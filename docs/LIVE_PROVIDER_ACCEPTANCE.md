@@ -8,7 +8,8 @@ at the time of execution.
 
 ## Safety boundary
 
-- The runner only performs public HTTP GET requests and read-only JSON-RPC methods. Binance Spot uses Binance's documented public-market-data-only host (`data-api.binance.vision`); Ethereum mainnet RPC uses the public endpoint advertised by PublicNode.
+- The runner only performs public HTTP GET requests and read-only JSON-RPC methods.
+- Binance Spot uses Binance's documented public-market-data-only host (`data-api.binance.vision`); Ethereum mainnet RPC uses PublicNode's public endpoint.
 - It does not sign transactions, connect wallets, read exchange accounts, create
   orders, or need private/API credentials.
 - It does not run the trading/research signal pipeline and cannot authorize a trade.
@@ -48,16 +49,30 @@ market/RPC data freshness, and 72 hours for daily sentiment/feed observations.
 The latest source timestamp is compared with the UTC receive time recorded by
 the runner. A missing trustworthy timestamp produces `INCONCLUSIVE`, not PASS.
 An invalid schema, non-access-related provider error, stale data, future
-timestamp, latency breach, or cross-venue discrepancy produces FAIL. HTTP 403,
-429, or 451 access/rate-limit responses are INCONCLUSIVE: the runner cannot use
-them to validate payload correctness or market freshness, and the result must
-be repeated from an authorized network/region. A missing/unavailable required
-source also prevents an overall PASS.
+timestamp, latency breach, or cross-venue discrepancy produces FAIL. HTTP 403
+(access/WAF denial), 429 (rate limit), and 451 (legal access restriction) are
+INCONCLUSIVE: the runner cannot use them to validate payload correctness or
+market freshness. Retry a 429 only after the provider's backoff requirement;
+repeat 403/451 checks from an authorized network/region. A missing/unavailable
+required source also prevents an overall PASS.
+
+The observed GitHub-hosted run was placed in Azure `East US 2`. Bybit's current
+V5 integration guidance states that US and Mainland China IPs are restricted
+and can receive HTTP 403. This explains the Bybit result in that run; it does
+not establish whether the same APIs are reachable from the intended production
+region. Do not route around a provider's regional controls. Run the same
+read-only command from the authorized deployment region instead.
 
 Bybit's REST ticker response exposes a top-level `time` field. For Bybit, the
 reported freshness timestamp therefore measures the provider response clock,
 not the timestamp of an individual last trade. This limitation is made explicit
-in the returned check details.
+in the returned check details. See the [Bybit V5 ticker response reference](https://bybit-exchange.github.io/docs/v5/market/tickers).
+
+The [Binance Spot REST documentation](https://developers.binance.com/en/docs/products/spot/rest-api)
+specifically directs public-market-data-only requests to
+`https://data-api.binance.vision`. The Ethereum endpoint
+`https://ethereum-rpc.publicnode.com` is the public mainnet RPC published by
+[PublicNode](https://ethereum.publicnode.com/).
 
 The Binance default funding interval is treated as 8 hours only when Binance's
 adjusted `fundingInfo` endpoint has no entry for the selected symbol. Bybit
@@ -77,8 +92,8 @@ green.
 - `PASS`: the provider returned valid, fresh evidence within configured thresholds.
 - `FAIL`: concrete evidence violated a requirement, such as stale data, bad schema,
   provider error, excessive latency, or cross-venue disagreement.
-- `INCONCLUSIVE`: the endpoint replied but did not provide the timestamp needed to
-  assert freshness, or the evidence was insufficient for the check.
+- `INCONCLUSIVE`: the endpoint did not provide enough evidence to decide, its
+  timestamp was missing, or access was denied/throttled in the test environment.
 
 A PASS is a point-in-time availability snapshot, not proof of sustained uptime,
 full historical coverage, economic validity, or trading readiness. Repeat the
