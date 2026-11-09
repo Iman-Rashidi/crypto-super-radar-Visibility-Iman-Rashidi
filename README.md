@@ -278,7 +278,18 @@ A configured RSS set is reported as `KNOWN` only when every configured feed retu
 
 AI is an **optional explanatory layer**, not part of the deterministic scoring or trade-decision path. The engine continues to calculate technical indicators, whale evidence, sentiment baseline, Risk Score, Opportunity Rank, Confidence Level and all 12 mandatory gates when AI is disabled or unavailable.
 
-To enable it on a server, set these environment variables in the server's private environment configuration (never commit keys or expose them in browser code):
+To enable it on Render without changing the Blueprint or committing a secret:
+
+1. Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey).
+2. In the Render Dashboard, open the existing CRYPTO SUPER RADAR service and add these variables under **Environment**:
+   - `GEMINI_API_KEY`: the private key from AI Studio
+   - `CSR_AI_PROVIDER`: `gemini`
+   - `CSR_GEMINI_MODEL`: `gemini-2.5-flash`
+3. Save the environment changes when you are ready to apply them. This repository change does not create, edit, or deploy a Render service.
+
+For local use, copy the optional examples from `.env.example` into an untracked `.env` file and load them through your own process environment. Never commit keys or expose them in browser code.
+
+The Gemini Developer API currently lists a free tier for Gemini 2.5 Flash, but limits and model availability can change. Google's free-tier terms state that submitted content may be used to improve its products; this integration therefore sends only public headline text, never private user or trading data. Do not enable it unless those terms are acceptable.
 
 ```text
 GEMINI_API_KEY=<server-side secret>
