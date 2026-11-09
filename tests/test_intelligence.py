@@ -183,7 +183,9 @@ class EvmTests(unittest.TestCase):
                 "can_take_back_ownership": "0", "hidden_owner": "0",
                 "selfdestruct": "0", "transfer_pausable": "0",
                 "is_blacklisted": "0", "cannot_buy": "0", "cannot_sell_all": "0",
-                "slippage_modifiable": "0", "personal_slippage_modifiable": "0",\n                "anti_whale_modifiable": "0", "trading_cooldown": "0", "external_call": "0",\n                "buy_tax": "0", "sell_tax": "0",
+                "slippage_modifiable": "0", "personal_slippage_modifiable": "0",
+                "anti_whale_modifiable": "0", "trading_cooldown": "0", "external_call": "0",
+                "buy_tax": "0", "sell_tax": "0",
                 "holders": [{"percent": "0.10"}, {"percent": "0.05"}],
             }},
         }
@@ -399,18 +401,22 @@ class IntegratedEngineTests(unittest.TestCase):
     def test_integrated_engine_adds_mandatory_whale_and_sentiment_gates(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
-            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),\n            whale_store=WhaleStore(":memory:"),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
         )
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
-        self.assertEqual(len(result.gates), 11)
+        self.assertEqual(len(result.gates), 12)
         self.assertEqual(result.gates[9].status.value, "PASS")
         self.assertEqual(result.gates[10].status.value, "PASS")
+        self.assertEqual(result.gates[11].status.value, "UNKNOWN")
+        self.assertEqual(result.signal.value, "NO TRADE")
         self.assertIn("evidence_confidence_pct", result.metrics)
 
     def test_partial_sentiment_coverage_blocks_any_trade(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
-            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("PARTIAL"),\n            whale_store=WhaleStore(":memory:"),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("PARTIAL"),
+            whale_store=WhaleStore(":memory:"),
         )
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.gates[10].status.value, "UNKNOWN")
