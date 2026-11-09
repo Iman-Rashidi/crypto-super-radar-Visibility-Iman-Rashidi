@@ -205,10 +205,20 @@ class AcceptanceRunner:
             details, source_timestamp = operation()
         except requests.HTTPError as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code in {403, 429, 451}:
+            if status_code == 403:
                 inconclusive_reason = (
-                    f"HTTP {status_code}: endpoint access is restricted or throttled "
-                    "from this runner's network/region; repeat from an authorized location."
+                    "HTTP 403: provider access was denied by its access-control/WAF policy; "
+                    "verify the runner's network and regional eligibility before retrying."
+                )
+            elif status_code == 429:
+                inconclusive_reason = (
+                    "HTTP 429: provider rate limit was reached; retry only after the "
+                    "provider's required backoff interval."
+                )
+            elif status_code == 451:
+                inconclusive_reason = (
+                    "HTTP 451: provider marks this endpoint unavailable for legal reasons "
+                    "from the current request context; repeat only from an authorized location."
                 )
             else:
                 error = f"{type(exc).__name__}: {str(exc)[:180]}"
