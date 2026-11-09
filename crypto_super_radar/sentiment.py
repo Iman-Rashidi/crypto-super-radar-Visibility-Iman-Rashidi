@@ -43,6 +43,7 @@ def analyze_market_sentiment(
     sources: Mapping[str, Iterable[str]],
     *,
     source_weights: Optional[Mapping[str, float]] = None,
+    numeric_scores: Optional[Mapping[str, float]] = None,
 ) -> dict:
     """Combine explicitly supplied news/social/market-positioning text sources."""
     weights = dict(source_weights or {"news": 1.0, "social": 1.0, "positioning": 1.0})
@@ -70,6 +71,21 @@ def analyze_market_sentiment(
         total_negative += sum(s["negative_hits"] for s in valid)
         total_intensity += sum(s["intensity_hits"] for s in valid)
         source_results[source] = {"status": "KNOWN", "score": score, "items": len(valid)}
+    for source, raw_score in (numeric_scores or {}).items():
+        try:
+            numeric = float(raw_score)
+        except (TypeError, ValueError):
+            source_results[source] = {"status": "UNKNOWN", "score": None}
+            continue
+        if not -100.0 <= numeric <= 100.0:
+            source_results[source] = {"status": "UNKNOWN", "score": None}
+            continue
+        weight = float(weights.get(source, 1.0))
+        if weight <= 0:
+            raise ValueError("Source weights must be positive")
+        weighted_sum += numeric * weight
+        total_weight += weight
+        source_results[source] = {"status": "KNOWN", "score": numeric, "items": 1}
     if total_weight == 0:
         return {"status": "UNKNOWN", "score": None, "sources": source_results,
                 "interpretation": "No usable sentiment observations were supplied."}
@@ -106,3 +122,12 @@ def detect_sentiment_divergence(
                 "interpretation": "Negative sentiment conflicts with net exchange outflow; possible accumulation, not proof."}
     return {"status": "KNOWN", "divergence": "NO_STRONG_DIVERGENCE",
             "interpretation": "No configured sentiment/flow divergence detected."}
+
+
+
+def fear_greed_to_sentiment(value: float) -> float:
+    """Convert Alternative.me's 0..100 index to a centered -100..100 score."""
+    number = float(value)
+    if not 0.0 <= number <= 100.0:
+        raise ValueError("Fear & Greed value must be between 0 and 100")
+    return 2.0 * number - 100.0
