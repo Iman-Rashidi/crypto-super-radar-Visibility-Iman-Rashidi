@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .integrated_engine import WhaleAwareConfirmationEngine
+from .indicators import observed_price_ranges
 from .models import AssetSpec
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -34,6 +35,12 @@ button{{background:#2563eb;border:0;margin-top:12px;cursor:pointer}} table{{widt
 td,th{{padding:9px;border-bottom:1px solid #334155;text-align:right;vertical-align:top}}
 small,.muted{{color:#9ca3af}} .status{{font-weight:bold}} code{{direction:ltr;display:inline-block}}
 pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px;border-radius:8px;direction:ltr;text-align:left}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}}
+.metric{{background:#0b1729;border:1px solid #334155;border-radius:10px;padding:12px}}
+.metric strong{{display:block;font-size:1.2rem;margin-top:6px;direction:ltr;text-align:right}}
+canvas{{width:100%;height:300px;background:#08101d;border-radius:10px}}
+label{{display:block;margin-top:10px}} .calc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}}
+.status-pass{{color:#22c55e}} .status-unknown{{color:#f59e0b}}
 </style></head><body><main>{body}</main></body></html>""".encode("utf-8")
 
 
@@ -45,8 +52,33 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             headlines=[headline] if headline else [],
             social_posts=[social_post] if social_post else [],
         )
+        candle_frame = getattr(ENGINE.data, "candle_frames", {}).get(asset.raw)
+        range_evidence = observed_price_ranges(candle_frame)
+        trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
+        regime_gate = next((gate for gate in result.gates if gate.gate_id == 2), None)
+        candle_records = []
+        if candle_frame is not None and not candle_frame.empty:
+            required_ohlc = {"open", "high", "low", "close"}
+            if required_ohlc.issubset(candle_frame.columns):
+                for timestamp, row in candle_frame.tail(120).iterrows():
+                    values = [float(row[key]) for key in ("open", "high", "low", "close")]
+                    if all(value > 0 for value in values):
+                        candle_records.append({
+                            "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+                            "open": values[0], "high": values[1], "low": values[2], "close": values[3],
+                        })
         payload = {
             "asset": asset.raw,
+            "market_overview": {
+                "status": range_evidence.get("status", "UNKNOWN"),
+                "reason": range_evidence.get("reason"),
+                "current_price": range_evidence.get("current_price"),
+                "candle_age_hours": range_evidence.get("candle_age_hours"),
+                "ranges": range_evidence.get("windows", {}),
+                "candles": candle_records,
+                "asset_regime": (trend_gate.evidence or {}).get("asset_regime") if trend_gate else None,
+                "benchmark_regime": (regime_gate.evidence or {}).get("regime") if regime_gate else None,
+            },
             "signal": result.signal.value,
             "confirmation_score": result.confirmation_score,
             "estimated_risk_score": result.estimated_risk_score,
@@ -132,6 +164,59 @@ class Handler(BaseHTTPRequestHandler):
             <button type="submit">اجرای اسکن پژوهشی</button>
           </form>
         </section>
+        <section class="card" id="market-tools">
+          <h2>ماشین‌حساب حرفه‌ای سناریوی Spot</h2>
+          <p class="muted">محاسبهٔ سود/زیان فرضی Long بدون اهرم؛ زمان انتخابی فقط افق سناریو است، نه پیش‌بینی زمان سود.</p>
+          <div class="calc-grid">
+            <div><label for="calc-amount">سرمایه (EUR)</label><input id="calc-amount" type="number" min="0.01" step="0.01" value="10"></div>
+            <div><label for="calc-move">تغییر فرضی قیمت (%)</label><input id="calc-move" type="number" min="-99.9" step="0.1" value="10"></div>
+            <div><label for="calc-days">افق سناریو (روز)</label><input id="calc-days" type="number" min="1" max="3650" value="14"></div>
+            <div><label for="calc-buy-fee">کارمزد خرید (%)</label><input id="calc-buy-fee" type="number" min="0" max="20" step="0.01" value="0.1"></div>
+            <div><label for="calc-sell-fee">کارمزد فروش (%)</label><input id="calc-sell-fee" type="number" min="0" max="20" step="0.01" value="0.1"></div>
+            <div><label for="calc-buy-slip">لغزش خرید (%)</label><input id="calc-buy-slip" type="number" min="0" max="20" step="0.01" value="0.2"></div>
+            <div><label for="calc-sell-slip">لغزش فروش (%)</label><input id="calc-sell-slip" type="number" min="0" max="20" step="0.01" value="0.2"></div>
+          </div>
+          <div class="grid" style="margin-top:12px">
+            <div class="metric">سود/زیان خالص<strong id="calc-pnl">—</strong></div>
+            <div class="metric">ارزش نهایی<strong id="calc-value">—</strong></div>
+            <div class="metric">بازده خالص<strong id="calc-return">—</strong></div>
+            <div class="metric">رشد سربه‌سر<strong id="calc-break-even">—</strong></div>
+          </div>
+          <h3>مقایسهٔ سناریوهای قیمت</h3><div id="calc-scenarios"></div>
+          <p class="muted">فرمول: Vnet = I(1−fb)(1−sb)(1+r)(1−ss)(1−fs). مالیات، تغییر EUR/USD، هزینه برداشت/شبکه و اثر اندازه سفارش خارج از محاسبه‌اند.</p>
+          <p class="muted">این ابزار پیش‌بینی، توصیه سرمایه‌گذاری یا سفارش معاملاتی نیست.</p>
+        </section>
+        <script>
+        (function(){
+          const ids=['calc-amount','calc-move','calc-days','calc-buy-fee','calc-sell-fee','calc-buy-slip','calc-sell-slip'];
+          const el=id=>document.getElementById(id);
+          function calc(move){
+            const amount=Number(el('calc-amount').value), change=Number(move);
+            const bf=Number(el('calc-buy-fee').value)/100, sf=Number(el('calc-sell-fee').value)/100;
+            const bs=Number(el('calc-buy-slip').value)/100, ss=Number(el('calc-sell-slip').value)/100;
+            const factor=(1-bf)*(1-bs)*(1+change/100)*(1-ss)*(1-sf);
+            const net=amount*factor, pnl=net-amount;
+            const base=(1-bf)*(1-bs)*(1-ss)*(1-sf);
+            return {net,pnl,ret:pnl/amount*100,be:(1/base-1)*100};
+          }
+          function update(){
+            const amount=Number(el('calc-amount').value),move=Number(el('calc-move').value);
+            const days=Number(el('calc-days').value);
+            const rates=ids.slice(3).map(id=>Number(el(id).value));
+            if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(move)||move<=-100||!Number.isFinite(days)||days<1||rates.some(x=>!Number.isFinite(x)||x<0||x>=100)){
+              el('calc-pnl').textContent='ورودی نامعتبر';return;
+            }
+            const out=calc(move),eur=x=>x.toFixed(4)+' €';
+            el('calc-pnl').textContent=(out.pnl>=0?'+':'')+eur(out.pnl);
+            el('calc-value').textContent=eur(out.net);
+            el('calc-return').textContent=(out.ret>=0?'+':'')+out.ret.toFixed(3)+'%';
+            el('calc-break-even').textContent=out.be.toFixed(3)+'%';
+            const rows=[-20,-10,0,5,10,20].map(v=>{const x=calc(v);return '<tr><td>'+v.toFixed(1)+'%</td><td>'+eur(x.pnl)+'</td><td>'+x.ret.toFixed(3)+'%</td><td>'+days+' روز</td></tr>';}).join('');
+            el('calc-scenarios').innerHTML='<table><thead><tr><th>تغییر قیمت</th><th>سود/زیان خالص</th><th>بازده خالص</th><th>افق</th></tr></thead><tbody>'+rows+'</tbody></table>';
+          }
+          ids.forEach(id=>el(id).addEventListener('input',update));update();
+        })();
+        </script>
         <section class="card">
           <h3>۱۲ فیلتر اجباری</h3>
           <p>داده بازار · رژیم · روند · مومنتوم · جریان سرمایه · امنیت · احساسات · بک‌تست · ریسک · نهنگ‌ها · پوشش احساسات · Walk-forward</p>
@@ -182,11 +267,27 @@ class Handler(BaseHTTPRequestHandler):
             body = (
                 "<h2>اسکن آغاز شد</h2><p>شناسه کار: <code>" + job_id + "</code></p>"
                 "<p id='state'>در حال جمع‌آوری داده‌های بازار، نهنگ‌ها و احساسات...</p>"
+                "<section class='card'><h3>نمای بازار، کف و سقف</h3><div id='market-summary' class='grid'></div>"
+                "<div id='range-table'></div><canvas id='candles' width='1000' height='320'></canvas></section>"
+                "<section class='card'><h3>۱۲ فیلتر</h3><div id='gate-table'></div></section>"
                 "<pre id='result'>لطفاً این صفحه را باز نگه دارید.</pre><p><a href='/'>بازگشت</a></p>"
                 "<script>const job='" + job_id + "';"
-                "async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();"
-                "document.getElementById('state').textContent=j.status;"
-                "if(j.status==='completed'||j.status==='failed'){document.getElementById('result').textContent=JSON.stringify(j,null,2);return;}"
+                "function cell(tag,text){const e=document.createElement(tag);e.textContent=text??'UNKNOWN';return e;}"
+                "function table(container,headers,rows){const t=document.createElement('table'),h=document.createElement('thead'),hr=document.createElement('tr');headers.forEach(v=>hr.appendChild(cell('th',v)));h.appendChild(hr);t.appendChild(h);const b=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach(v=>tr.appendChild(cell('td',v)));b.appendChild(tr);});t.appendChild(b);container.replaceChildren(t);}"
+                "function renderMarket(m){const box=document.getElementById('market-summary');"
+                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status]];"
+                "box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));const strong=cell('strong',v);d.appendChild(strong);box.appendChild(d);});"
+                "const labels={'7':'۷ روز','30':'۳۰ روز','90':'۹۰ روز','365':'۳۶۵ روز'};"
+                "const rows=Object.entries(m.ranges||{}).map(([k,v])=>[labels[k]||k,v.status,v.low,v.high,v.candle_count,v.coverage_pct]);"
+                "table(document.getElementById('range-table'),['بازه','وضعیت','کف','سقف','تعداد کندل','پوشش %'],rows);"
+                "const canvas=document.getElementById('candles'),ctx=canvas.getContext('2d'),bars=m.candles||[];ctx.clearRect(0,0,canvas.width,canvas.height);"
+                "if(!bars.length){ctx.fillStyle='#f59e0b';ctx.fillText('تاریخچه OHLC برای نمودار موجود نیست',20,30);return;}"
+                "const lo=Math.min(...bars.map(x=>x.low)),hi=Math.max(...bars.map(x=>x.high)),span=Math.max(hi-lo,1e-12),pad=20,w=(canvas.width-2*pad)/bars.length;"
+                "bars.forEach((x,i)=>{const cx=pad+i*w+w/2,y=v=>canvas.height-pad-(v-lo)/span*(canvas.height-2*pad);const up=x.close>=x.open;ctx.strokeStyle=up?'#22c55e':'#ef4444';ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(cx,y(x.high));ctx.lineTo(cx,y(x.low));ctx.stroke();const top=y(Math.max(x.open,x.close)),bottom=y(Math.min(x.open,x.close));ctx.fillRect(cx-w*.32,top,Math.max(1,w*.64),Math.max(1,bottom-top));});}"
+                "function renderGates(gates){const rows=(gates||[]).map(g=>[g.id,g.name,g.status,g.reason]);table(document.getElementById('gate-table'),['#','فیلتر','وضعیت','دلیل'],rows);}"
+                "async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;"
+                "if(j.status==='completed'){renderMarket(j.result.market_overview||{});renderGates(j.result.gates);document.getElementById('result').textContent=JSON.stringify(j.result,null,2);return;}"
+                "if(j.status==='failed'){document.getElementById('result').textContent=j.error;return;}"
                 "}catch(e){document.getElementById('state').textContent='ارتباط قطع شد؛ بعداً /jobs/'+job+' را بررسی کنید';return;}"
                 "setTimeout(poll,2500);}poll();</script>"
             )
