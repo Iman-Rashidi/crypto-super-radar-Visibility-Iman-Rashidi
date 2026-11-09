@@ -468,6 +468,9 @@ class IntegratedEngineTests(unittest.TestCase):
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.gates[9].status.value, "PASS")
         self.assertEqual(result.metrics["whale_alignment"], "OPPOSED")
+        self.assertEqual(result.metrics["opportunity_whale_adjustment"], -6.0)
+        self.assertEqual(result.metrics["opportunity_sentiment_adjustment"], 2.0)
+        self.assertEqual(result.metrics["opportunity_total_adjustment"], -4.0)
         self.assertLess(
             result.metrics["confidence_level_pct"],
             result.metrics["evidence_confidence_pct"],
@@ -488,7 +491,8 @@ class IntegratedEngineTests(unittest.TestCase):
 
         engine.base.analyze = analyze_with_independent_rank
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
-        self.assertEqual(result.opportunity_rank, 12.34)
+        self.assertEqual(result.opportunity_rank, 18.34)
+        self.assertNotEqual(result.opportunity_rank, result.confirmation_score)
 
     def test_no_trade_from_low_confirmation_keeps_known_low_risk_status(self):
         engine = WhaleAwareConfirmationEngine(
