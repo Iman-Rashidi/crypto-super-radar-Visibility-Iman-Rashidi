@@ -442,6 +442,7 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertEqual(len(frames["gates"]), 12)
         self.assertTrue(frames["errors"].empty)
         self.assertIn("RSI-14", frames["quantitative"]["شاخص"].tolist())
+        self.assertIn("تغییر RSI-14", frames["quantitative"]["شاخص"].tolist())
         self.assertIn("Risk Score", frames["whale_sentiment"]["شاخص"].tolist())
         self.assertIn("Confidence Level", frames["whale_sentiment"]["شاخص"].tolist())
 
@@ -488,6 +489,28 @@ class IntegratedEngineTests(unittest.TestCase):
         engine.base.analyze = analyze_with_independent_rank
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.opportunity_rank, 12.34)
+
+    def test_no_trade_from_low_confirmation_keeps_known_low_risk_status(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
+        )
+        original_analyze = engine.base.analyze
+
+        def analyze_below_confirmation(*args, **kwargs):
+            result = original_analyze(*args, **kwargs)
+            result.signal = type(result.signal).LONG
+            result.confirmation_score = 1.0
+            return result
+
+        engine.base.analyze = analyze_below_confirmation
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        self.assertEqual([gate.status.value for gate in result.gates], ["PASS"] * 12)
+        self.assertEqual(result.signal.value, "NO TRADE")
+        self.assertEqual(result.safety_status.value, "LOW_RISK")
+        self.assertTrue(result.metrics["decision_blockers"]["confirmation_below_threshold"])
+        self.assertIn("۱۲ فیلتر", result.summary_fa)
 
     def test_scenario_b_security_failure_blocks_signal(self):
         engine = WhaleAwareConfirmationEngine(
