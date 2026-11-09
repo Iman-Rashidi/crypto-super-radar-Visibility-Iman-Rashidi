@@ -45,25 +45,6 @@ jobs:
           grep -q '۱۲ فیلتر اجباری' /tmp/csr-render/home.html
           curl --connect-timeout 2 -fsS 'http://127.0.0.1:18765/history?asset=cex%3ABTCUSDT' > /tmp/csr-render/history.json
           grep -q 'LOCAL_SQLITE' /tmp/csr-render/history.json
-      - name: Inspect bundled provider implementation (temporary audit)
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import tarfile
-          Path("/tmp/csr-bundle").mkdir(exist_ok=True)
-          with tarfile.open("dist/crypto-super-radar-source.tar.xz", "r:xz") as archive:
-              archive.extractall("/tmp/csr-bundle", filter="data")
-          root = Path("/tmp/csr-bundle/crypto-super-radar/crypto_super_radar")
-          print("=== BUNDLED MODULE INVENTORY ===")
-          print("\\n".join(sorted(p.name for p in root.glob("*.py"))))
-          for name in ("providers.py", "filters.py", "engine.py", "config.py", "models.py", "backtesting.py"):
-              path = root / name
-              print(f"\\n===== SOURCE: {name} =====")
-              if path.exists():
-                  print(path.read_text(encoding="utf-8"))
-              else:
-                  print("NOT FOUND")
-          PY
       - name: Verify extracted full source bundle
         run: |
           mkdir -p /tmp/csr-bundle
