@@ -16,6 +16,7 @@ from crypto_super_radar.integrated_engine import WhaleAwareConfirmationEngine
 from crypto_super_radar.cex_whales import CexWhaleScanner
 from crypto_super_radar.whale_store import WhaleStore
 from crypto_super_radar.models import AssetSpec, MarketSnapshot
+from crypto_super_radar.config import AppConfig, IntelligenceScoringConfig
 
 
 class WhaleTests(unittest.TestCase):
@@ -476,8 +477,13 @@ class IntegratedEngineTests(unittest.TestCase):
             result.metrics["evidence_confidence_pct"],
         )
 
-    def test_opportunity_rank_is_not_overwritten_by_confirmation_score(self):
+    def test_opportunity_rank_uses_central_scoring_config_not_confirmation_score(self):
+        scoring = IntelligenceScoringConfig(
+            opportunity_whale_aligned=7.0,
+            opportunity_sentiment_aligned=4.0,
+        )
         engine = WhaleAwareConfirmationEngine(
+            config=AppConfig(scoring=scoring),
             data_service=FakeIntegratedDataService(),
             sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
             whale_store=WhaleStore(":memory:"),
@@ -491,7 +497,8 @@ class IntegratedEngineTests(unittest.TestCase):
 
         engine.base.analyze = analyze_with_independent_rank
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
-        self.assertEqual(result.opportunity_rank, 18.34)
+        self.assertEqual(result.opportunity_rank, 23.34)
+        self.assertEqual(result.metrics["opportunity_total_adjustment"], 11.0)
         self.assertNotEqual(result.opportunity_rank, result.confirmation_score)
 
     def test_no_trade_from_low_confirmation_keeps_known_low_risk_status(self):
