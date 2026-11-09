@@ -197,7 +197,7 @@ The feature branch adds the following explicit research APIs:
 
 - Net exchange inflow is a **potential increase in sell-side supply**, not evidence that the coins were sold.
 - Net exchange outflow can indicate custody or accumulation, but does not prove spot buying.
-- A wallet is only identified as an exchange, fund, market maker or smart-money entity when an upstream label is explicitly supplied. The engine does not invent wallet identities.
+- EVM top-holder watchlists can be derived from GoPlus holder percentages and token supply; Solana token-account owners are resolved through public RPC. Both are partial samples, not a complete wallet universe.\n- A wallet is only identified as an exchange, fund, market maker or smart-money entity when an upstream label is explicitly supplied. The engine does not invent wallet identities.
 - Solana sampling only inspects a bounded recent subset of the largest token accounts. Its coverage status stays `PARTIAL`; the unified engine will not treat that as a complete whale confirmation.
 
 ### Example: offline sentiment and transfer analysis
