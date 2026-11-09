@@ -94,7 +94,11 @@ def screen_evm_token(
         payload = gp.json()
         if str(payload.get("code")) != "1":
             raise ValueError("GoPlus returned a non-success response")
-        token = payload.get("result", {}).get(address)
+        result_map = payload.get("result", {})
+        token = result_map.get(address)
+        if token is None and isinstance(result_map, dict):
+            token = next((value for key, value in result_map.items()
+                          if str(key).lower() == address), None)
         if not isinstance(token, dict):
             raise ValueError("GoPlus token result is missing")
         evidence["goplus"] = token
