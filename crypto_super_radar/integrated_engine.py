@@ -339,8 +339,40 @@ class WhaleAwareConfirmationEngine:
         self.whale_store.record(asset.raw, whale, whale_bias)
         whale_history = self.whale_store.summary(asset.raw)
         if result.estimated_risk_score is not None:
-            result.estimated_risk_score = round(min(100.0, result.estimated_risk_score + risk_adjustment), 2)
+            result.estimated_risk_score = round(
+                max(0.0, min(100.0, result.estimated_risk_score + risk_adjustment)), 2
+            )
         passed = sum(g.status == GateStatus.PASS for g in result.gates)
+        evidence_confidence = round(passed / len(result.gates) * 100.0, 2) if result.gates else 0.0
+        whale_alignment = "UNKNOWN"
+        if direction in {"LONG", "SHORT"} and whale_bias != "UNKNOWN":
+            if whale_bias == "MIXED_OR_BALANCED":
+                whale_alignment = "NEUTRAL"
+            elif (whale_bias == "ACCUMULATION_PRESSURE" and direction == "LONG") or (
+                whale_bias == "DISTRIBUTION_PRESSURE" and direction == "SHORT"
+            ):
+                whale_alignment = "ALIGNED"
+            else:
+                whale_alignment = "OPPOSED"
+        sentiment_alignment = "UNKNOWN"
+        if direction in {"LONG", "SHORT"} and sentiment_score is not None:
+            if abs(float(sentiment_score)) < 25:
+                sentiment_alignment = "NEUTRAL"
+            elif (float(sentiment_score) >= 25 and direction == "LONG") or (
+                float(sentiment_score) <= -25 and direction == "SHORT"
+            ):
+                sentiment_alignment = "ALIGNED"
+            else:
+                sentiment_alignment = "OPPOSED"
+        confidence_penalty = (
+            (15.0 if whale_alignment == "OPPOSED" else 5.0 if whale_alignment == "NEUTRAL" else 0.0)
+            + (10.0 if sentiment_alignment == "OPPOSED" else 0.0)
+        )
+        if whale_alignment == "OPPOSED" and sentiment_alignment == "ALIGNED":
+            confidence_penalty += 5.0
+        elif whale_alignment == "ALIGNED" and sentiment_alignment == "OPPOSED":
+            confidence_penalty += 5.0
+        confidence_level = round(max(0.0, evidence_confidence - confidence_penalty), 2)
         result.metrics.update({
             "whale_status": whale_status, "whale_bias": whale_bias,
             "whale_history_count": whale_history["observation_count"],
@@ -359,10 +391,17 @@ class WhaleAwareConfirmationEngine:
             "fear_greed_scope": (sentiment.get("fear_greed") or {}).get("scope"),
             "sentiment_coverage_status": sentiment_status,
             "mandatory_gate_count": len(result.gates),
+            "risk_score": result.estimated_risk_score,
+            "opportunity_rank": result.opportunity_rank,
+            "confidence_level_pct": confidence_level,
+            "confidence_level_semantics": "Evidence coverage adjusted for whale/market/sentiment disagreement; not a probability of profit.",
+            "whale_alignment": whale_alignment,
+            "sentiment_alignment": sentiment_alignment,
+            "confidence_penalty_pct": confidence_penalty,
             "walk_forward_status": walk.get("status"),
             "walk_forward_fold_count": walk.get("fold_count"),
             "walk_forward_worst_fold_drawdown_pct": walk.get("worst_fold_drawdown_pct"),
-            "evidence_confidence_pct": round(passed / len(result.gates) * 100.0, 2),
+            "evidence_confidence_pct": evidence_confidence,
         })
         all_pass = all(g.status == GateStatus.PASS for g in result.gates)
         if result.signal != Signal.NO_TRADE and (
@@ -387,6 +426,6 @@ class WhaleAwareConfirmationEngine:
             result.summary_en = "NO TRADE: all 12 mandatory gates must pass; whale and sentiment evidence are required."
             result.summary_fa = "عدم معامله: هر ۱۲ فیلتر اجباری باید تأیید شوند؛ تحلیل نهنگ‌ها و احساسات بازار الزامی است."
         else:
-            result.summary_en = "All 11 mandatory gates passed. Paper/research plan only; no order was submitted."
+            result.summary_en = "All 12 mandatory gates passed. Paper/research plan only; no order was submitted."
             result.summary_fa = "هر ۱۱ فیلتر تأیید شده‌اند؛ فقط برنامه پژوهشی و آزمایشی است و سفارشی ارسال نشده است."
         return result
