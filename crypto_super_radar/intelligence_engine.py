@@ -20,8 +20,10 @@ def combine_intelligence(
 ) -> dict[str, Any]:
     """Combine independent evidence blocks into LONG/SHORT/NO TRADE research output."""
     gate_states = {
-        "whale": "PASS" if whale.get("status") == "KNOWN" and
-                 whale.get("net_exchange_flow_usd") is not None else "UNKNOWN",
+        "whale": "PASS" if whale.get("status") == "KNOWN" and (
+            whale.get("net_exchange_flow_usd") is not None or
+            whale.get("net_whale_transfer_usd") is not None
+        ) else "UNKNOWN",
         "sentiment": "PASS" if sentiment.get("status") == "KNOWN" else "UNKNOWN",
         "market": str(market.get("status", "UNKNOWN")).upper(),
         "derivatives": str(derivatives.get("status", "UNKNOWN")).upper(),
@@ -33,21 +35,33 @@ def combine_intelligence(
             gate_states[key] = "UNKNOWN"
     blocked = [key for key, state in gate_states.items() if state != "PASS"]
     sentiment_score = sentiment.get("score")
-    whale_net = whale.get("net_exchange_flow_usd")
+    exchange_net = whale.get("net_exchange_flow_usd")
+    wallet_net = whale.get("net_whale_transfer_usd")
+    whale_bias = "UNKNOWN"
+    bias_points = []
+    if exchange_net is not None:
+        bias_points.append(-1 if exchange_net > 0 else 1 if exchange_net < 0 else 0)
+    if wallet_net is not None:
+        bias_points.append(1 if wallet_net > 0 else -1 if wallet_net < 0 else 0)
+    bias_total = sum(bias_points)
+    if bias_points:
+        whale_bias = "ACCUMULATION_PRESSURE" if bias_total > 0 else (
+            "DISTRIBUTION_PRESSURE" if bias_total < 0 else "MIXED_OR_BALANCED"
+        )
     market_direction = market.get("direction")
     derivatives_direction = derivatives.get("direction")
     divergence = None
-    if sentiment_score is not None and whale_net is not None:
-        if sentiment_score >= 25 and whale_net > 0:
-            divergence = "POSITIVE_SENTIMENT_WITH_NET_EXCHANGE_INFLOW"
-        elif sentiment_score <= -25 and whale_net < 0:
-            divergence = "NEGATIVE_SENTIMENT_WITH_NET_EXCHANGE_OUTFLOW"
+    if sentiment_score is not None and whale_bias != "UNKNOWN":
+        if sentiment_score >= 25 and whale_bias == "DISTRIBUTION_PRESSURE":
+            divergence = "POSITIVE_SENTIMENT_WITH_WHALE_DISTRIBUTION_PRESSURE"
+        elif sentiment_score <= -25 and whale_bias == "ACCUMULATION_PRESSURE":
+            divergence = "NEGATIVE_SENTIMENT_WITH_WHALE_ACCUMULATION_PRESSURE"
     # Direction is corroborative only; never convert exchange flow into a buy/sell.
     corroboration = 0
     corroboration += int(market_direction in {"LONG", "SHORT"})
     corroboration += int(derivatives_direction in {"LONG", "SHORT"})
     corroboration += int(sentiment_score is not None)
-    corroboration += int(whale_net is not None)
+    corroboration += int(whale_bias != "UNKNOWN")
     confirmation_score: Optional[float] = None
     if not blocked:
         # This score describes evidence agreement, not a probability.
@@ -57,12 +71,12 @@ def combine_intelligence(
         if sentiment_score is not None:
             agreement += 15 if (sentiment_score >= 25 and market_direction == "LONG") or (
                 sentiment_score <= -25 and market_direction == "SHORT") else 5
-        if whale_net is not None:
-            # Inflow is potential sell-side supply; outflow may be accumulation,
-            # but direction is not assigned without corroborating market evidence.
-            if (whale_net > 0 and market_direction == "SHORT") or (
-                whale_net < 0 and market_direction == "LONG"):
+        if whale_bias != "UNKNOWN":
+            if (whale_bias == "ACCUMULATION_PRESSURE" and market_direction == "LONG") or (
+                whale_bias == "DISTRIBUTION_PRESSURE" and market_direction == "SHORT"):
                 agreement += 20
+            elif whale_bias == "MIXED_OR_BALANCED":
+                agreement += 0
             else:
                 agreement += 5
         confirmation_score = min(100.0, float(agreement))
@@ -83,7 +97,7 @@ def combine_intelligence(
         "blocked_by": blocked,
         "confirmation_score": confirmation_score,
         "score_semantics": "Evidence-agreement score; not a probability of profit.",
-        "whale_sentiment_divergence": divergence,
+        "whale_sentiment_divergence": divergence,\n        "whale_bias": whale_bias,\n        "whale_exchange_net_flow_usd": exchange_net,\n        "whale_wallet_net_transfer_usd": wallet_net,
         "evidence_coverage_count": corroboration,
         "decision_policy": "Any FAIL or UNKNOWN in a mandatory gate blocks the signal.",
         "execution": "PAPER_RESEARCH_ONLY",
