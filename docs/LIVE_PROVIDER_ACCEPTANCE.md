@@ -78,14 +78,36 @@ The Binance default funding interval is treated as 8 hours only when Binance's
 adjusted `fundingInfo` endpoint has no entry for the selected symbol. Bybit
 instrument metadata must provide an interval, and the two values must match.
 
+## Integrated 12-gate live research scan
+
+Run the full read-only research engine after installing the project dependencies:
+
+```bash
+python -m scripts.live_research_scan --asset cex:BTCUSDT \
+  --output reports/live-research-scan.json
+```
+
+The runner is deliberately limited to a single CEX spot/perpetual symbol. Its
+JSON output includes all twelve gate results, decision blockers, source evidence,
+the final `LONG`/`SHORT`/`NO TRADE` research result, and explicit safety fields
+confirming that no order was submitted and no transaction was signed. A scan
+that cannot establish all twelve mandatory gates must remain `NO TRADE`.
+A `PASS` gate summary is only evidence that the required gates passed at that
+point in time; it is not a guarantee of profitability and does not authorize
+execution.
+
 ## GitHub Actions
 
-The dedicated `live-provider-acceptance` workflow runs for changes to this
-acceptance tooling on the feature branch / its pull request, and also exposes a
-`workflow_dispatch` input for a later operator-initiated run. It uploads the
-JSON report even when an acceptance check fails. Treat a non-PASS report as a
-provider-readiness blocker; do not weaken thresholds merely to make the workflow
-green.
+The dedicated `live-provider-acceptance` workflow runs for changes to the
+acceptance tooling and the relevant provider adapters on the feature branch /
+its pull request. It rebuilds and extracts the complete source bundle, runs
+focused tests for both runners, runs the live provider checks, executes the
+integrated 12-gate research scan, and uploads both JSON reports as an artifact.
+It exposes a `workflow_dispatch` input for a later operator-initiated symbol
+selection. The workflow intentionally remains blocked unless provider
+acceptance is fully `PASS` and the integrated scan completes. An
+`INCONCLUSIVE` provider result is not promoted to `PASS`; repeat from an
+authorized network/region rather than weakening a threshold.
 
 ## Interpreting outcomes
 
