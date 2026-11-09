@@ -84,12 +84,15 @@ Run the full read-only research engine after installing the project dependencies
 
 ```bash
 python -m scripts.live_research_scan --asset cex:BTCUSDT \
-  --output reports/live-research-scan.json
+  --output reports/live-research-scan-spot.json
+python -m scripts.live_research_scan --asset perp:BTCUSDT \
+  --output reports/live-research-scan-perpetual.json
 ```
 
 The runner is deliberately limited to a single CEX spot/perpetual symbol. Its
-JSON output includes all twelve gate results, decision blockers, source evidence,
-the final `LONG`/`SHORT`/`NO TRADE` research result, and explicit safety fields
+JSON output for both spot and perpetual markets includes all twelve gate results,
+decision blockers, source evidence, the final `LONG`/`SHORT`/`NO TRADE` research result,
+and explicit safety fields
 confirming that no order was submitted and no transaction was signed. A scan
 that cannot establish all twelve mandatory gates must remain `NO TRADE`.
 A `PASS` gate summary is only evidence that the required gates passed at that
@@ -101,8 +104,8 @@ execution.
 The dedicated `live-provider-acceptance` workflow runs for changes to the
 acceptance tooling and the relevant provider adapters on the feature branch /
 its pull request. It rebuilds and extracts the complete source bundle, runs
-focused tests for both runners, runs the live provider checks, executes the
-integrated 12-gate research scan, and uploads both JSON reports as an artifact.
+focused tests for both runners, runs the live provider checks, executes the integrated 12-gate spot and perpetual
+research scans, and uploads all three JSON reports as one artifact.
 It exposes a `workflow_dispatch` input for a later operator-initiated symbol
 selection. The workflow intentionally remains blocked unless provider
 acceptance is fully `PASS` and the integrated scan completes. An
