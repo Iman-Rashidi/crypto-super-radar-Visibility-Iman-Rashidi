@@ -205,3 +205,17 @@ def extract_goplus_whale_watchlist(
         "sampled_holders": min(10, len(holders)),
         "reason": "Top-holder sample only; no complete holder universe or beneficial-owner clustering.",
     }
+
+
+def build_wallet_label_map(
+    watchlist: Iterable[Mapping[str, Any]],
+    known_labels: Optional[Mapping[str, str]] = None,
+) -> dict[str, str]:
+    """Merge watchlist whale labels with explicit upstream entity labels."""
+    labels = {str(address).lower(): str(label).strip().lower()
+              for address, label in (known_labels or {}).items()}
+    for item in watchlist:
+        address = str(item.get("address", "")).lower()
+        if re.fullmatch(r"0x[a-f0-9]{40}", address):
+            labels.setdefault(address, "whale")
+    return labels
