@@ -55,7 +55,7 @@ class RiskConfig:
     max_open_portfolio_risk_pct: float = 2.0
     fee_bps_per_side: float = 8.0
     slippage_bps_per_side: float = 10.0
-    atr_stop_multiplte: float = 2.0
+    atr_stop_multiple: float = 2.0
     atr_target_multiple: float = 4.0
 
 
