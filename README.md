@@ -99,7 +99,7 @@ or:
 python -m unittest discover -s tests -v
 ```
 
-The offline test suite validates accepted and rejected data, timestamp handling, RSI, local sentiment, the 3-state safety layout, nine-gate behavior, and preservation of all rows in the Pandas master DataFrame. Tests do not call public APIs and do not incur network costs.
+The offline test suite validates accepted and rejected data, timestamp handling, RSI, local sentiment, the 3-state safety layout, twelve-gate behavior, and preservation of all rows in the Pandas master DataFrame. Tests do not call public APIs and do not incur network costs.
 
 ## 5. Run a scan
 
@@ -129,6 +129,16 @@ python -m crypto_super_radar \
   --asset base:YOUR_BASE_TOKEN_ADDRESS \
   --headline "Institutional adoption increases" \
   --headline "No exploit or withdrawal warning reported"
+```
+
+Custom public feeds can be supplied without an API key:
+
+```bash
+python -m crypto_super_radar \
+  --asset cex:BTCUSDT \
+  --news-rss "https://www.coindesk.com/arc/outboundfeeds/rss/" \
+  --social-rss "https://www.reddit.com/r/CryptoCurrency/.rss" \
+  --social-post "Community reports a major adoption upgrade"
 ```
 
 Save a CSV report:
@@ -180,6 +190,9 @@ Do not deploy this prototype as an unattended live trading bot. First complete l
 - Binance USD-M Futures API: <https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api>
 - Bybit V5 API: <https://bybit-exchange.github.io/docs/v5/intro>
 - Solana JSON-RPC: <https://solana.com/docs/rpc/http>
+- GoPlus Token Security API: <https://docs.gopluslabs.io/>
+- Sourcify verification API: <https://docs.sourcify.dev/>
+- Alternative.me Crypto Fear & Greed API: <https://alternative.me/crypto/api/>
 
 
 ## 10. Whale intelligence, sentiment and multi-fold validation (new research modules)
