@@ -303,7 +303,7 @@ class SentimentFeedTests(unittest.TestCase):
 def sample_candles(stronger=True):
     t = np.arange(400, dtype=float)
     slope = 0.19 if stronger else 0.09
-    close = 100.0 + slope * t + 2.3 * np.sin(t / 5.0) + np.sin(t / 13.0)
+    close = 100.0 + slope * t + 2.3 * np.sin(t / 5.0 + 0.3) + np.sin(t / 13.0 + 0.3)
     index = pd.date_range(end=pd.Timestamp.now(tz="UTC").floor("D"), periods=400, freq="D")
     return pd.DataFrame({
         "open": close * 0.999, "high": close * 1.012,
