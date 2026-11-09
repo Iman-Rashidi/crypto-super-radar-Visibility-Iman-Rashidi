@@ -6,6 +6,7 @@ a buy or sell. Wallet labels are evidence supplied by the upstream data source.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Iterable, Mapping, Optional
 
 
