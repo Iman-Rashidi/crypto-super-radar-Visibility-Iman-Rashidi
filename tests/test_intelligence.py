@@ -13,6 +13,7 @@ from crypto_super_radar.solana_whales import SolanaWhaleScanner
 from crypto_super_radar.market_sentiment import fetch_market_sentiment
 from crypto_super_radar.integrated_engine import WhaleAwareConfirmationEngine
 from crypto_super_radar.cex_whales import CexWhaleScanner
+from crypto_super_radar.whale_store import WhaleStore
 from crypto_super_radar.models import AssetSpec, MarketSnapshot
 
 
@@ -349,6 +350,19 @@ class FakeHttp:
         return self.responses.pop(0)
 
 
+class WhaleStoreTests(unittest.TestCase):
+    def test_records_local_whale_history(self):
+        store = WhaleStore(":memory:")
+        store.record("base:token", {
+            "status": "KNOWN", "net_whale_transfer_usd": 250000,
+            "coverage": "BLOCK_RANGE",
+        }, "ACCUMULATION_PRESSURE")
+        summary = store.summary("base:token")
+        self.assertEqual(summary["observation_count"], 1)
+        self.assertEqual(summary["recent_bias"], "ACCUMULATION_PRESSURE")
+        store.close()
+
+
 class CexWhaleTests(unittest.TestCase):
     def test_cross_venue_large_trade_flow(self):
         scanner = CexWhaleScanner(threshold_usd=100000)
@@ -384,7 +398,7 @@ class IntegratedEngineTests(unittest.TestCase):
     def test_integrated_engine_adds_mandatory_whale_and_sentiment_gates(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
-            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),\n            whale_store=WhaleStore(":memory:"),
         )
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(len(result.gates), 11)
@@ -395,7 +409,7 @@ class IntegratedEngineTests(unittest.TestCase):
     def test_partial_sentiment_coverage_blocks_any_trade(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
-            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("PARTIAL"),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("PARTIAL"),\n            whale_store=WhaleStore(":memory:"),
         )
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.gates[10].status.value, "UNKNOWN")
