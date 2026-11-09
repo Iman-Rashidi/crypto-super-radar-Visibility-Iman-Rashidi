@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleEvent, extract_goplus_whale_watchlist
+from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleEvent, extract_goplus_whale_watchlist, build_wallet_label_map
 from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentiment_divergence, score_text, fear_greed_to_sentiment
 from crypto_super_radar.walk_forward import WalkForwardConfig, walk_forward_validate
 from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
@@ -33,6 +33,14 @@ class WhaleTests(unittest.TestCase):
         }])
         self.assertIsNone(result["net_exchange_flow_usd"])
         self.assertEqual(result["net_whale_transfer_usd"], -250000)
+
+    def test_whale_labels_preserve_explicit_exchange_labels(self):
+        address = "0x" + "a" * 40
+        labels = build_wallet_label_map(
+            [{"address": address}, {"address": "not-valid"}],
+            known_labels={address: "exchange"},
+        )
+        self.assertEqual(labels, {address: "exchange"})
 
     def test_goplus_top_holder_whale_watchlist(self):
         result = extract_goplus_whale_watchlist({
