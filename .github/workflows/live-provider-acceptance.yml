@@ -91,7 +91,10 @@ jobs:
         run: |
           python -m scripts.live_research_scan \
             --asset "cex:${ACCEPTANCE_SYMBOL}" \
-            --output "$GITHUB_WORKSPACE/reports/live-research-scan.json"
+            --output "$GITHUB_WORKSPACE/reports/live-research-scan-spot.json"
+          python -m scripts.live_research_scan \
+            --asset "perp:${ACCEPTANCE_SYMBOL}" \
+            --output "$GITHUB_WORKSPACE/reports/live-research-scan-perpetual.json"
       - name: Upload live provider and integrated scan reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -108,14 +111,17 @@ jobs:
           from pathlib import Path
 
           provider_path = Path("reports/live-provider-acceptance.json")
-          scan_path = Path("reports/live-research-scan.json")
+          scan_paths = [
+              Path("reports/live-research-scan-spot.json"),
+              Path("reports/live-research-scan-perpetual.json"),
+          ]
           if not provider_path.exists():
               raise SystemExit("Live provider acceptance did not produce a report.")
-          if not scan_path.exists():
-              raise SystemExit("Integrated live research scan did not produce a report.")
+          if any(not path.exists() for path in scan_paths):
+              raise SystemExit("One or more integrated live research scan reports are missing.")
 
           provider = json.loads(provider_path.read_text(encoding="utf-8"))
-          scan = json.loads(scan_path.read_text(encoding="utf-8"))
+          scans = [json.loads(path.read_text(encoding="utf-8")) for path in scan_paths]
           print(
               "Provider acceptance:",
               provider.get("overall_status"),
@@ -123,19 +129,18 @@ jobs:
               f"FAIL={provider.get('fail_count')}",
               f"INCONCLUSIVE={provider.get('inconclusive_count')}",
           )
-          print(
-              "Integrated research scan:",
-              scan.get("execution_status"),
-              scan.get("gate_status"),
-              scan.get("decision", {}).get("signal"),
-              scan.get("gate_summary"),
-          )
-          print(
-              "Safety:",
-              scan.get("safety"),
-          )
+          for scan in scans:
+              print(
+                  "Integrated research scan:",
+                  scan.get("asset"),
+                  scan.get("execution_status"),
+                  scan.get("gate_status"),
+                  scan.get("decision", {}).get("signal"),
+                  scan.get("gate_summary"),
+              )
+              print("Safety:", scan.get("safety"))
           if provider.get("overall_status") != "PASS":
               raise SystemExit("Provider acceptance is not fully PASS; market readiness remains blocked.")
-          if scan.get("execution_status") != "COMPLETED":
-              raise SystemExit("The integrated live research scan did not complete.")
+          if any(scan.get("execution_status") != "COMPLETED" for scan in scans):
+              raise SystemExit("One or more integrated live research scans did not complete.")
           PY
