@@ -8,6 +8,7 @@ from crypto_super_radar.walk_forward import WalkForwardConfig, walk_forward_vali
 from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
 from crypto_super_radar.sentiment_feeds import fetch_fear_greed_index, fetch_rss_headlines
 from crypto_super_radar.solana_whales import SolanaWhaleScanner
+from crypto_super_radar.market_sentiment import fetch_market_sentiment
 
 
 class WhaleTests(unittest.TestCase):
@@ -214,6 +215,33 @@ class SolanaWhaleTests(unittest.TestCase):
         self.assertEqual(result["status"], "PARTIAL")
         self.assertEqual(result["whale_watchlist"][0]["address"], "walletowner")
         self.assertIn("LARGE_ENTITY_TRANSFER", result["classification_counts"])
+
+
+class MarketSentimentPipelineTests(unittest.TestCase):
+    def test_missing_social_coverage_stays_partial(self):
+        rss = b"<rss><channel><item><title>Bitcoin adoption grows</title></item></channel></rss>"
+        fng = {"data": [{"value": "70", "value_classification": "Greed", "timestamp": "1800000000"}]}
+        result = fetch_market_sentiment(
+            ["https://news.example/rss"],
+            session=FakeSession([FakeResponse({}, content=rss), FakeResponse(fng)]),
+            cache={}, limiter=NoWaitLimiter(),
+        )
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["social_coverage"], "UNKNOWN")
+
+    def test_full_news_social_and_fear_greed_coverage(self):
+        rss_news = b"<rss><channel><item><title>Bitcoin adoption grows</title></item></channel></rss>"
+        rss_social = b"<rss><channel><item><title>Community bullish breakout</title></item></channel></rss>"
+        fng = {"data": [{"value": "70", "value_classification": "Greed", "timestamp": "1800000000"}]}
+        result = fetch_market_sentiment(
+            ["https://news.example/rss"], social_feed_urls=["https://social.example/rss"],
+            session=FakeSession([
+                FakeResponse({}, content=rss_news), FakeResponse({}, content=rss_social), FakeResponse(fng)
+            ]),
+            cache={}, limiter=NoWaitLimiter(),
+        )
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["social_coverage"], "KNOWN")
 
 
 class SentimentFeedTests(unittest.TestCase):
