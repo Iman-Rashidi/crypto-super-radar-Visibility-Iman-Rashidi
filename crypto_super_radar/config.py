@@ -60,10 +60,36 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class IntelligenceScoringConfig:
+    """Explicit heuristic weights; calibrate with walk-forward evidence, not intuition alone."""
+
+    whale_confirmation_aligned: float = 5.0
+    whale_confirmation_opposed: float = -10.0
+    sentiment_confirmation_aligned: float = 3.0
+    sentiment_confirmation_opposed: float = -3.0
+
+    whale_risk_opposed: float = 10.0
+    whale_risk_neutral: float = 3.0
+    sentiment_risk_opposed: float = 5.0
+    sentiment_risk_neutral: float = 1.0
+
+    opportunity_whale_aligned: float = 4.0
+    opportunity_whale_opposed: float = -6.0
+    opportunity_sentiment_aligned: float = 2.0
+    opportunity_sentiment_opposed: float = -3.0
+
+    confidence_whale_opposed: float = 15.0
+    confidence_whale_neutral: float = 5.0
+    confidence_sentiment_opposed: float = 10.0
+    confidence_cross_divergence: float = 5.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     rate_limits: RateLimitConfig = field(default_factory=RateLimitConfig)
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    scoring: IntelligenceScoringConfig = field(default_factory=IntelligenceScoringConfig)
     request_timeout_seconds: int = 15
     max_http_retries: int = 3
     user_agent: str = "CRYPTO-SUPER-RADAR/0.1 public-data-research)"
