@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -20,6 +21,19 @@ JOBS: dict[str, dict] = {}
 LAST_SCAN: dict[str, float] = {}
 LOCK = threading.RLock()
 SCAN_RUNNING = False
+
+# Small, explicitly curated public spot board; it is not a market-cap ranking.
+CRYPTO_MARKET_UNIVERSE = (
+    ("BTCUSDT", "Bitcoin", "بیت‌کوین"),
+    ("ETHUSDT", "Ethereum", "اتریوم"),
+    ("SOLUSDT", "Solana", "سولانا"),
+    ("BNBUSDT", "BNB", "بی‌ان‌بی"),
+    ("XRPUSDT", "XRP", "ریپل"),
+    ("DOGEUSDT", "Dogecoin", "دوج‌کوین"),
+)
+CRYPTO_MARKET_CACHE_TTL_SECONDS = 60
+CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None}
+CRYPTO_MARKET_FETCH_LOCK = threading.Lock()
 
 
 def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
@@ -113,6 +127,52 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             SCAN_RUNNING = False
 
 
+
+def _crypto_market_board() -> dict:
+    """Return a short-lived, free public spot-market board cross-checked by both venues."""
+    with CRYPTO_MARKET_FETCH_LOCK:
+        now = time.monotonic()
+        cached = CRYPTO_MARKET_CACHE["payload"]
+        if cached is not None and CRYPTO_MARKET_CACHE["expires_at"] > now:
+            return cached
+
+        items = []
+        for symbol, name_en, name_fa in CRYPTO_MARKET_UNIVERSE:
+            try:
+                asset = AssetSpec.parse(f"cex:{symbol}")
+                snapshot = ENGINE.data.snapshot(asset)
+                items.append({
+                    "symbol": symbol,
+                    "name_en": name_en,
+                    "name_fa": name_fa,
+                    "status": "PASS",
+                    "price_usd": snapshot.price_usd,
+                    "volume_24h_usd": snapshot.volume_24h_usd,
+                    "price_discrepancy_pct": snapshot.price_discrepancy_pct,
+                    "providers": [snapshot.provider_a, snapshot.provider_b],
+                    "received_at_utc": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception as exc:
+                items.append({
+                    "symbol": symbol,
+                    "name_en": name_en,
+                    "name_fa": name_fa,
+                    "status": "UNKNOWN",
+                    "reason": f"{type(exc).__name__}: {str(exc)[:180]}",
+                })
+
+        payload = {
+            "status": "PASS" if all(item["status"] == "PASS" for item in items) else "PARTIAL",
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
+            "sources": ["Binance Spot", "Bybit Spot"],
+            "items": items,
+        }
+        CRYPTO_MARKET_CACHE["payload"] = payload
+        CRYPTO_MARKET_CACHE["expires_at"] = time.monotonic() + CRYPTO_MARKET_CACHE_TTL_SECONDS
+        return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
@@ -129,6 +189,10 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             return self._send(200, b'{"status":"ok"}', "application/json")
+        if parsed.path == "/api/crypto-markets":
+            payload = _crypto_market_board()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path.startswith("/jobs/"):
             job_id = parsed.path.rsplit("/", 1)[-1]
             with LOCK:
@@ -164,6 +228,53 @@ class Handler(BaseHTTPRequestHandler):
             <button type="submit">اجرای اسکن پژوهشی</button>
           </form>
         </section>
+
+        <section class="card" id="crypto-markets">
+          <h2>بازار رمزارزها</h2>
+          <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
+          <p id="crypto-market-status" class="muted" aria-live="polite">در حال دریافت دادهٔ عمومی بازار...</p>
+          <div style="overflow-x:auto"><table>
+            <thead><tr><th>رمزارز</th><th>نماد</th><th>قیمت مرجع (USD)</th><th>حجم ۲۴ساعته (USD)</th><th>اختلاف منابع</th><th>وضعیت</th></tr></thead>
+            <tbody id="crypto-market-rows"><tr><td colspan="6">در حال بارگذاری...</td></tr></tbody>
+          </table></div>
+          <button type="button" id="crypto-market-refresh">به‌روزرسانی بازار</button>
+          <p class="muted">به‌روزرسانی سمت سرور هر ۶۰ ثانیه cache می‌شود. این بخش هیچ API پولی یا کلید API نمی‌خواهد؛ محدودیت منطقه‌ای و قطع سرویس عمومی ممکن است بعضی ردیف‌ها را UNKNOWN کند.</p>
+        </section>
+        <script>
+        (function(){
+          const status=document.getElementById('crypto-market-status');
+          const rows=document.getElementById('crypto-market-rows');
+          const button=document.getElementById('crypto-market-refresh');
+          const fmt=(value,max=8)=>Number(value).toLocaleString(undefined,{maximumFractionDigits:max});
+          function cell(tag,value){const node=document.createElement(tag);node.textContent=value??'—';return node;}
+          async function refresh(){
+            button.disabled=true;status.textContent='در حال دریافت قیمت‌های عمومی...';
+            try{
+              const response=await fetch('/api/crypto-markets');
+              const data=await response.json();
+              if(!response.ok)throw new Error('HTTP '+response.status);
+              const tableRows=(data.items||[]).map(item=>{
+                const tr=document.createElement('tr');
+                const values=[item.name_fa+' · '+item.name_en,item.symbol,
+                  item.status==='PASS'?fmt(item.price_usd):'—',
+                  item.status==='PASS'?fmt(item.volume_24h_usd,2):'—',
+                  item.status==='PASS'?fmt(item.price_discrepancy_pct,4)+'%':'—',
+                  item.status==='PASS'?'تأیید دو منبع':'نامشخص · UNKNOWN'];
+                values.forEach((value,index)=>tr.appendChild(cell(index===5?'td':'td',value)));
+                if(item.status!=='PASS')tr.className='status-unknown';
+                return tr;
+              });
+              rows.replaceChildren(...tableRows);
+              const received=new Date(data.updated_at_utc).toLocaleString();
+              status.textContent='منابع: '+(data.sources||[]).join(' و ')+' · دریافت: '+received+
+                ' · وضعیت کلی: '+data.status+' · cache: '+data.cache_ttl_seconds+' ثانیه';
+            }catch(error){
+              status.textContent='دادهٔ بازار در دسترس نیست: '+String(error.message||error);
+            }finally{button.disabled=false;}
+          }
+          button.addEventListener('click',refresh);refresh();
+        })();
+        </script>
         <section class="card" id="market-tools">
           <h2>ماشین‌حساب حرفه‌ای سناریوی Spot</h2>
           <p class="muted">محاسبهٔ سود/زیان فرضی Long بدون اهرم؛ زمان انتخابی فقط افق سناریو است، نه پیش‌بینی زمان سود.</p>
