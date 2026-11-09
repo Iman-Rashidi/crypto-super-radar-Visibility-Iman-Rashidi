@@ -178,6 +178,53 @@ Do not deploy this prototype as an unattended live trading bot. First complete t
 - Bybit V5 API: <https://bybit-exchange.github.io/docs/v5/intro>
 - Solana JSON-RPC: <https://solana.com/docs/rpc/http>
 
+
+## 10. Whale intelligence, sentiment and multi-fold validation (new research modules)
+
+The feature branch adds the following explicit research APIs:
+
+| Module | Capability | Important boundary |
+|---|---|---|
+| `whale_intelligence.py` | Classifies large transfers, exchange inflows/outflows and labelled-entity movements | A transfer is not proof of a buy or sell; unknown labels remain unattributed |
+| `evm_transfers.py` | Bounded ERC-20 Transfer-log scanning on Ethereum and Base public JSON-RPC | Requires a valid USD price to size whales; block-range and log-count caps prevent uncontrolled RPC use |
+| `solana_whales.py` | Samples recent transactions for the largest SPL token accounts | Explicitly partial coverage; not a full historical Solana indexer or proof of beneficial ownership |
+| `sentiment.py` | News/social/positioning keyword scoring and whale-flow divergence flags | Offline keyword baseline; supplied text only, not an autonomous social-media crawler |
+| `evm_security.py` | GoPlus token-security checks plus Sourcify source verification | Requires exact Sourcify match; proxy/admin and missing fields are not assumed safe |
+| `walk_forward.py` | Non-overlapping chronological out-of-sample folds, costs and per-fold drawdown | Requires a causally generated return series; historical funding is mandatory for perpetuals |
+| `intelligence_engine.py` | Fail-closed combination of whale, sentiment, market, derivatives, security and validation states | Any mandatory `FAIL` or `UNKNOWN` blocks the research signal |
+
+### Whale-flow interpretation
+
+- Net exchange inflow is a **potential increase in sell-side supply**, not evidence that the coins were sold.
+- Net exchange outflow can indicate custody or accumulation, but does not prove spot buying.
+- A wallet is only identified as an exchange, fund, market maker or smart-money entity when an upstream label is explicitly supplied. The engine does not invent wallet identities.
+- Solana sampling only inspects a bounded recent subset of the largest token accounts. Its coverage status stays `PARTIAL`; the unified engine will not treat that as a complete whale confirmation.
+
+### Example: offline sentiment and transfer analysis
+
+```python
+from crypto_super_radar.whale_intelligence import analyze_whale_activity
+from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentiment_divergence
+
+whales = analyze_whale_activity(normalized_transfer_rows)
+sentiment = analyze_market_sentiment({
+    "news": ["Institutional adoption increases"],
+    "social": ["Community reports a major exploit"],
+})
+divergence = detect_sentiment_divergence(
+    sentiment.get("score"),
+    whales.get("net_exchange_flow_usd"),
+)
+print(whales)
+print(sentiment)
+print(divergence)
+```
+
+### Release boundary
+
+These modules are committed on the feature branch and covered by offline tests. They are **research components**, not yet evidence of a live end-to-end production scan. No live market scan, live wallet-label enrichment, or unattended trading has been run. The current CLI/report path must be wired to these modules and verified as one integrated application before the Render service is created. The CI workflow rebuilds the bundled source archive and publishes it as an artifact; the original archive in the repository is not treated as updated until that CI job succeeds.
+
+
 ---
 
 **CRYPTO SUPER RADAR** — Discover Early. Analyze Smarter. Manage Risk.
