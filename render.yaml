@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: crypto-super-radar
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m crypto_super_radar.web_app
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: CSR_DB_PATH
+        value: data/crypto_super_radar.sqlite3
