@@ -345,3 +345,20 @@ Provider adapters apply strict normalization before market data reaches the gate
 - HTTP retries are limited to transient network errors, 408/425/429 and server errors. Retry-After delta-seconds and HTTP-date values are supported with a 30-second cap; non-retryable client errors fail immediately.
 
 These checks validate response shape and internal consistency; they do not prove that a public provider is correct, independent, manipulation-free, or continuously available. CI uses mocked/offline fixtures and does not replace a live-provider acceptance test. All 12 mandatory gates remain fail-closed, and no order execution is enabled.
+
+
+## 16. Read-only live provider acceptance
+
+Run the public-data acceptance check manually; it makes no order, wallet-signing, account, or state-changing calls:
+
+```bash
+python -m crypto_super_radar.provider_acceptance \
+  --asset cex:BTCUSDT \
+  --asset perp:BTCUSDT \
+  --asset solana:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --output provider-acceptance.json
+```
+
+The JSON report records each source's status, UTC receive time, request latency, price, the two-source price discrepancy, and latest daily-candle age. Solana assets also include a read-only Solana RPC mint-authority and concentration check. `PASS` requires both price sources, an acceptable price difference, fresh candles, and the applicable Solana RPC check. Missing candle evidence remains `UNKNOWN`; provider errors fail the live run. The default candle freshness limit is 48 hours and can be changed with `--max-candle-age-hours`.
+
+A live result only describes the observed request window and selected assets. Rate limits, regional access, API changes, coverage outside these samples, and long-term availability remain unverified. A live `PASS` is not a trading recommendation or permission to submit orders.
