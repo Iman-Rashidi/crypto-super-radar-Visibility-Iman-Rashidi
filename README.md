@@ -99,6 +99,17 @@ or:
 python -m unittest discover -s tests -v
 ```
 
+## 4a. Run a read-only live research scan
+
+After installing the dependencies, run the integrated 12-gate engine against a public CEX instrument:
+
+```bash
+python -m scripts.live_research_scan --asset cex:BTCUSDT \
+  --output reports/live-research-scan.json
+```
+
+The JSON report contains the complete gate evidence and decision blockers. The runner is restricted to a single CEX spot/perpetual asset and never submits orders, signs transactions, connects a wallet, or reads private exchange accounts. Any mandatory `FAIL` or `UNKNOWN` must keep the decision at `NO TRADE`. See [Live Provider Acceptance](docs/LIVE_PROVIDER_ACCEPTANCE.md) for the companion real-provider checks and their regional access requirements.
+
 The offline test suite validates accepted and rejected data, timestamp handling, RSI, local sentiment, the 3-state safety layout, twelve-gate behavior, and preservation of all rows in the Pandas master DataFrame. Tests do not call public APIs and do not incur network costs.
 
 ## 5. Run a scan
