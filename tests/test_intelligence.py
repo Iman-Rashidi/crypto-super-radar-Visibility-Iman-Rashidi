@@ -1,5 +1,7 @@
 import unittest
+from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 
 from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleEvent, extract_goplus_whale_watchlist, build_wallet_label_map
@@ -9,6 +11,8 @@ from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
 from crypto_super_radar.sentiment_feeds import fetch_fear_greed_index, fetch_rss_headlines
 from crypto_super_radar.solana_whales import SolanaWhaleScanner
 from crypto_super_radar.market_sentiment import fetch_market_sentiment
+from crypto_super_radar.integrated_engine import WhaleAwareConfirmationEngine
+from crypto_super_radar.models import AssetSpec, MarketSnapshot
 
 
 class WhaleTests(unittest.TestCase):
@@ -289,6 +293,83 @@ class SentimentFeedTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "KNOWN")
         self.assertEqual(result["headlines"][0]["title"], "Bitcoin adoption grows")
+
+
+def sample_candles(stronger=True):
+    t = np.arange(240, dtype=float)
+    slope = 0.19 if stronger else 0.09
+    close = 100.0 + slope * t + 2.3 * np.sin(t / 5.0) + np.sin(t / 13.0)
+    index = pd.date_range(end=pd.Timestamp.now(tz="UTC").floor("D"), periods=240, freq="D")
+    return pd.DataFrame({
+        "open": close * 0.999, "high": close * 1.012,
+        "low": close * 0.988, "close": close,
+        "volume": np.full(240, 1_000_000.0),
+    }, index=index)
+
+
+class FakeIntegratedDataService:
+    def __init__(self, whale_status="KNOWN"):
+        self.asset_candles = sample_candles(True)
+        self.benchmark = sample_candles(False)
+        self.whale_evidence = {
+            "cex:BTCUSDT": {
+                "status": whale_status,
+                "net_whale_trade_flow_usd": 250000 if whale_status == "KNOWN" else None,
+            }
+        }
+        self.http = SimpleNamespace(limiter=NoWaitLimiter())
+
+    def snapshot(self, asset):
+        return MarketSnapshot(
+            asset=asset, price_usd=float(self.asset_candles["close"].iloc[-1]),
+            volume_24h_usd=25_000_000.0, liquidity_usd=5_000_000.0,
+            price_discrepancy_pct=0.2, volume_discrepancy_pct=None,
+            provider_a="Mock-A", provider_b="Mock-B",
+        )
+
+    def candles(self, asset, snapshot):
+        return self.asset_candles.copy()
+
+    def benchmark_candles(self):
+        return self.benchmark.copy()
+
+    def security(self, asset):
+        return {"status": "PASS", "reason": "Mock security PASS."}
+
+    def funding_history(self, asset):
+        return pd.Series(dtype=float)
+
+
+class IntegratedEngineTests(unittest.TestCase):
+    @staticmethod
+    def sentiment_payload(status="KNOWN"):
+        return {
+            "status": status, "score": 35.0 if status == "KNOWN" else None,
+            "label": "POSITIVE" if status == "KNOWN" else None,
+            "news": {"status": "KNOWN"}, "social": {"status": "KNOWN"},
+            "fear_greed": {"status": "KNOWN", "value": 68},
+            "social_coverage": "KNOWN" if status == "KNOWN" else "UNKNOWN",
+        }
+
+    def test_integrated_engine_adds_mandatory_whale_and_sentiment_gates(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+        )
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        self.assertEqual(len(result.gates), 11)
+        self.assertEqual(result.gates[9].status.value, "PASS")
+        self.assertEqual(result.gates[10].status.value, "PASS")
+        self.assertIn("evidence_confidence_pct", result.metrics)
+
+    def test_partial_sentiment_coverage_blocks_any_trade(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("PARTIAL"),
+        )
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        self.assertEqual(result.gates[10].status.value, "UNKNOWN")
+        self.assertEqual(result.signal.value, "NO TRADE")
 
 
 class UnifiedEngineTests(unittest.TestCase):
