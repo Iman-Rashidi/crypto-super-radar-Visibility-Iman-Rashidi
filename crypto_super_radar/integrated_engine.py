@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Optional
 
+import pandas as pd
+
 from .cex_whales import CexWhaleScanner
 from .config import AppConfig
 from .engine import ConfirmationEngine
@@ -12,6 +14,7 @@ from .market_sentiment import fetch_market_sentiment
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
 from .solana_whales import SolanaWhaleScanner
+from .walk_forward import WalkForwardConfig, walk_forward_validate
 from .whale_intelligence import (
     build_wallet_label_map,
     extract_goplus_whale_watchlist,
@@ -26,6 +29,18 @@ class WhaleAwareMarketDataService(MarketDataService):
         self.http = PublicHttpClient(self.config)
         self.snapshots: dict[str, Any] = {}
         self.whale_evidence: dict[str, dict[str, Any]] = {}
+        self.candle_frames: dict[str, pd.DataFrame] = {}
+        self.funding_frames: dict[str, pd.Series] = {}
+
+    def candles(self, asset: AssetSpec, snapshot):
+        frame = super().candles(asset, snapshot)
+        self.candle_frames[asset.raw] = frame.copy()
+        return frame
+
+    def funding_history(self, asset: AssetSpec):
+        series = super().funding_history(asset)
+        self.funding_frames[asset.raw] = series.copy()
+        return series
 
     def snapshot(self, asset: AssetSpec):
         snapshot = super().snapshot(asset)
