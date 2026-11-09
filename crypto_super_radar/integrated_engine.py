@@ -151,6 +151,71 @@ class WhaleAwareConfirmationEngine:
         self.social_feed_urls = social_feed_urls or ["https://www.reddit.com/r/CryptoCurrency/.rss"]
         self.sentiment_cache: dict = {}
 
+
+    def _multi_fold_validation(self, asset: AssetSpec) -> dict[str, Any]:
+        candles = self.data.candle_frames.get(asset.raw)
+        if candles is None or not isinstance(candles.index, pd.DatetimeIndex):
+            return {"status": "UNKNOWN", "reason": "Validated candle history is unavailable for multi-fold validation."}
+        if len(candles) < 315 or "close" not in candles:
+            return {"status": "UNKNOWN", "reason": "At least 315 daily candles are required for three non-overlapping out-of-sample folds."}
+        close = pd.to_numeric(candles["close"], errors="coerce")
+        if close.isna().any() or (close <= 0).any():
+            return {"status": "UNKNOWN", "reason": "Missing or invalid close prices block multi-fold validation."}
+        fast = close.ewm(span=20, adjust=False).mean()
+        slow = close.ewm(span=50, adjust=False).mean()
+        if asset.market_type == "perp":
+            position = pd.Series(0.0, index=close.index)
+            position.loc[fast > slow] = 1.0
+            position.loc[fast < slow] = -1.0
+        else:
+            position = (fast > slow).astype(float)
+        held_position = position.shift(1).fillna(0.0)
+        asset_returns = close.pct_change().fillna(0.0)
+        turnover = position.diff().abs().fillna(position.abs())
+        one_way_cost = (self.config.risk.fee_bps_per_side + self.config.risk.slippage_bps_per_side) / 10000.0
+        strategy_returns = held_position * asset_returns - turnover * one_way_cost
+        funding_daily = None
+        if asset.market_type == "perp":
+            funding = self.data.funding_frames.get(asset.raw)
+            if funding is None or funding.empty:
+                return {"status": "UNKNOWN", "reason": "Historical funding is mandatory for perpetual multi-fold validation."}
+            funding_daily = pd.to_numeric(funding, errors="coerce").groupby(funding.index.floor("D")).sum()
+        cfg = WalkForwardConfig(
+            train_bars=180, test_bars=45, step_bars=45, embargo_bars=0,
+            min_folds=3, fee_bps_per_side=0.0, slippage_bps_per_side=0.0,
+        )
+        validation = walk_forward_validate(
+            strategy_returns, cfg, funding_returns=funding_daily,
+            perpetual=(asset.market_type == "perp"),
+        )
+        if validation.get("status") != "KNOWN":
+            return {"status": "UNKNOWN", "reason": validation.get("reason", "Multi-fold validation is unknown."),
+                    "fold_count": validation.get("fold_count"), "folds": validation.get("folds", [])}
+        aggregate = validation.get("aggregate_oos") or {}
+        sharpe = aggregate.get("sharpe")
+        profit_factor = aggregate.get("profit_factor")
+        drawdown = aggregate.get("max_drawdown_pct")
+        worst = validation.get("worst_fold_drawdown_pct")
+        if any(value is None for value in (sharpe, profit_factor, drawdown, worst)):
+            return {"status": "UNKNOWN", "reason": "One or more multi-fold performance metrics are undefined.",
+                    "fold_count": validation.get("fold_count"), "aggregate_oos": aggregate}
+        passed = (
+            sharpe >= self.config.thresholds.min_oos_sharpe
+            and profit_factor >= self.config.thresholds.min_oos_profit_factor
+            and drawdown < self.config.thresholds.max_backtest_drawdown_pct
+            and worst < self.config.thresholds.max_backtest_drawdown_pct
+        )
+        return {
+            "status": "PASS" if passed else "FAIL",
+            "reason": "Multi-fold OOS metrics pass stability thresholds." if passed else "Multi-fold OOS metrics fail Sharpe, profit-factor or drawdown thresholds.",
+            "fold_count": validation.get("fold_count"),
+            "aggregate_oos": aggregate,
+            "worst_fold_drawdown_pct": worst,
+            "folds": validation.get("folds", []),
+            "costs_included": True,
+            "strategy": "Fixed EMA20/EMA50; chronological non-overlapping test folds; no parameter optimization.",
+        }
+
     def analyze(
         self,
         asset_input: str | AssetSpec,
