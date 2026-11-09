@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 import requests
 
+from .rate_limiter import SharedRateLimiter
+
 CHAIN_IDS = {"eth": 1, "ethereum": 1, "base": 8453}
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 GOPLUS_URL = "https://api.gopluslabs.io/api/v1/token_security/{chain_id}"
@@ -65,6 +67,7 @@ def screen_evm_token(
     max_tax_pct: float = 5.0,
     max_top10_holder_pct: float = 60.0,
     now: Optional[float] = None,
+    limiter: Optional[SharedRateLimiter] = None,
 ) -> EvmSecurityResult:
     normalized_chain = chain.lower()
     if normalized_chain not in CHAIN_IDS or not ADDRESS_RE.fullmatch(address or ""):
@@ -80,9 +83,11 @@ def screen_evm_token(
     if cached and now - cached[0] <= cache_ttl_seconds:
         return cached[1]
     client = session or requests.Session()
+    rate_limiter = limiter or SharedRateLimiter()
     reasons: list[str] = []
     evidence: dict[str, Any] = {}
     try:
+        rate_limiter.wait(GOPLUS_URL)
         gp = client.get(GOPLUS_URL.format(chain_id=chain_id),
                         params={"contract_addresses": address}, timeout=timeout)
         gp.raise_for_status()
@@ -108,11 +113,12 @@ def screen_evm_token(
     if isinstance(holders, list) and holders:
         try:
             percentages = [float(item["percent"]) * 100.0 for item in holders[:10]]
-            if all(0 <= value <= 100 for value in percentages):
+            if all(0 <= value <= 100 for value in percentages) and sum(percentages) <= 100.0:
                 top10 = sum(percentages)
         except (KeyError, TypeError, ValueError):
             top10 = None
     try:
+        rate_limiter.wait(SOURCIFY_URL)
         sourcify = client.get(SOURCIFY_URL.format(chain_id=chain_id, address=address),
                               params={}, timeout=timeout)
         if sourcify.status_code == 404:
