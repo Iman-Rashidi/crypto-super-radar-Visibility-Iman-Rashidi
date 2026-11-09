@@ -70,8 +70,15 @@ def combine_intelligence(
     if not blocked and confirmation_score is not None and confirmation_score >= score_threshold:
         if market_direction == derivatives_direction and market_direction in {"LONG", "SHORT"}:
             signal = market_direction
+    confidence_score = 100.0 * sum(state == "PASS" for state in gate_states.values()) / len(gate_states)
+    estimated_risk = market.get("estimated_risk_score")
+    opportunity_rank = market.get("opportunity_rank")
     return {
         "signal": signal,
+        "estimated_risk_score": estimated_risk if isinstance(estimated_risk, (int, float)) else None,
+        "opportunity_rank": opportunity_rank if isinstance(opportunity_rank, (int, float)) else None,
+        "confidence_score": confidence_score,
+        "confidence_semantics": "Mandatory evidence coverage score; not a probability of profit.",
         "gate_states": gate_states,
         "blocked_by": blocked,
         "confirmation_score": confirmation_score,
