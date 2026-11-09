@@ -138,13 +138,14 @@ class WhaleAwareConfirmationEngine:
         asset_input: str | AssetSpec,
         headlines: Optional[Iterable[str]] = None,
         open_portfolio_risk_pct: float = 0.0,
+        social_posts: Optional[Iterable[str]] = None,
     ):
         asset = asset_input if isinstance(asset_input, AssetSpec) else AssetSpec.parse(asset_input)
         supplied = list(headlines or [])
         sentiment = fetch_market_sentiment(
             self.news_feed_urls,
             social_feed_urls=self.social_feed_urls,
-            social_text=supplied,
+            social_text=list(social_posts or []),
             cache=self.sentiment_cache,
             limiter=self.data.http.limiter,
         )
