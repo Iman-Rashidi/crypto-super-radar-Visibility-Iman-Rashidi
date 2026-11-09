@@ -349,6 +349,8 @@ class WhaleAwareConfirmationEngine:
             "market_sentiment_score": sentiment_score,
             "market_sentiment_label": sentiment.get("label"),
             "fear_greed_value": (sentiment.get("fear_greed") or {}).get("value"),
+            "fear_greed_attribution": (sentiment.get("fear_greed") or {}).get("attribution"),
+            "fear_greed_scope": (sentiment.get("fear_greed") or {}).get("scope"),
             "sentiment_coverage_status": sentiment_status,
             "mandatory_gate_count": len(result.gates),
             "walk_forward_status": walk.get("status"),
