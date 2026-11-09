@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleEvent, extract_goplus_whale_watchlist, build_wallet_label_map
+from crypto_super_radar.dashboard_data import build_dashboard_frames
 from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentiment_divergence, score_text, fear_greed_to_sentiment, score_headlines
 from crypto_super_radar.walk_forward import WalkForwardConfig, walk_forward_validate
 from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
@@ -429,6 +430,31 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertEqual(result.metrics["confidence_level_pct"], 100.0)
         self.assertEqual(result.metrics["risk_score"], result.estimated_risk_score)
         self.assertEqual(result.metrics["opportunity_rank"], result.opportunity_rank)
+
+    def test_dashboard_dataframes_show_twelve_gates_and_quant_metrics(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
+        )
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        frames = build_dashboard_frames(result)
+        self.assertEqual(len(frames["gates"]), 12)
+        self.assertTrue(frames["errors"].empty)
+        self.assertIn("RSI-14", frames["quantitative"]["شاخص"].tolist())
+        self.assertIn("Risk Score", frames["whale_sentiment"]["شاخص"].tolist())
+        self.assertIn("Confidence Level", frames["whale_sentiment"]["شاخص"].tolist())
+
+    def test_dashboard_error_table_lists_failed_security_gate(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(security_status="FAIL"),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
+        )
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        errors = build_dashboard_frames(result)["errors"]
+        self.assertIn(6, errors["شماره فیلتر"].tolist())
+        self.assertIn("FAIL", errors["وضعیت"].tolist())
 
     def test_whale_divergence_reduces_confidence_without_failing_gate(self):
         data = FakeIntegratedDataService()
