@@ -413,11 +413,27 @@ class WhaleAwareConfirmationEngine:
             "evidence_confidence_pct": evidence_confidence,
         })
         all_pass = all(g.status == GateStatus.PASS for g in result.gates)
+        failed_gates = [g for g in result.gates if g.status == GateStatus.FAIL]
+        unknown_gates = [g for g in result.gates if g.status == GateStatus.UNKNOWN]
+        confirmation_blocked = (
+            result.confirmation_score is None
+            or result.confirmation_score < self.config.thresholds.min_confirmation_score
+        )
+        risk_missing = result.estimated_risk_score is None
+        risk_too_high = (
+            result.estimated_risk_score is not None
+            and result.estimated_risk_score >= self.config.thresholds.max_estimated_risk_score
+        )
+        result.metrics["decision_blockers"] = {
+            "failed_filters": [{"id": g.gate_id, "name": g.name_fa} for g in failed_gates],
+            "unknown_filters": [{"id": g.gate_id, "name": g.name_fa} for g in unknown_gates],
+            "confirmation_below_threshold": confirmation_blocked,
+            "risk_score_missing": risk_missing,
+            "risk_score_at_or_above_limit": risk_too_high,
+            "base_engine_returned_no_trade": result.signal == Signal.NO_TRADE,
+        }
         if result.signal != Signal.NO_TRADE and (
-            not all_pass or result.confirmation_score is None or
-            result.confirmation_score < self.config.thresholds.min_confirmation_score or
-            result.estimated_risk_score is None or
-            result.estimated_risk_score >= self.config.thresholds.max_estimated_risk_score
+            not all_pass or confirmation_blocked or risk_missing or risk_too_high
         ):
             result.signal = Signal.NO_TRADE
         if result.signal == Signal.NO_TRADE:
@@ -427,14 +443,16 @@ class WhaleAwareConfirmationEngine:
             result.expected_holding_days = None
             result.position_notional_usd = None
             result.risk_budget_usd = None
-            result.safety_status = (
-                SafetyStatus.HIGH_RISK if any(g.status == GateStatus.FAIL for g in result.gates)
-                or (result.estimated_risk_score is not None and result.estimated_risk_score >= self.config.thresholds.max_estimated_risk_score)
-                else SafetyStatus.UNKNOWN
-            )
-            result.summary_en = "NO TRADE: all 12 mandatory gates must pass; whale and sentiment evidence are required."
-            result.summary_fa = "عدم معامله: هر ۱۲ فیلتر اجباری باید تأیید شوند؛ تحلیل نهنگ‌ها و احساسات بازار الزامی است."
+            if failed_gates or risk_too_high:
+                result.safety_status = SafetyStatus.HIGH_RISK
+            elif unknown_gates or risk_missing:
+                result.safety_status = SafetyStatus.UNKNOWN
+            else:
+                # A missed confirmation threshold is not the same as unknown risk.
+                result.safety_status = SafetyStatus.LOW_RISK
+            result.summary_en = "NO TRADE: mandatory evidence, confirmation threshold, or risk limits did not qualify."
+            result.summary_fa = "عدم معامله: شواهد اجباری، حداقل امتیاز تأیید یا محدودیت ریسک شرایط لازم را ندارند."
         else:
             result.summary_en = "All 12 mandatory gates passed. Paper/research plan only; no order was submitted."
-            result.summary_fa = "هر ۱۱ فیلتر تأیید شده‌اند؛ فقط برنامه پژوهشی و آزمایشی است و سفارشی ارسال نشده است."
+            result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند؛ خروجی فقط برنامه پژوهشی و آزمایشی است و هیچ سفارشی ارسال نشده است."
         return result
