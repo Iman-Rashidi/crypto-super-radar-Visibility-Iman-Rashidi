@@ -320,6 +320,7 @@ class WhaleAwareConfirmationEngine:
             "ACCUMULATION_PRESSURE" if bias_total > 0 else
             "DISTRIBUTION_PRESSURE" if bias_total < 0 else "MIXED_OR_BALANCED"
         )
+        scoring = self.config.scoring
         adjustment = 0.0
         whale_risk_adjustment = 0.0
         sentiment_risk_adjustment = 0.0
@@ -330,8 +331,15 @@ class WhaleAwareConfirmationEngine:
             opposed = (whale_bias == "ACCUMULATION_PRESSURE" and direction == "SHORT") or (
                 whale_bias == "DISTRIBUTION_PRESSURE" and direction == "LONG"
             )
-            adjustment += 5.0 if aligned else -10.0 if opposed else 0.0
-            whale_risk_adjustment = 0.0 if aligned else 10.0 if opposed else 3.0
+            adjustment += (
+                scoring.whale_confirmation_aligned if aligned else
+                scoring.whale_confirmation_opposed if opposed else 0.0
+            )
+            whale_risk_adjustment = (
+                0.0 if aligned else
+                scoring.whale_risk_opposed if opposed else
+                scoring.whale_risk_neutral
+            )
         sentiment_score = sentiment.get("score")
         if direction in {"LONG", "SHORT"} and sentiment_score is not None:
             aligned_sentiment = (sentiment_score >= 25 and direction == "LONG") or (
@@ -340,8 +348,15 @@ class WhaleAwareConfirmationEngine:
             opposed_sentiment = (sentiment_score <= -25 and direction == "LONG") or (
                 sentiment_score >= 25 and direction == "SHORT"
             )
-            adjustment += 3.0 if aligned_sentiment else -3.0 if opposed_sentiment else 0.0
-            sentiment_risk_adjustment = 0.0 if aligned_sentiment else 5.0 if opposed_sentiment else 1.0
+            adjustment += (
+                scoring.sentiment_confirmation_aligned if aligned_sentiment else
+                scoring.sentiment_confirmation_opposed if opposed_sentiment else 0.0
+            )
+            sentiment_risk_adjustment = (
+                0.0 if aligned_sentiment else
+                scoring.sentiment_risk_opposed if opposed_sentiment else
+                scoring.sentiment_risk_neutral
+            )
         if result.confirmation_score is not None:
             result.confirmation_score = round(max(0.0, min(100.0, result.confirmation_score + adjustment)), 2)
         risk_adjustment = whale_risk_adjustment + sentiment_risk_adjustment
@@ -374,23 +389,31 @@ class WhaleAwareConfirmationEngine:
             else:
                 sentiment_alignment = "OPPOSED"
         confidence_penalty = (
-            (15.0 if whale_alignment == "OPPOSED" else 5.0 if whale_alignment == "NEUTRAL" else 0.0)
-            + (10.0 if sentiment_alignment == "OPPOSED" else 0.0)
+            (
+                scoring.confidence_whale_opposed if whale_alignment == "OPPOSED" else
+                scoring.confidence_whale_neutral if whale_alignment == "NEUTRAL" else 0.0
+            )
+            + (
+                scoring.confidence_sentiment_opposed
+                if sentiment_alignment == "OPPOSED" else 0.0
+            )
         )
-        if whale_alignment == "OPPOSED" and sentiment_alignment == "ALIGNED":
-            confidence_penalty += 5.0
-        elif whale_alignment == "ALIGNED" and sentiment_alignment == "OPPOSED":
-            confidence_penalty += 5.0
+        if (
+            whale_alignment == "OPPOSED" and sentiment_alignment == "ALIGNED"
+        ) or (
+            whale_alignment == "ALIGNED" and sentiment_alignment == "OPPOSED"
+        ):
+            confidence_penalty += scoring.confidence_cross_divergence
         confidence_level = round(max(0.0, evidence_confidence - confidence_penalty), 2)
 
         # Opportunity is adjusted on its own scale; it is never copied from confirmation.
         opportunity_whale_adjustment = (
-            4.0 if whale_alignment == "ALIGNED" else
-            -6.0 if whale_alignment == "OPPOSED" else 0.0
+            scoring.opportunity_whale_aligned if whale_alignment == "ALIGNED" else
+            scoring.opportunity_whale_opposed if whale_alignment == "OPPOSED" else 0.0
         )
         opportunity_sentiment_adjustment = (
-            2.0 if sentiment_alignment == "ALIGNED" else
-            -3.0 if sentiment_alignment == "OPPOSED" else 0.0
+            scoring.opportunity_sentiment_aligned if sentiment_alignment == "ALIGNED" else
+            scoring.opportunity_sentiment_opposed if sentiment_alignment == "OPPOSED" else 0.0
         )
         opportunity_adjustment = (
             opportunity_whale_adjustment + opportunity_sentiment_adjustment
