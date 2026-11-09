@@ -74,6 +74,11 @@ def technical_metrics(candles: pd.DataFrame, benchmark: pd.DataFrame) -> Dict[st
     ema200 = close.ewm(span=200, adjust=False).mean()
     last = float(close.iloc[-1])
     rsi_value = rsi(close)
+    rsi_previous = rsi(close.iloc[:-1]) if len(close) >= 16 else None
+    rsi_change = (
+        float(rsi_value - rsi_previous)
+        if rsi_value is not None and rsi_previous is not None else None
+    )
     atr_value = atr(candles)
     if rsi_value is None or atr_value is None:
         return {"status": "UNKNOWN", "reason": "RSI or ATR could not be calculated."}
@@ -90,6 +95,8 @@ def technical_metrics(candles: pd.DataFrame, benchmark: pd.DataFrame) -> Dict[st
         "ema50": float(ema50.iloc[-1]),
         "ema200": float(ema200.iloc[-1]),
         "rsi14": float(rsi_value),
+        "rsi14_previous": float(rsi_previous) if rsi_previous is not None else None,
+        "rsi14_change": rsi_change,
         "atr14": float(atr_value),
         "asset_return_30d_pct": float(asset_ret30),
         "benchmark_return_30d_pct": float(benchmark_ret30),
