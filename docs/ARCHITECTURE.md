@@ -26,6 +26,13 @@ Any `FAIL` or `UNKNOWN` blocks entry. Scores are descriptive evidence and never 
 | `config.py` | Thresholds, rate limits, paper risk parameters | تنظیمات مرکزی، محدودیت API و بودجه ریسک آزمایشی |
 | `models.py` | Typed assets, gates, snapshots and results | مدل داده و وضعیت هر فیلتر |
 | `rate_limiter.py` | Process-wide per-host scheduling | کنترل یکپارچه فاصله درخواست‌ها |
+| `whale_intelligence.py` | Large transfer classification and exchange-flow aggregation | تفکیک انتقال بزرگ از جریان ورود/خروج صرافی |
+| `evm_transfers.py` | Bounded ERC-20 Transfer-log scanner on Ethereum/Base | رصد انتقال‌های EVM با محدودیت بازه بلاک |
+| `solana_whales.py` | Recent SPL largest-account transaction sampling | نمونه‌برداری محدود تراکنش حساب‌های بزرگ سولانا |
+| `sentiment.py` | Multi-source keyword sentiment and divergence | تحلیل متن خبر/اجتماع و تضاد با جریان نهنگ |
+| `evm_security.py` | GoPlus + exact Sourcify contract screening | غربالگری امنیت قرارداد EVM با تطبیق دقیق سورس |
+| `walk_forward.py` | Non-overlapping chronological OOS folds | اعتبارسنجی چندبخشی بدون هم‌پوشانی داده آزمون |
+| `intelligence_engine.py` | Fail-closed evidence combiner | ترکیب شواهد با مسدودسازی FAIL/UNKNOWN |
 | `providers.py` | GeckoTerminal, DexScreener, Binance, Bybit and Solana RPC | دریافت داده رایگان و عمومی |
 | `indicators.py` | RSI, ATR, EMA regime and relative strength | اندیکاتورهای تکنیکال و رژیم بازار |
 | `sentiment.py` | Local keyword sentiment | تحلیل محلی تیترها بدون سرویس پولی |
@@ -51,3 +58,8 @@ Persian: `UNKNOWN` به معنی «احتمالاً خوب» نیست؛ یعنی
 - The confirmation engine applies an AND policy to hard gates.
 - The opportunity score ranks evidence quality; it cannot override a failed gate.
 - Portfolio sizing is paper-only and never sends execution requests.
+
+
+## New research-module integration contract / قرارداد اتصال ماژول‌های جدید
+
+The modules above expose normalized research APIs. They must be wired into the scan/CLI/report path before a hosted end-to-end release. EVM transfer scanning can cover bounded public RPC ranges; Solana whale sampling is intentionally partial and cannot satisfy a full-history whale gate. Sentiment currently scores supplied text and does not claim live social coverage. The decision combiner requires all six mandatory evidence groups to be PASS and emits only paper/research labels.
