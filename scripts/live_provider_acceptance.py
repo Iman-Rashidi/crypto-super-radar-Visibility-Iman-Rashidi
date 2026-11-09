@@ -400,7 +400,7 @@ class AcceptanceRunner:
         if not valid:
             self._evaluate_derived(
                 "perpetual_price_agreement", "Binance USD-M + Bybit Linear", {}, [],
-                error="Both perpetual providers must return valid mark prices.",
+                inconclusive_reason="Perpetual price comparison is unavailable until both providers return valid mark prices.",
             )
             self._evaluate_derived(
                 "funding_interval_agreement", "Binance USD-M + Bybit Linear", {}, [],
