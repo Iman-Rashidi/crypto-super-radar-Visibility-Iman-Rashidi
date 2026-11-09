@@ -76,6 +76,8 @@ def fetch_rss_headlines(
     client = session or requests.Session()
     headlines: list[dict[str, str]] = []
     failures: list[str] = []
+    empty_feeds: list[str] = []
+    successful_feeds = 0
     unique = list(dict.fromkeys(feed_urls))[:max_feeds]
     for url in unique:
         try:
@@ -84,6 +86,7 @@ def fetch_rss_headlines(
             response.raise_for_status()
             root = ET.fromstring(response.content)
             items = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1].lower() in {"item", "entry"}]
+            feed_headline_count = 0
             for item in items[:max_items_per_feed]:
                 fields = {}
                 for child in list(item):
@@ -92,12 +95,16 @@ def fetch_rss_headlines(
                         fields[key] = " ".join("".join(child.itertext()).split())
                 title = fields.get("title", "")
                 if title:
+                    feed_headline_count += 1
                     headlines.append({
                         "title": title,
                         "summary": fields.get("description", fields.get("summary", "")),
                         "published": fields.get("published", fields.get("updated", "")),
                         "source_url": url,
                     })
+            successful_feeds += 1
+            if feed_headline_count == 0:
+                empty_feeds.append(url)
         except Exception as exc:
             failures.append(f"{url}: {type(exc).__name__}")
     deduped = []
@@ -107,10 +114,17 @@ def fetch_rss_headlines(
         if key not in seen:
             seen.add(key)
             deduped.append(item)
+    coverage = (
+        "KNOWN" if deduped and not failures and not empty_feeds
+        else "PARTIAL" if deduped
+        else "UNKNOWN"
+    )
     return {
-        "status": "KNOWN" if deduped else "UNKNOWN",
+        "status": coverage,
         "headlines": deduped,
         "feed_count": len(unique),
+        "successful_feed_count": successful_feeds,
+        "empty_feeds": empty_feeds,
         "failed_feeds": failures,
-        "coverage": "PARTIAL" if failures else ("KNOWN" if deduped else "UNKNOWN"),
+        "coverage": coverage,
     }
