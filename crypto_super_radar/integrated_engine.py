@@ -382,6 +382,24 @@ class WhaleAwareConfirmationEngine:
         elif whale_alignment == "ALIGNED" and sentiment_alignment == "OPPOSED":
             confidence_penalty += 5.0
         confidence_level = round(max(0.0, evidence_confidence - confidence_penalty), 2)
+
+        # Opportunity is adjusted on its own scale; it is never copied from confirmation.
+        opportunity_whale_adjustment = (
+            4.0 if whale_alignment == "ALIGNED" else
+            -6.0 if whale_alignment == "OPPOSED" else 0.0
+        )
+        opportunity_sentiment_adjustment = (
+            2.0 if sentiment_alignment == "ALIGNED" else
+            -3.0 if sentiment_alignment == "OPPOSED" else 0.0
+        )
+        opportunity_adjustment = (
+            opportunity_whale_adjustment + opportunity_sentiment_adjustment
+        )
+        if result.opportunity_rank is not None:
+            result.opportunity_rank = round(
+                max(0.0, min(100.0, float(result.opportunity_rank) + opportunity_adjustment)), 2
+            )
+
         result.metrics.update({
             "whale_status": whale_status, "whale_bias": whale_bias,
             "whale_history_count": whale_history["observation_count"],
@@ -402,6 +420,9 @@ class WhaleAwareConfirmationEngine:
             "mandatory_gate_count": len(result.gates),
             "risk_score": result.estimated_risk_score,
             "opportunity_rank": result.opportunity_rank,
+            "opportunity_whale_adjustment": opportunity_whale_adjustment,
+            "opportunity_sentiment_adjustment": opportunity_sentiment_adjustment,
+            "opportunity_total_adjustment": opportunity_adjustment,
             "confidence_level_pct": confidence_level,
             "confidence_level_semantics": "Evidence coverage adjusted for whale/market/sentiment disagreement; not a probability of profit.",
             "whale_alignment": whale_alignment,
