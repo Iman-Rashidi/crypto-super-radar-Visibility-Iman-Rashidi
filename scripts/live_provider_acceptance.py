@@ -25,7 +25,7 @@ from crypto_super_radar.config import AppConfig
 from crypto_super_radar.rate_limiter import SharedRateLimiter
 
 
-BINANCE_SPOT = "https://api.binance.com"
+BINANCE_SPOT = "https://data-api.binance.vision"
 BYBIT = "https://api.bybit.com"
 BINANCE_FUTURES = "https://fapi.binance.com"
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
