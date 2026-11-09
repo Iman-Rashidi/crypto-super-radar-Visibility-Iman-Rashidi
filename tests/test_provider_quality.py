@@ -143,6 +143,41 @@ class PerpetualProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(DataProviderError, "API error"):
             BybitProvider(fake_http).ticker("BTCUSDT")
 
+    def test_funding_intervals_default_to_binance_eight_hours_and_match_bybit(self):
+        fake_http = MagicMock()
+        fake_http.get.side_effect = [
+            [],
+            {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "fundingInterval": "480"}]}},
+        ]
+        result = PerpetualMarketProvider(fake_http).funding_interval_hours("BTCUSDT")
+        self.assertEqual(result, 8.0)
+
+    def test_adjusted_funding_interval_must_match_both_venues(self):
+        fake_http = MagicMock()
+        fake_http.get.side_effect = [
+            [{"symbol": "BTCUSDT", "fundingIntervalHours": 4}],
+            {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "fundingInterval": "240"}]}},
+        ]
+        self.assertEqual(PerpetualMarketProvider(fake_http).funding_interval_hours("BTCUSDT"), 4.0)
+
+    def test_funding_interval_mismatch_fails_closed(self):
+        fake_http = MagicMock()
+        fake_http.get.side_effect = [
+            [{"symbol": "BTCUSDT", "fundingIntervalHours": 4}],
+            {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "fundingInterval": "480"}]}},
+        ]
+        with self.assertRaisesRegex(DataProviderError, "interval mismatch"):
+            PerpetualMarketProvider(fake_http).funding_interval_hours("BTCUSDT")
+
+    def test_missing_bybit_funding_interval_is_unknown(self):
+        fake_http = MagicMock()
+        fake_http.get.side_effect = [
+            [],
+            {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT"}]}},
+        ]
+        with self.assertRaisesRegex(DataProviderError, "funding interval"):
+            PerpetualMarketProvider(fake_http).funding_interval_hours("BTCUSDT")
+
     def test_historical_funding_matches_both_venues_and_keeps_negative_rates(self):
         now = pd.Timestamp.now(tz="UTC").floor("8h")
         stamps = [now - pd.Timedelta(hours=16), now - pd.Timedelta(hours=8), now]
@@ -157,6 +192,8 @@ class PerpetualProviderTests(unittest.TestCase):
         ]
         fake_http = MagicMock()
         fake_http.get.side_effect = [
+            [],
+            {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "fundingInterval": "480"}]}},
             binance_rows,
             {"retCode": 0, "result": {"list": bybit_rows}},
         ]
@@ -176,7 +213,12 @@ class PerpetualProviderTests(unittest.TestCase):
         b = [{"fundingRateTimestamp": str(int(ts.timestamp() * 1000)), "fundingRate": str(rate)}
              for ts, rate in zip(stamps, b_rates)]
         fake_http = MagicMock()
-        fake_http.get.side_effect = [a, {"retCode": 0, "result": {"list": b}}]
+        fake_http.get.side_effect = [
+            [],
+            {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "fundingInterval": "480"}]}},
+            a,
+            {"retCode": 0, "result": {"list": b}},
+        ]
         with self.assertRaisesRegex(DataProviderError, "diverge"):
             PerpetualMarketProvider(fake_http).funding_history("BTCUSDT")
 
