@@ -99,7 +99,8 @@ def screen_evm_token(
     flags = {name: _tri(token.get(name)) for name in (
         "is_honeypot", "is_open_source", "is_proxy", "is_mintable",
         "owner_change_balance", "can_take_back_ownership", "hidden_owner",
-        "selfdestruct", "transfer_pausable", "is_blacklisted",
+        "selfdestruct", "transfer_pausable", "is_blacklisted", "cannot_buy", "cannot_sell_all", "slippage_modifiable",
+        "personal_slippage_modifiable", "anti_whale_modifiable", "trading_cooldown", "external_call",
     )}
     buy_tax, sell_tax = _pct(token.get("buy_tax")), _pct(token.get("sell_tax"))
     holders = token.get("holders")
@@ -131,7 +132,9 @@ def screen_evm_token(
     if flags["is_honeypot"] is True:
         reasons.append("GoPlus flags a honeypot.")
     for flag in ("hidden_owner", "selfdestruct", "owner_change_balance",
-                 "can_take_back_ownership", "is_blacklisted"):
+                 "can_take_back_ownership", "is_blacklisted", "cannot_buy",
+                 "cannot_sell_all", "slippage_modifiable", "personal_slippage_modifiable",
+                 "anti_whale_modifiable", "trading_cooldown"):
         if flags[flag] is True:
             reasons.append(f"GoPlus risk flag: {flag}.")
     if flags["is_open_source"] is False:
@@ -146,8 +149,11 @@ def screen_evm_token(
         reasons.append("Sell tax exceeds configured threshold.")
     if top10 is not None and top10 > max_top10_holder_pct:
         reasons.append("Top-10 holder concentration exceeds configured threshold.")
-    required = [flags[k] for k in ("is_honeypot", "is_open_source", "is_mintable",
-                "transfer_pausable", "is_blacklisted", "hidden_owner")]
+    required = [flags[k] for k in ("is_honeypot", "is_open_source", "is_proxy", "is_mintable",
+                "owner_change_balance", "can_take_back_ownership", "hidden_owner", "selfdestruct",
+                "transfer_pausable", "is_blacklisted", "cannot_buy", "cannot_sell_all",
+                "slippage_modifiable", "personal_slippage_modifiable", "anti_whale_modifiable",
+                "trading_cooldown", "external_call")]
     unknown = any(v is None for v in required) or buy_tax is None or sell_tax is None or top10 is None or source_verified is None
     if source_verified is False:
         reasons.append("Contract is not verified on Sourcify.")
