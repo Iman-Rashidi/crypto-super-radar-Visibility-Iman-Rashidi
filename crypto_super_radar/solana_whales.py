@@ -64,6 +64,29 @@ class SolanaWhaleScanner:
             if not accounts:
                 return {"status": "UNKNOWN", "reason": "No token accounts returned for this mint."}
             signatures: dict[str, int] = {}
+            watchlist = []
+            labels = dict(labels)
+            for account in accounts:
+                try:
+                    info = self._rpc("getAccountInfo", [
+                        account["address"], {"encoding": "jsonParsed", "commitment": "confirmed"}
+                    ])
+                    parsed = (((info or {}).get("value") or {}).get("data") or {}).get("parsed") or {}
+                    owner = str((parsed.get("info") or {}).get("owner") or "").lower()
+                    ui_amount = account.get("uiAmount")
+                    if ui_amount is None and account.get("uiAmountString") is not None:
+                        ui_amount = float(account["uiAmountString"])
+                    balance_usd = None if price_usd is None or ui_amount is None else float(ui_amount) * price_usd
+                    if owner and balance_usd is not None:
+                        watchlist.append({
+                            "address": owner, "token_account": account.get("address"),
+                            "balance_tokens": float(ui_amount), "balance_usd": balance_usd,
+                        })
+                        if balance_usd >= whale_threshold_usd and owner not in labels:
+                            labels[owner] = "whale"
+                except Exception:
+                    # Keep scanning signatures, but do not invent the owner label.
+                    continue
             for account in accounts:
                 result = self._rpc("getSignaturesForAddress", [
                     account["address"],
@@ -117,8 +140,7 @@ class SolanaWhaleScanner:
             summary = analyze_whale_activity(events, whale_threshold_usd)
             summary.update({
                 "chain": "solana", "mint": mint, "sampled_token_accounts": len(accounts),
-                "sampled_transactions": len(signatures),
-                "coverage": "PARTIAL_RECENT_SAMPLE",
+                "sampled_transactions": len(signatures), "whale_watchlist": watchlist,\n                "coverage": "PARTIAL_RECENT_SAMPLE",
                 "source": "public_solana_json_rpc",
                 "caveat": "Recent transactions for largest token accounts only; no complete history, beneficial-owner clustering, or proof of exchange classification.",
             })
