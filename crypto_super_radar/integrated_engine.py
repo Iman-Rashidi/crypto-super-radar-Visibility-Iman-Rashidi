@@ -1,7 +1,7 @@
 """Connect the new whale/sentiment modules to the legacy nine-gate engine."""
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .cex_whales import CexWhaleScanner
 from .config import AppConfig
@@ -125,10 +125,13 @@ class WhaleAwareConfirmationEngine:
         *,
         news_feed_urls: Optional[list[str]] = None,
         social_feed_urls: Optional[list[str]] = None,
+        data_service: Optional[Any] = None,
+        sentiment_fetcher: Optional[Callable[..., dict]] = None,
     ):
         self.config = config or AppConfig()
-        self.data = WhaleAwareMarketDataService(self.config)
+        self.data = data_service or WhaleAwareMarketDataService(self.config)
         self.base = ConfirmationEngine(self.config, data_service=self.data)
+        self.sentiment_fetcher = sentiment_fetcher or fetch_market_sentiment
         self.news_feed_urls = news_feed_urls or ["https://www.coindesk.com/arc/outboundfeeds/rss/"]
         self.social_feed_urls = social_feed_urls or ["https://www.reddit.com/r/CryptoCurrency/.rss"]
         self.sentiment_cache: dict = {}
@@ -142,12 +145,12 @@ class WhaleAwareConfirmationEngine:
     ):
         asset = asset_input if isinstance(asset_input, AssetSpec) else AssetSpec.parse(asset_input)
         supplied = list(headlines or [])
-        sentiment = fetch_market_sentiment(
+        sentiment = self.sentiment_fetcher(
             self.news_feed_urls,
             social_feed_urls=self.social_feed_urls,
             social_text=list(social_posts or []),
             cache=self.sentiment_cache,
-            limiter=self.data.http.limiter,
+            limiter=getattr(getattr(self.data, "http", None), "limiter", None),
         )
         news_items = [
             " ".join(x for x in (item.get("title", ""), item.get("summary", "")) if x)
