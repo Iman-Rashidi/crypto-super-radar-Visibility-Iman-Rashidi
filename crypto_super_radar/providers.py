@@ -209,7 +209,8 @@ class DexScreenerProvider:
 
 
 class BinanceProvider:
-    BASE = "https://api.binance.com"
+    # Binance documents this host specifically for public market-data-only APIs.
+    BASE = "https://data-api.binance.vision"
 
     def __init__(self, http: PublicHttpClient):
         self.http = http
