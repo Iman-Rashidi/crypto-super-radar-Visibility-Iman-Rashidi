@@ -3,7 +3,7 @@ import unittest
 import pandas as pd
 
 from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleEvent, extract_goplus_whale_watchlist, build_wallet_label_map
-from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentiment_divergence, score_text, fear_greed_to_sentiment
+from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentiment_divergence, score_text, fear_greed_to_sentiment, score_headlines
 from crypto_super_radar.walk_forward import WalkForwardConfig, walk_forward_validate
 from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
 from crypto_super_radar.sentiment_feeds import fetch_fear_greed_index, fetch_rss_headlines
@@ -72,6 +72,13 @@ class SentimentTests(unittest.TestCase):
 
     def test_missing_source_unknown(self):
         self.assertEqual(analyze_market_sentiment({"social": []})["status"], "UNKNOWN")
+
+    def test_legacy_headline_api_remains_compatible(self):
+        self.assertEqual(score_headlines([])["status"], "UNKNOWN")
+        result = score_headlines(["Protocol suffers exploit and withdrawals paused"])
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertLess(result["score"], 35)
+        self.assertIn("hype_score", result)
 
     def test_persian_sentiment_and_fear_greed(self):
         result = score_text("رشد و پذیرش نهادی")
