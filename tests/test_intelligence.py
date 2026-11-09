@@ -53,6 +53,23 @@ class WalkForwardTests(unittest.TestCase):
         for fold in result["folds"]:
             self.assertLess(fold["train_end"], fold["test_start"])
 
+    def test_overlapping_test_folds_rejected(self):
+        index = pd.date_range("2024-01-01", periods=300, freq="D", tz="UTC")
+        returns = pd.Series(0.001, index=index)
+        result = walk_forward_validate(
+            returns, WalkForwardConfig(train_bars=100, test_bars=50, step_bars=25, min_folds=2)
+        )
+        self.assertEqual(result["status"], "FAIL")
+
+    def test_missing_return_not_filled(self):
+        index = pd.date_range("2024-01-01", periods=300, freq="D", tz="UTC")
+        returns = pd.Series(0.001, index=index)
+        returns.iloc[120] = float("nan")
+        result = walk_forward_validate(
+            returns, WalkForwardConfig(train_bars=100, test_bars=40, min_folds=2)
+        )
+        self.assertEqual(result["status"], "UNKNOWN")
+
     def test_perpetual_missing_funding_unknown(self):
         index = pd.date_range("2024-01-01", periods=300, freq="D", tz="UTC")
         returns = pd.Series(0.001, index=index)
