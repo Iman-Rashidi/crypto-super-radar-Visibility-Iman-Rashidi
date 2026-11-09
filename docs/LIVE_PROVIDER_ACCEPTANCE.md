@@ -80,9 +80,14 @@ instrument metadata must provide an interval, and the two values must match.
 
 ## Integrated 12-gate live research scan
 
-Run the full read-only research engine after installing the project dependencies:
+From the repository root, rebuild and extract the complete source package first. The legacy engine modules are intentionally retained in the source archive:
 
 ```bash
+python scripts/rebuild_source_archive.py
+mkdir -p /tmp/csr-live
+tar -xJf dist/crypto-super-radar-source.tar.xz -C /tmp/csr-live
+cd /tmp/csr-live/crypto-super-radar
+python -m pip install -r requirements.txt
 python -m scripts.live_research_scan --asset cex:BTCUSDT \
   --output reports/live-research-scan-spot.json
 python -m scripts.live_research_scan --asset perp:BTCUSDT \
