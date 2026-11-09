@@ -30,7 +30,7 @@ BYBIT = "https://api.bybit.com"
 BINANCE_FUTURES = "https://fapi.binance.com"
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 EVM_RPCS = (
-    ("Ethereum Cloudflare RPC", "https://cloudflare-eth.com", 1),
+    ("Ethereum PublicNode RPC", "https://ethereum-rpc.publicnode.com", 1),
     ("Base public RPC", "https://mainnet.base.org", 8453),
 )
 NEWS_RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
@@ -195,20 +195,33 @@ class AcceptanceRunner:
         details: dict[str, Any] = {}
         source_timestamp = None
         error = None
+        inconclusive_reason = None
         try:
             details, source_timestamp = operation()
+        except requests.HTTPError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {403, 429, 451}:
+                inconclusive_reason = (
+                    f"HTTP {status_code}: endpoint access is restricted or throttled "
+                    "from this runner's network/region; repeat from an authorized location."
+                )
+            else:
+                error = f"{type(exc).__name__}: {str(exc)[:180]}"
         except Exception as exc:
             error = f"{type(exc).__name__}: {str(exc)[:180]}"
         latency_ms = (time.monotonic() - started) * 1000.0
         received = utc_now()
-        status, age, reason = classify_observation(
-            latency_ms=latency_ms,
-            source_timestamp=source_timestamp,
-            received_at=received,
-            max_latency_ms=self.max_latency_ms,
-            max_age_seconds=max_age_seconds or self.max_data_age_seconds,
-            error=error,
-        )
+        if inconclusive_reason:
+            status, age, reason = "INCONCLUSIVE", None, inconclusive_reason
+        else:
+            status, age, reason = classify_observation(
+                latency_ms=latency_ms,
+                source_timestamp=source_timestamp,
+                received_at=received,
+                max_latency_ms=self.max_latency_ms,
+                max_age_seconds=max_age_seconds or self.max_data_age_seconds,
+                error=error,
+            )
         result = {
             "check": name,
             "provider": provider,
@@ -233,18 +246,22 @@ class AcceptanceRunner:
         source_timestamps: list[Optional[datetime]],
         *,
         error: Optional[str] = None,
+        inconclusive_reason: Optional[str] = None,
     ) -> dict[str, Any]:
         timestamps = [item for item in source_timestamps if item is not None]
         conservative_timestamp = min(timestamps) if timestamps else None
         received = utc_now()
-        status, age, reason = classify_observation(
-            latency_ms=0.0,
-            source_timestamp=conservative_timestamp,
-            received_at=received,
-            max_latency_ms=self.max_latency_ms,
-            max_age_seconds=self.max_data_age_seconds,
-            error=error,
-        )
+        if inconclusive_reason and not error:
+            status, age, reason = "INCONCLUSIVE", None, inconclusive_reason
+        else:
+            status, age, reason = classify_observation(
+                latency_ms=0.0,
+                source_timestamp=conservative_timestamp,
+                received_at=received,
+                max_latency_ms=self.max_latency_ms,
+                max_age_seconds=self.max_data_age_seconds,
+                error=error,
+            )
         result = {
             "check": name,
             "provider": provider,
@@ -299,7 +316,7 @@ class AcceptanceRunner:
         if not a.get("price") or not b.get("price"):
             return self._evaluate_derived(
                 "spot_price_agreement", "Binance Spot + Bybit Spot",
-                {}, [], error="Both spot providers must return valid prices.",
+                {}, [], inconclusive_reason="Spot price comparison is unavailable until both providers return valid observations.",
             )
         difference = relative_difference_pct(a["price"], b["price"])
         details = {
@@ -387,11 +404,11 @@ class AcceptanceRunner:
             )
             self._evaluate_derived(
                 "funding_interval_agreement", "Binance USD-M + Bybit Linear", {}, [],
-                error="Both perpetual providers must return funding-interval metadata.",
+                inconclusive_reason="Funding interval comparison is unavailable until both providers return instrument metadata.",
             )
             self._evaluate_derived(
                 "funding_rate_agreement", "Binance USD-M + Bybit Linear", {}, [],
-                error="Both perpetual providers must return valid funding rates.",
+                inconclusive_reason="Funding rate comparison is unavailable until both providers return valid funding rates.",
             )
             return
         timestamps = [self._source("binance_perpetual"), self._source("bybit_perpetual")]
