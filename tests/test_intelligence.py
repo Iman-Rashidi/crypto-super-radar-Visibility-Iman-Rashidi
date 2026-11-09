@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleEvent
+from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleEvent, extract_goplus_whale_watchlist
 from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentiment_divergence, score_text, fear_greed_to_sentiment
 from crypto_super_radar.walk_forward import WalkForwardConfig, walk_forward_validate
 from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
@@ -22,6 +22,18 @@ class WhaleTests(unittest.TestCase):
         result = analyze_whale_activity(rows)
         self.assertEqual(result["net_exchange_flow_usd"], 50000)
         self.assertIn("not proof of selling", result["interpretation"])
+
+    def test_goplus_top_holder_whale_watchlist(self):
+        result = extract_goplus_whale_watchlist({
+            "total_supply": "1000000", "decimals": "0",
+            "holders": [
+                {"address": "0x" + "a" * 40, "percent": "0.4", "tag": "unknown"},
+                {"address": "0x" + "b" * 40, "percent": "0.05"},
+            ],
+        }, token_price_usd=1.0, min_balance_usd=100000)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(len(result["watchlist"]), 1)
+        self.assertEqual(result["watchlist"][0]["label"], "whale")
 
     def test_missing_usd_is_not_zero(self):
         result = analyze_whale_activity([{
