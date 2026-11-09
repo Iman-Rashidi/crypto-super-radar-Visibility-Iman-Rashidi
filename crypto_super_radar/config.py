@@ -15,6 +15,7 @@ class RateLimitConfig:
         "api.geckoterminal.com": 6.0,
         "api.dexscreener.com": 0.21,
         "api.binance.com": 0.25,
+        "data-api.binance.vision": 0.25,
         "api.bybit.com": 0.25,
         "api.mainnet-beta.solana.com": 1.0,
         "ethereum-rpc.publicnode.com": 1.0,
