@@ -25,6 +25,15 @@ class WhaleTests(unittest.TestCase):
         self.assertEqual(result["net_exchange_flow_usd"], 50000)
         self.assertIn("not proof of selling", result["interpretation"])
 
+    def test_labelled_whale_wallet_distribution_is_separate_from_exchange_flow(self):
+        result = analyze_whale_activity([{
+            "tx_hash": "whale-out", "timestamp": 2, "token_address": "token",
+            "from_address": "0x" + "a" * 40, "to_address": "0x" + "b" * 40,
+            "amount": 1, "amount_usd": 250000, "from_label": "whale",
+        }])
+        self.assertIsNone(result["net_exchange_flow_usd"])
+        self.assertEqual(result["net_whale_transfer_usd"], -250000)
+
     def test_goplus_top_holder_whale_watchlist(self):
         result = extract_goplus_whale_watchlist({
             "total_supply": "1000000", "decimals": "0",
@@ -278,6 +287,18 @@ class UnifiedEngineTests(unittest.TestCase):
         )
         self.assertEqual(result["signal"], "NO TRADE")
         self.assertIn("whale", result["blocked_by"])
+
+    def test_wallet_whale_flow_can_confirm_without_exchange_labels(self):
+        result = combine_intelligence(
+            whale={"status": "KNOWN", "net_exchange_flow_usd": None,
+                   "net_whale_transfer_usd": -200000},
+            sentiment={"status": "KNOWN", "score": -40},
+            market={"status": "PASS", "direction": "SHORT"},
+            derivatives={"status": "PASS", "direction": "SHORT"},
+            security_status="PASS", backtest_status="PASS",
+        )
+        self.assertEqual(result["signal"], "SHORT")
+        self.assertEqual(result["whale_bias"], "DISTRIBUTION_PRESSURE")
 
     def test_all_gates_and_alignment_can_emit_paper_signal(self):
         result = combine_intelligence(
