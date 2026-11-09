@@ -53,6 +53,9 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('lang="fa" dir="rtl"', page)
         self.assertIn("۱۲ فیلتر اجباری", page)
         self.assertIn("Paper Research", page)
+        self.assertIn("ماشین‌حساب حرفه‌ای سناریوی Spot", page)
+        self.assertIn('id="calc-amount"', page)
+        self.assertIn("calc-break-even", page)
 
     def test_history_endpoint_returns_local_sqlite_summary(self):
         status, headers, payload = self.request(
