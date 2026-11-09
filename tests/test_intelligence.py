@@ -7,6 +7,7 @@ from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentim
 from crypto_super_radar.walk_forward import WalkForwardConfig, walk_forward_validate
 from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
 from crypto_super_radar.sentiment_feeds import fetch_fear_greed_index, fetch_rss_headlines
+from crypto_super_radar.solana_whales import SolanaWhaleScanner
 
 
 class WhaleTests(unittest.TestCase):
@@ -178,6 +179,41 @@ class EvmTests(unittest.TestCase):
 
 
 from crypto_super_radar.intelligence_engine import combine_intelligence
+
+
+class FakeRPCSession:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+
+    def post(self, *args, **kwargs):
+        return FakeResponse({"result": self.payloads.pop(0)})
+
+
+class SolanaWhaleTests(unittest.TestCase):
+    def test_top_holder_owner_and_recent_transfer_sample(self):
+        tx = {
+            "meta": {
+                "preTokenBalances": [{
+                    "mint": "S" * 32, "owner": "WalletOwner",
+                    "uiTokenAmount": {"uiAmount": 300000},
+                }],
+                "postTokenBalances": [{
+                    "mint": "S" * 32, "owner": "Receiver",
+                    "uiTokenAmount": {"uiAmount": 300000},
+                }],
+            }
+        }
+        rpc = FakeRPCSession([
+            {"value": [{"address": "TokenAccount", "uiAmount": 200000}]},
+            {"value": {"data": {"parsed": {"info": {"owner": "WalletOwner"}}}}},
+            [{"signature": "signature-1", "blockTime": 1700000000, "err": None}],
+            tx,
+        ])
+        scanner = SolanaWhaleScanner(session=rpc, limiter=NoWaitLimiter())
+        result = scanner.scan_mint("S" * 32, price_usd=1.0)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["whale_watchlist"][0]["address"], "walletowner")
+        self.assertIn("LARGE_ENTITY_TRANSFER", result["classification_counts"])
 
 
 class SentimentFeedTests(unittest.TestCase):
