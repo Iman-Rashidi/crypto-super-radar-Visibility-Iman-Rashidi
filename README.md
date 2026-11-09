@@ -265,6 +265,19 @@ These modules are committed on the feature branch and covered by offline tests. 
 
 
 
+
+## 14. Market overview and scenario calculator
+
+The Streamlit dashboard includes an OHLC candlestick view, per-asset and benchmark regime labels (bullish / bearish / neutral / unknown), and observed high/low extrema for 7, 30, 90 and 365 calendar-day windows. A range is shown as `KNOWN` only when timestamps, OHLC consistency, freshness and minimum window coverage pass validation; insufficient history, stale candles, duplicate timestamps or malformed bars remain `UNKNOWN`. These extrema are observed historical ranges, not guaranteed support/resistance levels.
+
+The Spot scenario calculator is an unleveraged long-only arithmetic tool. For investment (I), assumed price move (r), buy/sell fee fractions (f_b,f_s), and buy/sell slippage fractions (s_b,s_s):
+
+`V_net = I × (1-f_b) × (1-s_b) × (1+r) × (1-s_s) × (1-f_s)`
+
+`Net P/L = V_net − I`
+
+Break-even price appreciation is `1 / ((1-f_b)(1-s_b)(1-s_s)(1-f_s)) − 1`. The user-selected horizon is a scenario label only; the calculator does not estimate the time or probability of reaching a target. Taxes, EUR/USD FX changes, custody/network charges and market impact beyond the supplied slippage assumptions are excluded. The calculator never submits orders and does not relax any of the twelve mandatory research gates.
+
 ## 13. RSS provider coverage semantics
 
 A configured RSS set is reported as `KNOWN` only when every configured feed returns at least one titled item and none of the feeds fails. If some feeds return usable headlines while another fails or returns no titled items, the source is `PARTIAL`; the full-market-sentiment gate must remain blocked. Whitespace-only manually supplied social text is not accepted as social coverage. This is a coverage control, not a claim that RSS feeds represent the entire news or social universe.
