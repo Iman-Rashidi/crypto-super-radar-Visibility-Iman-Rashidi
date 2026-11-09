@@ -76,7 +76,9 @@ class CexWhaleScanner:
                     "coverage": "LATEST_UP_TO_1000_TRADES_PER_VENUE",
                 }
             net_a, net_b = a["net_aggressive_flow_usd"], b["net_aggressive_flow_usd"]
-            if net_a * net_b < 0:
+            sign_a = 1 if net_a > 0 else -1 if net_a < 0 else 0
+            sign_b = 1 if net_b > 0 else -1 if net_b < 0 else 0
+            if sign_a != sign_b:
                 return {
                     "status": "UNKNOWN", "reason": "Binance and Bybit large-trade flow directions disagree.",
                     "binance": a, "bybit": b, "coverage": "LATEST_UP_TO_1000_TRADES_PER_VENUE",
