@@ -5,6 +5,7 @@ from typing import Optional, Sequence
 
 import requests
 
+from .ai_gateway import enrich_public_headlines
 from .rate_limiter import SharedRateLimiter
 from .sentiment import analyze_market_sentiment, fear_greed_to_sentiment
 from .sentiment_feeds import fetch_fear_greed_index, fetch_rss_headlines
@@ -24,6 +25,9 @@ def fetch_market_sentiment(
     The social source is mandatory for a KNOWN full-coverage result. If no
     social feed/text is supplied, the overall status is PARTIAL and the
     fail-closed decision engine must not treat the sentiment gate as PASS.
+
+    Optional AI enrichment summarizes public news headlines only. It does
+    not contribute to the numeric sentiment score or any mandatory gate.
     """
     rate_limiter = limiter or SharedRateLimiter()
     news = fetch_rss_headlines(news_feed_urls, session=session, limiter=rate_limiter)
@@ -65,5 +69,6 @@ def fetch_market_sentiment(
         "fear_greed": fear_greed,
         "social_coverage": "KNOWN" if core_coverage[1] else "UNKNOWN",
         "coverage_note": "News, social and Fear & Greed are separate evidence sources. Missing social coverage is PARTIAL, not silently treated as neutral.",
+        "ai_enrichment": enrich_public_headlines(news.get("headlines", []), session=session, cache=cache),
     })
     return scored
