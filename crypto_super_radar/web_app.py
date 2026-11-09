@@ -50,20 +50,24 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             "signal": result.signal.value,
             "confirmation_score": result.confirmation_score,
             "estimated_risk_score": result.estimated_risk_score,
+            "risk_score": result.metrics.get("risk_score"),
             "opportunity_rank": result.opportunity_rank,
+            "confidence_level_pct": result.metrics.get("confidence_level_pct"),
             "evidence_confidence_pct": result.metrics.get("evidence_confidence_pct"),
             "summary_fa": result.summary_fa,
             "gates": [
-                {"id": gate.gate_id, "name": gate.name_en, "status": gate.status.value,
-                 "reason": gate.reason_en}
+                {"id": gate.gate_id, "name": gate.name_fa, "name_en": gate.name_en,
+                 "status": gate.status.value, "reason": gate.reason_fa,
+                 "reason_en": gate.reason_en, "evidence": gate.evidence}
                 for gate in result.gates
             ],
             "metrics": {
                 key: result.metrics.get(key) for key in (
                     "whale_status", "whale_bias", "whale_history_count",
-                    "whale_recent_history_bias", "market_sentiment_score",
-                    "fear_greed_value", "fear_greed_attribution",
-                    "walk_forward_status", "walk_forward_fold_count",
+                    "whale_recent_history_bias", "whale_alignment", "sentiment_alignment",
+                    "market_sentiment_score", "fear_greed_value", "fear_greed_attribution",
+                    "walk_forward_status", "walk_forward_fold_count", "risk_score",
+                    "opportunity_rank", "confidence_level_pct", "evidence_confidence_pct",
                 )
             },
         }
