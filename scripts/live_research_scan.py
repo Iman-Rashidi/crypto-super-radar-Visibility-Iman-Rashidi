@@ -11,7 +11,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -64,7 +64,7 @@ def run_scan(
         "asset": asset_input,
         "execution_status": "COMPLETED",
         "gate_status": overall,
-        "generated_at_utc": datetime.now().astimezone().isoformat(),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "safety": {
             "read_only": True,
             "public_data_only": True,
