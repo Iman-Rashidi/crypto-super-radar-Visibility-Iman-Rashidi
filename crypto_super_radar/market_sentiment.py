@@ -40,7 +40,12 @@ def fetch_market_sentiment(
         " ".join(part for part in (item.get("title", ""), item.get("summary", "")) if part)
         for item in news.get("headlines", [])
     ]
-    social_items = list(social_text or []) + [
+    social_text_items = [
+        " ".join(str(item).split())
+        for item in (social_text or [])
+        if isinstance(item, str) and item.strip()
+    ]
+    social_items = social_text_items + [
         " ".join(part for part in (item.get("title", ""), item.get("summary", "")) if part)
         for item in social.get("headlines", [])
     ]
@@ -51,9 +56,12 @@ def fetch_market_sentiment(
         {"news": news_items, "social": social_items},
         numeric_scores=numeric,
     )
+    news_complete = news.get("status") == "KNOWN" and news.get("coverage") == "KNOWN"
+    social_feed_complete = social.get("status") == "KNOWN" and social.get("coverage") == "KNOWN"
+    social_text_complete = bool(social_text_items)
     core_coverage = [
-        news.get("status") == "KNOWN",
-        social.get("status") == "KNOWN" or bool(social_text),
+        news_complete,
+        social_feed_complete or social_text_complete,
         fear_greed.get("status") == "KNOWN",
     ]
     if all(core_coverage):
@@ -67,7 +75,9 @@ def fetch_market_sentiment(
         "news": news,
         "social": social,
         "fear_greed": fear_greed,
-        "social_coverage": "KNOWN" if core_coverage[1] else "UNKNOWN",
+        "social_coverage": "KNOWN" if core_coverage[1] else ("PARTIAL" if social.get("status") == "PARTIAL" else "UNKNOWN"),
+        "social_text_count": len(social_text_items),
+        "news_coverage": news.get("coverage", "UNKNOWN"),
         "coverage_note": "News, social and Fear & Greed are separate evidence sources. Missing social coverage is PARTIAL, not silently treated as neutral.",
         "ai_enrichment": enrich_public_headlines(news.get("headlines", []), session=session, cache=cache),
     })
