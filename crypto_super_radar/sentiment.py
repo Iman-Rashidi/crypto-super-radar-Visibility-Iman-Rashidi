@@ -31,7 +31,11 @@ def score_text(text: str) -> dict:
     negative = sum(token in NEGATIVE for token in tokens)
     intensity = sum(token in INTENSIFIERS for token in tokens)
     denominator = positive + negative
-    score = 0.0 if denominator == 0 else 100.0 * (positive - negative) / denominator
+    if denominator == 0:
+        return {"status": "UNKNOWN", "score": None, "positive_hits": 0,
+                "negative_hits": 0, "intensity_hits": intensity,
+                "token_count": len(tokens)}
+    score = 100.0 * (positive - negative) / denominator
     return {
         "status": "KNOWN", "score": score, "positive_hits": positive,
         "negative_hits": negative, "intensity_hits": intensity,
