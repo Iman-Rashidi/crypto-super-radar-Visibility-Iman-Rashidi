@@ -163,7 +163,7 @@ streamlit run crypto_super_radar/streamlit_app.py
 
 The dashboard reads the same `AnalysisResult` as the CLI and builds Pandas DataFrames for all 12 gates, FAIL/UNKNOWN data errors, RSI/EMA/ATR and backtest evidence, whale-flow observations, sentiment and Fear & Greed. It does not create synthetic values for missing evidence.
 
-The default `render.yaml` continues to launch the lightweight HTTP dashboard in `web_app.py`; it has not been switched to Streamlit or deployed. This avoids making the optional Streamlit runtime a mandatory dependency on the constrained Render Free service. Run Streamlit locally first and measure memory use before considering a hosted Streamlit service.
+The default `render.yaml` continues to launch the lightweight HTTP dashboard in `web_app.py`; it has not been switched to Streamlit or deployed. Its build command extracts the bundled legacy engine modules, overlays the current tracked Feature-branch package files, and then installs only `requirements.txt`. This is necessary because the complete source distribution includes compatibility modules retained in the archive. Auto-deploy remains disabled, and this blueprint has not created or changed a Render service. The optional Streamlit runtime is not a mandatory dependency on the constrained Render Free service. Run Streamlit locally first and measure memory use before considering a hosted Streamlit service.
 
 ## 6. Global throttling and cross-validation
 
