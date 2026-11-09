@@ -551,8 +551,53 @@ class PerpetualMarketProvider:
         rows = self.http.get(f"{self.BINANCE}/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": min(limit, 1000)})
         return _ohlcv_frame(rows)
 
+    def funding_interval_hours(self, symbol: str) -> float:
+        """Require Binance USD-M and Bybit Linear funding settlement intervals to agree."""
+        binance_payload = self.http.get(f"{self.BINANCE}/fapi/v1/fundingInfo")
+        if not isinstance(binance_payload, list):
+            raise DataProviderError("Binance funding-info response has an invalid schema")
+        binance_matches = [
+            row for row in binance_payload
+            if isinstance(row, dict) and row.get("symbol") == symbol
+        ]
+        if len(binance_matches) > 1:
+            raise DataProviderError("Binance returned duplicate funding-interval metadata")
+        if binance_matches:
+            binance_hours = _positive_float(binance_matches[0].get("fundingIntervalHours"))
+            if binance_hours is None:
+                raise DataProviderError("Binance adjusted funding interval is missing or invalid")
+        else:
+            # Binance documents 8 hours as the default; fundingInfo returns
+            # symbols whose funding caps/floors/interval have been adjusted.
+            binance_hours = 8.0
+
+        bybit_payload = self.http.get(
+            f"{self.BYBIT}/v5/market/instruments-info",
+            {"category": "linear", "symbol": symbol},
+        )
+        if not isinstance(bybit_payload, dict) or bybit_payload.get("retCode") not in (0, "0"):
+            raise DataProviderError("Bybit instrument metadata returned an API error or unreadable response")
+        items = ((bybit_payload.get("result") or {}).get("list") or [])
+        matches = [
+            item for item in items
+            if isinstance(item, dict) and item.get("symbol") == symbol
+        ] if isinstance(items, list) else []
+        if len(matches) != 1:
+            raise DataProviderError("Bybit must return exactly one matching linear instrument")
+        bybit_minutes = _positive_float(matches[0].get("fundingInterval"))
+        if bybit_minutes is None or not bybit_minutes.is_integer():
+            raise DataProviderError("Bybit funding interval is missing or invalid")
+        bybit_hours = bybit_minutes / 60.0
+
+        if abs(binance_hours - bybit_hours) > 1e-9:
+            raise DataProviderError(
+                f"Funding settlement interval mismatch: Binance={binance_hours:g}h, Bybit={bybit_hours:g}h"
+            )
+        return binance_hours
+
     def funding_history(self, symbol: str, limit: int = 1000) -> pd.Series:
-        """Fetch cross-checked public funding history, preserving signed 8-hour rates."""
+        """Fetch cross-checked funding history with a validated common settlement interval."""
+        funding_interval_hours = self.funding_interval_hours(symbol)
         binance_rows = self.http.get(f"{self.BINANCE}/fapi/v1/fundingRate", {"symbol": symbol, "limit": min(limit, 1000)})
         bybit_payload = self.http.get(f"{self.BYBIT}/v5/market/funding/history", {"category": "linear", "symbol": symbol, "limit": 200})
         if not isinstance(bybit_payload, dict) or bybit_payload.get("retCode") not in (0, "0"):
@@ -619,4 +664,6 @@ class PerpetualMarketProvider:
         merged = pd.merge_asof(left, right, on="timestamp", direction="nearest", tolerance=pd.Timedelta("10min"))
         merged = validate_overlap(merged.dropna())
         merged["funding"] = (merged["binance"] + merged["bybit"]) / 2.0
-        return pd.Series(merged["funding"].to_numpy(), index=pd.DatetimeIndex(merged["timestamp"])).sort_index()
+        result = pd.Series(merged["funding"].to_numpy(), index=pd.DatetimeIndex(merged["timestamp"])).sort_index()
+        result.attrs["funding_interval_hours"] = funding_interval_hours
+        return result
