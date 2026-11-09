@@ -125,3 +125,56 @@ def analyze_whale_activity(
         "interpretation": interpretation,
         "caveat": "Transfers are not trades. Labels can be incomplete; wallet clusters and beneficial ownership are not inferred.",
     }
+
+
+
+def extract_goplus_whale_watchlist(
+    token_security: Mapping[str, Any],
+    *,
+    token_price_usd: Optional[float],
+    min_balance_usd: float = 100_000.0,
+) -> dict[str, Any]:
+    """Build a top-holder watchlist from GoPlus supply/holder evidence.
+
+    The list is PARTIAL by design: GoPlus supplies a top-holder sample, not all
+    holders, and token accounts/contracts are not guaranteed beneficial owners.
+    """
+    if token_price_usd is None or token_price_usd <= 0:
+        return {"status": "UNKNOWN", "watchlist": [],
+                "reason": "A valid USD price is required to value holder balances."}
+    try:
+        supply_raw = float(token_security["total_supply"])
+        decimals = int(token_security["decimals"])
+        holders = token_security["holders"]
+        if supply_raw <= 0 or not 0 <= decimals <= 36 or not isinstance(holders, list):
+            raise ValueError("invalid supply metadata")
+    except (KeyError, TypeError, ValueError):
+        return {"status": "UNKNOWN", "watchlist": [],
+                "reason": "GoPlus total supply, decimals or holder list is missing."}
+    total_supply = supply_raw / (10 ** decimals)
+    watchlist = []
+    for holder in holders[:10]:
+        try:
+            address = str(holder["address"]).lower()
+            percent = float(holder["percent"])
+            if not re.fullmatch(r"0x[a-f0-9]{40}", address) or not 0 <= percent <= 1:
+                continue
+            balance_tokens = total_supply * percent
+            balance_usd = balance_tokens * float(token_price_usd)
+            if balance_usd >= min_balance_usd:
+                watchlist.append({
+                    "address": address, "label": "whale",
+                    "tag": holder.get("tag"),
+                    "balance_tokens": balance_tokens,
+                    "balance_usd": balance_usd,
+                    "supply_pct": percent * 100.0,
+                    "is_contract": holder.get("is_contract"),
+                    "is_locked": holder.get("is_locked"),
+                })
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {
+        "status": "PARTIAL", "watchlist": watchlist,
+        "sampled_holders": min(10, len(holders)),
+        "reason": "Top-holder sample only; no complete holder universe or beneficial-owner clustering.",
+    }
