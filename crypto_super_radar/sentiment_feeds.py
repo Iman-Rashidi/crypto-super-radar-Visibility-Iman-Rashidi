@@ -51,7 +51,7 @@ def fetch_fear_greed_index(
             "status": "KNOWN", "source": "Alternative.me",
             "value": value, "classification": current.get("value_classification"),
             "timestamp": timestamp, "previous_value": previous,
-            "attribution": "Data from alternative.me",
+            "attribution": "Data from alternative.me",\n            "scope": "Broad Bitcoin/large-crypto sentiment index; not asset-specific.",
         }
         if len(cache) >= 32:
             cache.pop(next(iter(cache)))
