@@ -15,6 +15,7 @@ from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
 from .solana_whales import SolanaWhaleScanner
 from .walk_forward import WalkForwardConfig, walk_forward_validate
+from .whale_store import WhaleStore
 from .whale_intelligence import (
     build_wallet_label_map,
     extract_goplus_whale_watchlist,
@@ -142,11 +143,13 @@ class WhaleAwareConfirmationEngine:
         social_feed_urls: Optional[list[str]] = None,
         data_service: Optional[Any] = None,
         sentiment_fetcher: Optional[Callable[..., dict]] = None,
+        whale_store: Optional[WhaleStore] = None,
     ):
         self.config = config or AppConfig()
         self.data = data_service or WhaleAwareMarketDataService(self.config)
         self.base = ConfirmationEngine(self.config, data_service=self.data)
         self.sentiment_fetcher = sentiment_fetcher or fetch_market_sentiment
+        self.whale_store = whale_store or WhaleStore()
         self.news_feed_urls = news_feed_urls or ["https://www.coindesk.com/arc/outboundfeeds/rss/"]
         self.social_feed_urls = social_feed_urls or ["https://www.reddit.com/r/CryptoCurrency/.rss"]
         self.sentiment_cache: dict = {}
@@ -334,11 +337,13 @@ class WhaleAwareConfirmationEngine:
             result.confirmation_score = round(max(0.0, min(100.0, result.confirmation_score + adjustment)), 2)
             result.opportunity_rank = result.confirmation_score
         risk_adjustment = whale_risk_adjustment + sentiment_risk_adjustment
+        self.whale_store.record(asset.raw, whale, whale_bias)
+        whale_history = self.whale_store.summary(asset.raw)
         if result.estimated_risk_score is not None:
             result.estimated_risk_score = round(min(100.0, result.estimated_risk_score + risk_adjustment), 2)
         passed = sum(g.status == GateStatus.PASS for g in result.gates)
         result.metrics.update({
-            "whale_status": whale_status, "whale_bias": whale_bias,
+            "whale_status": whale_status, "whale_bias": whale_bias,\n            "whale_history_count": whale_history["observation_count"],\n            "whale_recent_history_bias": whale_history["recent_bias"],
             "whale_exchange_net_flow_usd": exchange_net,
             "whale_wallet_net_transfer_usd": wallet_net,
             "whale_cex_large_trade_net_usd": cex_net,
