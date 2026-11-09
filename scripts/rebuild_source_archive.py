@@ -21,7 +21,7 @@ TEST_DIR = ROOT / "tests"
 def main() -> int:
     if not ARCHIVE.exists():
         raise SystemExit(f"Source archive not found: {ARCHIVE}")
-    tracked = [p for base in (PACKAGE_DIR, TEST_DIR, ROOT / "docs") if base.exists()
+    tracked = [p for base in (PACKAGE_DIR, TEST_DIR, ROOT / "docs", ROOT / "scripts") if base.exists()
                for p in base.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
     tracked.extend(
         ROOT / name for name in ("README.md", "pyproject.toml", "requirements.txt", ".env.example", "render.yaml")
