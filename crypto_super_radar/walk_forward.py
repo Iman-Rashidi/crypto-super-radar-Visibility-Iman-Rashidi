@@ -52,9 +52,19 @@ def walk_forward_validate(
     perpetual: bool = False,
 ) -> dict:
     """Validate net returns across chronological test folds; no missing-value fill."""
+    if config.train_bars <= 0 or config.test_bars <= 0 or config.step_bars <= 0 or config.min_folds <= 0 or config.embargo_bars < 0:
+        return {"status": "FAIL", "reason": "Walk-forward window sizes must be positive and embargo non-negative."}
+    if config.step_bars < config.test_bars:
+        return {"status": "FAIL", "reason": "Test folds must not overlap; step_bars must be >= test_bars."}
     if not isinstance(strategy_returns.index, pd.DatetimeIndex):
         return {"status": "UNKNOWN", "reason": "A DatetimeIndex is required."}
     data = strategy_returns.sort_index()
+    numeric = pd.to_numeric(data, errors="coerce")
+    if numeric.isna().any() or not np.isfinite(numeric.to_numpy()).all():
+        return {"status": "UNKNOWN", "reason": "Missing or non-finite strategy returns; values are never filled."}
+    if (numeric <= -1.0).any():
+        return {"status": "FAIL", "reason": "A per-bar return at or below -100% is invalid for this return model."}
+    data = numeric
     if data.index.has_duplicates or not data.index.is_monotonic_increasing:
         return {"status": "FAIL", "reason": "Timestamps must be unique and chronological."}
     if len(data) < config.train_bars + config.embargo_bars + config.test_bars:
