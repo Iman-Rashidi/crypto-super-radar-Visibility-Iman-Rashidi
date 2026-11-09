@@ -74,6 +74,32 @@ class EvmTests(unittest.TestCase):
         result = screen_evm_token("base", "not-an-address")
         self.assertEqual(result.status, "FAIL")
 
+from crypto_super_radar.intelligence_engine import combine_intelligence
+
+
+class UnifiedEngineTests(unittest.TestCase):
+    def test_unknown_whale_gate_blocks(self):
+        result = combine_intelligence(
+            whale={"status": "PARTIAL", "net_exchange_flow_usd": None},
+            sentiment={"status": "KNOWN", "score": 30},
+            market={"status": "PASS", "direction": "LONG"},
+            derivatives={"status": "PASS", "direction": "LONG"},
+            security_status="PASS", backtest_status="PASS",
+        )
+        self.assertEqual(result["signal"], "NO TRADE")
+        self.assertIn("whale", result["blocked_by"])
+
+    def test_all_gates_and_alignment_can_emit_paper_signal(self):
+        result = combine_intelligence(
+            whale={"status": "KNOWN", "net_exchange_flow_usd": -200000},
+            sentiment={"status": "KNOWN", "score": 40},
+            market={"status": "PASS", "direction": "LONG"},
+            derivatives={"status": "PASS", "direction": "LONG"},
+            security_status="PASS", backtest_status="PASS",
+        )
+        self.assertEqual(result["signal"], "LONG")
+        self.assertEqual(result["execution"], "PAPER_RESEARCH_ONLY")
+
 
 if __name__ == "__main__":
     unittest.main()
