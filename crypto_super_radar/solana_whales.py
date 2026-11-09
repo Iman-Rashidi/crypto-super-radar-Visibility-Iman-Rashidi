@@ -140,7 +140,8 @@ class SolanaWhaleScanner:
             summary = analyze_whale_activity(events, whale_threshold_usd)
             summary.update({
                 "chain": "solana", "mint": mint, "sampled_token_accounts": len(accounts),
-                "sampled_transactions": len(signatures), "whale_watchlist": watchlist,\n                "coverage": "PARTIAL_RECENT_SAMPLE",
+                "sampled_transactions": len(signatures), "whale_watchlist": watchlist,
+                "coverage": "PARTIAL_RECENT_SAMPLE",
                 "source": "public_solana_json_rpc",
                 "caveat": "Recent transactions for largest token accounts only; no complete history, beneficial-owner clustering, or proof of exchange classification.",
             })
