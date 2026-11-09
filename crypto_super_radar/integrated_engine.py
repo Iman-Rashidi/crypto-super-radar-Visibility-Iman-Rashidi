@@ -153,7 +153,7 @@ class WhaleAwareConfirmationEngine:
 
 
     def _multi_fold_validation(self, asset: AssetSpec) -> dict[str, Any]:
-        candles = self.data.candle_frames.get(asset.raw)
+        candles = getattr(self.data, "candle_frames", {}).get(asset.raw)
         if candles is None or not isinstance(candles.index, pd.DatetimeIndex):
             return {"status": "UNKNOWN", "reason": "Validated candle history is unavailable for multi-fold validation."}
         if len(candles) < 315 or "close" not in candles:
@@ -176,17 +176,20 @@ class WhaleAwareConfirmationEngine:
         strategy_returns = held_position * asset_returns - turnover * one_way_cost
         funding_daily = None
         if asset.market_type == "perp":
-            funding = self.data.funding_frames.get(asset.raw)
+            funding = getattr(self.data, "funding_frames", {}).get(asset.raw)
             if funding is None or funding.empty:
                 return {"status": "UNKNOWN", "reason": "Historical funding is mandatory for perpetual multi-fold validation."}
-            funding_daily = pd.to_numeric(funding, errors="coerce").groupby(funding.index.floor("D")).sum()
+            funding_daily = pd.to_numeric(funding, errors="coerce").groupby(funding.index.floor("D")).sum(min_count=1)
+            aligned_funding = funding_daily.reindex(strategy_returns.index)
+            if aligned_funding.isna().any():
+                return {"status": "UNKNOWN", "reason": "Historical funding does not cover every daily observation; missing funding is never assumed to be zero."}
+            strategy_returns = strategy_returns - held_position * aligned_funding
         cfg = WalkForwardConfig(
             train_bars=180, test_bars=45, step_bars=45, embargo_bars=0,
             min_folds=3, fee_bps_per_side=0.0, slippage_bps_per_side=0.0,
         )
         validation = walk_forward_validate(
-            strategy_returns, cfg, funding_returns=funding_daily,
-            perpetual=(asset.market_type == "perp"),
+            strategy_returns, cfg, funding_returns=None, perpetual=False,
         )
         if validation.get("status") != "KNOWN":
             return {"status": "UNKNOWN", "reason": validation.get("reason", "Multi-fold validation is unknown."),
