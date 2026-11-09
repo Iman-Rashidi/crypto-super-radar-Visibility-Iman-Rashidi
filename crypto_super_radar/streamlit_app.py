@@ -151,6 +151,30 @@ def main() -> None:
     c4.metric("تصمیم پژوهشی", result.signal.value)
 
     st.write(result.summary_fa)
+    blockers = result.metrics.get("decision_blockers") or {}
+    if result.signal == Signal.NO_TRADE and blockers:
+        failed = blockers.get("failed_filters") or []
+        unknown = blockers.get("unknown_filters") or []
+        if failed:
+            st.error("فیلترهای مردود: " + "، ".join(
+                f"{item.get('id')}: {item.get('name')}" for item in failed
+            ))
+        if unknown:
+            st.warning("فیلترهای نامشخص: " + "، ".join(
+                f"{item.get('id')}: {item.get('name')}" for item in unknown
+            ))
+        if blockers.get("confirmation_below_threshold"):
+            st.info("امتیاز تأیید به حداقل لازم برای ارائهٔ برنامه پژوهشی نرسیده است.")
+        if blockers.get("risk_score_missing"):
+            st.warning("Risk Score قابل محاسبه نبوده و به‌عنوان داده نامشخص در نظر گرفته شده است.")
+        if blockers.get("risk_score_at_or_above_limit"):
+            st.error("Risk Score به سقف ریسک مجاز رسیده یا از آن عبور کرده است.")
+        if blockers.get("base_engine_returned_no_trade") and not (
+            failed or unknown or blockers.get("confirmation_below_threshold")
+            or blockers.get("risk_score_missing") or blockers.get("risk_score_at_or_above_limit")
+        ):
+            st.info("موتور پایه جهت معاملاتی قابل تأییدی تولید نکرده است.")
+
     if result.signal != Signal.NO_TRADE:
         plan = {
             "ورود": result.entry_price,
