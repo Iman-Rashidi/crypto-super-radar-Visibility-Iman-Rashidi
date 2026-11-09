@@ -322,7 +322,7 @@ Provider adapters apply strict normalization before market data reaches the gate
 
 - Prices and open interest must be finite and strictly positive; volumes and token supplies must be finite and non-negative. Boolean values are not numeric evidence.
 - Funding rates are signed values. Negative funding is valid and is preserved; missing, non-finite, stale, duplicated, or cross-venue-conflicting funding remains an error/UNKNOWN condition.
-- Binance and Bybit perpetual funding observations are checked for timestamp proximity and rate agreement before historical values are combined. An absent Bybit success code or malformed API envelope is rejected even when the HTTP response itself is successful.
+- Binance and Bybit perpetual funding observations are checked for a matching settlement interval, timestamp proximity and rate agreement before historical values are combined. Binance's documented 8-hour default is used only when its adjusted-interval endpoint has no entry for the symbol; Bybit's instrument metadata must provide the interval in minutes. An absent Bybit success code or malformed API envelope is rejected even when the HTTP response itself is successful.
 - OHLCV rows with duplicate or fractional timestamps, future timestamps, missing/non-finite prices, or inconsistent high/low ranges are rejected. An entirely unusable candle response becomes an empty history so downstream freshness/coverage checks remain UNKNOWN; a mixed response containing valid and invalid timestamp rows is rejected as a whole.
 - HTTP retries are limited to transient network errors, 408/425/429 and server errors. Retry-After delta-seconds and HTTP-date values are supported with a 30-second cap; non-retryable client errors fail immediately.
 
