@@ -42,7 +42,8 @@ Any `FAIL` or `UNKNOWN` blocks entry. Scores are descriptive evidence and never 
 | `indicators.py` | RSI, ATR, EMA regime and relative strength | اندیکاتورهای تکنیکال و رژیم بازار |
 | `backtesting.py` | Fixed-rule, chronological out-of-sample testing | آزمون تاریخی با هزینه و بدون نگاه به آینده |
 | `filters.py` | Gates 1–7 | هفت فیلتر داده، بازار، روند، مومنتوم، جریان پول، امنیت و خبر |
-| `engine.py` | Gates 8–9, score, TP/SL and sizing | تصمیم پایه، بک‌تست، اندازه موقعیت و حد سود/ضرر |\n| `cex_whales.py` | Binance/Bybit large-trade flow sample | رصد معاملات بزرگ در بازار متمرکز |\n| `integrated_engine.py` | Adds mandatory gates 10–12 and combines whale/sentiment/walk-forward evidence | اتصال سه فیلتر جدید به موتور تصمیم |\n| `enhanced_cli.py` | Integrated command-line entry point | رابط خط فرمان یکپارچه |
+| `engine.py` | Gates 8–9, score, TP/SL and sizing | تصمیم پایه، بک‌تست، اندازه موقعیت و حد سود/ضرر |
+| `cex_whales.py` | Binance/Bybit large-trade flow sample | رصد معاملات بزرگ در بازار متمرکز |\n| `integrated_engine.py` | Adds mandatory gates 10–12 and combines whale/sentiment/walk-forward evidence | اتصال سه فیلتر جدید به موتور تصمیم |\n| `enhanced_cli.py` | Integrated command-line entry point | رابط خط فرمان یکپارچه |
 | `reporting.py` | Persian explanations and Pandas DataFrame | گزارش قابل فهم برای کاربر فارسی‌زبان |
 | `cli.py` | Command-line interface | اجرای اسکن و ذخیره گزارش |
 | `selftest.py` | Offline smoke/unit tests | تست خودکار بدون تماس با API |
