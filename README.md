@@ -315,3 +315,15 @@ CSR_GEMINI_MODEL=gemini-2.5-flash
 The response is constrained to a small JSON schema (summary, themes, risk flags, conflicting evidence). Invalid JSON, schema violations, authentication failures, quota errors, timeouts, and provider outages become `UNKNOWN` enrichment; none can change numeric sentiment, open a gate, or override `NO TRADE`. Results are cached in-process for 15 minutes. Render Free may clear this cache when the service sleeps or restarts.
 
 **Privacy and quota note:** Gemini API free-tier eligibility, model availability, rate limits and data-use terms can change. Check the current Google AI Studio/API terms before enabling it. Do not send confidential or proprietary material to a free-tier provider unless its current data-use terms are acceptable. No provider key is included in this repository and no Render environment variable or service has been changed.
+
+## 15. Public market-provider data validation
+
+Provider adapters apply strict normalization before market data reaches the gates:
+
+- Prices and open interest must be finite and strictly positive; volumes and token supplies must be finite and non-negative. Boolean values are not numeric evidence.
+- Funding rates are signed values. Negative funding is valid and is preserved; missing, non-finite, stale, duplicated, or cross-venue-conflicting funding remains an error/UNKNOWN condition.
+- Binance and Bybit perpetual funding observations are checked for timestamp proximity and rate agreement before historical values are combined. An absent Bybit success code or malformed API envelope is rejected even when the HTTP response itself is successful.
+- OHLCV rows with duplicate or fractional timestamps, future timestamps, missing/non-finite prices, or inconsistent high/low ranges are rejected. An entirely unusable candle response becomes an empty history so downstream freshness/coverage checks remain UNKNOWN; a mixed response containing valid and invalid timestamp rows is rejected as a whole.
+- HTTP retries are limited to transient network errors, 408/425/429 and server errors. Retry-After delta-seconds and HTTP-date values are supported with a 30-second cap; non-retryable client errors fail immediately.
+
+These checks validate response shape and internal consistency; they do not prove that a public provider is correct, independent, manipulation-free, or continuously available. CI uses mocked/offline fixtures and does not replace a live-provider acceptance test. All 12 mandatory gates remain fail-closed, and no order execution is enabled.
