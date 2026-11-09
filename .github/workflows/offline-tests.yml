@@ -49,6 +49,10 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import tarfile
+          Path("/tmp/csr-bundle").mkdir(exist_ok=True)
+          with tarfile.open("dist/crypto-super-radar-source.tar.xz", "r:xz") as archive:
+              archive.extractall("/tmp/csr-bundle", filter="data")
           root = Path("/tmp/csr-bundle/crypto-super-radar/crypto_super_radar")
           print("=== BUNDLED MODULE INVENTORY ===")
           print("\\n".join(sorted(p.name for p in root.glob("*.py"))))
