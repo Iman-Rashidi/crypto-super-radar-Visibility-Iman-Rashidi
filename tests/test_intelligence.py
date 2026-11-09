@@ -12,6 +12,7 @@ from crypto_super_radar.sentiment_feeds import fetch_fear_greed_index, fetch_rss
 from crypto_super_radar.solana_whales import SolanaWhaleScanner
 from crypto_super_radar.market_sentiment import fetch_market_sentiment
 from crypto_super_radar.integrated_engine import WhaleAwareConfirmationEngine
+from crypto_super_radar.cex_whales import CexWhaleScanner
 from crypto_super_radar.models import AssetSpec, MarketSnapshot
 
 
@@ -338,6 +339,35 @@ class FakeIntegratedDataService:
 
     def funding_history(self, asset):
         return pd.Series(dtype=float)
+
+
+class FakeHttp:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def get(self, *args, **kwargs):
+        return self.responses.pop(0)
+
+
+class CexWhaleTests(unittest.TestCase):
+    def test_cross_venue_large_trade_flow(self):
+        scanner = CexWhaleScanner(threshold_usd=100000)
+        scanner.http = FakeHttp([
+            [{"p": "1000", "q": "200", "m": False}],
+            {"result": {"list": [{"price": "1000", "size": "200", "side": "Buy"}]}},
+        ])
+        result = scanner.scan("BTCUSDT", "cex")
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["net_whale_trade_flow_usd"], 200000)
+
+    def test_cross_venue_disagreement_is_unknown(self):
+        scanner = CexWhaleScanner(threshold_usd=100000)
+        scanner.http = FakeHttp([
+            [{"p": "1000", "q": "200", "m": False}],
+            {"result": {"list": [{"price": "1000", "size": "200", "side": "Sell"}]}},
+        ])
+        result = scanner.scan("BTCUSDT", "cex")
+        self.assertEqual(result["status"], "UNKNOWN")
 
 
 class IntegratedEngineTests(unittest.TestCase):
