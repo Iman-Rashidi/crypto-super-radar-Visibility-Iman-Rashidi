@@ -89,6 +89,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(content)
 
@@ -144,7 +145,14 @@ class Handler(BaseHTTPRequestHandler):
         global SCAN_RUNNING
         if urlparse(self.path).path != "/scan":
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
-        length = int(self.headers.get("Content-Length", "0"))
+        origin = self.headers.get("Origin")
+        request_host = self.headers.get("Host", "")
+        if origin and urlparse(origin).netloc.lower() != request_host.lower():
+            return self._send(403, b"Cross-origin scan requests are not allowed", "text/plain; charset=utf-8")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return self._send(400, b"Invalid Content-Length", "text/plain; charset=utf-8")
         if length <= 0 or length > 16_384:
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         client = self.client_address[0]
@@ -162,7 +170,7 @@ class Handler(BaseHTTPRequestHandler):
             asset = AssetSpec.parse(form.get("asset", [""])[0].strip())
             headline = form.get("headline", [""])[0].strip()
             social_post = form.get("social_post", [""])[0].strip()
-            job_id = uuid.uuid4().hex[:12]
+            job_id = uuid.uuid4().hex
             with LOCK:
                 JOBS[job_id] = {"status": "queued"}
                 while len(JOBS) > 100:
