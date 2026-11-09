@@ -64,6 +64,16 @@ class WhaleStore:
                  exchange_net, wallet_net, cex_net, whale_bias, coverage,
                  json.dumps(summary, ensure_ascii=False, default=str)),
             )
+            self._db.execute(
+                "DELETE FROM whale_observations WHERE observed_at < ?",
+                (int(time.time()) - 90 * 24 * 60 * 60,),
+            )
+            self._db.execute(
+                """DELETE FROM whale_observations WHERE asset=? AND id NOT IN
+                (SELECT id FROM whale_observations WHERE asset=?
+                 ORDER BY observed_at DESC, id DESC LIMIT 500)""",
+                (asset, asset),
+            )
             return int(cursor.lastrowid)
 
     def history(self, asset: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -83,7 +93,7 @@ class WhaleStore:
         }]
         recent_bias = "UNKNOWN"
         if biases:
-            recent_bias = max(set(biases), key=biases.count)
+            recent_bias = biases[-1]
         return {
             "observation_count": len(rows),
             "known_observation_count": len(known),
