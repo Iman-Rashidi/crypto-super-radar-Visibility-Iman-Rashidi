@@ -7,7 +7,6 @@ The original bundle is preserved until the replacement archive is complete.
 """
 from __future__ import annotations
 
-import io
 import os
 import tarfile
 import tempfile
@@ -22,8 +21,12 @@ TEST_DIR = ROOT / "tests"
 def main() -> int:
     if not ARCHIVE.exists():
         raise SystemExit(f"Source archive not found: {ARCHIVE}")
-    tracked = [p for base in (PACKAGE_DIR, TEST_DIR) if base.exists()
+    tracked = [p for base in (PACKAGE_DIR, TEST_DIR, ROOT / "docs") if base.exists()
                for p in base.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+    tracked.extend(
+        ROOT / name for name in ("README.md", "pyproject.toml", "requirements.txt", ".env.example")
+        if (ROOT / name).is_file()
+    )
     # Infer the archive's top-level directory to preserve its documented layout.
     with tarfile.open(ARCHIVE, "r:xz") as src:
         members = src.getmembers()
