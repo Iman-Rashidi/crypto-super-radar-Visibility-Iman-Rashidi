@@ -278,8 +278,64 @@ class MarketSentimentPipelineTests(unittest.TestCase):
         self.assertEqual(result["status"], "KNOWN")
         self.assertEqual(result["social_coverage"], "KNOWN")
 
+    def test_partial_news_feed_coverage_blocks_full_sentiment_coverage(self):
+        rss_news = b"<rss><channel><item><title>Bitcoin adoption grows</title></item></channel></rss>"
+        rss_social = b"<rss><channel><item><title>Community bullish breakout</title></item></channel></rss>"
+        fng = {"data": [{"value": "70", "value_classification": "Greed", "timestamp": "1800000000"}]}
+        result = fetch_market_sentiment(
+            ["https://news-a.example/rss", "https://news-b.example/rss"],
+            social_feed_urls=["https://social.example/rss"],
+            session=FakeSession([
+                FakeResponse({}, content=rss_news), FakeResponse({}, status_code=503),
+                FakeResponse({}, content=rss_social), FakeResponse(fng),
+            ]),
+            cache={}, limiter=NoWaitLimiter(),
+        )
+        self.assertEqual(result["news"]["status"], "PARTIAL")
+        self.assertEqual(result["news_coverage"], "PARTIAL")
+        self.assertEqual(result["status"], "PARTIAL")
+
+    def test_whitespace_social_text_does_not_count_as_coverage(self):
+        rss_news = b"<rss><channel><item><title>Bitcoin adoption grows</title></item></channel></rss>"
+        fng = {"data": [{"value": "70", "value_classification": "Greed", "timestamp": "1800000000"}]}
+        result = fetch_market_sentiment(
+            ["https://news.example/rss"], social_text=[" ", "\\n\\t"],
+            session=FakeSession([FakeResponse({}, content=rss_news), FakeResponse(fng)]),
+            cache={}, limiter=NoWaitLimiter(),
+        )
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["social_coverage"], "UNKNOWN")
+        self.assertEqual(result["social_text_count"], 0)
+
 
 class SentimentFeedTests(unittest.TestCase):
+    def test_rss_partial_when_one_configured_feed_fails(self):
+        rss = b"<rss><channel><item><title>Bitcoin adoption grows</title></item></channel></rss>"
+        result = fetch_rss_headlines(
+            ["https://news-a.example/rss", "https://news-b.example/rss"],
+            session=FakeSession([
+                FakeResponse({}, content=rss), FakeResponse({}, status_code=503),
+            ]),
+            limiter=NoWaitLimiter(),
+        )
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["coverage"], "PARTIAL")
+        self.assertEqual(result["successful_feed_count"], 1)
+        self.assertEqual(len(result["failed_feeds"]), 1)
+
+    def test_empty_configured_feed_prevents_full_coverage(self):
+        empty = b"<rss><channel></channel></rss>"
+        populated = b"<rss><channel><item><title>Bitcoin adoption grows</title></item></channel></rss>"
+        result = fetch_rss_headlines(
+            ["https://news-a.example/rss", "https://news-b.example/rss"],
+            session=FakeSession([
+                FakeResponse({}, content=empty), FakeResponse({}, content=populated),
+            ]),
+            limiter=NoWaitLimiter(),
+        )
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(len(result["empty_feeds"]), 1)
+
     def test_fear_greed_provider(self):
         payload = {"data": [
             {"value": "72", "value_classification": "Greed", "timestamp": "1800000000"},
