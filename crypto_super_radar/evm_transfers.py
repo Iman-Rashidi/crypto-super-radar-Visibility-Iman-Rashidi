@@ -64,6 +64,10 @@ class EvmTransferScanner:
             raise ValueError(f"RPC error for {method}")
         return payload["result"]
 
+    def latest_block_number(self) -> int:
+        """Return the latest canonical block number from the configured public RPC."""
+        return _hex_int(self._rpc("eth_blockNumber", []))
+
     def scan_erc20_transfers(
         self,
         token_address: str,
