@@ -286,6 +286,21 @@ def main() -> None:
             ]), hide_index=True, use_container_width=True)
             st.latex(r"V_{net}=I(1-f_b)(1-s_b)(1+r)(1-s_s)(1-f_s)")
             st.caption("سود خالص = ارزش دریافتی پس از هزینه‌ها − سرمایه اولیه. سربه‌سر از حل V_net = I به‌دست می‌آید. نرخ‌های کارمزد و لغزش صرفاً فرض ورودی‌اند و باید با بازار/صرافی واقعی جایگزین شوند.")
+            scenario_rows = []
+            for move_pct in (-20.0, -10.0, 0.0, 5.0, 10.0, 20.0):
+                row = simulate_spot_long(
+                    float(amount), move_pct, buy_fee_pct=float(buy_fee),
+                    sell_fee_pct=float(sell_fee), buy_slippage_pct=float(buy_slippage),
+                    sell_slippage_pct=float(sell_slippage),
+                )
+                scenario_rows.append({
+                    "تغییر قیمت فرضی": f"{move_pct:+.1f}%",
+                    "سود/زیان خالص (EUR)": round(row["net_pnl_eur"], 4),
+                    "بازده خالص": f"{row['net_return_pct']:+.3f}%",
+                    "افق سناریو (روز)": int(horizon_days),
+                })
+            st.subheader("جدول سناریوهای مقایسه‌ای")
+            st.dataframe(pd.DataFrame(scenario_rows), hide_index=True, use_container_width=True)
         except ValueError as exc:
             st.error(f"ورودی ماشین‌حساب معتبر نیست: {exc}")
         st.warning("مالیات، تغییر نرخ EUR/USD، هزینه برداشت/شبکه، اسپردِ فراتر از لغزش ورودی و اثر اندازه سفارش لحاظ نشده‌اند. سود یا زمان سود تضمین نمی‌شود.")
