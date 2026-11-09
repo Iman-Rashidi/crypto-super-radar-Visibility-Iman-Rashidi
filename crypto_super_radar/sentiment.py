@@ -156,7 +156,7 @@ def score_headlines(headlines: Iterable[str]) -> dict:
     normalized = (raw_score + 100.0) / 2.0
     hype_terms = {"moon", "100x", "pump", "爆", "انفجاری", "نجومی"}
     leader_terms = {"whale", "whales", "smart", "institutional", "نهنگ", "نهنگها"}
-    tokens = re.findall(r"[^\\W\\d_]+", " ".join(items).lower(), flags=re.UNICODE)
+    tokens = re.findall(r"[^\W\d_]+", " ".join(items).lower(), flags=re.UNICODE)
     hype_hits = sum(item.get("intensity_hits", 0) for item in valid) + sum(t in hype_terms for t in tokens)
     hype_score = min(100.0, hype_hits * 20.0)
     leader_mentions = sum(t in leader_terms for t in tokens)
