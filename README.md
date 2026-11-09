@@ -267,3 +267,22 @@ These modules are committed on the feature branch and covered by offline tests. 
 ---
 
 **CRYPTO SUPER RADAR** — Discover Early. Analyze Smarter. Manage Risk.
+
+
+## 12. Optional AI headline enrichment (Gemini)
+
+AI is an **optional explanatory layer**, not part of the deterministic scoring or trade-decision path. The engine continues to calculate technical indicators, whale evidence, sentiment baseline, Risk Score, Opportunity Rank, Confidence Level and all 12 mandatory gates when AI is disabled or unavailable.
+
+To enable it on a server, set these environment variables in the server's private environment configuration (never commit keys or expose them in browser code):
+
+```text
+GEMINI_API_KEY=<server-side secret>
+CSR_AI_PROVIDER=gemini
+CSR_GEMINI_MODEL=gemini-2.5-flash
+```
+
+`GEMINI_API_KEY` is intentionally optional. Without it, AI enrichment reports `DISABLED`; the regular sentiment pipeline continues normally. The gateway sends only a bounded set of public news headline titles/summaries to Gemini. It does not send user-supplied social posts, wallet addresses, portfolio holdings, private keys, or trade plans.
+
+The response is constrained to a small JSON schema (summary, themes, risk flags, conflicting evidence). Invalid JSON, schema violations, authentication failures, quota errors, timeouts, and provider outages become `UNKNOWN` enrichment; none can change numeric sentiment, open a gate, or override `NO TRADE`. Results are cached in-process for 15 minutes. Render Free may clear this cache when the service sleeps or restarts.
+
+**Privacy and quota note:** Gemini API free-tier eligibility, model availability, rate limits and data-use terms can change. Check the current Google AI Studio/API terms before enabling it. Do not send confidential or proprietary material to a free-tier provider unless its current data-use terms are acceptable. No provider key is included in this repository and no Render environment variable or service has been changed.
