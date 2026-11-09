@@ -316,7 +316,9 @@ class SolanaRpcProvider:
 
 
 def _finite_float(value: Any) -> Optional[float]:
-    """Parse any finite numeric value, including legitimate negative funding rates."""
+    """Parse finite numeric values, including signed funding; reject boolean schema values."""
+    if isinstance(value, bool):
+        return None
     try:
         result = float(value)
         return result if math.isfinite(result) else None
@@ -360,6 +362,8 @@ def _ohlcv_frame(rows: Any) -> pd.DataFrame:
         if raw_ts is None or raw_ts <= 0:
             invalid_timestamps.append(index)
             continue
+        if not raw_ts.is_integer():
+            raise DataProviderError(f"Fractional OHLCV timestamp at position {index}")
         ts = int(raw_ts)
         if ts > 10**12:
             ts //= 1000
