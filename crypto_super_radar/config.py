@@ -17,7 +17,7 @@ class RateLimitConfig:
         "api.binance.com": 0.25,
         "api.bybit.com": 0.25,
         "api.mainnet-beta.solana.com": 1.0,
-        "cloudflare-eth.com": 1.0,
+        "ethereum-rpc.publicnode.com": 1.0,
         "mainnet.base.org": 1.0,
     })
 
