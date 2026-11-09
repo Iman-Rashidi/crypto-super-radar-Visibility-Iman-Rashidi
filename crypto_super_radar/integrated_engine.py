@@ -209,6 +209,8 @@ class WhaleAwareConfirmationEngine:
             "DISTRIBUTION_PRESSURE" if bias_total < 0 else "MIXED_OR_BALANCED"
         )
         adjustment = 0.0
+        whale_risk_adjustment = 0.0
+        sentiment_risk_adjustment = 0.0
         if direction in {"LONG", "SHORT"} and whale_bias != "UNKNOWN":
             aligned = (whale_bias == "ACCUMULATION_PRESSURE" and direction == "LONG") or (
                 whale_bias == "DISTRIBUTION_PRESSURE" and direction == "SHORT"
@@ -217,6 +219,7 @@ class WhaleAwareConfirmationEngine:
                 whale_bias == "DISTRIBUTION_PRESSURE" and direction == "LONG"
             )
             adjustment += 5.0 if aligned else -10.0 if opposed else 0.0
+            whale_risk_adjustment = 0.0 if aligned else 10.0 if opposed else 3.0
         sentiment_score = sentiment.get("score")
         if direction in {"LONG", "SHORT"} and sentiment_score is not None:
             aligned_sentiment = (sentiment_score >= 25 and direction == "LONG") or (
@@ -226,9 +229,13 @@ class WhaleAwareConfirmationEngine:
                 sentiment_score >= 25 and direction == "SHORT"
             )
             adjustment += 3.0 if aligned_sentiment else -3.0 if opposed_sentiment else 0.0
+            sentiment_risk_adjustment = 0.0 if aligned_sentiment else 5.0 if opposed_sentiment else 1.0
         if result.confirmation_score is not None:
             result.confirmation_score = round(max(0.0, min(100.0, result.confirmation_score + adjustment)), 2)
             result.opportunity_rank = result.confirmation_score
+        risk_adjustment = whale_risk_adjustment + sentiment_risk_adjustment
+        if result.estimated_risk_score is not None:
+            result.estimated_risk_score = round(min(100.0, result.estimated_risk_score + risk_adjustment), 2)
         passed = sum(g.status == GateStatus.PASS for g in result.gates)
         result.metrics.update({
             "whale_status": whale_status, "whale_bias": whale_bias,
@@ -236,6 +243,9 @@ class WhaleAwareConfirmationEngine:
             "whale_wallet_net_transfer_usd": wallet_net,
             "whale_cex_large_trade_net_usd": cex_net,
             "whale_sentiment_adjustment": adjustment,
+            "whale_risk_adjustment": whale_risk_adjustment,
+            "sentiment_risk_adjustment": sentiment_risk_adjustment,
+            "combined_risk_adjustment": risk_adjustment,
             "market_sentiment_score": sentiment_score,
             "market_sentiment_label": sentiment.get("label"),
             "fear_greed_value": (sentiment.get("fear_greed") or {}).get("value"),
@@ -246,7 +256,9 @@ class WhaleAwareConfirmationEngine:
         all_pass = all(g.status == GateStatus.PASS for g in result.gates)
         if result.signal != Signal.NO_TRADE and (
             not all_pass or result.confirmation_score is None or
-            result.confirmation_score < self.config.thresholds.min_confirmation_score
+            result.confirmation_score < self.config.thresholds.min_confirmation_score or
+            result.estimated_risk_score is None or
+            result.estimated_risk_score >= self.config.thresholds.max_estimated_risk_score
         ):
             result.signal = Signal.NO_TRADE
         if result.signal == Signal.NO_TRADE:
@@ -258,6 +270,7 @@ class WhaleAwareConfirmationEngine:
             result.risk_budget_usd = None
             result.safety_status = (
                 SafetyStatus.HIGH_RISK if any(g.status == GateStatus.FAIL for g in result.gates)
+                or (result.estimated_risk_score is not None and result.estimated_risk_score >= self.config.thresholds.max_estimated_risk_score)
                 else SafetyStatus.UNKNOWN
             )
             result.summary_en = "NO TRADE: all 11 mandatory gates must pass; whale and sentiment evidence are required."
