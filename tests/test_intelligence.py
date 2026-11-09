@@ -308,7 +308,7 @@ def sample_candles(stronger=True):
     return pd.DataFrame({
         "open": close * 0.999, "high": close * 1.012,
         "low": close * 0.988, "close": close,
-        "volume": np.full(240, 1_000_000.0),
+        "volume": np.full(len(t), 1_000_000.0),
     }, index=index)
 
 
