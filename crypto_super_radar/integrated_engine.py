@@ -450,8 +450,24 @@ class WhaleAwareConfirmationEngine:
             else:
                 # A missed confirmation threshold is not the same as unknown risk.
                 result.safety_status = SafetyStatus.LOW_RISK
-            result.summary_en = "NO TRADE: mandatory evidence, confirmation threshold, or risk limits did not qualify."
-            result.summary_fa = "عدم معامله: شواهد اجباری، حداقل امتیاز تأیید یا محدودیت ریسک شرایط لازم را ندارند."
+            if failed_gates:
+                result.summary_en = "NO TRADE: one or more mandatory filters failed."
+                result.summary_fa = "معامله مسدود شد: حداقل یکی از ۱۲ فیلتر اجباری با وضعیت FAIL رد شده است."
+            elif unknown_gates:
+                result.summary_en = "NO TRADE: one or more mandatory filters are unknown."
+                result.summary_fa = "معامله مسدود شد: وضعیت حداقل یکی از ۱۲ فیلتر اجباری نامشخص است."
+            elif risk_missing:
+                result.summary_en = "NO TRADE: risk score is unavailable."
+                result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند، اما Risk Score قابل محاسبه نیست؛ معامله انجام نمی‌شود."
+            elif risk_too_high:
+                result.summary_en = "NO TRADE: estimated risk is at or above the configured limit."
+                result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند، اما Risk Score به سقف مجاز رسیده یا از آن عبور کرده است."
+            elif confirmation_blocked:
+                result.summary_en = "NO TRADE: confirmation score is below the required threshold."
+                result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند، اما امتیاز تأیید به حداقل لازم نرسیده است."
+            else:
+                result.summary_en = "NO TRADE: the base engine did not confirm a trade direction."
+                result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند، اما موتور جهت معاملاتی قابل تأییدی پیدا نکرده است."
         else:
             result.summary_en = "All 12 mandatory gates passed. Paper/research plan only; no order was submitted."
             result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند؛ خروجی فقط برنامه پژوهشی و آزمایشی است و هیچ سفارشی ارسال نشده است."
