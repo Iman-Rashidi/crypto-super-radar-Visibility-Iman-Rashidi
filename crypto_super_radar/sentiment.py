@@ -23,7 +23,7 @@ INTENSIFIERS = {"massive", "surge", "record", "crash", "collapse", "extreme"}
 
 
 def score_text(text: str) -> dict:
-    tokens = re.findall(r"[a-zA-Z][a-zA-Z'-]{1,}", (text or "").lower())
+    tokens = re.findall(r"[^\\W\\d_]+", (text or "").lower(), flags=re.UNICODE)
     if not tokens:
         return {"status": "UNKNOWN", "score": None, "positive_hits": 0,
                 "negative_hits": 0, "intensity_hits": 0}
