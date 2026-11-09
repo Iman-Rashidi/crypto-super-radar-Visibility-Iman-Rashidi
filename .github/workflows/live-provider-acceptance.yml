@@ -1,0 +1,82 @@
+name: live-provider-acceptance
+on:
+  push:
+    branches:
+      - feature/multi-stage-confirmation-engine
+    paths:
+      - scripts/live_provider_acceptance.py
+      - tests/test_live_provider_acceptance.py
+      - docs/LIVE_PROVIDER_ACCEPTANCE.md
+      - .github/workflows/live-provider-acceptance.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/live_provider_acceptance.py
+      - tests/test_live_provider_acceptance.py
+      - docs/LIVE_PROVIDER_ACCEPTANCE.md
+      - .github/workflows/live-provider-acceptance.yml
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: Public spot/perpetual symbol supported by Binance and Bybit
+        required: false
+        default: BTCUSDT
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  live-provider-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Run offline unit tests for the acceptance runner
+        run: python -m unittest tests.test_live_provider_acceptance -v
+      - name: Run public read-only provider checks
+        id: live_checks
+        continue-on-error: true
+        env:
+          ACCEPTANCE_SYMBOL: ${{ github.event.inputs.symbol || 'BTCUSDT' }}
+        run: |
+          python scripts/live_provider_acceptance.py \
+            --symbol "${ACCEPTANCE_SYMBOL}" \
+            --output reports/live-provider-acceptance.json
+      - name: Upload live acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-provider-acceptance-report
+          path: reports/live-provider-acceptance.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Require all configured providers to pass
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("reports/live-provider-acceptance.json")
+          if not path.exists():
+              raise SystemExit("Live acceptance did not produce a report.")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          print(
+              "Live provider acceptance:",
+              report.get("overall_status"),
+              f"PASS={report.get('pass_count')}",
+              f"FAIL={report.get('fail_count')}",
+              f"INCONCLUSIVE={report.get('inconclusive_count')}",
+          )
+          if report.get("overall_status") != "PASS":
+              raise SystemExit(1)
+          PY
