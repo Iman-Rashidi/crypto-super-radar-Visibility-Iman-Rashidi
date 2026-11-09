@@ -344,7 +344,8 @@ class WhaleAwareConfirmationEngine:
         passed = sum(g.status == GateStatus.PASS for g in result.gates)
         result.metrics.update({
             "whale_status": whale_status, "whale_bias": whale_bias,
-            "whale_history_count": whale_history["observation_count"],\n            "whale_recent_history_bias": whale_history["recent_bias"],
+            "whale_history_count": whale_history["observation_count"],
+            "whale_recent_history_bias": whale_history["recent_bias"],
             "whale_exchange_net_flow_usd": exchange_net,
             "whale_wallet_net_transfer_usd": wallet_net,
             "whale_cex_large_trade_net_usd": cex_net,
