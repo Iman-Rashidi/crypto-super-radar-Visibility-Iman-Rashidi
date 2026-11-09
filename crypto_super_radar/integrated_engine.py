@@ -258,10 +258,19 @@ class WhaleAwareConfirmationEngine:
             GateStatus.PASS if whale_status == "KNOWN" and whale_flow_available
             else GateStatus.FAIL if whale_status == "FAIL" else GateStatus.UNKNOWN
         )
+        whale_reason = whale.get("reason") or whale.get("interpretation")
+        if not whale_reason:
+            whale_reason = (
+                "Directional whale-flow evidence is present; no wallet identity is inferred."
+                if whale_gate_status == GateStatus.PASS else
+                "Whale source reported a hard failure."
+                if whale_gate_status == GateStatus.FAIL else
+                "Whale-flow evidence is missing, partial, or not attributable."
+            )
         result.gates.append(GateResult(
             10, "Whale intelligence", "ردیابی رفتار نهنگ‌ها",
             whale_gate_status,
-            whale.get("reason", whale.get("interpretation", "Whale flow is unavailable or incomplete.")),
+            whale_reason,
             "جریان نهنگ‌ها فقط با داده معتبر و پوشش کافی تأیید می‌شود؛ انتقال بزرگ به‌تنهایی خرید یا فروش نیست.",
             {k: v for k, v in whale.items() if k not in {"reason", "interpretation"}},
         ))
