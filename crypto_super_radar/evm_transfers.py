@@ -14,7 +14,7 @@ from .rate_limiter import SharedRateLimiter
 from .whale_intelligence import analyze_whale_activity
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-DEFAULT_RPC = {1: "https://cloudflare-eth.com", 8453: "https://mainnet.base.org"}
+DEFAULT_RPC = {1: "https://ethereum-rpc.publicnode.com", 8453: "https://mainnet.base.org"}
 
 
 def _hex_int(value: str) -> int:
