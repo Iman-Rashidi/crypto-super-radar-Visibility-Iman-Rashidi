@@ -27,6 +27,7 @@ class NumericNormalizationTests(unittest.TestCase):
         self.assertIsNone(_finite_float("nan"))
         self.assertIsNone(_finite_float("inf"))
         self.assertIsNone(_finite_float(None))
+        self.assertIsNone(_finite_float(True))
 
     def test_ohlcv_accepts_valid_rows_and_sorts_timestamps(self):
         now = int(time.time())
@@ -54,6 +55,11 @@ class NumericNormalizationTests(unittest.TestCase):
         future = int(time.time()) + 600
         with self.assertRaisesRegex(DataProviderError, "Future OHLCV timestamp"):
             _ohlcv_frame([[future, "10", "12", "9", "11", "90"]])
+
+    def test_ohlcv_rejects_fractional_timestamp(self):
+        timestamp = int(time.time()) - 60 + 0.5
+        with self.assertRaisesRegex(DataProviderError, "Fractional OHLCV timestamp"):
+            _ohlcv_frame([[timestamp, "10", "12", "9", "11", "90"]])
 
     def test_ohlcv_rejects_non_finite_or_negative_price(self):
         now = int(time.time()) - 60
