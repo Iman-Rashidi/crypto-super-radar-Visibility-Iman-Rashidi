@@ -90,6 +90,8 @@ def analyze_whale_activity(
             "status": "UNKNOWN", "event_count": 0, "whale_event_count": None,
             "exchange_inflow_usd": None, "exchange_outflow_usd": None,
             "net_exchange_flow_usd": None, "net_exchange_flow_pct": None,
+            "whale_inflow_usd": None, "whale_outflow_usd": None,
+            "net_whale_transfer_usd": None, "whale_flow_event_count": 0,
             "classification_counts": {}, "unique_wallet_count": 0,
             "interpretation": "No transfer events supplied; whale activity is unknown.",
         }
@@ -99,11 +101,23 @@ def analyze_whale_activity(
         counts[label] = counts.get(label, 0) + 1
     inflow_values = [e.amount_usd for e, label in classified if label == "EXCHANGE_INFLOW"]
     outflow_values = [e.amount_usd for e, label in classified if label == "EXCHANGE_OUTFLOW"]
+    whale_entities = {"whale", "smart_money", "fund", "market_maker"}
+    whale_in = [e.amount_usd for e in events
+                if (e.to_label or "") in whale_entities and (e.from_label or "") not in whale_entities]
+    whale_out = [e.amount_usd for e in events
+                 if (e.from_label or "") in whale_entities and (e.to_label or "") not in whale_entities]
     inflow = sum(v for v in inflow_values if v is not None) if inflow_values else 0.0
     outflow = sum(v for v in outflow_values if v is not None) if outflow_values else 0.0
     known_exchange = len(inflow_values) + len(outflow_values)
     known_values = sum(v is not None for v in inflow_values + outflow_values)
     net = None if known_exchange == 0 or known_values != known_exchange else inflow - outflow
+    whale_count_known = len(whale_in) + len(whale_out)
+    whale_values_known = sum(v is not None for v in whale_in + whale_out)
+    whale_inflow = sum(v for v in whale_in if v is not None) if whale_in else None
+    whale_outflow = sum(v for v in whale_out if v is not None) if whale_out else None
+    net_whale = None if whale_count_known == 0 or whale_values_known != whale_count_known else (
+        sum(whale_in) - sum(whale_out)
+    )
     unique_wallets = {e.from_address for e in events} | {e.to_address for e in events}
     whale_count = sum(label not in {"BELOW_WHALE_THRESHOLD", "UNKNOWN_VALUE"} for _, label in classified)
     if net is None:
@@ -121,6 +135,10 @@ def analyze_whale_activity(
         "exchange_outflow_usd": outflow if outflow_values else None,
         "net_exchange_flow_usd": net,
         "net_exchange_flow_pct": None,
+        "whale_inflow_usd": whale_inflow,
+        "whale_outflow_usd": whale_outflow,
+        "net_whale_transfer_usd": net_whale,
+        "whale_flow_event_count": whale_count_known,
         "classification_counts": counts,
         "unique_wallet_count": len(unique_wallets),
         "interpretation": interpretation,
