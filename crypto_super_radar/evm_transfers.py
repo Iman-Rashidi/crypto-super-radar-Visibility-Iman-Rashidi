@@ -6,6 +6,7 @@ Unlabelled transfers stay unattributed; they are never interpreted as exchange f
 from __future__ import annotations
 
 from typing import Any, Mapping, Optional
+import re
 
 import requests
 
@@ -75,8 +76,7 @@ class EvmTransferScanner:
         whale_threshold_usd: float = 100_000.0,
     ) -> dict[str, Any]:
         """Scan a bounded block range and return normalized whale-flow evidence."""
-        if not (isinstance(token_address, str) and token_address.startswith("0x")
-                and len(token_address) == 42):
+        if not (isinstance(token_address, str) and re.fullmatch(r"0x[a-fA-F0-9]{40}", token_address)):
             return {"status": "FAIL", "reason": "Invalid token contract address."}
         if from_block < 0 or to_block < from_block:
             return {"status": "FAIL", "reason": "Invalid block range."}
