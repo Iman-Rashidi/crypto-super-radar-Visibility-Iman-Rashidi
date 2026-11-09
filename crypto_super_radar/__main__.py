@@ -1,5 +1,4 @@
 """Support `python -m crypto_super_radar`."""
-
-from .cli import main
+from .enhanced_cli import main
 
 raise SystemExit(main())
