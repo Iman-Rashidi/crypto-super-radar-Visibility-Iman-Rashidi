@@ -94,6 +94,8 @@ def quantitative_dataframe(result: AnalysisResult) -> pd.DataFrame:
         e = trend.evidence
         add("روند و مومنتوم", "قیمت آخر", e.get("close"), "USD")
         add("روند و مومنتوم", "RSI-14", e.get("rsi14"), "۰ تا ۱۰۰")
+        add("روند و مومنتوم", "RSI-14 نسبت به کندل قبلی", e.get("rsi14_previous"), "۰ تا ۱۰۰")
+        add("روند و مومنتوم", "تغییر RSI-14", e.get("rsi14_change"), "واحد RSI")
         add("روند و مومنتوم", "EMA20", e.get("ema20"), "USD")
         add("روند و مومنتوم", "EMA50", e.get("ema50"), "USD")
         add("روند و مومنتوم", "EMA200", e.get("ema200"), "USD")
@@ -113,6 +115,7 @@ def quantitative_dataframe(result: AnalysisResult) -> pd.DataFrame:
         e = initial_oos.evidence
         add("بک‌تست اولیه", "Sharpe خارج از نمونه", e.get("oos_sharpe"))
         add("بک‌تست اولیه", "Profit Factor", e.get("oos_profit_factor"))
+        add("بک‌تست اولیه", "Sortino خارج از نمونه", e.get("oos_sortino"))
         add("بک‌تست اولیه", "حداکثر افت سرمایه", e.get("oos_max_drawdown_pct"), "%")
         add("بک‌تست اولیه", "بازده خالص", e.get("oos_net_return_pct"), "%")
         add("بک‌تست اولیه", "تعداد معاملات/تغییر موقعیت", e.get("oos_trade_transitions"))
@@ -135,7 +138,6 @@ def whale_sentiment_dataframe(result: AnalysisResult) -> pd.DataFrame:
     """Show whale, sentiment and independent decision vectors in Persian."""
     metrics = result.metrics or {}
     gates = _gate_map(result)
-    whale_gate = gates.get(10)
     sentiment_gate = gates.get(11)
     sentiment_evidence = sentiment_gate.evidence if sentiment_gate else {}
     fear_greed = sentiment_evidence.get("fear_greed") or {}
@@ -158,6 +160,7 @@ def whale_sentiment_dataframe(result: AnalysisResult) -> pd.DataFrame:
         ("امتیازهای مستقل", "Risk Score", result.estimated_risk_score, "۰ تا ۱۰۰؛ بیشتر یعنی ریسک بالاتر"),
         ("امتیازهای مستقل", "Opportunity Rank", result.opportunity_rank, "رتبه فرصت؛ احتمال سود نیست"),
         ("امتیازهای مستقل", "Confidence Level", metrics.get("confidence_level_pct"), "پوشش شواهد با جریمه واگرایی؛ احتمال سود نیست"),
+        ("امتیازهای مستقل", "جریمه اطمینان به دلیل واگرایی", metrics.get("confidence_penalty_pct"), "واحد درصد"),
         ("امتیازهای مستقل", "پوشش خام شواهد", metrics.get("evidence_confidence_pct"), "%"),
     ]
     rows = []
