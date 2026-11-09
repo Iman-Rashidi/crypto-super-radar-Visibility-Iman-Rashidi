@@ -178,8 +178,13 @@ class AcceptanceRunner:
         )
         if not isinstance(payload, dict) or payload.get("id") != 1:
             raise ValueError(f"{method}: malformed JSON-RPC envelope")
-        if payload.get("error") or "result" not in payload:
-            raise ValueError(f"{method}: JSON-RPC error or missing result")
+        if payload.get("error"):
+            error_payload = payload.get("error")
+            code = error_payload.get("code") if isinstance(error_payload, dict) else None
+            message = error_payload.get("message") if isinstance(error_payload, dict) else str(error_payload)
+            raise ValueError(f"{method}: JSON-RPC error code={code}, message={str(message)[:120]}")
+        if "result" not in payload:
+            raise ValueError(f"{method}: JSON-RPC response omitted result")
         return payload["result"], latency, received
 
     def _probe(
@@ -307,7 +312,7 @@ class AcceptanceRunner:
             price = positive_number(items[0].get("lastPrice"))
             if price is None:
                 raise ValueError("Bybit Spot lastPrice is missing/invalid")
-            return {"symbol": self.symbol, "price": price}, epoch_datetime(payload.get("time"))
+            return {"symbol": self.symbol, "price": price, "timestamp_basis": "Bybit REST response time; not an individual last-trade timestamp"}, epoch_datetime(payload.get("time"))
         return self._probe("bybit_spot", "Bybit Spot", operation)
 
     def check_spot_price_agreement(self) -> dict[str, Any]:
@@ -390,6 +395,7 @@ class AcceptanceRunner:
                 "symbol": self.symbol, "mark_price": price, "funding_rate": funding,
                 "funding_interval_hours": interval_minutes / 60.0,
                 "next_funding_time_utc": iso_utc(epoch_datetime(item.get("nextFundingTime"))),
+                "timestamp_basis": "Bybit REST response time; not an individual last-trade timestamp",
             }, epoch_datetime(payload.get("time"))
         return self._probe("bybit_perpetual", "Bybit Linear", operation)
 
