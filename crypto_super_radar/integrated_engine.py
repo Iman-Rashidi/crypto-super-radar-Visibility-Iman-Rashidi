@@ -174,7 +174,7 @@ class WhaleAwareConfirmationEngine:
             position = (fast > slow).astype(float)
         held_position = position.shift(1).fillna(0.0)
         asset_returns = close.pct_change().fillna(0.0)
-        turnover = position.diff().abs().fillna(position.abs())
+        turnover = held_position.diff().abs().fillna(held_position.abs())
         one_way_cost = (self.config.risk.fee_bps_per_side + self.config.risk.slippage_bps_per_side) / 10000.0
         strategy_returns = held_position * asset_returns - turnover * one_way_cost
         funding_daily = None
@@ -335,7 +335,6 @@ class WhaleAwareConfirmationEngine:
             sentiment_risk_adjustment = 0.0 if aligned_sentiment else 5.0 if opposed_sentiment else 1.0
         if result.confirmation_score is not None:
             result.confirmation_score = round(max(0.0, min(100.0, result.confirmation_score + adjustment)), 2)
-            result.opportunity_rank = result.confirmation_score
         risk_adjustment = whale_risk_adjustment + sentiment_risk_adjustment
         self.whale_store.record(asset.raw, whale, whale_bias)
         whale_history = self.whale_store.summary(asset.raw)
