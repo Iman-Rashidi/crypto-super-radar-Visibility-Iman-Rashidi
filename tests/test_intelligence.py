@@ -299,7 +299,7 @@ class MarketSentimentPipelineTests(unittest.TestCase):
         rss_news = b"<rss><channel><item><title>Bitcoin adoption grows</title></item></channel></rss>"
         fng = {"data": [{"value": "70", "value_classification": "Greed", "timestamp": "1800000000"}]}
         result = fetch_market_sentiment(
-            ["https://news.example/rss"], social_text=[" ", "\\n\\t"],
+            ["https://news.example/rss"], social_text=[" ", "   "],
             session=FakeSession([FakeResponse({}, content=rss_news), FakeResponse(fng)]),
             cache={}, limiter=NoWaitLimiter(),
         )
