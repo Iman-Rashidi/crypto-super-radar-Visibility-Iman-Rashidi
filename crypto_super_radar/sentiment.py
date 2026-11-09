@@ -12,18 +12,18 @@ from typing import Iterable, Mapping, Optional
 POSITIVE = {
     "adoption", "approved", "approval", "partnership", "integration", "inflow",
     "accumulation", "upgrade", "launch", "growth", "bullish", "breakout",
-    "institutional", "record", "buyback",
+    "institutional", "record", "buyback", "صعود", "رشد", "تایید", "پذیرش", "انباشت", "خرید", "مثبت", "افزایش", "شکست", "مشارکت", "رونق",
 }
 NEGATIVE = {
     "hack", "exploit", "breach", "lawsuit", "ban", "delist", "outflow",
     "liquidation", "insolvency", "bankruptcy", "scam", "rug", "bearish",
-    "blacklist", "depeg", "downtime", "drain",
+    "blacklist", "depeg", "downtime", "drain", "نزول", "سقوط", "هک", "حمله", "کلاهبرداری", "ممنوعیت", "خروج", "فروش", "لیکویید", "ورشکستگی", "ریزش", "منفی", "کاهش", "سرقت",
 }
-INTENSIFIERS = {"massive", "surge", "record", "crash", "collapse", "extreme"}
+INTENSIFIERS = {"massive", "surge", "record", "crash", "collapse", "extreme", "شدید", "عظیم"}
 
 
 def score_text(text: str) -> dict:
-    tokens = re.findall(r"[^\\W\\d_]+", (text or "").lower(), flags=re.UNICODE)
+    tokens = re.findall(r"[^\W\d_]+", (text or "").lower(), flags=re.UNICODE)
     if not tokens:
         return {"status": "UNKNOWN", "score": None, "positive_hits": 0,
                 "negative_hits": 0, "intensity_hits": 0}
