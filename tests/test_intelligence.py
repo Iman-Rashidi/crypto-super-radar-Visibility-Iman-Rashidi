@@ -181,7 +181,7 @@ class EvmTests(unittest.TestCase):
             }},
         }
         session = FakeSession([FakeResponse(goplus), FakeResponse({"match": "exact_match"})])
-        result = screen_evm_token("base", address, session=session, cache={})
+        result = screen_evm_token("base", address, session=session, cache={}, limiter=NoWaitLimiter())
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.top10_holder_pct, 15.0)
 
