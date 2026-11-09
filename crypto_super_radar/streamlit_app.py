@@ -8,9 +8,12 @@ The default Render blueprint continues to use the lightweight HTTP application.
 """
 from __future__ import annotations
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 from crypto_super_radar.dashboard_data import build_dashboard_frames
+from crypto_super_radar.indicators import simulate_spot_long
 from crypto_super_radar.integrated_engine import WhaleAwareConfirmationEngine
 from crypto_super_radar.models import AssetSpec, GateStatus, Signal
 
@@ -145,7 +148,8 @@ def main() -> None:
         )
         return
 
-    frames = build_dashboard_frames(result)
+    candle_frame = getattr(_engine().data, "candle_frames", {}).get(result.asset)
+    frames = build_dashboard_frames(result, candles=candle_frame)
     st.subheader(f"نتیجهٔ پژوهش: {result.asset}")
     _show_gate_status(result)
 
@@ -198,22 +202,104 @@ def main() -> None:
         )
 
     tabs = st.tabs([
+        "نمای بازار و کف/سقف",
+        "ماشین‌حساب سود و زیان",
         "۱۲ فیلتر",
         "خطاها و داده‌های نامشخص",
         "معیارهای کوانت",
         "نهنگ‌ها و احساسات",
     ])
     with tabs[0]:
-        st.dataframe(frames["gates"], hide_index=True, use_container_width=True)
+        trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
+        regime_gate = next((gate for gate in result.gates if gate.gate_id == 2), None)
+        asset_regime = (trend_gate.evidence or {}).get("asset_regime") if trend_gate else None
+        market_regime = (regime_gate.evidence or {}).get("regime") if regime_gate else None
+        regime_labels = {
+            "BULLISH": "صعودی · Bullish",
+            "BEARISH": "نزولی · Bearish",
+            "NEUTRAL": "خنثی · Neutral",
+        }
+        r1, r2, r3 = st.columns(3)
+        r1.metric("رژیم دارایی", regime_labels.get(asset_regime, "نامشخص · UNKNOWN"))
+        r2.metric("رژیم بازار معیار", regime_labels.get(market_regime, "نامشخص · UNKNOWN"))
+        r3.metric("قیمت آخرین کندل", "نامشخص" if candle_frame is None or candle_frame.empty else f"{float(candle_frame['close'].iloc[-1]):,.8g} USD")
+        st.subheader("کف و سقف مشاهده‌شده")
+        st.caption("این اعداد بیشینه و کمینهٔ واقعی کندل‌های موجود در هر بازه‌اند؛ حمایت/مقاومت قطعی یا پیش‌بینی قیمت نیستند. هر بازهٔ ناقص یا قدیمی UNKNOWN نمایش داده می‌شود.")
+        if frames["market_ranges"].empty:
+            st.warning("تاریخچهٔ معتبر OHLC برای محاسبهٔ کف و سقف در دسترس نیست.")
+        else:
+            st.dataframe(frames["market_ranges"], hide_index=True, use_container_width=True)
+        if candle_frame is not None and not candle_frame.empty:
+            required = {"open", "high", "low", "close"}
+            if required.issubset(candle_frame.columns):
+                chart_data = candle_frame.tail(180).reset_index()
+                chart_data = chart_data.rename(columns={chart_data.columns[0]: "timestamp"})
+                chart_data["timestamp"] = pd.to_datetime(chart_data["timestamp"], utc=True)
+                chart_data["direction"] = chart_data.apply(
+                    lambda row: "صعودی" if row["close"] >= row["open"] else "نزولی", axis=1
+                )
+                wick = alt.Chart(chart_data).mark_rule().encode(
+                    x=alt.X("timestamp:T", title="زمان"),
+                    y=alt.Y("low:Q", title="قیمت (USD)"),
+                    y2="high:Q",
+                    color=alt.Color("direction:N", scale=alt.Scale(domain=["صعودی", "نزولی"], range=["#16a34a", "#dc2626"]), legend=None),
+                    tooltip=["timestamp:T", "open:Q", "high:Q", "low:Q", "close:Q"],
+                )
+                body = alt.Chart(chart_data).mark_bar(size=7).encode(
+                    x="timestamp:T",
+                    y="open:Q",
+                    y2="close:Q",
+                    color=alt.Color("direction:N", scale=alt.Scale(domain=["صعودی", "نزولی"], range=["#16a34a", "#dc2626"]), legend=None),
+                )
+                st.altair_chart((wick + body).properties(height=360), use_container_width=True)
+            else:
+                st.info("ستون‌های کامل OHLC برای نمودار کندلی موجود نیستند.")
     with tabs[1]:
+        st.subheader("ماشین‌حساب سناریوی Spot")
+        st.caption("این ابزار سناریو را محاسبه می‌کند، نه زمان یا احتمال رسیدن به هدف را پیش‌بینی. فقط Long بدون اهرم؛ Short و سفارش واقعی وجود ندارد.")
+        a1, a2, a3 = st.columns(3)
+        amount = a1.number_input("سرمایه (EUR)", min_value=0.01, value=10.0, step=1.0)
+        move = a2.number_input("تغییر فرضی قیمت (%)", min_value=-99.9, max_value=10000.0, value=10.0, step=1.0)
+        horizon_days = a3.number_input("افق سناریو (روز)", min_value=1, max_value=3650, value=14, step=1)
+        b1, b2, b3, b4 = st.columns(4)
+        buy_fee = b1.number_input("کارمزد خرید (%)", min_value=0.0, max_value=20.0, value=0.10, step=0.05)
+        sell_fee = b2.number_input("کارمزد فروش (%)", min_value=0.0, max_value=20.0, value=0.10, step=0.05)
+        buy_slippage = b3.number_input("لغزش خرید (%)", min_value=0.0, max_value=20.0, value=0.20, step=0.05)
+        sell_slippage = b4.number_input("لغزش فروش (%)", min_value=0.0, max_value=20.0, value=0.20, step=0.05)
+        try:
+            scenario = simulate_spot_long(
+                float(amount), float(move), buy_fee_pct=float(buy_fee),
+                sell_fee_pct=float(sell_fee), buy_slippage_pct=float(buy_slippage),
+                sell_slippage_pct=float(sell_slippage),
+            )
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("سود/زیان خالص", f"{scenario['net_pnl_eur']:+.4f} €")
+            p2.metric("ارزش نهایی", f"{scenario['net_proceeds_eur']:.4f} €")
+            p3.metric("بازده خالص", f"{scenario['net_return_pct']:+.3f}%")
+            p4.metric("رشد لازم برای سربه‌سر", f"{scenario['break_even_price_change_pct']:.3f}%")
+            st.write(f"سناریو: سرمایه‌گذاری {amount:.2f} یورو، تغییر فرضی قیمت {move:+.2f}% طی افق انتخابی {int(horizon_days)} روز.")
+            st.dataframe(pd.DataFrame([
+                {"جزء محاسبه": "کارمزد خرید", "مقدار (EUR)": scenario["buy_fee_eur"]},
+                {"جزء محاسبه": "لغزش خرید", "مقدار (EUR)": scenario["buy_slippage_eur"]},
+                {"جزء محاسبه": "لغزش فروش", "مقدار (EUR)": scenario["sell_slippage_eur"]},
+                {"جزء محاسبه": "کارمزد فروش", "مقدار (EUR)": scenario["sell_fee_eur"]},
+            ]), hide_index=True, use_container_width=True)
+            st.latex(r"V_{net}=I(1-f_b)(1-s_b)(1+r)(1-s_s)(1-f_s)")
+            st.caption("سود خالص = ارزش دریافتی پس از هزینه‌ها − سرمایه اولیه. سربه‌سر از حل V_net = I به‌دست می‌آید. نرخ‌های کارمزد و لغزش صرفاً فرض ورودی‌اند و باید با بازار/صرافی واقعی جایگزین شوند.")
+        except ValueError as exc:
+            st.error(f"ورودی ماشین‌حساب معتبر نیست: {exc}")
+        st.warning("مالیات، تغییر نرخ EUR/USD، هزینه برداشت/شبکه، اسپردِ فراتر از لغزش ورودی و اثر اندازه سفارش لحاظ نشده‌اند. سود یا زمان سود تضمین نمی‌شود.")
+    with tabs[2]:
+        st.dataframe(frames["gates"], hide_index=True, use_container_width=True)
+    with tabs[3]:
         if frames["errors"].empty:
             st.success("در این اسکن فیلتر FAIL یا UNKNOWN وجود ندارد.")
         else:
             st.dataframe(frames["errors"], hide_index=True, use_container_width=True)
-    with tabs[2]:
+    with tabs[4]:
         st.dataframe(frames["quantitative"], hide_index=True, use_container_width=True)
         st.caption("RSI، EMA، ATR و معیارهای بک‌تست مستقیماً از شواهد همان اسکن استخراج شده‌اند.")
-    with tabs[3]:
+    with tabs[5]:
         st.dataframe(frames["whale_sentiment"], hide_index=True, use_container_width=True)
         st.caption(
             "ورود توکن به صرافی به‌تنهایی اثبات فروش و خروج از صرافی اثبات خرید نیست. "
