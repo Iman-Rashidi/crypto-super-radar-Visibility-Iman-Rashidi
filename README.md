@@ -101,9 +101,14 @@ python -m unittest discover -s tests -v
 
 ## 4a. Run a read-only live research scan
 
-After installing the dependencies, run the integrated 12-gate engine against a public CEX instrument:
+From the repository root, rebuild and extract the complete source package first. The legacy engine modules are bundled in the source archive:
 
 ```bash
+python scripts/rebuild_source_archive.py
+mkdir -p /tmp/csr-live
+tar -xJf dist/crypto-super-radar-source.tar.xz -C /tmp/csr-live
+cd /tmp/csr-live/crypto-super-radar
+python -m pip install -r requirements.txt
 python -m scripts.live_research_scan --asset cex:BTCUSDT \
   --output reports/live-research-scan-spot.json
 python -m scripts.live_research_scan --asset perp:BTCUSDT \
