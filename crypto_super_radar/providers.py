@@ -350,6 +350,7 @@ def _ohlcv_frame(rows: Any) -> pd.DataFrame:
         return empty
 
     parsed = []
+    invalid_timestamps = []
     seen_timestamps = set()
     now = pd.Timestamp.now(tz="UTC")
     for index, row in enumerate(rows):
@@ -357,7 +358,8 @@ def _ohlcv_frame(rows: Any) -> pd.DataFrame:
             raise DataProviderError(f"Malformed OHLCV row at position {index}")
         raw_ts = _finite_float(row[0])
         if raw_ts is None or raw_ts <= 0:
-            raise DataProviderError(f"Invalid OHLCV timestamp at position {index}")
+            invalid_timestamps.append(index)
+            continue
         ts = int(raw_ts)
         if ts > 10**12:
             ts //= 1000
@@ -378,6 +380,15 @@ def _ohlcv_frame(rows: Any) -> pd.DataFrame:
         if high < max(open_, low, close) or low > min(open_, high, close):
             raise DataProviderError(f"Inconsistent OHLC range at position {index}")
         parsed.append((stamp, open_, high, low, close, volume))
+
+    if invalid_timestamps and parsed:
+        raise DataProviderError(
+            f"OHLCV response mixes valid candles with invalid timestamps at positions {invalid_timestamps}"
+        )
+    if not parsed:
+        # An entirely unusable response remains an empty frame, which downstream
+        # freshness/coverage gates classify as UNKNOWN rather than fabricating data.
+        return empty
 
     frame = pd.DataFrame(parsed, columns=["timestamp", "open", "high", "low", "close", "volume"])
     return frame.set_index("timestamp").sort_index().astype(float)
