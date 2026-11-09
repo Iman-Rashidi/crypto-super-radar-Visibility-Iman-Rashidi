@@ -264,6 +264,11 @@ print(divergence)
 These modules are committed on the feature branch and covered by offline tests. They are **research components**, not yet evidence of a live end-to-end production scan. No live market scan, sustained wallet monitoring, or unattended trading has been run. EVM and Solana wallet watchlists are bounded top-holder samples; CEX whale flow is a recent large-trade sample, not wallet attribution. The integrated CLI/report path is wired to these modules. It still requires live-provider verification and sustained Paper Trading before the separate Render service is created. The CI workflow rebuilds the bundled source archive and publishes it as an artifact; the original archive in the repository is not treated as updated until that CI job succeeds.
 
 
+
+## 13. RSS provider coverage semantics
+
+A configured RSS set is reported as `KNOWN` only when every configured feed returns at least one titled item and none of the feeds fails. If some feeds return usable headlines while another fails or returns no titled items, the source is `PARTIAL`; the full-market-sentiment gate must remain blocked. Whitespace-only manually supplied social text is not accepted as social coverage. This is a coverage control, not a claim that RSS feeds represent the entire news or social universe.
+
 ---
 
 **CRYPTO SUPER RADAR** — Discover Early. Analyze Smarter. Manage Risk.
