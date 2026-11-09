@@ -345,3 +345,8 @@ Provider adapters apply strict normalization before market data reaches the gate
 - HTTP retries are limited to transient network errors, 408/425/429 and server errors. Retry-After delta-seconds and HTTP-date values are supported with a 30-second cap; non-retryable client errors fail immediately.
 
 These checks validate response shape and internal consistency; they do not prove that a public provider is correct, independent, manipulation-free, or continuously available. CI uses mocked/offline fixtures and does not replace a live-provider acceptance test. All 12 mandatory gates remain fail-closed, and no order execution is enabled.
+
+
+## 16. Free cryptocurrency market board
+
+The default lightweight HTTP dashboard now includes a small, curated spot-market board for BTC, ETH, SOL, BNB, XRP and DOGE. It uses the existing public Binance Spot and Bybit Spot adapters, requires no API key or paid data subscription, and displays a price only when both sources return valid data within the configured discrepancy limit. The server caches results for 60 seconds to limit public API traffic. If a provider is unavailable or the venues disagree, that row remains `UNKNOWN`; the board is not a market-cap ranking or a trading recommendation.
