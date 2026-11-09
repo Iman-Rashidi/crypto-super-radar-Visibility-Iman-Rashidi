@@ -426,6 +426,42 @@ class IntegratedEngineTests(unittest.TestCase):
         )
         self.assertIn("evidence_confidence_pct", result.metrics)
         self.assertEqual(result.metrics["evidence_confidence_pct"], 100.0)
+        self.assertEqual(result.metrics["confidence_level_pct"], 100.0)
+        self.assertEqual(result.metrics["risk_score"], result.estimated_risk_score)
+        self.assertEqual(result.metrics["opportunity_rank"], result.opportunity_rank)
+
+    def test_whale_divergence_reduces_confidence_without_failing_gate(self):
+        data = FakeIntegratedDataService()
+        data.whale_evidence["cex:BTCUSDT"]["net_whale_trade_flow_usd"] = -250000
+        engine = WhaleAwareConfirmationEngine(
+            data_service=data,
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
+        )
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        self.assertEqual(result.gates[9].status.value, "PASS")
+        self.assertEqual(result.metrics["whale_alignment"], "OPPOSED")
+        self.assertLess(
+            result.metrics["confidence_level_pct"],
+            result.metrics["evidence_confidence_pct"],
+        )
+
+    def test_opportunity_rank_is_not_overwritten_by_confirmation_score(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
+        )
+        original_analyze = engine.base.analyze
+
+        def analyze_with_independent_rank(*args, **kwargs):
+            result = original_analyze(*args, **kwargs)
+            result.opportunity_rank = 12.34
+            return result
+
+        engine.base.analyze = analyze_with_independent_rank
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        self.assertEqual(result.opportunity_rank, 12.34)
 
     def test_scenario_b_security_failure_blocks_signal(self):
         engine = WhaleAwareConfirmationEngine(
