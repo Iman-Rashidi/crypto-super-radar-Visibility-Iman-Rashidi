@@ -182,7 +182,8 @@ class EvmTests(unittest.TestCase):
                 "is_mintable": "0", "owner_change_balance": "0",
                 "can_take_back_ownership": "0", "hidden_owner": "0",
                 "selfdestruct": "0", "transfer_pausable": "0",
-                "is_blacklisted": "0", "cannot_buy": "0", "cannot_sell_all": "0",\n                "slippage_modifiable": "0", "personal_slippage_modifiable": "0",\n                "anti_whale_modifiable": "0", "trading_cooldown": "0", "external_call": "0",\n                "buy_tax": "0", "sell_tax": "0",
+                "is_blacklisted": "0", "cannot_buy": "0", "cannot_sell_all": "0",
+                "slippage_modifiable": "0", "personal_slippage_modifiable": "0",\n                "anti_whale_modifiable": "0", "trading_cooldown": "0", "external_call": "0",\n                "buy_tax": "0", "sell_tax": "0",
                 "holders": [{"percent": "0.10"}, {"percent": "0.05"}],
             }},
         }
