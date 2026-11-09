@@ -301,10 +301,10 @@ class SentimentFeedTests(unittest.TestCase):
 
 
 def sample_candles(stronger=True):
-    t = np.arange(240, dtype=float)
+    t = np.arange(400, dtype=float)
     slope = 0.19 if stronger else 0.09
     close = 100.0 + slope * t + 2.3 * np.sin(t / 5.0) + np.sin(t / 13.0)
-    index = pd.date_range(end=pd.Timestamp.now(tz="UTC").floor("D"), periods=240, freq="D")
+    index = pd.date_range(end=pd.Timestamp.now(tz="UTC").floor("D"), periods=400, freq="D")
     return pd.DataFrame({
         "open": close * 0.999, "high": close * 1.012,
         "low": close * 0.988, "close": close,
@@ -313,14 +313,24 @@ def sample_candles(stronger=True):
 
 
 class FakeIntegratedDataService:
-    def __init__(self, whale_status="KNOWN"):
+    def __init__(self, whale_status="KNOWN", security_status="PASS"):
         self.asset_candles = sample_candles(True)
         self.benchmark = sample_candles(False)
+        self.candle_frames = {
+            "cex:BTCUSDT": self.asset_candles.copy(),
+            "perp:BTCUSDT": self.asset_candles.copy(),
+        }
+        self.funding_frames = {"perp:BTCUSDT": pd.Series(dtype=float)}
+        self.security_status = security_status
         self.whale_evidence = {
             "cex:BTCUSDT": {
                 "status": whale_status,
                 "net_whale_trade_flow_usd": 250000 if whale_status == "KNOWN" else None,
-            }
+            },
+            "perp:BTCUSDT": {
+                "status": whale_status,
+                "net_whale_trade_flow_usd": 250000 if whale_status == "KNOWN" else None,
+            },
         }
         self.http = SimpleNamespace(limiter=NoWaitLimiter())
 
@@ -339,10 +349,10 @@ class FakeIntegratedDataService:
         return self.benchmark.copy()
 
     def security(self, asset):
-        return {"status": "PASS", "reason": "Mock security PASS."}
+        return {"status": self.security_status, "reason": f"Mock security {self.security_status}."}
 
     def funding_history(self, asset):
-        return pd.Series(dtype=float)
+        return self.funding_frames.get(asset.raw, pd.Series(dtype=float)).copy()
 
 
 class FakeHttp:
@@ -398,7 +408,7 @@ class IntegratedEngineTests(unittest.TestCase):
             "social_coverage": "KNOWN" if status == "KNOWN" else "UNKNOWN",
         }
 
-    def test_integrated_engine_adds_mandatory_whale_and_sentiment_gates(self):
+    def test_scenario_a_all_twelve_mandatory_gates_pass(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
             sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
@@ -406,11 +416,33 @@ class IntegratedEngineTests(unittest.TestCase):
         )
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(len(result.gates), 12)
-        self.assertEqual(result.gates[9].status.value, "PASS")
-        self.assertEqual(result.gates[10].status.value, "PASS")
+        self.assertEqual(
+            [gate.status.value for gate in result.gates],
+            ["PASS"] * 12,
+            [(gate.gate_id, gate.name_en, gate.status.value, gate.reason_en) for gate in result.gates],
+        )
+        self.assertIn("evidence_confidence_pct", result.metrics)
+        self.assertEqual(result.metrics["evidence_confidence_pct"], 100.0)
+
+    def test_scenario_b_security_failure_blocks_signal(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(security_status="FAIL"),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
+        )
+        result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
+        self.assertEqual(result.gates[5].status.value, "FAIL")
+        self.assertEqual(result.signal.value, "NO TRADE")
+
+    def test_scenario_c_missing_perpetual_funding_is_unknown(self):
+        engine = WhaleAwareConfirmationEngine(
+            data_service=FakeIntegratedDataService(),
+            sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
+            whale_store=WhaleStore(":memory:"),
+        )
+        result = engine.analyze("perp:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.gates[11].status.value, "UNKNOWN")
         self.assertEqual(result.signal.value, "NO TRADE")
-        self.assertIn("evidence_confidence_pct", result.metrics)
 
     def test_partial_sentiment_coverage_blocks_any_trade(self):
         engine = WhaleAwareConfirmationEngine(
