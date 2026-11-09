@@ -3,8 +3,13 @@ services:
     name: crypto-super-radar
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m crypto_super_radar.web_app
+    buildCommand: >-
+      tar -xJf dist/crypto-super-radar-source.tar.xz -C . &&
+      cp -R crypto_super_radar/. crypto-super-radar/crypto_super_radar/ &&
+      cp README.md pyproject.toml requirements.txt crypto-super-radar/ &&
+      cd crypto-super-radar &&
+      pip install -r requirements.txt
+    startCommand: cd crypto-super-radar && python -m crypto_super_radar.web_app
     healthCheckPath: /health
     autoDeploy: false
     envVars:
