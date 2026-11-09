@@ -1,0 +1,37 @@
+name: restore-archived-package-modules
+
+on:
+  push:
+    branches:
+      - feature/restore-archived-engine-modules
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Restore missing Python modules from the pinned source archive
+        run: python scripts/restore_archived_package_modules.py
+      - name: Commit restored modules to this isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crypto_super_radar
+          if git diff --cached --quiet; then
+            echo "No missing modules found."
+          else
+            git commit -m "Restore missing package modules from source archive"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+      - name: Verify complete package imports
+        run: python -m compileall -q crypto_super_radar
