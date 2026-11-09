@@ -64,6 +64,30 @@ class EvmTransferScanner:
             raise ValueError(f"RPC error for {method}")
         return payload["result"]
 
+    def _rpc_batch(self, method: str, params_list: list[list[Any]]) -> list[Any]:
+        """Fetch block headers in bounded JSON-RPC batches to avoid one call per log."""
+        results = []
+        for offset in range(0, len(params_list), 100):
+            chunk = params_list[offset:offset + 100]
+            payload = [
+                {"jsonrpc": "2.0", "id": offset + index + 1,
+                 "method": method, "params": params}
+                for index, params in enumerate(chunk)
+            ]
+            self.limiter.wait(self.rpc_url)
+            response = self.session.post(self.rpc_url, json=payload, timeout=self.timeout)
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, list):
+                raise ValueError("RPC provider does not support JSON-RPC batch responses")
+            by_id = {item.get("id"): item for item in body}
+            for index in range(len(chunk)):
+                item = by_id.get(offset + index + 1)
+                if not item or item.get("error") or "result" not in item:
+                    raise ValueError(f"RPC batch failed for {method}")
+                results.append(item["result"])
+        return results
+
     def latest_block_number(self) -> int:
         """Return the latest canonical block number from the configured public RPC."""
         return _hex_int(self._rpc("eth_blockNumber", []))
@@ -99,19 +123,25 @@ class EvmTransferScanner:
             }])
             if not isinstance(logs, list) or len(logs) > self.max_logs:
                 return {"status": "UNKNOWN", "reason": "RPC log response is invalid or exceeds configured cap."}
+            block_hashes = []
+            for log in logs:
+                if len(log.get("topics", [])) >= 3:
+                    block_hash = log.get("blockHash")
+                    if not block_hash or not log.get("blockNumber"):
+                        raise ValueError("Transfer log is missing block identity")
+                    if block_hash not in block_hashes:
+                        block_hashes.append(block_hash)
             block_times: dict[str, int] = {}
+            if block_hashes:
+                blocks = self._rpc_batch("eth_getBlockByHash", [[block_hash, False] for block_hash in block_hashes])
+                block_times = {block_hash: _hex_int(block["timestamp"])
+                               for block_hash, block in zip(block_hashes, blocks)}
             rows = []
             for log in logs:
                 topics = log.get("topics", [])
                 if len(topics) < 3:
                     continue
-                block_hash = log.get("blockHash")
-                block_number = log.get("blockNumber")
-                if not block_hash or not block_number:
-                    raise ValueError("Transfer log is missing block identity")
-                if block_hash not in block_times:
-                    block = self._rpc("eth_getBlockByHash", [block_hash, False])
-                    block_times[block_hash] = _hex_int(block["timestamp"])
+                block_hash = log["blockHash"]
                 raw_amount = _hex_int(log["data"])
                 amount = raw_amount / (10 ** decimals)
                 amount_usd = None if price_usd is None else amount * price_usd
