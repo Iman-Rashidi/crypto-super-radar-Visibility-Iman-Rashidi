@@ -105,7 +105,9 @@ After installing the dependencies, run the integrated 12-gate engine against a p
 
 ```bash
 python -m scripts.live_research_scan --asset cex:BTCUSDT \
-  --output reports/live-research-scan.json
+  --output reports/live-research-scan-spot.json
+python -m scripts.live_research_scan --asset perp:BTCUSDT \
+  --output reports/live-research-scan-perpetual.json
 ```
 
 The JSON report contains the complete gate evidence and decision blockers. The runner is restricted to a single CEX spot/perpetual asset and never submits orders, signs transactions, connects a wallet, or reads private exchange accounts. Any mandatory `FAIL` or `UNKNOWN` must keep the decision at `NO TRADE`. See [Live Provider Acceptance](docs/LIVE_PROVIDER_ACCEPTANCE.md) for the companion real-provider checks and their regional access requirements.
