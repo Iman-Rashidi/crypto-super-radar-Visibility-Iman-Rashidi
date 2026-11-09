@@ -37,7 +37,7 @@ class CexWhaleScanner:
                 binance_url = "https://fapi.binance.com/fapi/v1/aggTrades"
                 category = "linear"
             else:
-                binance_url = "https://api.binance.com/api/v3/aggTrades"
+                binance_url = "https://data-api.binance.vision/api/v3/aggTrades"
                 category = "spot"
             binance_rows = self.http.get(binance_url, {"symbol": symbol, "limit": 1000})
             bybit_payload = self.http.get(
