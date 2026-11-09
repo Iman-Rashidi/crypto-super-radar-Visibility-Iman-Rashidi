@@ -68,6 +68,13 @@ class CexWhaleScanner:
             if not binance_rows or not bybit_rows:
                 return {"status": "UNKNOWN", "reason": "CEX sample coverage is incomplete."}
             a, b = self._summary(binance_trades), self._summary(bybit_trades)
+            if a["large_trade_count"] == 0 or b["large_trade_count"] == 0:
+                return {
+                    "status": "UNKNOWN",
+                    "reason": "Both venues must contain at least one whale-sized trade in the bounded sample.",
+                    "binance": a, "bybit": b,
+                    "coverage": "LATEST_UP_TO_1000_TRADES_PER_VENUE",
+                }
             net_a, net_b = a["net_aggressive_flow_usd"], b["net_aggressive_flow_usd"]
             if net_a * net_b < 0:
                 return {
