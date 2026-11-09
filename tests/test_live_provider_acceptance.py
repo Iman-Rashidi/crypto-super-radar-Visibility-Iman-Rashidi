@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import unittest
+
+import requests
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -87,6 +89,26 @@ class FakeSession:
         return FakeResponse(self.payload)
 
 
+class FakeBlockedResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        raise requests.HTTPError(
+            f"{self.status_code} blocked",
+            response=self,
+        )
+
+
+class FakeBlockedSession:
+    def __init__(self, status_code):
+        self.status_code = status_code
+        self.headers = {}
+
+    def get(self, url, **kwargs):
+        return FakeBlockedResponse(self.status_code)
+
+
 class FakeLimiter:
     def wait(self, url):
         return 0.0
@@ -135,11 +157,28 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "INCONCLUSIVE")
         self.assertIsNone(result["source_timestamp_utc"])
 
-    def test_derived_spot_check_requires_both_venues(self):
+    def test_derived_spot_check_is_inconclusive_without_both_venues(self):
         runner = AcceptanceRunner(limiter=FakeLimiter())
         result = runner.check_spot_price_agreement()
-        self.assertEqual(result["status"], "FAIL")
-        self.assertIn("Both spot providers", result["reason"])
+        self.assertEqual(result["status"], "INCONCLUSIVE")
+        self.assertIn("unavailable until both providers", result["reason"])
+
+    def test_region_or_access_restriction_is_inconclusive_not_provider_failure(self):
+        for status_code in (403, 429, 451):
+            runner = AcceptanceRunner(
+                session=FakeBlockedSession(status_code),
+                limiter=FakeLimiter(),
+            )
+            result = runner.check_binance_spot()
+            self.assertEqual(result["status"], "INCONCLUSIVE")
+            self.assertIn(f"HTTP {status_code}", result["reason"])
+
+    def test_missing_perpetual_venues_make_derived_checks_inconclusive(self):
+        runner = AcceptanceRunner(limiter=FakeLimiter())
+        runner.check_perpetual_agreement()
+        derived = [item for item in runner.results]
+        self.assertEqual(len(derived), 3)
+        self.assertTrue(all(item["status"] == "INCONCLUSIVE" for item in derived))
 
 
 if __name__ == "__main__":
