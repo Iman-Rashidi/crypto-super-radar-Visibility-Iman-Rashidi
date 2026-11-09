@@ -46,6 +46,20 @@ perp:BTCUSDT            Perpetual instrument; LONG or SHORT if every gate passes
 
 Base and Ethereum market data can be collected, but the generic EVM security adapter intentionally returns `UNKNOWN`. This avoids pretending that a basic `owner()` or bytecode check proves that a contract is free of mint, proxy, blacklist, honeypot, or privileged-role risks. A verified EVM contract-risk adapter is a prerequisite before those assets can receive trade signals.
 
+
+
+> **Source package note / راهنمای دریافت سورس:** برای جلوگیری از ناقص‌بودن ساختار فایل‌ها در مرورگر GitHub، نسخه کامل قابل اجرا در آرشیو `dist/crypto-super-radar-source.tar.xz` قرار دارد. ابتدا آرشیو را در یک مسیر جداگانه استخراج کنید و فرمان‌های نصب و اجرا را از داخل پوشه `crypto-super-radar` اجرا کنید:
+>
+> ```bash
+> mkdir -p /tmp/crypto-super-radar
+> tar -xJf dist/crypto-super-radar-source.tar.xz -C /tmp
+> cd /tmp/crypto-super-radar
+> python -m pip install -r requirements.txt
+> python -m crypto_super_radar --test
+> ```
+>
+> **English:** The complete executable package is bundled in the source archive. Extract it first; run commands from the extracted project directory.
+
 ## 3. Installation
 
 Requires Python 3.10 or later.
