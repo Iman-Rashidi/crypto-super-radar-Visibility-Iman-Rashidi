@@ -8,7 +8,7 @@ at the time of execution.
 
 ## Safety boundary
 
-- The runner only performs public HTTP GET requests and read-only JSON-RPC methods.
+- The runner only performs public HTTP GET requests and read-only JSON-RPC methods. Binance Spot uses Binance's documented public-market-data-only host (`data-api.binance.vision`); Ethereum mainnet RPC uses the public endpoint advertised by PublicNode.
 - It does not sign transactions, connect wallets, read exchange accounts, create
   orders, or need private/API credentials.
 - It does not run the trading/research signal pipeline and cannot authorize a trade.
@@ -47,9 +47,17 @@ Default thresholds are 5 seconds for a check's total latency, 180 seconds for
 market/RPC data freshness, and 72 hours for daily sentiment/feed observations.
 The latest source timestamp is compared with the UTC receive time recorded by
 the runner. A missing trustworthy timestamp produces `INCONCLUSIVE`, not PASS.
-An invalid schema, provider error, stale data, future timestamp, latency breach,
-or cross-venue discrepancy produces FAIL. A missing/unavailable required source
-also prevents an overall PASS.
+An invalid schema, non-access-related provider error, stale data, future
+timestamp, latency breach, or cross-venue discrepancy produces FAIL. HTTP 403,
+429, or 451 access/rate-limit responses are INCONCLUSIVE: the runner cannot use
+them to validate payload correctness or market freshness, and the result must
+be repeated from an authorized network/region. A missing/unavailable required
+source also prevents an overall PASS.
+
+Bybit's REST ticker response exposes a top-level `time` field. For Bybit, the
+reported freshness timestamp therefore measures the provider response clock,
+not the timestamp of an individual last trade. This limitation is made explicit
+in the returned check details.
 
 The Binance default funding interval is treated as 8 hours only when Binance's
 adjusted `fundingInfo` endpoint has no entry for the selected symbol. Bybit
