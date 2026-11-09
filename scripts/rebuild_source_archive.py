@@ -24,7 +24,7 @@ def main() -> int:
     tracked = [p for base in (PACKAGE_DIR, TEST_DIR, ROOT / "docs") if base.exists()
                for p in base.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
     tracked.extend(
-        ROOT / name for name in ("README.md", "pyproject.toml", "requirements.txt", ".env.example")
+        ROOT / name for name in ("README.md", "pyproject.toml", "requirements.txt", ".env.example", "render.yaml")
         if (ROOT / name).is_file()
     )
     # Infer the archive's top-level directory to preserve its documented layout.
