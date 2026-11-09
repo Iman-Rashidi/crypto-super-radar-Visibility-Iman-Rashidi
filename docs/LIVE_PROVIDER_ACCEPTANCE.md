@@ -21,7 +21,7 @@ From the repository root, install the existing project dependencies and run:
 
 ```bash
 python -m pip install -r requirements.txt
-python scripts/live_provider_acceptance.py --symbol BTCUSDT \
+python -m scripts.live_provider_acceptance --symbol BTCUSDT \
   --output reports/live-provider-acceptance.json
 ```
 
