@@ -152,6 +152,19 @@ python -m crypto_super_radar \
 
 `--headline` and `--social-post` can be repeated. By default the integrated CLI also fetches public news RSS, public social/community RSS and the Alternative.me Fear & Greed Index. Override feeds with `--news-rss` and `--social-rss`. If any of the three required sentiment sources is missing, Gate 11 is `UNKNOWN` and no trade is allowed. The text scorer is a transparent keyword baseline, not a trained NLP model.
 
+### Optional Persian Streamlit dashboard (local installation)
+
+Streamlit is an optional UI dependency; it is not installed by the base CLI or the default Render service.
+
+```bash
+python -m pip install -e ".[dashboard]"
+streamlit run crypto_super_radar/streamlit_app.py
+```
+
+The dashboard reads the same `AnalysisResult` as the CLI and builds Pandas DataFrames for all 12 gates, FAIL/UNKNOWN data errors, RSI/EMA/ATR and backtest evidence, whale-flow observations, sentiment and Fear & Greed. It does not create synthetic values for missing evidence.
+
+The default `render.yaml` continues to launch the lightweight HTTP dashboard in `web_app.py`; it has not been switched to Streamlit or deployed. This avoids making the optional Streamlit runtime a mandatory dependency on the constrained Render Free service. Run Streamlit locally first and measure memory use before considering a hosted Streamlit service.
+
 ## 6. Global throttling and cross-validation
 
 A shared process-wide, thread-safe singleton limiter spaces requests by host. GeckoTerminal uses a conservative **one request every six seconds** (approximately 10 requests/minute), based on its public API documentation. DexScreener and exchange endpoints also have conservative per-host spacing. HTTP 429 and transient 5xx responses are retried with bounded delays.
@@ -163,6 +176,7 @@ A provider returning no data, an unreadable candle timestamp, a missing pool cre
 ## 7. Signal and risk policy
 
 - The initial confirmation threshold is 75/100; it is a tunable research parameter, not a probability of profit.
+- **Risk Score** is the model's estimated risk on a 0–100 scale (higher means riskier); **Opportunity Rank** is preserved as a separate ranking output; **Confidence Level** is evidence coverage adjusted for whale/sentiment disagreement. Confidence is not a probability of profit. Their separate calculation paths do not prove statistical independence or zero correlation; that requires historical validation.
 - Estimated risk is separate from confirmation score; lower is better.
 - Entry/Stop/Target use daily ATR14. Default SL distance is 2×ATR and TP distance is 4×ATR (2:1 nominal reward/risk before gaps and execution effects).
 - Paper sizing starts from a configurable simulated equity of $10,000 and a 0.50% risk budget per trade. It does not read a real account balance.
@@ -210,13 +224,18 @@ The feature branch adds the following explicit research APIs:
 | `evm_security.py` | GoPlus token-security checks plus Sourcify source verification | Requires exact Sourcify match; proxy/admin and missing fields are not assumed safe |
 | `walk_forward.py` | Non-overlapping chronological out-of-sample folds, costs and per-fold drawdown | Requires a causally generated return series; historical funding is mandatory for perpetuals |
 | `intelligence_engine.py` | Fail-closed combination of whale, sentiment, market, derivatives, security and validation states | Any mandatory `FAIL` or `UNKNOWN` blocks the research signal |
-| `integrated_engine.py` | Connects whale, sentiment and 12-gate walk-forward checks to the legacy engine | اتصال ماژول‌ها به موتور اصلی و ۱۲ فیلتر اجباری |\n| `cex_whales.py` | Cross-venue large-trade flow from Binance and Bybit | تشخیص جریان معاملات بزرگ در دو صرافی |\n| `enhanced_cli.py` | Integrated CLI entry point with RSS configuration | رابط خط فرمان یکپارچه |\n| `whale_store.py` | Local SQLite history for repeated whale-flow observations | ذخیره محلی تاریخچه حرکت نهنگ‌ها |\n| `web_app.py` | Persian on-demand dashboard, job polling and history endpoint | داشبورد وب فارسی برای اسکن و تاریخچه |
+| `integrated_engine.py` | Connects whale, sentiment and 12-gate walk-forward checks to the legacy engine | اتصال ماژول‌ها به موتور اصلی و ۱۲ فیلتر اجباری |
+| `cex_whales.py` | Cross-venue large-trade flow from Binance and Bybit | تشخیص جریان معاملات بزرگ در دو صرافی |
+| `enhanced_cli.py` | Integrated CLI entry point with RSS configuration | رابط خط فرمان یکپارچه |
+| `whale_store.py` | Local SQLite history for repeated whale-flow observations | ذخیره محلی تاریخچه حرکت نهنگ‌ها |
+| `web_app.py` | Persian on-demand dashboard, job polling and history endpoint | داشبورد وب فارسی برای اسکن و تاریخچه |
 
 ### Whale-flow interpretation
 
 - Net exchange inflow is a **potential increase in sell-side supply**, not evidence that the coins were sold.
 - Net exchange outflow can indicate custody or accumulation, but does not prove spot buying.
-- EVM top-holder watchlists can be derived from GoPlus holder percentages and token supply; Solana token-account owners are resolved through public RPC. Both are partial samples, not a complete wallet universe.\n- A wallet is only identified as an exchange, fund, market maker or smart-money entity when an upstream label is explicitly supplied. The engine does not invent wallet identities.
+- EVM top-holder watchlists can be derived from GoPlus holder percentages and token supply; Solana token-account owners are resolved through public RPC. Both are partial samples, not a complete wallet universe.
+- A wallet is only identified as an exchange, fund, market maker or smart-money entity when an upstream label is explicitly supplied. The engine does not invent wallet identities.
 - Solana sampling only inspects a bounded recent subset of the largest token accounts. Its coverage status stays `PARTIAL`; the unified engine will not treat that as a complete whale confirmation.
 
 ### Example: offline sentiment and transfer analysis
