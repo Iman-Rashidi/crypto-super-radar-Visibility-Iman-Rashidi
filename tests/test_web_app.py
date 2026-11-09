@@ -4,11 +4,14 @@ from __future__ import annotations
 import json
 import threading
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from http.client import HTTPConnection
 from urllib.parse import quote
 
 from crypto_super_radar.web_app import Handler
+from crypto_super_radar import web_app
 
 
 class QuietHandler(Handler):
@@ -56,6 +59,60 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("ماشین‌حساب حرفه‌ای سناریوی Spot", page)
         self.assertIn('id="calc-amount"', page)
         self.assertIn("calc-break-even", page)
+        self.assertIn("بازار رمزارزها", page)
+        self.assertIn("APIهای عمومی و رایگان", page)
+        self.assertIn("/api/crypto-markets", page)
+
+    def test_crypto_market_endpoint_uses_free_cross_validated_spot_data_and_cache(self):
+        web_app.CRYPTO_MARKET_CACHE.update(expires_at=0.0, payload=None)
+
+        def snapshot(asset):
+            return SimpleNamespace(
+                price_usd=100.0,
+                volume_24h_usd=1_000_000.0,
+                price_discrepancy_pct=0.25,
+                provider_a="Binance Spot",
+                provider_b="Bybit Spot",
+            )
+
+        with patch.object(web_app.ENGINE.data, "snapshot", side_effect=snapshot) as fetch:
+            status, _, payload = self.request("GET", "/api/crypto-markets")
+            first = json.loads(payload)
+            self.assertEqual(status, 200)
+            self.assertEqual(first["status"], "PASS")
+            self.assertEqual(first["cache_ttl_seconds"], 60)
+            self.assertEqual(len(first["items"]), len(web_app.CRYPTO_MARKET_UNIVERSE))
+            self.assertEqual(first["items"][0]["symbol"], "BTCUSDT")
+            self.assertEqual(first["items"][0]["providers"], ["Binance Spot", "Bybit Spot"])
+
+            status, _, payload = self.request("GET", "/api/crypto-markets")
+            second = json.loads(payload)
+            self.assertEqual(status, 200)
+            self.assertEqual(second, first)
+            self.assertEqual(fetch.call_count, len(web_app.CRYPTO_MARKET_UNIVERSE))
+
+    def test_crypto_market_endpoint_keeps_failed_symbols_unknown(self):
+        web_app.CRYPTO_MARKET_CACHE.update(expires_at=0.0, payload=None)
+
+        def snapshot(asset):
+            if asset.symbol == "ETHUSDT":
+                raise RuntimeError("public source unavailable")
+            return SimpleNamespace(
+                price_usd=100.0,
+                volume_24h_usd=1_000_000.0,
+                price_discrepancy_pct=0.25,
+                provider_a="Binance Spot",
+                provider_b="Bybit Spot",
+            )
+
+        with patch.object(web_app.ENGINE.data, "snapshot", side_effect=snapshot):
+            status, _, payload = self.request("GET", "/api/crypto-markets")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["status"], "PARTIAL")
+        eth = next(item for item in result["items"] if item["symbol"] == "ETHUSDT")
+        self.assertEqual(eth["status"], "UNKNOWN")
+        self.assertIn("public source unavailable", eth["reason"])
 
     def test_history_endpoint_returns_local_sqlite_summary(self):
         status, headers, payload = self.request(
