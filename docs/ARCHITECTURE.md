@@ -43,7 +43,7 @@ Any `FAIL` or `UNKNOWN` blocks entry. Scores are descriptive evidence and never 
 | `backtesting.py` | Fixed-rule, chronological out-of-sample testing | آزمون تاریخی با هزینه و بدون نگاه به آینده |
 | `filters.py` | Gates 1–7 | هفت فیلتر داده، بازار، روند، مومنتوم، جریان پول، امنیت و خبر |
 | `engine.py` | Gates 8–9, score, TP/SL and sizing | تصمیم پایه، بک‌تست، اندازه موقعیت و حد سود/ضرر |
-| `cex_whales.py` | Binance/Bybit large-trade flow sample | رصد معاملات بزرگ در بازار متمرکز |\n| `integrated_engine.py` | Adds mandatory gates 10–12 and combines whale/sentiment/walk-forward evidence | اتصال سه فیلتر جدید به موتور تصمیم |\n| `enhanced_cli.py` | Integrated command-line entry point | رابط خط فرمان یکپارچه |
+| `cex_whales.py` | Binance/Bybit large-trade flow sample | رصد معاملات بزرگ در بازار متمرکز |\n| `integrated_engine.py` | Adds mandatory gates 10–12 and combines whale/sentiment/walk-forward evidence | اتصال سه فیلتر جدید به موتور تصمیم |\n| `enhanced_cli.py` | Integrated command-line entry point | رابط خط فرمان یکپارچه |\n| `web_app.py` | Persian on-demand web dashboard and job polling | داشبورد وب فارسی و اجرای اسکن غیرهمزمان |\n| `whale_store.py` | Local SQLite whale-flow history | ذخیره محلی تاریخچه جریان نهنگ‌ها |
 | `reporting.py` | Persian explanations and Pandas DataFrame | گزارش قابل فهم برای کاربر فارسی‌زبان |
 | `cli.py` | Command-line interface | اجرای اسکن و ذخیره گزارش |
 | `selftest.py` | Offline smoke/unit tests | تست خودکار بدون تماس با API |
@@ -73,4 +73,4 @@ Persian: `UNKNOWN` به معنی «احتمالاً خوب» نیست؛ یعنی
 - Gate 11 — Full Market Sentiment Coverage: public news RSS, a selected social/community RSS feed or explicit social posts, and Alternative.me Fear & Greed must all be available. Missing coverage blocks.
 - Gate 12 — Multi-fold Walk-forward Stability: fixed EMA20/EMA50 strategy, non-overlapping chronological test folds, fees/slippage, per-fold drawdown, and signed historical funding costs for perpetuals. Missing funding remains UNKNOWN.
 
-The decision contract remains fail-closed: all 12 gates must PASS. Solana's bounded recent sample is not treated as full-history coverage, and EVM/CEX samples do not establish beneficial ownership. No orders are executed; output remains paper/research only.
+The decision contract remains fail-closed: all 12 gates must PASS. Solana's bounded recent sample is not treated as full-history coverage, and EVM/CEX samples do not establish beneficial ownership. No orders are executed; output remains paper/research only. Render Free sleeps after 15 minutes of inactivity and loses local SQLite data on spin-down/restart, so the hosted dashboard is on-demand and history is not durable there.
