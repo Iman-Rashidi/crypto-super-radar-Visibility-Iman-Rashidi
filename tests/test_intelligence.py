@@ -419,7 +419,7 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertEqual(
             [gate.status.value for gate in result.gates],
             ["PASS"] * 12,
-            [(gate.gate_id, gate.name_en, gate.status.value, gate.reason_en) for gate in result.gates],
+            [(gate.gate_id, gate.name_en, gate.status.value, gate.reason_en, gate.evidence) for gate in result.gates],
         )
         self.assertIn("evidence_confidence_pct", result.metrics)
         self.assertEqual(result.metrics["evidence_confidence_pct"], 100.0)
