@@ -120,14 +120,22 @@ def analyze_whale_activity(
     )
     unique_wallets = {e.from_address for e in events} | {e.to_address for e in events}
     whale_count = sum(label not in {"BELOW_WHALE_THRESHOLD", "UNKNOWN_VALUE"} for _, label in classified)
+    interpretations = []
     if net is None:
-        interpretation = "Exchange-flow direction is UNKNOWN: labels or USD values are incomplete."
+        interpretations.append("Exchange-flow direction is UNKNOWN: exchange labels or USD values are incomplete.")
     elif net > 0:
-        interpretation = "Net exchange inflow observed; this can increase potential sell-side supply, but is not proof of selling."
+        interpretations.append("Net exchange inflow observed; this can increase potential sell-side supply, but is not proof of selling.")
     elif net < 0:
-        interpretation = "Net exchange outflow observed; this can indicate custody or accumulation, but is not proof of buying."
+        interpretations.append("Net exchange outflow observed; this can indicate custody or accumulation, but is not proof of buying.")
     else:
-        interpretation = "Exchange inflow and outflow are balanced in the observed sample."
+        interpretations.append("Exchange inflow and outflow are balanced in the observed sample.")
+    if net_whale is not None and net_whale > 0:
+        interpretations.append("Net token transfer into labelled whale wallets observed; this may indicate accumulation, not proof of spot buying.")
+    elif net_whale is not None and net_whale < 0:
+        interpretations.append("Net token transfer out of labelled whale wallets observed; this may indicate distribution, not proof of selling.")
+    elif net_whale == 0:
+        interpretations.append("Labelled whale-wallet inflows and outflows are balanced in the observed sample.")
+    interpretation = " ".join(interpretations)
     return {
         "status": "KNOWN" if all(e.amount_usd is not None for e in events) else "PARTIAL",
         "event_count": len(events), "whale_event_count": whale_count,
