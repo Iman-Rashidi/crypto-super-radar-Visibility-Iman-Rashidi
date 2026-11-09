@@ -38,9 +38,17 @@ def _show_gate_status(result) -> None:
     unknown = [gate for gate in result.gates if gate.status == GateStatus.UNKNOWN]
     if failed:
         reasons = "، ".join(f"{gate.gate_id}: {gate.name_fa}" for gate in failed)
+        categories = []
+        failed_ids = {gate.gate_id for gate in failed}
+        if 1 in failed_ids:
+            categories.append("کیفیت یا عدم تطابق داده‌ها")
+        if 6 in failed_ids:
+            categories.append("ریسک امنیتی قرارداد")
+        if failed_ids - {1, 6}:
+            categories.append("شکست معیارهای بازار، مدل یا ریسک")
+        explanation = "، ".join(categories) or "شکست فیلتر اجباری"
         st.error(
-            "معامله مسدود شد: حداقل یک فیلتر اجباری شکست خورده است. "
-            "به دلیل ریسک امنیتی یا عدم تطابق داده‌ها، معامله مسدود شد. "
+            f"معامله مسدود شد: {explanation}. "
             f"فیلترهای ناموفق: {reasons}"
         )
     elif unknown:
