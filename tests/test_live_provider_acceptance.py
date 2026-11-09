@@ -180,6 +180,55 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(derived), 3)
         self.assertTrue(all(item["status"] == "INCONCLUSIVE" for item in derived))
 
+    def test_germany_spot_provider_snapshot_passes_cross_venue_price_check(self):
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        runner = AcceptanceRunner(limiter=FakeLimiter())
+        runner._values["binance_spot"] = {"price": 75228.0}
+        runner._values["bybit_spot"] = {"price": 75221.4}
+        runner.results.extend([
+            {"check": "binance_spot", "source_timestamp_utc": now},
+            {"check": "bybit_spot", "source_timestamp_utc": now},
+        ])
+        result = runner.check_spot_price_agreement()
+        self.assertEqual(result["status"], "PASS")
+        self.assertLess(result["details"]["difference_pct"], 0.01)
+
+    def test_germany_perpetual_snapshot_passes_price_funding_and_interval_checks(self):
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        runner = AcceptanceRunner(limiter=FakeLimiter())
+        runner._values["binance_perpetual"] = {
+            "mark_price": 75194.32082609,
+            "funding_rate": 0.0001,
+            "funding_interval_hours": 8.0,
+        }
+        runner._values["bybit_perpetual"] = {
+            "mark_price": 75191.2,
+            "funding_rate": 0.00007689,
+            "funding_interval_hours": 8.0,
+        }
+        runner.results.extend([
+            {"check": "binance_perpetual", "source_timestamp_utc": now},
+            {"check": "bybit_perpetual", "source_timestamp_utc": now},
+        ])
+        runner.check_perpetual_agreement()
+        derived = runner.results[-3:]
+        self.assertEqual([item["status"] for item in derived], ["PASS", "PASS", "PASS"])
+        self.assertLess(derived[0]["details"]["difference_pct"], 0.01)
+        self.assertEqual(derived[1]["details"]["binance_interval_hours"], 8.0)
+        self.assertLess(derived[2]["details"]["absolute_difference"], 0.0002)
+
+    def test_cross_venue_price_divergence_is_a_hard_failure(self):
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        runner = AcceptanceRunner(limiter=FakeLimiter())
+        runner._values["binance_spot"] = {"price": 100.0}
+        runner._values["bybit_spot"] = {"price": 120.0}
+        runner.results.extend([
+            {"check": "binance_spot", "source_timestamp_utc": now},
+            {"check": "bybit_spot", "source_timestamp_utc": now},
+        ])
+        result = runner.check_spot_price_agreement()
+        self.assertEqual(result["status"], "FAIL")
+
 
 if __name__ == "__main__":
     unittest.main()
