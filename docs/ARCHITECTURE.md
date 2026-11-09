@@ -29,7 +29,7 @@ Any `FAIL` or `UNKNOWN` blocks entry. Scores are descriptive evidence and never 
 | `whale_intelligence.py` | Large transfer classification and exchange-flow aggregation | تفکیک انتقال بزرگ از جریان ورود/خروج صرافی |
 | `evm_transfers.py` | Bounded ERC-20 Transfer-log scanner on Ethereum/Base | رصد انتقال‌های EVM با محدودیت بازه بلاک |
 | `solana_whales.py` | Recent SPL largest-account transaction sampling | نمونه‌برداری محدود تراکنش حساب‌های بزرگ سولانا |
-| `sentiment.py` | Multi-source keyword sentiment and divergence | تحلیل متن خبر/اجتماع و تضاد با جریان نهنگ |
+| `sentiment.py` | Persian/English keyword sentiment, Fear & Greed normalization and divergence | تحلیل متن فارسی/انگلیسی، شاخص ترس و طمع و تضاد جریان نهنگ |\n| `sentiment_feeds.py` | Public RSS + Alternative.me Fear & Greed adapters | دریافت خبر عمومی و شاخص ترس و طمع رایگان |
 | `evm_security.py` | GoPlus + exact Sourcify contract screening | غربالگری امنیت قرارداد EVM با تطبیق دقیق سورس |
 | `walk_forward.py` | Non-overlapping chronological OOS folds | اعتبارسنجی چندبخشی بدون هم‌پوشانی داده آزمون |
 | `intelligence_engine.py` | Fail-closed evidence combiner | ترکیب شواهد با مسدودسازی FAIL/UNKNOWN |
