@@ -10,6 +10,7 @@ from typing import Any
 
 import pandas as pd
 
+from .indicators import observed_price_ranges
 from .models import AnalysisResult
 
 
@@ -102,6 +103,7 @@ def quantitative_dataframe(result: AnalysisResult) -> pd.DataFrame:
         add("روند و مومنتوم", "ATR-14", e.get("atr14"), "USD")
         add("روند و مومنتوم", "قدرت نسبی ۳۰ روزه نسبت به BTC", e.get("relative_strength_30d_pct"), "%")
         add("روند و مومنتوم", "جهت ساختار", e.get("direction"))
+        add("روند و مومنتوم", "رژیم دارایی", e.get("asset_regime"))
 
     liquidity = gates.get(5)
     if liquidity:
@@ -178,11 +180,37 @@ def whale_sentiment_dataframe(result: AnalysisResult) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["بخش", "شاخص", "مقدار", "واحد"])
 
 
-def build_dashboard_frames(result: AnalysisResult) -> dict[str, pd.DataFrame]:
+def market_ranges_dataframe(candles: pd.DataFrame | None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Return observed high/low ranges with explicit per-window coverage state."""
+    evidence = observed_price_ranges(candles)
+    rows = []
+    labels = {"7": "کوتاه‌مدت · ۷ روز", "30": "میان‌مدت · ۳۰ روز",
+              "90": "بلندمدت · ۹۰ روز", "365": "بلندمدت · ۳۶۵ روز"}
+    for days, item in evidence.get("windows", {}).items():
+        rows.append({
+            "بازه": labels.get(days, f"{days} روز"),
+            "کف مشاهده‌شده": item.get("low"),
+            "سقف مشاهده‌شده": item.get("high"),
+            "تعداد کندل": item.get("candle_count"),
+            "پوشش داده": item.get("coverage_pct"),
+            "وضعیت": item.get("status", "UNKNOWN"),
+            "زمان ثبت کف": item.get("low_at"),
+            "زمان ثبت سقف": item.get("high_at"),
+            "علت": item.get("reason"),
+        })
+    return pd.DataFrame(rows), evidence
+
+
+def build_dashboard_frames(
+    result: AnalysisResult,
+    candles: pd.DataFrame | None = None,
+) -> dict[str, pd.DataFrame]:
     """Build all source-backed dashboard tables from one engine result."""
+    ranges, _ = market_ranges_dataframe(candles)
     return {
         "gates": gates_dataframe(result),
         "errors": data_errors_dataframe(result),
         "quantitative": quantitative_dataframe(result),
         "whale_sentiment": whale_sentiment_dataframe(result),
+        "market_ranges": ranges,
     }
