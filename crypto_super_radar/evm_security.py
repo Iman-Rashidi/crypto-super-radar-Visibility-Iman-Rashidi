@@ -113,13 +113,13 @@ def screen_evm_token(
             top10 = None
     try:
         sourcify = client.get(SOURCIFY_URL.format(chain_id=chain_id, address=address),
-                              params={"fields": "creationBytecode"}, timeout=timeout)
+                              params={}, timeout=timeout)
         if sourcify.status_code == 404:
             source_verified = False
         else:
             sourcify.raise_for_status()
             source_payload = sourcify.json()
-            source_verified = bool(source_payload.get("match"))
+            source_verified = source_payload.get("match") == "exact_match"
             evidence["sourcify"] = {
                 "match": source_payload.get("match"),
                 "chainId": source_payload.get("chainId"),
