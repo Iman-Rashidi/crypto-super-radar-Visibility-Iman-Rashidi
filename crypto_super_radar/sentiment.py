@@ -135,3 +135,33 @@ def fear_greed_to_sentiment(value: float) -> float:
     if not 0.0 <= number <= 100.0:
         raise ValueError("Fear & Greed value must be between 0 and 100")
     return 2.0 * number - 100.0
+
+
+def score_headlines(headlines: Iterable[str]) -> dict:
+    """Backward-compatible 0..100 headline score for the legacy nine-gate filter."""
+    items = [str(item).strip() for item in (headlines or []) if str(item).strip()]
+    if not items:
+        return {
+            "status": "UNKNOWN", "score": None, "hype_score": None,
+            "leader_mentions": None, "reason": "No valid headlines were supplied.",
+        }
+    scored = [score_text(item) for item in items]
+    valid = [item for item in scored if item.get("score") is not None]
+    if not valid:
+        return {
+            "status": "UNKNOWN", "score": None, "hype_score": None,
+            "leader_mentions": None, "reason": "Headlines contained no recognized sentiment evidence.",
+        }
+    raw_score = sum(item["score"] for item in valid) / len(valid)
+    normalized = (raw_score + 100.0) / 2.0
+    hype_terms = {"moon", "100x", "pump", "爆", "انفجاری", "نجومی"}
+    leader_terms = {"whale", "whales", "smart", "institutional", "نهنگ", "نهنگها"}
+    tokens = re.findall(r"[^\\W\\d_]+", " ".join(items).lower(), flags=re.UNICODE)
+    hype_hits = sum(item.get("intensity_hits", 0) for item in valid) + sum(t in hype_terms for t in tokens)
+    hype_score = min(100.0, hype_hits * 20.0)
+    leader_mentions = sum(t in leader_terms for t in tokens)
+    return {
+        "status": "KNOWN", "score": round(normalized, 2),
+        "hype_score": hype_score, "leader_mentions": leader_mentions,
+        "reason": "Transparent Persian/English keyword baseline; not a trained NLP model.",
+    }
