@@ -6,6 +6,7 @@ from crypto_super_radar.whale_intelligence import analyze_whale_activity, WhaleE
 from crypto_super_radar.sentiment import analyze_market_sentiment, detect_sentiment_divergence, score_text, fear_greed_to_sentiment
 from crypto_super_radar.walk_forward import WalkForwardConfig, walk_forward_validate
 from crypto_super_radar.evm_security import screen_evm_token, _tri, _pct
+from crypto_super_radar.sentiment_feeds import fetch_fear_greed_index, fetch_rss_headlines
 
 
 class WhaleTests(unittest.TestCase):
@@ -90,6 +91,33 @@ class WalkForwardTests(unittest.TestCase):
         self.assertEqual(result["status"], "UNKNOWN")
 
 
+class FakeResponse:
+    def __init__(self, payload, status_code=200, content=b""):
+        self.payload = payload
+        self.status_code = status_code
+        self.content = content
+
+    def json(self):
+        return self.payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError("HTTP error")
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def get(self, *args, **kwargs):
+        return self.responses.pop(0)
+
+
+class NoWaitLimiter:
+    def wait(self, url):
+        return 0
+
+
 class EvmTests(unittest.TestCase):
     def test_unknown_semantics(self):
         self.assertIsNone(_tri(None))
@@ -101,7 +129,66 @@ class EvmTests(unittest.TestCase):
         result = screen_evm_token("base", "not-an-address")
         self.assertEqual(result.status, "FAIL")
 
+    def test_exact_sourcify_match_and_complete_goplus_data_pass(self):
+        address = "0x" + "1" * 40
+        goplus = {
+            "code": 1,
+            "result": {address: {
+                "is_honeypot": "0", "is_open_source": "1", "is_proxy": "0",
+                "is_mintable": "0", "owner_change_balance": "0",
+                "can_take_back_ownership": "0", "hidden_owner": "0",
+                "selfdestruct": "0", "transfer_pausable": "0",
+                "is_blacklisted": "0", "buy_tax": "0", "sell_tax": "0",
+                "holders": [{"percent": "0.10"}, {"percent": "0.05"}],
+            }},
+        }
+        session = FakeSession([FakeResponse(goplus), FakeResponse({"match": "exact_match"})])
+        result = screen_evm_token("base", address, session=session, cache={})
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.top10_holder_pct, 15.0)
+
+    def test_partial_sourcify_match_is_not_accepted(self):
+        address = "0x" + "2" * 40
+        goplus = {
+            "code": 1,
+            "result": {address: {
+                "is_honeypot": "0", "is_open_source": "1", "is_proxy": "0",
+                "is_mintable": "0", "owner_change_balance": "0",
+                "can_take_back_ownership": "0", "hidden_owner": "0",
+                "selfdestruct": "0", "transfer_pausable": "0",
+                "is_blacklisted": "0", "buy_tax": "0", "sell_tax": "0",
+                "holders": [{"percent": "0.10"}],
+            }},
+        }
+        session = FakeSession([FakeResponse(goplus), FakeResponse({"match": "match"})])
+        result = screen_evm_token("base", address, session=session, cache={})
+        self.assertEqual(result.status, "FAIL")
+
+
 from crypto_super_radar.intelligence_engine import combine_intelligence
+
+
+class SentimentFeedTests(unittest.TestCase):
+    def test_fear_greed_provider(self):
+        payload = {"data": [
+            {"value": "72", "value_classification": "Greed", "timestamp": "1800000000"},
+            {"value": "64", "value_classification": "Greed", "timestamp": "1799913600"},
+        ]}
+        result = fetch_fear_greed_index(
+            session=FakeSession([FakeResponse(payload)]), cache={}, limiter=NoWaitLimiter()
+        )
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["value"], 72.0)
+
+    def test_rss_provider_extracts_headlines(self):
+        xml = b"<rss><channel><item><title>Bitcoin adoption grows</title><description>Positive</description></item></channel></rss>"
+        result = fetch_rss_headlines(
+            ["https://example.test/rss"],
+            session=FakeSession([FakeResponse({}, content=xml)]),
+            limiter=NoWaitLimiter(),
+        )
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["headlines"][0]["title"], "Bitcoin adoption grows")
 
 
 class UnifiedEngineTests(unittest.TestCase):
