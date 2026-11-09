@@ -48,7 +48,7 @@ jobs:
         env:
           ACCEPTANCE_SYMBOL: ${{ github.event.inputs.symbol || 'BTCUSDT' }}
         run: |
-          python scripts/live_provider_acceptance.py \
+          python -m scripts.live_provider_acceptance \
             --symbol "${ACCEPTANCE_SYMBOL}" \
             --output reports/live-provider-acceptance.json
       - name: Upload live acceptance report
