@@ -1,37 +1,57 @@
-"""High-level public sentiment fetch and normalization pipeline."""
+"""High-level public news, social-RSS and Fear & Greed sentiment pipeline."""
 from __future__ import annotations
 
 from typing import Optional, Sequence
 
 import requests
 
+from .rate_limiter import SharedRateLimiter
 from .sentiment import analyze_market_sentiment, fear_greed_to_sentiment
 from .sentiment_feeds import fetch_fear_greed_index, fetch_rss_headlines
 
 
 def fetch_market_sentiment(
-    feed_urls: Sequence[str],
+    news_feed_urls: Sequence[str],
     *,
+    social_feed_urls: Sequence[str] = (),
     social_text: Optional[Sequence[str]] = None,
     session: Optional[requests.Session] = None,
     cache: Optional[dict] = None,
+    limiter: Optional[SharedRateLimiter] = None,
 ) -> dict:
-    """Combine free RSS news and Fear & Greed; social posts are explicit inputs."""
-    rss = fetch_rss_headlines(feed_urls, session=session)
-    fear_greed = fetch_fear_greed_index(session=session, cache=cache)
-    news_text = [
+    """Combine free news RSS, optional social RSS/text and Fear & Greed.
+
+    The social source is mandatory for a KNOWN full-coverage result. If no
+    social feed/text is supplied, the overall status is PARTIAL and the
+    fail-closed decision engine must not treat the sentiment gate as PASS.
+    """
+    rate_limiter = limiter or SharedRateLimiter()
+    news = fetch_rss_headlines(news_feed_urls, session=session, limiter=rate_limiter)
+    social = fetch_rss_headlines(social_feed_urls, session=session, limiter=rate_limiter) if social_feed_urls else {
+        "status": "UNKNOWN", "headlines": [], "feed_count": 0,
+        "failed_feeds": [], "coverage": "UNKNOWN",
+    }
+    fear_greed = fetch_fear_greed_index(session=session, cache=cache, limiter=rate_limiter)
+    news_items = [
         " ".join(part for part in (item.get("title", ""), item.get("summary", "")) if part)
-        for item in rss.get("headlines", [])
+        for item in news.get("headlines", [])
+    ]
+    social_items = list(social_text or []) + [
+        " ".join(part for part in (item.get("title", ""), item.get("summary", "")) if part)
+        for item in social.get("headlines", [])
     ]
     numeric = {}
     if fear_greed.get("status") == "KNOWN":
         numeric["fear_greed"] = fear_greed_to_sentiment(fear_greed["value"])
-    sources = {
-        "news": news_text,
-        "social": list(social_text or []),
-    }
-    scored = analyze_market_sentiment(sources, numeric_scores=numeric)
-    core_coverage = [rss.get("status") == "KNOWN", fear_greed.get("status") == "KNOWN"]
+    scored = analyze_market_sentiment(
+        {"news": news_items, "social": social_items},
+        numeric_scores=numeric,
+    )
+    core_coverage = [
+        news.get("status") == "KNOWN",
+        social.get("status") == "KNOWN" or bool(social_text),
+        fear_greed.get("status") == "KNOWN",
+    ]
     if all(core_coverage):
         status = "KNOWN"
     elif any(core_coverage):
@@ -40,9 +60,10 @@ def fetch_market_sentiment(
         status = "UNKNOWN"
     scored.update({
         "status": status,
-        "rss": rss,
+        "news": news,
+        "social": social,
         "fear_greed": fear_greed,
-        "social_coverage": "KNOWN" if social_text else "UNKNOWN",
-        "coverage_note": "News RSS and Fear & Greed are public baseline sources; social coverage is not silently inferred when no posts are supplied.",
+        "social_coverage": "KNOWN" if core_coverage[1] else "UNKNOWN",
+        "coverage_note": "News, social and Fear & Greed are separate evidence sources. Missing social coverage is PARTIAL, not silently treated as neutral.",
     })
     return scored
