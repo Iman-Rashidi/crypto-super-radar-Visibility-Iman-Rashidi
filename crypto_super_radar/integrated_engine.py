@@ -275,6 +275,20 @@ class WhaleAwareConfirmationEngine:
                 "social_coverage": sentiment.get("social_coverage"),
             },
         ))
+        walk = self._multi_fold_validation(asset)
+        if walk.get("status") == "PASS":
+            walk_status = GateStatus.PASS
+        elif walk.get("status") == "FAIL":
+            walk_status = GateStatus.FAIL
+        else:
+            walk_status = GateStatus.UNKNOWN
+        result.gates.append(GateResult(
+            12, "Multi-fold walk-forward stability", "پایداری اعتبارسنجی چندبخشی",
+            walk_status,
+            walk.get("reason", "Multi-fold out-of-sample evidence is unavailable."),
+            "اعتبارسنجی زمانی چندبخشی باید تعداد Fold و معیارهای خارج از نمونه را پاس کند؛ داده ناقص UNKNOWN است.",
+            {k: v for k, v in walk.items() if k not in {"status", "reason"}},
+        ))
         direction = result.gates[2].evidence.get("direction") if len(result.gates) >= 3 else None
         exchange_net = whale.get("net_exchange_flow_usd")
         wallet_net = whale.get("net_whale_transfer_usd")
@@ -334,6 +348,9 @@ class WhaleAwareConfirmationEngine:
             "fear_greed_value": (sentiment.get("fear_greed") or {}).get("value"),
             "sentiment_coverage_status": sentiment_status,
             "mandatory_gate_count": len(result.gates),
+            "walk_forward_status": walk.get("status"),
+            "walk_forward_fold_count": walk.get("fold_count"),
+            "walk_forward_worst_fold_drawdown_pct": walk.get("worst_fold_drawdown_pct"),
             "evidence_confidence_pct": round(passed / len(result.gates) * 100.0, 2),
         })
         all_pass = all(g.status == GateStatus.PASS for g in result.gates)
@@ -356,8 +373,8 @@ class WhaleAwareConfirmationEngine:
                 or (result.estimated_risk_score is not None and result.estimated_risk_score >= self.config.thresholds.max_estimated_risk_score)
                 else SafetyStatus.UNKNOWN
             )
-            result.summary_en = "NO TRADE: all 11 mandatory gates must pass; whale and sentiment evidence are required."
-            result.summary_fa = "عدم معامله: هر ۱۱ فیلتر اجباری باید تأیید شوند؛ تحلیل نهنگ‌ها و احساسات بازار الزامی است."
+            result.summary_en = "NO TRADE: all 12 mandatory gates must pass; whale and sentiment evidence are required."
+            result.summary_fa = "عدم معامله: هر ۱۲ فیلتر اجباری باید تأیید شوند؛ تحلیل نهنگ‌ها و احساسات بازار الزامی است."
         else:
             result.summary_en = "All 11 mandatory gates passed. Paper/research plan only; no order was submitted."
             result.summary_fa = "هر ۱۱ فیلتر تأیید شده‌اند؛ فقط برنامه پژوهشی و آزمایشی است و سفارشی ارسال نشده است."
