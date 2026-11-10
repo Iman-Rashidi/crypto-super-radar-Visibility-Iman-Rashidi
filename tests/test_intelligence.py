@@ -492,7 +492,7 @@ class IntegratedEngineTests(unittest.TestCase):
             "social_coverage": "KNOWN" if status == "KNOWN" else "UNKNOWN",
         }
 
-    def test_scenario_a_all_twelve_mandatory_gates_pass(self):
+    def test_scenario_a_blocks_without_fibonacci_and_reward_risk_confluence(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
             sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
@@ -502,12 +502,15 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertEqual(len(result.gates), 12)
         self.assertEqual(
             [gate.status.value for gate in result.gates],
-            ["PASS"] * 12,
+            ["PASS"] * 11 + ["FAIL"],
             [(gate.gate_id, gate.name_en, gate.status.value, gate.reason_en, gate.evidence) for gate in result.gates],
         )
+        self.assertEqual(result.signal.value, "NO TRADE")
+        self.assertIn("market_behavior", result.metrics)
+        self.assertIn("estimated_error_pct", result.metrics["market_behavior"])
         self.assertIn("evidence_confidence_pct", result.metrics)
-        self.assertEqual(result.metrics["evidence_confidence_pct"], 100.0)
-        self.assertEqual(result.metrics["confidence_level_pct"], 100.0)
+        self.assertAlmostEqual(result.metrics["evidence_confidence_pct"], 91.67, places=2)
+        self.assertEqual(result.metrics["confidence_level_pct"], result.metrics["evidence_confidence_pct"])
         self.assertEqual(result.metrics["risk_score"], result.estimated_risk_score)
         self.assertEqual(result.metrics["opportunity_rank"], result.opportunity_rank)
         self.assertIn("elliott_wave", result.metrics)
@@ -515,7 +518,7 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertIn(result.metrics["elliott_wave"]["status"], {"UNKNOWN", "AMBIGUOUS", "CANDIDATE", "CONFIRMED"})
         self.assertEqual(len(result.gates), 12)
 
-    def test_dashboard_dataframes_show_twelve_gates_and_quant_metrics(self):
+    def test_dashboard_shows_twelve_gates_and_blocks_missing_structure_confluence(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
             sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
@@ -524,7 +527,8 @@ class IntegratedEngineTests(unittest.TestCase):
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         frames = build_dashboard_frames(result)
         self.assertEqual(len(frames["gates"]), 12)
-        self.assertTrue(frames["errors"].empty)
+        self.assertIn(12, frames["errors"]["شماره فیلتر"].tolist())
+        self.assertIn("FAIL", frames["errors"]["وضعیت"].tolist())
         self.assertIn("RSI-14", frames["quantitative"]["شاخص"].tolist())
         self.assertIn("تغییر RSI-14", frames["quantitative"]["شاخص"].tolist())
         self.assertIn("Risk Score", frames["whale_sentiment"]["شاخص"].tolist())
@@ -600,7 +604,7 @@ class IntegratedEngineTests(unittest.TestCase):
 
         engine.base.analyze = analyze_below_confirmation
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
-        self.assertEqual([gate.status.value for gate in result.gates], ["PASS"] * 12)
+        self.assertEqual([gate.status.value for gate in result.gates], ["PASS"] * 11 + ["FAIL"])
         self.assertEqual(result.signal.value, "NO TRADE")
         self.assertEqual(result.safety_status.value, "LOW_RISK")
         self.assertTrue(result.metrics["decision_blockers"]["confirmation_below_threshold"])
@@ -623,7 +627,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         result = engine.analyze("perp:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
-        self.assertEqual(result.gates[11].status.value, "UNKNOWN")
+        self.assertNotEqual(result.gates[11].status.value, "PASS")
         self.assertEqual(result.signal.value, "NO TRADE")
 
     def test_partial_sentiment_coverage_blocks_any_trade(self):

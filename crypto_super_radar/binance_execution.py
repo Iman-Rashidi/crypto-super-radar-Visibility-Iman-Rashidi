@@ -314,7 +314,7 @@ class ValidatedSignalExecutor:
             raise OrderSafetyError("Signal net reward/risk is below the configured minimum.")
         quantity = min(
             free_usdt * Decimal("0.005") / unit_risk,
-            Decimal("25") / estimated_entry,
+            Decimal("25") / (price * (Decimal(1) + Decimal("0.0015"))),
             free_usdt / (estimated_entry * Decimal("1.01")),
         )
         order = self.executor.submit_limit_ioc(
