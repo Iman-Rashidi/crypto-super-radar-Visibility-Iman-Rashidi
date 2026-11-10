@@ -473,6 +473,14 @@ class Handler(BaseHTTPRequestHandler):
               const button=document.getElementById('asset-search-button');
               const results=document.getElementById('asset-search-results');
               const selected=document.getElementById('scan-asset');
+              const form=document.querySelector('form[action="/scan"]');
+              let chosenLabel='';
+              form.addEventListener('submit',event=>{
+                if(input.value.trim() && input.value.trim()!==chosenLabel){
+                  event.preventDefault();
+                  results.textContent='ابتدا روی «جست‌وجوی ارز» بزنید و نتیجهٔ دقیق را انتخاب کنید.';
+                }
+              });
               button.addEventListener('click',async()=>{
                 const q=input.value.trim();
                 if(q.length<2){results.textContent='حداقل دو نویسه وارد کنید.';return;}
@@ -653,6 +661,7 @@ if __name__ == "__main__":
                     choose.addEventListener('click',()=>{
                       selected.value=item.asset;
                       input.value=item.name+' ('+item.symbol+')';
+                      chosenLabel=input.value;
                       results.textContent='انتخاب شد: '+item.name+' / '+item.chain+' / '+item.address;
                     });
                     row.append(info,choose);results.appendChild(row);
