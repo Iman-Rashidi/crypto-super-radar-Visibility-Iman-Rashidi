@@ -432,6 +432,7 @@ class MarketDataService:
     def __init__(self, config: Optional[AppConfig] = None):
         self.config = config or AppConfig()
         http = PublicHttpClient(self.config)
+        self.http = http
         self.gecko = GeckoTerminalProvider(http)
         self.dexscreener = DexScreenerProvider(http)
         self.binance = BinanceProvider(http)

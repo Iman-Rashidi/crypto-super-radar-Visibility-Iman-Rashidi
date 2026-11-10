@@ -20,6 +20,7 @@ from .indicators import observed_price_ranges
 from .models import AssetSpec
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .market_intelligence import search_dex_tokens
+from .gem_hunter_discovery import discover_gem_candidates
 from .providers import _ohlcv_frame
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -829,6 +830,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/gem-hunter/discover":
+            raw_limit = parse_qs(parsed.query).get("limit", ["20"])[0]
+            try:
+                limit = max(1, min(int(raw_limit), 50))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"error":"limit must be an integer from 1 to 50"}', "application/json")
+            payload = discover_gem_candidates(getattr(ENGINE.data, "http", None), limit=limit)
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/crypto-markets":
             payload = _crypto_market_board()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -882,6 +892,65 @@ class Handler(BaseHTTPRequestHandler):
             </article>
           </div>
         </section>
+        <section class="card" id="gem-hunter-panel">
+          <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
+          <p class="muted">استخرهای تازه و پرتحرک Solana و Base را برای بررسی بیشتر پیدا می‌کند. امتیاز فقط اولویت پژوهش است؛ امنیت توکن تأیید نشده و مجوز معامله همیشه NO TRADE است.</p>
+          <div class="grid" style="align-items:center;margin:12px 0">
+            <button id="gem-hunter-run" type="button">شروع کشف کاندیداها</button>
+            <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن کشف اجرا نشده است.</span>
+          </div>
+          <div id="gem-hunter-results" style="overflow-x:auto">
+            <p class="muted">برای دریافت فهرست اولیهٔ کاندیداها دکمهٔ کشف را بزنید.</p>
+          </div>
+        </section>
+        <script>
+        (() => {
+          const button = document.getElementById('gem-hunter-run');
+          const status = document.getElementById('gem-hunter-status');
+          const results = document.getElementById('gem-hunter-results');
+          if (!button || !status || !results) return;
+          const cell = (tag, value) => {
+            const node = document.createElement(tag);
+            node.textContent = value === null || value === undefined ? 'UNKNOWN' : String(value);
+            return node;
+          };
+          button.addEventListener('click', async () => {
+            button.disabled = true;
+            status.textContent = 'در حال دریافت استخرهای تازه و پرتحرک از Solana و Base...';
+            try {
+              const response = await fetch('/api/gem-hunter/discover?limit=20', {cache:'no-store'});
+              const data = await response.json();
+              if (!response.ok) throw new Error(data.error || 'Discovery request failed');
+              status.textContent = 'وضعیت: ' + data.status + ' · کاندیداها: ' + (data.candidate_count || 0) + ' · مجوز معامله: NO TRADE';
+              const table = document.createElement('table');
+              const head = document.createElement('thead');
+              const header = document.createElement('tr');
+              ['شبکه','توکن','نماد','قیمت USD','نقدینگی USD','حجم ۲۴ساعت','سن استخر (ساعت)','امتیاز پژوهشی','وضعیت','ریسک‌ها'].forEach(v => header.appendChild(cell('th',v)));
+              head.appendChild(header); table.appendChild(head);
+              const body = document.createElement('tbody');
+              (data.candidates || []).forEach(item => {
+                const row = document.createElement('tr');
+                [
+                  item.chain, item.token_name || item.token_address, item.token_symbol,
+                  item.price_usd, item.liquidity_usd, item.volume_24h_usd,
+                  item.pool_age_hours, item.discovery_priority_score,
+                  item.candidate_status, (item.risk_flags || []).join(', ') || 'بدون پرچم اولیه'
+                ].forEach(v => row.appendChild(cell('td',v)));
+                body.appendChild(row);
+              });
+              if (!(data.candidates || []).length) {
+                const row = document.createElement('tr'), td = cell('td', 'کاندیدای معتبر در پاسخ فعلی پیدا نشد؛ وضعیت منبع را بررسی کنید.');
+                td.colSpan = 10; row.appendChild(td); body.appendChild(row);
+              }
+              table.appendChild(body); results.replaceChildren(table);
+            } catch (error) {
+              status.textContent = 'خطا در کشف: ' + error.message;
+            } finally {
+              button.disabled = false;
+            }
+          });
+        })();
+        </script>
         <section class="card" id="crypto-markets">
           <h2>بازار رمزارزها</h2>
           <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
