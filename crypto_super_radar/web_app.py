@@ -59,6 +59,20 @@ CRYPTO_MARKET_UNIVERSE = (
     ("BNBUSDT", "BNB", "بی‌ان‌بی"),
     ("XRPUSDT", "XRP", "ریپل"),
     ("DOGEUSDT", "Dogecoin", "دوج‌کوین"),
+    ("ADAUSDT", "Cardano", "کاردانو"),
+    ("AVAXUSDT", "Avalanche", "آوالانچ"),
+    ("LINKUSDT", "Chainlink", "چین‌لینک"),
+    ("DOTUSDT", "Polkadot", "پولکادات"),
+    ("LTCUSDT", "Litecoin", "لایت‌کوین"),
+    ("TRXUSDT", "TRON", "ترون"),
+    ("TONUSDT", "Toncoin", "تون‌کوین"),
+    ("PEPEUSDT", "Pepe", "پپه"),
+    ("SHIBUSDT", "Shiba Inu", "شیبا اینو"),
+    ("BCHUSDT", "Bitcoin Cash", "بیت‌کوین کش"),
+    ("SUIUSDT", "Sui", "سویی"),
+    ("HBARUSDT", "Hedera", "هدرا"),
+    ("NEARUSDT", "NEAR Protocol", "نیر"),
+    ("UNIUSDT", "Uniswap", "یونی‌سواپ"),
 )
 CRYPTO_MARKET_CACHE_TTL_SECONDS = 60
 CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None}
@@ -676,6 +690,19 @@ class Handler(BaseHTTPRequestHandler):
           <h2>بازار رمزارزها</h2>
           <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
           <p id="crypto-market-status" class="muted" aria-live="polite">در حال دریافت دادهٔ عمومی بازار...</p>
+          <div class="grid" style="margin:12px 0">
+            <label>جست‌وجوی نام یا نماد
+              <input id="crypto-market-search" type="search" placeholder="مثلاً BTC، بیت‌کوین یا SUI" autocomplete="off">
+            </label>
+            <label>مرتب‌سازی
+              <select id="crypto-market-sort">
+                <option value="volume">بیشترین حجم ۲۴ساعته</option>
+                <option value="name">نام رمزارز</option>
+                <option value="symbol">نماد</option>
+              </select>
+            </label>
+          </div>
+          <p id="crypto-market-count" class="muted">۰ رمزارز</p>
           <div style="overflow-x:auto"><table>
             <thead><tr><th>رمزارز</th><th>نماد</th><th>قیمت مرجع (USD)</th><th>حجم ۲۴ساعته (USD)</th><th>اختلاف منابع</th><th>وضعیت</th><th>اقدام</th></tr></thead>
             <tbody id="crypto-market-rows"><tr><td colspan="7">در حال بارگذاری...</td></tr></tbody>
@@ -688,38 +715,57 @@ class Handler(BaseHTTPRequestHandler):
           const status=document.getElementById('crypto-market-status');
           const rows=document.getElementById('crypto-market-rows');
           const button=document.getElementById('crypto-market-refresh');
+          const search=document.getElementById('crypto-market-search');
+          const sort=document.getElementById('crypto-market-sort');
+          const count=document.getElementById('crypto-market-count');
+          let marketItems=[];
           const fmt=(value,max=8)=>Number(value).toLocaleString(undefined,{maximumFractionDigits:max});
           function cell(tag,value){const node=document.createElement(tag);node.textContent=value??'—';return node;}
+          function renderRows(){
+            const query=search.value.trim().toLocaleLowerCase();
+            const visible=marketItems.filter(item=>
+              (item.name_fa+' '+item.name_en+' '+item.symbol).toLocaleLowerCase().includes(query)
+            );
+            visible.sort((a,b)=>{
+              if(sort.value==='name')return (a.name_en||'').localeCompare(b.name_en||'');
+              if(sort.value==='symbol')return (a.symbol||'').localeCompare(b.symbol||'');
+              return (Number(b.volume_24h_usd)||-1)-(Number(a.volume_24h_usd)||-1);
+            });
+            const tableRows=visible.map(item=>{
+              const tr=document.createElement('tr');
+              const values=[item.name_fa+' · '+item.name_en,item.symbol,
+                item.status==='PASS'?fmt(item.price_usd):'—',
+                item.status==='PASS'?fmt(item.volume_24h_usd,2):'—',
+                item.status==='PASS'?fmt(item.price_discrepancy_pct,4)+'%':'—',
+                item.status==='PASS'?'تأیید دو منبع':'نامشخص · UNKNOWN'];
+              values.forEach((value,index)=>{const itemCell=cell('td',value);if(index>=2&&index<=4)itemCell.className='numeric';tr.appendChild(itemCell);});
+              const actionCell=document.createElement('td');
+              const scanButton=document.createElement('button');
+              scanButton.type='button';scanButton.className='market-scan-button';
+              scanButton.textContent='انتخاب برای اسکن';
+              scanButton.disabled=item.status!=='PASS';
+              scanButton.addEventListener('click',()=>{
+                const input=document.getElementById('scan-asset');
+                input.value='cex:'+item.symbol;
+                document.getElementById('scan-section').scrollIntoView({behavior:'smooth',block:'start'});
+                input.focus();
+              });
+              actionCell.appendChild(scanButton);tr.appendChild(actionCell);
+              if(item.status!=='PASS')tr.className='status-unknown';
+              return tr;
+            });
+            rows.replaceChildren(...tableRows);
+            count.textContent='نمایش '+visible.length+' از '+marketItems.length+' رمزارز';
+            if(!visible.length){const empty=cell('td','موردی با این جست‌وجو پیدا نشد');empty.colSpan=7;const tr=document.createElement('tr');tr.appendChild(empty);rows.replaceChildren(tr);}
+          }
           async function refresh(){
             button.disabled=true;status.textContent='در حال دریافت قیمت‌های عمومی...';
             try{
               const response=await fetch('/api/crypto-markets');
               const data=await response.json();
               if(!response.ok)throw new Error('HTTP '+response.status);
-              const tableRows=(data.items||[]).map(item=>{
-                const tr=document.createElement('tr');
-                const values=[item.name_fa+' · '+item.name_en,item.symbol,
-                  item.status==='PASS'?fmt(item.price_usd):'—',
-                  item.status==='PASS'?fmt(item.volume_24h_usd,2):'—',
-                  item.status==='PASS'?fmt(item.price_discrepancy_pct,4)+'%':'—',
-                  item.status==='PASS'?'تأیید دو منبع':'نامشخص · UNKNOWN'];
-                values.forEach((value,index)=>{const itemCell=cell('td',value);if(index>=2&&index<=4)itemCell.className='numeric';tr.appendChild(itemCell);});
-                const actionCell=document.createElement('td');
-                const scanButton=document.createElement('button');
-                scanButton.type='button';scanButton.className='market-scan-button';
-                scanButton.textContent='انتخاب برای اسکن';
-                scanButton.disabled=item.status!=='PASS';
-                scanButton.addEventListener('click',()=>{
-                  const input=document.getElementById('scan-asset');
-                  input.value='cex:'+item.symbol;
-                  document.getElementById('scan-section').scrollIntoView({behavior:'smooth',block:'start'});
-                  input.focus();
-                });
-                actionCell.appendChild(scanButton);tr.appendChild(actionCell);
-                if(item.status!=='PASS')tr.className='status-unknown';
-                return tr;
-              });
-              rows.replaceChildren(...tableRows);
+              marketItems=data.items||[];
+              renderRows();
               const received=new Date(data.updated_at_utc).toLocaleString();
               status.textContent='منابع: '+(data.sources||[]).join(' و ')+' · دریافت: '+received+
                 ' · وضعیت کلی: '+data.status+' · cache: '+data.cache_ttl_seconds+' ثانیه';
@@ -727,6 +773,8 @@ class Handler(BaseHTTPRequestHandler):
               status.textContent='دادهٔ بازار در دسترس نیست: '+String(error.message||error);
             }finally{button.disabled=false;}
           }
+          search.addEventListener('input',renderRows);
+          sort.addEventListener('change',renderRows);
           button.addEventListener('click',refresh);refresh();
         })();
         </script>
