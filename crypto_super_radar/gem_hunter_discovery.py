@@ -260,11 +260,11 @@ def discover_gem_candidates(http, *, limit: int = 20,
                         merged[key] = row
                     else:
                         existing["sources"] = combined_sources
-        except Exception as exc:
-            sources[source] = {
+            except Exception as exc:
+                sources[source] = {
                 "status": "UNKNOWN",
-                "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
-            }
+                    "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
+                }
     statuses = [item["status"] for item in sources.values()]
     expected_sources = len(NETWORKS) * 2
     overall = "PASS" if len(statuses) == expected_sources and all(s == "PASS" for s in statuses) else "PARTIAL" if any(s == "PASS" for s in statuses) else "UNKNOWN"
