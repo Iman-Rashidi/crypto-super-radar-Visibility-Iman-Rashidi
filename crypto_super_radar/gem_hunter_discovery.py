@@ -262,7 +262,7 @@ def discover_gem_candidates(http, *, limit: int = 20,
                         existing["sources"] = combined_sources
             except Exception as exc:
                 sources[source] = {
-                "status": "UNKNOWN",
+                    "status": "UNKNOWN",
                     "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
                 }
     statuses = [item["status"] for item in sources.values()]
