@@ -14,6 +14,7 @@ from crypto_super_radar.solana_whales import SolanaWhaleScanner
 from crypto_super_radar.market_sentiment import fetch_market_sentiment
 from crypto_super_radar.integrated_engine import WhaleAwareConfirmationEngine
 from crypto_super_radar.cex_whales import CexWhaleScanner
+from crypto_super_radar.providers import DataProviderError
 from crypto_super_radar.whale_store import WhaleStore
 from crypto_super_radar.models import AssetSpec, MarketSnapshot
 from crypto_super_radar.config import AppConfig, IntelligenceScoringConfig
@@ -156,7 +157,10 @@ class FakeSession:
         self.responses = list(responses)
 
     def get(self, *args, **kwargs):
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 class NoWaitLimiter:
@@ -456,6 +460,22 @@ class CexWhaleTests(unittest.TestCase):
         ])
         result = scanner.scan("BTCUSDT", "cex")
         self.assertEqual(result["status"], "UNKNOWN")
+
+
+    def test_regional_denials_use_free_gate_okx_whale_feeds(self):
+        scanner = CexWhaleScanner(threshold_usd=100000)
+        scanner.http = FakeHttp([
+            DataProviderError("HTTP 451 from fapi.binance.com"),
+            [{"price": "1000", "size": "200", "create_time": 123}],
+            {"quanto_multiplier": "1"},
+            DataProviderError("HTTP 403 from api.bybit.com"),
+            {"code": "0", "data": [{"px": "1000", "sz": "200", "side": "buy"}]},
+            {"code": "0", "data": [{"ctVal": "1"}]},
+        ])
+        result = scanner.scan("BTCUSDT", "perp")
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["sources"], ["Gate.io", "OKX"])
+        self.assertEqual(result["net_whale_trade_flow_usd"], 200000)
 
 
 class IntegratedEngineTests(unittest.TestCase):
