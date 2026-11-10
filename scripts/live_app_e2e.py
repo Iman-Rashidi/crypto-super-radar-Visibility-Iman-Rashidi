@@ -158,6 +158,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         require('action="/scan"' in page, "Research scan form is missing")
         require('id="crypto-market-search"' in page, "Market search control is missing")
         require('id="crypto-market-sort"' in page, "Market sorting control is missing")
+        require('id="gem-hunter-panel"' in page, "Gem Hunter dashboard panel is missing")
+        require('id="gem-hunter-run"' in page, "Gem Hunter discovery control is missing")
         require('id="crypto-market-search-activity"' in page, "Animated market search feedback is missing")
         require("market-search-spin" in page, "Market search animation is missing")
         report["home"] = {
@@ -221,7 +223,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         report["stage"] = "gem_hunter_discovery"
         print("[E2E] Checking read-only Solana/Base Gem Hunter discovery", flush=True)
         _, discovery = get_json(
-            session, base_url + "/api/gem-hunter/discover?limit=10", timeout=90
+            session, base_url + "/api/gem-hunter/discover?limit=10", timeout=120
         )
         candidates = discovery.get("candidates", [])
         require(

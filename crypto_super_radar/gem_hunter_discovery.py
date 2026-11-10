@@ -235,36 +235,39 @@ def discover_gem_candidates(http, *, limit: int = 20,
             "trade_authorization": "NO_TRADE",
             "reason": "Market data HTTP client is unavailable.",
         }
-    for source, endpoint in (
-        ("GECKOTERMINAL_NEW_POOLS", "new_pools"),
-        ("GECKOTERMINAL_TRENDING_POOLS", "trending_pools"),
-    ):
-        url = f"{BASE_URL}/networks/{endpoint}"
-        try:
-            payload = http.get(url, params={"page": 1, "include": INCLUDE})
-            rows = _rows(payload, source, now)
-            sources[source] = {"status": "PASS", "candidate_rows": len(rows)}
-            for row in rows:
-                key = row["asset"].lower()
-                existing = merged.get(key)
-                if existing is None:
-                    merged[key] = row
-                    continue
-                combined_sources = sorted(set(existing["sources"] + row["sources"]))
-                old_liq = existing.get("liquidity_usd") or 0.0
-                new_liq = row.get("liquidity_usd") or 0.0
-                if new_liq > old_liq:
-                    row["sources"] = combined_sources
-                    merged[key] = row
-                else:
-                    existing["sources"] = combined_sources
+    for network in sorted(NETWORKS):
+        for source_suffix, endpoint in (
+            ("NEW_POOLS", "new_pools"),
+            ("TRENDING_POOLS", "trending_pools"),
+        ):
+            source = f"GECKOTERMINAL_{source_suffix}_{network.upper()}"
+            url = f"{BASE_URL}/networks/{network}/{endpoint}"
+            try:
+                payload = http.get(url, params={"page": 1, "include": INCLUDE})
+                rows = _rows(payload, source, now)
+                sources[source] = {"status": "PASS", "candidate_rows": len(rows)}
+                for row in rows:
+                    key = row["asset"].lower()
+                    existing = merged.get(key)
+                    if existing is None:
+                        merged[key] = row
+                        continue
+                    combined_sources = sorted(set(existing["sources"] + row["sources"]))
+                    old_liq = existing.get("liquidity_usd") or 0.0
+                    new_liq = row.get("liquidity_usd") or 0.0
+                    if new_liq > old_liq:
+                        row["sources"] = combined_sources
+                        merged[key] = row
+                    else:
+                        existing["sources"] = combined_sources
         except Exception as exc:
             sources[source] = {
                 "status": "UNKNOWN",
                 "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
             }
     statuses = [item["status"] for item in sources.values()]
-    overall = "PASS" if len(statuses) == 2 and all(s == "PASS" for s in statuses) else "PARTIAL" if any(s == "PASS" for s in statuses) else "UNKNOWN"
+    expected_sources = len(NETWORKS) * 2
+    overall = "PASS" if len(statuses) == expected_sources and all(s == "PASS" for s in statuses) else "PARTIAL" if any(s == "PASS" for s in statuses) else "UNKNOWN"
     candidates = sorted(
         merged.values(),
         key=lambda item: (
@@ -280,6 +283,10 @@ def discover_gem_candidates(http, *, limit: int = 20,
         "networks": sorted(NETWORKS),
         "source_count": len(sources),
         "sources": sources,
+        "candidate_counts_by_network": {
+            network: sum(1 for item in merged.values() if item.get("chain") == network)
+            for network in sorted(NETWORKS)
+        },
         "candidate_count": len(candidates),
         "candidates": candidates,
         "trade_authorization": "NO_TRADE",

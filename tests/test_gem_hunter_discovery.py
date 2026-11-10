@@ -39,7 +39,9 @@ class FakeHttp:
 
     def get(self, url, params=None):
         self.calls.append((url, params))
-        key = "new_pools" if url.endswith("/new_pools") else "trending_pools"
+        parts = url.rstrip("/").split("/")
+        network, endpoint = parts[-2], parts[-1]
+        key = f"{network}_{endpoint}"
         value = self.responses[key]
         if isinstance(value, Exception):
             raise value
@@ -57,18 +59,28 @@ class GemHunterDiscoveryTests(unittest.TestCase):
             "base", "0x" + "2" * 40, f"base_{BASE_TOKEN}",
             "2026-11-09T12:00:00Z",
         )
+        sol_response = {
+            "data": [self.sol_pool],
+            "included": [
+                {"id": f"solana_{SOL_TOKEN}", "type": "token",
+                 "attributes": {"address": SOL_TOKEN, "name": "Sol Test", "symbol": "ST", "decimals": 9}},
+                {"id": "test-dex", "type": "dex", "attributes": {"name": "Test DEX"}},
+            ],
+        }
+        base_response = {
+            "data": [self.base_pool],
+            "included": [
+                {"id": f"base_{BASE_TOKEN}", "type": "token",
+                 "attributes": {"address": BASE_TOKEN, "name": "Base Test", "symbol": "BT", "decimals": 18}},
+                {"id": "test-dex", "type": "dex", "attributes": {"name": "Test DEX"}},
+            ],
+        }
+        empty = {"data": [], "included": []}
         self.responses = {
-            "new_pools": {
-                "data": [self.sol_pool, self.base_pool],
-                "included": [
-                    {"id": f"solana_{SOL_TOKEN}", "type": "token",
-                     "attributes": {"address": SOL_TOKEN, "name": "Sol Test", "symbol": "ST", "decimals": 9}},
-                    {"id": f"base_{BASE_TOKEN}", "type": "token",
-                     "attributes": {"address": BASE_TOKEN, "name": "Base Test", "symbol": "BT", "decimals": 18}},
-                    {"id": "test-dex", "type": "dex", "attributes": {"name": "Test DEX"}},
-                ],
-            },
-            "trending_pools": {"data": [], "included": []},
+            "solana_new_pools": sol_response,
+            "solana_trending_pools": empty,
+            "base_new_pools": base_response,
+            "base_trending_pools": empty,
         }
 
     def test_discovers_only_supported_chains_and_normalizes_evidence(self):
@@ -79,15 +91,18 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual({item["chain"] for item in result["candidates"]}, {"solana", "base"})
         self.assertTrue(all(item["candidate_status"] == "UNSCREENED" for item in result["candidates"]))
         self.assertTrue(all(item["discovery_priority_score"] is not None for item in result["candidates"]))
-        self.assertEqual(len(http.calls), 2)
-        self.assertEqual(http.calls[0][1]["include"], "base_token,quote_token,dex")
+        self.assertEqual(len(http.calls), 4)
+        self.assertTrue(all(call[1]["include"] == "base_token,quote_token,dex" for call in http.calls))
+        self.assertEqual(result["candidate_counts_by_network"], {"base": 1, "solana": 1})
 
     def test_deduplicates_token_across_sources_and_merges_provenance(self):
         trending = {
             "data": [self.sol_pool],
-            "included": self.responses["new_pools"]["included"],
+            "included": self.responses["solana_new_pools"]["included"],
         }
-        http = FakeHttp({"new_pools": self.responses["new_pools"], "trending_pools": trending})
+        responses = dict(self.responses)
+        responses["solana_trending_pools"] = trending
+        http = FakeHttp(responses)
         result = discover_gem_candidates(http, now=self.now)
         sol = next(item for item in result["candidates"] if item["chain"] == "solana")
         self.assertEqual(sol["sources"], ["GECKOTERMINAL_NEW_POOLS", "GECKOTERMINAL_TRENDING_POOLS"])
@@ -99,7 +114,9 @@ class GemHunterDiscoveryTests(unittest.TestCase):
             "data": [zero],
             "included": self.responses["new_pools"]["included"],
         }
-        result = discover_gem_candidates(FakeHttp({"new_pools": response, "trending_pools": {"data": []}}), now=self.now)
+        responses = dict(self.responses)
+        responses["solana_new_pools"] = response
+        result = discover_gem_candidates(FakeHttp(responses), now=self.now)
         candidate = result["candidates"][0]
         self.assertEqual(candidate["candidate_status"], "UNKNOWN")
         self.assertIn("LIQUIDITY_UNAVAILABLE", candidate["risk_flags"])
@@ -117,9 +134,9 @@ class GemHunterDiscoveryTests(unittest.TestCase):
              "attributes": {"address": risky_token, "name": "Risky", "symbol": "RISK", "decimals": 6}}
         ]
         response = {"data": [normal, risky], "included": included}
-        result = discover_gem_candidates(
-            FakeHttp({"new_pools": response, "trending_pools": {"data": []}}), now=self.now
-        )
+        responses = dict(self.responses)
+        responses["solana_new_pools"] = response
+        result = discover_gem_candidates(FakeHttp(responses), now=self.now)
         by_symbol = {item["token_symbol"]: item for item in result["candidates"]}
         self.assertEqual(len(by_symbol), 2)
         self.assertLess(by_symbol["RISK"]["discovery_priority_score"], by_symbol["ST"]["discovery_priority_score"])
@@ -131,14 +148,18 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         invalid = pool("solana", "PoolBad", "solana_not-an-address", "2026-11-10T10:00:00Z")
         unsupported = pool("ethereum", "PoolEth", "ethereum_" + "0x" + "1" * 40, "2026-11-10T10:00:00Z")
         response = {"data": [invalid, unsupported], "included": []}
-        result = discover_gem_candidates(FakeHttp({"new_pools": response, "trending_pools": {"data": []}}), now=self.now)
+        responses = dict(self.responses)
+        responses["solana_new_pools"] = response
+        result = discover_gem_candidates(FakeHttp(responses), now=self.now)
         self.assertEqual(result["candidate_count"], 0)
 
     def test_one_source_failure_is_partial_not_false_pass(self):
-        http = FakeHttp({"new_pools": self.responses["new_pools"], "trending_pools": RuntimeError("429")})
+        responses = dict(self.responses)
+        responses["base_trending_pools"] = RuntimeError("429")
+        http = FakeHttp(responses)
         result = discover_gem_candidates(http, now=self.now)
         self.assertEqual(result["status"], "PARTIAL")
-        self.assertEqual(result["sources"]["GECKOTERMINAL_TRENDING_POOLS"]["status"], "UNKNOWN")
+        self.assertEqual(result["sources"]["GECKOTERMINAL_TRENDING_POOLS_BASE"]["status"], "UNKNOWN")
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
     def test_unavailable_http_client_returns_unknown(self):
