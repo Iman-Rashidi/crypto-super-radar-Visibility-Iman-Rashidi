@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .models import AssetSpec
+from .database import connect_database, storage_backend
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -40,8 +41,7 @@ class PaperLedger:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._db = sqlite3.connect(self.path, check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
+        self._db = connect_database(self.path)
         with self._db:
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS paper_account (
@@ -317,7 +317,7 @@ class PaperLedger:
             },
             "open_position": open_position,
             "recent_trades": [dict(row) for row in trades],
-            "storage": "LOCAL_SQLITE",
+            "storage": storage_backend(),
         }
 
     def close(self) -> None:
