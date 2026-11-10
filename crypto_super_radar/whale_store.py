@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from .database import connect_database, storage_backend
+
 
 class WhaleStore:
     """Persist scan snapshots locally; Render free filesystems may reset on restart."""
@@ -18,8 +20,7 @@ class WhaleStore:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._db = sqlite3.connect(self.path, check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
+        self._db = connect_database(self.path)
         with self._db:
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS whale_observations (
@@ -100,7 +101,7 @@ class WhaleStore:
             "recent_bias": recent_bias,
             "latest_observation": rows[-1] if rows else None,
             "history": rows,
-            "storage": "LOCAL_SQLITE",
+            "storage": storage_backend(),
         }
 
     def close(self) -> None:
