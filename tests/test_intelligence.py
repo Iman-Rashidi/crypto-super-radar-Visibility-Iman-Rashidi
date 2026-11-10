@@ -588,7 +588,7 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertEqual(result.metrics["opportunity_total_adjustment"], 11.0)
         self.assertNotEqual(result.opportunity_rank, result.confirmation_score)
 
-    def test_no_trade_from_low_confirmation_keeps_known_low_risk_status(self):
+    def test_low_confirmation_and_weak_market_structure_force_high_risk_no_trade(self):
         engine = WhaleAwareConfirmationEngine(
             data_service=FakeIntegratedDataService(),
             sentiment_fetcher=lambda *args, **kwargs: self.sentiment_payload("KNOWN"),
@@ -606,7 +606,7 @@ class IntegratedEngineTests(unittest.TestCase):
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual([gate.status.value for gate in result.gates], ["PASS"] * 11 + ["FAIL"])
         self.assertEqual(result.signal.value, "NO TRADE")
-        self.assertEqual(result.safety_status.value, "LOW_RISK")
+        self.assertEqual(result.safety_status.value, "HIGH_RISK")
         self.assertTrue(result.metrics["decision_blockers"]["confirmation_below_threshold"])
         self.assertIn("۱۲ فیلتر", result.summary_fa)
 
