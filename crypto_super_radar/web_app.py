@@ -42,19 +42,46 @@ def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)}</title>
 <style>
-body{{font-family:Arial,sans-serif;background:#0b1220;color:#e5e7eb;margin:0;padding:24px}}
-main{{max-width:980px;margin:auto}} .card{{background:#111c2f;border:1px solid #26364d;border-radius:14px;padding:18px;margin:14px 0}}
-input,button{{font:inherit;padding:12px;border-radius:8px;border:1px solid #46566d;background:#0b1220;color:#fff;width:100%;box-sizing:border-box}}
-button{{background:#2563eb;border:0;margin-top:12px;cursor:pointer}} button:disabled{{opacity:.45;cursor:not-allowed}} button.market-scan-button{{width:auto;margin:0;padding:8px 10px;font-size:.9rem}} table{{width:100%;border-collapse:collapse}}
-td,th{{padding:9px;border-bottom:1px solid #334155;text-align:right;vertical-align:top}}
-small,.muted{{color:#9ca3af}} .status{{font-weight:bold}} code{{direction:ltr;display:inline-block}}
-pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px;border-radius:8px;direction:ltr;text-align:left}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}}
-.metric{{background:#0b1729;border:1px solid #334155;border-radius:10px;padding:12px}}
-.metric strong{{display:block;font-size:1.2rem;margin-top:6px;direction:ltr;text-align:right}}
-canvas{{width:100%;height:300px;background:#08101d;border-radius:10px}}
-label{{display:block;margin-top:10px}} .calc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}}
-.status-pass{{color:#22c55e}} .status-unknown{{color:#f59e0b}}
+:root{{color-scheme:dark;--bg:#07111f;--surface:#0e1b2c;--surface-raised:#14263c;--line:#24374f;--text:#edf4fb;--muted:#98abc0;--teal:#54ded0;--blue:#72a7ff;--green:#53d6a0;--amber:#ffc66d;--red:#ff7b85;--radius:18px}}
+*{{box-sizing:border-box}}
+body{{font-family:"Segoe UI",Tahoma,Arial,sans-serif;background:radial-gradient(ellipse at 82% -10%,#14334a 0,transparent 34%),var(--bg);color:var(--text);margin:0;padding:32px 20px 48px;line-height:1.65}}
+main{{max-width:1120px;margin:auto}}
+.app-header{{display:flex;align-items:center;gap:16px;margin:0 0 22px;padding:8px 2px 18px;border-bottom:1px solid var(--line)}}
+.brand-mark{{display:grid;place-items:center;width:54px;height:54px;border:1px solid #2a5263;border-radius:17px;background:linear-gradient(145deg,#153445,#102338);font-size:27px;box-shadow:0 10px 30px #0003}}
+.brand-copy{{min-width:0;flex:1}}
+.brand-copy h1{{margin:1px 0 0;font-size:clamp(1.3rem,3vw,1.85rem);letter-spacing:.035em;line-height:1.25}}
+.brand-copy p{{margin:5px 0 0}}
+.eyebrow{{color:var(--teal);font-size:.78rem;font-weight:700;letter-spacing:.04em}}
+.mode-pill{{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid #2e5360;border-radius:999px;background:#102a34;color:#a8f2e6;font-size:.82rem;white-space:nowrap}}
+.mode-dot{{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 12px #54ded080}}
+.card{{background:linear-gradient(145deg,#101e30,#0d1929);border:1px solid var(--line);border-radius:var(--radius);padding:22px;margin:16px 0;box-shadow:0 14px 34px #0002}}
+.card h2{{margin:0 0 6px;font-size:1.25rem;letter-spacing:-.01em}}
+.card h3{{margin-top:22px}}
+.muted{{color:var(--muted)}}
+input,button{{font:inherit;padding:12px 14px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text);width:100%;box-sizing:border-box}}
+input:focus{{outline:2px solid #54ded080;border-color:var(--teal)}}
+label{{display:block;margin-top:12px;font-size:.94rem;font-weight:600}}
+button{{background:linear-gradient(135deg,#3179e8,#2862c7);border:0;margin-top:12px;cursor:pointer;font-weight:700;transition:filter .15s ease,transform .15s ease}}
+button:hover{{filter:brightness(1.12);transform:translateY(-1px)}}
+button:focus-visible{{outline:3px solid #54ded080;outline-offset:2px}}
+button:disabled{{opacity:.45;cursor:not-allowed;transform:none}}
+button.market-scan-button{{width:auto;min-width:132px;margin:0;padding:8px 12px;font-size:.88rem;border:1px solid #315b74;background:#123344;color:#b9f5ed}}
+button.market-scan-button:hover{{background:#174355}}
+#crypto-market-status{{padding:9px 12px;border:1px solid #1f3448;border-radius:10px;background:#0a1725;font-size:.88rem}}
+table{{width:100%;border-collapse:collapse;font-size:.93rem}}
+th{{color:var(--muted);font-size:.79rem;font-weight:650;background:#0a1725;white-space:nowrap}}
+td,th{{padding:12px 10px;border-bottom:1px solid #203149;text-align:right;vertical-align:middle}}
+tbody tr:hover{{background:#ffffff06}}
+.numeric{{direction:ltr;text-align:left;font-variant-numeric:tabular-nums;white-space:nowrap}}
+.status{{font-weight:bold}} .status-pass{{color:var(--green)}} .status-unknown{{color:var(--amber)}}
+code{{direction:ltr;display:inline-block}}
+pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px;border-radius:10px;direction:ltr;text-align:left}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}}
+.metric{{background:#0a1725;border:1px solid #263a53;border-radius:13px;padding:14px}}
+.metric strong{{display:block;font-size:1.2rem;margin-top:6px;direction:ltr;text-align:right;font-variant-numeric:tabular-nums}}
+canvas{{width:100%;height:300px;background:#08101d;border-radius:12px}}
+.calc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}}
+@media(max-width:680px){{body{{padding:20px 12px 32px}}.app-header{{gap:11px;align-items:flex-start}}.brand-mark{{width:44px;height:44px;border-radius:14px;font-size:23px}}.mode-pill{{font-size:.72rem;padding:5px 8px}}.card{{padding:17px 14px;border-radius:15px}}table{{font-size:.84rem}}td,th{{padding:10px 8px}}button.market-scan-button{{min-width:116px;padding:8px;font-size:.8rem}}}}
 </style></head><body><main>{body}</main></body></html>""".encode("utf-8")
 
 
@@ -213,22 +240,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path != "/":
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         body = """
-        <h1>🐋 CRYPTO SUPER RADAR</h1>
-        <p class="muted">Quantitative Crypto Intelligence · فقط تحلیل و Paper Research، بدون اجرای سفارش</p>
-        <section class="card" id="scan-section">
-          <h2>اسکن دارایی</h2>
-          <form method="post" action="/scan">
-            <label>بازار و نماد / آدرس</label>
-            <input id="scan-asset" name="asset" required value="cex:BTCUSDT" placeholder="cex:BTCUSDT یا base:0x...">
-            <p class="muted">نمونه‌ها: cex:BTCUSDT · perp:BTCUSDT · base:0x... · eth:0x... · solana:MINT</p>
-            <label>تیتر خبری تکمیلی (اختیاری)</label>
-            <input name="headline" placeholder="تیتر خبر">
-            <label>متن اجتماعی تکمیلی (اختیاری)</label>
-            <input name="social_post" placeholder="متن عمومی شبکه اجتماعی">
-            <button type="submit">اجرای اسکن پژوهشی</button>
-          </form>
-        </section>
-
+        <header class="app-header">
+          <div class="brand-mark" aria-hidden="true">🐋</div>
+          <div class="brand-copy">
+            <span class="eyebrow">پایش بازار · دادهٔ عمومی و رایگان</span>
+            <h1>CRYPTO SUPER RADAR</h1>
+            <p class="muted">تحلیل و پژوهش؛ بدون اتصال کیف‌پول یا ارسال سفارش</p>
+          </div>
+          <span class="mode-pill"><span class="mode-dot"></span>فقط خواندنی</span>
+        </header>
         <section class="card" id="crypto-markets">
           <h2>بازار رمزارزها</h2>
           <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
@@ -260,7 +280,7 @@ class Handler(BaseHTTPRequestHandler):
                   item.status==='PASS'?fmt(item.volume_24h_usd,2):'—',
                   item.status==='PASS'?fmt(item.price_discrepancy_pct,4)+'%':'—',
                   item.status==='PASS'?'تأیید دو منبع':'نامشخص · UNKNOWN'];
-                values.forEach(value=>tr.appendChild(cell('td',value)));
+                values.forEach((value,index)=>{const itemCell=cell('td',value);if(index>=2&&index<=4)itemCell.className='numeric';tr.appendChild(itemCell);});
                 const actionCell=document.createElement('td');
                 const scanButton=document.createElement('button');
                 scanButton.type='button';scanButton.className='market-scan-button';
@@ -287,6 +307,20 @@ class Handler(BaseHTTPRequestHandler):
           button.addEventListener('click',refresh);refresh();
         })();
         </script>
+        <section class="card" id="scan-section">
+          <h2>اسکن دارایی</h2>
+          <form method="post" action="/scan">
+            <label>بازار و نماد / آدرس</label>
+            <input id="scan-asset" name="asset" required value="cex:BTCUSDT" placeholder="cex:BTCUSDT یا base:0x...">
+            <p class="muted">نمونه‌ها: cex:BTCUSDT · perp:BTCUSDT · base:0x... · eth:0x... · solana:MINT</p>
+            <label>تیتر خبری تکمیلی (اختیاری)</label>
+            <input name="headline" placeholder="تیتر خبر">
+            <label>متن اجتماعی تکمیلی (اختیاری)</label>
+            <input name="social_post" placeholder="متن عمومی شبکه اجتماعی">
+            <button type="submit">اجرای اسکن پژوهشی</button>
+          </form>
+        </section>
+
         <section class="card" id="market-tools">
           <h2>ماشین‌حساب حرفه‌ای سناریوی Spot</h2>
           <p class="muted">محاسبهٔ سود/زیان فرضی Long بدون اهرم؛ زمان انتخابی فقط افق سناریو است، نه پیش‌بینی زمان سود.</p>
