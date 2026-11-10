@@ -261,7 +261,19 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
             "status": "FAIL",
             "reason": f"ریسک {risk if risk is not None else 'ناموجود'} است؛ سقف مجاز کمتر از {max_risk:g} است.",
         })
-    if not gate_reasons:
+    if direction == "SELL" and tradable:
+        gate_reasons.append({
+            "id": None, "name": "جهت بازار",
+            "status": "PASS",
+            "reason": "جهت تأییدشدهٔ موتور فروش است؛ بنابراین خرید تازه توصیه نمی‌شود و فقط کاهش موقعیت موجود قابل بررسی است.",
+        })
+    elif direction == "NEUTRAL" and not gate_reasons:
+        gate_reasons.append({
+            "id": None, "name": "جهت بازار",
+            "status": "UNKNOWN",
+            "reason": result.summary_fa or "جهت خرید یا فروش مشخص نشده است؛ فعلاً صبر کن.",
+        })
+    elif not gate_reasons:
         gate_reasons.append({
             "id": None, "name": "وضعیت فعلی",
             "status": "PASS",
