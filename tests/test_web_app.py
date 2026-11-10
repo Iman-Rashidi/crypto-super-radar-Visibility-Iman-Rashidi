@@ -67,6 +67,9 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("انتخاب برای اسکن", page)
         self.assertIn("scanButton.disabled=item.status!=='PASS'", page)
         self.assertIn("input.value='cex:'+item.symbol", page)
+        self.assertIn('class="app-header"', page)
+        self.assertIn("var(--teal)", page)
+        self.assertLess(page.index('id="crypto-markets"'), page.index('id="scan-section"'))
 
     def test_crypto_market_endpoint_uses_free_cross_validated_spot_data_and_cache(self):
         web_app.CRYPTO_MARKET_CACHE.update(expires_at=0.0, payload=None)
