@@ -104,21 +104,21 @@ main{{max-width:1120px;margin:auto}}
 input,button,select{{font:inherit;padding:12px 14px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text);width:100%;box-sizing:border-box}}
 input:focus{{outline:2px solid #54ded080;border-color:var(--teal)}}
 
-.market-loading-mascot{display:flex;align-items:center;justify-content:center;gap:14px;min-height:112px;padding:12px;color:#f5d9a8;font-weight:700}
-.market-loading-rabbit{width:104px;height:82px;flex:0 0 104px;overflow:visible}
-.market-loading-rabbit .rabbit-body{transform-box:fill-box;transform-origin:50% 80%;animation:rabbit-dig-body .38s ease-in-out infinite alternate}
-.market-loading-rabbit .rabbit-ear{transform-box:fill-box;transform-origin:50% 100%;animation:rabbit-ear-flop .3s ease-in-out infinite alternate}
-.market-loading-rabbit .rabbit-paw{transform-box:fill-box;transform-origin:50% 10%;animation:rabbit-dig-paw .2s ease-in-out infinite alternate}
-.market-loading-rabbit .rabbit-dirt{transform-box:fill-box;transform-origin:center;animation:rabbit-dirt-pop .42s ease-in-out infinite}
-.market-loading-rabbit .rabbit-carrot{transform-box:fill-box;transform-origin:50% 100%;animation:rabbit-carrot-peek 1.25s ease-out infinite}
-.market-loading-carrot{display:inline-block;font-size:25px;animation:rabbit-carrot-bounce .65s ease-in-out infinite alternate}
-@keyframes rabbit-dig-body{from{transform:translateY(1px) rotate(-2deg)}to{transform:translateY(-2px) rotate(2deg)}}
-@keyframes rabbit-ear-flop{from{transform:rotate(-7deg)}to{transform:rotate(9deg)}}
-@keyframes rabbit-dig-paw{from{transform:rotate(-28deg) translateY(1px)}to{transform:rotate(24deg) translateY(4px)}}
-@keyframes rabbit-dirt-pop{0%,100%{opacity:.2;transform:translateY(2px) scale(.7)}50%{opacity:1;transform:translateY(-5px) scale(1.1)}}
-@keyframes rabbit-carrot-peek{0%,35%{transform:translateY(17px) rotate(-12deg);opacity:0}65%,100%{transform:translateY(0) rotate(8deg);opacity:1}}
-@keyframes rabbit-carrot-bounce{from{transform:translateY(2px) rotate(-8deg)}to{transform:translateY(-4px) rotate(8deg)}}
-@media(prefers-reduced-motion:reduce){.market-loading-rabbit *,.market-loading-carrot{animation:none!important}}
+.market-loading-mascot{{display:flex;align-items:center;justify-content:center;gap:14px;min-height:112px;padding:12px;color:#f5d9a8;font-weight:700}}
+.market-loading-rabbit{{width:104px;height:82px;flex:0 0 104px;overflow:visible}}
+.market-loading-rabbit .rabbit-body{{transform-box:fill-box;transform-origin:50% 80%;animation:rabbit-dig-body .38s ease-in-out infinite alternate}}
+.market-loading-rabbit .rabbit-ear{{transform-box:fill-box;transform-origin:50% 100%;animation:rabbit-ear-flop .3s ease-in-out infinite alternate}}
+.market-loading-rabbit .rabbit-paw{{transform-box:fill-box;transform-origin:50% 10%;animation:rabbit-dig-paw .2s ease-in-out infinite alternate}}
+.market-loading-rabbit .rabbit-dirt{{transform-box:fill-box;transform-origin:center;animation:rabbit-dirt-pop .42s ease-in-out infinite}}
+.market-loading-rabbit .rabbit-carrot{{transform-box:fill-box;transform-origin:50% 100%;animation:rabbit-carrot-peek 1.25s ease-out infinite}}
+.market-loading-carrot{{display:inline-block;font-size:25px;animation:rabbit-carrot-bounce .65s ease-in-out infinite alternate}}
+@keyframes rabbit-dig-body{{from{{transform:translateY(1px) rotate(-2deg)}}to{{transform:translateY(-2px) rotate(2deg)}}}}
+@keyframes rabbit-ear-flop{{from{{transform:rotate(-7deg)}}to{{transform:rotate(9deg)}}}}
+@keyframes rabbit-dig-paw{{from{{transform:rotate(-28deg) translateY(1px)}}to{{transform:rotate(24deg) translateY(4px)}}}}
+@keyframes rabbit-dirt-pop{{0%,100%{{opacity:.2;transform:translateY(2px) scale(.7)}}50%{{opacity:1;transform:translateY(-5px) scale(1.1)}}}}
+@keyframes rabbit-carrot-peek{{0%,35%{{transform:translateY(17px) rotate(-12deg);opacity:0}}65%,100%{{transform:translateY(0) rotate(8deg);opacity:1}}}}
+@keyframes rabbit-carrot-bounce{{from{{transform:translateY(2px) rotate(-8deg)}}to{{transform:translateY(-4px) rotate(8deg)}}}}
+@media(prefers-reduced-motion:reduce){{.market-loading-rabbit *,.market-loading-carrot{{animation:none!important}}}}
 
 .market-search-activity{{display:none;align-items:center;gap:10px;margin:10px 2px 0;padding:8px 11px;border:1px solid #24556a;border-radius:14px;background:linear-gradient(100deg,#0c2634,#102c39);color:#9feee4;font-size:.84rem;font-weight:650;overflow:hidden}}
 .market-search-activity.is-searching,.market-search-activity.is-found{{display:flex}}
@@ -890,12 +890,12 @@ class Handler(BaseHTTPRequestHandler):
             searchActivity.classList.toggle('is-found',query.length>0&&visible.length>0);
             if(!visible.length){const empty=cell('td','موردی با این جست‌وجو پیدا نشد');empty.colSpan=7;const tr=document.createElement('tr');tr.appendChild(empty);rows.replaceChildren(tr);}
           }
-          function showMarketLoading(){
+          function showMarketLoading(){{
             const tr=document.createElement('tr'),td=document.createElement('td');
             td.colSpan=7;
             td.innerHTML='<div class="market-loading-mascot" role="status" aria-live="polite"><svg class="market-loading-rabbit" viewBox="0 0 120 92" role="img" aria-label="خرگوش در حال کندن زمین و پیدا کردن هویج"><g class="rabbit-body"><ellipse cx="55" cy="59" rx="31" ry="22" fill="#eee0c9" stroke="#9e8061" stroke-width="2"/><circle cx="31" cy="57" r="9" fill="#fff7e9" stroke="#9e8061" stroke-width="1.5"/><g class="rabbit-ear"><ellipse cx="39" cy="23" rx="8" ry="23" transform="rotate(-15 39 23)" fill="#f4e7d4" stroke="#9e8061" stroke-width="2"/><ellipse cx="40" cy="24" rx="3.5" ry="15" transform="rotate(-15 40 24)" fill="#e9a9a5"/></g><ellipse cx="67" cy="46" rx="22" ry="19" fill="#f4e7d4" stroke="#9e8061" stroke-width="2"/><ellipse cx="81" cy="52" rx="13" ry="10" fill="#fff7e9"/><circle cx="72" cy="43" r="2.5" fill="#34271e"/><circle cx="91" cy="53" r="3" fill="#d98791"/><path d="M79 59q5 4 9 0" fill="none" stroke="#795c4a" stroke-width="1.5" stroke-linecap="round"/><g class="rabbit-paw"><ellipse cx="83" cy="72" rx="13" ry="6" fill="#f4e7d4" stroke="#9e8061" stroke-width="1.5"/><path d="M88 70l8 5" stroke="#9e8061" stroke-width="2" stroke-linecap="round"/></g></g><g class="rabbit-dirt" fill="#a66a3f"><circle cx="100" cy="73" r="3"/><circle cx="109" cy="65" r="2"/><circle cx="96" cy="61" r="2.5"/></g><path d="M17 79q24-13 47 0q20-10 42 0" fill="none" stroke="#a66a3f" stroke-width="5" stroke-linecap="round"/><g class="rabbit-carrot"><path d="M105 72q-7 11-4 17q8-4 11-15z" fill="#f28b28" stroke="#b85a1b" stroke-width="1.2"/><path d="M106 72q-6-8-12-6q4 7 10 9q1-9 8-11q1 7-6 12" fill="#59b66b" stroke="#347c49" stroke-width="1"/></g></svg><span>خرگوش دوباره مشغول کندن زمینه... 🥕</span><span class="market-loading-carrot" aria-hidden="true">🥕</span></div>';
             tr.appendChild(td);rows.replaceChildren(tr);
-          }
+          }}
           async function refresh(){
             button.disabled=true;status.textContent='در حال دریافت قیمت‌های عمومی...';showMarketLoading();
             try{
