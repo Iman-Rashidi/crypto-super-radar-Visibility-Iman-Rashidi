@@ -157,11 +157,11 @@ canvas{{width:100%;height:300px;background:#08101d;border-radius:12px}}
 .calc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}}
 @media(max-width:680px){{body{{padding:20px 12px 32px}}.app-header{{gap:11px;align-items:flex-start}}.brand-mark{{width:44px;height:44px;border-radius:14px;font-size:23px}}.mode-pill{{font-size:.72rem;padding:5px 8px}}.card{{padding:17px 14px;border-radius:15px}}table{{font-size:.84rem}}td,th{{padding:10px 8px}}button.market-scan-button{{min-width:116px;padding:8px;font-size:.8rem}}}}
 </style></head><body><main>{body}<script>
-(function(){
+(function(){{
   const source=document.getElementById('crypto-market-search-activity');
   if(!source)return;
   const selector='input[type="search"], input[data-search], input[id*="search"], input[id*="query"], input[placeholder*="جست"]';
-  const attach=input=>{
+  const attach=input=>{{
     if(input.id==='crypto-market-search'||input.dataset.shibaAttached==='1')return;
     input.dataset.shibaAttached='1';
     const panel=source.cloneNode(true);
@@ -176,30 +176,30 @@ canvas{{width:100%;height:300px;background:#08101d;border-radius:12px}}
     if(host&&host.tagName==='LABEL')input.insertAdjacentElement('afterend',panel);
     else if(host)host.insertAdjacentElement('afterend',panel);
     let timer=null;
-    const show=()=>{
+    const show=()=>{{
       const term=(input.value||'').trim();
-      if(!term){panel.classList.remove('is-searching','is-found');return;}
+      if(!term){{panel.classList.remove('is-searching','is-found');return;}}
       panel.classList.add('is-searching');panel.classList.remove('is-found');
       if(timer)clearTimeout(timer);
-      timer=setTimeout(()=>{
+      timer=setTimeout(()=>{{
         panel.classList.remove('is-searching');
         const id=input.id==='dex-token-query'?'dex-search-results':input.dataset.results;
         const resultBox=id?document.getElementById(id):null;
         if(term.length>=2&&resultBox&&resultBox.children.length)panel.classList.add('is-found');
-      },500);
-    };
+      }},500);
+    }};
     input.addEventListener('input',show);
     input.addEventListener('search',show);
-    input.addEventListener('keydown',event=>{if(event.key==='Enter')show();});
+    input.addEventListener('keydown',event=>{{if(event.key==='Enter')show();}});
     show();
-  };
+  }};
   document.querySelectorAll(selector).forEach(attach);
-  new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{
+  new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{{
     if(node.nodeType!==1)return;
     if(node.matches&&node.matches(selector))attach(node);
     node.querySelectorAll&&node.querySelectorAll(selector).forEach(attach);
-  }))).observe(document.body,{childList:true,subtree:true});
-})();
+  }}))).observe(document.body,{{childList:true,subtree:true}});
+}})();
 </script></main></body></html>""".encode("utf-8")
 
 
