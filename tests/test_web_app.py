@@ -169,13 +169,15 @@ class WebAppHttpTests(unittest.TestCase):
             reason_fa="کندل‌ها تازه‌اند.", reason_en="Candles are fresh.",
             evidence={"candle_age_hours": 47.7},
         )
-        result = SimpleNamespace(gates=[gate])
+        result = SimpleNamespace(gates=[gate], signal="LONG", summary_fa="قابل معامله")
         ranges = {"status": "KNOWN", "candle_age_hours": 47.7}
         timeframes = {"1h": {"status": "KNOWN", "age_hours": 1.72}}
 
         web_app._enforce_daily_candle_freshness(result, ranges, timeframes)
 
         self.assertEqual(gate.status, web_app.GateStatus.UNKNOWN)
+        self.assertEqual(result.signal, web_app.Signal.NO_TRADE)
+        self.assertIn("سن کندل روزانه", result.summary_fa)
         self.assertEqual(ranges["status"], "UNKNOWN")
         self.assertIn("47.7", gate.reason_fa)
         self.assertIn("36.0", gate.reason_fa)
@@ -188,10 +190,11 @@ class WebAppHttpTests(unittest.TestCase):
             reason_fa="کندل‌ها تازه‌اند.", reason_en="Candles are fresh.",
             evidence={},
         )
-        result = SimpleNamespace(gates=[gate])
+        result = SimpleNamespace(gates=[gate], signal="LONG", summary_fa="قابل معامله")
         ranges = {"status": "KNOWN", "candle_age_hours": 20.0}
         web_app._enforce_daily_candle_freshness(result, ranges, {"1h": {"age_hours": 1.0}})
         self.assertEqual(gate.status, web_app.GateStatus.PASS)
+        self.assertEqual(result.signal, "LONG")
         self.assertEqual(ranges["status"], "KNOWN")
 
     def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
