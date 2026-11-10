@@ -5,7 +5,9 @@ GeckoTerminal new/trending lists are attention/discovery inputs, not endorsement
 """
 from __future__ import annotations
 
+import copy
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -14,6 +16,44 @@ NETWORKS = frozenset({"solana", "base"})
 INCLUDE = "base_token,quote_token,dex"
 MAX_CANDIDATES = 50
 MAX_POOL_AGE_HOURS = 168.0
+
+# Trending pools are a slower-moving supplementary signal. Cache successful
+# payloads for five minutes and rate-limit failures for two minutes so repeated
+# dashboard scans do not exhaust GeckoTerminal's shared public quota.
+_TRENDING_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
+_TRENDING_CACHE_TTL_SECONDS = 300.0
+_TRENDING_ERROR_COOLDOWN_SECONDS = 120.0
+
+
+def _get_trending_payload(http, url: str, params: dict[str, Any], source: str,
+                          now: datetime) -> tuple[Any, dict[str, Any]]:
+    current = time.monotonic()
+    cached = _TRENDING_SOURCE_CACHE.get(source)
+    if cached and cached.get("expires_at", 0.0) > current:
+        age = max(0.0, (now - cached["fetched_at"]).total_seconds())
+        if cached.get("status") == "PASS":
+            return copy.deepcopy(cached["payload"]), {
+                "cached": True, "data_age_seconds": round(age, 1)
+            }
+        raise RuntimeError(f"Cached rate-limit cooldown: {cached.get('error', 'source unavailable')}")
+    try:
+        payload = http.get(url, params=params)
+    except Exception as exc:
+        _TRENDING_SOURCE_CACHE[source] = {
+            "status": "UNKNOWN",
+            "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+            "fetched_at": now,
+            "expires_at": current + _TRENDING_ERROR_COOLDOWN_SECONDS,
+        }
+        raise
+    _TRENDING_SOURCE_CACHE[source] = {
+        "status": "PASS",
+        "payload": copy.deepcopy(payload),
+        "fetched_at": now,
+        "expires_at": current + _TRENDING_CACHE_TTL_SECONDS,
+    }
+    return payload, {"cached": False, "data_age_seconds": 0.0}
+
 
 # Only canonical native/wrapped assets are excluded. Symbols alone are not trusted.
 BASE_QUOTE_ADDRESSES = {
@@ -399,9 +439,14 @@ def discover_gem_candidates(http, *, limit: int = 20,
             source = f"GECKOTERMINAL_{source_suffix}_{network.upper()}"
             url = f"{BASE_URL}/networks/{network}/{endpoint}"
             try:
-                payload = http.get(url, params={"page": 1, "include": INCLUDE})
+                cache_metadata = {}
+                params = {"page": 1, "include": INCLUDE}
+                if source_suffix == "TRENDING_POOLS":
+                    payload, cache_metadata = _get_trending_payload(http, url, params, source, now)
+                else:
+                    payload = http.get(url, params=params)
                 rows = _rows(payload, source, now)
-                sources[source] = {"status": "PASS", "candidate_rows": len(rows)}
+                sources[source] = {"status": "PASS", "candidate_rows": len(rows), **cache_metadata}
                 for row in rows:
                     key = row["asset"].lower()
                     existing = merged.get(key)

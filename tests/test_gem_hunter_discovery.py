@@ -289,5 +289,27 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual(recovered["trade_authorization"], "NO_TRADE")
 
 
+    def test_trending_feeds_are_cached_across_repeated_discovery_scans(self):
+        from crypto_super_radar import gem_hunter_discovery as discovery
+        discovery._TRENDING_SOURCE_CACHE.clear()
+        class CountingHttp(FakeHttp):
+            def __init__(inner, responses):
+                super().__init__(responses)
+                inner.calls = {}
+            def get(inner, url, params=None):
+                inner.calls[url] = inner.calls.get(url, 0) + 1
+                return super().get(url, params=params)
+        http = CountingHttp(self.responses)
+        first = discover_gem_candidates(http, now=self.now)
+        second = discover_gem_candidates(http, now=self.now)
+        self.assertEqual(first["status"], "PASS")
+        self.assertEqual(second["status"], "PASS")
+        trending_calls = sum(count for url, count in http.calls.items() if "trending_pools" in url)
+        self.assertEqual(trending_calls, 2)
+        self.assertTrue(second["sources"]["GECKOTERMINAL_TRENDING_POOLS_BASE"]["cached"])
+        self.assertTrue(second["sources"]["GECKOTERMINAL_TRENDING_POOLS_SOLANA"]["cached"])
+        discovery._TRENDING_SOURCE_CACHE.clear()
+
+
 if __name__ == "__main__":
     unittest.main()
