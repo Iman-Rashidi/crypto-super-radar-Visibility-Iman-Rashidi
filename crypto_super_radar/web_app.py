@@ -438,15 +438,19 @@ def _enforce_volume_cross_validation(result) -> None:
         volume_valid = False
     if volume_valid:
         return
-    data_gate.status = GateStatus.UNKNOWN
-    data_gate.reason_fa = (
+    prior_fa = data_gate.reason_fa if data_gate.status == GateStatus.UNKNOWN else ""
+    prior_en = data_gate.reason_en if data_gate.status == GateStatus.UNKNOWN else ""
+    volume_reason_fa = (
         "اختلاف قیمت بین منابع قابل بررسی است، اما اختلاف حجم مستقل محاسبه نشده؛ "
         "بنابراین اعتبارسنجی کامل حجم تأیید نشده است."
     )
-    data_gate.reason_en = (
+    volume_reason_en = (
         "Price comparison is available, but independent volume discrepancy is missing; "
         "full volume validation remains UNKNOWN."
     )
+    data_gate.status = GateStatus.UNKNOWN
+    data_gate.reason_fa = (prior_fa + " همچنین " + volume_reason_fa) if prior_fa else volume_reason_fa
+    data_gate.reason_en = (prior_en + " Also, " + volume_reason_en) if prior_en else volume_reason_en
     evidence["volume_cross_validation_status"] = "UNKNOWN"
     data_gate.evidence = evidence
     result.signal = Signal.NO_TRADE
