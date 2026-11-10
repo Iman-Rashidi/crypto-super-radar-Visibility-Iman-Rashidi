@@ -156,6 +156,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         require('lang="fa" dir="rtl"' in page, "Persian dashboard markup is missing")
         require('action="/paper-bot/tick"' in page, "Paper Trading form is missing")
         require('action="/scan"' in page, "Research scan form is missing")
+        require('id="crypto-market-search"' in page, "Market search control is missing")
+        require('id="crypto-market-sort"' in page, "Market sorting control is missing")
         report["home"] = {
             "http_status": home.status_code,
             "persian_dashboard": True,
@@ -165,7 +167,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         report["stage"] = "market_board"
         print("[E2E] Fetching cross-validated market board", flush=True)
-        _, markets = get_json(session, base_url + "/api/crypto-markets", timeout=120)
+        _, markets = get_json(session, base_url + "/api/crypto-markets", timeout=240)
         market_items = markets.get("items", [])
         report["market_board"] = {
             "status": markets.get("status"),
@@ -181,7 +183,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 for item in market_items
             ],
         }
-        require(len(market_items) >= 1, "Market board returned no instruments")
+        require(len(market_items) >= 20, f"Market board returned only {len(market_items)} instruments; expected at least 20")
 
         report["stage"] = "dex_search"
         print("[E2E] Checking DEX discovery endpoint", flush=True)
