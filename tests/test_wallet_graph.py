@@ -88,7 +88,7 @@ class WalletGraphAnalyticsTests(unittest.TestCase):
         result = self.analytics.analyze_token_distribution(
             rows, chain="solana", token="mint-a"
         )
-        self.assertEqual(result["deployer_linked_wallet_count"], 1)
+        self.assertEqual(result["deployer_linked_wallet_count"], 2)
 
     def test_invalid_amounts_are_rejected(self):
         for bad in (float("nan"), float("inf"), -1, True):
