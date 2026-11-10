@@ -106,20 +106,26 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual(candidate["trade_authorization"], "NO_TRADE")
 
     def test_risk_adjustments_penalize_extreme_turnover_and_sharp_drawdown(self):
+        risky_token = "7MYAKr4Tw2iBRNAqLneV68rn2amfpd7hWkjuh3f2pump"
         normal = pool("solana", "PoolNormal", f"solana_{SOL_TOKEN}", "2026-11-10T10:00:00Z",
                       liquidity="50000", volume="100000")
-        risky = pool("solana", "PoolRisky", f"solana_{SOL_TOKEN}", "2026-11-10T10:00:00Z",
+        risky = pool("solana", "PoolRisky", f"solana_{risky_token}", "2026-11-10T10:00:00Z",
                      liquidity="50000", volume="1000000")
         risky["attributes"]["price_change_percentage"]["h1"] = "-35"
-        response = {"data": [normal, risky], "included": self.responses["new_pools"]["included"]}
+        included = self.responses["new_pools"]["included"] + [
+            {"id": f"solana_{risky_token}", "type": "token",
+             "attributes": {"address": risky_token, "name": "Risky", "symbol": "RISK", "decimals": 6}}
+        ]
+        response = {"data": [normal, risky], "included": included}
         result = discover_gem_candidates(
             FakeHttp({"new_pools": response, "trending_pools": {"data": []}}), now=self.now
         )
-        scores = [item["discovery_priority_score"] for item in result["candidates"]]
-        self.assertEqual(len(scores), 1)
-        self.assertLessEqual(scores[0], 50)
-        self.assertIn("SHARP_1H_DRAWDOWN", result["candidates"][0]["risk_flags"])
-        self.assertEqual(result["candidates"][0]["trade_authorization"], "NO_TRADE")
+        by_symbol = {item["token_symbol"]: item for item in result["candidates"]}
+        self.assertEqual(len(by_symbol), 2)
+        self.assertLess(by_symbol["RISK"]["discovery_priority_score"], by_symbol["ST"]["discovery_priority_score"])
+        self.assertIn("SHARP_1H_DRAWDOWN", by_symbol["RISK"]["risk_flags"])
+        self.assertIn("EXTREME_VOLUME_LIQUIDITY_RATIO", by_symbol["RISK"]["risk_flags"])
+        self.assertEqual(by_symbol["RISK"]["trade_authorization"], "NO_TRADE")
 
     def test_rejects_invalid_token_address_and_unsupported_chain(self):
         invalid = pool("solana", "PoolBad", "solana_not-an-address", "2026-11-10T10:00:00Z")
