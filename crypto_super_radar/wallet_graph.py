@@ -126,6 +126,7 @@ class WalletGraphAnalytics:
         normalized: list[WalletEvent] = []
         seen: set[tuple[Any, ...]] = set()
         invalid_count = 0
+        duplicate_count = 0
         for raw in events:
             try:
                 event = raw if isinstance(raw, WalletEvent) else WalletEvent.from_mapping(raw)
@@ -147,8 +148,10 @@ class WalletGraphAnalytics:
                 identity = (
                     event.chain.lower(), event.token.lower(), event.wallet.lower(),
                     event.event_type, event.timestamp, event.tx_hash,
+                    event.amount_usd, event.funding_source, event.funding_source_type,
                 )
                 if identity in seen:
+                    duplicate_count += 1
                     continue
                 seen.add(identity)
                 normalized.append(event)
@@ -169,7 +172,7 @@ class WalletGraphAnalytics:
                 "status": "INSUFFICIENT_DATA",
                 "chain": target_chain, "token": target_token,
                 "event_count": len(normalized), "unique_wallet_count": len(unique_wallets),
-                "invalid_event_count": invalid_count, "duplicate_events_removed": len(seen) - len(normalized),
+                "invalid_event_count": invalid_count, "duplicate_events_removed": duplicate_count,
                 "deployer_linked_wallet_count": len(deployer_wallets),
                 "candidate_pair_count": 0, "suspicious_pair_count": 0,
                 "cluster_ratio": None, "confidence": "LOW",
@@ -249,10 +252,11 @@ class WalletGraphAnalytics:
                 reasons.append("shared_non_public_funding_source")
             if deployer_link:
                 reasons.append("deployer_linked_wallet")
-            is_suspicious = bool(reasons) and (
+            # Shared private funding alone is not enough: require temporal corroboration.
+            is_suspicious = (
                 "deployer_linked_wallet" in reasons
-                or "shared_non_public_funding_source" in reasons
-                or ("repeated_temporal_and_amount_similarity" in reasons)
+                or "repeated_temporal_and_amount_similarity" in reasons
+                or ("shared_non_public_funding_source" in reasons and temporal_rate >= 0.5)
             )
             if is_suspicious:
                 suspicious_pairs += 1
@@ -264,7 +268,9 @@ class WalletGraphAnalytics:
 
         possible_pairs = len(unique_wallets) * (len(unique_wallets) - 1) / 2
         ratio = suspicious_pairs / possible_pairs if possible_pairs else None
-        if len(deployer_wallets) >= 2 or (ratio is not None and ratio >= 0.20):
+        if invalid_count:
+            status = "ANALYSIS_INCOMPLETE"
+        elif len(deployer_wallets) >= 2 or (ratio is not None and ratio >= 0.20):
             status = "SUSPICIOUS"
         elif suspicious_pairs or deployer_wallets:
             status = "WATCHLIST"
@@ -276,13 +282,13 @@ class WalletGraphAnalytics:
             "chain": target_chain, "token": target_token,
             "event_count": len(normalized), "unique_wallet_count": len(unique_wallets),
             "invalid_event_count": invalid_count,
-            "duplicate_events_removed": len(seen) - len(normalized),
+            "duplicate_events_removed": duplicate_count,
             "deployer_linked_wallet_count": len(deployer_wallets),
             "candidate_pair_count": len(candidates),
             "suspicious_pair_count": suspicious_pairs,
             "cluster_ratio": None if ratio is None else round(ratio, 6),
             "candidate_generation_truncated": len(candidates) >= self.max_candidate_pairs,
-            "confidence": "LOW" if invalid_count else ("MEDIUM" if len(normalized) >= 30 else "LOW"),
+            "confidence": "LOW", "calibration_status": "NOT_CALIBRATED",
             "evidence": evidence[:500],
             "trade_authorization": "NO_TRADE",
             "reason": "Wallet graph is an evidence signal only; no status from this module authorizes trading.",
