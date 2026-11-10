@@ -28,7 +28,7 @@ jobs:
       - name: Run one paper cycle and one live research scan through deployed app forms
         env:
           CSR_BASE_URL: https://crypto-super-radar.onrender.com
-          CSR_EXPECTED_COMMIT: \${{ github.sha }}
+          CSR_EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           python scripts/live_app_e2e.py \
             --deploy-timeout 600 \
