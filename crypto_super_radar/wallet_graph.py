@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Any, Iterable, Mapping
 
@@ -17,6 +17,29 @@ PUBLIC_FUNDING_TYPES = {
     "aggregator", "known_service", "unknown",
 }
 VALID_EVENT_TYPES = {"buy", "sell", "transfer", "funding", "swap", "mint", "other"}
+EVM_CHAINS = frozenset({
+    "ethereum", "eth", "base", "arbitrum", "optimism", "polygon",
+    "bsc", "avalanche",
+})
+
+
+def _normalize_chain(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_chain_address(chain: str, value: Any) -> str:
+    raw = str(value or "").strip()
+    # EVM addresses are case-insensitive; Solana base58 addresses/signatures
+    # are case-sensitive. Unknown chains preserve case rather than guessing.
+    return raw.lower() if chain in EVM_CHAINS else raw
+
+
+def _optional_nonnegative_int(value: Any, name: str) -> int | None:
+    if value is None or value == "":
+        return None
+    return _nonnegative_int(value, name)
+
+
 
 
 @dataclass(frozen=True)
@@ -32,12 +55,16 @@ class WalletEvent:
     deployer_relation: bool = False
     tx_hash: str | None = None
     received_at: int | None = None
+    log_index: int | None = None
+    instruction_index: int | None = None
+    inner_instruction_index: int | None = None
+    block_hash: str | None = None
 
     @classmethod
     def from_mapping(cls, row: Mapping[str, Any]) -> "WalletEvent":
-        chain = str(row.get("chain") or "").strip().lower()
-        wallet = str(row.get("wallet") or "").strip().lower()
-        token = str(row.get("token") or "").strip().lower()
+        chain = _normalize_chain(row.get("chain"))
+        wallet = _normalize_chain_address(chain, row.get("wallet"))
+        token = _normalize_chain_address(chain, row.get("token"))
         event_type = str(row.get("event_type") or "other").strip().lower()
         if not chain or not wallet or not token:
             raise ValueError("chain, wallet and token are required")
@@ -50,15 +77,50 @@ class WalletEvent:
         amount_usd = None if amount is None else _finite_nonnegative(amount, "amount_usd")
         funding = row.get("funding_source")
         funding_type = str(row.get("funding_source_type") or "unknown").strip().lower()
+        tx_hash_value = row.get("tx_hash") or row.get("signature")
+        instruction_index_value = row.get("instruction_index")
+        if instruction_index_value is None:
+            instruction_index_value = row.get("outer_instruction_index")
         return cls(
             chain=chain, wallet=wallet, token=token, event_type=event_type,
             timestamp=timestamp, amount_usd=amount_usd,
-            funding_source=None if funding in (None, "") else str(funding).strip().lower(),
+            funding_source=None if funding in (None, "") else _normalize_chain_address(chain, funding),
             funding_source_type=funding_type,
             deployer_relation=bool(row.get("deployer_relation", False)),
-            tx_hash=None if row.get("tx_hash") in (None, "") else str(row["tx_hash"]).lower(),
+            tx_hash=None if tx_hash_value in (None, "") else _normalize_chain_address(chain, tx_hash_value),
             received_at=received_at,
+            log_index=_optional_nonnegative_int(row.get("log_index"), "log_index"),
+            instruction_index=_optional_nonnegative_int(instruction_index_value, "instruction_index"),
+            inner_instruction_index=_optional_nonnegative_int(
+                row.get("inner_instruction_index"), "inner_instruction_index"
+            ),
+            block_hash=(
+                None if row.get("block_hash") in (None, "")
+                else _normalize_chain_address(chain, row.get("block_hash"))
+            ),
         )
+
+
+@dataclass(frozen=True)
+class WalletGraphConfig:
+    temporal_tolerance_seconds: int = 30
+    min_wallets: int = 5
+    min_events: int = 10
+    max_candidate_pairs: int = 100_000
+    max_events: int = 100_000
+
+    def __post_init__(self) -> None:
+        minimums = {
+            "temporal_tolerance_seconds": 1,
+            "min_wallets": 2,
+            "min_events": 1,
+            "max_candidate_pairs": 1,
+            "max_events": 1,
+        }
+        for name, minimum in minimums.items():
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
 def _nonnegative_int(value: Any, name: str) -> int:
@@ -100,12 +162,21 @@ class WalletGraphAnalytics:
         min_events: int = 10,
         max_candidate_pairs: int = 100_000,
         max_events: int = 100_000,
+        config: WalletGraphConfig | None = None,
     ) -> None:
-        self.temporal_tolerance_seconds = max(1, int(temporal_tolerance_seconds))
-        self.min_wallets = max(2, int(min_wallets))
-        self.min_events = max(1, int(min_events))
-        self.max_candidate_pairs = max(1, int(max_candidate_pairs))
-        self.max_events = max(1, int(max_events))
+        settings = config or WalletGraphConfig(
+            temporal_tolerance_seconds=max(1, int(temporal_tolerance_seconds)),
+            min_wallets=max(2, int(min_wallets)),
+            min_events=max(1, int(min_events)),
+            max_candidate_pairs=max(1, int(max_candidate_pairs)),
+            max_events=max(1, int(max_events)),
+        )
+        self.config = settings
+        self.temporal_tolerance_seconds = settings.temporal_tolerance_seconds
+        self.min_wallets = settings.min_wallets
+        self.min_events = settings.min_events
+        self.max_candidate_pairs = settings.max_candidate_pairs
+        self.max_events = settings.max_events
 
     def analyze_token_distribution(
         self,
@@ -117,8 +188,8 @@ class WalletGraphAnalytics:
         end_timestamp: int | None = None,
     ) -> dict[str, Any]:
         """Analyze one chain/token/time scope; no anomaly result is not a safety pass."""
-        target_chain = str(chain).strip().lower()
-        target_token = str(token).strip().lower()
+        target_chain = _normalize_chain(chain)
+        target_token = _normalize_chain_address(target_chain, token)
         if not target_chain or not target_token:
             raise ValueError("chain and token scope are required")
         start = None if start_timestamp is None else _nonnegative_int(start_timestamp, "start_timestamp")
@@ -137,10 +208,47 @@ class WalletGraphAnalytics:
                 break
             try:
                 event = raw if isinstance(raw, WalletEvent) else WalletEvent.from_mapping(raw)
-                # Re-validate directly constructed dataclasses at the boundary.
+                # Re-validate directly constructed dataclasses at the boundary and
+                # canonicalize identities according to the chain's address rules.
+                event_chain = _normalize_chain(event.chain)
+                event = replace(
+                    event,
+                    chain=event_chain,
+                    wallet=_normalize_chain_address(event_chain, event.wallet),
+                    token=_normalize_chain_address(event_chain, event.token),
+                    event_type=str(event.event_type or "other").strip().lower(),
+                    timestamp=_nonnegative_int(event.timestamp, "timestamp"),
+                    received_at=_optional_nonnegative_int(event.received_at, "received_at"),
+                    amount_usd=(
+                        None if event.amount_usd is None
+                        else _finite_nonnegative(event.amount_usd, "amount_usd")
+                    ),
+                    funding_source=(
+                        None if event.funding_source in (None, "")
+                        else _normalize_chain_address(event_chain, event.funding_source)
+                    ),
+                    funding_source_type=str(event.funding_source_type or "unknown").strip().lower(),
+                    tx_hash=(
+                        None if event.tx_hash in (None, "")
+                        else _normalize_chain_address(event_chain, event.tx_hash)
+                    ),
+                    log_index=_optional_nonnegative_int(event.log_index, "log_index"),
+                    instruction_index=_optional_nonnegative_int(
+                        event.instruction_index, "instruction_index"
+                    ),
+                    inner_instruction_index=_optional_nonnegative_int(
+                        event.inner_instruction_index, "inner_instruction_index"
+                    ),
+                    block_hash=(
+                        None if event.block_hash in (None, "")
+                        else _normalize_chain_address(event_chain, event.block_hash)
+                    ),
+                )
                 if not event.chain or not event.wallet or not event.token:
                     raise ValueError("missing identity")
-                if event.chain.lower() != target_chain or event.token.lower() != target_token:
+                if event.event_type not in VALID_EVENT_TYPES:
+                    raise ValueError(f"unsupported event_type: {event.event_type}")
+                if event.chain != target_chain or event.token != target_token:
                     continue
                 if start is not None and event.timestamp < start:
                     continue
@@ -152,11 +260,27 @@ class WalletGraphAnalytics:
                     not math.isfinite(float(event.amount_usd)) or float(event.amount_usd) < 0
                 ):
                     raise ValueError("invalid amount")
-                identity = (
-                    event.chain.lower(), event.token.lower(), event.wallet.lower(),
-                    event.event_type, event.timestamp, event.tx_hash,
-                    event.amount_usd, event.funding_source, event.funding_source_type,
-                )
+                if event.chain in EVM_CHAINS and event.tx_hash and event.log_index is not None:
+                    identity = (
+                        "evm_log", event.chain, event.token, event.tx_hash,
+                        event.log_index, event.event_type, event.block_hash,
+                    )
+                elif event.chain == "solana" and event.tx_hash and event.instruction_index is not None:
+                    identity = (
+                        "solana_instruction", event.chain, event.token, event.tx_hash,
+                        event.instruction_index, event.inner_instruction_index,
+                        event.event_type,
+                    )
+                else:
+                    # Legacy fallback is deliberately conservative: only byte-for-byte
+                    # equivalent event evidence is deduplicated when indices are absent.
+                    identity = (
+                        "fallback", event.chain, event.token, event.wallet,
+                        event.event_type, event.timestamp, event.tx_hash,
+                        event.log_index, event.instruction_index,
+                        event.inner_instruction_index, event.block_hash,
+                        event.amount_usd, event.funding_source, event.funding_source_type,
+                    )
                 if identity in seen:
                     duplicate_count += 1
                     continue
@@ -167,7 +291,7 @@ class WalletGraphAnalytics:
 
         wallets: dict[str, list[WalletEvent]] = defaultdict(list)
         for event in normalized:
-            wallets[event.wallet.lower()].append(event)
+            wallets[event.wallet].append(event)
         unique_wallets = sorted(wallets)
         deployer_wallets = sorted({
             wallet for wallet, rows in wallets.items()

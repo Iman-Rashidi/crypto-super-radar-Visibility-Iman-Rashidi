@@ -1,7 +1,7 @@
 """Deterministic tests for WalletGraphAnalytics."""
 import unittest
 
-from crypto_super_radar.wallet_graph import WalletEvent, WalletGraphAnalytics
+from crypto_super_radar.wallet_graph import WalletEvent, WalletGraphAnalytics, WalletGraphConfig
 
 
 def _rows(wallet_count=10, *, chain="solana", token="mint-a", start=1_700_000_000):
@@ -117,6 +117,58 @@ class WalletGraphAnalyticsTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "NO_ANOMALY_DETECTED")
         self.assertEqual(result["suspicious_pair_count"], 0)
+
+
+    def test_solana_base58_identity_preserves_case(self):
+        event = WalletEvent.from_mapping({
+            "chain": "solana", "wallet": "AbCdEf123", "token": "MintAbC123",
+            "event_type": "buy", "timestamp": 1,
+        })
+        self.assertEqual(event.wallet, "AbCdEf123")
+        self.assertEqual(event.token, "MintAbC123")
+
+    def test_evm_addresses_are_normalized_case_insensitively(self):
+        event = WalletEvent.from_mapping({
+            "chain": "base", "wallet": "0xAbCd", "token": "0xDeF",
+            "event_type": "buy", "timestamp": 1,
+        })
+        self.assertEqual(event.wallet, "0xabcd")
+        self.assertEqual(event.token, "0xdef")
+
+    def test_distinct_solana_instructions_in_one_signature_are_not_deduplicated(self):
+        rows = _rows()
+        rows[0].update({
+            "signature": "5igNaTuReCaseSensitive",
+            "instruction_index": 2,
+            "inner_instruction_index": 0,
+        })
+        rows.append(dict(rows[0], inner_instruction_index=1))
+        result = self.analytics.analyze_token_distribution(
+            rows, chain="solana", token="mint-a"
+        )
+        self.assertEqual(result["event_count"], 11)
+        self.assertEqual(result["duplicate_events_removed"], 0)
+
+    def test_distinct_evm_logs_in_one_transaction_are_not_deduplicated(self):
+        rows = _rows(chain="base", token="0xToken")
+        rows[0].update({"tx_hash": "0xABCDEF", "log_index": 7, "block_hash": "0xBEEF"})
+        rows.append(dict(rows[0], log_index=8))
+        result = self.analytics.analyze_token_distribution(
+            rows, chain="base", token="0xTOKEN"
+        )
+        self.assertEqual(result["event_count"], 11)
+        self.assertEqual(result["duplicate_events_removed"], 0)
+
+    def test_wallet_graph_config_is_injectable_and_validated(self):
+        config = WalletGraphConfig(
+            temporal_tolerance_seconds=45, min_wallets=4, min_events=8,
+            max_candidate_pairs=500, max_events=2_000,
+        )
+        analytics = WalletGraphAnalytics(config=config)
+        self.assertEqual(analytics.temporal_tolerance_seconds, 45)
+        self.assertEqual(analytics.min_wallets, 4)
+        with self.assertRaises(ValueError):
+            WalletGraphConfig(min_wallets=1)
 
     def test_invalid_rows_make_analysis_incomplete_not_clean(self):
         rows = _rows()
