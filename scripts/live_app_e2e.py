@@ -259,8 +259,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             expected_sources.issubset(set((discovery.get("sources") or {}).keys())),
             "Gem Hunter is missing one or more chain-scoped discovery feeds",
         )
+        require(
+            discovery.get("source_count") == 4,
+            "Gem Hunter must attempt all four Solana/Base new/trending feeds",
+        )
+        require(
+            all(isinstance(value, int) and value >= 0 for value in network_counts.values()),
+            "Gem Hunter network coverage counts are invalid",
+        )
         report["gem_hunter_discovery"] = {
             "status": discovery.get("status"),
+            "source_count": discovery.get("source_count"),
             "candidate_counts_by_network": network_counts,
             "candidate_count": discovery.get("candidate_count"),
             "available_candidate_count": discovery.get("available_candidate_count"),
