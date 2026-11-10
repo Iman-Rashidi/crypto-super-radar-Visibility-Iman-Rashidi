@@ -139,7 +139,7 @@ class PaperTradingBotTests(unittest.TestCase):
         self.engine.result.take_profit = 110.0
         result = self.bot.run_once("cex:BTCUSDT")
         self.assertEqual(result["status"], "NO_TRADE")
-        self.assertIn("net reward/risk", result["reason"])
+        self.assertIn("net reward/risk", result["reason"].lower())
 
     def test_break_even_and_trailing_stop_only_move_up(self):
         opened = self.bot.run_once("cex:BTCUSDT")
