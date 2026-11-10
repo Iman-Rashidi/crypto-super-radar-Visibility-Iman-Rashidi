@@ -164,8 +164,8 @@ class WebAppHttpTests(unittest.TestCase):
             with patch.object(web_app, "_ensure_scan_worker"):
                 first_status, _, first_payload = self.request("POST", "/scan", body=body, headers=headers)
                 second_status, _, second_payload = self.request("POST", "/scan", body=body, headers=headers)
-            first_id = re.search(rb"شناسه کار: <code>([a-f0-9]+)</code>", first_payload).group(1)
-            second_id = re.search(rb"شناسه کار: <code>([a-f0-9]+)</code>", second_payload).group(1)
+            first_id = re.search(r"شناسه کار: <code>([a-f0-9]+)</code>", first_payload.decode("utf-8")).group(1)
+            second_id = re.search(r"شناسه کار: <code>([a-f0-9]+)</code>", second_payload.decode("utf-8")).group(1)
             self.assertEqual(first_status, 202)
             self.assertEqual(second_status, 202)
             self.assertEqual(first_id, second_id)
