@@ -46,7 +46,9 @@ class WebAppHttpTests(unittest.TestCase):
     def test_health_endpoint_is_live_and_not_cacheable(self):
         status, headers, payload = self.request("GET", "/health")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(payload), {"status": "ok"})
+        health = json.loads(payload)
+        self.assertEqual(health["status"], "ok")
+        self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
     def test_home_page_is_persian_and_lists_twelve_gates(self):

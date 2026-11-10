@@ -383,6 +383,14 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                             "open": values[0], "high": values[1], "low": values[2], "close": values[3],
                         })
         payload = {
+            "safety": {
+                "read_only": True,
+                "public_data_only": True,
+                "wallet_credentials_used": False,
+                "private_exchange_credentials_used": False,
+                "orders_submitted": False,
+                "transactions_signed": False,
+            },
             "asset": asset.raw,
             "coin_name": coin_display["name_fa"],
             "coin_name_en": coin_display["name_en"],
@@ -441,7 +449,18 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
     global SCAN_RUNNING
     try:
         result = PAPER_BOT.run_once(asset)
-        payload = {"cycle": result, "paper_state": PAPER_BOT.state()}
+        payload = {
+            "safety": {
+                "read_only": True,
+                "paper_only": True,
+                "wallet_credentials_used": False,
+                "private_exchange_credentials_used": False,
+                "orders_submitted": False,
+                "transactions_signed": False,
+            },
+            "cycle": result,
+            "paper_state": PAPER_BOT.state(),
+        }
         with LOCK:
             JOBS[job_id] = {"status": "completed", "result": payload}
     except Exception as exc:
@@ -545,7 +564,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
-            return self._send(200, b'{"status":"ok"}', "application/json")
+            health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
+            return self._send(200, json.dumps(health).encode(), "application/json")
         if parsed.path == "/api/dex-search":
             query = parse_qs(parsed.query).get("q", [""])[0]
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
