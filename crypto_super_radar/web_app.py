@@ -103,6 +103,13 @@ main{{max-width:1120px;margin:auto}}
 .muted{{color:var(--muted)}}
 input,button,select{{font:inherit;padding:12px 14px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text);width:100%;box-sizing:border-box}}
 input:focus{{outline:2px solid #54ded080;border-color:var(--teal)}}
+.market-search-activity{{display:none;align-items:center;gap:8px;margin:8px 2px 0;color:#9feee4;font-size:.82rem;font-weight:600}}
+.market-search-activity.is-searching{{display:inline-flex}}
+.market-search-glass{{display:inline-grid;place-items:center;width:25px;height:25px;border:1px solid #397c82;border-radius:50%;background:#10313a;box-shadow:0 0 14px #54ded033;font-size:15px;animation:market-search-spin .72s ease-in-out infinite alternate}}
+.market-search-activity.is-searching .market-search-glass{{animation:market-search-spin .72s ease-in-out infinite alternate,market-search-hop .42s ease-in-out infinite alternate}}
+@keyframes market-search-spin{{from{{transform:rotate(-24deg)}}to{{transform:rotate(32deg)}}}}
+@keyframes market-search-hop{{from{{translate:0 1px}}to{{translate:0 -4px}}}}
+@media(prefers-reduced-motion:reduce){{.market-search-glass,.market-search-activity.is-searching .market-search-glass{{animation:none}}}}
 label{{display:block;margin-top:12px;font-size:.94rem;font-weight:600}}
 button{{background:linear-gradient(135deg,#3179e8,#2862c7);border:0;margin-top:12px;cursor:pointer;font-weight:700;transition:filter .15s ease,transform .15s ease}}
 button:hover{{filter:brightness(1.12);transform:translateY(-1px)}}
@@ -693,6 +700,10 @@ class Handler(BaseHTTPRequestHandler):
           <div class="grid" style="margin:12px 0">
             <label>جست‌وجوی نام یا نماد
               <input id="crypto-market-search" type="search" placeholder="مثلاً BTC، بیت‌کوین یا SUI" autocomplete="off">
+              <span id="crypto-market-search-activity" class="market-search-activity" role="status" aria-live="polite">
+                <span class="market-search-glass" aria-hidden="true">🔎</span>
+                <span>دارم می‌گردم... نکنه قایم شده؟ 😄</span>
+              </span>
             </label>
             <label>مرتب‌سازی
               <select id="crypto-market-sort">
@@ -718,7 +729,9 @@ class Handler(BaseHTTPRequestHandler):
           const search=document.getElementById('crypto-market-search');
           const sort=document.getElementById('crypto-market-sort');
           const count=document.getElementById('crypto-market-count');
+          const searchActivity=document.getElementById('crypto-market-search-activity');
           let marketItems=[];
+          let searchTimer=null;
           const fmt=(value,max=8)=>Number(value).toLocaleString(undefined,{maximumFractionDigits:max});
           function cell(tag,value){const node=document.createElement(tag);node.textContent=value??'—';return node;}
           function renderRows(){
@@ -773,7 +786,15 @@ class Handler(BaseHTTPRequestHandler):
               status.textContent='دادهٔ بازار در دسترس نیست: '+String(error.message||error);
             }finally{button.disabled=false;}
           }
-          search.addEventListener('input',renderRows);
+          search.addEventListener('input',()=>{
+            searchActivity.classList.add('is-searching');
+            if(searchTimer!==null)clearTimeout(searchTimer);
+            searchTimer=setTimeout(()=>{
+              renderRows();
+              searchActivity.classList.remove('is-searching');
+              searchTimer=null;
+            },260);
+          });
           sort.addEventListener('change',renderRows);
           button.addEventListener('click',refresh);refresh();
         })();
