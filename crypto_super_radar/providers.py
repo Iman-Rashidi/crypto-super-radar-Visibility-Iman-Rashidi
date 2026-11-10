@@ -529,7 +529,7 @@ class MarketDataService:
     def security(self, asset: AssetSpec) -> Dict[str, Any]:
         if asset.market_type in {"cex", "perp"}:
             # Only major native assets have an explicit allowlist in this prototype.
-            if asset.symbol in {"BTCUSDT", "ETHUSDT", "SOLUSDT"}:
+            if asset.symbol in {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT", "TRXUSDT", "TONUSDT"}:
                 return {"status": "PASS", "reason": "Native major asset; token-contract authority checks are not applicable.", "scope": "Exchange/custody and market risks remain; listing is not a guarantee of safety."}
             return {"status": "UNKNOWN", "reason": "CEX instrument is not in the conservative native-asset allowlist."}
         if asset.chain == "solana":
