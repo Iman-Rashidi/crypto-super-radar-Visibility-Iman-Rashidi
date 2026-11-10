@@ -172,8 +172,9 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(web_app.SCAN_QUEUE.qsize(), 1)
             job = web_app.JOBS[first_id.decode()]
             self.assertEqual(job["status"], "queued")
-            self.assertTrue(job["fencing_token"])
+            self.assertIsInstance(job["fencing_token"], int)
             self.assertTrue(job["idempotency_key"])
+            self.assertIn("valid_until_utc", job)
         finally:
             web_app.JOBS.clear()
             web_app.JOBS.update(old_jobs)
