@@ -5,6 +5,7 @@ authorizes a trade. Missing or insufficient evidence is represented explicitly.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass
 import math
@@ -98,11 +99,13 @@ class WalletGraphAnalytics:
         min_wallets: int = 5,
         min_events: int = 10,
         max_candidate_pairs: int = 100_000,
+        max_events: int = 100_000,
     ) -> None:
         self.temporal_tolerance_seconds = max(1, int(temporal_tolerance_seconds))
         self.min_wallets = max(2, int(min_wallets))
         self.min_events = max(1, int(min_events))
         self.max_candidate_pairs = max(1, int(max_candidate_pairs))
+        self.max_events = max(1, int(max_events))
 
     def analyze_token_distribution(
         self,
@@ -127,7 +130,11 @@ class WalletGraphAnalytics:
         seen: set[tuple[Any, ...]] = set()
         invalid_count = 0
         duplicate_count = 0
+        input_truncated = False
         for raw in events:
+            if len(normalized) >= self.max_events:
+                input_truncated = True
+                break
             try:
                 event = raw if isinstance(raw, WalletEvent) else WalletEvent.from_mapping(raw)
                 # Re-validate directly constructed dataclasses at the boundary.
@@ -172,7 +179,7 @@ class WalletGraphAnalytics:
                 "status": "INSUFFICIENT_DATA",
                 "chain": target_chain, "token": target_token,
                 "event_count": len(normalized), "unique_wallet_count": len(unique_wallets),
-                "invalid_event_count": invalid_count, "duplicate_events_removed": duplicate_count,
+                "invalid_event_count": invalid_count, "duplicate_events_removed": duplicate_count,\n                "input_truncated": input_truncated,
                 "deployer_linked_wallet_count": len(deployer_wallets),
                 "candidate_pair_count": 0, "suspicious_pair_count": 0,
                 "cluster_ratio": None, "confidence": "LOW",
@@ -226,12 +233,31 @@ class WalletGraphAnalytics:
             left_rows, right_rows = wallets[left], wallets[right]
             temporal_matches = 0
             amount_scores: list[float] = []
+            right_by_type: dict[str, list[WalletEvent]] = defaultdict(list)
+            for row in right_rows:
+                right_by_type[row.event_type].append(row)
+            right_times: dict[str, list[int]] = {}
+            for event_type, rows_for_type in right_by_type.items():
+                rows_for_type.sort(key=lambda item: item.timestamp)
+                right_times[event_type] = [item.timestamp for item in rows_for_type]
             for a in left_rows:
-                nearest = min((abs(a.timestamp - b.timestamp) for b in right_rows), default=None)
-                if nearest is not None and nearest <= self.temporal_tolerance_seconds:
+                matching = right_by_type.get(a.event_type, [])
+                times = right_times.get(a.event_type, [])
+                if not times:
+                    continue
+                position = bisect_left(times, a.timestamp)
+                nearby_indices = []
+                if position < len(times):
+                    nearby_indices.append(position)
+                if position > 0:
+                    nearby_indices.append(position - 1)
+                nearby = [
+                    matching[index] for index in nearby_indices
+                    if abs(matching[index].timestamp - a.timestamp) <= self.temporal_tolerance_seconds
+                ]
+                if nearby:
                     temporal_matches += 1
-                    close_rows = [b for b in right_rows if abs(a.timestamp - b.timestamp) <= self.temporal_tolerance_seconds]
-                    scores = [_amount_similarity(a.amount_usd, b.amount_usd) for b in close_rows]
+                    scores = [_amount_similarity(a.amount_usd, b.amount_usd) for b in nearby]
                     known_scores = [score for score in scores if score is not None]
                     if known_scores:
                         amount_scores.append(max(known_scores))
@@ -268,7 +294,7 @@ class WalletGraphAnalytics:
 
         possible_pairs = len(unique_wallets) * (len(unique_wallets) - 1) / 2
         ratio = suspicious_pairs / possible_pairs if possible_pairs else None
-        if invalid_count:
+        if invalid_count or input_truncated:
             status = "ANALYSIS_INCOMPLETE"
         elif len(deployer_wallets) >= 2 or (ratio is not None and ratio >= 0.20):
             status = "SUSPICIOUS"
@@ -283,6 +309,7 @@ class WalletGraphAnalytics:
             "event_count": len(normalized), "unique_wallet_count": len(unique_wallets),
             "invalid_event_count": invalid_count,
             "duplicate_events_removed": duplicate_count,
+            "input_truncated": input_truncated,
             "deployer_linked_wallet_count": len(deployer_wallets),
             "candidate_pair_count": len(candidates),
             "suspicious_pair_count": suspicious_pairs,
