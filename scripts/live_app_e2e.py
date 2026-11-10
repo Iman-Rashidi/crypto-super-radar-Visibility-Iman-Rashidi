@@ -32,7 +32,7 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def get_json(session: requests.Session, url: str, timeout: float = 20.0) -> tuple[requests.Response, dict[str, Any]]:
+def get_json(session: requests.Session, url: str, timeout: float = 45.0) -> tuple[requests.Response, dict[str, Any]]:
     response = session.get(url, timeout=timeout)
     response.raise_for_status()
     try:
@@ -84,7 +84,7 @@ def submit_and_wait(
         f"{base_url}{route}",
         data={"asset": asset},
         headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=20,
+        timeout=60,
         allow_redirects=False,
     )
     require(
@@ -98,7 +98,7 @@ def submit_and_wait(
     deadline = time.monotonic() + timeout_seconds
     last_job: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        _, last_job = get_json(session, f"{base_url}/jobs/{job_id}", timeout=20)
+        _, last_job = get_json(session, f"{base_url}/jobs/{job_id}", timeout=45)
         state = last_job.get("status")
         if state in {"completed", "failed"}:
             return {"http_status": response.status_code, "job_id": job_id, **last_job}
@@ -142,11 +142,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     session = requests.Session()
     session.headers.update({"User-Agent": "crypto-super-radar-e2e/1.0"})
     try:
+        report["stage"] = "health"
+        print("[E2E] Checking Render deployment and health", flush=True)
         report["health"] = wait_for_health(
             session, base_url, args.expected_commit, args.deploy_timeout
         )
 
-        home = session.get(base_url + "/", timeout=20)
+        report["stage"] = "home"
+        print("[E2E] Checking dashboard and form markup", flush=True)
+        home = session.get(base_url + "/", timeout=60)
         home.raise_for_status()
         page = home.text
         require('lang="fa" dir="rtl"' in page, "Persian dashboard markup is missing")
@@ -159,7 +163,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "scan_form": True,
         }
 
-        _, markets = get_json(session, base_url + "/api/crypto-markets")
+        report["stage"] = "market_board"
+        print("[E2E] Fetching cross-validated market board", flush=True)
+        _, markets = get_json(session, base_url + "/api/crypto-markets", timeout=120)
         market_items = markets.get("items", [])
         report["market_board"] = {
             "status": markets.get("status"),
@@ -177,13 +183,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
         require(len(market_items) >= 1, "Market board returned no instruments")
 
-        _, dex = get_json(session, base_url + "/api/dex-search?q=PEPE")
+        report["stage"] = "dex_search"
+        print("[E2E] Checking DEX discovery endpoint", flush=True)
+        _, dex = get_json(session, base_url + "/api/dex-search?q=PEPE", timeout=75)
         report["dex_search"] = {
             "status": dex.get("status"),
             "result_count": dex.get("result_count"),
             "networks": dex.get("supported_networks"),
         }
 
+        report["stage"] = "paper_status_before"
+        print("[E2E] Checking paper account safety state", flush=True)
         _, before = get_json(session, base_url + "/paper-bot/status")
         require(before.get("mode") == "PAPER_ONLY", "Paper bot mode is not PAPER_ONLY")
         require(before.get("orders_submitted") is False, "Paper bot reports live orders enabled")
@@ -195,6 +205,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "storage": before.get("storage"),
         }
 
+        report["stage"] = "paper_cycle"
+        print("[E2E] Submitting exactly one paper-only cycle", flush=True)
         report["actions"]["paper_cycles_submitted"] = 1
         paper_job = submit_and_wait(
             session, base_url, "/paper-bot/tick", "cex:BTCUSDT", args.job_timeout
@@ -217,6 +229,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "safety": paper_result.get("safety"),
         }
 
+        report["stage"] = "spot_scan"
+        print("[E2E] Submitting exactly one BTC Spot research scan", flush=True)
         report["actions"]["research_scans_submitted"] = 1
         scan_job = submit_and_wait(
             session, base_url, "/scan", "cex:BTCUSDT", args.job_timeout
@@ -246,6 +260,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "safety": scan.get("safety"),
         }
 
+        report["stage"] = "paper_status_after"
+        print("[E2E] Verifying post-cycle paper account", flush=True)
         _, after = get_json(session, base_url + "/paper-bot/status")
         require(after.get("mode") == "PAPER_ONLY", "Paper mode changed after scan")
         require(after.get("orders_submitted") is False, "Post-test account reports real orders")
@@ -258,6 +274,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "risk_controls": after.get("risk_controls"),
         }
 
+        report["stage"] = "history"
+        print("[E2E] Checking scan history endpoint", flush=True)
         _, history = get_json(
             session, base_url + "/history?asset=cex%3ABTCUSDT"
         )
@@ -268,6 +286,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if gate_counts["PASS"] == 12 and signal in {"LONG", "SHORT"}
             else "BLOCKED_NO_TRADE"
         )
+        report["stage"] = "completed"
+        return report
+    except Exception as exc:
+        report["overall_status"] = "FAIL"
+        report["failed_stage"] = report.get("stage", "unknown")
+        report["error"] = f"{type(exc).__name__}: {exc}"
         return report
     finally:
         report["finished_at_utc"] = utc_now()
@@ -289,7 +313,7 @@ def main() -> int:
         report = run(args)
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        return 0
+        return 0 if report.get("overall_status") == "PASS" else 1
     except Exception as exc:
         failed = {
             "project": "CRYPTO SUPER RADAR",

@@ -565,7 +565,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
-            return self._send(200, json.dumps(health).encode(), "application/json")
+            return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
         if parsed.path == "/api/dex-search":
             query = parse_qs(parsed.query).get("q", [""])[0]
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
