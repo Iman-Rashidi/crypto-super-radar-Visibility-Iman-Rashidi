@@ -170,7 +170,7 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(second_status, 202)
             self.assertEqual(first_id, second_id)
             self.assertEqual(web_app.SCAN_QUEUE.qsize(), 1)
-            job = web_app.JOBS[first_id.decode()]
+            job = web_app.JOBS[first_id]
             self.assertEqual(job["status"], "queued")
             self.assertIsInstance(job["fencing_token"], int)
             self.assertTrue(job["idempotency_key"])
