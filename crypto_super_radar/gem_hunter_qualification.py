@@ -142,7 +142,11 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
     filters = qualification.get("filters")
     if not isinstance(filters, Mapping) or set(filters.keys()) != set(FILTER_IDS):
         return False
-    if any(filters.get(filter_id) not in {"PASS", "FAIL", "UNKNOWN"} for filter_id in FILTER_IDS):
+    if any(
+        not isinstance(filters.get(filter_id), str)
+        or filters.get(filter_id) not in {"PASS", "FAIL", "UNKNOWN"}
+        for filter_id in FILTER_IDS
+    ):
         return False
     if sum(filters[filter_id] == "PASS" for filter_id in FILTER_IDS) < MIN_PASSED_FILTERS:
         return False

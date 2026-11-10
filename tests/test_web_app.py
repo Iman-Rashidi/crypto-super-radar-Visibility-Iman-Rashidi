@@ -165,7 +165,7 @@ class WebAppHttpTests(unittest.TestCase):
     def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
         from test_gem_hunter_qualification import valid_candidate
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
-        good = valid_candidate()
+        good = valid_candidate(now=datetime.now(timezone.utc))
         bad = dict(good)
         bad["candidate_status"] = "UNSCREENED"
         bad["trade_authorization"] = "NO_TRADE"
