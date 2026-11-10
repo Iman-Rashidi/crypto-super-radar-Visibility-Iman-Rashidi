@@ -223,5 +223,44 @@ class PerpetualProviderTests(unittest.TestCase):
             PerpetualMarketProvider(fake_http).funding_history("BTCUSDT")
 
 
+class FreeRegionalFallbackTests(unittest.TestCase):
+    def test_bybit_spot_access_denial_uses_public_okx_ticker(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            DataProviderError("HTTP 403 from api.bybit.com"),
+            {"code": "0", "data": [{"last": "65000", "volCcy24h": "1200000"}]},
+        ]
+        result = BybitProvider(http).ticker("BTCUSDT")
+        self.assertEqual(result["provider"], "OKX Spot")
+        self.assertEqual(result["price"], 65000)
+        self.assertEqual(http.get.call_count, 2)
+
+    def test_binance_perpetual_access_denial_uses_public_gate_ticker(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            DataProviderError("HTTP 451 from fapi.binance.com"),
+            [{"mark_price": "65000", "volume_24h_settle": "1000000",
+              "funding_rate": "-0.0001", "total_size": "1234"}],
+            {"funding_interval": 28800},
+        ]
+        result = PerpetualMarketProvider(http).binance_ticker("BTCUSDT")
+        self.assertEqual(result["provider"], "Gate.io USDT Perpetual")
+        self.assertEqual(result["funding_rate"], -0.0001)
+        self.assertEqual(result["funding_interval_hours"], 8)
+
+    def test_bybit_perpetual_access_denial_uses_public_okx_swap(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            DataProviderError("HTTP 403 from api.bybit.com"),
+            {"code": "0", "data": [{"last": "65000", "volCcy24h": "1000000"}]},
+            {"code": "0", "data": [{"fundingRate": "-0.0002"}]},
+            {"code": "0", "data": [{"oi": "4321"}]},
+        ]
+        result = PerpetualMarketProvider(http).bybit_ticker("BTCUSDT")
+        self.assertEqual(result["provider"], "OKX USDT Swap")
+        self.assertEqual(result["funding_rate"], -0.0002)
+        self.assertEqual(result["open_interest"], 4321)
+
+
 if __name__ == "__main__":
     unittest.main()

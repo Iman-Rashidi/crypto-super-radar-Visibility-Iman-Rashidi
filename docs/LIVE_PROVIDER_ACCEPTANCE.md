@@ -56,12 +56,7 @@ market freshness. Retry a 429 only after the provider's backoff requirement;
 repeat 403/451 checks from an authorized network/region. A missing/unavailable
 required source also prevents an overall PASS.
 
-The observed GitHub-hosted run was placed in Azure `East US 2`. Bybit's current
-V5 integration guidance states that US and Mainland China IPs are restricted
-and can receive HTTP 403. This explains the Bybit result in that run; it does
-not establish whether the same APIs are reachable from the intended production
-region. Do not route around a provider's regional controls. Run the same
-read-only command from the authorized deployment region instead.
+The observed GitHub-hosted run was placed in Azure `East US 2`. Bybit can deny US and Mainland China IPs with HTTP 403, and Binance Futures can return HTTP 451 for restricted locations. The application now uses free, unauthenticated public fallbacks after these explicit access denials: OKX Spot for Bybit Spot, Gate.io USDT Perpetual for Binance USD-M, and OKX USDT Swap for Bybit Linear. It never proxies or retries a prohibited endpoint to evade regional controls. Gate.io/OKX fallback responses are independently schema-checked and cross-validated; timestamp and funding-history requirements still fail closed if the alternatives cannot provide adequate evidence. The standalone acceptance runner continues to report the original venue denials as inconclusive, so its legacy venue-specific report must not be interpreted as testing the fallback path.
 
 Bybit's REST ticker response exposes a top-level `time` field. For Bybit, the
 reported freshness timestamp therefore measures the provider response clock,

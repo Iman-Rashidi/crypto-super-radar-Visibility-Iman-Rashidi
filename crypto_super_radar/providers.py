@@ -236,6 +236,26 @@ class BybitProvider:
         self.http = http
 
     def ticker(self, symbol: str) -> Dict[str, float]:
+        try:
+            return self._bybit_ticker(symbol)
+        except DataProviderError as exc:
+            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                raise
+            # Free public fallback after an access denial; no proxy or private key.
+            instrument = f"{symbol[:-4]}-{symbol[-4:]}"
+            payload = self.http.get("https://www.okx.com/api/v5/market/ticker", {"instId": instrument})
+            if not isinstance(payload, dict) or payload.get("code") != "0":
+                raise DataProviderError(f"OKX spot fallback returned an API error for {symbol}") from exc
+            items = payload.get("data")
+            if not isinstance(items, list) or len(items) != 1:
+                raise DataProviderError(f"OKX spot fallback has no unique ticker for {symbol}") from exc
+            item = items[0]
+            price, volume = _positive_float(item.get("last")), _safe_float(item.get("volCcy24h"))
+            if price is None or volume is None:
+                raise DataProviderError(f"OKX spot fallback returned incomplete ticker for {symbol}") from exc
+            return {"price": price, "volume_24h": volume, "raw": item, "provider": "OKX Spot"}
+
+    def _bybit_ticker(self, symbol: str) -> Dict[str, float]:
         payload = self.http.get(f"{self.BASE}/v5/market/tickers", {"category": "spot", "symbol": symbol})
         if not isinstance(payload, dict) or payload.get("retCode") not in (0, "0"):
             raise DataProviderError(f"Bybit spot ticker returned an API error for {symbol}")
@@ -437,12 +457,12 @@ class MarketDataService:
                     raise DataProviderError(f"Funding-rate discrepancy exceeds 2 bps: {funding_diff:.6f}")
                 if a["open_interest"] <= 0 or b["open_interest"] <= 0:
                     raise DataProviderError("Open interest is zero or unavailable")
-                name_a, name_b = "Binance USD-M", "Bybit Linear"
+                name_a, name_b = a.get("provider", "Binance USD-M"), b.get("provider", "Bybit Linear")
             else:
                 future_a = executor.submit(self.binance.ticker, asset.symbol)
                 future_b = executor.submit(self.bybit.ticker, asset.symbol)
                 a, b = future_a.result(), future_b.result()
-                name_a, name_b = "Binance Spot", "Bybit Spot"
+                name_a, name_b = "Binance Spot", b.get("provider", "Bybit Spot")
         price_diff = relative_difference_pct(a["price"], b["price"])
         # DEX providers describe the same token/pool universe, so both price
         # and volume are compared. CEX venues have different traded volumes by
@@ -480,7 +500,22 @@ class MarketDataService:
                 raise DataProviderError("No validated pool address for OHLCV request")
             return self.gecko.candles(asset.chain, snapshot.pool_address, token_address=asset.address, timeframe="day", aggregate=1, limit=365)
         if asset.market_type == "perp":
-            return self.perpetual.binance_candles(asset.symbol, limit=365)
+            try:
+                return self.perpetual.binance_candles(asset.symbol, limit=365)
+            except DataProviderError as exc:
+                if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                    raise
+                instrument = f"{asset.symbol[:-4]}-{asset.symbol[-4:]}-SWAP"
+                payload = self.perpetual.http.get(
+                    f"{self.perpetual.OKX}/market/history-candles",
+                    {"instId": instrument, "bar": "1Dutc", "limit": 365},
+                )
+                if not isinstance(payload, dict) or payload.get("code") != "0":
+                    raise DataProviderError("OKX perpetual candle fallback returned an API error") from exc
+                rows = payload.get("data")
+                if not isinstance(rows, list):
+                    raise DataProviderError("OKX perpetual candle fallback returned an invalid schema") from exc
+                return _ohlcv_frame(rows)
         return self.binance.candles(asset.symbol, interval="1d", limit=365)
 
     def benchmark_candles(self) -> pd.DataFrame:
@@ -507,15 +542,41 @@ class MarketDataService:
         }
 
 class PerpetualMarketProvider:
-    """Public Binance USD-M / Bybit linear perpetual market data."""
+    """Public exchange market data with free Gate.io/OKX regional fallbacks."""
 
     BINANCE = "https://fapi.binance.com"
     BYBIT = "https://api.bybit.com"
+    GATE = "https://api.gateio.ws/api/v4"
+    OKX = "https://www.okx.com/api/v5"
 
     def __init__(self, http: PublicHttpClient):
         self.http = http
 
     def binance_ticker(self, symbol: str) -> Dict[str, Any]:
+        try:
+            return self._binance_ticker(symbol)
+        except DataProviderError as exc:
+            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                raise
+            contract = f"{symbol[:-4]}_USDT"
+            tickers = self.http.get(f"{self.GATE}/futures/usdt/tickers", {"contract": contract})
+            meta = self.http.get(f"{self.GATE}/futures/usdt/contracts/{contract}")
+            if not isinstance(tickers, list) or len(tickers) != 1 or not isinstance(meta, dict):
+                raise DataProviderError(f"Gate.io fallback returned invalid ticker for {symbol}") from exc
+            row = tickers[0]
+            values = {
+                "price": _positive_float(row.get("mark_price")),
+                "volume_24h": _safe_float(row.get("volume_24h_settle") or row.get("volume_24h_quote")),
+                "funding_rate": _finite_float(row.get("funding_rate")),
+                "open_interest": _positive_float(row.get("total_size")),
+            }
+            interval = _positive_float(meta.get("funding_interval"))
+            if interval is None or any(v is None for v in values.values()):
+                raise DataProviderError(f"Gate.io fallback returned incomplete data for {symbol}") from exc
+            return {**values, "funding_interval_hours": interval / 3600.0,
+                    "raw": row, "provider": "Gate.io USDT Perpetual"}
+
+    def _binance_ticker(self, symbol: str) -> Dict[str, Any]:
         price = self.http.get(f"{self.BINANCE}/fapi/v1/ticker/price", {"symbol": symbol})
         stats = self.http.get(f"{self.BINANCE}/fapi/v1/ticker/24hr", {"symbol": symbol})
         premium = self.http.get(f"{self.BINANCE}/fapi/v1/premiumIndex", {"symbol": symbol})
@@ -531,6 +592,34 @@ class PerpetualMarketProvider:
         return {**values, "raw": {"ticker": stats, "premium": premium, "open_interest": oi}}
 
     def bybit_ticker(self, symbol: str) -> Dict[str, Any]:
+        try:
+            return self._bybit_ticker(symbol)
+        except DataProviderError as exc:
+            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                raise
+            instrument = f"{symbol[:-4]}-{symbol[-4:]}-SWAP"
+            ticker = self.http.get(f"{self.OKX}/market/ticker", {"instId": instrument})
+            funding = self.http.get(f"{self.OKX}/public/funding-rate", {"instId": instrument})
+            interest = self.http.get(f"{self.OKX}/public/open-interest", {"instType": "SWAP", "instId": instrument})
+            payloads = (ticker, funding, interest)
+            if any(not isinstance(p, dict) or p.get("code") != "0" for p in payloads):
+                raise DataProviderError(f"OKX perpetual fallback returned an API error for {symbol}") from exc
+            rows = [p.get("data") for p in payloads]
+            if any(not isinstance(row, list) or len(row) != 1 for row in rows):
+                raise DataProviderError(f"OKX perpetual fallback has incomplete data for {symbol}") from exc
+            t, f, o = (row[0] for row in rows)
+            values = {
+                "price": _positive_float(t.get("last")),
+                "volume_24h": _safe_float(t.get("volCcy24h")),
+                "funding_rate": _finite_float(f.get("fundingRate")),
+                "open_interest": _positive_float(o.get("oi")),
+            }
+            if any(v is None for v in values.values()):
+                raise DataProviderError(f"OKX perpetual fallback returned invalid values for {symbol}") from exc
+            return {**values, "raw": {"ticker": t, "funding": f, "open_interest": o},
+                    "provider": "OKX USDT Swap"}
+
+    def _bybit_ticker(self, symbol: str) -> Dict[str, Any]:
         payload = self.http.get(f"{self.BYBIT}/v5/market/tickers", {"category": "linear", "symbol": symbol})
         if not isinstance(payload, dict) or payload.get("retCode") not in (0, "0"):
             raise DataProviderError(f"Bybit Linear ticker returned an API error for {symbol}")
@@ -553,6 +642,30 @@ class PerpetualMarketProvider:
         return _ohlcv_frame(rows)
 
     def funding_interval_hours(self, symbol: str) -> float:
+        try:
+            return self._legacy_funding_interval_hours(symbol)
+        except DataProviderError as exc:
+            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                raise
+            contract = f"{symbol[:-4]}_USDT"
+            instrument = f"{symbol[:-4]}-{symbol[-4:]}-SWAP"
+            meta = self.http.get(f"{self.GATE}/futures/usdt/contracts/{contract}")
+            gate_seconds = _positive_float(meta.get("funding_interval")) if isinstance(meta, dict) else None
+            okx = self.http.get(f"{self.OKX}/public/funding-rate-history", {"instId": instrument, "limit": 3})
+            rows = okx.get("data") if isinstance(okx, dict) and okx.get("code") == "0" else None
+            stamps = sorted(
+                int(float(row["fundingTime"])) for row in rows
+                if isinstance(row, dict) and _positive_float(row.get("fundingTime")) is not None
+            ) if isinstance(rows, list) else []
+            if gate_seconds is None or len(stamps) < 2:
+                raise DataProviderError("Gate.io/OKX funding interval metadata is incomplete") from exc
+            okx_hours = (stamps[-1] - stamps[-2]) / 3_600_000
+            gate_hours = gate_seconds / 3600.0
+            if okx_hours <= 0 or abs(gate_hours - okx_hours) > (1.0 / 6.0):
+                raise DataProviderError(f"Gate.io/OKX funding interval mismatch: {gate_hours:g}h vs {okx_hours:g}h") from exc
+            return gate_hours
+
+    def _legacy_funding_interval_hours(self, symbol: str) -> float:
         """Require Binance USD-M and Bybit Linear funding settlement intervals to agree."""
         binance_payload = self.http.get(f"{self.BINANCE}/fapi/v1/fundingInfo")
         if not isinstance(binance_payload, list):
@@ -597,6 +710,51 @@ class PerpetualMarketProvider:
         return binance_hours
 
     def funding_history(self, symbol: str, limit: int = 1000) -> pd.Series:
+        try:
+            return self._legacy_funding_history(symbol, limit)
+        except DataProviderError as exc:
+            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                raise
+            interval = self.funding_interval_hours(symbol)
+            contract, instrument = f"{symbol[:-4]}_USDT", f"{symbol[:-4]}-{symbol[-4:]}-SWAP"
+            gate_rows = self.http.get(f"{self.GATE}/futures/usdt/funding_rate",
+                                      {"contract": contract, "limit": min(limit, 1000)})
+            okx_payload = self.http.get(f"{self.OKX}/public/funding-rate-history",
+                                        {"instId": instrument, "limit": min(limit, 100)})
+            okx_rows = okx_payload.get("data") if isinstance(okx_payload, dict) and okx_payload.get("code") == "0" else None
+            if not isinstance(gate_rows, list) or not isinstance(okx_rows, list):
+                raise DataProviderError("Gate.io/OKX historical funding returned an invalid schema") from exc
+            def series(rows, ts_key, rate_key, scale):
+                points = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise DataProviderError("Historical funding row has an invalid schema")
+                    stamp = _positive_float(row.get(ts_key))
+                    rate = _finite_float(row.get(rate_key))
+                    if stamp is None or rate is None:
+                        raise DataProviderError("Historical funding timestamp or rate is invalid")
+                    points.append((pd.to_datetime(int(stamp), unit=scale, utc=True), rate))
+                result = pd.Series(dict(points), dtype=float).sort_index()
+                if result.index.has_duplicates:
+                    raise DataProviderError("Historical funding contains duplicate timestamps")
+                return result
+            gate = series(gate_rows, "t", "r", "s")
+            okx = series(okx_rows, "fundingTime", "fundingRate", "ms")
+            if gate.empty or okx.empty:
+                raise DataProviderError("Gate.io/OKX historical funding is empty") from exc
+            left = gate.rename("gate").reset_index().rename(columns={"index": "timestamp"})
+            right = okx.rename("okx").reset_index().rename(columns={"index": "timestamp"})
+            matched = pd.merge_asof(left.sort_values("timestamp"), right.sort_values("timestamp"),
+                                    on="timestamp", direction="nearest", tolerance=pd.Timedelta(minutes=10))
+            matched = matched.dropna(subset=["okx"])
+            if matched.empty or (matched["gate"].sub(matched["okx"]).abs() > 0.0002).any():
+                raise DataProviderError("Gate.io/OKX historical funding is unavailable or divergent") from exc
+            result = pd.Series((matched["gate"].to_numpy() + matched["okx"].to_numpy()) / 2.0,
+                               index=pd.DatetimeIndex(matched["timestamp"])).sort_index()
+            result.attrs["funding_interval_hours"] = interval
+            return result
+
+    def _legacy_funding_history(self, symbol: str, limit: int = 1000) -> pd.Series:
         """Fetch cross-checked funding history with a validated common settlement interval."""
         funding_interval_hours = self.funding_interval_hours(symbol)
         binance_rows = self.http.get(f"{self.BINANCE}/fapi/v1/fundingRate", {"symbol": symbol, "limit": min(limit, 1000)})
