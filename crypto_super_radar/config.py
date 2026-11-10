@@ -14,6 +14,7 @@ class RateLimitConfig:
         # page mentioning 30 calls/min; the API documentation may lag.
         "api.geckoterminal.com": 6.0,
         "api.dexscreener.com": 0.21,
+        "open-api-v4.coinglass.com": 2.1,
         "api.binance.com": 0.25,
         "data-api.binance.vision": 0.25,
         "api.bybit.com": 0.25,
