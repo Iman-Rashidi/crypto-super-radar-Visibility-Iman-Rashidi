@@ -103,13 +103,30 @@ main{{max-width:1120px;margin:auto}}
 .muted{{color:var(--muted)}}
 input,button,select{{font:inherit;padding:12px 14px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text);width:100%;box-sizing:border-box}}
 input:focus{{outline:2px solid #54ded080;border-color:var(--teal)}}
-.market-search-activity{{display:none;align-items:center;gap:8px;margin:8px 2px 0;color:#9feee4;font-size:.82rem;font-weight:600}}
-.market-search-activity.is-searching{{display:inline-flex}}
-.market-search-glass{{display:inline-grid;place-items:center;width:25px;height:25px;border:1px solid #397c82;border-radius:50%;background:#10313a;box-shadow:0 0 14px #54ded033;font-size:15px;animation:market-search-spin .72s ease-in-out infinite alternate}}
-.market-search-activity.is-searching .market-search-glass{{animation:market-search-spin .72s ease-in-out infinite alternate,market-search-hop .42s ease-in-out infinite alternate}}
-@keyframes market-search-spin{{from{{transform:rotate(-24deg)}}to{{transform:rotate(32deg)}}}}
-@keyframes market-search-hop{{from{{translate:0 1px}}to{{translate:0 -4px}}}}
-@media(prefers-reduced-motion:reduce){{.market-search-glass,.market-search-activity.is-searching .market-search-glass{{animation:none}}}}
+.market-search-activity{{display:none;align-items:center;gap:10px;margin:10px 2px 0;padding:8px 11px;border:1px solid #24556a;border-radius:14px;background:linear-gradient(100deg,#0c2634,#102c39);color:#9feee4;font-size:.84rem;font-weight:650;overflow:hidden}}
+.market-search-activity.is-searching,.market-search-activity.is-found{{display:flex}}
+.market-search-dog{{display:block;flex:0 0 82px;width:82px;height:58px;overflow:visible}}
+.market-search-dog .shiba-body{{transform-box:fill-box;transform-origin:center;animation:shiba-sniff-body .48s ease-in-out infinite alternate}}
+.market-search-dog .shiba-head{{transform-box:fill-box;transform-origin:72% 78%;animation:shiba-sniff-head .34s ease-in-out infinite alternate}}
+.market-search-dog .shiba-tail{{transform-box:fill-box;transform-origin:10% 90%;animation:shiba-tail-wag .22s ease-in-out infinite alternate}}
+.market-search-dog .shiba-leg-front{{transform-box:fill-box;transform-origin:50% 0;animation:shiba-paw .3s ease-in-out infinite alternate}}
+.market-search-dog .shiba-leg-back{{transform-box:fill-box;transform-origin:50% 0;animation:shiba-paw .3s ease-in-out .12s infinite alternate}}
+.market-search-treasure{{font-size:25px;opacity:0;transform:scale(.35) rotate(-18deg);transition:opacity .22s ease,transform .3s cubic-bezier(.2,1.5,.5,1)}}
+.market-search-activity.is-found .market-search-treasure{{opacity:1;transform:scale(1) rotate(8deg);animation:shiba-treasure-pop .55s ease-in-out infinite alternate}}
+.market-search-activity.is-found .market-search-dog .shiba-body{{animation:shiba-found-bounce .38s ease-in-out infinite alternate}}
+.market-search-activity.is-found .market-search-dog .shiba-head{{animation:shiba-found-look .6s ease-in-out infinite alternate}}
+.market-search-activity.is-found .market-search-dog .shiba-tail{{animation:shiba-tail-wag .1s ease-in-out infinite alternate}}
+.market-search-found-copy{{display:none}}
+.market-search-activity.is-found .market-search-searching-copy{{display:none}}
+.market-search-activity.is-found .market-search-found-copy{{display:inline}}
+@keyframes shiba-sniff-body{{from{{transform:translateY(1px)}}to{{transform:translateY(-2px)}}}}
+@keyframes shiba-sniff-head{{from{{transform:rotate(5deg) translateY(2px)}}to{{transform:rotate(-8deg) translateY(5px)}}}}
+@keyframes shiba-tail-wag{{from{{transform:rotate(-20deg)}}to{{transform:rotate(24deg)}}}}
+@keyframes shiba-paw{{from{{transform:rotate(-9deg) translateY(0)}}to{{transform:rotate(10deg) translateY(2px)}}}}
+@keyframes shiba-found-bounce{{from{{transform:translateY(0) scale(1)}}to{{transform:translateY(-5px) scale(1.025)}}}}
+@keyframes shiba-found-look{{from{{transform:rotate(-12deg)}}to{{transform:rotate(7deg)}}}}
+@keyframes shiba-treasure-pop{{from{{filter:drop-shadow(0 0 2px #ffc857)}}to{{filter:drop-shadow(0 0 10px #ffc857)}}}}
+@media(prefers-reduced-motion:reduce){{.market-search-dog *,.market-search-treasure{{animation:none!important;transition:none!important}}}}
 label{{display:block;margin-top:12px;font-size:.94rem;font-weight:600}}
 button{{background:linear-gradient(135deg,#3179e8,#2862c7);border:0;margin-top:12px;cursor:pointer;font-weight:700;transition:filter .15s ease,transform .15s ease}}
 button:hover{{filter:brightness(1.12);transform:translateY(-1px)}}
@@ -701,8 +718,30 @@ class Handler(BaseHTTPRequestHandler):
             <label>جست‌وجوی نام یا نماد
               <input id="crypto-market-search" type="search" placeholder="مثلاً BTC، بیت‌کوین یا SUI" autocomplete="off">
               <span id="crypto-market-search-activity" class="market-search-activity" role="status" aria-live="polite">
-                <span class="market-search-glass" aria-hidden="true">🔎</span>
-                <span>دارم می‌گردم... نکنه قایم شده؟ 😄</span>
+                <svg class="market-search-dog" viewBox="0 0 120 82" role="img" aria-label="سگ شیبا در حال بو کشیدن و جست‌وجو">
+                  <g class="shiba-body">
+                    <path class="shiba-tail" d="M25 37 C3 35 8 5 27 9 C43 12 36 29 24 25" fill="none" stroke="#d9782d" stroke-width="11" stroke-linecap="round"/>
+                    <path d="M26 44 Q36 26 68 34 Q91 39 91 57 Q83 72 48 67 Q23 65 26 44" fill="#d9782d" stroke="#8c451f" stroke-width="2"/>
+                    <path d="M43 55 Q62 65 83 56 Q81 70 57 70 Q42 67 43 55" fill="#fff0d7"/>
+                    <g class="shiba-leg-back"><path d="M36 59 L32 73 Q31 78 43 77 L49 74 L48 64" fill="#d9782d" stroke="#8c451f" stroke-width="1.5"/><path d="M31 74 Q39 71 48 75 Q49 80 35 80 Q28 79 31 74" fill="#fff0d7"/></g>
+                    <g class="shiba-leg-front"><path d="M72 57 L70 73 Q69 78 82 77 L88 74 L84 59" fill="#d9782d" stroke="#8c451f" stroke-width="1.5"/><path d="M69 74 Q78 71 87 75 Q89 80 75 80 Q67 79 69 74" fill="#fff0d7"/></g>
+                  </g>
+                  <g class="shiba-head">
+                    <path d="M72 39 L74 9 Q77 2 86 15 L91 39" fill="#d9782d" stroke="#8c451f" stroke-width="2"/>
+                    <path d="M76 15 L78 31 L86 22" fill="#f8c7a0"/>
+                    <path d="M92 36 L104 12 Q111 7 113 23 L109 47" fill="#d9782d" stroke="#8c451f" stroke-width="2"/>
+                    <path d="M101 23 L108 18 L107 37" fill="#f8c7a0"/>
+                    <path d="M69 35 Q80 20 102 34 Q117 45 107 60 Q96 72 76 61 Q62 53 69 35" fill="#e9893b" stroke="#8c451f" stroke-width="2"/>
+                    <path d="M71 49 Q80 39 91 49 Q101 55 111 47 Q113 62 98 66 Q79 67 71 49" fill="#fff0d7"/>
+                    <ellipse cx="104" cy="49" rx="3" ry="2.5" fill="#241b18"/>
+                    <path d="M108 57 Q112 60 115 56" fill="none" stroke="#40251d" stroke-width="2" stroke-linecap="round"/>
+                    <circle cx="87" cy="40" r="2.5" fill="#241b18"/>
+                    <path d="M74 30 L88 26 L101 31" fill="none" stroke="#ffc36b" stroke-width="2" stroke-linecap="round"/>
+                  </g>
+                </svg>
+                <span class="market-search-searching-copy">شیبا داره بو می‌کشه... چیزی پیدا می‌کنه؟ 🐾</span>
+                <span class="market-search-found-copy">پیداش کرد! گنج اینجاست! 🎉</span>
+                <span class="market-search-treasure" aria-hidden="true">💰</span>
               </span>
             </label>
             <label>مرتب‌سازی
@@ -769,6 +808,7 @@ class Handler(BaseHTTPRequestHandler):
             });
             rows.replaceChildren(...tableRows);
             count.textContent='نمایش '+visible.length+' از '+marketItems.length+' رمزارز';
+            searchActivity.classList.toggle('is-found',query.length>0&&visible.length>0);
             if(!visible.length){const empty=cell('td','موردی با این جست‌وجو پیدا نشد');empty.colSpan=7;const tr=document.createElement('tr');tr.appendChild(empty);rows.replaceChildren(tr);}
           }
           async function refresh(){
@@ -793,7 +833,7 @@ class Handler(BaseHTTPRequestHandler):
               renderRows();
               searchActivity.classList.remove('is-searching');
               searchTimer=null;
-            },260);
+            },650);
           });
           sort.addEventListener('change',renderRows);
           button.addEventListener('click',refresh);refresh();
