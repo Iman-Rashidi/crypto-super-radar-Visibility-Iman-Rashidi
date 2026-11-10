@@ -191,6 +191,17 @@ Each DEX asset is checked against GeckoTerminal and DexScreener. CEX spot assets
 
 A provider returning no data, an unreadable candle timestamp, a missing pool creation timestamp, or insufficient history does **not** become zero, fresh, or safe. The corresponding gate is `UNKNOWN`.
 
+## Elliott-wave structure monitor
+
+The analysis report also contains an optional, price-only Elliott-wave structure
+summary. It uses confirmed ZigZag pivots from validated daily candles, applies
+standard impulse invalidation checks, and reports candidate phase, confirmed
+pivot times, and an invalidation level. A pivot records both where it occurred
+and when a later reversal confirmed it, avoiding look-ahead/repainting.
+Ambiguous structures remain AMBIGUOUS. Wave labels are scenarios, not
+probabilities or independent buy/sell signals; this module does not add a
+mandatory gate and cannot alter the 12-gate decision.
+
 ## 7. Signal and risk policy
 
 - The initial confirmation threshold is 75/100; it is a tunable research parameter, not a probability of profit.

@@ -86,3 +86,13 @@ The decision contract remains fail-closed: all 12 gates must PASS. Solana's boun
 ## Optional dashboard / داشبورد اختیاری
 
 The core CLI and the Render HTTP service do not require Streamlit. A local analyst can install the optional dashboard dependency with `python -m pip install -e ".[dashboard]"` and launch `streamlit run crypto_super_radar/streamlit_app.py`. The UI consumes the same `AnalysisResult` object and renders gate, error, quantitative and whale/sentiment Pandas tables. The Render blueprint remains the dependency-light HTTP application until a separate memory and deployment assessment is approved.
+
+
+## Elliott-wave monitoring
+
+Daily close-only confirmed pivots feed a deterministic impulse-prefix evaluator
+for waves 1–5. The monitor emits a direction/phase hypothesis, pivot confirmation
+timestamps, and a structural invalidation level. It does not infer a corrective
+direction after wave 5 and does not participate in hard-gate approval. If the
+pivot sequence violates impulse rules or cannot be counted, the result is
+AMBIGUOUS; the market-engine signal remains unchanged.

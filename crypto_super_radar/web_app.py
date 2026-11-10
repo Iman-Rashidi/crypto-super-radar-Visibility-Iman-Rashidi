@@ -141,6 +141,7 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                     "market_sentiment_score", "fear_greed_value", "fear_greed_attribution",
                     "walk_forward_status", "walk_forward_fold_count", "risk_score",
                     "opportunity_rank", "confidence_level_pct", "evidence_confidence_pct",
+                    "elliott_wave",
                 )
             },
         }

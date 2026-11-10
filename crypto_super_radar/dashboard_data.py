@@ -105,6 +105,16 @@ def quantitative_dataframe(result: AnalysisResult) -> pd.DataFrame:
         add("روند و مومنتوم", "جهت ساختار", e.get("direction"))
         add("روند و مومنتوم", "رژیم دارایی", e.get("asset_regime"))
 
+    wave = (result.metrics or {}).get("elliott_wave") or {}
+    add("ساختار موج", "وضعیت شمارش الیوت", wave.get("status"))
+    add("ساختار موج", "سناریوی ساختاری", wave.get("pattern"))
+    add("ساختار موج", "فاز موج", wave.get("phase"))
+    add("ساختار موج", "تعداد موج‌های تأییدشده", wave.get("wave_count"))
+    add("ساختار موج", "موج بعدی سناریویی", wave.get("next_wave"))
+    add("ساختار موج", "سطح ابطال شمارش", wave.get("invalidation_price"), "USD")
+    add("ساختار موج", "تعداد پیوت‌های تأییدشده", wave.get("confirmed_pivot_count"))
+    add("ساختار موج", "معنای اطمینان", wave.get("confidence_semantics"))
+
     liquidity = gates.get(5)
     if liquidity:
         e = liquidity.evidence

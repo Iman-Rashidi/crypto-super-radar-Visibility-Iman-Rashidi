@@ -9,6 +9,7 @@ from .cex_whales import CexWhaleScanner
 from .config import AppConfig
 from .engine import ConfirmationEngine
 from .evm_security import screen_evm_token
+from .elliott_waves import monitor_elliott_waves
 from .evm_transfers import EvmTransferScanner
 from .market_sentiment import fetch_market_sentiment
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
@@ -249,6 +250,10 @@ class WhaleAwareConfirmationEngine:
         result = self.base.analyze(
             asset, supplied + news_items + social_items, open_portfolio_risk_pct,
         )
+        candle_frames = getattr(self.data, "candle_frames", {})
+        wave_candles = candle_frames.get(asset.raw) if isinstance(candle_frames, dict) else None
+        # Elliott output is descriptive only; it does not gate or change decisions.
+        result.metrics["elliott_wave"] = monitor_elliott_waves(wave_candles)
         whale = self.data.whale_evidence.get(asset.raw, {"status": "UNKNOWN"})
         whale_status = str(whale.get("status", "UNKNOWN")).upper()
         whale_flow_available = any(whale.get(key) is not None for key in (

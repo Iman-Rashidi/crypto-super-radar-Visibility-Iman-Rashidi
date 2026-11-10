@@ -510,6 +510,10 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertEqual(result.metrics["confidence_level_pct"], 100.0)
         self.assertEqual(result.metrics["risk_score"], result.estimated_risk_score)
         self.assertEqual(result.metrics["opportunity_rank"], result.opportunity_rank)
+        self.assertIn("elliott_wave", result.metrics)
+        # A missing/ambiguous wave count is advisory and does not change the engine signal.
+        self.assertEqual(result.metrics["elliott_wave"]["status"], "UNKNOWN")
+        self.assertEqual(result.signal.value, "LONG")
 
     def test_dashboard_dataframes_show_twelve_gates_and_quant_metrics(self):
         engine = WhaleAwareConfirmationEngine(
