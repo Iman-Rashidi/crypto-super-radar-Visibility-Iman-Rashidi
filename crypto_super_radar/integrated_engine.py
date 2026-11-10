@@ -14,6 +14,7 @@ from .chart_patterns import monitor_chart_patterns, contradicts_confirmed_breako
 from .candle_quality import completed_daily_candles
 from .evm_transfers import EvmTransferScanner
 from .market_sentiment import fetch_market_sentiment
+from .market_intelligence import fetch_market_intelligence
 from .market_behavior import analyze_market_behavior
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
@@ -358,6 +359,26 @@ class WhaleAwareConfirmationEngine:
              "market_behavior": behavior},
         ))
         direction = result.gates[2].evidence.get("direction") if len(result.gates) >= 3 else None
+        market_intelligence = fetch_market_intelligence(
+            asset,
+            direction or "NONE",
+            snapshot=snapshot,
+            http=getattr(self.data, "http", None),
+            min_dex_liquidity_usd=self.config.thresholds.min_dex_liquidity_usd,
+        )
+        market_intelligence_scoring = market_intelligence.get("scoring") or {}
+        market_intelligence_confirmation_adjustment = float(
+            market_intelligence_scoring.get("confirmation_adjustment") or 0.0
+        )
+        market_intelligence_risk_adjustment = float(
+            market_intelligence_scoring.get("risk_adjustment") or 0.0
+        )
+        market_intelligence_opportunity_adjustment = float(
+            market_intelligence_scoring.get("opportunity_adjustment") or 0.0
+        )
+        market_intelligence_confidence_penalty = float(
+            market_intelligence_scoring.get("confidence_penalty") or 0.0
+        )
         exchange_net = whale.get("net_exchange_flow_usd")
         wallet_net = whale.get("net_whale_transfer_usd")
         cex_net = whale.get("net_whale_trade_flow_usd")
@@ -374,7 +395,7 @@ class WhaleAwareConfirmationEngine:
             "DISTRIBUTION_PRESSURE" if bias_total < 0 else "MIXED_OR_BALANCED"
         )
         scoring = self.config.scoring
-        adjustment = 0.0
+        adjustment = market_intelligence_confirmation_adjustment
         whale_risk_adjustment = 0.0
         sentiment_risk_adjustment = 0.0
         if direction in {"LONG", "SHORT"} and whale_bias != "UNKNOWN":
@@ -412,7 +433,11 @@ class WhaleAwareConfirmationEngine:
             )
         if result.confirmation_score is not None:
             result.confirmation_score = round(max(0.0, min(100.0, result.confirmation_score + adjustment)), 2)
-        risk_adjustment = whale_risk_adjustment + sentiment_risk_adjustment
+        risk_adjustment = (
+            market_intelligence_risk_adjustment
+            + whale_risk_adjustment
+            + sentiment_risk_adjustment
+        )
         self.whale_store.record(asset.raw, whale, whale_bias)
         whale_history = self.whale_store.summary(asset.raw)
         if result.estimated_risk_score is not None:
@@ -442,7 +467,8 @@ class WhaleAwareConfirmationEngine:
             else:
                 sentiment_alignment = "OPPOSED"
         confidence_penalty = (
-            (
+            market_intelligence_confidence_penalty
+            + (
                 scoring.confidence_whale_opposed if whale_alignment == "OPPOSED" else
                 scoring.confidence_whale_neutral if whale_alignment == "NEUTRAL" else 0.0
             )
@@ -469,7 +495,9 @@ class WhaleAwareConfirmationEngine:
             scoring.opportunity_sentiment_opposed if sentiment_alignment == "OPPOSED" else 0.0
         )
         opportunity_adjustment = (
-            opportunity_whale_adjustment + opportunity_sentiment_adjustment
+            opportunity_whale_adjustment
+            + opportunity_sentiment_adjustment
+            + market_intelligence_opportunity_adjustment
         )
         if result.opportunity_rank is not None:
             result.opportunity_rank = round(
@@ -483,7 +511,12 @@ class WhaleAwareConfirmationEngine:
             "whale_exchange_net_flow_usd": exchange_net,
             "whale_wallet_net_transfer_usd": wallet_net,
             "whale_cex_large_trade_net_usd": cex_net,
-            "whale_sentiment_adjustment": adjustment,
+            "whale_sentiment_adjustment": adjustment - market_intelligence_confirmation_adjustment,
+            "market_intelligence": market_intelligence,
+            "market_intelligence_confirmation_adjustment": market_intelligence_confirmation_adjustment,
+            "market_intelligence_risk_adjustment": market_intelligence_risk_adjustment,
+            "market_intelligence_opportunity_adjustment": market_intelligence_opportunity_adjustment,
+            "market_intelligence_confidence_penalty": market_intelligence_confidence_penalty,
             "whale_risk_adjustment": whale_risk_adjustment,
             "sentiment_risk_adjustment": sentiment_risk_adjustment,
             "combined_risk_adjustment": risk_adjustment,
