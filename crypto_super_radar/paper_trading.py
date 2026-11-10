@@ -64,7 +64,10 @@ class PaperLedger:
                     signal_bar TEXT NOT NULL,
                     confirmation_score REAL NOT NULL,
                     risk_budget REAL NOT NULL,
-                    mark_price REAL NOT NULL
+                    mark_price REAL NOT NULL,
+                    initial_stop_loss REAL NOT NULL DEFAULT 0,
+                    max_holding_days INTEGER NOT NULL DEFAULT 14,
+                    peak_price REAL NOT NULL DEFAULT 0
                 )
             """)
             self._db.execute("""
@@ -89,6 +92,24 @@ class PaperLedger:
                     UNIQUE(asset, signal_bar)
                 )
             """)
+            position_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(paper_positions)")
+            }
+            for name, declaration in (
+                ("initial_stop_loss", "REAL NOT NULL DEFAULT 0"),
+                ("max_holding_days", "INTEGER NOT NULL DEFAULT 14"),
+                ("peak_price", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if name not in position_columns:
+                    self._db.execute(
+                        f"ALTER TABLE paper_positions ADD COLUMN {name} {declaration}"
+                    )
+            self._db.execute(
+                "UPDATE paper_positions SET initial_stop_loss=stop_loss WHERE initial_stop_loss<=0"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET peak_price=entry_price WHERE peak_price<=0"
+            )
             self._db.execute(
                 "INSERT OR IGNORE INTO paper_account(id, initial_equity, cash_balance, updated_at) VALUES (1, ?, ?, ?)",
                 (float(initial_equity_usd), float(initial_equity_usd), int(time.time())),
@@ -126,14 +147,16 @@ class PaperLedger:
             self._db.execute("""
                 INSERT INTO paper_positions
                 (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
-                 opened_at, signal_bar, confirmation_score, risk_budget, mark_price)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
+                 initial_stop_loss, max_holding_days, peak_price)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 position["asset"], position["quantity"], position["entry_price"],
                 position["stop_loss"], position["take_profit"], position["entry_fee"],
                 position["opened_at"], position["signal_bar"],
                 position["confirmation_score"], position["risk_budget"],
-                position["entry_price"],
+                position["entry_price"], position["initial_stop_loss"],
+                position["max_holding_days"], position["entry_price"],
             ))
             self._db.execute(
                 "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
@@ -141,11 +164,93 @@ class PaperLedger:
             )
         return True
 
-    def mark(self, price: float) -> None:
+    def update_management(self, price: float, stop_loss: float) -> None:
         with self._lock, self._db:
             self._db.execute(
-                "UPDATE paper_positions SET mark_price=? WHERE id=1", (float(price),)
+                """UPDATE paper_positions
+                SET mark_price=?, peak_price=MAX(peak_price, ?),
+                    stop_loss=MAX(stop_loss, ?)
+                WHERE id=1""",
+                (float(price), float(price), float(stop_loss)),
             )
+
+    def risk_controls(
+        self, *, asset: str, daily_loss_limit_pct: float, max_drawdown_pct: float,
+        max_consecutive_losses: int, cooldown_hours_after_loss: float,
+        now: Optional[int] = None,
+    ) -> dict[str, Any]:
+        now = int(time.time()) if now is None else int(now)
+        day_start = now // 86_400 * 86_400
+        state = self.state()
+        initial = float(state["account"]["initial_equity_usd"])
+        equity = float(state["account"]["equity_usd"])
+        with self._lock:
+            daily_net = float(self._db.execute(
+                "SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE closed_at>=?",
+                (day_start,),
+            ).fetchone()[0])
+            recent = self._db.execute(
+                "SELECT net_pnl FROM paper_trades ORDER BY closed_at DESC, id DESC LIMIT ?",
+                (int(max_consecutive_losses),),
+            ).fetchall()
+            history = self._db.execute(
+                "SELECT net_pnl FROM paper_trades ORDER BY closed_at ASC, id ASC"
+            ).fetchall()
+            last_asset = self._db.execute(
+                "SELECT net_pnl, closed_at FROM paper_trades WHERE asset=? "
+                "ORDER BY closed_at DESC, id DESC LIMIT 1",
+                (asset,),
+            ).fetchone()
+        consecutive = 0
+        for row in recent:
+            if float(row["net_pnl"]) >= 0:
+                break
+            consecutive += 1
+        daily_loss_pct = max(0.0, -daily_net / initial * 100.0) if initial > 0 else 0.0
+        running_equity = initial
+        peak_equity = initial
+        max_historical_drawdown = 0.0
+        for row in history:
+            running_equity += float(row["net_pnl"])
+            peak_equity = max(peak_equity, running_equity)
+            if peak_equity > 0:
+                max_historical_drawdown = max(
+                    max_historical_drawdown,
+                    (peak_equity - running_equity) / peak_equity * 100.0,
+                )
+        peak_equity = max(peak_equity, equity)
+        current_drawdown = (
+            (peak_equity - equity) / peak_equity * 100.0 if peak_equity > 0 else 100.0
+        )
+        drawdown_pct = max(max_historical_drawdown, current_drawdown)
+        cooldown_remaining = 0.0
+        if last_asset and float(last_asset["net_pnl"]) < 0:
+            cooldown_remaining = max(
+                0.0, cooldown_hours_after_loss * 3600.0 - (now - int(last_asset["closed_at"]))
+            ) / 3600.0
+        reasons = []
+        if daily_loss_pct >= daily_loss_limit_pct * 100.0:
+            reasons.append("DAILY_LOSS_LIMIT")
+        if drawdown_pct >= max_drawdown_pct * 100.0:
+            reasons.append("MAX_EQUITY_DRAWDOWN")
+        if consecutive >= max_consecutive_losses:
+            reasons.append("CONSECUTIVE_LOSSES")
+        if cooldown_remaining > 0:
+            reasons.append("POST_LOSS_COOLDOWN")
+        return {
+            "entry_allowed": not reasons,
+            "halt_reasons": reasons,
+            "daily_realized_loss_pct": round(daily_loss_pct, 4),
+            "max_equity_drawdown_pct": round(drawdown_pct, 4),
+            "consecutive_losses": consecutive,
+            "cooldown_hours_remaining": round(cooldown_remaining, 2),
+            "limits": {
+                "daily_loss_pct": daily_loss_limit_pct * 100.0,
+                "max_drawdown_pct": max_drawdown_pct * 100.0,
+                "max_consecutive_losses": max_consecutive_losses,
+                "cooldown_hours_after_loss": cooldown_hours_after_loss,
+            },
+        }
 
     def close_position(self, exit_price: float, exit_fee_rate: float, reason: str) -> Optional[dict[str, Any]]:
         with self._lock, self._db:
@@ -234,11 +339,18 @@ class PaperTradingBot:
         min_confirmation_score: float = 75.0,
         fee_bps_per_side: float = 8.0,
         slippage_bps_per_side: float = 10.0,
+        daily_loss_limit_pct: float = 0.015,
+        max_drawdown_pct: float = 0.10,
+        max_consecutive_losses: int = 3,
+        cooldown_hours_after_loss: float = 24.0,
+        min_net_reward_risk: float = 1.8,
     ):
         self.engine = engine
         self.ledger = ledger or PaperLedger()
         values = (risk_per_trade_pct, max_position_notional_pct, max_risk_score,
-                  min_confirmation_score, fee_bps_per_side, slippage_bps_per_side)
+                  min_confirmation_score, fee_bps_per_side, slippage_bps_per_side,
+                  daily_loss_limit_pct, max_drawdown_pct, cooldown_hours_after_loss,
+                  min_net_reward_risk)
         if not all(math.isfinite(float(x)) for x in values):
             raise ValueError("Paper trading configuration must be finite.")
         if not 0 < risk_per_trade_pct <= 0.02:
@@ -247,12 +359,39 @@ class PaperTradingBot:
             raise ValueError("Position notional cap must be greater than zero and at most 25%.")
         if fee_bps_per_side < 0 or slippage_bps_per_side < 0:
             raise ValueError("Fee and slippage assumptions cannot be negative.")
+        if not 0 < daily_loss_limit_pct <= 0.10 or not 0 < max_drawdown_pct <= 0.50:
+            raise ValueError("Daily loss and max drawdown limits must be conservative positive fractions.")
+        if not isinstance(max_consecutive_losses, int) or max_consecutive_losses <= 0:
+            raise ValueError("Maximum consecutive losses must be a positive integer.")
+        if cooldown_hours_after_loss < 0 or min_net_reward_risk < 1.0:
+            raise ValueError("Cooldown cannot be negative and net reward/risk must be at least 1.");
         self.risk_per_trade_pct = risk_per_trade_pct
         self.max_position_notional_pct = max_position_notional_pct
         self.max_risk_score = max_risk_score
         self.min_confirmation_score = min_confirmation_score
         self.fee_rate = fee_bps_per_side / 10_000.0
         self.slippage_rate = slippage_bps_per_side / 10_000.0
+        self.daily_loss_limit_pct = daily_loss_limit_pct
+        self.max_drawdown_pct = max_drawdown_pct
+        self.max_consecutive_losses = max_consecutive_losses
+        self.cooldown_hours_after_loss = cooldown_hours_after_loss
+        self.min_net_reward_risk = min_net_reward_risk
+
+    def state(self) -> dict[str, Any]:
+        state = self.ledger.state()
+        position = state.get("open_position")
+        recent_trades = state.get("recent_trades") or []
+        control_asset = (position or {}).get("asset") or (
+            recent_trades[0].get("asset") if recent_trades else ""
+        )
+        state["risk_controls"] = self.ledger.risk_controls(
+            asset=control_asset,
+            daily_loss_limit_pct=self.daily_loss_limit_pct,
+            max_drawdown_pct=self.max_drawdown_pct,
+            max_consecutive_losses=self.max_consecutive_losses,
+            cooldown_hours_after_loss=self.cooldown_hours_after_loss,
+        )
+        return state
 
     def run_once(self, asset_input: str | AssetSpec) -> dict[str, Any]:
         asset = asset_input if isinstance(asset_input, AssetSpec) else AssetSpec.parse(asset_input)
@@ -277,16 +416,34 @@ class PaperTradingBot:
             if price is None or price <= 0:
                 return {"status": "UNKNOWN", "asset": asset.raw,
                         "reason": "Fresh cross-validated price is invalid; position was left unchanged."}
-            self.ledger.mark(price)
-            if price <= float(position["stop_loss"]):
-                fill = min(price, float(position["stop_loss"])) * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(fill, self.fee_rate, "STOP_LOSS")
+            entry = float(position["entry_price"])
+            initial_stop = float(position.get("initial_stop_loss") or position["stop_loss"])
+            initial_risk = max(0.0, entry - initial_stop)
+            peak = max(float(position.get("peak_price") or entry), price)
+            managed_stop = float(position["stop_loss"])
+            if initial_risk > 0 and peak >= entry + initial_risk:
+                break_even = entry * (1.0 + 2.0 * self.fee_rate + 2.0 * self.slippage_rate)
+                managed_stop = max(managed_stop, break_even)
+            if initial_risk > 0 and peak >= entry + 1.5 * initial_risk:
+                managed_stop = max(managed_stop, peak - initial_risk)
+            self.ledger.update_management(price, managed_stop)
+            managed_position = self.ledger.position() or position
+            active_stop = float(managed_position["stop_loss"])
+            if price <= active_stop:
+                fill = min(price, active_stop) * (1.0 - self.slippage_rate)
+                closed = self.ledger.close_position(fill, self.fee_rate, "TRAILING_OR_INITIAL_STOP")
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             if price >= float(position["take_profit"]):
                 fill = float(position["take_profit"]) * (1.0 - self.slippage_rate)
                 closed = self.ledger.close_position(fill, self.fee_rate, "TAKE_PROFIT")
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
+            max_holding = max(1, int(position.get("max_holding_days") or 14))
+            if int(time.time()) - int(position["opened_at"]) >= max_holding * 86_400:
+                fill = price * (1.0 - self.slippage_rate)
+                closed = self.ledger.close_position(fill, self.fee_rate, "TIME_EXIT")
+                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             return {"status": "HOLDING", "asset": asset.raw, "mark_price": price,
+                    "active_stop_loss": active_stop,
                     "unrealized_pnl_usd": self.ledger.state()["account"]["unrealized_pnl_usd"]}
 
         try:
@@ -332,6 +489,18 @@ class PaperTradingBot:
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "This completed-candle signal was already paper-traded."}
 
+        controls = self.ledger.risk_controls(
+            asset=asset.raw,
+            daily_loss_limit_pct=self.daily_loss_limit_pct,
+            max_drawdown_pct=self.max_drawdown_pct,
+            max_consecutive_losses=self.max_consecutive_losses,
+            cooldown_hours_after_loss=self.cooldown_hours_after_loss,
+        )
+        if not controls["entry_allowed"]:
+            return {"status": "RISK_HALT", "asset": asset.raw,
+                    "reason": "Paper entries paused by risk circuit breaker.",
+                    "risk_controls": controls}
+
         state = self.ledger.state()
         equity = _number(state["account"]["equity_usd"])
         cash = _number(state["account"]["cash_balance_usd"])
@@ -339,8 +508,20 @@ class PaperTradingBot:
             return {"status": "UNKNOWN", "asset": asset.raw, "reason": "Paper account balance is invalid."}
         risk_budget = equity * self.risk_per_trade_pct
         unit_risk = entry - exit_at_stop + entry * self.fee_rate + exit_at_stop * self.fee_rate
-        if unit_risk <= 0:
-            return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Per-unit risk is invalid."}
+        target_fill = target * (1.0 - self.slippage_rate)
+        unit_reward = target_fill - entry - entry * self.fee_rate - target_fill * self.fee_rate
+        net_reward_risk = unit_reward / unit_risk if unit_risk > 0 else None
+        if unit_risk <= 0 or unit_reward <= 0 or net_reward_risk is None:
+            return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Net reward/risk is invalid after costs."}
+        if net_reward_risk < self.min_net_reward_risk:
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Net reward/risk after fees and slippage is below the minimum.",
+                    "net_reward_risk": round(net_reward_risk, 3)}
+        holding_raw = _number(getattr(result, "expected_holding_days", None))
+        if holding_raw is None or holding_raw < 1:
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "A valid maximum holding period is required for paper entry."}
+        max_holding_days = min(90, max(1, int(holding_raw)))
         quantity = min(
             risk_budget / unit_risk,
             equity * self.max_position_notional_pct / entry,
@@ -353,9 +534,11 @@ class PaperTradingBot:
             return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Position sizing returned no safe quantity."}
         record = {
             "asset": asset.raw, "quantity": quantity, "entry_price": entry,
-            "stop_loss": stop, "take_profit": target, "entry_fee": entry_fee,
+            "stop_loss": stop, "initial_stop_loss": stop,
+            "take_profit": target, "entry_fee": entry_fee,
             "opened_at": int(time.time()), "signal_bar": signal_bar,
             "confirmation_score": score, "risk_budget": risk_budget,
+            "max_holding_days": max_holding_days,
         }
         if not self.ledger.open_position(record, debit):
             return {"status": "NO_TRADE", "asset": asset.raw,
@@ -363,5 +546,6 @@ class PaperTradingBot:
         return {"status": "OPENED", "asset": asset.raw, "side": "LONG",
                 "quantity": quantity, "entry_price": entry, "stop_loss": stop,
                 "take_profit": target, "risk_budget_usd": risk_budget,
-                "confirmation_score": score, "fee_usd": entry_fee,
-                "mode": "PAPER_ONLY", "orders_submitted": False}
+                "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
+                "max_holding_days": max_holding_days, "fee_usd": entry_fee,
+                "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False}

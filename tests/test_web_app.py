@@ -57,6 +57,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("۱۲ فیلتر اجباری", page)
         self.assertIn("Paper Research", page)
         self.assertIn("ربات معامله‌گر آزمایشی", page)
+        self.assertIn("سقف زیان روزانه", page)
         self.assertIn('action="/paper-bot/tick"', page)
         self.assertIn("python scripts/paper_trading_bot.py", page)
         self.assertIn("ماشین‌حساب حرفه‌ای سناریوی Spot", page)

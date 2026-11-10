@@ -163,7 +163,7 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
     global SCAN_RUNNING
     try:
         result = PAPER_BOT.run_once(asset)
-        payload = {"cycle": result, "paper_state": PAPER_BOT.ledger.state()}
+        payload = {"cycle": result, "paper_state": PAPER_BOT.state()}
         with LOCK:
             JOBS[job_id] = {"status": "completed", "result": payload}
     except Exception as exc:
@@ -248,7 +248,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(job, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/paper-bot/status":
-            payload = PAPER_BOT.ledger.state()
+            payload = PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/history":
@@ -332,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
         </script>
         <section class="card" id="paper-bot">
           <h2>ربات معامله‌گر آزمایشی (Paper Trading)</h2>
-          <p class="muted">ربات فقط LONG در بازار Spot را با همان ۱۲ فیلتر ارزیابی می‌کند؛ هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش نیز در حساب آزمایشی اعمال می‌شوند.</p>
+          <p class="muted">ربات فقط LONG در بازار Spot را با همان ۱۲ فیلتر ارزیابی می‌کند؛ هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
           <form method="post" action="/paper-bot/tick">
             <label>دارایی</label>
             <select name="asset">
@@ -351,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
           try{
             const r=await fetch('/paper-bot/status');const s=await r.json();
             const a=s.account||{};
-            box.textContent='حالت: Paper فقط · موجودی نقدی: '+Number(a.cash_balance_usd||0).toFixed(2)+' USD · ارزش کل حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · سود/زیان تحقق‌یافته: '+Number(a.realized_pnl_usd||0).toFixed(2)+' USD · موقعیت باز: '+((s.open_position||{}).asset||'ندارد');
+            box.textContent='حالت: Paper فقط · موجودی نقدی: '+Number(a.cash_balance_usd||0).toFixed(2)+' USD · ارزش کل حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · سود/زیان تحقق‌یافته: '+Number(a.realized_pnl_usd||0).toFixed(2)+' USD · موقعیت باز: '+((s.open_position||{}).asset||'ندارد')+' · ترمز ریسک: '+(s.risk_controls&&s.risk_controls.entry_allowed?'فعال':'متوقف')+' · زیان روز: '+Number((s.risk_controls||{}).daily_realized_loss_pct||0).toFixed(3)+'%';
           }catch(e){box.textContent='وضعیت حساب آزمایشی در دسترس نیست.';}
         })();
         </script>
