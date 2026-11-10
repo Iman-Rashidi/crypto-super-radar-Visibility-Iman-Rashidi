@@ -185,6 +185,14 @@ def _timeframe_ranges(asset: AssetSpec, snapshot=None) -> dict:
             raise ValueError("Unsupported asset market type.")
         if frame is None or frame.empty:
             raise ValueError("The provider returned no 1h candles.")
+        if getattr(frame.index, "tz", None) is None:
+            frame = frame.copy()
+            frame.index = frame.index.tz_localize(timezone.utc)
+        # Exclude the still-forming current hour so high/low values use closed candles only.
+        closed_before = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        frame = frame.loc[frame.index < closed_before]
+        if frame.empty:
+            raise ValueError("No completed 1h candles are available yet.")
         required = {"high", "low"}
         if not required.issubset(frame.columns):
             raise ValueError("The provider returned an incomplete OHLC schema.")
