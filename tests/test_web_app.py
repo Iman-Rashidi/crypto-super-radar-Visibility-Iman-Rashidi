@@ -66,6 +66,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('lang="fa" dir="rtl"', page)
         self.assertIn("۱۲ فیلتر اجباری", page)
+        self.assertIn("فقط BUYهایی نمایش داده می‌شوند", page)
         self.assertIn("Paper Research", page)
         self.assertIn("ربات معامله‌گر آزمایشی", page)
         self.assertIn("سقف زیان روزانه", page)
@@ -162,7 +163,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("public source unavailable", eth["reason"])
 
     def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
-        from tests.test_gem_hunter_qualification import valid_candidate
+        from test_gem_hunter_qualification import valid_candidate
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
         good = valid_candidate()
         bad = dict(good)
@@ -239,6 +240,10 @@ class WebAppHttpTests(unittest.TestCase):
             first_id = re.search(r"شناسه کار: <code>([a-f0-9]+)</code>", first_payload.decode("utf-8")).group(1)
             second_id = re.search(r"شناسه کار: <code>([a-f0-9]+)</code>", second_payload.decode("utf-8")).group(1)
             self.assertEqual(first_status, 202)
+            scan_page = first_payload.decode("utf-8")
+            self.assertIn("pollAttempts=0", scan_page)
+            self.assertIn("setTimeout(poll,delay)", scan_page)
+            self.assertIn("pollStarted", scan_page)
             self.assertEqual(second_status, 202)
             self.assertEqual(first_id, second_id)
             self.assertEqual(web_app.SCAN_QUEUE.qsize(), 1)
