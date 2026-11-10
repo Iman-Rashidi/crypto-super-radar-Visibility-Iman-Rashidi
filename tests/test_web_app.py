@@ -167,7 +167,7 @@ class WebAppHttpTests(unittest.TestCase):
         gate = SimpleNamespace(
             gate_id=1, status=web_app.GateStatus.PASS,
             reason_fa="کندل‌ها تازه‌اند.", reason_en="Candles are fresh.",
-            evidence={"candle_age_hours": 47.7},
+            evidence={"candle_age_hours": 47.7, "volume_discrepancy_pct": 0.2},
         )
         result = SimpleNamespace(gates=[gate], signal="LONG", summary_fa="قابل معامله")
         ranges = {"status": "KNOWN", "candle_age_hours": 47.7}
@@ -188,7 +188,7 @@ class WebAppHttpTests(unittest.TestCase):
         gate = SimpleNamespace(
             gate_id=1, status=web_app.GateStatus.PASS,
             reason_fa="کندل‌ها تازه‌اند.", reason_en="Candles are fresh.",
-            evidence={},
+            evidence={"volume_discrepancy_pct": 0.2},
         )
         result = SimpleNamespace(gates=[gate], signal="LONG", summary_fa="قابل معامله")
         ranges = {"status": "KNOWN", "candle_age_hours": 20.0}
@@ -196,6 +196,20 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(gate.status, web_app.GateStatus.PASS)
         self.assertEqual(result.signal, "LONG")
         self.assertEqual(ranges["status"], "KNOWN")
+
+    def test_missing_independent_volume_comparison_blocks_data_quality(self):
+        gate = SimpleNamespace(
+            gate_id=1, status=web_app.GateStatus.PASS,
+            reason_fa="دو منبع قیمت و حجم را تأیید کرده‌اند.",
+            reason_en="Price and volume confirmed.",
+            evidence={"volume_discrepancy_pct": None},
+        )
+        result = SimpleNamespace(gates=[gate], signal="LONG", summary_fa="قابل معامله")
+        web_app._enforce_volume_cross_validation(result)
+        self.assertEqual(gate.status, web_app.GateStatus.UNKNOWN)
+        self.assertEqual(result.signal, web_app.Signal.NO_TRADE)
+        self.assertEqual(gate.evidence["volume_cross_validation_status"], "UNKNOWN")
+        self.assertIn("اختلاف حجم مستقل", gate.reason_fa)
 
     def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
         from test_gem_hunter_qualification import valid_candidate
