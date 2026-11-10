@@ -1,6 +1,4 @@
 """Deterministic tests for WalletGraphAnalytics."""
-import math
-
 import pytest
 
 from crypto_super_radar.wallet_graph import WalletEvent, WalletGraphAnalytics
@@ -106,4 +104,32 @@ def test_missing_or_insufficient_evidence_never_authorizes_trade():
         rows, chain="solana", token="mint-a"
     )
     assert result["status"] == "NO_ANOMALY_DETECTED"
+    assert result["trade_authorization"] == "NO_TRADE"
+
+
+
+def test_shared_private_funder_without_temporal_corroboration_is_not_enough():
+    rows = _rows()
+    for index, row in enumerate(rows):
+        row["funding_source"] = "same-private-source"
+        row["funding_source_type"] = "private"
+        row["timestamp"] = 1_700_000_000 + index * 600
+    result = WalletGraphAnalytics().analyze_token_distribution(
+        rows, chain="solana", token="mint-a"
+    )
+    assert result["status"] == "NO_ANOMALY_DETECTED"
+    assert result["suspicious_pair_count"] == 0
+
+
+def test_invalid_rows_make_analysis_incomplete_not_clean():
+    rows = _rows()
+    rows.append({
+        "chain": "solana", "wallet": "bad-wallet", "token": "mint-a",
+        "event_type": "buy", "timestamp": -10, "amount_usd": 10,
+    })
+    result = WalletGraphAnalytics().analyze_token_distribution(
+        rows, chain="solana", token="mint-a"
+    )
+    assert result["status"] == "ANALYSIS_INCOMPLETE"
+    assert result["invalid_event_count"] == 1
     assert result["trade_authorization"] == "NO_TRADE"
