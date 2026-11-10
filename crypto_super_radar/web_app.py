@@ -124,6 +124,7 @@ input:focus{{outline:2px solid #54ded080;border-color:var(--teal)}}
 .market-search-activity{{display:none;align-items:center;gap:10px;margin:10px 2px 0;padding:8px 11px;border:1px solid #24556a;border-radius:14px;background:linear-gradient(100deg,#0c2634,#102c39);color:#9feee4;font-size:.84rem;font-weight:650;overflow:hidden}}
 .market-search-activity.is-searching,.market-search-activity.is-found{{display:flex}}
 .market-search-dog{{display:block;flex:0 0 82px;width:82px;height:58px;overflow:visible}}
+.market-search-spin{{animation:shiba-sniff-body .48s ease-in-out infinite alternate}}
 .market-search-dog .shiba-body{{transform-box:fill-box;transform-origin:center;animation:shiba-sniff-body .48s ease-in-out infinite alternate}}
 .market-search-dog .shiba-head{{transform-box:fill-box;transform-origin:72% 78%;animation:shiba-sniff-head .34s ease-in-out infinite alternate}}
 .market-search-dog .shiba-tail{{transform-box:fill-box;transform-origin:10% 90%;animation:shiba-tail-wag .22s ease-in-out infinite alternate}}
@@ -144,7 +145,7 @@ input:focus{{outline:2px solid #54ded080;border-color:var(--teal)}}
 @keyframes shiba-found-bounce{{from{{transform:translateY(0) scale(1)}}to{{transform:translateY(-5px) scale(1.025)}}}}
 @keyframes shiba-found-look{{from{{transform:rotate(-12deg)}}to{{transform:rotate(7deg)}}}}
 @keyframes shiba-treasure-pop{{from{{filter:drop-shadow(0 0 2px #ffc857)}}to{{filter:drop-shadow(0 0 10px #ffc857)}}}}
-@media(prefers-reduced-motion:reduce){{.market-search-dog *,.market-search-treasure{{animation:none!important;transition:none!important}}}}
+@media(prefers-reduced-motion:reduce){{.market-search-dog *,.market-search-spin,.market-search-treasure{{animation:none!important;transition:none!important}}}}
 label{{display:block;margin-top:12px;font-size:.94rem;font-weight:600}}
 button{{background:linear-gradient(135deg,#3179e8,#2862c7);border:0;margin-top:12px;cursor:pointer;font-weight:700;transition:filter .15s ease,transform .15s ease}}
 button:hover{{filter:brightness(1.12);transform:translateY(-1px)}}
@@ -889,7 +890,7 @@ class Handler(BaseHTTPRequestHandler):
             <label>جست‌وجوی نام یا نماد
               <input id="crypto-market-search" type="search" placeholder="مثلاً BTC، بیت‌کوین یا SUI" autocomplete="off">
               <span id="crypto-market-search-activity" class="market-search-activity" role="status" aria-live="polite">
-                <svg class="market-search-dog" viewBox="0 0 120 82" role="img" aria-label="سگ شیبا در حال بو کشیدن و جست‌وجو">
+                <svg class="market-search-dog market-search-spin" viewBox="0 0 120 82" role="img" aria-label="سگ شیبا در حال بو کشیدن و جست‌وجو">
                   <g class="shiba-body">
                     <path class="shiba-tail" d="M25 37 C3 35 8 5 27 9 C43 12 36 29 24 25" fill="none" stroke="#d9782d" stroke-width="11" stroke-linecap="round"/>
                     <path d="M26 44 Q36 26 68 34 Q91 39 91 57 Q83 72 48 67 Q23 65 26 44" fill="#d9782d" stroke="#8c451f" stroke-width="2"/>

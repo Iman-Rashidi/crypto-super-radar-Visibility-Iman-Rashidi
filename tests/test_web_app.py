@@ -82,7 +82,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('id="crypto-market-search-activity"', page)
         self.assertIn("شیبا داره بو می‌کشه", page)
         self.assertIn("shiba-sniff-body", page)
-        self.assertIn('class="market-search-dog"', page)
+        self.assertIn('class="market-search-dog market-search-spin"', page)
         self.assertIn("shiba-sniff-head", page)
         self.assertIn("shiba-tail-wag", page)
         self.assertIn("market-search-treasure", page)
