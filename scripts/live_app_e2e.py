@@ -169,11 +169,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         report["stage"] = "market_board"
         print("[E2E] Fetching cross-validated market board", flush=True)
-        _, markets = get_json(session, base_url + "/api/crypto-markets", timeout=240)
+        _, markets = get_json(session, base_url + "/api/crypto-markets", timeout=45)
         market_items = markets.get("items", [])
+        market_deadline = time.monotonic() + 240
+        # The production endpoint intentionally returns LOADING immediately and
+        # refreshes the 20-symbol universe in the background. Poll progress rather
+        # than treating the first fast response as a completed data snapshot.
+        while (
+            (len(market_items) < 20 or markets.get("refreshing") is True)
+            and time.monotonic() < market_deadline
+        ):
+            time.sleep(2.0)
+            _, markets = get_json(
+                session, base_url + "/api/crypto-markets", timeout=45
+            )
+            market_items = markets.get("items", [])
         report["market_board"] = {
             "status": markets.get("status"),
+            "freshness": markets.get("freshness"),
             "item_count": len(market_items),
+            "expected_count": markets.get("total_items", 20),
+            "refreshing": markets.get("refreshing"),
             "items": [
                 {
                     "symbol": item.get("symbol"),
@@ -185,7 +201,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 for item in market_items
             ],
         }
-        require(len(market_items) >= 20, f"Market board returned only {len(market_items)} instruments; expected at least 20")
+        require(
+            len(market_items) >= 20 and markets.get("refreshing") is not True,
+            "Market board refresh timed out: "
+            f"{len(market_items)}/{markets.get('total_items', 20)} instruments; "
+            f"status={markets.get('status')}, refreshing={markets.get('refreshing')}",
+        )
 
         report["stage"] = "dex_search"
         print("[E2E] Checking DEX discovery endpoint", flush=True)
