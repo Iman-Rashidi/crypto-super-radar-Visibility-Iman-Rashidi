@@ -56,6 +56,9 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('lang="fa" dir="rtl"', page)
         self.assertIn("۱۲ فیلتر اجباری", page)
         self.assertIn("Paper Research", page)
+        self.assertIn("ربات معامله‌گر آزمایشی", page)
+        self.assertIn('action="/paper-bot/tick"', page)
+        self.assertIn("python scripts/paper_trading_bot.py", page)
         self.assertIn("ماشین‌حساب حرفه‌ای سناریوی Spot", page)
         self.assertIn('id="calc-amount"', page)
         self.assertIn("calc-break-even", page)
@@ -121,6 +124,15 @@ class WebAppHttpTests(unittest.TestCase):
         eth = next(item for item in result["items"] if item["symbol"] == "ETHUSDT")
         self.assertEqual(eth["status"], "UNKNOWN")
         self.assertIn("public source unavailable", eth["reason"])
+
+    def test_paper_bot_status_is_local_and_cannot_submit_live_orders(self):
+        status, _, payload = self.request("GET", "/paper-bot/status")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["mode"], "PAPER_ONLY")
+        self.assertFalse(result["live_orders_enabled"])
+        self.assertFalse(result["orders_submitted"])
+        self.assertEqual(result["storage"], "LOCAL_SQLITE")
 
     def test_history_endpoint_returns_local_sqlite_summary(self):
         status, headers, payload = self.request(

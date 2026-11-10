@@ -14,9 +14,11 @@ from urllib.parse import parse_qs, urlparse
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
 from .models import AssetSpec
+from .paper_trading import PAPER_ASSETS, PaperTradingBot
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
+PAPER_BOT = PaperTradingBot(ENGINE)
 JOBS: dict[str, dict] = {}
 LAST_SCAN: dict[str, float] = {}
 LOCK = threading.RLock()
@@ -58,7 +60,7 @@ main{{max-width:1120px;margin:auto}}
 .card h2{{margin:0 0 6px;font-size:1.25rem;letter-spacing:-.01em}}
 .card h3{{margin-top:22px}}
 .muted{{color:var(--muted)}}
-input,button{{font:inherit;padding:12px 14px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text);width:100%;box-sizing:border-box}}
+input,button,select{{font:inherit;padding:12px 14px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text);width:100%;box-sizing:border-box}}
 input:focus{{outline:2px solid #54ded080;border-color:var(--teal)}}
 label{{display:block;margin-top:12px;font-size:.94rem;font-weight:600}}
 button{{background:linear-gradient(135deg,#3179e8,#2862c7);border:0;margin-top:12px;cursor:pointer;font-weight:700;transition:filter .15s ease,transform .15s ease}}
@@ -157,6 +159,21 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
 
 
 
+def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
+    global SCAN_RUNNING
+    try:
+        result = PAPER_BOT.run_once(asset)
+        payload = {"cycle": result, "paper_state": PAPER_BOT.ledger.state()}
+        with LOCK:
+            JOBS[job_id] = {"status": "completed", "result": payload}
+    except Exception as exc:
+        with LOCK:
+            JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        with LOCK:
+            SCAN_RUNNING = False
+
+
 def _crypto_market_board() -> dict:
     """Return a short-lived, free public spot-market board cross-checked by both venues."""
     with CRYPTO_MARKET_FETCH_LOCK:
@@ -229,6 +246,10 @@ class Handler(BaseHTTPRequestHandler):
             if job is None:
                 return self._send(404, b'{"error":"job not found"}', "application/json")
             return self._send(200, json.dumps(job, ensure_ascii=False, default=str).encode(),
+                              "application/json; charset=utf-8")
+        if parsed.path == "/paper-bot/status":
+            payload = PAPER_BOT.ledger.state()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/history":
             asset = parse_qs(parsed.query).get("asset", [""])[0]
@@ -309,6 +330,31 @@ class Handler(BaseHTTPRequestHandler):
           button.addEventListener('click',refresh);refresh();
         })();
         </script>
+        <section class="card" id="paper-bot">
+          <h2>ربات معامله‌گر آزمایشی (Paper Trading)</h2>
+          <p class="muted">ربات فقط LONG در بازار Spot را با همان ۱۲ فیلتر ارزیابی می‌کند؛ هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش نیز در حساب آزمایشی اعمال می‌شوند.</p>
+          <form method="post" action="/paper-bot/tick">
+            <label>دارایی</label>
+            <select name="asset">
+              <option value="cex:BTCUSDT">BTC / USDT</option>
+              <option value="cex:ETHUSDT">ETH / USDT</option>
+              <option value="cex:SOLUSDT">SOL / USDT</option>
+            </select>
+            <button type="submit">اجرای یک چرخهٔ ربات آزمایشی</button>
+          </form>
+          <div id="paper-bot-status" class="muted" style="margin-top:12px" aria-live="polite">در حال دریافت وضعیت حساب آزمایشی...</div>
+          <p class="muted">برای اجرای دوره‌ای رایگان روی رایانهٔ خود: <code>python scripts/paper_trading_bot.py --asset cex:BTCUSDT --interval-seconds 900</code>. فایل SQLite محلی است؛ سرویس رایگان Render ممکن است هنگام خواب یا راه‌اندازی مجدد فایل‌های محلی را پاک کند.</p>
+        </section>
+        <script>
+        (async function(){
+          const box=document.getElementById('paper-bot-status');
+          try{
+            const r=await fetch('/paper-bot/status');const s=await r.json();
+            const a=s.account||{};
+            box.textContent='حالت: Paper فقط · موجودی نقدی: '+Number(a.cash_balance_usd||0).toFixed(2)+' USD · ارزش کل حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · سود/زیان تحقق‌یافته: '+Number(a.realized_pnl_usd||0).toFixed(2)+' USD · موقعیت باز: '+((s.open_position||{}).asset||'ندارد');
+          }catch(e){box.textContent='وضعیت حساب آزمایشی در دسترس نیست.';}
+        })();
+        </script>
         <section class="card" id="scan-section">
           <h2>اسکن دارایی</h2>
           <form method="post" action="/scan">
@@ -387,7 +433,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global SCAN_RUNNING
-        if urlparse(self.path).path != "/scan":
+        route = urlparse(self.path).path
+        if route not in {"/scan", "/paper-bot/tick"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -412,17 +459,31 @@ class Handler(BaseHTTPRequestHandler):
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
             asset = AssetSpec.parse(form.get("asset", [""])[0].strip())
-            headline = form.get("headline", [""])[0].strip()
-            social_post = form.get("social_post", [""])[0].strip()
+            if route == "/paper-bot/tick" and (
+                asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS
+            ):
+                raise ValueError("Paper trading accepts only BTC, ETH or SOL spot.")
+            headline = form.get("headline", [""])[0].strip() if route == "/scan" else ""
+            social_post = form.get("social_post", [""])[0].strip() if route == "/scan" else ""
             job_id = uuid.uuid4().hex
             with LOCK:
                 JOBS[job_id] = {"status": "queued"}
                 while len(JOBS) > 100:
                     JOBS.pop(next(iter(JOBS)))
             worker = threading.Thread(
-                target=_run_scan, args=(job_id, asset, headline, social_post), daemon=True
+                target=_run_paper_tick if route == "/paper-bot/tick" else _run_scan,
+                args=(job_id, asset) if route == "/paper-bot/tick" else (job_id, asset, headline, social_post),
+                daemon=True,
             )
             worker.start()
+            if route == "/paper-bot/tick":
+                body = (
+                    "<h2>چرخهٔ ربات آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
+                    "<p id='state'>در حال ارزیابی دادهٔ بازار و مدیریت موقعیت کاغذی...</p>"
+                    "<pre id='result'>هیچ سفارش واقعی ارسال نمی‌شود.</pre><p><a href='/'>بازگشت</a></p>"
+                    "<script>const job='" + job_id + "';async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;if(j.status==='completed'){document.getElementById('result').textContent=JSON.stringify(j.result,null,2);return;}if(j.status==='failed'){document.getElementById('result').textContent=j.error;return;}}catch(e){document.getElementById('state').textContent='ارتباط قطع شد؛ وضعیت در /paper-bot/status موجود است';return;}setTimeout(poll,2500);}poll();</script>"
+                )
+                return self._send(202, _page(body, "Paper Bot Cycle"))
             body = (
                 "<h2>اسکن آغاز شد</h2><p>شناسه کار: <code>" + job_id + "</code></p>"
                 "<p id='state'>در حال جمع‌آوری داده‌های بازار، نهنگ‌ها و احساسات...</p>"

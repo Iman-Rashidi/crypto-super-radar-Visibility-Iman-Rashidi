@@ -367,3 +367,18 @@ These checks validate response shape and internal consistency; they do not prove
 ## 16. Free cryptocurrency market board
 
 The default lightweight HTTP dashboard now includes a small, curated spot-market board for BTC, ETH, SOL, BNB, XRP and DOGE. It uses the existing public Binance Spot and Bybit Spot adapters, requires no API key or paid data subscription, and displays a price only when both sources return valid data within the configured discrepancy limit. The server caches results for 60 seconds to limit public API traffic. See [Dashboard Design](docs/DASHBOARD_DESIGN.md) for the visual system and interaction notes. If a provider is unavailable or the venues disagree, that row remains `UNKNOWN`; the board is not a market-cap ranking or a trading recommendation. A verified row can prefill the research scan form; it never starts the scan automatically.
+
+
+## 13. Integrated paper trading bot
+
+A free paper-trading bot is available for BTCUSDT, ETHUSDT and SOLUSDT spot. It scans through the existing 12 mandatory gates, opens only LONG paper positions, and manages exits using the engine's stop-loss and take-profit levels. Every signal needs all gates PASS, confirmation score at least 75, estimated risk below 45, and a valid stop/target plan. Position sizing risks at most 0.5% of paper equity and caps notional at 10%; the simulation includes 8 bps fee and 10 bps slippage per side and permits one open position at a time. Entries are deduplicated per completed daily candle.
+
+The dashboard's **ربات معامله‌گر آزمایشی** section can run one on-demand cycle. For repeated free local operation, run:
+
+```text
+python scripts/paper_trading_bot.py --asset cex:BTCUSDT --interval-seconds 900
+```
+
+Use Ctrl+C to stop. State and closed trades are stored in the local SQLite database configured by `CSR_DB_PATH`. Render Free can sleep and reset its local filesystem, so it is not a durable always-on bot host.
+
+This bot is explicitly paper-only: it has no exchange order adapter, API-key input or live-order mode. It never submits exchange orders. Paper fills are estimates from cross-validated public spot prices, fee assumptions and slippage; they are not guaranteed executable fills.
