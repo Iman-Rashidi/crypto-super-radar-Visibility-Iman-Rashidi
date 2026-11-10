@@ -318,7 +318,7 @@ A configured RSS set is reported as `KNOWN` only when every configured feed retu
 
 ## 11. Geometric chart-pattern monitoring
 
-The research scan now checks confirmed, non-repainting pivots for symmetrical, ascending and descending triangle structures. A forming pattern requires three confirmed contacts on each boundary, contracting price range and fitted trend lines. The latest candle close must move beyond a small boundary buffer before the pattern is labeled as a breakout. This remains explanatory evidence; it does not add a decision gate, change a score or create an order.
+The research scan now checks confirmed, non-repainting pivots for symmetrical, ascending and descending triangle structures. A forming pattern requires three confirmed contacts on each boundary, contracting price range and fitted trend lines. The latest candle close must move beyond a small boundary buffer before the pattern is labeled as a breakout. This remains outside the 12-gate count and does not add score. A confirmed triangle breakout that directly opposes the independently calculated market direction vetoes a research signal; forming, ambiguous or missing patterns do not. The monitor never creates an order.
 
 The Persian web chart draws the upper/lower boundaries and confirmed pivot points with the browser's built-in canvas renderer. This adds no paid charting library, AI call or external chart service. Pattern matching is a rule-based approximation and should be reviewed with out-of-sample data before any strategy use.
 

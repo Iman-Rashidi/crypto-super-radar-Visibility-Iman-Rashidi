@@ -124,6 +124,15 @@ def classify_confirmed_pivots(
     }
 
 
+def contradicts_confirmed_breakout(direction: Optional[str], pattern: dict[str, Any]) -> bool:
+    """Return True only when a confirmed triangle breakout opposes the market direction."""
+    direction_value = str(direction or "").strip().upper()
+    breakout = str((pattern or {}).get("breakout", "NONE")).strip().upper()
+    return (direction_value == "LONG" and breakout == "DOWN") or (
+        direction_value == "SHORT" and breakout == "UP"
+    )
+
+
 def monitor_chart_patterns(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
     """Detect triangle structures from close-only, confirmed non-repainting pivots."""
     if not isinstance(candles, pd.DataFrame) or "close" not in candles:

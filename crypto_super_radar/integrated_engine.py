@@ -10,7 +10,7 @@ from .config import AppConfig
 from .engine import ConfirmationEngine
 from .evm_security import screen_evm_token
 from .elliott_waves import monitor_elliott_waves
-from .chart_patterns import monitor_chart_patterns
+from .chart_patterns import monitor_chart_patterns, contradicts_confirmed_breakout
 from .evm_transfers import EvmTransferScanner
 from .market_sentiment import fetch_market_sentiment
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
@@ -472,6 +472,9 @@ class WhaleAwareConfirmationEngine:
             result.confirmation_score is None
             or result.confirmation_score < self.config.thresholds.min_confirmation_score
         )
+        chart_pattern = result.metrics.get("chart_pattern") or {}
+        structure_conflict = contradicts_confirmed_breakout(direction, chart_pattern)
+        result.metrics["chart_structure_conflict"] = structure_conflict
         risk_missing = result.estimated_risk_score is None
         risk_too_high = (
             result.estimated_risk_score is not None
@@ -483,10 +486,11 @@ class WhaleAwareConfirmationEngine:
             "confirmation_below_threshold": confirmation_blocked,
             "risk_score_missing": risk_missing,
             "risk_score_at_or_above_limit": risk_too_high,
+            "confirmed_structure_breakout_opposes_direction": structure_conflict,
             "base_engine_returned_no_trade": result.signal == Signal.NO_TRADE,
         }
         if result.signal != Signal.NO_TRADE and (
-            not all_pass or confirmation_blocked or risk_missing or risk_too_high
+            not all_pass or confirmation_blocked or risk_missing or risk_too_high or structure_conflict
         ):
             result.signal = Signal.NO_TRADE
         if result.signal == Signal.NO_TRADE:
@@ -496,7 +500,7 @@ class WhaleAwareConfirmationEngine:
             result.expected_holding_days = None
             result.position_notional_usd = None
             result.risk_budget_usd = None
-            if failed_gates or risk_too_high:
+            if failed_gates or risk_too_high or structure_conflict:
                 result.safety_status = SafetyStatus.HIGH_RISK
             elif unknown_gates or risk_missing:
                 result.safety_status = SafetyStatus.UNKNOWN
@@ -518,6 +522,9 @@ class WhaleAwareConfirmationEngine:
             elif confirmation_blocked:
                 result.summary_en = "NO TRADE: confirmation score is below the required threshold."
                 result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند، اما امتیاز تأیید به حداقل لازم نرسیده است."
+            elif structure_conflict:
+                result.summary_en = "NO TRADE: a confirmed triangle breakout opposes the market direction."
+                result.summary_fa = "شکست تأییدشدهٔ الگوی مثلث خلاف جهت بازار است؛ سیگنال مسدود شد."
             else:
                 result.summary_en = "NO TRADE: the base engine did not confirm a trade direction."
                 result.summary_fa = "هر ۱۲ فیلتر تأیید شده‌اند، اما موتور جهت معاملاتی قابل تأییدی پیدا نکرده است."

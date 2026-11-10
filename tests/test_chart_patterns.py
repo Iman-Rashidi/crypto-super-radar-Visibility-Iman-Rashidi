@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from crypto_super_radar.chart_patterns import classify_confirmed_pivots
+from crypto_super_radar.chart_patterns import (
+    classify_confirmed_pivots,
+    contradicts_confirmed_breakout,
+)
 
 
 class TrianglePatternTests(unittest.TestCase):
@@ -33,6 +36,15 @@ class TrianglePatternTests(unittest.TestCase):
         result = classify_confirmed_pivots(self.pivots, 110.0, 22)
         self.assertEqual(result["status"], "BREAKOUT_UP")
         self.assertEqual(result["breakout"], "UP")
+
+    def test_opposing_confirmed_breakout_vetoes_direction(self):
+        self.assertTrue(contradicts_confirmed_breakout("LONG", {"breakout": "DOWN"}))
+        self.assertTrue(contradicts_confirmed_breakout("SHORT", {"breakout": "UP"}))
+
+    def test_aligned_or_unconfirmed_pattern_does_not_veto(self):
+        self.assertFalse(contradicts_confirmed_breakout("LONG", {"breakout": "UP"}))
+        self.assertFalse(contradicts_confirmed_breakout("SHORT", {"breakout": "NONE"}))
+        self.assertFalse(contradicts_confirmed_breakout("LONG", {"status": "UNKNOWN"}))
 
     def test_rejects_non_finite_price(self):
         result = classify_confirmed_pivots(self.pivots, float("nan"), 21)
