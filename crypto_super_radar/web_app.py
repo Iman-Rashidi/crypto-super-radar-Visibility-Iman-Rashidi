@@ -79,6 +79,13 @@ tbody tr:hover{{background:#ffffff06}}
 code{{direction:ltr;display:inline-block}}
 pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px;border-radius:10px;direction:ltr;text-align:left}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}}
+.analysis-links-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}}
+.analysis-link-card{{display:flex;flex-direction:column;gap:8px;padding:18px;border:1px solid #2b4660;border-radius:15px;background:linear-gradient(145deg,#12283a,#0b1a2a);min-width:0}}
+.analysis-link-card h3{{margin:0;font-size:1.08rem}}
+.analysis-link-card p{{margin:0;color:var(--muted);font-size:.9rem}}
+.analysis-link{{display:inline-flex;align-items:center;justify-content:center;gap:8px;margin-top:6px;padding:11px 14px;border:1px solid #37627b;border-radius:11px;background:#123344;color:#c8fff4;text-decoration:none;font-weight:700}}
+.analysis-link:hover{{background:#19465a}}
+@media(max-width:680px){{.analysis-links-grid{{grid-template-columns:1fr}}}}
 .metric{{background:#0a1725;border:1px solid #263a53;border-radius:13px;padding:14px}}
 .metric strong{{display:block;font-size:1.2rem;margin-top:6px;direction:ltr;text-align:right;font-variant-numeric:tabular-nums}}
 canvas{{width:100%;height:300px;background:#08101d;border-radius:12px}}
@@ -272,6 +279,22 @@ class Handler(BaseHTTPRequestHandler):
           </div>
           <span class="mode-pill"><span class="mode-dot"></span>فقط خواندنی</span>
         </header>
+        <section class="card" id="external-analysis-tools">
+          <h2>ابزارهای تحلیل بازار</h2>
+          <p class="muted">دو منبع تحلیلی را هم‌زمان و در کنار داشبورد اصلی باز کنید؛ هرکدام در زبانهٔ جداگانه باز می‌شود.</p>
+          <div class="analysis-links-grid">
+            <article class="analysis-link-card">
+              <h3>CoinGlass · مشتقات و لیکوییدیشن</h3>
+              <p>Open Interest، Funding Rate، نسبت Long/Short و نقشهٔ لیکوییدیشن‌ها.</p>
+              <a class="analysis-link" href="https://www.coinglass.com/" target="_blank" rel="noopener noreferrer">باز کردن CoinGlass ↗</a>
+            </article>
+            <article class="analysis-link-card">
+              <h3>DEX Screener · بازارهای غیرمتمرکز</h3>
+              <p>قیمت، حجم، نقدینگی، جفت‌ارزها و فعالیت توکن‌های DEX.</p>
+              <a class="analysis-link" href="https://dexscreener.com/" target="_blank" rel="noopener noreferrer">باز کردن DEX Screener ↗</a>
+            </article>
+          </div>
+        </section>
         <section class="card" id="crypto-markets">
           <h2>بازار رمزارزها</h2>
           <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
