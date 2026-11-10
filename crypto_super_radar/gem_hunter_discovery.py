@@ -238,7 +238,12 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         if not isinstance(pool, dict) or str(pool.get("chain", "")).lower() != network:
             continue
         pool_id = pool.get("id")
-        if not _valid_address(network, pool_id):
+        valid_pool_id = (
+            bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", pool_id))
+            if network == "base" and isinstance(pool_id, str)
+            else _valid_address(network, pool_id)
+        )
+        if not valid_pool_id:
             continue
         try:
             detail = http.get(f"{base}/networks/{network}/pools/{pool_id}")
