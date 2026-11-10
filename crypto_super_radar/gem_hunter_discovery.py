@@ -63,8 +63,9 @@ def _valid_address(chain: str, address: Any) -> bool:
 def _score(age_hours: Optional[float], liquidity: Optional[float],
            volume_24h: Optional[float], buys: Optional[float],
            sells: Optional[float], buyers: Optional[float],
-           sellers: Optional[float]) -> Optional[float]:
-    """Bounded discovery-priority heuristic; not a probability or trade signal."""
+           sellers: Optional[float], price_change_1h: Optional[float],
+           volume_to_liquidity: Optional[float]) -> Optional[float]:
+    """Bounded research-ordering heuristic with explicit risk penalties; not a signal."""
     if age_hours is None or liquidity is None or liquidity <= 0 or volume_24h is None:
         return None
     age_points = 25 if age_hours <= 1 else 20 if age_hours <= 6 else 15 if age_hours <= 24 else 8 if age_hours <= 72 else 3
@@ -77,7 +78,24 @@ def _score(age_hours: Optional[float], liquidity: Optional[float],
     unique_share = (buyers / unique_total) if unique_total > 0 else None
     pressure = buy_share if buy_share is not None else unique_share
     pressure_points = 7 if pressure is None else 0 if pressure < 0.35 else 4 if pressure < 0.45 else 8 if pressure < 0.55 else 12 if pressure < 0.65 else 15
-    return round(min(100.0, age_points + liq_points + vol_points + activity_points + pressure_points), 2)
+    penalty = 0
+    if liquidity < 25_000:
+        penalty += 10
+    if volume_to_liquidity is not None and volume_to_liquidity > 10:
+        penalty += 20
+    if buys is not None and sells is not None and sells > buys:
+        penalty += 8
+    if price_change_1h is not None:
+        if price_change_1h <= -20:
+            penalty += 20
+        elif price_change_1h <= -10:
+            penalty += 10
+        elif price_change_1h >= 100:
+            penalty += 15
+        elif price_change_1h >= 50:
+            penalty += 10
+    base_score = min(100.0, age_points + liq_points + vol_points + activity_points + pressure_points)
+    return round(max(0.0, base_score - penalty), 2)
 
 
 def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
@@ -156,7 +174,14 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
         ratio = volume_24h / liquidity if volume_24h is not None and liquidity and liquidity > 0 else None
         if ratio is not None and ratio > 10:
             flags.append("EXTREME_VOLUME_LIQUIDITY_RATIO")
-        score = _score(age, liquidity, volume_24h, buys, sells, buyers, sellers)
+        if change_1h is not None and change_1h <= -20:
+            flags.append("SHARP_1H_DRAWDOWN")
+        elif change_1h is not None and change_1h >= 50:
+            flags.append("SHARP_1H_PUMP")
+        score = _score(
+            age, liquidity, volume_24h, buys, sells, buyers, sellers,
+            change_1h, ratio,
+        )
         candidates.append({
             "asset": f"{chain}:{token_address}",
             "chain": chain,
@@ -184,7 +209,7 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
             "source": source,
             "sources": [source],
             "discovery_priority_score": score,
-            "score_semantics": "Bounded heuristic for research ordering only; not a probability, safety score, or trade signal.",
+            "score_semantics": "Bounded research-ordering heuristic with penalties for low liquidity, extreme turnover/liquidity, sell pressure and sharp 1h moves; not a probability, safety score, or trade signal.",
             "candidate_status": "UNSCREENED" if score is not None and price is not None and price > 0 and liquidity is not None and liquidity > 0 else "UNKNOWN",
             "trade_authorization": "NO_TRADE",
             "risk_flags": flags,
@@ -258,5 +283,5 @@ def discover_gem_candidates(http, *, limit: int = 20,
         "candidate_count": len(candidates),
         "candidates": candidates,
         "trade_authorization": "NO_TRADE",
-        "score_semantics": "Discovery ordering only; candidates require independent market validation and security gates before any paper evaluation.",
+        "score_semantics": "Risk-adjusted discovery ordering only; candidates require independent market validation and security gates before any paper evaluation.",
     }

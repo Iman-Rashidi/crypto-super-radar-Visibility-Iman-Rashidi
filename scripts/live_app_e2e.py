@@ -165,6 +165,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "persian_dashboard": True,
             "paper_form": True,
             "scan_form": True,
+            "gem_hunter_panel": "id=\"gem-hunter-panel\"" in home.text,
         }
 
         report["stage"] = "market_board"
@@ -215,6 +216,52 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "status": dex.get("status"),
             "result_count": dex.get("result_count"),
             "networks": dex.get("supported_networks"),
+        }
+
+        report["stage"] = "gem_hunter_discovery"
+        print("[E2E] Checking read-only Solana/Base Gem Hunter discovery", flush=True)
+        _, discovery = get_json(
+            session, base_url + "/api/gem-hunter/discover?limit=10", timeout=90
+        )
+        candidates = discovery.get("candidates", [])
+        require(
+            discovery.get("status") in {"PASS", "PARTIAL", "UNKNOWN"},
+            f"Gem Hunter returned an invalid status: {discovery.get('status')}",
+        )
+        require(
+            discovery.get("trade_authorization") == "NO_TRADE",
+            "Gem Hunter must never authorize a trade",
+        )
+        require(
+            isinstance(candidates, list)
+            and all(item.get("chain") in {"solana", "base"} for item in candidates),
+            "Gem Hunter returned an unsupported chain or invalid candidate list",
+        )
+        require(
+            all(item.get("trade_authorization") == "NO_TRADE" for item in candidates),
+            "A Gem Hunter candidate has unexpected trade authorization",
+        )
+        report["gem_hunter_discovery"] = {
+            "status": discovery.get("status"),
+            "candidate_count": discovery.get("candidate_count"),
+            "available_candidate_count": discovery.get("available_candidate_count"),
+            "networks": discovery.get("networks"),
+            "chain_counts": {
+                chain: sum(1 for item in candidates if item.get("chain") == chain)
+                for chain in ("solana", "base")
+            },
+            "sources": discovery.get("sources"),
+            "top_candidates": [
+                {
+                    "chain": item.get("chain"),
+                    "symbol": item.get("token_symbol"),
+                    "score": item.get("discovery_priority_score"),
+                    "status": item.get("candidate_status"),
+                    "risk_flags": item.get("risk_flags"),
+                }
+                for item in candidates[:5]
+            ],
+            "trade_authorization": discovery.get("trade_authorization"),
         }
 
         report["stage"] = "paper_status_before"

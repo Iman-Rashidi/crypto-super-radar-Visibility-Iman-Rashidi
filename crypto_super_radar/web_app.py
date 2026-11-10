@@ -79,6 +79,28 @@ CRYPTO_MARKET_UNIVERSE = (
 CRYPTO_MARKET_CACHE_TTL_SECONDS = 60
 CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None, "refreshing": False, "last_error": None}
 CRYPTO_MARKET_CACHE_LOCK = threading.Lock()
+GEM_HUNTER_CACHE_TTL_SECONDS = 60
+GEM_HUNTER_CACHE = {"expires_at": 0.0, "payload": None}
+GEM_HUNTER_CACHE_LOCK = threading.Lock()
+
+
+def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
+    """Single-flight cache for the two rate-limited public discovery feeds."""
+    limit = max(1, min(int(limit), 50))
+    with GEM_HUNTER_CACHE_LOCK:
+        now = time.monotonic()
+        cached = GEM_HUNTER_CACHE.get("payload")
+        if cached is None or GEM_HUNTER_CACHE.get("expires_at", 0.0) <= now:
+            cached = discover_gem_candidates(getattr(ENGINE.data, "http", None), limit=50)
+            GEM_HUNTER_CACHE["payload"] = copy.deepcopy(cached)
+            ttl = GEM_HUNTER_CACHE_TTL_SECONDS if cached.get("status") == "PASS" else 15
+            GEM_HUNTER_CACHE["expires_at"] = time.monotonic() + ttl
+        result = copy.deepcopy(cached)
+    all_candidates = result.get("candidates") or []
+    result["available_candidate_count"] = len(all_candidates)
+    result["candidates"] = all_candidates[:limit]
+    result["candidate_count"] = len(result["candidates"])
+    return result
 
 
 def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
@@ -836,7 +858,7 @@ class Handler(BaseHTTPRequestHandler):
                 limit = max(1, min(int(raw_limit), 50))
             except (TypeError, ValueError):
                 return self._send(400, b'{"error":"limit must be an integer from 1 to 50"}', "application/json")
-            payload = discover_gem_candidates(getattr(ENGINE.data, "http", None), limit=limit)
+            payload = _gem_hunter_discovery_payload(limit=limit)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/crypto-markets":
