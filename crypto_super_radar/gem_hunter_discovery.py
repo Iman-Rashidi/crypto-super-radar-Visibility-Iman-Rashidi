@@ -219,34 +219,33 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
 
 
 
-def _dexpaprika_recovery_rows(http, now: datetime, *, limit: int = 5) -> tuple[list[dict[str, Any]], int]:
-    """Read a small, explicitly limited Base recovery sample from DexPaprika.
-
-    The keyless endpoint may omit pools younger than one hour. This is a
-    degraded recovery feed, never a substitute for complete new-pool coverage.
-    """
+def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int = 5) -> tuple[list[dict[str, Any]], int]:
+    """Read a small recovery sample; this never substitutes for complete new-pool coverage."""
+    if network not in NETWORKS:
+        raise ValueError(f"Unsupported recovery network: {network}")
     base = "https://api.dexpaprika.com"
     payload = http.get(
-        f"{base}/networks/base/pools/search",
+        f"{base}/networks/{network}/pools/search",
         params={"order_by": "created_at", "sort": "desc", "limit": max(1, min(limit, 5))},
     )
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-        raise ValueError("DexPaprika Base pool-search response has an invalid schema")
+        raise ValueError(f"DexPaprika {network} pool-search response has an invalid schema")
 
     candidates: list[dict[str, Any]] = []
     detail_errors = 0
+    source = f"DEXPAPRIKA_{network.upper()}_RECOVERY"
     for pool in payload["results"][:5]:
-        if not isinstance(pool, dict) or str(pool.get("chain", "")).lower() != "base":
+        if not isinstance(pool, dict) or str(pool.get("chain", "")).lower() != network:
             continue
         pool_id = pool.get("id")
-        if not isinstance(pool_id, str) or not re.fullmatch(r"0x[a-fA-F0-9]{64}", pool_id):
+        if not _valid_address(network, pool_id):
             continue
         try:
-            detail = http.get(f"{base}/networks/base/pools/{pool_id}")
+            detail = http.get(f"{base}/networks/{network}/pools/{pool_id}")
         except Exception:
             detail_errors += 1
             continue
-        if not isinstance(detail, dict) or str(detail.get("chain", "")).lower() != "base":
+        if not isinstance(detail, dict) or str(detail.get("chain", "")).lower() != network:
             detail_errors += 1
             continue
         base_token_id = detail.get("base_token_id")
@@ -261,9 +260,9 @@ def _dexpaprika_recovery_rows(http, now: datetime, *, limit: int = 5) -> tuple[l
             detail_errors += 1
             continue
         token_address = token.get("id")
-        if not _valid_address("base", token_address):
+        if not _valid_address(network, token_address):
             continue
-        if token_address.lower() in {item.lower() for item in BASE_QUOTE_ADDRESSES["base"]}:
+        if token_address.lower() in {item.lower() for item in BASE_QUOTE_ADDRESSES[network]}:
             continue
 
         created = _timestamp(detail.get("created_at") or pool.get("created_at"))
@@ -319,15 +318,15 @@ def _dexpaprika_recovery_rows(http, now: datetime, *, limit: int = 5) -> tuple[l
             flags.append("SHARP_1H_PUMP")
         score = _score(age, liquidity, volume_24h, buys, sells, None, None, change_1h, ratio)
         candidates.append({
-            "asset": f"base:{token_address}",
-            "chain": "base",
+            "asset": f"{network}:{token_address}",
+            "chain": network,
             "token_address": token_address,
             "token_name": token.get("name"),
             "token_symbol": token.get("symbol"),
             "token_decimals": token.get("decimals"),
             "pool_address": detail.get("pool_address"),
             "pool_id": detail.get("id") or pool_id,
-            "pool_name": f"{token.get('symbol') or token_address} / Base pair",
+            "pool_name": f"{token.get('symbol') or token_address} / {network} pair",
             "dex": detail.get("dex_name") or pool.get("dex_name"),
             "price_usd": price if price is not None and price > 0 else None,
             "liquidity_usd": liquidity if liquidity is not None and liquidity >= 0 else None,
@@ -343,17 +342,16 @@ def _dexpaprika_recovery_rows(http, now: datetime, *, limit: int = 5) -> tuple[l
             "price_change_1h_pct": change_1h,
             "pool_created_at_utc": created.isoformat().replace("+00:00", "Z") if created else None,
             "pool_age_hours": round(age, 2) if age is not None else None,
-            "source": "DEXPAPRIKA_BASE_RECOVERY",
-            "sources": ["DEXPAPRIKA_BASE_RECOVERY"],
+            "source": source,
+            "sources": [source],
             "discovery_priority_score": score,
             "score_semantics": "Limited secondary-source discovery ordering only; not a probability, safety score, or trade signal.",
             "candidate_status": "UNSCREENED" if score is not None and price is not None and price > 0 and liquidity is not None and liquidity > 0 else "UNKNOWN",
             "trade_authorization": "NO_TRADE",
             "risk_flags": flags,
-            "evidence_caveat": "Limited DexPaprika recovery sample; keyless coverage may omit pools younger than one hour and the sample is not complete Base new-pool coverage. Independent contract, holder and execution checks have not run.",
+            "evidence_caveat": "Limited DexPaprika recovery sample; keyless coverage may omit pools younger than one hour and the sample is not complete new-pool coverage. Independent contract, holder and execution checks have not run.",
         })
     return candidates, detail_errors
-
 
 def discover_gem_candidates(http, *, limit: int = 20,
                             now: Optional[datetime] = None) -> dict[str, Any]:
@@ -402,17 +400,18 @@ def discover_gem_candidates(http, *, limit: int = 20,
                     "status": "UNKNOWN",
                     "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
                 }
-    # Recover some Base discovery coverage if either GeckoTerminal Base feed is
-    # unavailable. This secondary sample is deliberately not allowed to upgrade
-    # the overall source state to PASS.
-    base_gecko = [
-        sources.get("GECKOTERMINAL_NEW_POOLS_BASE", {}).get("status"),
-        sources.get("GECKOTERMINAL_TRENDING_POOLS_BASE", {}).get("status"),
-    ]
-    if any(status != "PASS" for status in base_gecko):
-        fallback_source = "DEXPAPRIKA_BASE_RECOVERY"
+    # Recover limited coverage on whichever chain has a missing GeckoTerminal feed.
+    # A secondary feed never upgrades the primary GeckoTerminal completeness state.
+    for network in sorted(NETWORKS):
+        gecko_sources = (
+            f"GECKOTERMINAL_NEW_POOLS_{network.upper()}",
+            f"GECKOTERMINAL_TRENDING_POOLS_{network.upper()}",
+        )
+        if all(sources.get(name, {}).get("status") == "PASS" for name in gecko_sources):
+            continue
+        fallback_source = f"DEXPAPRIKA_{network.upper()}_RECOVERY"
         try:
-            fallback_rows, detail_errors = _dexpaprika_recovery_rows(http, now, limit=5)
+            fallback_rows, detail_errors = _dexpaprika_recovery_rows(http, network, now, limit=5)
             sources[fallback_source] = {
                 "status": "UNKNOWN" if detail_errors else "PASS",
                 "candidate_rows": len(fallback_rows),
@@ -461,7 +460,7 @@ def discover_gem_candidates(http, *, limit: int = 20,
         "source_count": len(sources),
         "sources": sources,
         "gecko_terminal_complete": gecko_complete,
-        "fallback_coverage_note": "DexPaprika is a limited recovery sample only; it never replaces complete GeckoTerminal Base coverage or authorizes trading." if "DEXPAPRIKA_BASE_RECOVERY" in sources else None,
+        "fallback_coverage_note": "DexPaprika is a limited recovery sample only; it never replaces complete GeckoTerminal coverage or authorizes trading." if any(name.startswith("DEXPAPRIKA_") for name in sources) else None,
         "candidate_counts_by_network": {
             network: sum(1 for item in merged.values() if item.get("chain") == network)
             for network in sorted(NETWORKS)

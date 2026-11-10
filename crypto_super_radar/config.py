@@ -10,9 +10,9 @@ class RateLimitConfig:
 
     host_intervals: Dict[str, float] = field(default_factory=lambda: {
         # GeckoTerminal's public OpenAPI page currently states ~10 calls/min.
-        # We intentionally use that conservative limit despite a newer support
+        # We intentionally leave headroom below that public limit despite a newer support
         # page mentioning 30 calls/min; the API documentation may lag.
-        "api.geckoterminal.com": 6.0,
+        "api.geckoterminal.com": 10.0,
         "api.dexscreener.com": 0.21,
         # DexPaprika keyless tier is 15 requests/minute; keep discovery/detail calls paced.
         "api.dexpaprika.com": 4.1,

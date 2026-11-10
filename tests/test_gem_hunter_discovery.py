@@ -223,5 +223,37 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
 
+    def test_solana_gecko_failure_uses_limited_dexpaprika_recovery_without_false_pass(self):
+        token = "8Mi9E1V2bdPeAaRkR5yxUsAvpzP6UBUEEUrYmgKNpump"
+        pool_id = "7mqknHnLZSG8yQuiXX5jjPuEWLvhFZiA7uGyajNbPTxv"
+        responses = dict(self.responses)
+        responses["solana_trending_pools"] = RuntimeError("HTTP 429")
+        class SolanaRecoveryHttp(FakeHttp):
+            def get(inner, url, params=None):
+                if url == "https://api.dexpaprika.com/networks/solana/pools/search":
+                    return {"results": [{"id": pool_id, "chain": "solana"}]}
+                if url.endswith("/pools/" + pool_id):
+                    return {
+                        "id": pool_id, "chain": "solana", "base_token_id": token,
+                        "tokens": [
+                            {"id": token, "name": "Recovery Solana", "symbol": "RSOL", "decimals": 6},
+                            {"id": "So11111111111111111111111111111111111111112", "name": "Wrapped SOL", "symbol": "SOL"},
+                        ],
+                        "created_at": "2026-11-10T11:00:00Z",
+                        "dex_name": "Pump.fun", "last_price_usd": 0.01, "liquidity_usd": 50000,
+                        "1h": {"volume_usd": 12000, "buys": 30, "sells": 10, "last_price_usd_change": 8},
+                        "24h": {"volume_usd": 100000, "buys": 200, "sells": 80},
+                    }
+                return super().get(url, params=params)
+        result = discover_gem_candidates(SolanaRecoveryHttp(responses), now=self.now)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertFalse(result["gecko_terminal_complete"])
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
+        self.assertEqual(result["sources"]["DEXPAPRIKA_SOLANA_RECOVERY"]["status"], "PASS")
+        recovered = next(item for item in result["candidates"] if item["token_address"] == token)
+        self.assertEqual(recovered["chain"], "solana")
+        self.assertEqual(recovered["trade_authorization"], "NO_TRADE")
+
+
 if __name__ == "__main__":
     unittest.main()
