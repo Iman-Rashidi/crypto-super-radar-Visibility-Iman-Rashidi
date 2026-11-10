@@ -382,3 +382,12 @@ python scripts/paper_trading_bot.py --asset cex:BTCUSDT --interval-seconds 900
 Use Ctrl+C to stop. State and closed trades are stored in the local SQLite database configured by `CSR_DB_PATH`. Render Free can sleep and reset its local filesystem, so it is not a durable always-on bot host.
 
 This bot is explicitly paper-only: it has no exchange order adapter, API-key input or live-order mode. It never submits exchange orders. Paper fills are estimates from cross-validated public spot prices, fee assumptions and slippage; they are not guaranteed executable fills.
+
+
+## Binance Spot order execution (testnet first)
+
+A guarded execution adapter is available in \`crypto_super_radar.binance_execution\`. It accepts only BTCUSDT, ETHUSDT and SOLUSDT spot orders, sends limit IOC orders, checks the live quote against the signal price, exchange quantity/price/minimum-notional filters, free balance, and a hard 25 USDT per-order ceiling. \`ValidatedSignalExecutor\` accepts only a LONG result with all 12 gates passing, score at least 75, risk score below 45, a valid stop/target, and net reward/risk at least 1.8. Position sizing risks at most 0.5% of free USDT.
+
+Set testnet API credentials in \`CSR_BINANCE_API_KEY\` and \`CSR_BINANCE_API_SECRET\`; the default environment is Binance Spot Testnet. Use API keys with trading permission only on the testnet account. The adapter does not retry a timed-out order. It returns the client order id so the caller can reconcile status with \`get_order\` before doing anything else.
+
+**Production execution is deliberately locked.** Do not set \`CSR_LIVE_PROTECTIVE_EXITS_READY\` until exchange-side stop/target orders, fill reconciliation, and recovery after a process restart are implemented and tested. Even after that, production requires \`CSR_BINANCE_ENV=production\`, \`CSR_LIVE_TRADING_ENABLED=YES\`, and the explicit per-call confirmation value \`I_CONFIRM_REAL_SPOT_ORDER\`. Never put API keys in the repository or dashboard request fields. This adapter does not currently wire order execution into the dashboard's periodic paper-bot loop.
