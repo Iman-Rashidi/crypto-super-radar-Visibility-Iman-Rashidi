@@ -67,7 +67,7 @@ class CexWhaleScanner:
                         raise DataProviderError("Gate.io trade fallback has incomplete contract metadata") from exc
                     binance_rows = [
                         {"p": row.get("price"), "q": abs(self._number(row.get("size")) or 0) * multiplier,
-                         "m": (_number(row.get("size")) or 0) < 0}
+                         "m": (self._number(row.get("size")) or 0) < 0}
                         for row in rows if isinstance(row, dict)
                     ]
                 else:
