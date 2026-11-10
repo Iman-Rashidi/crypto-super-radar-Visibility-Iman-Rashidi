@@ -131,7 +131,12 @@ def _parse_scan_asset(value: str) -> AssetSpec:
         compact = ASSET_NAME_ALIASES[compact]
     else:
         quote_suffixes = ("USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH", "EUR")
-        if not compact.endswith(quote_suffixes):
+        # A bare ticker such as BTC or ETH is a base asset, not a quote suffix.
+        has_quote = any(
+            len(compact) > len(quote) and compact.endswith(quote)
+            for quote in quote_suffixes
+        )
+        if not has_quote:
             compact += "USDT"
     return AssetSpec.parse("cex:" + compact)
 
