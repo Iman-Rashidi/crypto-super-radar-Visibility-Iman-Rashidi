@@ -160,4 +160,4 @@ class CexWhaleScanner:
                 "interpretation": "Positive flow means aggressive large-trade buying; negative means aggressive large-trade selling. This is not wallet attribution or a full-day total.",
             }
         except Exception as exc:
-            return {"status": "UNKNOWN", "reason": f"CEX large-trade scan failed: {type(exc).__name__}"}
+            return {"status": "UNKNOWN", "reason": f"CEX large-trade scan failed: {type(exc).__name__}: {str(exc)[:180]}"}

@@ -425,7 +425,10 @@ class FakeHttp:
         self.responses = list(responses)
 
     def get(self, *args, **kwargs):
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 class WhaleStoreTests(unittest.TestCase):
