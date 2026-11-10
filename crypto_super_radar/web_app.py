@@ -117,6 +117,7 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                 "candle_age_hours": range_evidence.get("candle_age_hours"),
                 "ranges": range_evidence.get("windows", {}),
                 "candles": candle_records,
+                "chart_pattern": result.metrics.get("chart_pattern"),
                 "asset_regime": (trend_gate.evidence or {}).get("asset_regime") if trend_gate else None,
                 "benchmark_regime": (regime_gate.evidence or {}).get("regime") if regime_gate else None,
             },
@@ -433,7 +434,7 @@ class Handler(BaseHTTPRequestHandler):
                 "function cell(tag,text){const e=document.createElement(tag);e.textContent=text??'UNKNOWN';return e;}"
                 "function table(container,headers,rows){const t=document.createElement('table'),h=document.createElement('thead'),hr=document.createElement('tr');headers.forEach(v=>hr.appendChild(cell('th',v)));h.appendChild(hr);t.appendChild(h);const b=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach(v=>tr.appendChild(cell('td',v)));b.appendChild(tr);});t.appendChild(b);container.replaceChildren(t);}"
                 "function renderMarket(m){const box=document.getElementById('market-summary');"
-                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status]];"
+                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status],['الگوی هندسی',(m.chart_pattern||{}).pattern||'نامشخص'],['وضعیت الگو',(m.chart_pattern||{}).status||'UNKNOWN']];"
                 "box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));const strong=cell('strong',v);d.appendChild(strong);box.appendChild(d);});"
                 "const labels={'7':'۷ روز','30':'۳۰ روز','90':'۹۰ روز','365':'۳۶۵ روز'};"
                 "const rows=Object.entries(m.ranges||{}).map(([k,v])=>[labels[k]||k,v.status,v.low,v.high,v.candle_count,v.coverage_pct]);"
@@ -441,7 +442,7 @@ class Handler(BaseHTTPRequestHandler):
                 "const canvas=document.getElementById('candles'),ctx=canvas.getContext('2d'),bars=m.candles||[];ctx.clearRect(0,0,canvas.width,canvas.height);"
                 "if(!bars.length){ctx.fillStyle='#f59e0b';ctx.fillText('تاریخچه OHLC برای نمودار موجود نیست',20,30);return;}"
                 "const lo=Math.min(...bars.map(x=>x.low)),hi=Math.max(...bars.map(x=>x.high)),span=Math.max(hi-lo,1e-12),pad=20,w=(canvas.width-2*pad)/bars.length;"
-                "bars.forEach((x,i)=>{const cx=pad+i*w+w/2,y=v=>canvas.height-pad-(v-lo)/span*(canvas.height-2*pad);const up=x.close>=x.open;ctx.strokeStyle=up?'#22c55e':'#ef4444';ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(cx,y(x.high));ctx.lineTo(cx,y(x.low));ctx.stroke();const top=y(Math.max(x.open,x.close)),bottom=y(Math.min(x.open,x.close));ctx.fillRect(cx-w*.32,top,Math.max(1,w*.64),Math.max(1,bottom-top));});}"
+                "bars.forEach((x,i)=>{const cx=pad+i*w+w/2,y=v=>canvas.height-pad-(v-lo)/span*(canvas.height-2*pad);const up=x.close>=x.open;ctx.strokeStyle=up?'#22c55e':'#ef4444';ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(cx,y(x.high));ctx.lineTo(cx,y(x.low));ctx.stroke();const top=y(Math.max(x.open,x.close)),bottom=y(Math.min(x.open,x.close));ctx.fillRect(cx-w*.32,top,Math.max(1,w*.64),Math.max(1,bottom-top));});const shape=m.chart_pattern||{};if(shape.status==='FORMING'||shape.status==='BREAKOUT_UP'||shape.status==='BREAKOUT_DOWN'){const drawLine=(line,color)=>{if(!line)return;ctx.save();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([7,5]);ctx.beginPath();ctx.moveTo(pad+(line.start_index+.5)*w,y(line.start_price));ctx.lineTo(pad+(line.end_index+.5)*w,y(line.end_price));ctx.stroke();ctx.restore();};drawLine(shape.upper_line,'#ffc66d');drawLine(shape.lower_line,'#72a7ff');(shape.pivots||[]).forEach(p=>{ctx.fillStyle=p.kind==='HIGH'?'#ffc66d':'#72a7ff';ctx.beginPath();ctx.arc(pad+(p.index+.5)*w,y(p.price),4,0,Math.PI*2);ctx.fill();});ctx.fillStyle='#edf4fb';ctx.fillText('Triangle: '+(shape.status||'UNKNOWN')+' / '+(shape.breakout||'NO BREAKOUT'),pad,16);}}"
                 "function renderGates(gates){const rows=(gates||[]).map(g=>[g.id,g.name,g.status,g.reason]);table(document.getElementById('gate-table'),['#','فیلتر','وضعیت','دلیل'],rows);}"
                 "async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;"
                 "if(j.status==='completed'){renderMarket(j.result.market_overview||{});renderGates(j.result.gates);document.getElementById('result').textContent=JSON.stringify(j.result,null,2);return;}"

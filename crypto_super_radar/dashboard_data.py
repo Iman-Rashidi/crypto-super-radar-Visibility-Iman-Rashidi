@@ -115,6 +115,15 @@ def quantitative_dataframe(result: AnalysisResult) -> pd.DataFrame:
     add("ساختار موج", "تعداد پیوت‌های تأییدشده", wave.get("confirmed_pivot_count"))
     add("ساختار موج", "معنای اطمینان", wave.get("confidence_semantics"))
 
+    shape = (result.metrics or {}).get("chart_pattern") or {}
+    add("الگوی هندسی", "وضعیت الگو", shape.get("status"))
+    add("الگوی هندسی", "نوع الگو", shape.get("pattern"))
+    add("الگوی هندسی", "وضعیت شکست", shape.get("breakout"))
+    add("الگوی هندسی", "تعداد برخورد سقف/کف", f"{shape.get('upper_touches', 0)}/{shape.get('lower_touches', 0)}")
+    add("الگوی هندسی", "مرز بالایی فعلی", shape.get("upper_now"), "USD")
+    add("الگوی هندسی", "مرز پایینی فعلی", shape.get("lower_now"), "USD")
+    add("الگوی هندسی", "معنای اطمینان", shape.get("confidence_semantics"))
+
     liquidity = gates.get(5)
     if liquidity:
         e = liquidity.evidence

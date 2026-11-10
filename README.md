@@ -316,6 +316,12 @@ A configured RSS set is reported as `KNOWN` only when every configured feed retu
 **CRYPTO SUPER RADAR** — Discover Early. Analyze Smarter. Manage Risk.
 
 
+## 11. Geometric chart-pattern monitoring
+
+The research scan now checks confirmed, non-repainting pivots for symmetrical, ascending and descending triangle structures. A forming pattern requires three confirmed contacts on each boundary, contracting price range and fitted trend lines. The latest candle close must move beyond a small boundary buffer before the pattern is labeled as a breakout. This remains explanatory evidence; it does not add a decision gate, change a score or create an order.
+
+The Persian web chart draws the upper/lower boundaries and confirmed pivot points with the browser's built-in canvas renderer. This adds no paid charting library, AI call or external chart service. Pattern matching is a rule-based approximation and should be reviewed with out-of-sample data before any strategy use.
+
 ## 12. Optional AI headline enrichment (Gemini)
 
 AI is an **optional explanatory layer**, not part of the deterministic scoring or trade-decision path. The engine continues to calculate technical indicators, whale evidence, sentiment baseline, Risk Score, Opportunity Rank, Confidence Level and all 12 mandatory gates when AI is disabled or unavailable.
