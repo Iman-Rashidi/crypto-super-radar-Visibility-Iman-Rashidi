@@ -425,6 +425,34 @@ def _enforce_daily_candle_freshness(result, range_evidence: dict, timeframe_rang
     result.summary_fa = "معامله مسدود شد: سن کندل روزانه از حد مجاز تازگی داده بیشتر است."
 
 
+def _enforce_volume_cross_validation(result) -> None:
+    """A missing independent volume comparison cannot be described as validated data."""
+    data_gate = next((gate for gate in (result.gates or []) if gate.gate_id == 1), None)
+    if data_gate is None:
+        return
+    evidence = dict(data_gate.evidence or {})
+    discrepancy = evidence.get("volume_discrepancy_pct")
+    try:
+        volume_valid = math.isfinite(float(discrepancy)) and float(discrepancy) >= 0.0
+    except (TypeError, ValueError, OverflowError):
+        volume_valid = False
+    if volume_valid:
+        return
+    data_gate.status = GateStatus.UNKNOWN
+    data_gate.reason_fa = (
+        "اختلاف قیمت بین منابع قابل بررسی است، اما اختلاف حجم مستقل محاسبه نشده؛ "
+        "بنابراین اعتبارسنجی کامل حجم تأیید نشده است."
+    )
+    data_gate.reason_en = (
+        "Price comparison is available, but independent volume discrepancy is missing; "
+        "full volume validation remains UNKNOWN."
+    )
+    evidence["volume_cross_validation_status"] = "UNKNOWN"
+    data_gate.evidence = evidence
+    result.signal = Signal.NO_TRADE
+    result.summary_fa = "معامله مسدود شد: اعتبارسنجی مستقل حجم کامل نیست."
+
+
 def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
     """Turn engine output into a plain-language, gate-backed decision summary."""
     mi = result.metrics.get("market_intelligence") or {}
@@ -590,6 +618,7 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
         snapshot = getattr(ENGINE.data, "snapshots", {}).get(asset.raw)
         timeframe_ranges = _timeframe_ranges(asset, snapshot)
         _enforce_daily_candle_freshness(result, range_evidence, timeframe_ranges)
+        _enforce_volume_cross_validation(result)
         market_intelligence = result.metrics.get("market_intelligence", {}) or {}
         coin_display = _coin_display(asset, market_intelligence)
         regime_gate = next((gate for gate in result.gates if gate.gate_id == 2), None)
