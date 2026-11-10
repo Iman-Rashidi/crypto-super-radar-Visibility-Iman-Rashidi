@@ -1,5 +1,5 @@
 """Tests for the public Gem Hunter BUY qualification gate."""
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import unittest
 
 from crypto_super_radar.gem_hunter_qualification import (
@@ -12,10 +12,7 @@ from crypto_super_radar.gem_hunter_qualification import (
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
 
 
-def valid_candidate(now=NOW):
-    data_as_of = (now - timedelta(seconds=120)).isoformat().replace("+00:00", "Z")
-    whale_time_a = (now - timedelta(seconds=600)).isoformat().replace("+00:00", "Z")
-    whale_time_b = (now - timedelta(seconds=540)).isoformat().replace("+00:00", "Z")
+def valid_candidate():
     wallet_a = "11111111111111111111111111111111"
     wallet_b = "22222222222222222222222222222222"
     tx_a = "3" * 88
@@ -44,7 +41,7 @@ def valid_candidate(now=NOW):
             },
             "opportunity_score": 84.0,
             "risk_score": 30.0,
-            "data_as_of_utc": data_as_of,
+            "data_as_of_utc": "2026-11-10T11:58:00Z",
             "market_data_sources": ["provider_a", "provider_b"],
             "market_metrics": {
                 "price_usd": 0.01,
@@ -68,10 +65,10 @@ def valid_candidate(now=NOW):
                 "events": [
                     {"wallet_address": wallet_a, "tx_hash": tx_a,
                      "event_type": "SWAP_BUY", "amount_usd": 28500,
-                     "timestamp_utc": whale_time_a},
+                     "timestamp_utc": "2026-11-10T11:50:00Z"},
                     {"wallet_address": wallet_b, "tx_hash": tx_b,
                      "event_type": "SWAP_BUY", "amount_usd": 17200,
-                     "timestamp_utc": whale_time_b},
+                     "timestamp_utc": "2026-11-10T11:51:00Z"},
                 ],
             },
         },
