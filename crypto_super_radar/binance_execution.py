@@ -20,6 +20,7 @@ import requests
 ALLOWED_SYMBOLS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
 LIVE_CONFIRMATION = "I_CONFIRM_REAL_SPOT_ORDER"
 ABSOLUTE_MAX_NOTIONAL_USDT = Decimal("25")
+LIVE_PROTECTIVE_EXITS_IMPLEMENTED = False
 
 
 class OrderSafetyError(ValueError):
@@ -146,7 +147,7 @@ class BinanceSpotExecutor:
                     "Production orders require CSR_LIVE_TRADING_ENABLED=YES and explicit confirmation."
                 )
             # Production is deliberately locked until server-side protective exits are integrated.
-            if os.getenv("CSR_LIVE_PROTECTIVE_EXITS_READY") != "YES":
+            if not LIVE_PROTECTIVE_EXITS_IMPLEMENTED:
                 raise OrderSafetyError(
                     "Production orders are locked until protective exit orders and reconciliation are enabled."
                 )
