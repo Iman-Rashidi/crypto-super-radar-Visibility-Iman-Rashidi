@@ -398,3 +398,19 @@ Set testnet API credentials in `CSR_BINANCE_API_KEY` and `CSR_BINANCE_API_SECRET
 The engine now strengthens its existing final gate with confirmed swing highs/lows, a robust ATR scale, Fibonacci retracement confluence, and a chronological historical-analogue check. It compares normalized 20-candle return shapes to separated prior episodes; all analogue outcomes must be observed before the current pattern window. The output reports the analogue sample size, cost-adjusted historical hit/error estimate, a Wilson 95% confidence bound, net expectancy, worst observed adverse move, and structural stop/target levels.
 
 This is an empirical screening estimate, not a true future error probability. It fails closed when history is incomplete, the market structure conflicts with the signal, Fibonacci confluence is absent, uncertainty is too wide, or structural net reward/risk is below 1.8. Elliott-wave and chart-shape labels remain contextual evidence, not stand-alone buy/sell triggers. The signal execution service also requires this gate and the exact structural stop/target returned by the analysis.
+
+## Optional persistent cloud storage (Turso)
+
+The dashboard can keep its existing SQLite schema while storing it in a remote Turso database. This persists whale observations and the paper-trading account, open paper position, and trade journal across Render restarts. The local SQLite backend remains the default when Turso is not configured.
+
+1. Create a separate database for this application in the [Turso dashboard](https://turso.tech/app) using the Free plan.
+2. Copy the database URL and create a read/write database token in Turso.
+3. In Render, open **Environment** for `crypto-super-radar` and add both variables:
+   - `TURSO_DATABASE_URL` — the database URL from Turso.
+   - `TURSO_AUTH_TOKEN` — the server-side database token.
+4. Save the variables and allow Render to redeploy. The application creates its required tables automatically on first startup.
+
+Keep the token only in Render's private environment variables. Never commit it to GitHub, place it in browser JavaScript, or paste it into public issue reports. Both variables must be configured together; a partial configuration fails closed rather than silently writing to temporary local storage.
+
+The scan queue and in-progress browser job registry are still in-memory and are not durable across a process restart. Market prices and provider evidence are fetched live; no synthetic historical market dataset is seeded into the database. There is no historical database file in the repository to import, so the new cloud database begins empty and accumulates real observations after activation.
+
