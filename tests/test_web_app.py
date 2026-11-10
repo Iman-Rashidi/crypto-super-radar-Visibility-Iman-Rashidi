@@ -70,6 +70,9 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("بازار رمزارزها", page)
         self.assertIn("APIهای عمومی و رایگان", page)
         self.assertIn("/api/crypto-markets", page)
+        self.assertIn('id="crypto-market-search"', page)
+        self.assertIn('id="crypto-market-sort"', page)
+        self.assertIn("نمایش ", page)
         self.assertIn('id="scan-asset"', page)
         self.assertIn('id="scan-section"', page)
         self.assertIn("انتخاب برای اسکن", page)
@@ -98,6 +101,8 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(first["status"], "PASS")
             self.assertEqual(first["cache_ttl_seconds"], 60)
             self.assertEqual(len(first["items"]), len(web_app.CRYPTO_MARKET_UNIVERSE))
+            self.assertGreaterEqual(len(first["items"]), 20)
+            self.assertEqual(len({item["symbol"] for item in first["items"]}), len(first["items"]))
             self.assertEqual(first["items"][0]["symbol"], "BTCUSDT")
             self.assertEqual(first["items"][0]["providers"], ["Binance Spot", "Bybit Spot"])
 
