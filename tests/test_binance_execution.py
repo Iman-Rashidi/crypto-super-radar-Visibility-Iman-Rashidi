@@ -142,7 +142,7 @@ class BinanceSpotExecutorTests(unittest.TestCase):
             confirmation_score=90, estimated_risk_score=10, stop_loss=90,
             take_profit=130, expected_holding_days=2,
         )
-        with self.assertRaisesRegex(OrderSafetyError, "twelve"):
+        with self.assertRaisesRegex(OrderSafetyError, "Every mandatory signal gate must PASS"):
             ValidatedSignalExecutor(self.executor).submit_long(
                 result=result, symbol="BTCUSDT", reference_price=100,
             )
