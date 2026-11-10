@@ -45,7 +45,7 @@ def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
 body{{font-family:Arial,sans-serif;background:#0b1220;color:#e5e7eb;margin:0;padding:24px}}
 main{{max-width:980px;margin:auto}} .card{{background:#111c2f;border:1px solid #26364d;border-radius:14px;padding:18px;margin:14px 0}}
 input,button{{font:inherit;padding:12px;border-radius:8px;border:1px solid #46566d;background:#0b1220;color:#fff;width:100%;box-sizing:border-box}}
-button{{background:#2563eb;border:0;margin-top:12px;cursor:pointer}} table{{width:100%;border-collapse:collapse}}
+button{{background:#2563eb;border:0;margin-top:12px;cursor:pointer}} button:disabled{{opacity:.45;cursor:not-allowed}} button.market-scan-button{{width:auto;margin:0;padding:8px 10px;font-size:.9rem}} table{{width:100%;border-collapse:collapse}}
 td,th{{padding:9px;border-bottom:1px solid #334155;text-align:right;vertical-align:top}}
 small,.muted{{color:#9ca3af}} .status{{font-weight:bold}} code{{direction:ltr;display:inline-block}}
 pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px;border-radius:8px;direction:ltr;text-align:left}}
@@ -215,11 +215,11 @@ class Handler(BaseHTTPRequestHandler):
         body = """
         <h1>🐋 CRYPTO SUPER RADAR</h1>
         <p class="muted">Quantitative Crypto Intelligence · فقط تحلیل و Paper Research، بدون اجرای سفارش</p>
-        <section class="card">
+        <section class="card" id="scan-section">
           <h2>اسکن دارایی</h2>
           <form method="post" action="/scan">
             <label>بازار و نماد / آدرس</label>
-            <input name="asset" required value="cex:BTCUSDT" placeholder="cex:BTCUSDT یا base:0x...">
+            <input id="scan-asset" name="asset" required value="cex:BTCUSDT" placeholder="cex:BTCUSDT یا base:0x...">
             <p class="muted">نمونه‌ها: cex:BTCUSDT · perp:BTCUSDT · base:0x... · eth:0x... · solana:MINT</p>
             <label>تیتر خبری تکمیلی (اختیاری)</label>
             <input name="headline" placeholder="تیتر خبر">
@@ -234,11 +234,11 @@ class Handler(BaseHTTPRequestHandler):
           <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
           <p id="crypto-market-status" class="muted" aria-live="polite">در حال دریافت دادهٔ عمومی بازار...</p>
           <div style="overflow-x:auto"><table>
-            <thead><tr><th>رمزارز</th><th>نماد</th><th>قیمت مرجع (USD)</th><th>حجم ۲۴ساعته (USD)</th><th>اختلاف منابع</th><th>وضعیت</th></tr></thead>
-            <tbody id="crypto-market-rows"><tr><td colspan="6">در حال بارگذاری...</td></tr></tbody>
+            <thead><tr><th>رمزارز</th><th>نماد</th><th>قیمت مرجع (USD)</th><th>حجم ۲۴ساعته (USD)</th><th>اختلاف منابع</th><th>وضعیت</th><th>اقدام</th></tr></thead>
+            <tbody id="crypto-market-rows"><tr><td colspan="7">در حال بارگذاری...</td></tr></tbody>
           </table></div>
           <button type="button" id="crypto-market-refresh">به‌روزرسانی بازار</button>
-          <p class="muted">به‌روزرسانی سمت سرور هر ۶۰ ثانیه cache می‌شود. این بخش هیچ API پولی یا کلید API نمی‌خواهد؛ محدودیت منطقه‌ای و قطع سرویس عمومی ممکن است بعضی ردیف‌ها را UNKNOWN کند.</p>
+          <p class="muted">برای آماده‌کردن اسکن، «انتخاب برای اسکن» را بزنید؛ اجرای اسکن فقط با دکمهٔ فرم انجام می‌شود. به‌روزرسانی سمت سرور هر ۶۰ ثانیه cache می‌شود. این بخش هیچ API پولی یا کلید API نمی‌خواهد؛ محدودیت منطقه‌ای و قطع سرویس عمومی ممکن است بعضی ردیف‌ها را UNKNOWN کند.</p>
         </section>
         <script>
         (function(){
@@ -260,7 +260,19 @@ class Handler(BaseHTTPRequestHandler):
                   item.status==='PASS'?fmt(item.volume_24h_usd,2):'—',
                   item.status==='PASS'?fmt(item.price_discrepancy_pct,4)+'%':'—',
                   item.status==='PASS'?'تأیید دو منبع':'نامشخص · UNKNOWN'];
-                values.forEach((value,index)=>tr.appendChild(cell(index===5?'td':'td',value)));
+                values.forEach(value=>tr.appendChild(cell('td',value)));
+                const actionCell=document.createElement('td');
+                const scanButton=document.createElement('button');
+                scanButton.type='button';scanButton.className='market-scan-button';
+                scanButton.textContent='انتخاب برای اسکن';
+                scanButton.disabled=item.status!=='PASS';
+                scanButton.addEventListener('click',()=>{
+                  const input=document.getElementById('scan-asset');
+                  input.value='cex:'+item.symbol;
+                  document.getElementById('scan-section').scrollIntoView({behavior:'smooth',block:'start'});
+                  input.focus();
+                });
+                actionCell.appendChild(scanButton);tr.appendChild(actionCell);
                 if(item.status!=='PASS')tr.className='status-unknown';
                 return tr;
               });
