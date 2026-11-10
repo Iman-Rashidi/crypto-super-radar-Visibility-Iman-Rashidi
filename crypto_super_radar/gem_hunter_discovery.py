@@ -219,14 +219,14 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
 
 
 
-def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int = 5) -> tuple[list[dict[str, Any]], int]:
+def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int = 2) -> tuple[list[dict[str, Any]], int]:
     """Read a small recovery sample; this never substitutes for complete new-pool coverage."""
     if network not in NETWORKS:
         raise ValueError(f"Unsupported recovery network: {network}")
     base = "https://api.dexpaprika.com"
     payload = http.get(
         f"{base}/networks/{network}/pools/search",
-        params={"order_by": "created_at", "sort": "desc", "limit": max(1, min(limit, 5))},
+        params={"order_by": "created_at", "sort": "desc", "limit": max(1, min(limit, 2))},
     )
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise ValueError(f"DexPaprika {network} pool-search response has an invalid schema")
@@ -234,7 +234,7 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
     candidates: list[dict[str, Any]] = []
     detail_errors = 0
     source = f"DEXPAPRIKA_{network.upper()}_RECOVERY"
-    for pool in payload["results"][:5]:
+    for pool in payload["results"][:2]:
         if not isinstance(pool, dict) or str(pool.get("chain", "")).lower() != network:
             continue
         pool_id = pool.get("id")
@@ -307,7 +307,7 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         sells = _number(h1.get("sells"))
         buys_24h = _number(h24.get("buys"))
         sells_24h = _number(h24.get("sells"))
-        change_1h = _number(h1.get("last_price_usd_change"))
+        change_1h = _number(h1.get("last_price_usd_change")) if str(token_address).lower() == str(base_token_id or "").lower() else None
         if liquidity is None:
             liquidity = _number(pool.get("liquidity_usd"))
         if volume_24h is None:
@@ -432,12 +432,13 @@ def discover_gem_candidates(http, *, limit: int = 20,
             continue
         fallback_source = f"DEXPAPRIKA_{network.upper()}_RECOVERY"
         try:
-            fallback_rows, detail_errors = _dexpaprika_recovery_rows(http, network, now, limit=5)
+            fallback_rows, detail_errors = _dexpaprika_recovery_rows(http, network, now, limit=2)
             sources[fallback_source] = {
                 "status": "UNKNOWN" if detail_errors else "PASS",
                 "candidate_rows": len(fallback_rows),
                 "detail_errors": detail_errors,
-                "coverage": "LIMITED_RECOVERY_NOT_COMPLETE_NEW_POOL_COVERAGE",
+                "detail_limit": 2,
+                "coverage": "LIMITED_TOP_2_RECOVERY_NOT_COMPLETE_NEW_POOL_COVERAGE",
                 "freshness_caveat": "Keyless coverage may omit pools younger than one hour.",
             }
             for row in fallback_rows:
