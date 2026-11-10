@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import queue
 import threading
 import time
 import uuid
@@ -15,14 +16,16 @@ from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
 from .models import AssetSpec
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
+from .market_intelligence import search_dex_tokens
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
 JOBS: dict[str, dict] = {}
-LAST_SCAN: dict[str, float] = {}
 LOCK = threading.RLock()
 SCAN_RUNNING = False
+SCAN_QUEUE = queue.Queue(maxsize=50)
+SCAN_WORKER_STARTED = False
 
 # Small, explicitly curated public spot board; it is not a market-cap ranking.
 CRYPTO_MARKET_UNIVERSE = (
@@ -138,6 +141,7 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             "confidence_level_pct": result.metrics.get("confidence_level_pct"),
             "evidence_confidence_pct": result.metrics.get("evidence_confidence_pct"),
             "summary_fa": result.summary_fa,
+            "market_intelligence": result.metrics.get("market_intelligence", {}),
             "gates": [
                 {"id": gate.gate_id, "name": gate.name_fa, "name_en": gate.name_en,
                  "status": gate.status.value, "reason": gate.reason_fa,
@@ -226,6 +230,40 @@ def _crypto_market_board() -> dict:
         return payload
 
 
+def _scan_queue_worker():
+    """Run stateful engine and paper-bot jobs serially on one worker."""
+    global SCAN_RUNNING
+    while True:
+        task = SCAN_QUEUE.get()
+        job_id = task["job_id"]
+        try:
+            with LOCK:
+                SCAN_RUNNING = True
+                if job_id in JOBS:
+                    JOBS[job_id] = {"status": "running"}
+            if task["route"] == "/paper-bot/tick":
+                _run_paper_tick(job_id, task["asset"])
+            else:
+                _run_scan(job_id, task["asset"], task["headline"], task["social_post"])
+        except Exception as exc:
+            with LOCK:
+                JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            with LOCK:
+                SCAN_RUNNING = False
+            SCAN_QUEUE.task_done()
+
+
+def _ensure_scan_worker():
+    global SCAN_WORKER_STARTED
+    with LOCK:
+        if SCAN_WORKER_STARTED:
+            return
+        worker = threading.Thread(target=_scan_queue_worker, daemon=True, name="crypto-scan-queue")
+        worker.start()
+        SCAN_WORKER_STARTED = True
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
@@ -242,6 +280,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             return self._send(200, b'{"status":"ok"}', "application/json")
+        if parsed.path == "/api/dex-search":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/crypto-markets":
             payload = _crypto_market_board()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -380,6 +423,16 @@ class Handler(BaseHTTPRequestHandler):
         </script>
         <section class="card" id="scan-section">
           <h2>اسکن دارایی</h2>
+          <div style="margin:12px 0 18px;padding:14px;border:1px solid #2b4660;border-radius:12px;background:#0a1725">
+            <label for="dex-token-query">جست‌وجوی نام یا نماد آلت‌کوین در DEX</label>
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px">
+              <input id="dex-token-query" placeholder="مثلاً PEPE، BONK یا نام توکن">
+              <button id="dex-token-search" type="button" style="width:auto;white-space:nowrap">جست‌وجو</button>
+            </div>
+            <p class="muted">نتیجه را با شبکه و آدرس قرارداد انتخاب کن؛ نمادهای تکراری ممکن است توکن‌های متفاوت باشند. شبکه‌های جست‌وجو: Ethereum، Base و Solana.</p>
+            <div id="dex-search-status" class="muted" aria-live="polite">برای آلت‌کوین‌ها ابتدا جست‌وجو و قرارداد دقیق را انتخاب کن.</div>
+            <div id="dex-search-results"></div>
+          </div>
           <form method="post" action="/scan">
             <label>بازار و نماد / آدرس</label>
             <input id="scan-asset" name="asset" required value="cex:BTCUSDT" placeholder="cex:BTCUSDT یا base:0x...">
@@ -391,7 +444,205 @@ class Handler(BaseHTTPRequestHandler):
             <button type="submit">اجرای اسکن پژوهشی</button>
           </form>
         </section>
+        <script>
+        (function(){
+          const query=document.getElementById('dex-token-query');
+          const button=document.getElementById('dex-token-search');
+          const status=document.getElementById('dex-search-status');
+          const results=document.getElementById('dex-search-results');
+          const assetInput=document.getElementById('scan-asset');
+          const fmt=value=>value===null||value===undefined?'N/A':Number(value).toLocaleString('en-US',{maximumFractionDigits:2});
+          async function search(){
+            const term=(query.value||'').trim();
+            if(term.length<2){status.textContent='حداقل دو نویسه وارد کن.';return;}
+            button.disabled=true;status.textContent='در حال جست‌وجوی توکن‌ها در DEX Screener...';results.replaceChildren();
+            try{
+              const response=await fetch('/api/dex-search?q='+encodeURIComponent(term));
+              const data=await response.json();
+              if(!response.ok||!Array.isArray(data.results)||!data.results.length){status.textContent=data.reason||'توکن منطبق در شبکه‌های پشتیبانی‌شده پیدا نشد.';return;}
+              status.textContent='نتایج: '+data.results.length+' توکن؛ قبل از اسکن قرارداد درست را انتخاب کن.';
+              data.results.forEach(item=>{
+                const option=document.createElement('button');
+                option.type='button';option.style.textAlign='right';option.style.marginTop='8px';
+                option.style.background='#0b1c2c';option.style.border='1px solid #31506a';
+                option.textContent=(item.name||'Unknown')+' ('+(item.symbol||'?')+') · '+item.chain+' · Liquidity 
+          <h2>ماشین‌حساب حرفه‌ای سناریوی Spot</h2>
+          <p class="muted">محاسبهٔ سود/زیان فرضی Long بدون اهرم؛ زمان انتخابی فقط افق سناریو است، نه پیش‌بینی زمان سود.</p>
+          <div class="calc-grid">
+            <div><label for="calc-amount">سرمایه (EUR)</label><input id="calc-amount" type="number" min="0.01" step="0.01" value="10"></div>
+            <div><label for="calc-move">تغییر فرضی قیمت (%)</label><input id="calc-move" type="number" min="-99.9" step="0.1" value="10"></div>
+            <div><label for="calc-days">افق سناریو (روز)</label><input id="calc-days" type="number" min="1" max="3650" value="14"></div>
+            <div><label for="calc-buy-fee">کارمزد خرید (%)</label><input id="calc-buy-fee" type="number" min="0" max="20" step="0.01" value="0.1"></div>
+            <div><label for="calc-sell-fee">کارمزد فروش (%)</label><input id="calc-sell-fee" type="number" min="0" max="20" step="0.01" value="0.1"></div>
+            <div><label for="calc-buy-slip">لغزش خرید (%)</label><input id="calc-buy-slip" type="number" min="0" max="20" step="0.01" value="0.2"></div>
+            <div><label for="calc-sell-slip">لغزش فروش (%)</label><input id="calc-sell-slip" type="number" min="0" max="20" step="0.01" value="0.2"></div>
+          </div>
+          <div class="grid" style="margin-top:12px">
+            <div class="metric">سود/زیان خالص<strong id="calc-pnl">—</strong></div>
+            <div class="metric">ارزش نهایی<strong id="calc-value">—</strong></div>
+            <div class="metric">بازده خالص<strong id="calc-return">—</strong></div>
+            <div class="metric">رشد سربه‌سر<strong id="calc-break-even">—</strong></div>
+          </div>
+          <h3>مقایسهٔ سناریوهای قیمت</h3><div id="calc-scenarios"></div>
+          <p class="muted">فرمول: Vnet = I(1−fb)(1−sb)(1+r)(1−ss)(1−fs). مالیات، تغییر EUR/USD، هزینه برداشت/شبکه و اثر اندازه سفارش خارج از محاسبه‌اند.</p>
+          <p class="muted">این ابزار پیش‌بینی، توصیه سرمایه‌گذاری یا سفارش معاملاتی نیست.</p>
+        </section>
+        <script>
+        (function(){
+          const ids=['calc-amount','calc-move','calc-days','calc-buy-fee','calc-sell-fee','calc-buy-slip','calc-sell-slip'];
+          const el=id=>document.getElementById(id);
+          function calc(move){
+            const amount=Number(el('calc-amount').value), change=Number(move);
+            const bf=Number(el('calc-buy-fee').value)/100, sf=Number(el('calc-sell-fee').value)/100;
+            const bs=Number(el('calc-buy-slip').value)/100, ss=Number(el('calc-sell-slip').value)/100;
+            const factor=(1-bf)*(1-bs)*(1+change/100)*(1-ss)*(1-sf);
+            const net=amount*factor, pnl=net-amount;
+            const base=(1-bf)*(1-bs)*(1-ss)*(1-sf);
+            return {net,pnl,ret:pnl/amount*100,be:(1/base-1)*100};
+          }
+          function update(){
+            const amount=Number(el('calc-amount').value),move=Number(el('calc-move').value);
+            const days=Number(el('calc-days').value);
+            const rates=ids.slice(3).map(id=>Number(el(id).value));
+            if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(move)||move<=-100||!Number.isFinite(days)||days<1||rates.some(x=>!Number.isFinite(x)||x<0||x>=100)){
+              el('calc-pnl').textContent='ورودی نامعتبر';return;
+            }
+            const out=calc(move),eur=x=>x.toFixed(4)+' €';
+            el('calc-pnl').textContent=(out.pnl>=0?'+':'')+eur(out.pnl);
+            el('calc-value').textContent=eur(out.net);
+            el('calc-return').textContent=(out.ret>=0?'+':'')+out.ret.toFixed(3)+'%';
+            el('calc-break-even').textContent=out.be.toFixed(3)+'%';
+            const rows=[-20,-10,0,5,10,20].map(v=>{const x=calc(v);return '<tr><td>'+v.toFixed(1)+'%</td><td>'+eur(x.pnl)+'</td><td>'+x.ret.toFixed(3)+'%</td><td>'+days+' روز</td></tr>';}).join('');
+            el('calc-scenarios').innerHTML='<table><thead><tr><th>تغییر قیمت</th><th>سود/زیان خالص</th><th>بازده خالص</th><th>افق</th></tr></thead><tbody>'+rows+'</tbody></table>';
+          }
+          ids.forEach(id=>el(id).addEventListener('input',update));update();
+        })();
+        </script>
+        <section class="card">
+          <h3>۱۲ فیلتر اجباری</h3>
+          <p>داده بازار · رژیم · روند · مومنتوم · جریان سرمایه · امنیت · احساسات · بک‌تست · ریسک · نهنگ‌ها · پوشش احساسات · Walk-forward</p>
+          <p class="muted">هر فیلتر FAIL یا UNKNOWN باشد، خروجی NO TRADE است. سولانا در نسخه فعلی فقط نمونه‌برداری محدود از تراکنش‌های اخیر دارد.</p>
+        </section>
+        <p class="muted">تاریخچه: <code>/history?asset=cex:BTCUSDT</code></p>
+        """
+        return self._send(200, _page(body))
 
+    def do_POST(self):
+        global SCAN_RUNNING
+        route = urlparse(self.path).path
+        if route not in {"/scan", "/paper-bot/tick"}:
+            return self._send(404, b"Not found", "text/plain; charset=utf-8")
+        origin = self.headers.get("Origin")
+        request_host = self.headers.get("Host", "")
+        if origin and urlparse(origin).netloc.lower() != request_host.lower():
+            return self._send(403, b"Cross-origin scan requests are not allowed", "text/plain; charset=utf-8")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return self._send(400, b"Invalid Content-Length", "text/plain; charset=utf-8")
+        if length <= 0 or length > 16_384:
+            return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
+        try:
+            form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            asset = AssetSpec.parse(form.get("asset", [""])[0].strip())
+            if route == "/paper-bot/tick" and (
+                asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS
+            ):
+                raise ValueError("Paper trading accepts only BTC, ETH or SOL spot.")
+            headline = form.get("headline", [""])[0].strip() if route == "/scan" else ""
+            social_post = form.get("social_post", [""])[0].strip() if route == "/scan" else ""
+            job_id = uuid.uuid4().hex
+            task = {
+                "job_id": job_id,
+                "route": route,
+                "asset": asset,
+                "headline": headline,
+                "social_post": social_post,
+            }
+            _ensure_scan_worker()
+            with LOCK:
+                if SCAN_QUEUE.full():
+                    return self._send(429, _page(
+                        "<h2>صف اسکن پر است</h2><p>۵۰ درخواست در صف هستند. کمی بعد دوباره تلاش کن.</p><a href='/'>بازگشت</a>"
+                    ))
+                JOBS[job_id] = {"status": "queued", "queue_position": SCAN_QUEUE.qsize() + 1}
+                while len(JOBS) > 100:
+                    oldest = next(iter(JOBS))
+                    if JOBS[oldest].get("status") in {"queued", "running"}:
+                        break
+                    JOBS.pop(oldest)
+                SCAN_QUEUE.put_nowait(task)
+            if route == "/paper-bot/tick":
+                body = (
+                    "<h2>چرخهٔ ربات آزمایشی در صف قرار گرفت</h2><p>شناسه: <code>" + job_id + "</code></p>"
+                    "<p id='state'>در انتظار نوبت اجرای سریالی...</p>"
+                    "<pre id='result'>هیچ سفارش واقعی ارسال نمی‌شود.</pre><p><a href='/'>بازگشت</a></p>"
+                    "<script>const job='" + job_id + "';async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;if(j.status==='completed'){document.getElementById('result').textContent=JSON.stringify(j.result,null,2);return;}if(j.status==='failed'){document.getElementById('result').textContent=j.error;return;}}catch(e){document.getElementById('state').textContent='ارتباط قطع شد؛ وضعیت در /paper-bot/status موجود است';return;}setTimeout(poll,2500);}poll();</script>"
+                )
+                return self._send(202, _page(body, "Paper Bot Cycle"))
+            body = (
+                "<h2>اسکن در صف قرار گرفت</h2><p>شناسه کار: <code>" + job_id + "</code></p>"
+                "<p id='state'>در انتظار اجرای سریالی اسکن...</p>"
+                "<section class='card'><h3>نمای بازار، کف و سقف</h3><div id='market-summary' class='grid'></div>"
+                "<div id='range-table'></div><canvas id='candles' width='1000' height='320'></canvas></section>"
+                "<section class='card'><h3>Market Intelligence · دادهٔ DEX و مشتقات</h3><div id='mi-summary' class='grid'></div><div id='mi-notes' class='muted'></div></section>"
+                "<section class='card'><h3>۱۲ فیلتر</h3><div id='gate-table'></div></section>"
+                "<section class='card'><h3>خلاصه نتیجه اسکن</h3><div id='scan-summary' class='grid'></div></section><p><a href='/'>بازگشت</a></p>"
+                "<script>const job='" + job_id + "';"
+                "function cell(tag,text){const e=document.createElement(tag);e.textContent=text??'UNKNOWN';return e;}"
+                "function table(container,headers,rows){const t=document.createElement('table'),h=document.createElement('thead'),hr=document.createElement('tr');headers.forEach(v=>hr.appendChild(cell('th',v)));h.appendChild(hr);t.appendChild(h);const b=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach(v=>tr.appendChild(cell('td',v)));b.appendChild(tr);});t.appendChild(b);container.replaceChildren(t);}"
+                "function renderMarket(m){const box=document.getElementById('market-summary');"
+                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status],['الگوی هندسی',(m.chart_pattern||{}).pattern||'نامشخص'],['وضعیت الگو',(m.chart_pattern||{}).status||'UNKNOWN'],['تأیید شکست با حجم',(m.chart_pattern||{}).breakout_confirmation||'UNKNOWN'],['حجم شکست / میانه ۲۰ کندل',(m.chart_pattern||{}).breakout_volume_ratio||'UNKNOWN']];"
+                "box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));const strong=cell('strong',v);d.appendChild(strong);box.appendChild(d);});"
+                "const labels={'7':'۷ روز','30':'۳۰ روز','90':'۹۰ روز','365':'۳۶۵ روز'};"
+                "const rows=Object.entries(m.ranges||{}).map(([k,v])=>[labels[k]||k,v.status,v.low,v.high,v.candle_count,v.coverage_pct]);"
+                "table(document.getElementById('range-table'),['بازه','وضعیت','کف','سقف','تعداد کندل','پوشش %'],rows);"
+                "const canvas=document.getElementById('candles'),ctx=canvas.getContext('2d'),bars=m.candles||[];ctx.clearRect(0,0,canvas.width,canvas.height);"
+                "if(!bars.length){ctx.fillStyle='#f59e0b';ctx.fillText('تاریخچه OHLC برای نمودار موجود نیست',20,30);return;}"
+                "const lo=Math.min(...bars.map(x=>x.low)),hi=Math.max(...bars.map(x=>x.high)),span=Math.max(hi-lo,1e-12),pad=20,w=(canvas.width-2*pad)/bars.length;"
+                "bars.forEach((x,i)=>{const cx=pad+i*w+w/2,y=v=>canvas.height-pad-(v-lo)/span*(canvas.height-2*pad);const up=x.close>=x.open;ctx.strokeStyle=up?'#22c55e':'#ef4444';ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(cx,y(x.high));ctx.lineTo(cx,y(x.low));ctx.stroke();const top=y(Math.max(x.open,x.close)),bottom=y(Math.min(x.open,x.close));ctx.fillRect(cx-w*.32,top,Math.max(1,w*.64),Math.max(1,bottom-top));});const shape=m.chart_pattern||{};if(shape.status==='FORMING'||shape.status==='BREAKOUT_UP'||shape.status==='BREAKOUT_DOWN'){const drawLine=(line,color)=>{if(!line)return;ctx.save();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([7,5]);ctx.beginPath();ctx.moveTo(pad+(line.start_index+.5)*w,y(line.start_price));ctx.lineTo(pad+(line.end_index+.5)*w,y(line.end_price));ctx.stroke();ctx.restore();};drawLine(shape.upper_line,'#ffc66d');drawLine(shape.lower_line,'#72a7ff');(shape.pivots||[]).forEach(p=>{ctx.fillStyle=p.kind==='HIGH'?'#ffc66d':'#72a7ff';ctx.beginPath();ctx.arc(pad+(p.index+.5)*w,y(p.price),4,0,Math.PI*2);ctx.fill();});ctx.fillStyle='#edf4fb';ctx.fillText('Triangle: '+(shape.status||'UNKNOWN')+' / '+(shape.breakout||'NO BREAKOUT'),pad,16);}}"
+                "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const notes=[...(s.notes||[]),d.reason,c.reason,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
+                "function renderGates(gates){const rows=(gates||[]).map(g=>[g.id,g.name,g.status,g.reason]);table(document.getElementById('gate-table'),['#','فیلتر','وضعیت','دلیل'],rows);}"
+                "async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;"
+                "if(j.status==='completed'){renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['دارایی',s.asset],['سیگنال',s.signal],['امتیاز تأیید',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
+                "if(j.status==='failed'){document.getElementById('state').textContent='اسکن ناموفق بود: '+j.error;return;}"
+                "}catch(e){document.getElementById('state').textContent='ارتباط قطع شد؛ بعداً /jobs/'+job+' را بررسی کنید';return;}"
+                "setTimeout(poll,2500);}poll();</script>"
+            )
+            return self._send(202, _page(body, "Scan Running"))
+        except Exception as exc:
+            message = html.escape(f"{type(exc).__name__}: {exc}")
+            return self._send(400, _page(f"<h2>خطا در ورودی</h2><p>{message}</p><a href='/'>بازگشت</a>"))
+
+    def log_message(self, fmt, *args):
+        super().log_message(fmt, *args)
+
+
+def main():
+    port = int(os.getenv("PORT", "10000"))
+    host = os.getenv("HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
++fmt(item.liquidity_usd)+' · '+item.address;
+                option.addEventListener('click',()=>{
+                  assetInput.value=item.asset;
+                  status.textContent='انتخاب شد: '+item.name+' ('+item.symbol+') · '+item.chain+' · قرارداد '+item.address+'. اکنون اسکن را اجرا کن.';
+                  results.replaceChildren();
+                });
+                results.appendChild(option);
+              });
+            }catch(error){status.textContent='خطا در ارتباط با سرویس جست‌وجوی DEX.';}
+            finally{button.disabled=false;}
+          }
+          button.addEventListener('click',search);
+          query.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();search();}});
+        })();
+        </script>
         <section class="card" id="market-tools">
           <h2>ماشین‌حساب حرفه‌ای سناریوی Spot</h2>
           <p class="muted">محاسبهٔ سود/زیان فرضی Long بدون اهرم؛ زمان انتخابی فقط افق سناریو است، نه پیش‌بینی زمان سود.</p>
