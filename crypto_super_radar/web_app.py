@@ -26,6 +26,8 @@ STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
 JOBS: dict[str, dict] = {}
 ACTIVE_SCAN_KEYS: dict[str, str] = {}
+JOB_FENCE_COUNTER = 0
+JOB_LEASE_SECONDS = 1800
 LOCK = threading.RLock()
 SCAN_RUNNING = False
 SCAN_QUEUE = queue.Queue(maxsize=50)
@@ -528,7 +530,7 @@ def _crypto_market_board() -> dict:
 
 
 def _scan_queue_worker():
-    """Run stateful scan and paper-bot jobs serially."""
+    """Run stateful scan and paper-bot jobs serially with lease and fencing checks."""
     global SCAN_RUNNING
     while True:
         task = SCAN_QUEUE.get()
@@ -538,8 +540,18 @@ def _scan_queue_worker():
                 SCAN_RUNNING = True
                 if job_id in JOBS:
                     current = JOBS[job_id]
+                    expired = False
+                    lease_text = current.get("valid_until_utc")
+                    if lease_text:
+                        try:
+                            expired = datetime.now(timezone.utc) >= datetime.fromisoformat(lease_text)
+                        except ValueError:
+                            expired = True
                     if current.get("fencing_token") != task.get("fencing_token"):
                         current["status"] = "superseded"
+                    elif expired:
+                        current["status"] = "expired"
+                        current["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
                     else:
                         current["status"] = "running"
                         current["worker_started_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -859,6 +871,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Paper trading accepts only BTC, ETH or SOL spot.")
             headline = form.get("headline", [""])[0].strip() if route == "/scan" else ""
             social_post = form.get("social_post", [""])[0].strip() if route == "/scan" else ""
+            global JOB_FENCE_COUNTER
             canonical_request = json.dumps(
                 {"route": route, "asset": asset.raw, "headline": headline, "social_post": social_post},
                 sort_keys=True, ensure_ascii=False, separators=(",", ":"),
@@ -878,12 +891,15 @@ class Handler(BaseHTTPRequestHandler):
                     if SCAN_QUEUE.full():
                         return self._send(429, _page("<h2>صف اسکن پر است</h2><p>۵۰ درخواست در صف هستند. کمی بعد دوباره تلاش کن.</p><a href='/'>بازگشت</a>"))
                     ACTIVE_SCAN_KEYS[idempotency_key] = job_id
+                    JOB_FENCE_COUNTER += 1
+                    created_at = datetime.now(timezone.utc)
                     JOBS[job_id] = {
                         "status": "queued",
                         "queue_position": SCAN_QUEUE.qsize() + 1,
-                        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "created_at_utc": created_at.isoformat(),
+                        "valid_until_utc": (created_at + __import__("datetime").timedelta(seconds=JOB_LEASE_SECONDS)).isoformat(),
                         "idempotency_key": idempotency_key,
-                        "fencing_token": uuid.uuid4().hex,
+                        "fencing_token": JOB_FENCE_COUNTER,
                     }
                     task["fencing_token"] = JOBS[job_id]["fencing_token"]
                     while len(JOBS) > 100:
