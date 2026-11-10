@@ -162,6 +162,59 @@ class BinanceSpotExecutorTests(unittest.TestCase):
             )
         self.session.request.assert_not_called()
 
+
+    def test_signal_executor_requires_market_behavior_and_wilson_risk_evidence(self):
+        from types import SimpleNamespace
+        from crypto_super_radar.binance_execution import ValidatedSignalExecutor
+        from crypto_super_radar.models import GateStatus, Signal
+        result = SimpleNamespace(
+            signal=Signal.LONG, gates=[SimpleNamespace(status=GateStatus.PASS) for _ in range(12)],
+            confirmation_score=90, estimated_risk_score=10, stop_loss=45000,
+            take_profit=62000, expected_holding_days=3, metrics={},
+        )
+        with self.assertRaisesRegex(OrderSafetyError, "Historical structure"):
+            ValidatedSignalExecutor(self.executor).submit_long(
+                result=result, symbol="BTCUSDT", reference_price=50000,
+            )
+        self.session.request.assert_not_called()
+
+    def test_validated_signal_submits_only_after_all_evidence_passes(self):
+        from types import SimpleNamespace
+        from crypto_super_radar.binance_execution import ValidatedSignalExecutor
+        from crypto_super_radar.models import GateStatus, Signal
+        self.session.request.side_effect = [
+            FakeResponse({"balances": [{"asset": "USDT", "free": "100"}]}),
+            FakeResponse({"symbols": [{
+                "status": "TRADING", "isSpotTradingAllowed": True,
+                "filters": [
+                    {"filterType": "LOT_SIZE", "minQty": "0.0001", "maxQty": "100", "stepSize": "0.0001"},
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                    {"filterType": "MIN_NOTIONAL", "minNotional": "5"},
+                ],
+            }]}),
+            FakeResponse({"symbol": "BTCUSDT", "bidPrice": "49999", "askPrice": "50000"}),
+            FakeResponse({"balances": [{"asset": "USDT", "free": "100"}]}),
+            FakeResponse({"symbol": "BTCUSDT", "orderId": 9, "status": "FILLED",
+                          "executedQty": "0.0001", "cummulativeQuoteQty": "5.01"}),
+        ]
+        result = SimpleNamespace(
+            signal=Signal.LONG, gates=[SimpleNamespace(status=GateStatus.PASS) for _ in range(12)],
+            confirmation_score=90, estimated_risk_score=10, stop_loss=45000,
+            take_profit=62000, expected_holding_days=3,
+            metrics={"market_behavior": {
+                "status": "PASS",
+                "risk_before_entry": {"historical_error_upper95_pct": 70.0},
+                "levels": {"stop_loss": 45000.0, "take_profit": 62000.0},
+            }},
+        )
+        order = ValidatedSignalExecutor(self.executor).submit_long(
+            result=result, symbol="BTCUSDT", reference_price=50000,
+            client_order_id="csr-validated-signal",
+        )
+        self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(order["client_order_id"], "csr-validated-signal")
+        self.assertEqual(self.session.request.call_count, 5)
+
     def test_quote_drift_blocks_order(self):
         self.session.request.side_effect = [
             FakeResponse({"symbols": [{

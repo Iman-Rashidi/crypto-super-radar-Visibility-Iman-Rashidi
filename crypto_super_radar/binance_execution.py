@@ -257,10 +257,17 @@ class ValidatedSignalExecutor:
         gates = getattr(result, "gates", None)
         if not isinstance(gates, (list, tuple)) or len(gates) != 12:
             raise OrderSafetyError("All twelve mandatory signal gates must be present.")
-        if any(str(getattr(g, "status", "")).upper() != "PASS" for g in gates):
+        if any(str(getattr(getattr(g, "status", ""), "value", getattr(g, "status", ""))).upper() != "PASS" for g in gates):
             raise OrderSafetyError("Every mandatory signal gate must PASS.")
-        if str(getattr(result, "signal", "")).upper() != "LONG":
+        if str(getattr(getattr(result, "signal", ""), "value", getattr(result, "signal", ""))).upper() != "LONG":
             raise OrderSafetyError("Spot execution accepts LONG signals only.")
+        metrics = getattr(result, "metrics", {})
+        behavior = metrics.get("market_behavior") if isinstance(metrics, dict) else None
+        if not isinstance(behavior, dict) or behavior.get("status") != "PASS":
+            raise OrderSafetyError("Historical structure, Fibonacci and analogue risk checks must PASS.")
+        risk_evidence = behavior.get("risk_before_entry", {})
+        if not isinstance(risk_evidence, dict) or risk_evidence.get("historical_error_upper95_pct") is None:
+            raise OrderSafetyError("Historical error confidence bound is unavailable.")
         score = _decimal(getattr(result, "confirmation_score", None), "confirmation score")
         try:
             risk = Decimal(str(getattr(result, "estimated_risk_score", None)))
@@ -273,6 +280,13 @@ class ValidatedSignalExecutor:
         price = _decimal(reference_price, "reference_price")
         stop = _decimal(getattr(result, "stop_loss", None), "stop_loss")
         target = _decimal(getattr(result, "take_profit", None), "take_profit")
+        structural_levels = behavior.get("levels", {})
+        if not isinstance(structural_levels, dict):
+            raise OrderSafetyError("Structural stop and target evidence is unavailable.")
+        structural_stop = _decimal(structural_levels.get("stop_loss"), "structural stop")
+        structural_target = _decimal(structural_levels.get("take_profit"), "structural target")
+        if stop != structural_stop or target != structural_target:
+            raise OrderSafetyError("Execution levels must match the validated market-structure levels.")
         if not stop < price < target:
             raise OrderSafetyError("Signal stop, reference and target are not safely ordered.")
         holding = _decimal(getattr(result, "expected_holding_days", None), "expected_holding_days")

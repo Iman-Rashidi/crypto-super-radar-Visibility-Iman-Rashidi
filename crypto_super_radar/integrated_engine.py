@@ -14,6 +14,7 @@ from .chart_patterns import monitor_chart_patterns, contradicts_confirmed_breako
 from .candle_quality import completed_daily_candles
 from .evm_transfers import EvmTransferScanner
 from .market_sentiment import fetch_market_sentiment
+from .market_behavior import analyze_market_behavior
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
 from .solana_whales import SolanaWhaleScanner
@@ -304,18 +305,54 @@ class WhaleAwareConfirmationEngine:
             },
         ))
         walk = self._multi_fold_validation(asset)
-        if walk.get("status") == "PASS":
-            walk_status = GateStatus.PASS
-        elif walk.get("status") == "FAIL":
+        snapshot = getattr(self.data, "snapshots", {}).get(asset.raw)
+        if snapshot is None:
+            snapshot_reader = getattr(self.data, "snapshot", None)
+            if callable(snapshot_reader):
+                try:
+                    snapshot = snapshot_reader(asset)
+                except Exception:
+                    snapshot = None
+        signal_side = getattr(getattr(result, "signal", None), "value", str(getattr(result, "signal", ""))).upper()
+        behavior = analyze_market_behavior(
+            wave_candles,
+            getattr(snapshot, "price_usd", None),
+            side=signal_side,
+            horizon_days=result.expected_holding_days or 5,
+            fee_bps_per_side=self.config.risk.fee_bps_per_side,
+            slippage_bps_per_side=self.config.risk.slippage_bps_per_side,
+        )
+        behavior["wave_context"] = {
+            "elliott_wave": result.metrics.get("elliott_wave"),
+            "chart_pattern": result.metrics.get("chart_pattern"),
+            "used_as_confirmation": False,
+        }
+        result.metrics["market_behavior"] = behavior
+        result.metrics["risk_before_entry"] = behavior.get("risk_before_entry")
+        # Existing walk-forward folds and market-history checks are one mandatory gate.
+        if walk.get("status") == "FAIL" or behavior.get("status") == "FAIL":
             walk_status = GateStatus.FAIL
+        elif walk.get("status") == "PASS" and behavior.get("status") == "PASS":
+            walk_status = GateStatus.PASS
+            structural_levels = behavior.get("levels", {})
+            result.stop_loss = structural_levels.get("stop_loss")
+            result.take_profit = structural_levels.get("take_profit")
+            result.metrics["execution_levels"] = structural_levels
         else:
             walk_status = GateStatus.UNKNOWN
+        combined_reason = (
+            f"Walk-forward: {walk.get('reason', 'unknown')}; "
+            f"market behavior: {behavior.get('reason', 'unknown')}."
+        )
         result.gates.append(GateResult(
-            12, "Multi-fold walk-forward stability", "پایداری اعتبارسنجی چندبخشی",
+            12, "Walk-forward, Fibonacci and historical analog risk",
+            "اعتبارسنجی زمانی، فیبوناچی و ریسکِ الگوهای تاریخی",
             walk_status,
-            walk.get("reason", "Multi-fold out-of-sample evidence is unavailable."),
-            "اعتبارسنجی زمانی چندبخشی باید تعداد Fold و معیارهای خارج از نمونه را پاس کند؛ داده ناقص UNKNOWN است.",
-            {k: v for k, v in walk.items() if k not in {"status", "reason"}},
+            combined_reason,
+            "ورود فقط پس از پایداری خارج از نمونه، ساختار سقف/کف همسو، هم‌گرایی فیبوناچی، "
+            "برآورد خطای تاریخی با بازه اطمینان، حدضرر ساختاری و نسبت سود به ریسک خالص مجاز است.",
+            {"walk_forward": {k: v for k, v in walk.items() if k not in {"status", "reason"}},
+             "market_behavior": behavior},
         ))
         direction = result.gates[2].evidence.get("direction") if len(result.gates) >= 3 else None
         exchange_net = whale.get("net_exchange_flow_usd")

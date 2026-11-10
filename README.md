@@ -391,3 +391,10 @@ A guarded execution adapter is available in `crypto_super_radar.binance_executio
 Set testnet API credentials in `CSR_BINANCE_API_KEY` and `CSR_BINANCE_API_SECRET`; the default environment is Binance Spot Testnet. Use API keys with trading permission only on the testnet account. The adapter does not retry a timed-out order. It returns the client order id so the caller can reconcile status with `get_order` before doing anything else.
 
 **Production execution is deliberately locked.** Exchange-side stop/target orders, fill reconciliation, and recovery after a process restart are not implemented, so the production lock cannot be overridden with an environment variable. After those controls are implemented and tested, production will also require `CSR_BINANCE_ENV=production`, `CSR_LIVE_TRADING_ENABLED=YES`, and the explicit per-call confirmation value `I_CONFIRM_REAL_SPOT_ORDER`. Never put API keys in the repository or dashboard request fields. This adapter does not currently wire order execution into the dashboard's periodic paper-bot loop.
+
+
+## Pre-trade market-history and structure gate
+
+The engine now strengthens its existing final gate with confirmed swing highs/lows, a robust ATR scale, Fibonacci retracement confluence, and a chronological historical-analogue check. It compares normalized 20-candle return shapes to separated prior episodes; all analogue outcomes must be observed before the current pattern window. The output reports the analogue sample size, cost-adjusted historical hit/error estimate, a Wilson 95% confidence bound, net expectancy, worst observed adverse move, and structural stop/target levels.
+
+This is an empirical screening estimate, not a true future error probability. It fails closed when history is incomplete, the market structure conflicts with the signal, Fibonacci confluence is absent, uncertainty is too wide, or structural net reward/risk is below 1.8. Elliott-wave and chart-shape labels remain contextual evidence, not stand-alone buy/sell triggers. The signal execution service also requires this gate and the exact structural stop/target returned by the analysis.
