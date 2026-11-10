@@ -138,7 +138,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         responses["solana_new_pools"] = response
         result = discover_gem_candidates(FakeHttp(responses), now=self.now)
         by_symbol = {item["token_symbol"]: item for item in result["candidates"]}
-        self.assertEqual(len(by_symbol), 2)
+        self.assertEqual(len(by_symbol), 3)
         self.assertLess(by_symbol["RISK"]["discovery_priority_score"], by_symbol["ST"]["discovery_priority_score"])
         self.assertIn("SHARP_1H_DRAWDOWN", by_symbol["RISK"]["risk_flags"])
         self.assertIn("EXTREME_VOLUME_LIQUIDITY_RATIO", by_symbol["RISK"]["risk_flags"])
