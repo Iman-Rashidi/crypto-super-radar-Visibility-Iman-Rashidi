@@ -161,6 +161,47 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(eth["status"], "UNKNOWN")
         self.assertIn("public source unavailable", eth["reason"])
 
+    def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
+        from tests.test_gem_hunter_qualification import valid_candidate
+        web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
+        good = valid_candidate()
+        bad = dict(good)
+        bad["candidate_status"] = "UNSCREENED"
+        bad["trade_authorization"] = "NO_TRADE"
+        with patch.object(web_app, "discover_gem_candidates", return_value={
+            "status": "PASS", "candidate_count": 2,
+            "candidates": [good, bad], "trade_authorization": "NO_TRADE",
+        }):
+            status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["signal_status"], "BUY_FOUND")
+        self.assertEqual(result["qualified_buy_count"], 1)
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["trade_authorization"], "BUY")
+        self.assertNotIn("available_candidate_count", result)
+        self.assertNotIn("trade_authorization", result)
+
+    def test_gem_hunter_endpoint_hides_all_unqualified_candidates(self):
+        web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
+        raw = {
+            "status": "PASS", "candidate_count": 1,
+            "candidates": [{
+                "chain": "solana", "token_address": "61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP",
+                "candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
+            }],
+            "trade_authorization": "NO_TRADE",
+        }
+        with patch.object(web_app, "discover_gem_candidates", return_value=raw):
+            status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["signal_status"], "NO_QUALIFIED_BUY")
+        self.assertEqual(result["qualified_buy_count"], 0)
+        self.assertEqual(result["candidates"], [])
+        self.assertNotIn("available_candidate_count", result)
+
     def test_paper_bot_status_is_local_and_cannot_submit_live_orders(self):
         status, _, payload = self.request("GET", "/paper-bot/status")
         result = json.loads(payload)

@@ -21,6 +21,7 @@ from .models import AssetSpec
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
+from .gem_hunter_qualification import public_buy_candidates
 from .providers import _ohlcv_frame
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -85,7 +86,7 @@ GEM_HUNTER_CACHE_LOCK = threading.Lock()
 
 
 def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
-    """Single-flight cache for the two rate-limited public discovery feeds."""
+    """Cache discovery internally but expose only evidence-complete BUY candidates."""
     limit = max(1, min(int(limit), 50))
     with GEM_HUNTER_CACHE_LOCK:
         now = time.monotonic()
@@ -93,15 +94,27 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
         if cached is None or GEM_HUNTER_CACHE.get("expires_at", 0.0) <= now:
             cached = discover_gem_candidates(getattr(ENGINE.data, "http", None), limit=50)
             GEM_HUNTER_CACHE["payload"] = copy.deepcopy(cached)
-            # Do not hammer rate-limited feeds after PARTIAL results. The cooldown
-            # is intentionally longer than the UI's request cadence.
+            # Do not hammer rate-limited feeds after PARTIAL results.
             ttl = GEM_HUNTER_CACHE_TTL_SECONDS if cached.get("status") == "PASS" else 90
             GEM_HUNTER_CACHE["expires_at"] = time.monotonic() + ttl
         result = copy.deepcopy(cached)
-    all_candidates = result.get("candidates") or []
-    result["available_candidate_count"] = len(all_candidates)
-    result["candidates"] = all_candidates[:limit]
-    result["candidate_count"] = len(result["candidates"])
+    # Raw discovery candidates stay server-side: this endpoint is a BUY shortlist,
+    # not a feed of rejected, unknown or unscreened tokens.
+    qualified = public_buy_candidates(result.get("candidates"), limit=limit)
+    result.pop("trade_authorization", None)
+    result.pop("available_candidate_count", None)
+    result["candidates"] = qualified
+    result["candidate_count"] = len(qualified)
+    result["qualified_buy_count"] = len(qualified)
+    result["signal_status"] = "BUY_FOUND" if qualified else "NO_QUALIFIED_BUY"
+    result["public_policy"] = {
+        "qualification_schema": "gem-hunter-v1",
+        "minimum_passed_filters": 9,
+        "total_filters": 12,
+        "minimum_opportunity_score": 80,
+        "critical_gates": ["security", "liquidity", "data_quality", "exit"],
+        "unknown_or_incomplete_candidates_hidden": True,
+    }
     return result
 
 
@@ -918,7 +931,7 @@ class Handler(BaseHTTPRequestHandler):
         </section>
         <section class="card" id="gem-hunter-panel">
           <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
-          <p class="muted">استخرهای تازه و پرتحرک Solana و Base را برای بررسی بیشتر پیدا می‌کند. امتیاز فقط اولویت پژوهش است؛ امنیت توکن تأیید نشده و مجوز معامله همیشه NO TRADE است.</p>
+          <p class="muted">توکن‌های تازه Solana و Base را بررسی می‌کند؛ فقط BUYهایی نمایش داده می‌شوند که دست‌کم ۹ فیلتر از ۱۲، همه دروازه‌های حیاتی، استانداردهای بازار و سوابق Swap نهنگ‌ها را با دادهٔ تازه و قابل‌ردیابی گذرانده باشند. نامزدهای ردشده یا ناقص در فهرست عمومی نمایش داده نمی‌شوند.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="gem-hunter-run" type="button">شروع کشف کاندیداها</button>
             <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن کشف اجرا نشده است.</span>
@@ -935,40 +948,88 @@ class Handler(BaseHTTPRequestHandler):
           if (!button || !status || !results) return;
           const cell = (tag, value) => {
             const node = document.createElement(tag);
-            node.textContent = value === null || value === undefined ? 'UNKNOWN' : String(value);
+            node.textContent = value === null || value === undefined ? '—' : String(value);
             return node;
+          };
+          const addLink = (parent, label, href) => {
+            const link = document.createElement('a');
+            link.textContent = label;
+            link.href = href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            parent.appendChild(link);
           };
           button.addEventListener('click', async () => {
             button.disabled = true;
-            status.textContent = 'در حال دریافت استخرهای تازه و پرتحرک از Solana و Base...';
+            results.replaceChildren(cell('p','در حال بررسی توکن‌های جدید و اعتبارسنجی شواهد بازار و نهنگ‌ها...'));
+            status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
             try {
               const response = await fetch('/api/gem-hunter/discover?limit=20', {cache:'no-store'});
               const data = await response.json();
               if (!response.ok) throw new Error(data.error || 'Discovery request failed');
-              status.textContent = 'وضعیت: ' + data.status + ' · کاندیداها: ' + (data.candidate_count || 0) + ' · مجوز معامله: NO TRADE';
+              const items = data.candidates || [];
+              status.textContent = items.length
+                ? 'فرصت‌های BUY تأییدشده: ' + items.length + ' · وضعیت منابع کشف: ' + data.status
+                : 'در این اسکن هیچ فرصت خریدی تمام استانداردها را نگذرانده است.';
+              if (!items.length) {
+                const message = cell('p','در حال حاضر فرصت خرید معتبر پیدا نشد. نامزدهای فاقد دادهٔ کامل، ردشده یا تأییدنشده در این فهرست نمایش داده نمی‌شوند.');
+                message.className = 'muted';
+                results.replaceChildren(message);
+                return;
+              }
               const table = document.createElement('table');
               const head = document.createElement('thead');
               const header = document.createElement('tr');
-              ['شبکه','توکن','نماد','قیمت USD','نقدینگی USD','حجم ۲۴ساعت','سن استخر (ساعت)','امتیاز پژوهشی','وضعیت','ریسک‌ها'].forEach(v => header.appendChild(cell('th',v)));
+              ['شبکه','توکن','Mint / Contract','DEX / Pool','نقدینگی USD','حجم ۲۴ساعت USD','دارندگان','معامله‌گران یکتا','خریداران نهنگ','فیلترها','امتیاز فرصت','ریسک','شواهد نهنگ و مسیر بازار'].forEach(v => header.appendChild(cell('th',v)));
               head.appendChild(header); table.appendChild(head);
               const body = document.createElement('tbody');
-              (data.candidates || []).forEach(item => {
+              items.forEach(item => {
+                const q = item.qualification || {};
+                const m = q.market_metrics || {};
+                const w = q.whale_evidence || {};
                 const row = document.createElement('tr');
                 [
-                  item.chain, item.token_name || item.token_address, item.token_symbol,
-                  item.price_usd, item.liquidity_usd, item.volume_24h_usd,
-                  item.pool_age_hours, item.discovery_priority_score,
-                  item.candidate_status, (item.risk_flags || []).join(', ') || 'بدون پرچم اولیه'
+                  item.chain,
+                  (item.token_name || 'Token') + ' (' + (item.token_symbol || '—') + ')',
+                  item.token_address,
+                  (item.dex || '—') + ' / ' + (item.pool_name || item.pool_address || '—'),
+                  m.liquidity_usd,
+                  m.volume_24h_usd,
+                  m.holder_count,
+                  m.unique_traders_24h,
+                  w.independent_buy_wallets,
+                  Object.values(q.filters || {}).filter(x=>x==='PASS').length + '/12',
+                  q.opportunity_score,
+                  q.risk_score,
                 ].forEach(v => row.appendChild(cell('td',v)));
+                const evidenceCell = document.createElement('td');
+                const details = document.createElement('details');
+                const summary = cell('summary','نمایش کیف‌پول‌ها و تراکنش‌های نهنگ');
+                details.appendChild(summary);
+                (w.events || []).forEach(event => {
+                  const line = document.createElement('p');
+                  const wallet = document.createElement('div');
+                  const tx = document.createElement('div');
+                  const explorer = item.chain === 'solana' ? 'https://solscan.io' : 'https://basescan.org';
+                  wallet.appendChild(cell('span',(event.event_type || 'SWAP') + ' · ' + (event.amount_usd || '—') + ' USD · کیف‌پول: '));
+                  addLink(wallet, event.wallet_address, explorer + '/account/' + encodeURIComponent(event.wallet_address));
+                  tx.appendChild(cell('span','تراکنش: '));
+                  addLink(tx, event.tx_hash, explorer + '/tx/' + encodeURIComponent(event.tx_hash));
+                  line.appendChild(wallet); line.appendChild(tx); details.appendChild(line);
+                });
+                evidenceCell.appendChild(details);
+                const explorer = item.chain === 'solana' ? 'https://dexscreener.com/solana/' : 'https://dexscreener.com/base/';
+                const poolLink = document.createElement('div');
+                addLink(poolLink,'بازکردن بازار',explorer + encodeURIComponent(item.pool_address));
+                evidenceCell.appendChild(poolLink);
+                row.appendChild(evidenceCell);
                 body.appendChild(row);
               });
-              if (!(data.candidates || []).length) {
-                const row = document.createElement('tr'), td = cell('td', 'کاندیدای معتبر در پاسخ فعلی پیدا نشد؛ وضعیت منبع را بررسی کنید.');
-                td.colSpan = 10; row.appendChild(td); body.appendChild(row);
-              }
-              table.appendChild(body); results.replaceChildren(table);
+              table.appendChild(body);
+              results.replaceChildren(table);
             } catch (error) {
-              status.textContent = 'خطا در کشف: ' + error.message;
+              status.textContent = 'خطا در دریافت داده: ' + error.message;
+              results.replaceChildren(cell('p','گزارش خریدی نمایش داده نشد؛ خطای ارتباطی باید برطرف شود و هیچ سیگنالی از دادهٔ ناقص صادر نمی‌شود.'));
             } finally {
               button.disabled = false;
             }
@@ -1351,10 +1412,11 @@ class Handler(BaseHTTPRequestHandler):
                 "function renderDiagnosis(d){const title=document.getElementById('diagnosis-title'),head=document.getElementById('diagnosis-headline');title.textContent='تشخیص نهایی · '+(d.coin_name||'رمزارز')+' ('+(d.symbol||'')+')';head.replaceChildren(cell('strong',d.final_recommendation||'تشخیص در دسترس نیست'),cell('div','وضعیت کلی: '+(d.overall_signal_fa||'خنثی')+' · '+(d.explanation||'')));const makeCard=(label,item)=>{const box=document.createElement('div');box.className='metric';box.appendChild(cell('strong',label));box.appendChild(cell('div',item.action_fa||'ناموجود'));(item.reasons||[]).forEach(reason=>{const p=cell('p','• '+reason);box.appendChild(p);});return box;};document.getElementById('diagnosis-short').replaceChildren(makeCard('تصمیم کوتاه‌مدت',d.short_term||{}));document.getElementById('diagnosis-long').replaceChildren(makeCard('تصمیم بلندمدت / نگهداری',d.long_term||{}));const list=document.createElement('ul');(d.blockers||[]).forEach(row=>{const li=cell('li',(row.name?row.name+' — ':'')+row.reason+' ['+row.status+']');list.appendChild(li);});const reasons=document.getElementById('diagnosis-reasons');reasons.replaceChildren(cell('h4','چرا خرید توصیه می‌شود یا نمی‌شود؟'),list);document.getElementById('candle-age-note').textContent=d.candle_age_text||'سن کندل در دسترس نیست.';}"
                 "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};"
                 "const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const notes=[...(s.notes||[]),d.reason,c.reason,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
-                "async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;"
+                "let pollAttempts=0;const pollStarted=Date.now();async function poll(){try{const r=await fetch('/jobs/'+job,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();pollAttempts=0;document.getElementById('state').textContent=j.status;"
                 "if(j.status==='completed'){renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز تأیید',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
                 "if(j.status==='failed'){document.getElementById('state').textContent='اسکن ناموفق بود: '+j.error;return;}"
-                "}catch(e){document.getElementById('state').textContent='ارتباط قطع شد؛ بعداً /jobs/'+job+' را بررسی کنید';return;}"
+                "if(Date.now()-pollStarted>=1800000){document.getElementById('state').textContent='مهلت پیگیری تمام شد؛ برای ادامه وضعیت همین شناسه را بررسی کنید: /jobs/'+job;return;}"
+                "}catch(e){pollAttempts+=1;const elapsed=Date.now()-pollStarted;if(elapsed>=1800000){document.getElementById('state').textContent='مهلت بازیابی ارتباط تمام شد؛ شناسهٔ همان اسکن: '+job;return;}const delay=Math.min(30000,2500*Math.pow(2,Math.min(pollAttempts,4)));document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ تلاش مجدد خودکار برای همان شناسه در '+Math.ceil(delay/1000)+' ثانیه...';setTimeout(poll,delay);return;}"
                 "setTimeout(poll,2500);}poll();</script>"
             )
             return self._send(202, _page(body, "Scan Running"))
