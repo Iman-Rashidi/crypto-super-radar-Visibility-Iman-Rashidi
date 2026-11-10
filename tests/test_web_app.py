@@ -62,6 +62,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("بازار رمزارزها", page)
         self.assertIn("APIهای عمومی و رایگان", page)
         self.assertIn("/api/crypto-markets", page)
+        self.assertIn('id="scan-asset"', page)
+        self.assertIn('id="scan-section"', page)
+        self.assertIn("انتخاب برای اسکن", page)
+        self.assertIn("scanButton.disabled=item.status!=='PASS'", page)
+        self.assertIn("input.value='cex:'+item.symbol", page)
 
     def test_crypto_market_endpoint_uses_free_cross_validated_spot_data_and_cache(self):
         web_app.CRYPTO_MARKET_CACHE.update(expires_at=0.0, payload=None)
