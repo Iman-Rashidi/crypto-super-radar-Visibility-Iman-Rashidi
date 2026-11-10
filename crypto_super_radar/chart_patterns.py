@@ -15,7 +15,7 @@ from .elliott_waves import monitor_elliott_waves
 def _unknown(reason: str) -> dict[str, Any]:
     return {
         "status": "UNKNOWN",
-        "pattern": "AMBIGUOUS",
+        "pattern": "UNKNOWN",
         "breakout": "NONE",
         "upper_touches": 0,
         "lower_touches": 0,

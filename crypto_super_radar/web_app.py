@@ -240,6 +240,9 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
     unknown = [g for g in gates if getattr(g.status, "value", g.status) == "UNKNOWN"]
     signal = getattr(result.signal, "value", str(result.signal))
     direction = "BUY" if signal == "LONG" else "SELL" if signal == "SHORT" else "NEUTRAL"
+    analysis_incomplete = bool(unknown) or market_overview.get("current_price") is None
+    if analysis_incomplete:
+        direction = "ANALYSIS_INCOMPLETE"
     thresholds = getattr(getattr(ENGINE, "config", None), "thresholds", None)
     min_confirmation = float(getattr(thresholds, "min_confirmation_score", 75.0))
     max_risk = float(getattr(thresholds, "max_estimated_risk_score", 45.0))
@@ -263,16 +266,18 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
             "reason": gate.reason_fa,
         })
     if not score_pass:
+        score_status = "NOT_COMPUTABLE" if confirmation is None else "FAIL"
         gate_reasons.append({
             "id": None, "name": "امتیاز نهایی",
-            "status": "FAIL",
-            "reason": f"امتیاز تأیید {confirmation if confirmation is not None else 'ناموجود'} است؛ حداقل لازم {min_confirmation:g} است.",
+            "status": score_status,
+            "reason": f"امتیاز تأیید {confirmation if confirmation is not None else 'قابل محاسبه نیست'} است؛ حداقل لازم {min_confirmation:g} است.",
         })
     if not risk_pass:
+        risk_status = "NOT_COMPUTABLE" if risk is None else "FAIL"
         gate_reasons.append({
             "id": None, "name": "ریسک معامله",
-            "status": "FAIL",
-            "reason": f"ریسک {risk if risk is not None else 'ناموجود'} است؛ سقف مجاز کمتر از {max_risk:g} است.",
+            "status": risk_status,
+            "reason": f"ریسک {risk if risk is not None else 'قابل محاسبه نیست'} است؛ سقف مجاز کمتر از {max_risk:g} است.",
         })
     if direction == "SELL" and tradable:
         gate_reasons.append({
@@ -343,11 +348,15 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
         "coin_name_en": coin["name_en"],
         "symbol": coin["symbol"],
         "overall_signal": direction,
-        "overall_signal_fa": {"BUY": "خرید", "SELL": "فروش", "NEUTRAL": "خنثی"}[direction],
+        "analysis_status": "INCOMPLETE" if analysis_incomplete else "COMPLETE",
+        "overall_signal_fa": {"BUY": "خرید", "SELL": "فروش", "NEUTRAL": "خنثی",
+                              "ANALYSIS_INCOMPLETE": "تحلیل ناقص · داده معتبر کافی نیست"}[direction],
         "short_term": {"action_fa": short_action, "reasons": short_reasons},
         "long_term": {"action_fa": long_action, "reasons": long_reasons},
         "final_recommendation": final_title,
         "buy_recommended": buy_allowed,
+        "score_status": "NOT_COMPUTABLE" if confirmation is None else ("PASS" if score_pass else "FAIL"),
+        "risk_status": "NOT_COMPUTABLE" if risk is None else ("PASS" if risk_pass else "FAIL"),
         "final_reasons": [row["reason"] for row in gate_reasons],
         "blockers": gate_reasons,
         "candle_age_text": candle_age_text,

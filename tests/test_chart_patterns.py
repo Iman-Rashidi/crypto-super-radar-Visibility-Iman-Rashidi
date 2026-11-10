@@ -34,6 +34,7 @@ class TrianglePatternTests(unittest.TestCase):
     def test_requires_three_confirmed_contacts_each_side(self):
         result = classify_confirmed_pivots(self.pivots[:4], 106.0, 21)
         self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["pattern"], "UNKNOWN")
 
     def test_reports_breakout_only_after_close_outside_buffer(self):
         result = classify_confirmed_pivots(self.pivots, 110.0, 22)

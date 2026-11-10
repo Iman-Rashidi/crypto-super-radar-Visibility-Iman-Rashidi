@@ -18,6 +18,8 @@ _CACHE_LOCK = threading.RLock()
 _DEX_CACHE: dict[str, tuple[float, Any]] = {}
 _CG_OI_CACHE: dict[str, tuple[float, Any]] = {}
 _CG_FUNDING_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
+_CACHE_KEY_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_KEY_LOCKS_GUARD = threading.Lock()
 
 
 def _number(value: Any) -> Optional[float]:
@@ -36,15 +38,20 @@ def _positive(value: Any) -> Optional[float]:
 
 
 def _cached(cache: dict, key: str, ttl: float, loader):
-    now = time.monotonic()
-    with _CACHE_LOCK:
-        entry = cache.get(key)
-        if entry and entry[0] > now:
-            return entry[1]
-    value = loader()
-    with _CACHE_LOCK:
-        cache[key] = (time.monotonic() + ttl, value)
-    return value
+    """TTL cache with per-key single-flight: one upstream request per key at a time."""
+    lock_key = f"{id(cache)}:{key}"
+    with _CACHE_KEY_LOCKS_GUARD:
+        key_lock = _CACHE_KEY_LOCKS.setdefault(lock_key, threading.Lock())
+    with key_lock:
+        now = time.monotonic()
+        with _CACHE_LOCK:
+            entry = cache.get(key)
+            if entry and entry[0] > now:
+                return entry[1]
+        value = loader()
+        with _CACHE_LOCK:
+            cache[key] = (time.monotonic() + ttl, value)
+        return value
 
 
 def _dex_pairs_for_token(asset, http) -> dict:
@@ -312,10 +319,31 @@ def fetch_market_intelligence(asset, direction: str, snapshot=None, http=None, m
             "status": "UNKNOWN",
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             "dex_screener": {"status": "UNKNOWN", "reason": "Public HTTP client unavailable."},
+            "validated_snapshot": None,
             "coinglass": {"status": "NOT_CONFIGURED", "reason": "CoinGlass client unavailable."},
             "scoring": _market_scoring(direction, {}, {}, min_dex_liquidity_usd),
         }
     dex = _dex_pairs_for_token(asset, http)
+    # Keep validated cross-provider snapshot separate from the single-venue DEX
+    # observation; never silently substitute one price for the other.
+    validated_snapshot = None
+    if snapshot is not None:
+        validated_snapshot = {
+            "status": "KNOWN",
+            "price_usd": _positive(getattr(snapshot, "price_usd", None)),
+            "volume_24h_usd": _number(getattr(snapshot, "volume_24h_usd", None)),
+            "provider_a": getattr(snapshot, "provider_a", None),
+            "provider_b": getattr(snapshot, "provider_b", None),
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    if dex.get("status") == "KNOWN":
+        dex = {
+            **dex,
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source": "DexScreener",
+            "supplementary_only": True,
+            "validated_for_primary_decision": False,
+        }
     symbol = _coinglass_symbol(asset, dex)
     cg = _coinglass_data(symbol, http)
     scoring = _market_scoring(direction, dex, cg, min_dex_liquidity_usd)
@@ -330,6 +358,7 @@ def fetch_market_intelligence(asset, direction: str, snapshot=None, http=None, m
         "asset": asset.raw,
         "direction_context": direction,
         "dex_screener": dex,
+        "validated_snapshot": validated_snapshot,
         "coinglass": cg,
         "scoring": scoring,
         "disclaimer": "Market Intelligence is supplementary, not a standalone buy/sell signal. Missing CoinGlass or DEX data is excluded, never treated as zero.",
