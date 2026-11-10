@@ -5,6 +5,7 @@ import html
 import hashlib
 import copy
 import json
+import math
 import os
 import queue
 import re
@@ -17,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
-from .models import AssetSpec
+from .models import AssetSpec, GateStatus
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
@@ -374,6 +375,53 @@ def _timeframe_ranges(asset: AssetSpec, snapshot=None) -> dict:
         return {label: {**row, "reason": reason} for label, row in empty.items()}
 
 
+def _enforce_daily_candle_freshness(result, range_evidence: dict, timeframe_ranges: dict) -> None:
+    """Fail closed when the daily analysis candles exceed their configured age limit.
+
+    The separately fetched 1h range table is descriptive and must never make stale
+    daily candles appear fresh for the engine's daily trend/backtest calculations.
+    """
+    thresholds = getattr(getattr(ENGINE, "config", None), "thresholds", None)
+    max_age = float(getattr(thresholds, "max_candle_age_hours", 36.0))
+    raw_age = range_evidence.get("candle_age_hours")
+    try:
+        age = float(raw_age)
+        age_valid = math.isfinite(age) and age >= -1.0
+    except (TypeError, ValueError, OverflowError):
+        age = None
+        age_valid = False
+    stale = not age_valid or age > max_age
+    if not stale:
+        return
+
+    hourly = (timeframe_ranges.get("1h") or {}).get("age_hours")
+    if age is None:
+        detail_fa = "سن آخرین کندل روزانه قابل تعیین نیست."
+        detail_en = "Latest daily candle age is unavailable."
+    else:
+        detail_fa = f"سن کندل روزانه {age:.1f} ساعت است و از حد مجاز {max_age:.1f} ساعت بیشتر است."
+        detail_en = f"Daily candle age {age:.1f}h exceeds the {max_age:.1f}h limit."
+    if hourly is not None:
+        detail_fa += f" دادهٔ ۱ساعته جداگانه {float(hourly):.1f} ساعت سن دارد و جایگزین تازگی دادهٔ روزانه نیست."
+        detail_en += f" Separately fetched 1h candles are {float(hourly):.1f}h old and do not refresh daily analysis data."
+
+    data_gate = next((gate for gate in (result.gates or []) if gate.gate_id == 1), None)
+    if data_gate is not None:
+        data_gate.status = GateStatus.UNKNOWN
+        data_gate.reason_fa = detail_fa
+        data_gate.reason_en = detail_en
+        evidence = dict(data_gate.evidence or {})
+        evidence.update({
+            "daily_candle_age_hours": age,
+            "daily_candle_max_age_hours": max_age,
+            "hourly_candle_age_hours": hourly,
+            "daily_freshness_status": "UNKNOWN",
+        })
+        data_gate.evidence = evidence
+    range_evidence["status"] = "UNKNOWN"
+    range_evidence["reason"] = detail_en
+
+
 def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
     """Turn engine output into a plain-language, gate-backed decision summary."""
     mi = result.metrics.get("market_intelligence") or {}
@@ -489,12 +537,20 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
         long_reasons = ["روند، ریسک و اعتبارسنجی زمانی بررسی شده‌اند."]
 
     age_hours = market_overview.get("candle_age_hours")
+    hourly_age = (timeframe_ranges.get("1h") or {}).get("age_hours")
+    max_daily_age = float(getattr(thresholds, "max_candle_age_hours", 36.0))
     if age_hours is None:
-        candle_age_text = "سن کندل روزانه در دسترس نیست."
+        candle_age_text = "سن کندل روزانه در دسترس نیست؛ اعتبار تحلیل مبتنی بر کندل روزانه UNKNOWN است."
+    elif float(age_hours) > max_daily_age:
+        candle_age_text = (
+            f"کندل روزانه {float(age_hours):.1f} ساعت سن دارد و از حد مجاز {max_daily_age:.1f} ساعت عبور کرده است؛ "
+            "بنابراین تحلیل روزانه معتبر تلقی نمی‌شود. "
+            + (f"کندل ۱ساعته جداگانه {float(hourly_age):.1f} ساعت سن دارد، اما جایگزین دادهٔ روزانه نیست." if hourly_age is not None else "دادهٔ ۱ساعته نیز در دسترس نیست.")
+        )
     else:
         candle_age_text = (
-            f"آخرین کندل روزانه حدود {float(age_hours):.1f} ساعت پیش ثبت شده است. "
-            "برای تصمیم کوتاه‌مدت، دادهٔ ۱ساعتهٔ تازه‌تر ملاک این جدول است."
+            f"سن کندل روزانه {float(age_hours):.1f} ساعت است (حد مجاز {max_daily_age:.1f} ساعت). "
+            + (f"سن دادهٔ ۱ساعتهٔ مستقل {float(hourly_age):.1f} ساعت است." if hourly_age is not None else "دادهٔ ۱ساعته در دسترس نیست.")
         )
     return {
         "coin_name": coin["name_fa"],
@@ -530,6 +586,7 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
         trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
         snapshot = getattr(ENGINE.data, "snapshots", {}).get(asset.raw)
         timeframe_ranges = _timeframe_ranges(asset, snapshot)
+        _enforce_daily_candle_freshness(result, range_evidence, timeframe_ranges)
         market_intelligence = result.metrics.get("market_intelligence", {}) or {}
         coin_display = _coin_display(asset, market_intelligence)
         regime_gate = next((gate for gate in result.gates if gate.gate_id == 2), None)
@@ -1413,7 +1470,7 @@ class Handler(BaseHTTPRequestHandler):
                 "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};"
                 "const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const notes=[...(s.notes||[]),d.reason,c.reason,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
                 "let pollAttempts=0;const pollStarted=Date.now();async function poll(){try{const r=await fetch('/jobs/'+job,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();pollAttempts=0;document.getElementById('state').textContent=j.status;"
-                "if(j.status==='completed'){renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز تأیید',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
+                "if(j.status==='completed'){renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز خام تأیید (مجوز ورود نیست)',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
                 "if(j.status==='failed'){document.getElementById('state').textContent='اسکن ناموفق بود: '+j.error;return;}"
                 "if(Date.now()-pollStarted>=1800000){document.getElementById('state').textContent='مهلت پیگیری تمام شد؛ برای ادامه وضعیت همین شناسه را بررسی کنید: /jobs/'+job;return;}"
                 "}catch(e){pollAttempts+=1;const elapsed=Date.now()-pollStarted;if(elapsed>=1800000){document.getElementById('state').textContent='مهلت بازیابی ارتباط تمام شد؛ شناسهٔ همان اسکن: '+job;return;}const delay=Math.min(30000,2500*Math.pow(2,Math.min(pollAttempts,4)));document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ تلاش مجدد خودکار برای همان شناسه در '+Math.ceil(delay/1000)+' ثانیه...';setTimeout(poll,delay);return;}"
