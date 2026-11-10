@@ -117,7 +117,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         responses = dict(self.responses)
         responses["solana_new_pools"] = response
         result = discover_gem_candidates(FakeHttp(responses), now=self.now)
-        candidate = result["candidates"][0]
+        candidate = next(item for item in result["candidates"] if item["chain"] == "solana")
         self.assertEqual(candidate["candidate_status"], "UNKNOWN")
         self.assertIn("LIQUIDITY_UNAVAILABLE", candidate["risk_flags"])
         self.assertEqual(candidate["trade_authorization"], "NO_TRADE")
@@ -129,7 +129,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         risky = pool("solana", "PoolRisky", f"solana_{risky_token}", "2026-11-10T10:00:00Z",
                      liquidity="50000", volume="1000000")
         risky["attributes"]["price_change_percentage"]["h1"] = "-35"
-        included = self.responses["new_pools"]["included"] + [
+        included = self.responses["solana_new_pools"]["included"] + [
             {"id": f"solana_{risky_token}", "type": "token",
              "attributes": {"address": risky_token, "name": "Risky", "symbol": "RISK", "decimals": 6}}
         ]
@@ -150,6 +150,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         response = {"data": [invalid, unsupported], "included": []}
         responses = dict(self.responses)
         responses["solana_new_pools"] = response
+        responses["base_new_pools"] = {"data": [], "included": []}
         result = discover_gem_candidates(FakeHttp(responses), now=self.now)
         self.assertEqual(result["candidate_count"], 0)
 
