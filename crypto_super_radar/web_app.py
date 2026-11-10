@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
-from .models import AssetSpec, GateStatus
+from .models import AssetSpec, GateStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
@@ -420,6 +420,9 @@ def _enforce_daily_candle_freshness(result, range_evidence: dict, timeframe_rang
         data_gate.evidence = evidence
     range_evidence["status"] = "UNKNOWN"
     range_evidence["reason"] = detail_en
+    # A stale daily data gate must also invalidate the engine's directional signal.
+    result.signal = Signal.NO_TRADE
+    result.summary_fa = "معامله مسدود شد: سن کندل روزانه از حد مجاز تازگی داده بیشتر است."
 
 
 def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
