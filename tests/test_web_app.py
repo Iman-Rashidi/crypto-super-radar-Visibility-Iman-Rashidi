@@ -5,6 +5,7 @@ import json
 import queue
 import re
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -44,6 +45,12 @@ class WebAppHttpTests(unittest.TestCase):
         response_headers = dict(response.getheaders())
         connection.close()
         return status, response_headers, payload
+
+    def test_head_health_probe_succeeds_without_body(self):
+        status, headers, payload = self.request("HEAD", "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, b"")
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
 
     def test_health_endpoint_is_live_and_not_cacheable(self):
         status, headers, payload = self.request("GET", "/health")
@@ -106,6 +113,12 @@ class WebAppHttpTests(unittest.TestCase):
             status, _, payload = self.request("GET", "/api/crypto-markets")
             first = json.loads(payload)
             self.assertEqual(status, 200)
+            self.assertIn(first["status"], {"LOADING", "PASS"})
+            deadline = time.monotonic() + 5
+            while (first.get("status") != "PASS" or first.get("refreshing")) and time.monotonic() < deadline:
+                time.sleep(0.01)
+                status, _, payload = self.request("GET", "/api/crypto-markets")
+                first = json.loads(payload)
             self.assertEqual(first["status"], "PASS")
             self.assertEqual(first["cache_ttl_seconds"], 60)
             self.assertEqual(len(first["items"]), len(web_app.CRYPTO_MARKET_UNIVERSE))
@@ -136,7 +149,12 @@ class WebAppHttpTests(unittest.TestCase):
 
         with patch.object(web_app.ENGINE.data, "snapshot", side_effect=snapshot):
             status, _, payload = self.request("GET", "/api/crypto-markets")
-        result = json.loads(payload)
+            result = json.loads(payload)
+            deadline = time.monotonic() + 5
+            while (result.get("status") != "PARTIAL" or result.get("refreshing")) and time.monotonic() < deadline:
+                time.sleep(0.01)
+                status, _, payload = self.request("GET", "/api/crypto-markets")
+                result = json.loads(payload)
         self.assertEqual(status, 200)
         self.assertEqual(result["status"], "PARTIAL")
         eth = next(item for item in result["items"] if item["symbol"] == "ETHUSDT")

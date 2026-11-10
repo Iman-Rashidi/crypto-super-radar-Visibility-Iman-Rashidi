@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import hashlib
+import copy
 import json
 import os
 import queue
@@ -75,8 +76,8 @@ CRYPTO_MARKET_UNIVERSE = (
     ("UNIUSDT", "Uniswap", "یونی‌سواپ"),
 )
 CRYPTO_MARKET_CACHE_TTL_SECONDS = 60
-CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None}
-CRYPTO_MARKET_FETCH_LOCK = threading.Lock()
+CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None, "refreshing": False, "last_error": None}
+CRYPTO_MARKET_CACHE_LOCK = threading.Lock()
 
 
 def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
@@ -593,20 +594,35 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
             SCAN_RUNNING = False
 
 
-def _crypto_market_board() -> dict:
-    """Return a short-lived, free public spot-market board cross-checked by both venues."""
-    with CRYPTO_MARKET_FETCH_LOCK:
-        now = time.monotonic()
-        cached = CRYPTO_MARKET_CACHE["payload"]
-        if cached is not None and CRYPTO_MARKET_CACHE["expires_at"] > now:
-            return cached
+def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
+    total = len(CRYPTO_MARKET_UNIVERSE)
+    complete = len(items) >= total
+    status = (
+        "PASS" if complete and all(item.get("status") == "PASS" for item in items[:total])
+        else "PARTIAL" if complete else "LOADING"
+    )
+    return {
+        "status": status,
+        "freshness": "FRESH" if complete else "PARTIAL",
+        "updated_at_utc": datetime.now(timezone.utc).isoformat() if items else None,
+        "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
+        "sources": ["Binance Spot", "Bybit Spot"],
+        "items": copy.deepcopy(items),
+        "completed_items": min(len(items), total),
+        "total_items": total,
+        "refreshing": refreshing,
+    }
 
-        items = []
+
+def _refresh_crypto_market_board() -> None:
+    """Refresh public prices away from the request thread, publishing bounded progress."""
+    items: list[dict] = []
+    try:
         for symbol, name_en, name_fa in CRYPTO_MARKET_UNIVERSE:
             try:
-                asset = AssetSpec.parse(f"cex:{symbol}")
+                asset = AssetSpec.parse("cex:" + symbol)
                 snapshot = ENGINE.data.snapshot(asset)
-                items.append({
+                item = {
                     "symbol": symbol,
                     "name_en": name_en,
                     "name_fa": name_fa,
@@ -616,27 +632,105 @@ def _crypto_market_board() -> dict:
                     "price_discrepancy_pct": snapshot.price_discrepancy_pct,
                     "providers": [snapshot.provider_a, snapshot.provider_b],
                     "received_at_utc": datetime.now(timezone.utc).isoformat(),
-                })
+                }
             except Exception as exc:
-                items.append({
+                item = {
                     "symbol": symbol,
                     "name_en": name_en,
                     "name_fa": name_fa,
                     "status": "UNKNOWN",
-                    "reason": f"{type(exc).__name__}: {str(exc)[:180]}",
-                })
+                    "reason": type(exc).__name__ + ": " + str(exc)[:180],
+                }
+            items.append(item)
+            with CRYPTO_MARKET_CACHE_LOCK:
+                CRYPTO_MARKET_CACHE["payload"] = _market_board_payload(items, refreshing=True)
+                CRYPTO_MARKET_CACHE["expires_at"] = 0.0
 
-        payload = {
-            "status": "PASS" if all(item["status"] == "PASS" for item in items) else "PARTIAL",
-            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        with CRYPTO_MARKET_CACHE_LOCK:
+            CRYPTO_MARKET_CACHE["payload"] = _market_board_payload(items, refreshing=False)
+            CRYPTO_MARKET_CACHE["expires_at"] = time.monotonic() + CRYPTO_MARKET_CACHE_TTL_SECONDS
+            CRYPTO_MARKET_CACHE["last_error"] = None
+    except Exception as exc:
+        with CRYPTO_MARKET_CACHE_LOCK:
+            CRYPTO_MARKET_CACHE["last_error"] = type(exc).__name__ + ": " + str(exc)[:180]
+            if CRYPTO_MARKET_CACHE.get("payload") is None:
+                CRYPTO_MARKET_CACHE["payload"] = {
+                    "status": "UNKNOWN", "freshness": "UNKNOWN", "updated_at_utc": None,
+                    "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
+                    "sources": ["Binance Spot", "Bybit Spot"], "items": [],
+                    "completed_items": 0, "total_items": len(CRYPTO_MARKET_UNIVERSE),
+                    "refreshing": False, "error": CRYPTO_MARKET_CACHE["last_error"],
+                }
+    finally:
+        with CRYPTO_MARKET_CACHE_LOCK:
+            CRYPTO_MARKET_CACHE["refreshing"] = False
+            current = CRYPTO_MARKET_CACHE.get("payload")
+            if current is not None:
+                current["refreshing"] = False
+
+
+def _start_market_board_refresh() -> None:
+    with CRYPTO_MARKET_CACHE_LOCK:
+        if CRYPTO_MARKET_CACHE["refreshing"]:
+            return
+        CRYPTO_MARKET_CACHE["refreshing"] = True
+        CRYPTO_MARKET_CACHE["last_error"] = None
+    worker = threading.Thread(
+        target=_refresh_crypto_market_board,
+        daemon=True,
+        name="crypto-market-board-refresh",
+    )
+    try:
+        worker.start()
+    except Exception:
+        with CRYPTO_MARKET_CACHE_LOCK:
+            CRYPTO_MARKET_CACHE["refreshing"] = False
+        raise
+
+
+def _crypto_market_board() -> dict:
+    """Return cached public prices immediately; refresh an expired board in one worker."""
+    now = time.monotonic()
+    with CRYPTO_MARKET_CACHE_LOCK:
+        cached = CRYPTO_MARKET_CACHE.get("payload")
+        expires_at = CRYPTO_MARKET_CACHE.get("expires_at", 0.0)
+        refreshing = CRYPTO_MARKET_CACHE.get("refreshing", False)
+
+    if (cached is None or expires_at <= now) and not refreshing:
+        _start_market_board_refresh()
+
+    with CRYPTO_MARKET_CACHE_LOCK:
+        cached = copy.deepcopy(CRYPTO_MARKET_CACHE.get("payload"))
+        expires_at = CRYPTO_MARKET_CACHE.get("expires_at", 0.0)
+        refreshing = CRYPTO_MARKET_CACHE.get("refreshing", False)
+        last_error = CRYPTO_MARKET_CACHE.get("last_error")
+
+    if cached is None:
+        return {
+            "status": "LOADING", "freshness": "LOADING", "updated_at_utc": None,
             "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
-            "sources": ["Binance Spot", "Bybit Spot"],
-            "items": items,
+            "sources": ["Binance Spot", "Bybit Spot"], "items": [],
+            "completed_items": 0, "total_items": len(CRYPTO_MARKET_UNIVERSE),
+            "refreshing": refreshing,
         }
-        CRYPTO_MARKET_CACHE["payload"] = payload
-        CRYPTO_MARKET_CACHE["expires_at"] = time.monotonic() + CRYPTO_MARKET_CACHE_TTL_SECONDS
-        return payload
 
+    cached["refreshing"] = refreshing
+    if refreshing and cached.get("completed_items", 0) < cached.get("total_items", len(CRYPTO_MARKET_UNIVERSE)):
+        cached["status"] = "LOADING"
+        cached["freshness"] = "PARTIAL" if cached.get("items") else "LOADING"
+        return cached
+
+    if expires_at <= time.monotonic():
+        cached["status"] = "STALE"
+        cached["freshness"] = "STALE"
+        for item in cached.get("items", []):
+            previous = item.get("status")
+            item["status"] = "UNKNOWN"
+            item["previous_status"] = previous
+            item["reason"] = "Cached quote expired; awaiting fresh cross-validation."
+    if last_error:
+        cached["refresh_error"] = last_error
+    return cached
 
 def _scan_queue_worker():
     """Run stateful scan and paper-bot jobs serially with lease and fencing checks."""
@@ -707,6 +801,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(content)
+
+    def do_HEAD(self):
+        """Support Render's default HEAD health probe without returning a 501."""
+        parsed = urlparse(self.path)
+        if parsed.path not in {"/", "/health"}:
+            status = 404
+            content_type = "text/plain; charset=utf-8"
+        else:
+            status = 200
+            content_type = "application/json" if parsed.path == "/health" else "text/html; charset=utf-8"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", "0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
