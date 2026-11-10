@@ -431,7 +431,9 @@ class PaperTradingBot:
             active_stop = float(managed_position["stop_loss"])
             if price <= active_stop:
                 fill = min(price, active_stop) * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(fill, self.fee_rate, "TRAILING_OR_INITIAL_STOP")
+                initial_stop = float(managed_position.get("initial_stop_loss") or active_stop)
+                exit_reason = "TRAILING_STOP" if active_stop > initial_stop else "STOP_LOSS"
+                closed = self.ledger.close_position(fill, self.fee_rate, exit_reason)
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             if price >= float(position["take_profit"]):
                 fill = float(position["take_profit"]) * (1.0 - self.slippage_rate)
