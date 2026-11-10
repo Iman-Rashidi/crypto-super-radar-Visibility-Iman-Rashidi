@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import queue
@@ -24,6 +25,7 @@ ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
 JOBS: dict[str, dict] = {}
+ACTIVE_SCAN_KEYS: dict[str, str] = {}
 LOCK = threading.RLock()
 SCAN_RUNNING = False
 SCAN_QUEUE = queue.Queue(maxsize=50)
@@ -535,17 +537,32 @@ def _scan_queue_worker():
             with LOCK:
                 SCAN_RUNNING = True
                 if job_id in JOBS:
-                    JOBS[job_id] = {"status": "running"}
-            if task["route"] == "/paper-bot/tick":
-                _run_paper_tick(job_id, task["asset"])
-            else:
-                _run_scan(job_id, task["asset"], task["headline"], task["social_post"])
+                    current = JOBS[job_id]
+                    if current.get("fencing_token") != task.get("fencing_token"):
+                        current["status"] = "superseded"
+                    else:
+                        current["status"] = "running"
+                        current["worker_started_at_utc"] = datetime.now(timezone.utc).isoformat()
+            with LOCK:
+                current = JOBS.get(job_id) or {}
+                should_run = (
+                    current.get("status") == "running"
+                    and current.get("fencing_token") == task.get("fencing_token")
+                )
+            if should_run:
+                if task["route"] == "/paper-bot/tick":
+                    _run_paper_tick(job_id, task["asset"])
+                else:
+                    _run_scan(job_id, task["asset"], task["headline"], task["social_post"])
         except Exception as exc:
             with LOCK:
                 JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
         finally:
             with LOCK:
                 SCAN_RUNNING = False
+                key = task.get("idempotency_key")
+                if key and ACTIVE_SCAN_KEYS.get(key) == job_id:
+                    ACTIVE_SCAN_KEYS.pop(key, None)
             SCAN_QUEUE.task_done()
 
 
@@ -842,20 +859,39 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Paper trading accepts only BTC, ETH or SOL spot.")
             headline = form.get("headline", [""])[0].strip() if route == "/scan" else ""
             social_post = form.get("social_post", [""])[0].strip() if route == "/scan" else ""
+            canonical_request = json.dumps(
+                {"route": route, "asset": asset.raw, "headline": headline, "social_post": social_post},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            )
+            idempotency_key = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
             job_id = uuid.uuid4().hex
             task = {"job_id": job_id, "route": route, "asset": asset,
-                    "headline": headline, "social_post": social_post}
+                    "headline": headline, "social_post": social_post,
+                    "idempotency_key": idempotency_key}
             _ensure_scan_worker()
             with LOCK:
-                if SCAN_QUEUE.full():
-                    return self._send(429, _page("<h2>صف اسکن پر است</h2><p>۵۰ درخواست در صف هستند. کمی بعد دوباره تلاش کن.</p><a href='/'>بازگشت</a>"))
-                JOBS[job_id] = {"status": "queued", "queue_position": SCAN_QUEUE.qsize() + 1}
-                while len(JOBS) > 100:
-                    oldest = next(iter(JOBS))
-                    if JOBS[oldest].get("status") in {"queued", "running"}:
-                        break
-                    JOBS.pop(oldest)
-                SCAN_QUEUE.put_nowait(task)
+                existing_id = ACTIVE_SCAN_KEYS.get(idempotency_key)
+                existing = JOBS.get(existing_id) if existing_id else None
+                if existing and existing.get("status") in {"queued", "running"}:
+                    job_id = existing_id
+                else:
+                    if SCAN_QUEUE.full():
+                        return self._send(429, _page("<h2>صف اسکن پر است</h2><p>۵۰ درخواست در صف هستند. کمی بعد دوباره تلاش کن.</p><a href='/'>بازگشت</a>"))
+                    ACTIVE_SCAN_KEYS[idempotency_key] = job_id
+                    JOBS[job_id] = {
+                        "status": "queued",
+                        "queue_position": SCAN_QUEUE.qsize() + 1,
+                        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "idempotency_key": idempotency_key,
+                        "fencing_token": uuid.uuid4().hex,
+                    }
+                    task["fencing_token"] = JOBS[job_id]["fencing_token"]
+                    while len(JOBS) > 100:
+                        oldest = next(iter(JOBS))
+                        if JOBS[oldest].get("status") in {"queued", "running"}:
+                            break
+                        JOBS.pop(oldest)
+                    SCAN_QUEUE.put_nowait(task)
             if route == "/paper-bot/tick":
                 body = (
                     "<h2>چرخهٔ ربات آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
