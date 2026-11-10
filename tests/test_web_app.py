@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import re
 import threading
 import unittest
 from types import SimpleNamespace
@@ -145,6 +147,39 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result["storage"], "LOCAL_SQLITE")
         self.assertIn("observation_count", result)
+
+    def test_identical_active_scan_posts_are_idempotent(self):
+        old_jobs = dict(web_app.JOBS)
+        old_keys = dict(web_app.ACTIVE_SCAN_KEYS)
+        old_queue = web_app.SCAN_QUEUE
+        web_app.JOBS.clear()
+        web_app.ACTIVE_SCAN_KEYS.clear()
+        web_app.SCAN_QUEUE = queue.Queue(maxsize=50)
+        body = "asset=cex%3ABTCUSDT&headline=market+test"
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": str(len(body)),
+        }
+        try:
+            with patch.object(web_app, "_ensure_scan_worker"):
+                first_status, _, first_payload = self.request("POST", "/scan", body=body, headers=headers)
+                second_status, _, second_payload = self.request("POST", "/scan", body=body, headers=headers)
+            first_id = re.search(rb"شناسه کار: <code>([a-f0-9]+)</code>", first_payload).group(1)
+            second_id = re.search(rb"شناسه کار: <code>([a-f0-9]+)</code>", second_payload).group(1)
+            self.assertEqual(first_status, 202)
+            self.assertEqual(second_status, 202)
+            self.assertEqual(first_id, second_id)
+            self.assertEqual(web_app.SCAN_QUEUE.qsize(), 1)
+            job = web_app.JOBS[first_id.decode()]
+            self.assertEqual(job["status"], "queued")
+            self.assertTrue(job["fencing_token"])
+            self.assertTrue(job["idempotency_key"])
+        finally:
+            web_app.JOBS.clear()
+            web_app.JOBS.update(old_jobs)
+            web_app.ACTIVE_SCAN_KEYS.clear()
+            web_app.ACTIVE_SCAN_KEYS.update(old_keys)
+            web_app.SCAN_QUEUE = old_queue
 
     def test_unknown_job_returns_not_found(self):
         status, _, payload = self.request("GET", "/jobs/not-a-real-job")
