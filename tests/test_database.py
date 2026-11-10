@@ -42,13 +42,13 @@ class DatabaseAdapterTests(unittest.TestCase):
 
     def test_remote_driver_is_selected_when_both_credentials_exist(self):
         def fake_connect(url, auth_token):
-            self.assertEqual(url, "libsql://test-db.turso.io")
+            self.assertEqual(url, "turso://test-db.turso.io")
             self.assertEqual(auth_token, "test-token")
             return sqlite3.connect(":memory:")
 
         fake_module = types.SimpleNamespace(connect=fake_connect)
         env = {
-            "TURSO_DATABASE_URL": "libsql://test-db.turso.io",
+            "TURSO_DATABASE_URL": "turso://test-db.turso.io",
             "TURSO_AUTH_TOKEN": "test-token",
         }
         with patch.dict(os.environ, env, clear=False), patch.dict(
@@ -63,7 +63,7 @@ class DatabaseAdapterTests(unittest.TestCase):
             db.close()
 
     def test_partial_turso_credentials_fail_closed(self):
-        env = {"TURSO_DATABASE_URL": "libsql://test-db.turso.io", "TURSO_AUTH_TOKEN": ""}
+        env = {"TURSO_DATABASE_URL": "turso://test-db.turso.io", "TURSO_AUTH_TOKEN": ""}
         with patch.dict(os.environ, env, clear=False):
             with self.assertRaisesRegex(RuntimeError, "Set both"):
                 connect_database("data/test.sqlite3")
