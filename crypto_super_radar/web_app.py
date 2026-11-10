@@ -5,6 +5,7 @@ import html
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -17,6 +18,7 @@ from .indicators import observed_price_ranges
 from .models import AssetSpec
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .market_intelligence import search_dex_tokens
+from .providers import _ohlcv_frame
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -26,6 +28,24 @@ LOCK = threading.RLock()
 SCAN_RUNNING = False
 SCAN_QUEUE = queue.Queue(maxsize=50)
 SCAN_WORKER_STARTED = False
+
+COMMON_ASSET_NAMES = {
+    "BTC": ("Bitcoin", "بیت‌کوین"), "ETH": ("Ethereum", "اتریوم"),
+    "XRP": ("XRP / Ripple", "ریپل"), "SOL": ("Solana", "سولانا"),
+    "BNB": ("BNB", "بی‌ان‌بی"), "DOGE": ("Dogecoin", "دوج‌کوین"),
+    "ADA": ("Cardano", "کاردانو"), "AVAX": ("Avalanche", "آوالانچ"),
+    "LINK": ("Chainlink", "چین‌لینک"), "DOT": ("Polkadot", "پولکادات"),
+    "LTC": ("Litecoin", "لایت‌کوین"), "TRX": ("TRON", "ترون"),
+    "TON": ("Toncoin", "تون‌کوین"), "PEPE": ("Pepe", "پپه"),
+    "SHIB": ("Shiba Inu", "شیبا اینو"),
+}
+ASSET_NAME_ALIASES = {
+    "BITCOIN": "BTCUSDT", "ETHEREUM": "ETHUSDT", "RIPPLE": "XRPUSDT",
+    "SOLANA": "SOLUSDT", "DOGECOIN": "DOGEUSDT", "CARDANO": "ADAUSDT",
+    "AVALANCHE": "AVAXUSDT", "CHAINLINK": "LINKUSDT", "POLKADOT": "DOTUSDT",
+    "LITECOIN": "LTCUSDT", "TRON": "TRXUSDT", "TONCOIN": "TONUSDT",
+}
+TIMEFRAME_WINDOWS = (("1h", 1), ("6h", 6), ("12h", 12), ("1d", 24), ("1w", 168), ("1mo", 720))
 
 # Small, explicitly curated public spot board; it is not a market-cap ranking.
 CRYPTO_MARKET_UNIVERSE = (
@@ -97,6 +117,219 @@ canvas{{width:100%;height:300px;background:#08101d;border-radius:12px}}
 </style></head><body><main>{body}</main></body></html>""".encode("utf-8")
 
 
+def _parse_scan_asset(value: str) -> AssetSpec:
+    """Accept simple coin names/tickers as USDT spot pairs; keep explicit DEX contracts."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("نام ارز یا نماد را وارد کن؛ نمونه: XRP یا BTCUSDT.")
+    if ":" in raw:
+        return AssetSpec.parse(raw)
+    compact = re.sub(r"[\s/_-]+", "", raw).upper()
+    if not compact.isalnum() or len(compact) > 24:
+        raise ValueError("نماد ارز معتبر نیست. نمونه: XRP، XRPUSDT یا eth:آدرس‌قرارداد.")
+    if compact in ASSET_NAME_ALIASES:
+        compact = ASSET_NAME_ALIASES[compact]
+    else:
+        quote_suffixes = ("USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH", "EUR")
+        if not compact.endswith(quote_suffixes):
+            compact += "USDT"
+    return AssetSpec.parse("cex:" + compact)
+
+
+def _coin_display(asset: AssetSpec, market_intelligence: dict) -> dict:
+    dex = (market_intelligence or {}).get("dex_screener") or {}
+    raw_symbol = (asset.symbol or "").upper()
+    for quote in ("USDT", "USDC", "FDUSD", "BUSD", "TUSD", "EUR", "BTC", "ETH"):
+        if raw_symbol.endswith(quote) and len(raw_symbol) > len(quote):
+            raw_symbol = raw_symbol[:-len(quote)]
+            break
+    symbol = dex.get("token_symbol") or raw_symbol or asset.address or asset.raw
+    names = COMMON_ASSET_NAMES.get(str(symbol).upper(), (str(dex.get("token_name") or symbol), str(dex.get("token_name") or symbol)))
+    name_en = dex.get("token_name") or names[0]
+    name_fa = names[1]
+    if asset.market_type == "dex" and dex.get("token_name"):
+        name_en = dex["token_name"]
+        name_fa = dex["token_name"]
+    return {"symbol": symbol, "name_en": name_en, "name_fa": name_fa}
+
+
+def _timeframe_ranges(asset: AssetSpec, snapshot=None) -> dict:
+    """Fetch actual 1h candles and derive truthful rolling high/low windows."""
+    empty = {
+        label: {"status": "UNKNOWN", "high": None, "low": None, "bar_count": 0,
+                "expected_bars": hours, "coverage_pct": 0.0, "age_hours": None}
+        for label, hours in TIMEFRAME_WINDOWS
+    }
+    try:
+        if asset.market_type == "cex":
+            frame = ENGINE.data.binance.candles(asset.symbol, interval="1h", limit=750)
+            source = "Binance Spot 1h candles"
+        elif asset.market_type == "perp":
+            provider = ENGINE.data.perpetual
+            rows = provider.http.get(
+                f"{provider.BINANCE}/fapi/v1/klines",
+                {"symbol": asset.symbol, "interval": "1h", "limit": 750},
+            )
+            frame = _ohlcv_frame(rows)
+            source = "Binance USD-M perpetual 1h candles"
+        elif asset.market_type == "dex":
+            snapshot = snapshot or getattr(ENGINE.data, "snapshots", {}).get(asset.raw)
+            if snapshot is None or not snapshot.pool_address:
+                raise ValueError("No validated DEX pool is available for timeframe candles.")
+            frame = ENGINE.data.gecko.candles(
+                asset.chain, snapshot.pool_address, token_address=asset.address,
+                timeframe="hour", aggregate=1, limit=750,
+            )
+            source = "GeckoTerminal pool 1h candles"
+        else:
+            raise ValueError("Unsupported asset market type.")
+        if frame is None or frame.empty:
+            raise ValueError("The provider returned no 1h candles.")
+        required = {"high", "low"}
+        if not required.issubset(frame.columns):
+            raise ValueError("The provider returned an incomplete OHLC schema.")
+        latest = frame.index.max()
+        if hasattr(latest, "to_pydatetime"):
+            latest = latest.to_pydatetime()
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (datetime.now(timezone.utc) - latest).total_seconds() / 3600.0)
+        output = {}
+        for label, hours in TIMEFRAME_WINDOWS:
+            subset = frame.tail(min(hours, len(frame)))
+            count = len(subset)
+            coverage = min(100.0, count / float(hours) * 100.0)
+            status = "KNOWN" if coverage >= 95.0 else "PARTIAL"
+            output[label] = {
+                "status": status,
+                "high": float(subset["high"].max()) if count else None,
+                "low": float(subset["low"].min()) if count else None,
+                "bar_count": count,
+                "expected_bars": hours,
+                "coverage_pct": round(coverage, 2),
+                "age_hours": round(age_hours, 2),
+                "source": source,
+                "window_hours": hours,
+                "note": None if status == "KNOWN" else f"فقط {coverage:.1f}% از کندل‌های این بازه دریافت شده است.",
+            }
+        return output
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {str(exc)[:160]}"
+        return {label: {**row, "reason": reason} for label, row in empty.items()}
+
+
+def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
+    """Turn engine output into a plain-language, gate-backed decision summary."""
+    mi = result.metrics.get("market_intelligence") or {}
+    coin = _coin_display(asset, mi)
+    gates = list(result.gates or [])
+    failed = [g for g in gates if getattr(g.status, "value", g.status) == "FAIL"]
+    unknown = [g for g in gates if getattr(g.status, "value", g.status) == "UNKNOWN"]
+    signal = getattr(result.signal, "value", str(result.signal))
+    direction = "BUY" if signal == "LONG" else "SELL" if signal == "SHORT" else "NEUTRAL"
+    thresholds = getattr(getattr(ENGINE, "config", None), "thresholds", None)
+    min_confirmation = float(getattr(thresholds, "min_confirmation_score", 75.0))
+    max_risk = float(getattr(thresholds, "max_estimated_risk_score", 45.0))
+    confirmation = result.confirmation_score
+    risk = result.estimated_risk_score
+    all_pass = len(gates) >= 12 and all(
+        getattr(g.status, "value", g.status) == "PASS" for g in gates
+    )
+    score_pass = confirmation is not None and float(confirmation) >= min_confirmation
+    risk_pass = risk is not None and float(risk) < max_risk
+    tradable = direction in {"BUY", "SELL"} and all_pass and score_pass and risk_pass
+    buy_allowed = direction == "BUY" and tradable
+
+    gate_reasons = []
+    for gate in failed + unknown:
+        status = getattr(gate.status, "value", gate.status)
+        gate_reasons.append({
+            "id": gate.gate_id,
+            "name": gate.name_fa,
+            "status": status,
+            "reason": gate.reason_fa,
+        })
+    if not score_pass:
+        gate_reasons.append({
+            "id": None, "name": "امتیاز نهایی",
+            "status": "FAIL",
+            "reason": f"امتیاز تأیید {confirmation if confirmation is not None else 'ناموجود'} است؛ حداقل لازم {min_confirmation:g} است.",
+        })
+    if not risk_pass:
+        gate_reasons.append({
+            "id": None, "name": "ریسک معامله",
+            "status": "FAIL",
+            "reason": f"ریسک {risk if risk is not None else 'ناموجود'} است؛ سقف مجاز کمتر از {max_risk:g} است.",
+        })
+    if not gate_reasons:
+        gate_reasons.append({
+            "id": None, "name": "وضعیت فعلی",
+            "status": "PASS",
+            "reason": "همهٔ فیلترهای اجباری و حدود امتیاز تأیید و ریسک رعایت شده‌اند.",
+        })
+
+    if buy_allowed:
+        short_action = "خرید کوتاه‌مدت قابل بررسی است؛ ورود فقط با حدضرر و اندازه موقعیت کنترل‌شده."
+        long_action = "خرید پله‌ای و نگهداری بلندمدت قابل بررسی است؛ این اسکن ارزش بنیادی یا تضمین سود را تأیید نمی‌کند."
+        final_title = "خرید قابل بررسی است"
+    elif direction == "SELL" and tradable:
+        short_action = "فروش یا کاهش موقعیت کوتاه‌مدت قابل بررسی است؛ در بازار Spot این به معنی فروش دارایی موجود است، نه فروش استقراضی."
+        long_action = "برای خرید و نگهداری بلندمدت فعلاً صبر کن؛ روند و داده‌های فعلی از خرید تازه پشتیبانی نمی‌کنند."
+        final_title = "خرید توصیه نمی‌شود؛ فشار فروش تأیید شده است"
+    else:
+        short_action = "فعلاً صبر؛ خرید یا فروش فوری تأیید نشده است."
+        long_action = "فعلاً خرید بلندمدت و نگهداری جدید توصیه نمی‌شود؛ ابتدا روند و آزمون‌های آماری باید تأیید شوند."
+        final_title = "فعلاً خرید توصیه نمی‌شود"
+
+    short_reasons = []
+    for gate_id in (1, 2, 3, 4, 5, 7, 10):
+        gate = next((g for g in gates if g.gate_id == gate_id), None)
+        if gate is not None:
+            status = getattr(gate.status, "value", gate.status)
+            short_reasons.append(f"{gate.name_fa}: {gate.reason_fa} (وضعیت: {status})")
+    if not short_reasons:
+        short_reasons = [result.summary_fa]
+
+    long_reasons = []
+    for gate_id in (2, 3, 6, 8, 12):
+        gate = next((g for g in gates if g.gate_id == gate_id), None)
+        if gate is not None:
+            status = getattr(gate.status, "value", gate.status)
+            long_reasons.append(f"{gate.name_fa}: {gate.reason_fa} (وضعیت: {status})")
+    month = timeframe_ranges.get("1mo") or {}
+    week = timeframe_ranges.get("1w") or {}
+    if month.get("status") != "KNOWN":
+        long_reasons.append("دادهٔ یک‌ماهه کامل نیست؛ کف و سقف این بازه با پوشش ناقص نمایش داده می‌شود.")
+    if week.get("status") != "KNOWN":
+        long_reasons.append("دادهٔ یک‌هفته کامل نیست؛ برای تصمیم بلندمدت به تاریخچهٔ بیشتری نیاز است.")
+    if not long_reasons:
+        long_reasons = ["روند، ریسک و اعتبارسنجی زمانی بررسی شده‌اند."]
+
+    age_hours = market_overview.get("candle_age_hours")
+    if age_hours is None:
+        candle_age_text = "سن کندل روزانه در دسترس نیست."
+    else:
+        candle_age_text = (
+            f"آخرین کندل روزانه حدود {float(age_hours):.1f} ساعت پیش ثبت شده است. "
+            "برای تصمیم کوتاه‌مدت، دادهٔ ۱ساعتهٔ تازه‌تر ملاک این جدول است."
+        )
+    return {
+        "coin_name": coin["name_fa"],
+        "coin_name_en": coin["name_en"],
+        "symbol": coin["symbol"],
+        "overall_signal": direction,
+        "overall_signal_fa": {"BUY": "خرید", "SELL": "فروش", "NEUTRAL": "خنثی"}[direction],
+        "short_term": {"action_fa": short_action, "reasons": short_reasons},
+        "long_term": {"action_fa": long_action, "reasons": long_reasons},
+        "final_recommendation": final_title,
+        "buy_recommended": buy_allowed,
+        "final_reasons": [row["reason"] for row in gate_reasons],
+        "blockers": gate_reasons,
+        "candle_age_text": candle_age_text,
+        "explanation": "نتیجه فقط بر پایهٔ فیلترهای همین اسکن است؛ در وضعیت خنثی یا با فیلتر ردشده، سیستم ورود را تأیید نمی‌کند. این خروجی سفارش واقعی ارسال نمی‌کند.",
+    }
+
+
 def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) -> None:
     global SCAN_RUNNING
     try:
@@ -108,6 +341,10 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
         candle_frame = getattr(ENGINE.data, "candle_frames", {}).get(asset.raw)
         range_evidence = observed_price_ranges(candle_frame)
         trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
+        snapshot = getattr(ENGINE.data, "snapshots", {}).get(asset.raw)
+        timeframe_ranges = _timeframe_ranges(asset, snapshot)
+        market_intelligence = result.metrics.get("market_intelligence", {}) or {}
+        coin_display = _coin_display(asset, market_intelligence)
         regime_gate = next((gate for gate in result.gates if gate.gate_id == 2), None)
         candle_records = []
         if candle_frame is not None and not candle_frame.empty:
@@ -122,6 +359,11 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                         })
         payload = {
             "asset": asset.raw,
+            "coin_name": coin_display["name_fa"],
+            "coin_name_en": coin_display["name_en"],
+            "symbol": coin_display["symbol"],
+            "timeframe_ranges": timeframe_ranges,
+            "diagnosis": _build_user_diagnosis(result, asset, timeframe_ranges, range_evidence),
             "market_overview": {
                 "status": range_evidence.get("status", "UNKNOWN"),
                 "reason": range_evidence.get("reason"),
@@ -434,8 +676,8 @@ class Handler(BaseHTTPRequestHandler):
           </div>
           <form method="post" action="/scan">
             <label>بازار و نماد / آدرس</label>
-            <input id="scan-asset" name="asset" required value="cex:BTCUSDT" placeholder="cex:BTCUSDT یا base:0x...">
-            <p class="muted">نمونه‌ها: cex:BTCUSDT · perp:BTCUSDT · base:0x... · eth:0x... · solana:MINT</p>
+            <input id="scan-asset" name="asset" required value="BTC" placeholder="XRP، BTCUSDT یا eth:آدرس‌قرارداد">
+            <p class="muted">نمونه‌ها: XRP، BTC، XRPUSDT · برای توکن DEX آدرس قرارداد را با شبکه وارد کن؛ مثل base:0x... یا solana:...</p>
             <label>تیتر خبری تکمیلی (اختیاری)</label>
             <input name="headline" placeholder="تیتر خبر">
             <label>متن اجتماعی تکمیلی (اختیاری)</label>
@@ -539,7 +781,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
-            asset = AssetSpec.parse(form.get("asset", [""])[0].strip())
+            asset = _parse_scan_asset(form.get("asset", [""])[0].strip())
             if route == "/paper-bot/tick" and (
                 asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS
             ):
@@ -571,7 +813,9 @@ class Handler(BaseHTTPRequestHandler):
             body = (
                 "<h2>اسکن آغاز شد</h2><p>شناسه کار: <code>" + job_id + "</code></p>"
                 "<p id='state'>در حال جمع‌آوری داده‌های بازار، نهنگ‌ها و احساسات...</p>"
-                "<section class='card'><h3>نمای بازار، کف و سقف</h3><div id='market-summary' class='grid'></div>"
+                "<section class='card'><h3 id='diagnosis-title'>تشخیص نهایی</h3><div id='diagnosis-headline' class='metric'></div><div id='diagnosis-short' class='grid'></div><div id='diagnosis-long' class='grid'></div><div id='diagnosis-reasons'></div></section>"
+                "<section class='card'><h3>کف و سقف در بازه‌های مختلف</h3><div id='timeframe-range-table'></div><p id='candle-age-note' class='muted'></p></section>"
+                "<section class='card'><h3>نمای کلی بازار و نمودار</h3><div id='market-summary' class='grid'></div>"
                 "<div id='range-table'></div><canvas id='candles' width='1000' height='320'></canvas></section>"
                 "<section class='card'><h3>Market Intelligence · DEX و مشتقات</h3><div id='mi-summary' class='grid'></div><div id='mi-notes' class='muted'></div></section>"
                 "<section class='card'><h3>۱۲ فیلتر</h3><div id='gate-table'></div></section>"
@@ -589,9 +833,11 @@ class Handler(BaseHTTPRequestHandler):
                 "if(!bars.length){ctx.fillStyle='#f59e0b';ctx.fillText('تاریخچه OHLC برای نمودار موجود نیست',20,30);return;}"
                 "const lo=Math.min(...bars.map(x=>x.low)),hi=Math.max(...bars.map(x=>x.high)),span=Math.max(hi-lo,1e-12),pad=20,w=(canvas.width-2*pad)/bars.length;"
                 "bars.forEach((x,i)=>{const cx=pad+i*w+w/2,y=v=>canvas.height-pad-(v-lo)/span*(canvas.height-2*pad);const up=x.close>=x.open;ctx.strokeStyle=up?'#22c55e':'#ef4444';ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(cx,y(x.high));ctx.lineTo(cx,y(x.low));ctx.stroke();const top=y(Math.max(x.open,x.close)),bottom=y(Math.min(x.open,x.close));ctx.fillRect(cx-w*.32,top,Math.max(1,w*.64),Math.max(1,bottom-top));});const shape=m.chart_pattern||{};if(shape.status==='FORMING'||shape.status==='BREAKOUT_UP'||shape.status==='BREAKOUT_DOWN'){const drawLine=(line,color)=>{if(!line)return;ctx.save();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([7,5]);ctx.beginPath();ctx.moveTo(pad+(line.start_index+.5)*w,y(line.start_price));ctx.lineTo(pad+(line.end_index+.5)*w,y(line.end_price));ctx.stroke();ctx.restore();};drawLine(shape.upper_line,'#ffc66d');drawLine(shape.lower_line,'#72a7ff');(shape.pivots||[]).forEach(p=>{ctx.fillStyle=p.kind==='HIGH'?'#ffc66d':'#72a7ff';ctx.beginPath();ctx.arc(pad+(p.index+.5)*w,y(p.price),4,0,Math.PI*2);ctx.fill();});ctx.fillStyle='#edf4fb';ctx.fillText('Triangle: '+(shape.status||'UNKNOWN')+' / '+(shape.breakout||'NO BREAKOUT'),pad,16);}}"
-                "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const notes=[...(s.notes||[]),d.reason,c.reason,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
+                "function renderTimeframes(rows){const labels={'1h':'۱ ساعت','6h':'۶ ساعت','12h':'۱۲ ساعت','1d':'۱ روز','1w':'۱ هفته','1mo':'۱ ماه'};const data=Object.entries(rows||{}).map(([k,v])=>[labels[k]||k,v.status==='KNOWN'?'کامل':v.status==='PARTIAL'?'ناقص':'ناموجود',v.low,v.high,v.bar_count+'/'+v.expected_bars,v.coverage_pct===undefined?'—':v.coverage_pct+'%',v.age_hours===null||v.age_hours===undefined?'—':v.age_hours+' ساعت']);table(document.getElementById('timeframe-range-table'),['بازه','وضعیت داده','کف','سقف','تعداد کندل','پوشش','سن آخرین کندل'],data);}"
+                "function renderDiagnosis(d){const title=document.getElementById('diagnosis-title'),head=document.getElementById('diagnosis-headline');title.textContent='تشخیص نهایی · '+(d.coin_name||'رمزارز')+' ('+(d.symbol||'')+')';head.replaceChildren(cell('strong',d.final_recommendation||'تشخیص در دسترس نیست'),cell('div','وضعیت کلی: '+(d.overall_signal_fa||'خنثی')+' · '+(d.explanation||'')));const makeCard=(label,item)=>{const box=document.createElement('div');box.className='metric';box.appendChild(cell('strong',label));box.appendChild(cell('div',item.action_fa||'ناموجود'));(item.reasons||[]).forEach(reason=>{const p=cell('p','• '+reason);box.appendChild(p);});return box;};document.getElementById('diagnosis-short').replaceChildren(makeCard('تصمیم کوتاه‌مدت',d.short_term||{}));document.getElementById('diagnosis-long').replaceChildren(makeCard('تصمیم بلندمدت / نگهداری',d.long_term||{}));const list=document.createElement('ul');(d.blockers||[]).forEach(row=>{const li=cell('li',(row.name?row.name+' — ':'')+row.reason+' ['+row.status+']');list.appendChild(li);});const reasons=document.getElementById('diagnosis-reasons');reasons.replaceChildren(cell('h4','چرا خرید توصیه می‌شود یا نمی‌شود؟'),list);document.getElementById('candle-age-note').textContent=d.candle_age_text||'سن کندل در دسترس نیست.';}"
+                "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};"const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const notes=[...(s.notes||[]),d.reason,c.reason,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
                 "async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;"
-                "if(j.status==='completed'){renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['دارایی',s.asset],['سیگنال',s.signal],['امتیاز تأیید',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
+                "if(j.status==='completed'){renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز تأیید',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
                 "if(j.status==='failed'){document.getElementById('state').textContent='اسکن ناموفق بود: '+j.error;return;}"
                 "}catch(e){document.getElementById('state').textContent='ارتباط قطع شد؛ بعداً /jobs/'+job+' را بررسی کنید';return;}"
                 "setTimeout(poll,2500);}poll();</script>"
