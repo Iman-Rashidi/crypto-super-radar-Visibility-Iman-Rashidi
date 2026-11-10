@@ -11,6 +11,7 @@ from .engine import ConfirmationEngine
 from .evm_security import screen_evm_token
 from .elliott_waves import monitor_elliott_waves
 from .chart_patterns import monitor_chart_patterns, contradicts_confirmed_breakout
+from .candle_quality import completed_daily_candles
 from .evm_transfers import EvmTransferScanner
 from .market_sentiment import fetch_market_sentiment
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
@@ -36,9 +37,12 @@ class WhaleAwareMarketDataService(MarketDataService):
         self.funding_frames: dict[str, pd.Series] = {}
 
     def candles(self, asset: AssetSpec, snapshot):
-        frame = super().candles(asset, snapshot)
+        frame = completed_daily_candles(super().candles(asset, snapshot))
         self.candle_frames[asset.raw] = frame.copy()
         return frame
+
+    def benchmark_candles(self):
+        return completed_daily_candles(super().benchmark_candles())
 
     def funding_history(self, asset: AssetSpec):
         series = super().funding_history(asset)

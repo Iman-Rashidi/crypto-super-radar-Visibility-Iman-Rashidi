@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import unittest
 
+import pandas as pd
+
 from crypto_super_radar.chart_patterns import (
     classify_confirmed_pivots,
+    confirm_breakout_with_volume,
     contradicts_confirmed_breakout,
 )
 
@@ -37,14 +40,44 @@ class TrianglePatternTests(unittest.TestCase):
         self.assertEqual(result["status"], "BREAKOUT_UP")
         self.assertEqual(result["breakout"], "UP")
 
-    def test_opposing_confirmed_breakout_vetoes_direction(self):
-        self.assertTrue(contradicts_confirmed_breakout("LONG", {"breakout": "DOWN"}))
-        self.assertTrue(contradicts_confirmed_breakout("SHORT", {"breakout": "UP"}))
+    def test_opposing_volume_confirmed_breakout_vetoes_direction(self):
+        self.assertTrue(contradicts_confirmed_breakout(
+            "LONG", {"breakout": "DOWN", "breakout_confirmation": "CONFIRMED"}
+        ))
+        self.assertTrue(contradicts_confirmed_breakout(
+            "SHORT", {"breakout": "UP", "breakout_confirmation": "CONFIRMED"}
+        ))
+        self.assertFalse(contradicts_confirmed_breakout(
+            "LONG", {"breakout": "DOWN", "breakout_confirmation": "UNCONFIRMED"}
+        ))
 
     def test_aligned_or_unconfirmed_pattern_does_not_veto(self):
         self.assertFalse(contradicts_confirmed_breakout("LONG", {"breakout": "UP"}))
         self.assertFalse(contradicts_confirmed_breakout("SHORT", {"breakout": "NONE"}))
         self.assertFalse(contradicts_confirmed_breakout("LONG", {"status": "UNKNOWN"}))
+
+    def test_volume_and_close_location_confirm_up_breakout(self):
+        index = pd.date_range("2026-01-01", periods=21, freq="D", tz="UTC")
+        frame = pd.DataFrame({
+            "high": [101.0] * 20 + [110.0],
+            "low": [99.0] * 20 + [100.0],
+            "close": [100.0] * 20 + [109.0],
+            "volume": [100.0] * 20 + [150.0],
+        }, index=index)
+        result = confirm_breakout_with_volume("UP", frame)
+        self.assertEqual(result["status"], "CONFIRMED")
+        self.assertEqual(result["volume_ratio"], 1.5)
+
+    def test_volume_confirmation_rejects_weak_close_or_volume(self):
+        index = pd.date_range("2026-01-01", periods=21, freq="D", tz="UTC")
+        frame = pd.DataFrame({
+            "high": [101.0] * 20 + [110.0],
+            "low": [99.0] * 20 + [100.0],
+            "close": [100.0] * 20 + [103.0],
+            "volume": [100.0] * 21,
+        }, index=index)
+        result = confirm_breakout_with_volume("UP", frame)
+        self.assertEqual(result["status"], "UNCONFIRMED")
 
     def test_rejects_non_finite_price(self):
         result = classify_confirmed_pivots(self.pivots, float("nan"), 21)

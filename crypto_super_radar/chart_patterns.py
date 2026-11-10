@@ -124,12 +124,50 @@ def classify_confirmed_pivots(
     }
 
 
+def confirm_breakout_with_volume(
+    breakout: str, candles: Optional[pd.DataFrame], *, min_volume_ratio: float = 1.2
+) -> dict[str, Any]:
+    """Confirm a triangle break with relative volume and close location."""
+    if breakout not in {"UP", "DOWN"}:
+        return {"status": "NOT_APPLICABLE", "volume_ratio": None, "close_location": None}
+    required = {"high", "low", "close", "volume"}
+    if not isinstance(candles, pd.DataFrame) or len(candles) < 21 or not required.issubset(candles.columns):
+        return {"status": "UNKNOWN", "volume_ratio": None, "close_location": None,
+                "reason": "Twenty prior volume bars and complete OHLC data are required."}
+    recent = candles.loc[:, ["high", "low", "close", "volume"]].tail(21).apply(
+        pd.to_numeric, errors="coerce"
+    )
+    if recent.isna().any().any() or not np.isfinite(recent.to_numpy(dtype=float)).all():
+        return {"status": "UNKNOWN", "volume_ratio": None, "close_location": None,
+                "reason": "Recent OHLCV observations are missing or non-finite."}
+    if (recent[["high", "low", "close"]] <= 0).any().any() or (recent["volume"] < 0).any():
+        return {"status": "UNKNOWN", "volume_ratio": None, "close_location": None,
+                "reason": "Recent OHLCV observations contain invalid values."}
+    baseline = float(recent["volume"].iloc[:-1].median())
+    bar_range = float(recent["high"].iloc[-1] - recent["low"].iloc[-1])
+    if baseline <= 0 or bar_range <= 0:
+        return {"status": "UNKNOWN", "volume_ratio": None, "close_location": None,
+                "reason": "A positive volume baseline and candle range are required."}
+    ratio = float(recent["volume"].iloc[-1] / baseline)
+    location = float((recent["close"].iloc[-1] - recent["low"].iloc[-1]) / bar_range)
+    close_confirmed = location >= 0.65 if breakout == "UP" else location <= 0.35
+    confirmed = ratio >= min_volume_ratio and close_confirmed
+    return {
+        "status": "CONFIRMED" if confirmed else "UNCONFIRMED",
+        "volume_ratio": round(ratio, 3),
+        "close_location": round(location, 3),
+        "reason": "Requires at least 1.2x median volume and a close near the breakout-side candle extreme.",
+    }
+
+
 def contradicts_confirmed_breakout(direction: Optional[str], pattern: dict[str, Any]) -> bool:
     """Return True only when a confirmed triangle breakout opposes the market direction."""
     direction_value = str(direction or "").strip().upper()
     breakout = str((pattern or {}).get("breakout", "NONE")).strip().upper()
-    return (direction_value == "LONG" and breakout == "DOWN") or (
-        direction_value == "SHORT" and breakout == "UP"
+    confirmed = (pattern or {}).get("breakout_confirmation") == "CONFIRMED"
+    return confirmed and (
+        (direction_value == "LONG" and breakout == "DOWN")
+        or (direction_value == "SHORT" and breakout == "UP")
     )
 
 
@@ -144,6 +182,12 @@ def monitor_chart_patterns(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
     if close.isna().any() or not np.isfinite(values).all() or (values <= 0).any():
         return _unknown("Candle closes contain missing, non-finite, or non-positive values.")
     wave = monitor_elliott_waves(candles)
-    return classify_confirmed_pivots(
+    result = classify_confirmed_pivots(
         wave.get("pivots", []), float(values[-1]), len(candles) - 1
     )
+    confirmation = confirm_breakout_with_volume(result.get("breakout", "NONE"), candles)
+    result["breakout_confirmation"] = confirmation["status"]
+    result["breakout_volume_ratio"] = confirmation.get("volume_ratio")
+    result["breakout_close_location"] = confirmation.get("close_location")
+    result["breakout_confirmation_reason"] = confirmation.get("reason")
+    return result

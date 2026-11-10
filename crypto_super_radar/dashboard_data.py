@@ -119,6 +119,8 @@ def quantitative_dataframe(result: AnalysisResult) -> pd.DataFrame:
     add("الگوی هندسی", "وضعیت الگو", shape.get("status"))
     add("الگوی هندسی", "نوع الگو", shape.get("pattern"))
     add("الگوی هندسی", "وضعیت شکست", shape.get("breakout"))
+    add("الگوی هندسی", "تأیید شکست با حجم", shape.get("breakout_confirmation"))
+    add("الگوی هندسی", "حجم شکست نسبت به میانهٔ ۲۰ کندل", shape.get("breakout_volume_ratio"), "برابر")
     add("الگوی هندسی", "تعداد برخورد سقف/کف", f"{shape.get('upper_touches', 0)}/{shape.get('lower_touches', 0)}")
     add("الگوی هندسی", "مرز بالایی فعلی", shape.get("upper_now"), "USD")
     add("الگوی هندسی", "مرز پایینی فعلی", shape.get("lower_now"), "USD")
