@@ -31,7 +31,7 @@ class ThresholdConfig:
     """Initial screening thresholds; calibrate only with out-of-sample tests."""
 
     provider_discrepancy_pct: float = 5.0
-    max_candle_age_hours: float = 48.0
+    max_candle_age_hours: float = 36.0
     min_dex_liquidity_usd: float = 250_000.0
     min_dex_volume_24h_usd: float = 50_000.0
     min_cex_quote_volume_24h_usd: float = 1_000_000.0
