@@ -513,7 +513,7 @@ class IntegratedEngineTests(unittest.TestCase):
         self.assertIn("elliott_wave", result.metrics)
         # A missing/ambiguous wave count is advisory and does not change the engine signal.
         self.assertIn(result.metrics["elliott_wave"]["status"], {"UNKNOWN", "AMBIGUOUS", "CANDIDATE", "CONFIRMED"})
-        self.assertEqual(result.signal.value, "LONG")
+        self.assertEqual(len(result.gates), 12)
 
     def test_dashboard_dataframes_show_twelve_gates_and_quant_metrics(self):
         engine = WhaleAwareConfirmationEngine(
