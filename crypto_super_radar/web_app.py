@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -897,7 +897,7 @@ class Handler(BaseHTTPRequestHandler):
                         "status": "queued",
                         "queue_position": SCAN_QUEUE.qsize() + 1,
                         "created_at_utc": created_at.isoformat(),
-                        "valid_until_utc": (created_at + __import__("datetime").timedelta(seconds=JOB_LEASE_SECONDS)).isoformat(),
+                        "valid_until_utc": (created_at + timedelta(seconds=JOB_LEASE_SECONDS)).isoformat(),
                         "idempotency_key": idempotency_key,
                         "fencing_token": JOB_FENCE_COUNTER,
                     }
