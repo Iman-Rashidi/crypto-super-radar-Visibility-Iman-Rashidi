@@ -255,5 +255,39 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual(recovered["trade_authorization"], "NO_TRADE")
 
 
+    def test_dexpaprika_uses_non_quote_token_and_derives_its_price_from_reserves(self):
+        token = "0x" + "4" * 40
+        weth = "0x4200000000000000000000000000000000000006"
+        pool_id = "0x" + "c" * 64
+        responses = dict(self.responses)
+        responses["base_trending_pools"] = RuntimeError("HTTP 429")
+        class ReversedPairHttp(FakeHttp):
+            def get(inner, url, params=None):
+                if url == "https://api.dexpaprika.com/networks/base/pools/search":
+                    return {"results": [{"id": pool_id, "chain": "base"}]}
+                if url.endswith("/pools/" + pool_id):
+                    return {
+                        "id": pool_id, "chain": "base", "base_token_id": weth,
+                        "tokens": [
+                            {"id": weth, "name": "Wrapped Ether", "symbol": "WETH", "decimals": 18},
+                            {"id": token, "name": "Reversed Token", "symbol": "REV", "decimals": 18},
+                        ],
+                        "token_reserves": [
+                            {"token_id": weth, "reserve": "1000000000000000000", "reserve_usd": "2000"},
+                            {"token_id": token, "reserve": "200000000000000000000", "reserve_usd": "2000"},
+                        ],
+                        "created_at": "2026-11-10T11:00:00Z",
+                        "dex_name": "Uniswap V3", "last_price_usd": 2000, "liquidity_usd": 4000,
+                        "1h": {"volume_usd": 12000, "buys": 30, "sells": 10},
+                        "24h": {"volume_usd": 100000, "buys": 200, "sells": 80},
+                    }
+                return super().get(url, params=params)
+        result = discover_gem_candidates(ReversedPairHttp(responses), now=self.now)
+        recovered = next(item for item in result["candidates"] if item["token_address"] == token)
+        self.assertAlmostEqual(recovered["price_usd"], 10.0)
+        self.assertEqual(recovered["token_symbol"], "REV")
+        self.assertEqual(recovered["trade_authorization"], "NO_TRADE")
+
+
 if __name__ == "__main__":
     unittest.main()

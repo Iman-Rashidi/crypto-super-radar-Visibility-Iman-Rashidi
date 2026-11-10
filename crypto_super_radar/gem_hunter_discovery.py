@@ -258,16 +258,14 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         if not isinstance(tokens, list):
             detail_errors += 1
             continue
+        quote_addresses = {item.lower() for item in BASE_QUOTE_ADDRESSES[network]}
         token = next((item for item in tokens
-                      if isinstance(item, dict) and str(item.get("id", "")).lower()
-                      == str(base_token_id or "").lower()), None)
+                      if isinstance(item, dict)
+                      and str(item.get("id", "")).lower() not in quote_addresses), None)
         if not isinstance(token, dict):
-            detail_errors += 1
             continue
         token_address = token.get("id")
         if not _valid_address(network, token_address):
-            continue
-        if token_address.lower() in {item.lower() for item in BASE_QUOTE_ADDRESSES[network]}:
             continue
 
         created = _timestamp(detail.get("created_at") or pool.get("created_at"))
@@ -277,7 +275,27 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         if age is not None and age > MAX_POOL_AGE_HOURS:
             continue
 
-        price = _number(detail.get("last_price_usd"))
+        price = _number(detail.get("last_price_usd")) if str(token_address).lower() == str(base_token_id or "").lower() else None
+        if price is None:
+            reserves = detail.get("token_reserves")
+            if isinstance(reserves, list):
+                reserve_row = next((item for item in reserves
+                                    if isinstance(item, dict)
+                                    and str(item.get("token_id", "")).lower() == str(token_address).lower()), None)
+                if isinstance(reserve_row, dict):
+                    raw_reserve = _number(reserve_row.get("reserve"))
+                    reserve_usd = _number(reserve_row.get("reserve_usd"))
+                    try:
+                        decimals = int(token.get("decimals"))
+                    except (TypeError, ValueError, OverflowError):
+                        decimals = -1
+                    if (raw_reserve is not None and raw_reserve > 0 and reserve_usd is not None
+                            and reserve_usd > 0 and 0 <= decimals <= 36):
+                        token_units = raw_reserve / (10 ** decimals)
+                        if token_units > 0:
+                            price = reserve_usd / token_units
+        if price is None or price <= 0:
+            price = _number(pool.get("price_usd")) if str(token_address).lower() == str(base_token_id or "").lower() else None
         liquidity = _number(detail.get("liquidity_usd"))
         h1 = detail.get("1h") or {}
         h24 = detail.get("24h") or {}
@@ -290,8 +308,6 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         buys_24h = _number(h24.get("buys"))
         sells_24h = _number(h24.get("sells"))
         change_1h = _number(h1.get("last_price_usd_change"))
-        if price is None or price <= 0:
-            price = _number(pool.get("price_usd"))
         if liquidity is None:
             liquidity = _number(pool.get("liquidity_usd"))
         if volume_24h is None:
