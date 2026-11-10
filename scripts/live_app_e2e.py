@@ -243,8 +243,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             all(item.get("trade_authorization") == "NO_TRADE" for item in candidates),
             "A Gem Hunter candidate has unexpected trade authorization",
         )
+        network_counts = discovery.get("candidate_counts_by_network")
+        require(
+            isinstance(network_counts, dict)
+            and set(network_counts) == {"solana", "base"},
+            "Gem Hunter must report independent Solana and Base coverage",
+        )
+        expected_sources = {
+            "GECKOTERMINAL_NEW_POOLS_SOLANA",
+            "GECKOTERMINAL_TRENDING_POOLS_SOLANA",
+            "GECKOTERMINAL_NEW_POOLS_BASE",
+            "GECKOTERMINAL_TRENDING_POOLS_BASE",
+        }
+        require(
+            expected_sources.issubset(set((discovery.get("sources") or {}).keys())),
+            "Gem Hunter is missing one or more chain-scoped discovery feeds",
+        )
         report["gem_hunter_discovery"] = {
             "status": discovery.get("status"),
+            "candidate_counts_by_network": network_counts,
             "candidate_count": discovery.get("candidate_count"),
             "available_candidate_count": discovery.get("available_candidate_count"),
             "networks": discovery.get("networks"),
