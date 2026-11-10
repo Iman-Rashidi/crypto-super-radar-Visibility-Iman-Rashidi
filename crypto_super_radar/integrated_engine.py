@@ -313,7 +313,10 @@ class WhaleAwareConfirmationEngine:
                     snapshot = snapshot_reader(asset)
                 except Exception:
                     snapshot = None
-        signal_side = getattr(getattr(result, "signal", None), "value", str(getattr(result, "signal", ""))).upper()
+        signal_side = (
+            result.gates[2].evidence.get("direction", "NO TRADE")
+            if len(result.gates) > 2 else "NO TRADE"
+        )
         behavior = analyze_market_behavior(
             wave_candles,
             getattr(snapshot, "price_usd", None),

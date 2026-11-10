@@ -34,7 +34,7 @@ class BinanceSpotExecutorTests(unittest.TestCase):
                 ],
             }]}),
             FakeResponse({"symbol": "BTCUSDT", "bidPrice": "49999", "askPrice": "50000"}),
-            FakeResponse({"balances": [{"asset": "USDT", "free": "100"}]}),
+            FakeResponse({"balances": [{"asset": "USDT", "free": "1000"}]}),
             FakeResponse({"symbol": "BTCUSDT", "orderId": 7, "status": "FILLED",
                           "executedQty": "0.0002", "cummulativeQuoteQty": "10"}),
         ]
@@ -122,7 +122,7 @@ class BinanceSpotExecutorTests(unittest.TestCase):
                 ],
             }]}),
             FakeResponse({"symbol": "BTCUSDT", "bidPrice": "49999", "askPrice": "50000"}),
-            FakeResponse({"balances": [{"asset": "USDT", "free": "100"}]}),
+            FakeResponse({"balances": [{"asset": "USDT", "free": "1000"}]}),
             requests.Timeout("uncertain"),
         ]
         with self.assertRaises(OrderStatusUnknown) as raised:
@@ -183,7 +183,7 @@ class BinanceSpotExecutorTests(unittest.TestCase):
         from crypto_super_radar.binance_execution import ValidatedSignalExecutor
         from crypto_super_radar.models import GateStatus, Signal
         self.session.request.side_effect = [
-            FakeResponse({"balances": [{"asset": "USDT", "free": "100"}]}),
+            FakeResponse({"balances": [{"asset": "USDT", "free": "1000"}]}),
             FakeResponse({"symbols": [{
                 "status": "TRADING", "isSpotTradingAllowed": True,
                 "filters": [
@@ -193,7 +193,7 @@ class BinanceSpotExecutorTests(unittest.TestCase):
                 ],
             }]}),
             FakeResponse({"symbol": "BTCUSDT", "bidPrice": "49999", "askPrice": "50000"}),
-            FakeResponse({"balances": [{"asset": "USDT", "free": "100"}]}),
+            FakeResponse({"balances": [{"asset": "USDT", "free": "1000"}]}),
             FakeResponse({"symbol": "BTCUSDT", "orderId": 9, "status": "FILLED",
                           "executedQty": "0.0001", "cummulativeQuoteQty": "5.01"}),
         ]
