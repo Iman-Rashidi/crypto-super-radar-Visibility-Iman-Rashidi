@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import unittest
 
+from crypto_super_radar import gem_hunter_discovery as discovery
 from crypto_super_radar.gem_hunter_discovery import discover_gem_candidates
 
 
@@ -50,6 +51,7 @@ class FakeHttp:
 
 class GemHunterDiscoveryTests(unittest.TestCase):
     def setUp(self):
+        discovery._TRENDING_SOURCE_CACHE.clear()
         self.now = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
         self.sol_pool = pool(
             "solana", "PoolSol", f"solana_{SOL_TOKEN}",
@@ -295,16 +297,16 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         class CountingHttp(FakeHttp):
             def __init__(inner, responses):
                 super().__init__(responses)
-                inner.calls = {}
+                inner.url_counts = {}
             def get(inner, url, params=None):
-                inner.calls[url] = inner.calls.get(url, 0) + 1
+                inner.url_counts[url] = inner.url_counts.get(url, 0) + 1
                 return super().get(url, params=params)
         http = CountingHttp(self.responses)
         first = discover_gem_candidates(http, now=self.now)
         second = discover_gem_candidates(http, now=self.now)
         self.assertEqual(first["status"], "PASS")
         self.assertEqual(second["status"], "PASS")
-        trending_calls = sum(count for url, count in http.calls.items() if "trending_pools" in url)
+        trending_calls = sum(count for url, count in http.url_counts.items() if "trending_pools" in url)
         self.assertEqual(trending_calls, 2)
         self.assertTrue(second["sources"]["GECKOTERMINAL_TRENDING_POOLS_BASE"]["cached"])
         self.assertTrue(second["sources"]["GECKOTERMINAL_TRENDING_POOLS_SOLANA"]["cached"])
