@@ -465,8 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             <p class="muted">از نتایج، شبکه و قرارداد دقیق توکن را انتخاب کنید تا توکن هم‌نام اشتباه اسکن نشود.</p>
             <div id="asset-search-results" aria-live="polite" class="muted"></div>
             <label for="scan-asset">دارایی انتخاب‌شده</label>
-            <input id="scan-asset" name="asset" required value="cex:BTCUSDT" readonly>
-            <p class="muted">شبکه‌های جست‌وجو: Ethereum، Base و Solana. آدرس قرارداد را نیز می‌توان مستقیماً وارد کرد.</p>
+            <input id="scan-asset" name="asset" required value="cex:BTCUSDT">
+            <p class="muted">شبکه‌های جست‌وجو: Ethereum، Base و Solana. در صورت نیاز، شناسه را با قالب eth:آدرس، base:آدرس یا solana:آدرس در کادر بالا وارد کنید.</p>
             <script>
             (function(){
               const input=document.getElementById('asset-search-input');
