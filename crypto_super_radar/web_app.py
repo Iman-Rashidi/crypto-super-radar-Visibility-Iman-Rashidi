@@ -295,6 +295,12 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
             "status": "UNKNOWN",
             "reason": result.summary_fa or "جهت خرید یا فروش مشخص نشده است؛ فعلاً صبر کن.",
         })
+    elif analysis_incomplete and not gate_reasons:
+        gate_reasons.append({
+            "id": None, "name": "کفایت داده",
+            "status": "UNKNOWN",
+            "reason": "قیمت معتبر یا شواهد کافی برای تکمیل تحلیل در دسترس نیست.",
+        })
     elif not gate_reasons:
         gate_reasons.append({
             "id": None, "name": "وضعیت فعلی",
@@ -306,6 +312,10 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
         short_action = "خرید کوتاه‌مدت قابل بررسی است؛ ورود فقط با حدضرر و اندازه موقعیت کنترل‌شده."
         long_action = "خرید پله‌ای و نگهداری بلندمدت قابل بررسی است؛ این اسکن ارزش بنیادی یا تضمین سود را تأیید نمی‌کند."
         final_title = "خرید قابل بررسی است"
+    elif analysis_incomplete:
+        short_action = "تحلیل ناقص است؛ تا دریافت قیمت و شواهد معتبر، هیچ تصمیم معاملاتی صادر نمی‌شود."
+        long_action = "دادهٔ تاریخی یا Snapshot معتبر کافی نیست؛ ارزیابی بلندمدت نیز متوقف است."
+        final_title = "تحلیل ناقص است؛ تصمیم‌گیری متوقف شد"
     elif direction == "SELL" and tradable:
         short_action = "فروش یا کاهش موقعیت کوتاه‌مدت قابل بررسی است؛ در بازار Spot این به معنی فروش دارایی موجود است، نه فروش استقراضی."
         long_action = "برای خرید و نگهداری بلندمدت فعلاً صبر کن؛ روند و داده‌های فعلی از خرید تازه پشتیبانی نمی‌کنند."
