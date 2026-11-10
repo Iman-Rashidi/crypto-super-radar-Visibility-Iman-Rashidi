@@ -163,6 +163,37 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(eth["status"], "UNKNOWN")
         self.assertIn("public source unavailable", eth["reason"])
 
+    def test_stale_daily_candles_are_unknown_even_when_hourly_ranges_are_fresh(self):
+        gate = SimpleNamespace(
+            gate_id=1, status=web_app.GateStatus.PASS,
+            reason_fa="کندل‌ها تازه‌اند.", reason_en="Candles are fresh.",
+            evidence={"candle_age_hours": 47.7},
+        )
+        result = SimpleNamespace(gates=[gate])
+        ranges = {"status": "KNOWN", "candle_age_hours": 47.7}
+        timeframes = {"1h": {"status": "KNOWN", "age_hours": 1.72}}
+
+        web_app._enforce_daily_candle_freshness(result, ranges, timeframes)
+
+        self.assertEqual(gate.status, web_app.GateStatus.UNKNOWN)
+        self.assertEqual(ranges["status"], "UNKNOWN")
+        self.assertIn("47.7", gate.reason_fa)
+        self.assertIn("36.0", gate.reason_fa)
+        self.assertIn("1.7", gate.reason_fa)
+        self.assertEqual(gate.evidence["daily_freshness_status"], "UNKNOWN")
+
+    def test_fresh_daily_candles_keep_data_gate_status(self):
+        gate = SimpleNamespace(
+            gate_id=1, status=web_app.GateStatus.PASS,
+            reason_fa="کندل‌ها تازه‌اند.", reason_en="Candles are fresh.",
+            evidence={},
+        )
+        result = SimpleNamespace(gates=[gate])
+        ranges = {"status": "KNOWN", "candle_age_hours": 20.0}
+        web_app._enforce_daily_candle_freshness(result, ranges, {"1h": {"age_hours": 1.0}})
+        self.assertEqual(gate.status, web_app.GateStatus.PASS)
+        self.assertEqual(ranges["status"], "KNOWN")
+
     def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
         from test_gem_hunter_qualification import valid_candidate
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
