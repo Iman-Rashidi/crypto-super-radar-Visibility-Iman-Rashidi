@@ -245,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
           <div class="brand-copy">
             <span class="eyebrow">پایش بازار · دادهٔ عمومی و رایگان</span>
             <h1>CRYPTO SUPER RADAR</h1>
-            <p class="muted">تحلیل و پژوهش؛ بدون اتصال کیف‌پول یا ارسال سفارش</p>
+            <p class="muted">تحلیل کمی و Paper Research؛ بدون اتصال کیف‌پول یا ارسال سفارش</p>
           </div>
           <span class="mode-pill"><span class="mode-dot"></span>فقط خواندنی</span>
         </header>
