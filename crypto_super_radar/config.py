@@ -14,6 +14,8 @@ class RateLimitConfig:
         # page mentioning 30 calls/min; the API documentation may lag.
         "api.geckoterminal.com": 6.0,
         "api.dexscreener.com": 0.21,
+        # DexPaprika keyless tier is 15 requests/minute; keep discovery/detail calls paced.
+        "api.dexpaprika.com": 4.1,
         "open-api-v4.coinglass.com": 2.1,
         "api.binance.com": 0.25,
         "data-api.binance.vision": 0.25,

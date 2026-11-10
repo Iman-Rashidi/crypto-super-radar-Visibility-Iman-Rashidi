@@ -218,6 +218,143 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
     return candidates
 
 
+
+def _dexpaprika_recovery_rows(http, now: datetime, *, limit: int = 5) -> tuple[list[dict[str, Any]], int]:
+    """Read a small, explicitly limited Base recovery sample from DexPaprika.
+
+    The keyless endpoint may omit pools younger than one hour. This is a
+    degraded recovery feed, never a substitute for complete new-pool coverage.
+    """
+    base = "https://api.dexpaprika.com"
+    payload = http.get(
+        f"{base}/networks/base/pools/search",
+        params={"order_by": "created_at", "sort": "desc", "limit": max(1, min(limit, 5))},
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        raise ValueError("DexPaprika Base pool-search response has an invalid schema")
+
+    candidates: list[dict[str, Any]] = []
+    detail_errors = 0
+    for pool in payload["results"][:5]:
+        if not isinstance(pool, dict) or str(pool.get("chain", "")).lower() != "base":
+            continue
+        pool_id = pool.get("id")
+        if not isinstance(pool_id, str) or not re.fullmatch(r"0x[a-fA-F0-9]{64}", pool_id):
+            continue
+        try:
+            detail = http.get(f"{base}/networks/base/pools/{pool_id}")
+        except Exception:
+            detail_errors += 1
+            continue
+        if not isinstance(detail, dict) or str(detail.get("chain", "")).lower() != "base":
+            detail_errors += 1
+            continue
+        base_token_id = detail.get("base_token_id")
+        tokens = detail.get("tokens")
+        if not isinstance(tokens, list):
+            detail_errors += 1
+            continue
+        token = next((item for item in tokens
+                      if isinstance(item, dict) and str(item.get("id", "")).lower()
+                      == str(base_token_id or "").lower()), None)
+        if not isinstance(token, dict):
+            detail_errors += 1
+            continue
+        token_address = token.get("id")
+        if not _valid_address("base", token_address):
+            continue
+        if token_address.lower() in {item.lower() for item in BASE_QUOTE_ADDRESSES["base"]}:
+            continue
+
+        created = _timestamp(detail.get("created_at") or pool.get("created_at"))
+        age = (now - created).total_seconds() / 3600.0 if created else None
+        if age is not None and age < -5:
+            age = None
+        if age is not None and age > MAX_POOL_AGE_HOURS:
+            continue
+
+        price = _number(detail.get("last_price_usd"))
+        liquidity = _number(detail.get("liquidity_usd"))
+        h1 = detail.get("1h") or {}
+        h24 = detail.get("24h") or {}
+        if not isinstance(h1, dict) or not isinstance(h24, dict):
+            detail_errors += 1
+            continue
+        volume_24h = _number(h24.get("volume_usd"))
+        buys = _number(h1.get("buys"))
+        sells = _number(h1.get("sells"))
+        buys_24h = _number(h24.get("buys"))
+        sells_24h = _number(h24.get("sells"))
+        change_1h = _number(h1.get("last_price_usd_change"))
+        if price is None or price <= 0:
+            price = _number(pool.get("price_usd"))
+        if liquidity is None:
+            liquidity = _number(pool.get("liquidity_usd"))
+        if volume_24h is None:
+            volume_24h = _number(pool.get("volume_usd_24h"))
+
+        flags = []
+        if price is None or price <= 0:
+            flags.append("PRICE_UNAVAILABLE")
+        if liquidity is None or liquidity <= 0:
+            flags.append("LIQUIDITY_UNAVAILABLE")
+        elif liquidity < 25_000:
+            flags.append("LOW_LIQUIDITY")
+        if volume_24h is None:
+            flags.append("VOLUME_UNAVAILABLE")
+        elif volume_24h < 10_000:
+            flags.append("LOW_24H_VOLUME")
+        if age is None:
+            flags.append("POOL_AGE_UNKNOWN")
+        if (buys or 0) + (sells or 0) < 20:
+            flags.append("LOW_1H_ACTIVITY")
+        if buys is not None and sells is not None and sells > buys:
+            flags.append("SELLS_EXCEED_BUYS")
+        ratio = volume_24h / liquidity if volume_24h is not None and liquidity and liquidity > 0 else None
+        if ratio is not None and ratio > 10:
+            flags.append("EXTREME_VOLUME_LIQUIDITY_RATIO")
+        if change_1h is not None and change_1h <= -20:
+            flags.append("SHARP_1H_DRAWDOWN")
+        elif change_1h is not None and change_1h >= 50:
+            flags.append("SHARP_1H_PUMP")
+        score = _score(age, liquidity, volume_24h, buys, sells, None, None, change_1h, ratio)
+        candidates.append({
+            "asset": f"base:{token_address}",
+            "chain": "base",
+            "token_address": token_address,
+            "token_name": token.get("name"),
+            "token_symbol": token.get("symbol"),
+            "token_decimals": token.get("decimals"),
+            "pool_address": detail.get("pool_address"),
+            "pool_id": detail.get("id") or pool_id,
+            "pool_name": f"{token.get('symbol') or token_address} / Base pair",
+            "dex": detail.get("dex_name") or pool.get("dex_name"),
+            "price_usd": price if price is not None and price > 0 else None,
+            "liquidity_usd": liquidity if liquidity is not None and liquidity >= 0 else None,
+            "volume_1h_usd": _number(h1.get("volume_usd")),
+            "volume_24h_usd": volume_24h,
+            "volume_to_liquidity_24h": round(ratio, 4) if ratio is not None else None,
+            "buys_1h": buys,
+            "sells_1h": sells,
+            "unique_buyers_1h": None,
+            "unique_sellers_1h": None,
+            "buys_24h": buys_24h,
+            "sells_24h": sells_24h,
+            "price_change_1h_pct": change_1h,
+            "pool_created_at_utc": created.isoformat().replace("+00:00", "Z") if created else None,
+            "pool_age_hours": round(age, 2) if age is not None else None,
+            "source": "DEXPAPRIKA_BASE_RECOVERY",
+            "sources": ["DEXPAPRIKA_BASE_RECOVERY"],
+            "discovery_priority_score": score,
+            "score_semantics": "Limited secondary-source discovery ordering only; not a probability, safety score, or trade signal.",
+            "candidate_status": "UNSCREENED" if score is not None and price is not None and price > 0 and liquidity is not None and liquidity > 0 else "UNKNOWN",
+            "trade_authorization": "NO_TRADE",
+            "risk_flags": flags,
+            "evidence_caveat": "Limited DexPaprika recovery sample; keyless coverage may omit pools younger than one hour and the sample is not complete Base new-pool coverage. Independent contract, holder and execution checks have not run.",
+        })
+    return candidates, detail_errors
+
+
 def discover_gem_candidates(http, *, limit: int = 20,
                             now: Optional[datetime] = None) -> dict[str, Any]:
     """Fetch bounded new/trending pools and return normalized Solana/Base candidates."""
@@ -265,9 +402,49 @@ def discover_gem_candidates(http, *, limit: int = 20,
                     "status": "UNKNOWN",
                     "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
                 }
+    # Recover some Base discovery coverage if either GeckoTerminal Base feed is
+    # unavailable. This secondary sample is deliberately not allowed to upgrade
+    # the overall source state to PASS.
+    base_gecko = [
+        sources.get("GECKOTERMINAL_NEW_POOLS_BASE", {}).get("status"),
+        sources.get("GECKOTERMINAL_TRENDING_POOLS_BASE", {}).get("status"),
+    ]
+    if any(status != "PASS" for status in base_gecko):
+        fallback_source = "DEXPAPRIKA_BASE_RECOVERY"
+        try:
+            fallback_rows, detail_errors = _dexpaprika_recovery_rows(http, now, limit=5)
+            sources[fallback_source] = {
+                "status": "UNKNOWN" if detail_errors else "PASS",
+                "candidate_rows": len(fallback_rows),
+                "detail_errors": detail_errors,
+                "coverage": "LIMITED_RECOVERY_NOT_COMPLETE_NEW_POOL_COVERAGE",
+                "freshness_caveat": "Keyless coverage may omit pools younger than one hour.",
+            }
+            for row in fallback_rows:
+                key = row["asset"].lower()
+                existing = merged.get(key)
+                if existing is None:
+                    merged[key] = row
+                else:
+                    existing["sources"] = sorted(set(existing.get("sources", []) + row["sources"]))
+                    if (row.get("liquidity_usd") or 0) > (existing.get("liquidity_usd") or 0):
+                        row["sources"] = existing["sources"]
+                        merged[key] = row
+        except Exception as exc:
+            sources[fallback_source] = {
+                "status": "UNKNOWN",
+                "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
+                "coverage": "LIMITED_RECOVERY_NOT_COMPLETE_NEW_POOL_COVERAGE",
+            }
+
     statuses = [item["status"] for item in sources.values()]
     expected_sources = len(NETWORKS) * 2
-    overall = "PASS" if len(statuses) == expected_sources and all(s == "PASS" for s in statuses) else "PARTIAL" if any(s == "PASS" for s in statuses) else "UNKNOWN"
+    gecko_statuses = [status for name, status in (
+        (name, item["status"]) for name, item in sources.items()
+        if name.startswith("GECKOTERMINAL_")
+    )]
+    gecko_complete = len(gecko_statuses) == expected_sources and all(status == "PASS" for status in gecko_statuses)
+    overall = "PASS" if gecko_complete else "PARTIAL" if any(s == "PASS" for s in statuses) else "UNKNOWN"
     candidates = sorted(
         merged.values(),
         key=lambda item: (
@@ -283,6 +460,8 @@ def discover_gem_candidates(http, *, limit: int = 20,
         "networks": sorted(NETWORKS),
         "source_count": len(sources),
         "sources": sources,
+        "gecko_terminal_complete": gecko_complete,
+        "fallback_coverage_note": "DexPaprika is a limited recovery sample only; it never replaces complete GeckoTerminal Base coverage or authorizes trading." if "DEXPAPRIKA_BASE_RECOVERY" in sources else None,
         "candidate_counts_by_network": {
             network: sum(1 for item in merged.values() if item.get("chain") == network)
             for network in sorted(NETWORKS)

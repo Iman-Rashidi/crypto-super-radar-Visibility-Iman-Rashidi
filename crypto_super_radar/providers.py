@@ -59,7 +59,11 @@ class PublicHttpClient:
         kwargs.setdefault("timeout", self.config.request_timeout_seconds)
         headers = dict(self.headers)
         headers.update(kwargs.pop("headers", {}) or {})
-        attempts = max(1, int(self.config.max_http_retries))
+        # GeckoTerminal's shared public quota is frequently IP-sensitive.
+        # A 429 is handed to the discovery-level cooldown/cache and fallback
+        # rather than retrying the same throttled host several times in one scan.
+        host = urlparse(url).netloc.lower()
+        attempts = 1 if host == "api.geckoterminal.com" else max(1, int(self.config.max_http_retries))
         last_error: Optional[Exception] = None
         for attempt in range(attempts):
             self.limiter.wait(url)

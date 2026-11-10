@@ -102,6 +102,17 @@ class HttpRetryTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
 
 
+    @patch("crypto_super_radar.providers.requests.request")
+    def test_geckoterminal_429_is_not_retried_inside_same_scan(self, request):
+        response = MagicMock(status_code=429, headers={"Retry-After": "30"}, text="rate limited")
+        request.return_value = response
+        client = PublicHttpClient(AppConfig(max_http_retries=3))
+        client.limiter.wait = MagicMock()
+        with self.assertRaisesRegex(DataProviderError, "HTTP 429"):
+            client.get("https://api.geckoterminal.com/api/v2/networks/base/new_pools")
+        self.assertEqual(request.call_count, 1)
+
+
 class PerpetualProviderTests(unittest.TestCase):
     def test_binance_ticker_preserves_negative_funding(self):
         fake_http = MagicMock()

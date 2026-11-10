@@ -93,7 +93,9 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
         if cached is None or GEM_HUNTER_CACHE.get("expires_at", 0.0) <= now:
             cached = discover_gem_candidates(getattr(ENGINE.data, "http", None), limit=50)
             GEM_HUNTER_CACHE["payload"] = copy.deepcopy(cached)
-            ttl = GEM_HUNTER_CACHE_TTL_SECONDS if cached.get("status") == "PASS" else 15
+            # Do not hammer rate-limited feeds after PARTIAL results. The cooldown
+            # is intentionally longer than the UI's request cadence.
+            ttl = GEM_HUNTER_CACHE_TTL_SECONDS if cached.get("status") == "PASS" else 90
             GEM_HUNTER_CACHE["expires_at"] = time.monotonic() + ttl
         result = copy.deepcopy(cached)
     all_candidates = result.get("candidates") or []

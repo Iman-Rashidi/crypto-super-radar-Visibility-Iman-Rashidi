@@ -174,5 +174,54 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertLessEqual(result["candidate_count"], 50)
 
 
+    def test_base_gecko_failure_uses_limited_dexpaprika_recovery_without_false_pass(self):
+        token = "0x" + "3" * 40
+        pool_id = "0x" + "a" * 64
+        responses = dict(self.responses)
+        responses["base_trending_pools"] = RuntimeError("HTTP 429")
+        class RecoveryHttp(FakeHttp):
+            def get(inner, url, params=None):
+                if url == "https://api.dexpaprika.com/networks/base/pools/search":
+                    return {"results": [{"id": pool_id, "chain": "base"}]}
+                if url.endswith("/pools/" + pool_id):
+                    return {
+                        "id": pool_id, "chain": "base", "base_token_id": token,
+                        "tokens": [
+                            {"id": token, "name": "Recovery Token", "symbol": "REC", "decimals": 18},
+                            {"id": "0x4200000000000000000000000000000000000006", "name": "WETH", "symbol": "WETH"},
+                        ],
+                        "created_at": "2026-11-10T11:00:00Z",
+                        "dex_name": "Uniswap V3",
+                        "last_price_usd": 0.01, "liquidity_usd": 50000,
+                        "1h": {"volume_usd": 12000, "buys": 30, "sells": 10, "last_price_usd_change": 8},
+                        "24h": {"volume_usd": 100000, "buys": 200, "sells": 80},
+                    }
+                return super().get(url, params=params)
+        result = discover_gem_candidates(RecoveryHttp(responses), now=self.now)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertFalse(result["gecko_terminal_complete"])
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
+        self.assertEqual(result["sources"]["DEXPAPRIKA_BASE_RECOVERY"]["status"], "PASS")
+        recovered = next(item for item in result["candidates"] if item["token_address"] == token)
+        self.assertEqual(recovered["source"], "DEXPAPRIKA_BASE_RECOVERY")
+        self.assertEqual(recovered["trade_authorization"], "NO_TRADE")
+        self.assertIn("younger than one hour", recovered["evidence_caveat"])
+
+    def test_dexpaprika_wrong_chain_is_not_admitted_as_base_candidate(self):
+        pool_id = "0x" + "b" * 64
+        class WrongChainHttp(FakeHttp):
+            def get(inner, url, params=None):
+                if url == "https://api.dexpaprika.com/networks/base/pools/search":
+                    return {"results": [{"id": pool_id, "chain": "ethereum"}]}
+                return super().get(url, params=params)
+        responses = dict(self.responses)
+        responses["base_new_pools"] = RuntimeError("HTTP 429")
+        result = discover_gem_candidates(WrongChainHttp(responses), now=self.now)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["sources"]["DEXPAPRIKA_BASE_RECOVERY"]["candidate_rows"], 0)
+        self.assertEqual(result["candidate_counts_by_network"]["base"], 0)
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
+
+
 if __name__ == "__main__":
     unittest.main()
