@@ -1,14 +1,7 @@
 name: render-app-e2e
 on:
-  push:
-    branches:
-      - feature/multi-stage-confirmation-engine
-    paths:
-      - crypto_super_radar/web_app.py
-      - crypto_super_radar/paper_trading.py
-      - scripts/live_app_e2e.py
-      - tests/test_web_app.py
-      - .github/workflows/render-app-e2e.yml
+  # This E2E targets the deployed Render service and expects it to run this exact
+  # commit. Keep it manual because Render deploys are intentionally approval-gated.
   workflow_dispatch:
 
 permissions:
