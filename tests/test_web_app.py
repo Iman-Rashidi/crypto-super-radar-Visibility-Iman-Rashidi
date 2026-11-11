@@ -71,6 +71,14 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("کشف‌شده:", page)
         self.assertIn("وضعیت منابع داده", page)
         self.assertIn("Paper Research", page)
+        self.assertIn('id="gem-hunter-watchlist"', page)
+        self.assertIn('id="watchlist-manual-form"', page)
+        self.assertIn('id="exchange-shortcuts"', page)
+        self.assertIn('cdn.simpleicons.org/binance', page)
+        self.assertIn('cdn.simpleicons.org/bybit', page)
+        self.assertIn('cdn.simpleicons.org/okx', page)
+        self.assertIn('/api/gem-hunter/report?limit=50', page)
+        self.assertIn('crypto-super-radar.gem-hunter-watchlist.v1', page)
         self.assertIn("ربات معامله‌گر آزمایشی", page)
         self.assertIn("سقف زیان روزانه", page)
         self.assertIn('action="/paper-bot/tick"', page)
@@ -266,6 +274,37 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertNotIn("available_candidate_count", result)
         self.assertNotIn("61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP", json.dumps(result))
+
+    def test_gem_hunter_report_exposes_research_candidates_separately_from_public_buy_api(self):
+        web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
+        address = "61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP"
+        raw = {
+            "status": "PASS", "candidate_count": 1,
+            "candidates": [{
+                "chain": "solana", "token_address": address,
+                "token_name": "Research Token", "token_symbol": "RSH",
+                "pool_address": "PoolAddressExample123",
+                "liquidity_usd": 120000, "volume_24h_usd": 180000,
+                "volume_to_liquidity_24h": 1.5,
+                "candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
+            }],
+            "trade_authorization": "NO_TRADE",
+        }
+        with patch.object(web_app, "discover_gem_candidates", return_value=raw):
+            status, _, payload = self.request("GET", "/api/gem-hunter/report?limit=50")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["report_mode"], "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL")
+        self.assertEqual(result["discovered_candidate_count"], 1)
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(len(result["diagnostic_candidates"]), 1)
+        candidate = result["diagnostic_candidates"][0]
+        self.assertEqual(candidate["token_name"], "Research Token")
+        self.assertEqual(candidate["token_symbol"], "RSH")
+        self.assertEqual(candidate["token_address"], address)
+        self.assertEqual(candidate["trade_authorization"], "NO_TRADE")
+        self.assertEqual(len(candidate["qualification"]["filters"]), 12)
+        self.assertEqual(len(candidate["qualification"]["critical_gates"]), 4)
 
     def test_paper_bot_status_is_local_and_cannot_submit_live_orders(self):
         status, _, payload = self.request("GET", "/paper-bot/status")
