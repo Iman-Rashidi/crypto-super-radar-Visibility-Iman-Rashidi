@@ -146,6 +146,24 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertIn("EXTREME_VOLUME_LIQUIDITY_RATIO", by_symbol["RISK"]["risk_flags"])
         self.assertEqual(by_symbol["RISK"]["trade_authorization"], "NO_TRADE")
 
+    def test_one_sided_24h_buying_is_marked_honeypot_suspect_and_score_zero(self):
+        self.sol_pool["attributes"]["transactions"]["h24"] = {"buys": 11, "sells": 0}
+        result = discover_gem_candidates(FakeHttp(self.responses), now=self.now)
+        candidate = next(item for item in result["candidates"] if item["chain"] == "solana")
+        self.assertIn("HONEYPOT_SUSPECT", candidate["risk_flags"])
+        self.assertEqual(candidate["candidate_status"], "HONEYPOT_SUSPECT")
+        self.assertEqual(candidate["discovery_priority_score"], 0.0)
+        self.assertEqual(candidate["trade_authorization"], "NO_TRADE")
+
+    def test_volume_liquidity_ratio_below_point_zero_five_is_rejected(self):
+        self.sol_pool["attributes"]["reserve_in_usd"] = 500000
+        self.sol_pool["attributes"]["volume_usd"]["h24"] = "10000"
+        result = discover_gem_candidates(FakeHttp(self.responses), now=self.now)
+        candidate = next(item for item in result["candidates"] if item["chain"] == "solana")
+        self.assertIn("LOW_VOLUME_LIQUIDITY_RATIO", candidate["risk_flags"])
+        self.assertEqual(candidate["candidate_status"], "REJECTED")
+        self.assertEqual(candidate["discovery_priority_score"], 0.0)
+
     def test_rejects_invalid_token_address_and_unsupported_chain(self):
         invalid = pool("solana", "PoolBad", "solana_not-an-address", "2026-11-10T10:00:00Z")
         unsupported = pool("ethereum", "PoolEth", "ethereum_" + "0x" + "1" * 40, "2026-11-10T10:00:00Z")
