@@ -33,11 +33,12 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         result = evaluate_discovery_candidate(candidate(), now=NOW)
         self.assertEqual(set(result["filters"]), set(FILTER_IDS))
         self.assertEqual(set(result["critical_gates"]), set(CRITICAL_GATES))
-        self.assertEqual(result["filters"]["volume_confirmation"], "PASS")
+        self.assertEqual(result["filters"]["volume_confirmation"], "UNKNOWN")
         self.assertEqual(result["filters"]["liquidity_depth"], "UNKNOWN")
         self.assertEqual(result["filters"]["whale_activity"], "UNKNOWN")
         self.assertEqual(result["filters"]["holder_distribution"], "UNKNOWN")
         self.assertEqual(result["critical_gates"]["security"], "UNKNOWN")
+        self.assertEqual(result["critical_gates"]["liquidity"], "UNKNOWN")
         self.assertEqual(result["critical_gates"]["data_quality"], "UNKNOWN")
         self.assertEqual(result["critical_gates"]["exit"], "UNKNOWN")
         self.assertEqual(set(result["critical_gate_reasons"]), set(CRITICAL_GATES))
@@ -61,6 +62,36 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         result = evaluate_discovery_candidate(item, now=NOW)
         self.assertEqual(result["critical_gates"]["liquidity"], "FAIL")
         self.assertEqual(result["filters"]["liquidity_depth"], "FAIL")
+
+    def test_only_reconciled_exact_pool_can_pass_market_gates(self):
+        item = candidate()
+        item["market_reconciliation"] = {
+            "status": "PASS",
+            "verified_liquidity_usd": 180000,
+            "verified_volume_24h_usd": 360000,
+            "verified_price_usd": 0.01,
+            "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["critical_gates"]["liquidity"], "PASS")
+        self.assertEqual(result["critical_gates"]["data_quality"], "PASS")
+        self.assertEqual(result["filters"]["volume_confirmation"], "PASS")
+        self.assertEqual(result["filters"]["liquidity_depth"], "UNKNOWN")
+        self.assertEqual(set(result["market_data_sources"]), {"DEXSCREENER", "GECKOTERMINAL"})
+
+    def test_market_data_disagreement_fails_liquidity_and_data_quality(self):
+        item = candidate()
+        item["market_reconciliation"] = {
+            "status": "FAIL",
+            "verified_liquidity_usd": 0.0004,
+            "verified_volume_24h_usd": 13761,
+            "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["critical_gates"]["liquidity"], "FAIL")
+        self.assertEqual(result["critical_gates"]["data_quality"], "FAIL")
+        self.assertEqual(result["filters"]["volume_confirmation"], "FAIL")
+        self.assertEqual(result["decision"], "NO_TRADE")
 
     def test_batch_evaluator_keeps_discovery_untradeable_and_preserves_existing_records(self):
         raw = candidate()
