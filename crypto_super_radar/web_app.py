@@ -1973,7 +1973,7 @@ class Handler(BaseHTTPRequestHandler):
         message = fmt % args if args else fmt
         # Keep normal polling traffic out of the durable event log; persist
         # client/server HTTP errors without making request handling depend on PG.
-        if re.search(r"HTTP/1\\.[01]\\\"\\s+[45]\\d\\d", message):
+        if re.search(r'" [45]\d\d(?:\s|$)', message):
             try:
                 get_cloud_store().record_log(
                     message, level="WARNING", component="http",
