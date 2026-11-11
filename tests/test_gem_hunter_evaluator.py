@@ -93,6 +93,17 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["filters"]["volume_confirmation"], "FAIL")
         self.assertEqual(result["decision"], "NO_TRADE")
 
+    def test_security_evidence_controls_security_filter_and_gate(self):
+        item = candidate()
+        item["security_evidence"] = {"status": "FAIL", "provider": "GOPLUS_SOURCIFY"}
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["contract_security"], "FAIL")
+        self.assertEqual(result["critical_gates"]["security"], "FAIL")
+        item["security_evidence"] = {"status": "UNKNOWN", "provider": "SOLANA_RPC"}
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["contract_security"], "UNKNOWN")
+        self.assertEqual(result["critical_gates"]["security"], "UNKNOWN")
+
     def test_batch_evaluator_keeps_discovery_untradeable_and_preserves_existing_records(self):
         raw = candidate()
         evaluated = evaluate_discovery_candidates([raw], now=NOW)
