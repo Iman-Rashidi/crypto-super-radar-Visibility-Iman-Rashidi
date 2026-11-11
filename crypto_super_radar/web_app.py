@@ -1175,7 +1175,7 @@ class Handler(BaseHTTPRequestHandler):
               <span class="exchange-copy"><strong>Bybit</strong><span>ورود به بازار Spot ↗</span></span>
             </a>
             <a class="exchange-card" href="https://www.okx.com/en-eu/trade-spot" target="_blank" rel="noopener noreferrer">
-              <img class="exchange-logo" src="https://cdn.simpleicons.org/okx/FFFFFF" alt="لوگوی OKX" loading="lazy">
+              <img class="exchange-logo" src="https://cdn.simpleicons.org/okx/000000" alt="لوگوی OKX" loading="lazy">
               <span class="exchange-copy"><strong>OKX</strong><span>ورود به بازار Spot اروپا ↗</span></span>
             </a>
           </div>
@@ -1403,7 +1403,7 @@ class Handler(BaseHTTPRequestHandler):
             try {
               const response = await fetch('/api/gem-hunter/report?limit=50', {cache:'no-store'});
               const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Discovery report failed');
-              const buys = data.candidates || []; const candidates = data.diagnostic_candidates || [];
+              const buys = data.candidates || []; const candidates = (data.diagnostic_candidates || []).filter(item => item.trade_authorization !== 'BUY');
               const discovered = Number(data.discovered_candidate_count || candidates.length || 0);
               status.textContent = 'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' +
                 Number(data.evaluation_record_count || 0) + ' · ساختار کامل پرونده: ' +
