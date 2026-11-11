@@ -1433,6 +1433,12 @@ class Handler(BaseHTTPRequestHandler):
               (source.provider || 'منبع') + ' · نقدینگی: ' + (source.liquidity_usd ?? 'ناموجود') +
               ' USD · حجم ۲۴ساعته: ' + (source.volume_24h_usd ?? 'ناموجود') + ' USD · Pool: ' +
               (source.pool_address || 'نامشخص'), 'candidate-meta')));
+            const securityEvidence = item.security_evidence || q.security_evidence || {};
+            details.appendChild(el('h4', 'بررسی امنیت قرارداد'));
+            details.appendChild(el('p', 'وضعیت: ' + (securityEvidence.status || 'UNKNOWN') +
+              ' · منبع: ' + (securityEvidence.provider || 'نامشخص')));
+            (securityEvidence.reason_fa || []).forEach(reason => details.appendChild(el('p', reason)));
+            if (securityEvidence.coverage_note) details.appendChild(el('p', securityEvidence.coverage_note, 'candidate-meta'));
             details.appendChild(el('p', 'منابع داده: ' + (Array.isArray(q.market_data_sources) ? q.market_data_sources.join(', ') : 'نامشخص') + ' · زمان ارزیابی UTC: ' + (q.data_as_of_utc || 'نامشخص')));
             details.appendChild(el('p', 'پرچم‌های ریسک کشف: ' + ((item.risk_flags || []).join('، ') || 'موردی گزارش نشده است.')));
             const whale = q.whale_evidence || {};
