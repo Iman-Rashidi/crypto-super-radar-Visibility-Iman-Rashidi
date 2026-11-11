@@ -1,0 +1,142 @@
+# Four-repository source audit and adaptation plan
+
+**Review date:** 2026-11-11  
+**Target:** `feature/multi-stage-confirmation-engine`  
+**Target project:** Crypto Super Radar (Python)  
+**Policy:** adapt concepts and verified algorithms; do not transplant applications, secrets, execution paths, or unverified claims.
+
+## Executive decision
+
+The four repositories are useful, but they do not provide four production-ready modules that can be copied into Crypto Super Radar. Several useful capabilities are already present in the target branch. The remaining gaps are explicit and are tracked below.
+
+| Reference | Useful contribution | Existing target implementation | Remaining gap / decision |
+|---|---|---|---|
+| [HyperData Terminal](https://github.com/Co-Messi/HyperData-Terminal) | Per-venue CVD/order flow, funding and OI normalization, liquidation evidence classes, freshness and coverage | `providers.py`, `market_intelligence.py`, `feed_health.py`, `walk_forward.py` | Funding/OI and health semantics exist. A real trade-level CVD stream and liquidation event feed with per-venue coverage are not established by the current target modules. Add only with event-time, deduplication, warm-up and stale/partial states. |
+| [million](https://github.com/Kelows/million) | Wallet ⇄ token discovery, wallet quality, owner/cluster inference, event-driven ingestion | `wallet_graph.py`, `whale_intelligence.py`, `solana_whales.py`, `whale_store.py`, Gem Hunter discovery modules | Existing Solana scan is deliberately partial. No claim of full token-lifetime wallet history. Adopt robust event ingestion and reconciliation only after durable/idempotent design. |
+| [TradeClaw](https://github.com/tradeclaw-labs/tradeclaw) | Strategy simulation skeleton, trade safety limits, simulation-first workflow | `walk_forward.py`, `signal_performance.py`, `paper_trading.py`, `indicators.py` | Target already has stronger cost-aware OOS and paper-ledger metrics. TradeClaw's inspected backtest engine does not model fees or slippage; do not use its raw return calculations as a performance benchmark. |
+| [Solbeam](https://github.com/CodeMuscle/solbeam) | Explainable weighted score, hard disqualifiers, holder and deployer risk concepts | `gem_hunter_security.py`, `evm_security.py`, `wallet_graph.py`, `solana_whales.py`, mandatory security gates | Reimplement only independently from documented concepts. The reviewed repository has no declared license, and its token route contains placeholder/default inputs; no source code may be copied. |
+
+## 1. HyperData Terminal — market microstructure and data integrity
+
+**Source reviewed:** `docs/DATA_INTEGRITY.md`, `data_layer/orderflow_engine.py`, `data_layer/liquidation_processing.py`, `data_layer/funding_rates.py`, `data_layer/health_monitor.py`.
+
+### Patterns worth adopting
+
+- Keep CVD split by venue; never present an unexplained aggregate when one venue is silent or partial.
+- Deduplicate trades using venue-native identifiers (for example, Hyperliquid trade ID and Binance aggregate-trade ID).
+- Use exchange event timestamps for event ordering and deduplication, not local receive time.
+- Track per-venue states such as `connecting`, `ok`, `partial`, `silent`, `frozen`, `stale`, and `disconnected`.
+- Attach window coverage to every CVD timeframe; do not treat a newly started 4-hour bucket as a 4-hour signal.
+- Separate confirmed liquidations from estimates/large prints. Report the collection method and source limitations for every venue.
+- Use a shared data-health report for freshness, completeness, cross-source drift and consistency.
+
+### Target status
+
+- **Already present:** cross-provider funding/OI retrieval and checks in `providers.py`; CoinGlass funding median, OI and large Hyperliquid position evidence in `market_intelligence.py`; market-board freshness/coverage in `feed_health.py`; historical funding-aware walk-forward validation in `walk_forward.py`.
+- **Not yet present as verified functionality:** continuous trade-level CVD with per-venue event IDs and coverage; multi-venue liquidation event ingestion with confirmed/estimated separation.
+- **Do not infer:** CoinGlass OI/funding snapshots are not a substitute for trade-level CVD or a complete liquidation tape.
+
+### Proposed acceptance tests
+
+1. Duplicate venue trade IDs do not change cumulative CVD.
+2. A dead venue cannot be hidden by another venue remaining live.
+3. A timeframe below the configured coverage threshold returns `WARMING_UP`, not a directional signal.
+4. A parser/schema failure transitions that venue to `FROZEN`.
+5. Estimated large prints never enter confirmed liquidation totals.
+6. Missing event timestamps, unknown contract multipliers or unsized contracts remain `UNKNOWN`/excluded with a reason.
+7. Cross-venue disagreement and regional fallback retain source provenance.
+
+## 2. million — smart-money discovery and event integrity
+
+**Source reviewed previously:** `apps/api/prisma/schema.prisma`, analysis/ledger/metrics, live feed/controller/flows, wallet ingestion and crawler paths. Repository reviewed at `main`, HEAD `c89ad07caaf70773d40b45943e136eadc4f946a5`.
+
+### Patterns worth adopting
+
+- Bidirectional wallet-to-token and token-to-wallet discovery with bounded budgets.
+- Wallet quality scoring based on realized history and behaviour, not one profitable trade.
+- Detect related wallets using multiple evidence types; do not equate a common public exchange funder with common ownership.
+- Record a decision log explaining why a wallet/token was included or rejected.
+- Treat the live event stream and periodic analysis as concurrent writers that need idempotency and reconciliation.
+
+### Previously identified source-level risks
+
+- `ObservedTrade` is a performance summary, not a reconstructable execution ledger tied to entry/exit transaction signatures.
+- Multi-wallet transaction attribution is incomplete in the reviewed webhook path: the first matching wallet is selected rather than emitting one event per subscribed wallet.
+- Live position writes and periodic roster/position seeding can race.
+- Webhook acceptance is not a durable acknowledgement; missing secret handling and background processing need fail-closed/durable semantics.
+- Some live transaction paths select only one mint; fallback SOL pricing can create apparently numeric PnL without a verified contemporaneous price.
+
+### Target status
+
+- **Already present:** bounded wallet graph analytics, event deduplication within analysis, wallet-flow classification, GoPlus top-holder samples, and explicit partial coverage for Solana largest-account scans.
+- **Not yet present:** a complete token-lifetime Solana swap index, durable webhook inbox, wallet+signature idempotency, chain-order reconciliation and a complete owner graph.
+- Keep all wallet findings as on-chain address relationships, not verified human identity.
+
+### Proposed acceptance tests
+
+Use the ten wallet/live-event regression tests already recorded in the project tracking page: multi-wallet attribution, replay deduplication, webhook secret, durable acknowledgement, out-of-order events, concurrent seed/live writes, atomic observed ledger, invalid/stale price, multi-mint/router legs, and feed-gap detection.
+
+## 3. TradeClaw — backtesting and execution discipline
+
+**Source reviewed:** `trading-engine/src/backtesting/engine.ts`, `scripts/backtest.py`, `trading-engine/tests/strategies.test.ts`, `trading-engine/package.json`, `LICENSE`.
+
+### Useful ideas
+
+- Keep simulation as the default operating mode.
+- Validate maximum trade size, slippage ceiling, daily trade count and safety state before any hypothetical execution.
+- Report individual trades and explicit exit reasons, not only a headline return.
+
+### Important limitations in the inspected backtester
+
+- The inspected TypeScript and Python backtest paths calculate price return from CoinGecko historical prices without deducting trading fees or slippage.
+- The TypeScript result counts buy and sell records in `totalTrades`, while win/loss statistics are derived from completed-return observations.
+- An open position is marked to the final price but the close is not consistently represented as a normal exit record in the returned trade history.
+- The Sharpe-like calculation is based on per-trade returns and is not a properly annualized periodic return series.
+
+Therefore, **do not port the reported return, win rate or Sharpe values as validated performance evidence**.
+
+### Target status
+
+- **Already present:** chronological walk-forward folds, fee/slippage assumptions, mandatory historical funding for perpetual validation, cost-aware closed-trade expectancy/profit factor/drawdown, and paper-only ledger/risk controls.
+- **Remaining improvement:** persist execution assumptions and actual modeled fill components (spread, fee, slippage, funding) per trade so net performance is independently reconstructable.
+
+## 4. Solbeam — token risk and holder analysis
+
+**Source reviewed:** `lib/signal-engine.ts`, `lib/disqualifiers.ts`, `app/api/tokens/[mint]/route.ts`, `lib/helius.ts`, `app/api/webhooks/helius/route.ts`, `lib/backtester-stats.ts`, initial Supabase schema and tests.
+
+### Useful ideas
+
+- Explainable score components instead of one opaque token score.
+- Hard disqualifiers for authority risk, holder concentration, bundled launches, deployer history and suspicious launch behaviour.
+- Preserve score history and compare forward outcomes by score cohort.
+- Separate token risk from momentum and smart-money evidence.
+
+### Source-level cautions
+
+- The token API route supplies hardcoded defaults for several risk inputs (including sniper share, developer selling, deployer rug count, bundled launch, holder growth and clustering). These are not measured observations.
+- Missing top-holder concentration is defaulted to zero in the disqualifier input, which can silently make missing evidence look safe.
+- The smart-money count is based on transaction rows rather than a verified distinct-wallet count.
+- The route calls the tier classifier with a constant multiplier (`1`), not a measured token outcome.
+- The webhook parser selects the first non-SOL transfer and uses the fee payer as the wallet identity; that is not a general multi-leg, multi-wallet attribution model.
+- The schema makes transaction signature globally unique, so one signature cannot naturally represent multiple tracked-wallet observations.
+- Repository metadata did not declare a license at review time.
+
+### Decision
+
+No Solbeam source code is copied. Its publicly described ideas may be independently implemented, but missing evidence must remain `UNKNOWN`; no placeholder zero, fixed default or unmeasured score may authorize a trade.
+
+## Implementation order for Crypto Super Radar
+
+1. **Preserve the existing architecture.** Continue using Python provider adapters, typed models, hard gates, paper ledger and test suite. Do not import the Node/NestJS, Next.js or Supabase application stacks.
+2. **Market flow extension.** Design and test per-venue CVD and confirmed/estimated liquidation contracts before connecting them to the decision engine.
+3. **Wallet event integrity.** Add durable, replay-safe wallet events and reconciliation before expanding smart-money discovery claims.
+4. **Risk evidence completeness.** Ensure every holder/deployer/authority field carries value, source, timestamp, coverage and status; missing inputs block rather than improve a score.
+5. **Backtest evidence.** Extend per-trade cost attribution and chronological OOS validation; reject fee-free headline metrics.
+6. **Acceptance.** Run unit, integration and offline smoke tests; compare source evidence and test outputs. CI currently has an unresolved failure with unavailable job logs, so no new feature is release-ready until the independent test path is green.
+
+## Scope and safety
+
+- Research and paper trading only. No real orders, signing, private keys, seed phrases or production wallet access.
+- No merge to `main`, no production migration, no secrets/config changes and no Render deploy as part of this reference audit.
+- `UNKNOWN`, stale, partial or conflicting evidence never becomes zero, `PASS` or `BUY`.
+- This document records a source audit and implementation plan; it does not claim that the missing CVD, liquidation stream, durable wallet event pipeline or full-history wallet graph has been implemented.
