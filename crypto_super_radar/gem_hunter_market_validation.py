@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 DEX_BASE = "https://api.dexscreener.com"
@@ -134,6 +135,7 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
     reported_volume = _number(candidate.get("volume_24h_usd"))
     base = {
         "status": "UNKNOWN",
+        "checked_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "pool_address": pool,
         "token_address": token,
         "chain": chain,
