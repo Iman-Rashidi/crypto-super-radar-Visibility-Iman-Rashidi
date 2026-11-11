@@ -40,6 +40,8 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["critical_gates"]["security"], "UNKNOWN")
         self.assertEqual(result["critical_gates"]["data_quality"], "UNKNOWN")
         self.assertEqual(result["critical_gates"]["exit"], "UNKNOWN")
+        self.assertEqual(set(result["critical_gate_reasons"]), set(CRITICAL_GATES))
+        self.assertIn("عمق اجرایی", result["critical_gate_reasons"]["exit"])
         self.assertIsNone(result["market_metrics"]["holder_count"])
         self.assertIsNone(result["market_metrics"]["buy_volume_share_pct"])
         self.assertIsNone(result["market_metrics"]["estimated_slippage_bps"])
