@@ -87,7 +87,7 @@ GEM_HUNTER_CACHE = {"expires_at": 0.0, "payload": None}
 GEM_HUNTER_CACHE_LOCK = threading.Lock()
 
 
-def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
+def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool = False) -> dict:
     """Return strict BUYs plus aggregate-only diagnostics for every pipeline stage."""
     limit = max(1, min(int(limit), 50))
     with GEM_HUNTER_CACHE_LOCK:
@@ -195,6 +195,9 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
     result["qualification_engine_status"] = engine_status
     result["signal_status"] = signal_status
     result["diagnostic_fa"] = diagnostic_fa
+    if include_diagnostics:
+        # Separate research-only report; this never upgrades a candidate to BUY.
+        result["diagnostic_candidates"] = copy.deepcopy(raw_candidates[:limit])
     result["public_policy"] = {
         "qualification_schema": SCHEMA_VERSION,
         "minimum_passed_filters": 9,
@@ -298,6 +301,43 @@ pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px
 .analysis-link-card p{{margin:0;color:var(--muted);font-size:.9rem}}
 .analysis-link{{display:inline-flex;align-items:center;justify-content:center;gap:8px;margin-top:6px;padding:11px 14px;border:1px solid #37627b;border-radius:11px;background:#123344;color:#c8fff4;text-decoration:none;font-weight:700}}
 .analysis-link:hover{{background:#19465a}}
+.exchange-links-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:16px}}
+.exchange-card{{display:flex;align-items:center;gap:13px;min-width:0;padding:16px;border:1px solid #2b4660;border-radius:15px;background:linear-gradient(145deg,#12283a,#0b1a2a);text-decoration:none;color:var(--text);transition:border-color .15s ease,transform .15s ease}}
+.exchange-card:hover{{border-color:var(--teal);transform:translateY(-2px)}}
+.exchange-logo{{width:42px;height:42px;flex:0 0 42px;object-fit:contain;padding:7px;border-radius:12px;background:#f4f7fb}}
+.exchange-copy{{display:flex;flex-direction:column;min-width:0;gap:2px}}
+.exchange-copy strong{{font-size:1rem}}
+.exchange-copy span{{font-size:.8rem;color:var(--muted)}}
+.gem-report-list{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,430px),1fr));gap:13px;margin-top:16px}}
+.gem-candidate{{border:1px solid #2b4660;border-radius:14px;padding:15px;background:#0a1725;min-width:0}}
+.gem-candidate h3{{margin:0 0 4px;font-size:1.05rem}}
+.gem-candidate .candidate-meta{{color:var(--muted);font-size:.82rem;overflow-wrap:anywhere}}
+.gem-facts{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}}
+.gem-fact{{padding:8px 10px;border:1px solid #20364d;border-radius:10px;background:#0c1b2c;min-width:0}}
+.gem-fact span{{display:block;color:var(--muted);font-size:.76rem}}
+.gem-fact strong{{display:block;direction:ltr;text-align:right;overflow-wrap:anywhere;font-size:.9rem}}
+.gem-status-pass{{color:var(--green)}} .gem-status-fail{{color:var(--red)}} .gem-status-unknown{{color:var(--amber)}}
+.gem-detail-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}
+.gem-detail{{padding:8px 10px;border:1px solid #20364d;border-radius:9px;font-size:.82rem;min-width:0}}
+.gem-detail strong{{display:block}}
+.gem-links{{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0}}
+.gem-links a,.watch-entry a{{color:#9feee4;overflow-wrap:anywhere}}
+.gem-add-watch{{width:auto;margin:8px 0 0;padding:9px 12px;background:linear-gradient(135deg,#167b70,#155e65)}}
+.watchlist-form{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0}}
+.watchlist-form label{{margin:0}}
+.watchlist-form .wide{{grid-column:1/-1}}
+.watchlist-form textarea{{width:100%;min-height:76px;padding:11px 13px;border:1px solid #334a63;border-radius:11px;background:#091522;color:var(--text);font:inherit}}
+.watchlist-entries{{display:grid;gap:11px;margin-top:14px}}
+.watch-entry{{padding:13px;border:1px solid #2b4660;border-radius:13px;background:#0a1725;min-width:0}}
+.watch-entry h3{{margin:0 0 4px;font-size:1rem}}
+.watch-entry label{{font-size:.82rem;margin-top:8px}}
+.watch-entry input,.watch-entry textarea{{margin-top:4px}}
+.watch-entry textarea{{width:100%;min-height:58px;padding:9px;border:1px solid #334a63;border-radius:9px;background:#091522;color:var(--text);font:inherit}}
+.watch-entry-actions{{display:flex;gap:8px;flex-wrap:wrap}}
+.watch-entry-actions button{{width:auto;padding:7px 11px;font-size:.82rem}}
+.watch-delete{{background:#6c2934}}
+@media(max-width:680px){{.exchange-links-grid{{grid-template-columns:1fr}}.watchlist-form{{grid-template-columns:1fr}}.watchlist-form .wide{{grid-column:auto}}.gem-facts,.gem-detail-grid{{grid-template-columns:1fr}}}}
+
 @media(max-width:680px){{.analysis-links-grid{{grid-template-columns:1fr}}}}
 .metric{{background:#0a1725;border:1px solid #263a53;border-radius:13px;padding:14px}}
 .metric strong{{display:block;font-size:1.2rem;margin-top:6px;direction:ltr;text-align:right;font-variant-numeric:tabular-nums}}
@@ -1050,6 +1090,16 @@ class Handler(BaseHTTPRequestHandler):
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/gem-hunter/report":
+            raw_limit = parse_qs(parsed.query).get("limit", ["50"])[0]
+            try:
+                limit = max(1, min(int(raw_limit), 50))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"error":"limit must be an integer from 1 to 50"}', "application/json")
+            payload = _gem_hunter_discovery_payload(limit=limit, include_diagnostics=True)
+            payload["report_mode"] = "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL"
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/gem-hunter/discover":
             raw_limit = parse_qs(parsed.query).get("limit", ["20"])[0]
             try:
@@ -1112,6 +1162,24 @@ class Handler(BaseHTTPRequestHandler):
             </article>
           </div>
         </section>
+        <section class="card" id="exchange-shortcuts">
+          <h2>ورود سریع به صرافی‌ها</h2>
+          <p class="muted">میان‌بر به وب‌سایت رسمی سه صرافی؛ این لینک‌ها فقط صفحهٔ صرافی را باز می‌کنند و هیچ اتصال کیف‌پول یا سفارشی انجام نمی‌دهند. دسترسی و امکان معامله به کشور محل اقامت و شرایط حساب بستگی دارد.</p>
+          <div class="exchange-links-grid">
+            <a class="exchange-card" href="https://www.binance.com/en/trade" target="_blank" rel="noopener noreferrer">
+              <img class="exchange-logo" src="https://cdn.simpleicons.org/binance/F0B90B" alt="لوگوی Binance" loading="lazy">
+              <span class="exchange-copy"><strong>Binance</strong><span>ورود به بازار Spot ↗</span></span>
+            </a>
+            <a class="exchange-card" href="https://www.bybit.com/en/trade/spot" target="_blank" rel="noopener noreferrer">
+              <img class="exchange-logo" src="https://cdn.simpleicons.org/bybit/FFFFFF" alt="لوگوی Bybit" loading="lazy">
+              <span class="exchange-copy"><strong>Bybit</strong><span>ورود به بازار Spot ↗</span></span>
+            </a>
+            <a class="exchange-card" href="https://www.okx.com/en-eu/trade-spot" target="_blank" rel="noopener noreferrer">
+              <img class="exchange-logo" src="https://cdn.simpleicons.org/okx/FFFFFF" alt="لوگوی OKX" loading="lazy">
+              <span class="exchange-copy"><strong>OKX</strong><span>ورود به بازار Spot اروپا ↗</span></span>
+            </a>
+          </div>
+        </section>
         <section class="card" id="gem-hunter-panel">
           <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
           <p class="muted">توکن‌های تازهٔ Solana و Base را در مرحلهٔ کشف شناسایی می‌کند. فقط BUYهایی نمایش داده می‌شوند که پروندهٔ ارزیابی نسخه‌دار، حداقل ۹ فیلتر از ۱۲، عبور همهٔ ۴ گیت حیاتی و شواهد تازه و قابل‌ردیابی بازار و Swapهای واقعی نهنگ را داشته باشند. کشف توکن به‌تنهایی سیگنال خرید نیست؛ نامزدهای ارزیابی‌نشده، ردشده یا دارای دادهٔ ناقص پنهان می‌مانند. شمارش هر مرحله و سلامت منابع برای آشکارشدن نقص اتصال ارزیابی گزارش می‌شود.</p>
@@ -1123,118 +1191,251 @@ class Handler(BaseHTTPRequestHandler):
             <p class="muted">برای دریافت فهرست اولیهٔ کاندیداها دکمهٔ کشف را بزنید.</p>
           </div>
         </section>
+        <section class="card" id="gem-hunter-watchlist">
+          <h2>فهرست محلی زیر نظر · پیگیری ساعت‌ها و روزهای آینده</h2>
+          <p class="muted">این فهرست فقط در همین مرورگر و دستگاه ذخیره می‌شود. نامزدهای اضافه‌شده سیگنال BUY نیستند. آدرس قرارداد یا لینک بازار را پیست کنید تا همراه با زمان بررسی بعدی و یادداشت ذخیره شود.</p>
+          <form id="watchlist-manual-form" class="watchlist-form">
+            <label>نام توکن / نماد
+              <input id="watch-manual-name" placeholder="مثلاً TOKEN (TKN)" autocomplete="off">
+            </label>
+            <label>شبکه
+              <select id="watch-manual-chain"><option value="solana">Solana</option><option value="base">Base</option><option value="unknown">نامشخص</option></select>
+            </label>
+            <label class="wide">آدرس قرارداد یا لینک توکن / بازار
+              <input id="watch-manual-reference" required placeholder="آدرس Mint / Contract یا لینک DEX Screener">
+            </label>
+            <label>زمان بررسی بعدی
+              <input id="watch-manual-next-check" type="datetime-local">
+            </label>
+            <label class="wide">یادداشت پیگیری
+              <textarea id="watch-manual-notes" placeholder="چه چیزی را در بررسی بعدی کنترل کنم؟ مثلاً حجم، نقدینگی، هولدرها یا تراکنش نهنگ‌ها"></textarea>
+            </label>
+            <div class="wide"><button type="submit" class="gem-add-watch">افزودن به فهرست زیر نظر</button></div>
+          </form>
+          <p id="watchlist-status" class="muted" aria-live="polite">هنوز موردی برای پیگیری ذخیره نشده است.</p>
+          <div id="watchlist-entries" class="watchlist-entries"></div>
+        </section>
         <script>
         (() => {
           const button = document.getElementById('gem-hunter-run');
           const status = document.getElementById('gem-hunter-status');
           const results = document.getElementById('gem-hunter-results');
-          if (!button || !status || !results) return;
-          const cell = (tag, value) => {
+          const watchEntries = document.getElementById('watchlist-entries');
+          const watchStatus = document.getElementById('watchlist-status');
+          const watchForm = document.getElementById('watchlist-manual-form');
+          if (!button || !status || !results || !watchEntries || !watchForm) return;
+          const STORAGE_KEY = 'crypto-super-radar.gem-hunter-watchlist.v1';
+          const filterLabels = {
+            trend:'روند', momentum:'شتاب', relative_strength:'قدرت نسبی',
+            volume_confirmation:'تأیید حجم', buy_sell_pressure:'فشار خرید/فروش',
+            capital_flow:'جریان سرمایه', whale_activity:'فعالیت نهنگ',
+            liquidity_depth:'عمق نقدینگی', market_integrity:'سلامت معاملات',
+            contract_security:'امنیت قرارداد', holder_distribution:'توزیع هولدرها',
+            market_regime_validation:'تأیید رژیم بازار'
+          };
+          const gateLabels = {security:'امنیت', liquidity:'نقدینگی', data_quality:'کیفیت داده', exit:'امکان خروج'};
+          const el = (tag, value, className) => {
             const node = document.createElement(tag);
-            node.textContent = value === null || value === undefined ? '—' : String(value);
+            node.textContent = value === null || value === undefined || value === '' ? '—' : String(value);
+            if (className) node.className = className;
             return node;
           };
+          const safeUrl = value => {
+            try {
+              const u = new URL(String(value || ''), window.location.origin);
+              return ['http:', 'https:'].includes(u.protocol) ? u.href : '';
+            } catch (_) { return ''; }
+          };
           const addLink = (parent, label, href) => {
+            const url = safeUrl(href);
+            if (!url) return;
             const link = document.createElement('a');
-            link.textContent = label;
-            link.href = href;
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer';
+            link.textContent = label; link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
             parent.appendChild(link);
           };
+          const explorerBase = chain => chain === 'solana' ? 'https://solscan.io' : 'https://basescan.org';
+          const tokenExplorer = item => explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address || '');
+          const poolUrl = item => 'https://dexscreener.com/' + encodeURIComponent(item.chain || '') + '/' + encodeURIComponent(item.pool_address || '');
+          const readWatchlist = () => {
+            try {
+              const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+              return Array.isArray(value) ? value.filter(x => x && typeof x === 'object') : [];
+            } catch (_) { return []; }
+          };
+          const writeWatchlist = list => {
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+              watchStatus.textContent = list.length + ' مورد در حافظهٔ محلی همین مرورگر ذخیره شده است.';
+              return true;
+            } catch (_) {
+              watchStatus.textContent = 'ذخیره‌سازی محلی در این مرورگر در دسترس نیست؛ فضای ذخیره‌سازی مرورگر را بررسی کنید.';
+              return false;
+            }
+          };
+          const addToWatchlist = item => {
+            const list = readWatchlist();
+            const key = [item.chain || '', item.token_address || item.reference_url || item.pool_address || ''].join(':').toLowerCase();
+            const exists = list.some(x => [x.chain || '', x.token_address || x.reference_url || x.pool_address || ''].join(':').toLowerCase() === key);
+            if (exists) { watchStatus.textContent = 'این توکن از قبل در فهرست زیر نظر وجود دارد.'; return; }
+            list.unshift(Object.assign({
+              id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8),
+              added_at: new Date().toISOString(), next_check_at: '', notes: '', status: 'WATCH'
+            }, item));
+            if (writeWatchlist(list)) renderWatchlist();
+          };
+          const renderWatchlist = () => {
+            const list = readWatchlist();
+            watchEntries.replaceChildren();
+            if (!list.length) {
+              watchEntries.appendChild(el('p', 'هنوز موردی برای پیگیری ذخیره نشده است.', 'muted'));
+              watchStatus.textContent = 'فهرست محلی خالی است؛ از گزارش کشف یا فرم افزودن دستی استفاده کنید.';
+              return;
+            }
+            watchStatus.textContent = list.length + ' مورد در حافظهٔ محلی همین مرورگر ذخیره شده است.';
+            list.forEach(item => {
+              const card = document.createElement('article'); card.className = 'watch-entry';
+              card.appendChild(el('h3', (item.token_name || item.name || 'توکن بدون نام') + ' · ' + (item.token_symbol || item.symbol || '—')));
+              card.appendChild(el('p', (item.chain || 'شبکه نامشخص').toUpperCase() + ' · ' + (item.token_address || item.reference_url || 'بدون آدرس'), 'candidate-meta'));
+              const links = document.createElement('div'); links.className = 'gem-links';
+              if (item.reference_url) addLink(links, 'لینک ذخیره‌شده ↗', item.reference_url);
+              if (item.token_address && ['solana','base'].includes(item.chain)) addLink(links, 'اکسپلورر ↗', explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address));
+              if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'DEX Screener ↗', 'https://dexscreener.com/' + item.chain + '/' + encodeURIComponent(item.pool_address));
+              card.appendChild(links);
+              const timeLabel = el('label', 'زمان بررسی بعدی');
+              const timeInput = document.createElement('input'); timeInput.type = 'datetime-local'; timeInput.value = item.next_check_at || '';
+              timeLabel.appendChild(timeInput); card.appendChild(timeLabel);
+              const notesLabel = el('label', 'یادداشت پیگیری');
+              const notes = document.createElement('textarea'); notes.value = item.notes || '';
+              notesLabel.appendChild(notes); card.appendChild(notesLabel);
+              const actions = document.createElement('div'); actions.className = 'watch-entry-actions';
+              const save = el('button', 'ذخیره تغییرات'); save.type = 'button';
+              save.addEventListener('click', () => {
+                const current = readWatchlist(); const index = current.findIndex(x => x.id === item.id);
+                if (index >= 0) { current[index].next_check_at = timeInput.value; current[index].notes = notes.value; if (writeWatchlist(current)) renderWatchlist(); }
+              });
+              const remove = el('button', 'حذف', 'watch-delete'); remove.type = 'button';
+              remove.addEventListener('click', () => { const current = readWatchlist().filter(x => x.id !== item.id); if (writeWatchlist(current)) renderWatchlist(); });
+              actions.append(save, remove); card.appendChild(actions); watchEntries.appendChild(card);
+            });
+          };
+          const fact = (parent, label, value) => {
+            const box = document.createElement('div'); box.className = 'gem-fact';
+            box.appendChild(el('span', label)); box.appendChild(el('strong', value)); parent.appendChild(box);
+          };
+          const renderCandidate = item => {
+            const q = item.qualification || {}; const m = q.market_metrics || {};
+            const filters = q.filters || {}; const reasons = q.filter_reasons || {}; const gates = q.critical_gates || {};
+            const card = document.createElement('article'); card.className = 'gem-candidate';
+            card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
+            card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · نامزد مرحلهٔ کشف · ' + (item.candidate_status || 'UNKNOWN') + ' · ' + (item.trade_authorization || 'NO_TRADE'), 'candidate-meta'));
+            card.appendChild(el('p', 'امتیاز اولویت پژوهشی، نه احتمال موفقیت و نه سیگنال خرید: ' + (item.discovery_priority_score ?? 'ناموجود'), 'candidate-meta'));
+            const facts = document.createElement('div'); facts.className = 'gem-facts';
+            fact(facts, 'قیمت مرجع (USD)', item.price_usd);
+            fact(facts, 'نقدینگی تجمیعی (USD)', m.liquidity_usd ?? item.liquidity_usd);
+            fact(facts, 'حجم ۲۴ساعته (USD)', m.volume_24h_usd ?? item.volume_24h_usd);
+            fact(facts, 'حجم / نقدینگی', item.volume_to_liquidity_24h);
+            fact(facts, 'تغییر قیمت ۱ساعته (%)', item.price_change_1h_pct);
+            fact(facts, 'عمر استخر (ساعت)', item.pool_age_hours);
+            fact(facts, 'خرید / فروش ۲۴ساعته (تعداد)', String(item.buys_24h ?? '—') + ' / ' + String(item.sells_24h ?? '—'));
+            fact(facts, 'امتیاز فرصت مستقل', q.opportunity_score);
+            card.appendChild(facts);
+            const addresses = document.createElement('p'); addresses.className = 'candidate-meta';
+            addresses.appendChild(el('span', 'Mint / Contract: ')); addresses.appendChild(el('code', item.token_address || '—'));
+            addresses.appendChild(el('span', ' · Pool: ')); addresses.appendChild(el('code', item.pool_address || '—'));
+            card.appendChild(addresses);
+            const links = document.createElement('div'); links.className = 'gem-links';
+            if (item.token_address && ['solana','base'].includes(item.chain)) addLink(links, 'اکسپلورر توکن ↗', tokenExplorer(item));
+            if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'بازار در DEX Screener ↗', poolUrl(item));
+            card.appendChild(links);
+            const details = document.createElement('details'); details.appendChild(el('summary', 'گزارش کامل ۱۲ فیلتر و ۴ گیت'));
+            details.appendChild(el('h4', '۱۲ فیلتر مستقل'));
+            const filterGrid = document.createElement('div'); filterGrid.className = 'gem-detail-grid';
+            Object.keys(filterLabels).forEach(key => {
+              const state = filters[key] || 'UNKNOWN'; const row = document.createElement('div'); row.className = 'gem-detail';
+              row.appendChild(el('strong', filterLabels[key] + ' · ' + state, 'gem-status-' + String(state).toLowerCase()));
+              row.appendChild(el('span', reasons[key] || 'برای این فیلتر هنوز دلیل مستند ثبت نشده است.'));
+              filterGrid.appendChild(row);
+            });
+            details.appendChild(filterGrid); details.appendChild(el('h4', '۴ گیت حیاتی'));
+            const gateGrid = document.createElement('div'); gateGrid.className = 'gem-detail-grid';
+            Object.keys(gateLabels).forEach(key => {
+              const state = gates[key] || 'UNKNOWN'; const row = document.createElement('div'); row.className = 'gem-detail';
+              row.appendChild(el('strong', gateLabels[key] + ' · ' + state, 'gem-status-' + String(state).toLowerCase()));
+              row.appendChild(el('span', state === 'PASS' ? 'شاهد این گیت در پرونده ثبت شده است.' : 'این گیت هنوز با شواهد کافی تأیید نشده است.'));
+              gateGrid.appendChild(row);
+            });
+            details.appendChild(gateGrid);
+            details.appendChild(el('p', 'وضعیت پرونده: ' + (q.evaluation_status || 'INCOMPLETE') + ' · ' + (q.evaluation_reason || 'دلیل تکمیل‌نشدن پرونده ثبت نشده است.')));
+            details.appendChild(el('p', 'منابع داده: ' + (Array.isArray(q.market_data_sources) ? q.market_data_sources.join(', ') : 'نامشخص') + ' · زمان ارزیابی UTC: ' + (q.data_as_of_utc || 'نامشخص')));
+            details.appendChild(el('p', 'پرچم‌های ریسک کشف: ' + ((item.risk_flags || []).join('، ') || 'موردی گزارش نشده است.')));
+            details.appendChild(el('p', 'شواهد Swap نهنگ: ' + ((q.whale_evidence && q.whale_evidence.reason) || 'داده‌ای متصل نیست') + ' · تعداد رویدادها: ' + (((q.whale_evidence || {}).events || []).length)));
+            card.appendChild(details);
+            const add = el('button', '＋ افزودن به فهرست زیر نظر'); add.type = 'button'; add.className = 'gem-add-watch';
+            add.addEventListener('click', () => addToWatchlist({
+              chain: item.chain, token_name: item.token_name, token_symbol: item.token_symbol,
+              token_address: item.token_address, pool_address: item.pool_address, dex: item.dex,
+              discovery_priority_score: item.discovery_priority_score, price_usd: item.price_usd,
+              liquidity_usd: item.liquidity_usd, volume_24h_usd: item.volume_24h_usd,
+              reference_url: item.pool_address ? poolUrl(item) : tokenExplorer(item)
+            }));
+            card.appendChild(add); return card;
+          };
+          watchForm.addEventListener('submit', event => {
+            event.preventDefault();
+            const reference = document.getElementById('watch-manual-reference').value.trim();
+            const chain = document.getElementById('watch-manual-chain').value;
+            const url = safeUrl(reference);
+            if (!reference) { watchStatus.textContent = 'ابتدا آدرس قرارداد یا لینک معتبر را وارد کنید.'; return; }
+            addToWatchlist({
+              chain, token_name: document.getElementById('watch-manual-name').value.trim() || 'توکن پیگیری دستی',
+              token_symbol: '', token_address: url ? '' : reference, reference_url: url || '',
+              next_check_at: document.getElementById('watch-manual-next-check').value,
+              notes: document.getElementById('watch-manual-notes').value.trim()
+            });
+            watchForm.reset();
+          });
+          renderWatchlist();
           button.addEventListener('click', async () => {
-            button.disabled = true;
-            results.replaceChildren(cell('p','در حال بررسی توکن‌های جدید و اعتبارسنجی شواهد بازار و نهنگ‌ها...'));
+            button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت نامزدها و ساخت گزارش فارسی ۱۲ فیلتر و ۴ گیت...'));
             status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
             try {
-              const response = await fetch('/api/gem-hunter/discover?limit=20', {cache:'no-store'});
-              const data = await response.json();
-              if (!response.ok) throw new Error(data.error || 'Discovery request failed');
-              const items = data.candidates || [];
-              const discovered = Number(data.discovered_candidate_count || 0);
-              const evaluated = Number(data.evaluation_record_count || 0);
-              const complete = Number(data.complete_evaluation_count || 0);
-              status.textContent =
-                'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' + evaluated +
-                ' · ساختار کامل پرونده: ' + complete + ' · BUY تأییدشده: ' + items.length;
-              if (!items.length) {
-                const message = cell('p', data.diagnostic_fa ||
-                  'سیگنال BUY صادر نشد؛ وضعیت منابع و مراحل ارزیابی را بررسی کنید.');
-                message.className = 'muted';
-                const counts = cell('p',
-                  'کشف: ' + discovered + ' | دارای پروندهٔ ارزیابی: ' + evaluated +
-                  ' | ساختار کامل پرونده: ' + complete + ' | ارزیابی ناقص: ' +
-                  Number(data.incomplete_evaluation_count || 0) + ' | ارزیابی‌نشده: ' +
-                  Number(data.unassessed_candidate_count || 0));
-                counts.className = 'muted';
-                const diagnostics = document.createElement('details');
-                diagnostics.appendChild(cell('summary', 'وضعیت منابع داده'));
-                const sourceList = document.createElement('ul');
-                Object.entries(data.sources || {}).forEach(([name, source]) => {
-                  const reason = source && source.reason ? ' · ' + source.reason : '';
-                  sourceList.appendChild(cell('li', name + ': ' +
-                    ((source && source.status) || 'UNKNOWN') + reason));
-                });
-                diagnostics.appendChild(sourceList);
-                results.replaceChildren(message, counts, diagnostics);
-                return;
-              }
-              const table = document.createElement('table');
-              const head = document.createElement('thead');
-              const header = document.createElement('tr');
-              ['شبکه','توکن','Mint / Contract','DEX / Pool','نقدینگی USD','حجم ۲۴ساعت USD','دارندگان','معامله‌گران یکتا','خریداران نهنگ','فیلترها','امتیاز فرصت','ریسک','شواهد نهنگ و مسیر بازار'].forEach(v => header.appendChild(cell('th',v)));
-              head.appendChild(header); table.appendChild(head);
-              const body = document.createElement('tbody');
-              items.forEach(item => {
-                const q = item.qualification || {};
-                const m = q.market_metrics || {};
-                const w = q.whale_evidence || {};
-                const row = document.createElement('tr');
-                [
-                  item.chain,
-                  (item.token_name || 'Token') + ' (' + (item.token_symbol || '—') + ')',
-                  item.token_address,
-                  (item.dex || '—') + ' / ' + (item.pool_name || item.pool_address || '—'),
-                  m.liquidity_usd,
-                  m.volume_24h_usd,
-                  m.holder_count,
-                  m.unique_traders_24h,
-                  w.independent_buy_wallets,
-                  Object.values(q.filters || {}).filter(x=>x==='PASS').length + '/12',
-                  q.opportunity_score,
-                  q.risk_score,
-                ].forEach(v => row.appendChild(cell('td',v)));
-                const evidenceCell = document.createElement('td');
-                const details = document.createElement('details');
-                const summary = cell('summary','نمایش کیف‌پول‌ها و تراکنش‌های نهنگ');
-                details.appendChild(summary);
-                (w.events || []).forEach(event => {
-                  const line = document.createElement('p');
-                  const wallet = document.createElement('div');
-                  const tx = document.createElement('div');
-                  const explorer = item.chain === 'solana' ? 'https://solscan.io' : 'https://basescan.org';
-                  wallet.appendChild(cell('span',(event.event_type || 'SWAP') + ' · ' + (event.amount_usd || '—') + ' USD · کیف‌پول: '));
-                  addLink(wallet, event.wallet_address, explorer + '/account/' + encodeURIComponent(event.wallet_address));
-                  tx.appendChild(cell('span','تراکنش: '));
-                  addLink(tx, event.tx_hash, explorer + '/tx/' + encodeURIComponent(event.tx_hash));
-                  line.appendChild(wallet); line.appendChild(tx); details.appendChild(line);
-                });
-                evidenceCell.appendChild(details);
-                const explorer = item.chain === 'solana' ? 'https://dexscreener.com/solana/' : 'https://dexscreener.com/base/';
-                const poolLink = document.createElement('div');
-                addLink(poolLink,'بازکردن بازار',explorer + encodeURIComponent(item.pool_address));
-                evidenceCell.appendChild(poolLink);
-                row.appendChild(evidenceCell);
-                body.appendChild(row);
+              const response = await fetch('/api/gem-hunter/report?limit=50', {cache:'no-store'});
+              const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Discovery report failed');
+              const buys = data.candidates || []; const candidates = data.diagnostic_candidates || [];
+              const discovered = Number(data.discovered_candidate_count || candidates.length || 0);
+              status.textContent = 'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' +
+                Number(data.evaluation_record_count || 0) + ' · ساختار کامل پرونده: ' +
+                Number(data.complete_evaluation_count || 0) + ' · BUY تأییدشده: ' + buys.length;
+              const summary = document.createElement('div');
+              summary.appendChild(el('p', data.diagnostic_fa || 'گزارش مرحلهٔ کشف آماده شد.', 'muted'));
+              summary.appendChild(el('p', 'کشف: ' + discovered + ' | دارای پروندهٔ ارزیابی: ' +
+                Number(data.evaluation_record_count || 0) + ' | ساختار کامل پرونده: ' +
+                Number(data.complete_evaluation_count || 0) + ' | ارزیابی ناقص: ' +
+                Number(data.incomplete_evaluation_count || 0) + ' | ارزیابی‌نشده: ' +
+                Number(data.unassessed_candidate_count || 0), 'muted'));
+              const sourceDetails = document.createElement('details'); sourceDetails.appendChild(el('summary', 'سلامت منابع داده'));
+              const sourceList = document.createElement('ul');
+              Object.entries(data.sources || {}).forEach(([name, source]) => {
+                sourceList.appendChild(el('li', name + ': ' + ((source && source.status) || 'UNKNOWN') +
+                  (source && source.reason ? ' · ' + source.reason : '')));
               });
-              table.appendChild(body);
-              results.replaceChildren(table);
+              sourceDetails.appendChild(sourceList); summary.appendChild(sourceDetails); results.replaceChildren(summary);
+              if (buys.length) {
+                results.appendChild(el('h3', 'فرصت‌های BUY تأییدشده'));
+                buys.forEach(item => results.appendChild(renderCandidate(item)));
+              } else results.appendChild(el('p', 'در این اسکن هیچ فرصت خریدی تمام استانداردها را نگذرانده است.', 'muted'));
+              results.appendChild(el('h3', 'گزارش نامزدهای کشف‌شده · فقط برای بررسی و زیر نظر گرفتن'));
+              results.appendChild(el('p', 'نامزدهای زیر BUY نیستند. وضعیت UNKNOWN یا پروندهٔ ناقص به معنی رد قطعی یا تأیید خرید نیست.', 'muted'));
+              const list = document.createElement('div'); list.className = 'gem-report-list';
+              candidates.forEach(item => list.appendChild(renderCandidate(item)));
+              if (!candidates.length) list.appendChild(el('p', 'در این اسکن نامزدی برای گزارش دریافت نشد.', 'muted'));
+              results.appendChild(list);
+              results.appendChild(el('p', 'زمان گزارش UTC: ' + (data.generated_at_utc || data.updated_at_utc || 'در دسترس نیست') +
+                ' · این گزارش برای تحقیق است و سفارش یا تراکنش ارسال نمی‌کند.', 'candidate-meta'));
             } catch (error) {
               status.textContent = 'خطا در دریافت داده: ' + error.message;
-              results.replaceChildren(cell('p','گزارش خریدی نمایش داده نشد؛ خطای ارتباطی باید برطرف شود و هیچ سیگنالی از دادهٔ ناقص صادر نمی‌شود.'));
-            } finally {
-              button.disabled = false;
-            }
+              results.replaceChildren(el('p', 'گزارش دریافت نشد؛ هیچ سیگنال خریدی از دادهٔ ناقص صادر نمی‌شود.', 'muted'));
+            } finally { button.disabled = false; }
           });
         })();
         </script>
