@@ -108,6 +108,8 @@ def _score(age_hours: Optional[float], liquidity: Optional[float],
     """Bounded research-ordering heuristic with explicit risk penalties; not a signal."""
     if age_hours is None or liquidity is None or liquidity <= 0 or volume_24h is None:
         return None
+    if volume_to_liquidity is not None and volume_to_liquidity < 0.05:
+        return 0.0
     # Research ordering must not reward extreme novelty: very young pools
     # have almost no operating history and therefore receive the fewest points.
     age_points = 3 if age_hours <= 1 else 8 if age_hours <= 6 else 12 if age_hours <= 24 else 18 if age_hours <= 72 else 25
@@ -210,8 +212,14 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
         if buys is not None and sells is not None and sells > buys:
             flags.append("SELLS_EXCEED_BUYS")
         ratio = volume_24h / liquidity if volume_24h is not None and liquidity and liquidity > 0 else None
+        if ratio is not None and ratio < 0.05:
+            flags.append("LOW_VOLUME_LIQUIDITY_RATIO")
         if ratio is not None and ratio > 10:
             flags.append("EXTREME_VOLUME_LIQUIDITY_RATIO")
+        honeypot_suspect = buys_24h is not None and buys_24h > 10 and sells_24h == 0
+        if honeypot_suspect:
+            flags.append("HONEYPOT_SUSPECT")
+        low_volume_liquidity = ratio is not None and ratio < 0.05
         if change_1h is not None and change_1h <= -20:
             flags.append("SHARP_1H_DRAWDOWN")
         elif change_1h is not None and change_1h >= 50:
@@ -220,6 +228,8 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
             age, liquidity, volume_24h, buys, sells, buyers, sellers,
             change_1h, ratio,
         )
+        if honeypot_suspect or low_volume_liquidity:
+            score = 0.0
         candidates.append({
             "asset": f"{chain}:{token_address}",
             "chain": chain,
@@ -248,7 +258,12 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
             "sources": [source],
             "discovery_priority_score": score,
             "score_semantics": "Bounded research-ordering heuristic; pool maturity earns more than novelty, transaction-count ratios do not substitute for notional buy flow, and penalties cover low liquidity, extreme turnover/liquidity and sharp 1h moves; not a probability, safety score, or trade signal.",
-            "candidate_status": "UNSCREENED" if score is not None and price is not None and price > 0 and liquidity is not None and liquidity > 0 else "UNKNOWN",
+            "candidate_status": (
+                "HONEYPOT_SUSPECT" if honeypot_suspect else
+                "REJECTED" if low_volume_liquidity else
+                "UNSCREENED" if score is not None and price is not None and price > 0
+                and liquidity is not None and liquidity > 0 else "UNKNOWN"
+            ),
             "trade_authorization": "NO_TRADE",
             "risk_flags": flags,
             "evidence_caveat": "DEX pool aggregates and transaction counts can be manipulated; no contract-security, holder-distribution, beneficial-ownership, or execution checks have run.",
@@ -369,13 +384,21 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         if buys is not None and sells is not None and sells > buys:
             flags.append("SELLS_EXCEED_BUYS")
         ratio = volume_24h / liquidity if volume_24h is not None and liquidity and liquidity > 0 else None
+        if ratio is not None and ratio < 0.05:
+            flags.append("LOW_VOLUME_LIQUIDITY_RATIO")
         if ratio is not None and ratio > 10:
             flags.append("EXTREME_VOLUME_LIQUIDITY_RATIO")
+        honeypot_suspect = buys_24h is not None and buys_24h > 10 and sells_24h == 0
+        if honeypot_suspect:
+            flags.append("HONEYPOT_SUSPECT")
+        low_volume_liquidity = ratio is not None and ratio < 0.05
         if change_1h is not None and change_1h <= -20:
             flags.append("SHARP_1H_DRAWDOWN")
         elif change_1h is not None and change_1h >= 50:
             flags.append("SHARP_1H_PUMP")
         score = _score(age, liquidity, volume_24h, buys, sells, None, None, change_1h, ratio)
+        if honeypot_suspect or low_volume_liquidity:
+            score = 0.0
         candidates.append({
             "asset": f"{network}:{token_address}",
             "chain": network,
@@ -405,7 +428,12 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
             "sources": [source],
             "discovery_priority_score": score,
             "score_semantics": "Limited secondary-source discovery ordering only; not a probability, safety score, or trade signal.",
-            "candidate_status": "UNSCREENED" if score is not None and price is not None and price > 0 and liquidity is not None and liquidity > 0 else "UNKNOWN",
+            "candidate_status": (
+                "HONEYPOT_SUSPECT" if honeypot_suspect else
+                "REJECTED" if low_volume_liquidity else
+                "UNSCREENED" if score is not None and price is not None and price > 0
+                and liquidity is not None and liquidity > 0 else "UNKNOWN"
+            ),
             "trade_authorization": "NO_TRADE",
             "risk_flags": flags,
             "evidence_caveat": "Limited DexPaprika recovery sample; keyless coverage may omit pools younger than one hour and the sample is not complete new-pool coverage. Independent contract, holder and execution checks have not run.",
