@@ -22,7 +22,7 @@ from .models import AssetSpec, GateStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
-from .gem_hunter_qualification import public_buy_candidates
+from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .providers import _ohlcv_frame
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -87,7 +87,7 @@ GEM_HUNTER_CACHE_LOCK = threading.Lock()
 
 
 def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
-    """Cache discovery internally but expose only evidence-complete BUY candidates."""
+    """Return strict BUYs plus aggregate-only diagnostics for every pipeline stage."""
     limit = max(1, min(int(limit), 50))
     with GEM_HUNTER_CACHE_LOCK:
         now = time.monotonic()
@@ -99,22 +99,105 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
             ttl = GEM_HUNTER_CACHE_TTL_SECONDS if cached.get("status") == "PASS" else 90
             GEM_HUNTER_CACHE["expires_at"] = time.monotonic() + ttl
         result = copy.deepcopy(cached)
-    # Raw discovery candidates stay server-side: this endpoint is a BUY shortlist,
-    # not a feed of rejected, unknown or unscreened tokens.
-    qualified = public_buy_candidates(result.get("candidates"), limit=limit)
+
+    # Discovery records are deliberately never exposed by this public endpoint.
+    # Count evaluation records without assuming that discovery itself is a
+    # qualification engine or that an incomplete record is a completed evaluation.
+    raw_candidates = result.get("candidates")
+    raw_candidates = raw_candidates if isinstance(raw_candidates, list) else []
+    discovered_count = len(raw_candidates)
+    evaluation_records = [
+        item.get("qualification")
+        for item in raw_candidates
+        if isinstance(item, dict) and isinstance(item.get("qualification"), dict)
+    ]
+    complete_evaluation_count = 0
+    for qualification in evaluation_records:
+        filters = qualification.get("filters")
+        critical = qualification.get("critical_gates")
+        metrics = qualification.get("market_metrics")
+        sources = qualification.get("market_data_sources")
+        whale_evidence = qualification.get("whale_evidence")
+        complete = (
+            qualification.get("schema_version") == SCHEMA_VERSION
+            and qualification.get("decision") in {"BUY", "NO_TRADE", "REJECT"}
+            and qualification.get("market_type") == "SPOT"
+            and isinstance(filters, dict)
+            and set(filters) == set(FILTER_IDS)
+            and all(value in {"PASS", "FAIL", "UNKNOWN"} for value in filters.values())
+            and isinstance(critical, dict)
+            and all(gate in critical and critical[gate] in {"PASS", "FAIL", "UNKNOWN"}
+                    for gate in CRITICAL_GATES)
+            and isinstance(metrics, dict)
+            and bool(qualification.get("data_as_of_utc"))
+            and isinstance(sources, list)
+            and len({str(value).strip() for value in sources if str(value).strip()}) >= 2
+            and isinstance(whale_evidence, dict)
+        )
+        if complete:
+            complete_evaluation_count += 1
+
+    evaluation_record_count = len(evaluation_records)
+    unassessed_count = max(0, discovered_count - evaluation_record_count)
+    incomplete_evaluation_count = max(0, evaluation_record_count - complete_evaluation_count)
+    qualified = public_buy_candidates(raw_candidates, limit=limit)
+
+    if qualified:
+        signal_status = "BUY_FOUND"
+        diagnostic_fa = f"{len(qualified)} فرصت BUY با شواهد کامل تأیید شد."
+        engine_status = "COMPLETE"
+    elif discovered_count == 0:
+        if result.get("status") == "PASS":
+            signal_status = "NO_DISCOVERY_CANDIDATES"
+            diagnostic_fa = "منابع کشف پاسخ موفق داده‌اند، اما در این دریافت هیچ نامزدی برنگشته است."
+        else:
+            signal_status = "DISCOVERY_FEED_DEGRADED"
+            diagnostic_fa = "دادهٔ منابع کشف کامل نیست؛ صفر بودن خروجی را نمی‌توان به معنی نبود فرصت بازار دانست."
+        engine_status = "NO_CANDIDATES"
+    elif evaluation_record_count == 0:
+        signal_status = "EVALUATION_NOT_CONFIGURED"
+        diagnostic_fa = (
+            f"{discovered_count} نامزد کشف شد، اما برای هیچ‌کدام پروندهٔ ارزیابی ۱۲ فیلتر و ۴ گیت ساخته نشده است؛ "
+            "بنابراین هنوز نمی‌توان گفت این کوین‌ها رد شده‌اند یا واجد BUY هستند."
+        )
+        engine_status = "NOT_WIRED"
+    elif complete_evaluation_count < discovered_count:
+        signal_status = "EVALUATION_INCOMPLETE"
+        diagnostic_fa = (
+            f"{discovered_count} نامزد کشف شد؛ {complete_evaluation_count} پروندهٔ ارزیابی کامل، "
+            f"{incomplete_evaluation_count} پروندهٔ ناقص و {unassessed_count} نامزدِ ارزیابی‌نشده وجود دارد. "
+            "تا تکمیل شواهد، هیچ سیگنال BUY صادر نمی‌شود."
+        )
+        engine_status = "INCOMPLETE"
+    else:
+        signal_status = "NO_QUALIFIED_BUY"
+        diagnostic_fa = (
+            f"هر {complete_evaluation_count} نامزد پروندهٔ ارزیابی کامل دارد، اما هیچ‌کدام تمام شروط BUY را نگذرانده‌اند."
+        )
+        engine_status = "COMPLETE"
+
     result.pop("trade_authorization", None)
     result.pop("available_candidate_count", None)
     result["candidates"] = qualified
     result["candidate_count"] = len(qualified)
+    result["discovered_candidate_count"] = discovered_count
+    result["evaluation_record_count"] = evaluation_record_count
+    result["complete_evaluation_count"] = complete_evaluation_count
+    result["incomplete_evaluation_count"] = incomplete_evaluation_count
+    result["unassessed_candidate_count"] = unassessed_count
     result["qualified_buy_count"] = len(qualified)
-    result["signal_status"] = "BUY_FOUND" if qualified else "NO_QUALIFIED_BUY"
+    result["qualification_engine_status"] = engine_status
+    result["signal_status"] = signal_status
+    result["diagnostic_fa"] = diagnostic_fa
     result["public_policy"] = {
-        "qualification_schema": "gem-hunter-v1",
+        "qualification_schema": SCHEMA_VERSION,
         "minimum_passed_filters": 9,
-        "total_filters": 12,
+        "total_filters": len(FILTER_IDS),
         "minimum_opportunity_score": 80,
-        "critical_gates": ["security", "liquidity", "data_quality", "exit"],
+        "critical_gates": list(CRITICAL_GATES),
         "unknown_or_incomplete_candidates_hidden": True,
+        "discovery_candidates_exposed": False,
+        "aggregate_pipeline_diagnostics_exposed": True,
     }
     return result
 
@@ -1061,13 +1144,32 @@ class Handler(BaseHTTPRequestHandler):
               const data = await response.json();
               if (!response.ok) throw new Error(data.error || 'Discovery request failed');
               const items = data.candidates || [];
-              status.textContent = items.length
-                ? 'فرصت‌های BUY تأییدشده: ' + items.length + ' · وضعیت منابع کشف: ' + data.status
-                : 'در این اسکن هیچ فرصت خریدی تمام استانداردها را نگذرانده است.';
+              const discovered = Number(data.discovered_candidate_count || 0);
+              const evaluated = Number(data.evaluation_record_count || 0);
+              const complete = Number(data.complete_evaluation_count || 0);
+              status.textContent =
+                'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' + evaluated +
+                ' · ارزیابی کامل: ' + complete + ' · BUY تأییدشده: ' + items.length;
               if (!items.length) {
-                const message = cell('p','در حال حاضر فرصت خرید معتبر پیدا نشد. نامزدهای فاقد دادهٔ کامل، ردشده یا تأییدنشده در این فهرست نمایش داده نمی‌شوند.');
+                const message = cell('p', data.diagnostic_fa ||
+                  'سیگنال BUY صادر نشد؛ وضعیت منابع و مراحل ارزیابی را بررسی کنید.');
                 message.className = 'muted';
-                results.replaceChildren(message);
+                const counts = cell('p',
+                  'کشف: ' + discovered + ' | دارای پروندهٔ ارزیابی: ' + evaluated +
+                  ' | ارزیابی کامل: ' + complete + ' | ارزیابی ناقص: ' +
+                  Number(data.incomplete_evaluation_count || 0) + ' | ارزیابی‌نشده: ' +
+                  Number(data.unassessed_candidate_count || 0));
+                counts.className = 'muted';
+                const diagnostics = document.createElement('details');
+                diagnostics.appendChild(cell('summary', 'وضعیت منابع داده'));
+                const sourceList = document.createElement('ul');
+                Object.entries(data.sources || {}).forEach(([name, source]) => {
+                  const reason = source && source.reason ? ' · ' + source.reason : '';
+                  sourceList.appendChild(cell('li', name + ': ' +
+                    ((source && source.status) || 'UNKNOWN') + reason));
+                });
+                diagnostics.appendChild(sourceList);
+                results.replaceChildren(message, counts, diagnostics);
                 return;
               }
               const table = document.createElement('table');
