@@ -1401,10 +1401,10 @@ class Handler(BaseHTTPRequestHandler):
             details.appendChild(el('p', 'منابع داده: ' + (Array.isArray(q.market_data_sources) ? q.market_data_sources.join(', ') : 'نامشخص') + ' · زمان ارزیابی UTC: ' + (q.data_as_of_utc || 'نامشخص')));
             details.appendChild(el('p', 'پرچم‌های ریسک کشف: ' + ((item.risk_flags || []).join('، ') || 'موردی گزارش نشده است.')));
             const whale = q.whale_evidence || {};
+            const whaleEvents = Array.isArray(whale.events) ? whale.events : [];
             details.appendChild(el('p', 'وضعیت شواهد Swap نهنگ: ' + (whale.status || 'UNKNOWN') +
               ' · پوشش: ' + (whale.coverage_status || 'UNKNOWN') + ' · خریداران مستقل: ' +
-              (whale.independent_buy_wallets ?? 0) + ' · توضیح: ' + ((whaleEvents.length ? 'رویدادهای ثبت‌شده در فهرست زیر آمده‌اند.' : 'تاریخچهٔ قابل‌ردیابی Swap نهنگ‌ها به منبع داده متصل نیست.'))));
-            const whaleEvents = Array.isArray(whale.events) ? whale.events : [];
+              (whale.independent_buy_wallets ?? 0) + ' · توضیح: ' + (whaleEvents.length ? 'رویدادهای ثبت‌شده در فهرست زیر آمده‌اند.' : 'تاریخچهٔ قابل‌ردیابی Swap نهنگ‌ها به منبع داده متصل نیست.')));
             if (whaleEvents.length) {
               const eventList = document.createElement('ul');
               whaleEvents.forEach(event => {
