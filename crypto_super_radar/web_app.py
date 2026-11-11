@@ -1754,7 +1754,7 @@ class Handler(BaseHTTPRequestHandler):
             watchForm.reset();
           });
           renderWatchlist();
-          const renderPendingReport = data => {{
+          const renderPendingReport = data => {
             const pendingCandidates = (data.diagnostic_candidates || [])
               .filter(item => item && item.trade_authorization !== 'BUY');
             const discovered = Number(data.discovered_candidate_count || pendingCandidates.length || 0);
@@ -1767,42 +1767,42 @@ class Handler(BaseHTTPRequestHandler):
                 : 'این‌ها نامزدهای اسکن جاری‌اند؛ مرحلهٔ تطبیق بازار و غربال امنیت هنوز کامل نشده است.',
               'muted'));
             results.replaceChildren(summary);
-            if (pendingCandidates.length) {{
+            if (pendingCandidates.length) {
               results.appendChild(el('h3', isStale
                 ? 'آخرین نامزدهای کشف‌شده · دادهٔ قدیمی'
                 : 'نامزدهای کشف‌شده · در انتظار اعتبارسنجی'));
               const list = document.createElement('div'); list.className = 'gem-report-list';
               pendingCandidates.forEach(item => list.appendChild(renderCandidate(item)));
               results.appendChild(list);
-            }} else {{
+            } else {
               results.appendChild(el('p', discovered
                 ? discovered + ' نامزد پیدا شده؛ جزئیات آن هنوز به پاسخ گزارش نرسیده است.'
                 : 'هنوز نامزدی دریافت نشده است؛ به‌محض پایان مرحلهٔ کشف، فهرست در همین‌جا ظاهر می‌شود.',
                 'muted'));
-            }}
+            }
             results.appendChild(el('p',
               'هیچ سیگنال BUY از دادهٔ ناقص یا منقضی صادر نمی‌شود.',
               'candidate-meta'));
-          }};
-          button.addEventListener('click', async () => {{
+          };
+          button.addEventListener('click', async () => {
             button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت نامزدها و ساخت گزارش فارسی ۱۲ فیلتر و ۴ گیت...'));
             status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
-            try {{
+            try {
               let data = null;
-              for (let attempt = 0; attempt < 180; attempt += 1) {{
-                const response = await fetch('/api/gem-hunter/report?limit=50', {{cache:'no-store'}});
+              for (let attempt = 0; attempt < 180; attempt += 1) {
+                const response = await fetch('/api/gem-hunter/report?limit=50', {cache:'no-store'});
                 data = await response.json();
                 if (!response.ok) throw new Error(data.error || 'Discovery report failed');
                 if (!data.refreshing) break;
                 status.textContent = 'اسکن در پس‌زمینه ادامه دارد... (' + (attempt + 1) + '/180)';
                 renderPendingReport(data);
                 await new Promise(resolve => setTimeout(resolve, 2000));
-              }}
-              if (data && data.refreshing) {{
+              }
+              if (data && data.refreshing) {
                 status.textContent = 'اسکن هنوز ادامه دارد؛ نامزدهای پیدا‌شده در همین پنل نمایش داده می‌شوند. برای دریافت نتیجهٔ نهایی دوباره کلیک کن.';
                 renderPendingReport(data);
                 return;
-              }}
+              }
               const buys = data.candidates || []; const candidates = (data.diagnostic_candidates || []).filter(item => item.trade_authorization !== 'BUY');
               const discovered = Number(data.discovered_candidate_count || candidates.length || 0);
               status.textContent = 'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' +
