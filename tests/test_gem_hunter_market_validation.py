@@ -73,7 +73,11 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         validation._CACHE.clear()
         validation._SCAN_OFFSET = 0
 
-    def test_evm_addresses_are_case_insensitive_but_solana_base58_is_not(self):\n        self.assertTrue(validation._same_address("0xAbCd", "0xabcd", "base"))\n        self.assertFalse(validation._same_address("AbCd", "abcd", "solana"))\n\n    def test_matching_exact_pool_sources_pass(self):
+    def test_evm_addresses_are_case_insensitive_but_solana_base58_is_not(self):
+        self.assertTrue(validation._same_address("0xAbCd", "0xabcd", "base"))
+        self.assertFalse(validation._same_address("AbCd", "abcd", "solana"))
+
+    def test_matching_exact_pool_sources_pass(self):
         result = reconcile_candidate_market_data(candidate(), FakeHttp())
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["source_count"], 2)
