@@ -31,6 +31,10 @@ class CloudPersistenceTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 CloudStore()
 
+    def test_native_notion_status_property_is_supported(self):
+        rendered = NotionSink._property_value("status", "CLOSED")
+        self.assertEqual(rendered, {"status": {"name": "CLOSED"}})
+
     def test_sensitive_fields_are_redacted_before_persistence(self):
         safe = _json_safe({
             "api_key": "secret-value",
