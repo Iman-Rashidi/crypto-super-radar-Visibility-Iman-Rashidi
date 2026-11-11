@@ -1386,8 +1386,9 @@ class Handler(BaseHTTPRequestHandler):
             card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · نامزد مرحلهٔ کشف · ' + (item.candidate_status || 'UNKNOWN') + ' · ' + (item.trade_authorization || 'NO_TRADE'), 'candidate-meta'));
             card.appendChild(el('p', 'امتیاز اولویت پژوهشی، نه احتمال موفقیت و نه سیگنال خرید: ' + (item.discovery_priority_score ?? 'ناموجود'), 'candidate-meta'));
             const facts = document.createElement('div'); facts.className = 'gem-facts';
-            fact(facts, 'قیمت مرجع (USD)', item.price_usd);
             const reconciliation = item.market_reconciliation || q.market_reconciliation || {};
+            fact(facts, 'قیمت گزارش کشف (USD)', item.price_usd);
+            fact(facts, 'قیمت تطبیق‌شده (USD)', reconciliation.verified_price_usd ?? m.price_usd);
             fact(facts, 'نقدینگی گزارش کشف (USD)', item.liquidity_usd);
             fact(facts, 'نقدینگی تطبیق‌شده (USD)', reconciliation.verified_liquidity_usd ?? m.liquidity_usd);
             fact(facts, 'وضعیت تطبیق Pool', reconciliation.status || 'UNKNOWN');
