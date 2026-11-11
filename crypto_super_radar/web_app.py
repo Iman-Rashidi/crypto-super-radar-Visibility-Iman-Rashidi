@@ -1247,7 +1247,7 @@ class Handler(BaseHTTPRequestHandler):
               trend:'برای تشخیص روند، تاریخچهٔ معتبر قیمت در چند بازهٔ زمانی لازم است؛ عمر استخر به‌تنهایی روند نیست.',
               momentum:'فقط تغییر قیمت یک‌ساعته در دسترس است؛ برای مومنتوم پایدار، چند بازهٔ زمانی لازم است.',
               relative_strength:'مقایسهٔ بازده توکن با BTC، ETH یا شاخص بازار هنوز متصل نیست.',
-              volume_confirmation:state === 'PASS' ? 'حجم ۲۴ساعته و نسبت حجم به نقدینگی از دادهٔ تجمیعی عبور کرده‌اند؛ این به‌تنهایی حجم خرید واقعی را ثابت نمی‌کند.' : 'حجم ۲۴ساعته یا نسبت حجم به نقدینگی به حد اولیه نرسیده یا دادهٔ کافی ندارد.',
+              volume_confirmation:state === 'PASS' ? 'حجم و نسبت حجم به نقدینگی برای همین Pool در دو منبع مستقل تطبیق داده شده‌اند؛ این به‌تنهایی حجم خرید دلاری را ثابت نمی‌کند.' : state === 'FAIL' ? 'تطبیق مستقل حجم یا نقدینگی همین Pool شکست خورده است.' : 'حجم و نقدینگی همین Pool هنوز در دو منبع مستقل تطبیق داده نشده‌اند.',
               buy_sell_pressure:'سهم دلاری خرید از فروش در دسترس نیست؛ تعداد تراکنش‌ها جایگزین حجم دلاری نیست.',
               capital_flow:'جریان خالص سرمایه با انتساب مستقل کیف‌پول‌ها هنوز محاسبه نشده است.',
               whale_activity:'تاریخچهٔ قابل‌ردیابی Swapهای واقعی خرید/فروش نهنگ‌ها متصل نیست.',
@@ -1364,8 +1364,11 @@ class Handler(BaseHTTPRequestHandler):
             card.appendChild(el('p', 'امتیاز اولویت پژوهشی، نه احتمال موفقیت و نه سیگنال خرید: ' + (item.discovery_priority_score ?? 'ناموجود'), 'candidate-meta'));
             const facts = document.createElement('div'); facts.className = 'gem-facts';
             fact(facts, 'قیمت مرجع (USD)', item.price_usd);
-            fact(facts, 'نقدینگی تجمیعی (USD)', m.liquidity_usd ?? item.liquidity_usd);
-            fact(facts, 'حجم ۲۴ساعته (USD)', m.volume_24h_usd ?? item.volume_24h_usd);
+            const reconciliation = item.market_reconciliation || q.market_reconciliation || {};
+            fact(facts, 'نقدینگی گزارش کشف (USD)', item.liquidity_usd);
+            fact(facts, 'نقدینگی تطبیق‌شده (USD)', reconciliation.verified_liquidity_usd ?? m.liquidity_usd);
+            fact(facts, 'وضعیت تطبیق Pool', reconciliation.status || 'UNKNOWN');
+            fact(facts, 'حجم ۲۴ساعتهٔ تطبیق‌شده (USD)', reconciliation.verified_volume_24h_usd ?? m.volume_24h_usd ?? item.volume_24h_usd);
             fact(facts, 'حجم / نقدینگی', item.volume_to_liquidity_24h);
             fact(facts, 'تغییر قیمت ۱ساعته (%)', item.price_change_1h_pct);
             fact(facts, 'عمر استخر (ساعت)', item.pool_age_hours);
@@ -1406,6 +1409,15 @@ class Handler(BaseHTTPRequestHandler):
             });
             details.appendChild(gateGrid);
             details.appendChild(el('p', 'وضعیت پرونده: ' + (q.evaluation_status || 'INCOMPLETE') + ' · علت: شواهد مستقل امنیت، هولدرها، جریان خرید و امکان خروج هنوز کامل نشده‌اند.'));
+            details.appendChild(el('h4', 'تطبیق مستقل داده‌های بازار'));
+            const reconSources = Array.isArray(reconciliation.sources) ? reconciliation.sources : [];
+            details.appendChild(el('p', 'وضعیت: ' + (reconciliation.status || 'UNKNOWN') +
+              ' · منابع تأییدشده: ' + reconSources.map(source => source.provider || 'نامشخص').join('، ')));
+            (reconciliation.reason_fa || []).forEach(reason => details.appendChild(el('p', reason)));
+            reconSources.forEach(source => details.appendChild(el('p',
+              (source.provider || 'منبع') + ' · نقدینگی: ' + (source.liquidity_usd ?? 'ناموجود') +
+              ' USD · حجم ۲۴ساعته: ' + (source.volume_24h_usd ?? 'ناموجود') + ' USD · Pool: ' +
+              (source.pool_address || 'نامشخص'), 'candidate-meta')));
             details.appendChild(el('p', 'منابع داده: ' + (Array.isArray(q.market_data_sources) ? q.market_data_sources.join(', ') : 'نامشخص') + ' · زمان ارزیابی UTC: ' + (q.data_as_of_utc || 'نامشخص')));
             details.appendChild(el('p', 'پرچم‌های ریسک کشف: ' + ((item.risk_flags || []).join('، ') || 'موردی گزارش نشده است.')));
             const whale = q.whale_evidence || {};
