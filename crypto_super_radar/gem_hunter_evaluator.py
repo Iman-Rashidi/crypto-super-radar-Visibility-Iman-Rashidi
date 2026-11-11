@@ -56,6 +56,13 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     security_status = security_evidence.get("status")
     if security_status not in {"PASS", "FAIL"}:
         security_status = "UNKNOWN"
+    risk_flags = candidate.get("risk_flags")
+    risk_flags = risk_flags if isinstance(risk_flags, list) else []
+    honeypot_suspect = "HONEYPOT_SUSPECT" in risk_flags
+    if honeypot_suspect:
+        # This is a conservative suspicion trigger, not proof of a honeypot.
+        # It must nevertheless fail the early security gate and force NO_TRADE.
+        security_status = "FAIL"
 
     filters = {name: "UNKNOWN" for name in FILTER_IDS}
     filters["contract_security"] = security_status
