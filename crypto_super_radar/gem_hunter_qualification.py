@@ -142,6 +142,8 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
     reconciliation = candidate.get("market_reconciliation")
     if not isinstance(reconciliation, Mapping) or reconciliation.get("status") != "PASS":
         return False
+    if str(reconciliation.get("chain") or "").lower() != chain:
+        return False
     if not _valid_token_identity(chain, reconciliation.get("token_address")):
         return False
     if not _same_chain_address(chain, reconciliation.get("token_address"), candidate.get("token_address")):
@@ -158,6 +160,11 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
     } if isinstance(reconciliation_sources, list) else set()
     if not {"DEXSCREENER", "GECKOTERMINAL"}.issubset(providers):
         return False
+    if len(reconciliation_sources) != 2 or source_count != 2:
+        return False
+    if not all(isinstance(row, Mapping) and row.get("token_identity_verified") is True
+               for row in reconciliation_sources):
+        return False
     verified_liquidity = _finite_number(reconciliation.get("verified_liquidity_usd"))
     verified_volume = _finite_number(reconciliation.get("verified_volume_24h_usd"))
     if verified_liquidity is None or verified_liquidity < 50_000:
@@ -167,6 +174,10 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
 
     security_evidence = candidate.get("security_evidence")
     if not isinstance(security_evidence, Mapping) or security_evidence.get("status") != "PASS":
+        return False
+    # Current Solana RPC evidence is intentionally insufficient for BUY; only
+    # the defined Base GoPlus + Sourcify minimum screen can pass this gate.
+    if chain != "base" or security_evidence.get("provider") != "GOPLUS_SOURCIFY":
         return False
 
     qualification = candidate.get("qualification")
