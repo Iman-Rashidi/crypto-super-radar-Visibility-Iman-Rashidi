@@ -171,6 +171,12 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 0)
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
+    def test_research_priority_does_not_reward_extreme_pool_novelty(self):
+        from crypto_super_radar.gem_hunter_discovery import _score
+        young = _score(0.5, 100000, 100000, 100, 50, None, None, 4, 1.0)
+        mature = _score(48, 100000, 100000, 100, 50, None, None, 4, 1.0)
+        self.assertGreater(mature, young)
+
     def test_limit_is_bounded(self):
         result = discover_gem_candidates(FakeHttp(self.responses), limit=1000, now=self.now)
         self.assertLessEqual(result["candidate_count"], 50)
