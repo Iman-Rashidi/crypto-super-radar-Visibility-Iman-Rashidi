@@ -255,6 +255,9 @@ class CloudStore:
                     break
                 except ValueError:
                     pass
+        payload["timestamp"] = occurred_at.isoformat()
+        payload["pnl_usd"] = payload.get("net_pnl_usd", payload.get("pnl_usd"))
+        payload["pnl_pct"] = payload.get("pnl_pct", payload.get("pnl_percent"))
         record = {
             "trade_id": trade_id, "occurred_at": occurred_at,
             "symbol": _clean_text(payload.get("symbol") or payload.get("asset") or "", 80) or None,
@@ -277,6 +280,30 @@ class CloudStore:
         if not chain or not address:
             return False
         now = _utcnow()
+        security = payload.get("security_evidence")
+        security = security if isinstance(security, dict) else {}
+        rugcheck = security.get("rugcheck")
+        rugcheck = rugcheck if isinstance(rugcheck, dict) else {}
+        flags = payload.get("risk_flags")
+        flags = flags if isinstance(flags, list) else []
+        payload["holder_count"] = (
+            security.get("holder_count") if security.get("holder_count") is not None
+            else rugcheck.get("holder_count")
+        )
+        payload["lp_locked"] = (
+            security.get("lp_locked") if security.get("lp_locked") is not None
+            else rugcheck.get("lp_locked")
+        )
+        payload["honeypot_status"] = (
+            "HONEYPOT_SUSPECT" if "HONEYPOT_SUSPECT" in flags else
+            "HONEYPOT" if rugcheck.get("honeypot") is True else
+            "NOT_FLAGGED" if rugcheck.get("honeypot") is False else "UNKNOWN"
+        )
+        payload["screening_status"] = (
+            payload.get("candidate_status") or payload.get("trade_authorization") or "UNKNOWN"
+        )
+        payload["security_json"] = security
+        payload["discovered_at"] = now.isoformat()
         minute = now.replace(second=0, microsecond=0).isoformat()
         snapshot_id = "tok-" + hashlib.sha256(
             f"{chain}:{address}:{minute}".encode("utf-8")
@@ -504,6 +531,8 @@ class NotionSink:
             "volume_24h": ("volume_24h_usd",),
             "liquidity": ("liquidity_usd",),
             "volume_liquidity": ("volume_to_liquidity_24h",),
+            "research_score": ("discovery_priority_score",),
+            "screening_status": ("candidate_status", "trade_authorization"),
             "honeypot_status": ("honeypot_status", "candidate_status"),
             "holders": ("holder_count", "holders_count", "top10_holder_pct"),
             "details_json": ("details", "payload"),
