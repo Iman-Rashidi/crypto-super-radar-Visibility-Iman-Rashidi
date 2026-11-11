@@ -160,7 +160,7 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
     } if isinstance(reconciliation_sources, list) else set()
     if not {"DEXSCREENER", "GECKOTERMINAL"}.issubset(providers):
         return False
-    if len(reconciliation_sources) != 2 or source_count != 2:
+    if not isinstance(reconciliation_sources, list) or len(reconciliation_sources) != 2 or source_count != 2:
         return False
     if not all(isinstance(row, Mapping) and row.get("token_identity_verified") is True
                for row in reconciliation_sources):
