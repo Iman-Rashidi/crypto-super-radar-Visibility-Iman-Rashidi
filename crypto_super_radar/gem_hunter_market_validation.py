@@ -62,7 +62,7 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
             continue
         liquidity = _number((pair.get("liquidity") or {}).get("usd"))
         volume = _number((pair.get("volume") or {}).get("h24"))
-        price = _number(pair.get("priceUsd")) if _same_address(base.get("address"), token) else None
+        price = _number(pair.get("priceUsd")) if _same_address(base.get("address"), token, chain) else None
         matches.append({
             "provider": "DEXSCREENER",
             "pool_address": pair.get("pairAddress"),
@@ -103,12 +103,12 @@ def _gecko_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
     quote = included.get(quote_id, {})
     base_address = base.get("address")
     quote_address = quote.get("address")
-    if not (_same_address(base_address, token) or _same_address(quote_address, token)):
+    if not (_same_address(base_address, token, chain) or _same_address(quote_address, token, chain)):
         raise LookupError("GeckoTerminal pool does not prove the requested token identity")
     returned_pool = attrs.get("address")
     if not _same_address(returned_pool, pool, chain):
         raise LookupError("GeckoTerminal did not prove the exact requested pool address")
-    price_key = "base_token_price_usd" if _same_address(base_address, token) else "quote_token_price_usd"
+    price_key = "base_token_price_usd" if _same_address(base_address, token, chain) else "quote_token_price_usd"
     price = _number(attrs.get(price_key))
     return {
         "provider": "GECKOTERMINAL",
