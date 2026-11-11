@@ -18,6 +18,8 @@ _CACHE_LOCK = threading.RLock()
 _DEX_CACHE: dict[str, tuple[float, Any]] = {}
 _CG_OI_CACHE: dict[str, tuple[float, Any]] = {}
 _CG_FUNDING_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
+_CG_WHALE_ALERT_CACHE: dict[str, tuple[float, Any]] = {}
+_CG_WHALE_POSITION_CACHE: dict[str, tuple[float, Any]] = {}
 _CACHE_KEY_LOCKS: dict[str, threading.Lock] = {}
 _CACHE_KEY_LOCKS_GUARD = threading.Lock()
 
@@ -223,6 +225,159 @@ def _coinglass_data(symbol: Optional[str], http) -> dict:
         }
 
 
+
+def _coinglass_whale_data(symbol: Optional[str], http) -> dict:
+    """Fetch Hyperliquid whale alerts and current >$1m positions.
+
+    This is derivatives-position intelligence for Hyperliquid only. It is not
+    a general EVM/Solana wallet-transfer indexer and does not infer identity.
+    """
+    api_key = os.getenv("COINGLASS_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "status": "NOT_CONFIGURED",
+            "reason": "COINGLASS_API_KEY is not configured; Startup plan or higher is required.",
+            "alerts_status": "NOT_CONFIGURED",
+            "positions_status": "NOT_CONFIGURED",
+            "alerts": [], "positions": [],
+        }
+    if not symbol:
+        return {
+            "status": "NO_SYMBOL",
+            "reason": "No supported coin symbol is available for Hyperliquid whale filtering.",
+            "alerts_status": "NOT_REQUESTED",
+            "positions_status": "NOT_REQUESTED",
+            "alerts": [], "positions": [],
+        }
+
+    headers = {"CG-API-KEY": api_key, "accept": "application/json"}
+
+    def request(path: str):
+        payload = http.request_json(
+            "GET", f"{COINGLASS_BASE}{path}", headers=headers,
+        )
+        if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+            code = payload.get("code") if isinstance(payload, dict) else "invalid-schema"
+            raise ValueError(f"CoinGlass API business code {code}")
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise ValueError("CoinGlass whale endpoint returned a non-list data field")
+        return data
+
+    alerts_rows = None
+    positions_rows = None
+    alerts_error = None
+    positions_error = None
+    try:
+        alerts_rows = _cached(
+            _CG_WHALE_ALERT_CACHE, "all", 20.0,
+            lambda: request("/api/hyperliquid/whale-alert"),
+        )
+    except Exception as exc:
+        alerts_error = f"{type(exc).__name__}"
+    try:
+        positions_rows = _cached(
+            _CG_WHALE_POSITION_CACHE, "all", 20.0,
+            lambda: request("/api/hyperliquid/whale-position"),
+        )
+    except Exception as exc:
+        positions_error = f"{type(exc).__name__}"
+
+    target = str(symbol).upper()
+    alerts = []
+    for row in alerts_rows or []:
+        if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != target:
+            continue
+        size = _number(row.get("position_size"))
+        action_value = _number(row.get("position_action"))
+        alerts.append({
+            "wallet": row.get("user"),
+            "symbol": target,
+            "direction": "LONG" if size is not None and size > 0 else (
+                "SHORT" if size is not None and size < 0 else "UNKNOWN"
+            ),
+            "position_size": size,
+            "position_value_usd": _positive(row.get("position_value_usd")),
+            "entry_price": _positive(row.get("entry_price")),
+            "liquidation_price": _positive(row.get("liq_price")),
+            "action": "OPEN" if action_value == 1 else "CLOSE" if action_value == 2 else "UNKNOWN",
+            "timestamp_ms": _number(row.get("create_time")),
+            "timestamp_semantics": "CoinGlass tracking-record timestamp; not guaranteed to be the actual position open/close time.",
+        })
+    alerts.sort(key=lambda item: item.get("timestamp_ms") or 0, reverse=True)
+
+    positions = []
+    long_usd = 0.0
+    short_usd = 0.0
+    long_count = short_count = 0
+    for row in positions_rows or []:
+        if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != target:
+            continue
+        size = _number(row.get("position_size"))
+        value = _positive(row.get("position_value_usd"))
+        direction = "LONG" if size is not None and size > 0 else (
+            "SHORT" if size is not None and size < 0 else "UNKNOWN"
+        )
+        if value is not None and direction == "LONG":
+            long_usd += value
+            long_count += 1
+        elif value is not None and direction == "SHORT":
+            short_usd += value
+            short_count += 1
+        positions.append({
+            "wallet": row.get("user"),
+            "symbol": target,
+            "direction": direction,
+            "position_size": size,
+            "position_value_usd": value,
+            "entry_price": _positive(row.get("entry_price")),
+            "mark_price": _positive(row.get("mark_price")),
+            "liquidation_price": _positive(row.get("liq_price")),
+            "leverage": _positive(row.get("leverage")),
+            "margin_used_usd": _positive(row.get("margin_balance")),
+            "unrealized_pnl_usd": _number(row.get("unrealized_pnl")),
+            "funding_fee_usd": _number(row.get("funding_fee")),
+            "margin_mode": row.get("margin_mode"),
+            "updated_at_ms": _number(row.get("update_time")),
+        })
+    positions.sort(key=lambda item: item.get("position_value_usd") or 0, reverse=True)
+
+    wallet_count = len({str(item.get("wallet")) for item in positions if item.get("wallet")})
+    if alerts_rows is not None and positions_rows is not None:
+        status = "KNOWN"
+    elif alerts_rows is not None or positions_rows is not None:
+        status = "PARTIAL"
+    else:
+        status = "UNAVAILABLE"
+    return {
+        "status": status,
+        "symbol": target,
+        "source": "CoinGlass Hyperliquid",
+        "minimum_position_value_usd": 1_000_000,
+        "alerts_status": "KNOWN" if alerts_rows is not None else "UNAVAILABLE",
+        "positions_status": "KNOWN" if positions_rows is not None else "UNAVAILABLE",
+        "alert_count": len(alerts),
+        "open_alert_count": sum(item["action"] == "OPEN" for item in alerts),
+        "close_alert_count": sum(item["action"] == "CLOSE" for item in alerts),
+        "position_count": len(positions),
+        "wallet_count": wallet_count,
+        "long_position_count": long_count,
+        "short_position_count": short_count,
+        "long_notional_usd": long_usd if positions_rows is not None else None,
+        "short_notional_usd": short_usd if positions_rows is not None else None,
+        "net_directional_notional_usd": (long_usd - short_usd) if positions_rows is not None else None,
+        "alerts": alerts[:20],
+        "positions": positions[:20],
+        "reason": "; ".join(
+            part for part in (
+                f"Whale alerts unavailable ({alerts_error})" if alerts_error else None,
+                f"Whale positions unavailable ({positions_error})" if positions_error else None,
+            ) if part
+        ) or None,
+        "coverage": "Hyperliquid only; positions/alerts are limited to records over $1m. Not general wallet-transfer tracking.",
+        "caveat": "CoinGlass tracking timestamps are not necessarily actual position open/close times; wallet addresses are public addresses, not verified identities.",
+    }
+
 def _market_scoring(direction: str, dex: dict, cg: dict, min_dex_liquidity: float) -> dict:
     direction = str(direction or "NONE").upper()
     confirmation = 0.0
@@ -346,6 +501,7 @@ def fetch_market_intelligence(asset, direction: str, snapshot=None, http=None, m
         }
     symbol = _coinglass_symbol(asset, dex)
     cg = _coinglass_data(symbol, http)
+    cg["whale_intelligence"] = _coinglass_whale_data(symbol, http)
     scoring = _market_scoring(direction, dex, cg, min_dex_liquidity_usd)
     source_statuses = [
         dex.get("status") == "KNOWN",
