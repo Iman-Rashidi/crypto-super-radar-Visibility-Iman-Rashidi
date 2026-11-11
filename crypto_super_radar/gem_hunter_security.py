@@ -15,6 +15,7 @@ from .evm_security import screen_evm_token
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL_SECONDS = 300.0
 _CACHE_LOCK = threading.RLock()
+_SCAN_OFFSET = 0
 
 
 def _cached(key: str):
@@ -127,18 +128,24 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
             "reason_fa": ["شبکه برای بررسی امنیت قرارداد پشتیبانی نمی‌شود."]}
 
 
-def screen_discovery_candidates(candidates: Any, data_service, *, limit: int = 10) -> list[dict]:
+def screen_discovery_candidates(candidates: Any, data_service, *, limit: int = 5) -> list[dict]:
     if not isinstance(candidates, list):
         return []
     valid = [dict(row) for row in candidates if isinstance(row, dict)]
-    bounded = max(0, min(int(limit), 10))
+    bounded = max(0, min(int(limit), 5, len(valid)))
+    global _SCAN_OFFSET
+    with _CACHE_LOCK:
+        start = (_SCAN_OFFSET % len(valid)) if valid and bounded else 0
+        if valid and bounded:
+            _SCAN_OFFSET = (start + bounded) % len(valid)
+    selected = {(start + offset) % len(valid) for offset in range(bounded)} if valid else set()
     for index, row in enumerate(valid):
-        if index < bounded:
+        if index in selected:
             row["security_evidence"] = screen_discovery_candidate(row, data_service)
         else:
             row["security_evidence"] = {
                 "status": "NOT_CHECKED_BUDGET",
                 "provider": "NOT_CHECKED",
-                "reason_fa": ["بررسی قرارداد در این نوبت به‌دلیل محدودیت درخواست API انجام نشد."],
+                "reason_fa": ["بررسی قرارداد در این نوبت به‌دلیل محدودیت درخواست API در صف بررسی بعدی قرار گرفت."],
             }
     return valid
