@@ -51,8 +51,23 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     buys = _number(candidate.get("buys_24h"))
     sells = _number(candidate.get("sells_24h"))
     change = _number(candidate.get("price_change_1h_pct"))
+    security_evidence = candidate.get("security_evidence")
+    security_evidence = security_evidence if isinstance(security_evidence, dict) else {}
+    security_status = security_evidence.get("status")
+    if security_status not in {"PASS", "FAIL"}:
+        security_status = "UNKNOWN"
 
     filters = {name: "UNKNOWN" for name in FILTER_IDS}
+    filters["contract_security"] = security_status
+    reasons = {
+        "contract_security": (
+            "بررسی حداقلی قرارداد از GoPlus و Sourcify عبور کرده است؛ این ممیزی کامل نیست."
+            if security_status == "PASS" else
+            "بررسی قرارداد یک ریسک یا اختیار حساس را شناسایی کرده است."
+            if security_status == "FAIL" else
+            "شواهد امنیت قرارداد ناقص است یا پوشش منبع برای صدور حکم کافی نیست."
+        )
+    }
     reasons = {}
 
     # GeckoTerminal exposes transaction counts, not buy/sell notional volume.
@@ -107,7 +122,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     reasons.setdefault("market_regime_validation", "No benchmark/regime validation is attached to this DEX candidate.")
 
     gates = {
-        "security": "UNKNOWN",
+        "security": security_status,
         # Aggregate liquidity is not trusted until the exact token/pool pair
         # matches across DexScreener and GeckoTerminal.
         "liquidity": (
@@ -128,7 +143,13 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     }
 
     gate_reasons = {
-        "security": "ارزیابی مستقل قرارداد، مالکیت، Honeypot و سوابق سوءاستفاده به منبع معتبر متصل نیست.",
+        "security": (
+            "بررسی حداقلی GoPlus و Sourcify عبور کرده است؛ این نتیجه ممیزی کامل یا تضمین امنیت نیست."
+            if security_status == "PASS" else
+            "منبع بررسی قرارداد ریسک امنیتی یا اختیار مدیریتی حساس گزارش کرده است."
+            if security_status == "FAIL" else
+            "امنیت قرارداد با دادهٔ فعلی قابل تأیید نیست؛ UNKNOWN."
+        ),
         "liquidity": (
             "نقدینگی و حجم Pool دقیق در دو منبع مستقل تطبیق داده شده‌اند؛ این وضعیت عمق اجرایی یا امکان خروج را اثبات نمی‌کند."
             if gates["liquidity"] == "PASS" else
@@ -193,6 +214,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "whale_evidence": whale,
         "evaluation_status": "INCOMPLETE",
         "market_reconciliation": reconciliation,
+        "security_evidence": security_evidence,
         "evaluation_reason": "Exact-pool market data is independently reconciled where available; contract security, holder ownership, notional flow, attributable whale swaps and executable exit depth still require separate evidence.",
     }
 
