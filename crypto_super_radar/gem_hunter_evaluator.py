@@ -103,6 +103,19 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "exit": "UNKNOWN",
     }
 
+    gate_reasons = {
+        "security": "ارزیابی مستقل قرارداد، مالکیت، Honeypot و سوابق سوءاستفاده به منبع معتبر متصل نیست.",
+        "liquidity": (
+            "نقدینگی تجمیعی و نسبت حجم به نقدینگی از حد اولیه عبور کرده‌اند؛ این وضعیت عمق اجرایی یا امکان خروج را اثبات نمی‌کند."
+            if gates["liquidity"] == "PASS" else
+            "نقدینگی گزارش‌شده زیر حد اولیه است."
+            if gates["liquidity"] == "FAIL" else
+            "دادهٔ نقدینگی یا نسبت حجم به نقدینگی برای ارزیابی اولیه کافی نیست."
+        ),
+        "data_quality": "فقط یک ارائه‌دهندهٔ داده در دسترس است؛ اعتبارسنجی مستقل بین چند منبع و تازگی همهٔ شواهد تکمیل نشده است.",
+        "exit": "عمق اجرایی و لغزش برای اندازهٔ سفارش مشخص نیست؛ امکان خروج قابل تأیید نیست.",
+    }
+
     # The only current discovery provider is GeckoTerminal. Multiple endpoint
     # names from one provider are not independent cross-source validation.
     sources = ["GECKOTERMINAL"]
@@ -135,6 +148,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "filters": filters,
         "filter_reasons": reasons,
         "critical_gates": gates,
+        "critical_gate_reasons": gate_reasons,
         "opportunity_score": None,
         "risk_score": None,
         "data_as_of_utc": now.isoformat().replace("+00:00", "Z"),
