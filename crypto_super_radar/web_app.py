@@ -895,12 +895,23 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
         "PASS" if complete and all(item.get("status") == "PASS" for item in items[:total])
         else "PARTIAL" if complete else "LOADING"
     )
+    # Report only venues that actually contributed to validated rows. This
+    # keeps a successful OKX fallback from being mislabeled as Bybit data.
+    sources = list(dict.fromkeys(
+        provider
+        for item in items
+        if isinstance(item, dict) and item.get("status") == "PASS"
+        for provider in (item.get("providers") or [])
+        if isinstance(provider, str) and provider.strip()
+    ))
+    if not sources:
+        sources = ["Binance Spot", "Bybit Spot"]
     return {
         "status": status,
         "freshness": "FRESH" if complete else "PARTIAL",
         "updated_at_utc": datetime.now(timezone.utc).isoformat() if items else None,
         "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
-        "sources": ["Binance Spot", "Bybit Spot"],
+        "sources": sources,
         "items": copy.deepcopy(items),
         "completed_items": min(len(items), total),
         "total_items": total,

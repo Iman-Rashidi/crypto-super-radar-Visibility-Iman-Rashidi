@@ -246,6 +246,33 @@ class FreeRegionalFallbackTests(unittest.TestCase):
         self.assertEqual(result["price"], 65000)
         self.assertEqual(http.get.call_count, 2)
 
+    def test_bybit_api_error_uses_exact_okx_instrument_and_keeps_fallback_provenance(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            {"retCode": 10001, "retMsg": "The parameters are invalid", "result": {"list": []}},
+            {"code": "0", "msg": "", "data": [
+                {"instId": "TON-USDT", "last": "1.60", "volCcy24h": "123456"}
+            ]},
+        ]
+        result = BybitProvider(http).ticker("TONUSDT")
+        self.assertEqual(result["provider"], "OKX Spot")
+        self.assertEqual(result["price"], 1.60)
+        self.assertEqual(result["volume_24h"], 123456)
+        self.assertEqual(result["raw"]["instId"], "TON-USDT")
+        self.assertIn("retCode=10001", result["fallback_reason"])
+        self.assertEqual(http.get.call_args_list[1].args[0],
+                         "https://www.okx.com/api/v5/market/ticker")
+        self.assertEqual(http.get.call_args_list[1].args[1], {"instId": "TON-USDT"})
+
+    def test_bybit_api_error_details_survive_when_okx_fallback_fails(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            {"retCode": 170121, "retMsg": "Invalid symbol", "result": {"list": []}},
+            {"code": "51001", "msg": "Instrument ID does not exist", "data": []},
+        ]
+        with self.assertRaisesRegex(DataProviderError, "retCode=170121.*Invalid symbol"):
+            BybitProvider(http).ticker("TONUSDT")
+
     def test_binance_perpetual_access_denial_uses_public_gate_ticker(self):
         http = MagicMock()
         http.get.side_effect = [

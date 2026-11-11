@@ -235,43 +235,120 @@ class BinanceProvider:
 
 class BybitProvider:
     BASE = "https://api.bybit.com"
+    OKX = "https://www.okx.com/api/v5"
 
     def __init__(self, http: PublicHttpClient):
         self.http = http
 
-    def ticker(self, symbol: str) -> Dict[str, float]:
+    @staticmethod
+    def _okx_instrument(symbol: str) -> str:
+        """Map a USDT-quoted symbol to the exact OKX spot instrument; never guess other quotes."""
+        normalized = str(symbol).upper()
+        if not normalized.endswith("USDT") or len(normalized) <= 4:
+            raise DataProviderError(
+                f"OKX spot fallback supports only explicit USDT-quoted symbols: {symbol}"
+            )
+        return f"{normalized[:-4]}-USDT"
+
+    def ticker(self, symbol: str) -> Dict[str, Any]:
         try:
             return self._bybit_ticker(symbol)
         except DataProviderError as exc:
-            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+            message = str(exc)
+            fallback_eligible = (
+                "HTTP 403" in message
+                or "HTTP 451" in message
+                or "Bybit API retCode=" in message
+                or "Bybit has no spot ticker" in message
+            )
+            if not fallback_eligible:
                 raise
-            # Free public fallback after an access denial; no proxy or private key.
-            instrument = f"{symbol[:-4]}-{symbol[-4:]}"
-            payload = self.http.get("https://www.okx.com/api/v5/market/ticker", {"instId": instrument})
-            if not isinstance(payload, dict) or payload.get("code") != "0":
-                raise DataProviderError(f"OKX spot fallback returned an API error for {symbol}") from exc
-            items = payload.get("data")
-            if not isinstance(items, list) or len(items) != 1:
-                raise DataProviderError(f"OKX spot fallback has no unique ticker for {symbol}") from exc
-            item = items[0]
-            price, volume = _positive_float(item.get("last")), _safe_float(item.get("volCcy24h"))
-            if price is None or volume is None:
-                raise DataProviderError(f"OKX spot fallback returned incomplete ticker for {symbol}") from exc
-            return {"price": price, "volume_24h": volume, "raw": item, "provider": "OKX Spot"}
 
-    def _bybit_ticker(self, symbol: str) -> Dict[str, float]:
-        payload = self.http.get(f"{self.BASE}/v5/market/tickers", {"category": "spot", "symbol": symbol})
-        if not isinstance(payload, dict) or payload.get("retCode") not in (0, "0"):
-            raise DataProviderError(f"Bybit spot ticker returned an API error for {symbol}")
-        items = ((payload.get("result") or {}).get("list") or [])
-        if not isinstance(items, list) or not items:
-            raise DataProviderError(f"Bybit has no spot ticker for {symbol}")
+            instrument = self._okx_instrument(symbol)
+            try:
+                payload = self.http.get(
+                    f"{self.OKX}/market/ticker", {"instId": instrument}
+                )
+                if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+                    code = payload.get("code") if isinstance(payload, dict) else "INVALID_SCHEMA"
+                    detail = payload.get("msg") if isinstance(payload, dict) else None
+                    raise DataProviderError(
+                        f"OKX spot fallback API error code={code!r} msg={detail!r} for {instrument}"
+                    )
+                items = payload.get("data")
+                if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+                    raise DataProviderError(
+                        f"OKX spot fallback returned no unique ticker for {instrument}"
+                    )
+                item = items[0]
+                returned_instrument = item.get("instId")
+                if returned_instrument and returned_instrument != instrument:
+                    raise DataProviderError(
+                        f"OKX spot fallback instrument mismatch: expected {instrument}, "
+                        f"received {returned_instrument}"
+                    )
+                price = _positive_float(item.get("last"))
+                volume = _safe_float(item.get("volCcy24h"))
+                if price is None or volume is None:
+                    raise DataProviderError(
+                        f"OKX spot fallback returned incomplete ticker for {instrument}"
+                    )
+                return {
+                    "price": price,
+                    "volume_24h": volume,
+                    "raw": item,
+                    "provider": "OKX Spot",
+                    "fallback_reason": message[:240],
+                }
+            except DataProviderError as fallback_error:
+                raise DataProviderError(
+                    f"Bybit spot unavailable ({message}); OKX fallback failed: {fallback_error}"
+                ) from fallback_error
+
+    def _bybit_ticker(self, symbol: str) -> Dict[str, Any]:
+        payload = self.http.get(
+            f"{self.BASE}/v5/market/tickers",
+            {"category": "spot", "symbol": symbol},
+        )
+        if not isinstance(payload, dict):
+            raise DataProviderError(
+                f"Bybit spot ticker returned an invalid response schema for {symbol}"
+            )
+        ret_code = payload.get("retCode", "MISSING")
+        if str(ret_code) != "0":
+            ret_msg = payload.get("retMsg", "MISSING")
+            raise DataProviderError(
+                f"Bybit API retCode={ret_code!r} retMsg={ret_msg!r} for spot ticker {symbol}"
+            )
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise DataProviderError(
+                f"Bybit spot ticker response omitted result object for {symbol}"
+            )
+        items = result.get("list")
+        if not isinstance(items, list):
+            raise DataProviderError(
+                f"Bybit spot ticker response omitted list for {symbol}"
+            )
+        if not items:
+            raise DataProviderError(
+                f"Bybit has no spot ticker for {symbol} (retCode=0, retMsg={payload.get('retMsg')!r})"
+            )
+        if len(items) != 1 or not isinstance(items[0], dict):
+            raise DataProviderError(
+                f"Bybit returned a non-unique spot ticker response for {symbol}"
+            )
         item = items[0]
-        p = _positive_float(item.get("lastPrice"))
-        vol = _safe_float(item.get("turnover24h"))
-        if p is None or vol is None:
+        returned_symbol = item.get("symbol")
+        if returned_symbol and returned_symbol != symbol:
+            raise DataProviderError(
+                f"Bybit spot ticker symbol mismatch: expected {symbol}, received {returned_symbol}"
+            )
+        price = _positive_float(item.get("lastPrice"))
+        volume = _safe_float(item.get("turnover24h"))
+        if price is None or volume is None:
             raise DataProviderError(f"Bybit returned incomplete ticker for {symbol}")
-        return {"price": p, "volume_24h": vol, "raw": item}
+        return {"price": price, "volume_24h": volume, "raw": item}
 
     def candles(self, symbol: str, interval: str = "D", limit: int = 365) -> pd.DataFrame:
         payload = self.http.get(f"{self.BASE}/v5/market/kline", {"category": "spot", "symbol": symbol, "interval": interval, "limit": min(limit, 1000)})

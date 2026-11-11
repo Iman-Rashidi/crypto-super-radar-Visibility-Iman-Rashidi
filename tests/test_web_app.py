@@ -173,6 +173,21 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(eth["status"], "UNKNOWN")
         self.assertIn("public source unavailable", eth["reason"])
 
+    def test_market_board_lists_actual_cross_validated_provider_names(self):
+        board = web_app._market_board_payload(
+            [
+                {"symbol": "TONUSDT", "status": "PASS",
+                 "providers": ["Binance Spot", "OKX Spot"]},
+                {"symbol": "BTCUSDT", "status": "PASS",
+                 "providers": ["Binance Spot", "Bybit Spot"]},
+            ],
+            refreshing=False,
+        )
+        self.assertEqual(
+            board["sources"],
+            ["Binance Spot", "OKX Spot", "Bybit Spot"],
+        )
+
     def test_stale_daily_candles_are_unknown_even_when_hourly_ranges_are_fresh(self):
         gate = SimpleNamespace(
             gate_id=1, status=web_app.GateStatus.PASS,
