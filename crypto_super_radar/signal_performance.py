@@ -1,0 +1,136 @@
+"""Cost-aware performance analytics for the paper-trading ledger.
+
+Metrics are descriptive only. A minimum sample threshold prevents a handful of
+trades from being presented as evidence of a durable trading edge.
+"""
+from __future__ import annotations
+
+import math
+from typing import Any, Iterable, Mapping
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def summarize_closed_trades(
+    trades: Iterable[Mapping[str, Any]],
+    *,
+    initial_equity_usd: float = 10_000.0,
+    min_sample_size: int = 30,
+) -> dict[str, Any]:
+    """Summarize realized paper trades after recorded costs.
+
+    R-multiples are calculated only when an immutable initial stop is available.
+    Slippage is not independently attributed by the existing ledger, so it is
+    never fabricated as a separate cost field.
+    """
+    if isinstance(min_sample_size, bool) or not isinstance(min_sample_size, int) or min_sample_size < 1:
+        raise ValueError("min_sample_size must be a positive integer")
+    initial_equity = _finite(initial_equity_usd)
+    if initial_equity is None or initial_equity <= 0:
+        raise ValueError("initial_equity_usd must be positive and finite")
+
+    normalized: list[dict[str, float | None]] = []
+    invalid_rows = 0
+    for trade in trades:
+        net = _finite(trade.get("net_pnl"))
+        gross = _finite(trade.get("gross_pnl"))
+        if net is None or gross is None:
+            invalid_rows += 1
+            continue
+        entry_fee = _finite(trade.get("entry_fee"))
+        exit_fee = _finite(trade.get("exit_fee"))
+        quantity = _finite(trade.get("quantity"))
+        entry = _finite(trade.get("entry_price"))
+        initial_stop = _finite(trade.get("initial_stop_loss"))
+        fee_total = (entry_fee or 0.0) + (exit_fee or 0.0)
+        risk_usd = (
+            quantity * abs(entry - initial_stop)
+            if quantity is not None and quantity > 0
+            and entry is not None and initial_stop is not None
+            and initial_stop > 0 and entry != initial_stop
+            else None
+        )
+        normalized.append({
+            "net": net,
+            "gross": gross,
+            "fees": fee_total,
+            "risk_usd": risk_usd,
+        })
+
+    count = len(normalized)
+    if not count:
+        return {
+            "status": "INSUFFICIENT_SAMPLE",
+            "sample_size": 0,
+            "minimum_sample_size": min_sample_size,
+            "invalid_rows_excluded": invalid_rows,
+            "performance_claim_allowed": False,
+            "reason": "No valid closed paper trades are recorded yet.",
+            "slippage_attribution": "NOT_SEPARATELY_RECORDED",
+        }
+
+    wins = [row for row in normalized if row["net"] > 0]
+    losses = [row for row in normalized if row["net"] < 0]
+    gross_losses = sum(float(row["net"]) for row in losses)
+    total_net = sum(float(row["net"]) for row in normalized)
+    total_gross = sum(float(row["gross"]) for row in normalized)
+    gross_profit = sum(max(0.0, float(row["gross"])) for row in normalized)
+    total_fees = sum(float(row["fees"]) for row in normalized)
+
+    equity = initial_equity
+    peak = initial_equity
+    max_drawdown_pct = 0.0
+    for row in normalized:
+        equity += float(row["net"])
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown_pct = max(max_drawdown_pct, (peak - equity) / peak * 100.0)
+
+    r_values = [
+        float(row["net"]) / float(row["risk_usd"])
+        for row in normalized if row["risk_usd"] is not None and float(row["risk_usd"]) > 0
+    ]
+    ready = count >= min_sample_size
+    return {
+        "status": "REVIEWABLE" if ready else "INSUFFICIENT_SAMPLE",
+        "sample_size": count,
+        "minimum_sample_size": min_sample_size,
+        "invalid_rows_excluded": invalid_rows,
+        "wins": len(wins),
+        "losses": len(losses),
+        "breakeven": count - len(wins) - len(losses),
+        "win_rate_pct": round(len(wins) / count * 100.0, 4),
+        "gross_pnl_usd": round(total_gross, 8),
+        "net_pnl_usd": round(total_net, 8),
+        "net_expectancy_usd_per_trade": round(total_net / count, 8),
+        "profit_factor_net": (
+            round(sum(float(row["net"]) for row in wins) / abs(gross_losses), 6)
+            if gross_losses < 0 else None
+        ),
+        "total_recorded_fees_usd": round(total_fees, 8),
+        "fees_as_pct_of_gross_profit": (
+            round(total_fees / gross_profit * 100.0, 4) if gross_profit > 0 else None
+        ),
+        "ending_equity_usd": round(equity, 8),
+        "net_return_pct": round((equity / initial_equity - 1.0) * 100.0, 4),
+        "max_realized_drawdown_pct": round(max_drawdown_pct, 4),
+        "r_sample_size": len(r_values),
+        "net_expectancy_r": round(sum(r_values) / len(r_values), 6) if r_values else None,
+        "performance_claim_allowed": False,
+        "reason": (
+            "Descriptive paper results only; this sample is not proof of future profitability."
+            if ready else
+            f"Need at least {min_sample_size} valid closed trades before performance review."
+        ),
+        "slippage_attribution": (
+            "NOT_SEPARATELY_RECORDED; any modeled slippage embedded in fill prices cannot be isolated here."
+        ),
+    }

@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from .models import AssetSpec
 from .database import connect_database, storage_backend
+from .signal_performance import summarize_closed_trades
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -79,6 +80,7 @@ class PaperLedger:
                     entry_price REAL NOT NULL,
                     exit_price REAL NOT NULL,
                     stop_loss REAL NOT NULL,
+                    initial_stop_loss REAL NOT NULL DEFAULT 0,
                     take_profit REAL NOT NULL,
                     entry_fee REAL NOT NULL,
                     exit_fee REAL NOT NULL,
@@ -92,6 +94,13 @@ class PaperLedger:
                     UNIQUE(asset, signal_bar)
                 )
             """)
+            trade_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(paper_trades)")
+            }
+            if "initial_stop_loss" not in trade_columns:
+                self._db.execute(
+                    "ALTER TABLE paper_trades ADD COLUMN initial_stop_loss REAL NOT NULL DEFAULT 0"
+                )
             position_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(paper_positions)")
             }
@@ -267,13 +276,14 @@ class PaperLedger:
             )
             self._db.execute("""
                 INSERT INTO paper_trades
-                (asset, side, quantity, entry_price, exit_price, stop_loss, take_profit,
-                 entry_fee, exit_fee, gross_pnl, net_pnl, opened_at, closed_at,
+                (asset, side, quantity, entry_price, exit_price, stop_loss, initial_stop_loss,
+                 take_profit, entry_fee, exit_fee, gross_pnl, net_pnl, opened_at, closed_at,
                  signal_bar, confirmation_score, exit_reason)
-                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 p["asset"], p["quantity"], p["entry_price"], exit_price,
-                p["stop_loss"], p["take_profit"], p["entry_fee"], exit_fee,
+                p["stop_loss"], p.get("initial_stop_loss") or p["stop_loss"],
+                p["take_profit"], p["entry_fee"], exit_fee,
                 gross, net, p["opened_at"], int(time.time()), p["signal_bar"],
                 p["confirmation_score"], reason,
             ))
@@ -288,11 +298,19 @@ class PaperLedger:
             trades = self._db.execute(
                 "SELECT * FROM paper_trades ORDER BY closed_at DESC, id DESC LIMIT 20"
             ).fetchall()
+            all_trades = self._db.execute(
+                "SELECT * FROM paper_trades ORDER BY closed_at ASC, id ASC LIMIT 10000"
+            ).fetchall()
             realized_total = self._db.execute(
                 "SELECT COALESCE(SUM(net_pnl), 0.0) AS total FROM paper_trades"
             ).fetchone()["total"]
         cash = float(account["cash_balance"])
         initial = float(account["initial_equity"])
+        performance = summarize_closed_trades(
+            [dict(row) for row in all_trades],
+            initial_equity_usd=initial,
+            min_sample_size=30,
+        )
         open_position = dict(position) if position else None
         unrealized = 0.0
         equity = cash
@@ -317,6 +335,7 @@ class PaperLedger:
             },
             "open_position": open_position,
             "recent_trades": [dict(row) for row in trades],
+            "performance": performance,
             "storage": storage_backend(),
         }
 
