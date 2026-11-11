@@ -56,6 +56,13 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     security_status = security_evidence.get("status")
     if security_status not in {"PASS", "FAIL"}:
         security_status = "UNKNOWN"
+    risk_flags = candidate.get("risk_flags")
+    risk_flags = risk_flags if isinstance(risk_flags, list) else []
+    honeypot_suspect = "HONEYPOT_SUSPECT" in risk_flags
+    if honeypot_suspect:
+        # This is a conservative suspicion trigger, not proof of a honeypot.
+        # It must nevertheless fail the early security gate and force NO_TRADE.
+        security_status = "FAIL"
 
     filters = {name: "UNKNOWN" for name in FILTER_IDS}
     filters["contract_security"] = security_status
@@ -120,12 +127,13 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     reasons.setdefault("holder_distribution", "No independent holder balances or beneficial-owner clustering data is connected.")
     reasons.setdefault("market_regime_validation", "No benchmark/regime validation is attached to this DEX candidate.")
 
+    low_turnover = ratio is not None and ratio < 0.05
     gates = {
         "security": security_status,
-        # Aggregate liquidity is not trusted until the exact token/pool pair
-        # matches across DexScreener and GeckoTerminal.
+        # A very low 24h turnover/liquidity ratio is an explicit rejection
+        # condition, even if other sources reconcile the pool successfully.
         "liquidity": (
-            "FAIL" if reconciliation_status == "FAIL" or (
+            "FAIL" if low_turnover or reconciliation_status == "FAIL" or (
                 reported_liquidity is not None and reported_liquidity < 50_000
             )
             else "PASS" if reconciliation_status == "PASS"
@@ -152,6 +160,8 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "liquidity": (
             "نقدینگی و حجم Pool دقیق در دو منبع مستقل تطبیق داده شده‌اند؛ این وضعیت عمق اجرایی یا امکان خروج را اثبات نمی‌کند."
             if gates["liquidity"] == "PASS" else
+            "نسبت حجم ۲۴ساعته به نقدینگی کمتر از حداقل ۰٫۰۵ است."
+            if low_turnover else
             "تطبیق مستقل Pool شکست خورده یا نقدینگی تأییدشده زیر حد اولیه است."
             if gates["liquidity"] == "FAIL" else
             "تطبیق دو منبع مستقل برای همین Pool تکمیل نشده؛ نقدینگی تأییدنشده است."
@@ -231,7 +241,11 @@ def evaluate_discovery_candidates(candidates: Any, *, now: datetime | None = Non
         # qualification gate; never overwrite or upgrade it here.
         if not isinstance(row.get("qualification"), dict):
             row["qualification"] = evaluate_discovery_candidate(row, now=now)
-            row["candidate_status"] = "UNSCREENED"
+            # Preserve hard discovery-stage exclusions for downstream reporting.
+            # The qualification record remains the source of truth for trade gates.
+            existing_status = row.get("candidate_status")
+            if existing_status not in {"HONEYPOT_SUSPECT", "REJECTED"}:
+                row["candidate_status"] = "UNSCREENED"
             row["trade_authorization"] = "NO_TRADE"
         evaluated.append(row)
     return evaluated

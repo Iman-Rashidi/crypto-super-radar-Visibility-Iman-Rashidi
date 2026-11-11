@@ -213,15 +213,34 @@ class DexScreenerProvider:
 
 
 class BinanceProvider:
-    # Binance documents this host specifically for public market-data-only APIs.
+    # Binance documents data-api.binance.vision for public market-data-only calls.
+    # Alternate official Spot hosts are tried only after an explicit 403/451 denial.
     BASE = "https://data-api.binance.vision"
+    FALLBACK_BASES = (
+        BASE,
+        "https://api.binance.com",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+    )
 
     def __init__(self, http: PublicHttpClient):
         self.http = http
 
+    def _get(self, path: str, params: dict) -> Any:
+        last_error = None
+        for index, base in enumerate(self.FALLBACK_BASES):
+            try:
+                return self.http.get(f"{base}{path}", params)
+            except DataProviderError as exc:
+                last_error = exc
+                denied = "HTTP 403" in str(exc) or "HTTP 451" in str(exc)
+                if not denied or index == len(self.FALLBACK_BASES) - 1:
+                    raise
+        raise DataProviderError(f"Binance public market-data hosts unavailable: {last_error}")
+
     def ticker(self, symbol: str) -> Dict[str, float]:
-        price = self.http.get(f"{self.BASE}/api/v3/ticker/price", {"symbol": symbol})
-        stats = self.http.get(f"{self.BASE}/api/v3/ticker/24hr", {"symbol": symbol})
+        price = self._get("/api/v3/ticker/price", {"symbol": symbol})
+        stats = self._get("/api/v3/ticker/24hr", {"symbol": symbol})
         p = _positive_float(price.get("price"))
         vol = _safe_float(stats.get("quoteVolume"))
         if p is None or vol is None:
@@ -229,7 +248,10 @@ class BinanceProvider:
         return {"price": p, "volume_24h": vol, "raw": stats}
 
     def candles(self, symbol: str, interval: str = "1d", limit: int = 365) -> pd.DataFrame:
-        payload = self.http.get(f"{self.BASE}/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
+        payload = self._get(
+            "/api/v3/klines",
+            {"symbol": symbol, "interval": interval, "limit": min(limit, 1000)},
+        )
         return _ohlcv_frame(payload)
 
 

@@ -278,8 +278,36 @@ class PaperLedger:
                 p["confirmation_score"], reason,
             ))
             self._db.execute("DELETE FROM paper_positions WHERE id=1")
-        return {"asset": p["asset"], "gross_pnl_usd": gross, "net_pnl_usd": net,
-                "exit_price": exit_price, "exit_reason": reason}
+        trade_id = f"paper:{p['asset']}:{p['signal_bar']}:{int(time.time())}"
+        trade_event = {
+            "trade_id": trade_id,
+            "asset": p["asset"],
+            "symbol": p["asset"],
+            "side": "LONG",
+            "quantity": p["quantity"],
+            "entry_price": p["entry_price"],
+            "exit_price": exit_price,
+            "gross_pnl_usd": gross,
+            "net_pnl_usd": net,
+            "status": "CLOSED",
+            "opened_at_epoch": p["opened_at"],
+            "closed_at_epoch": int(time.time()),
+            "signal_bar": p["signal_bar"],
+            "confirmation_score": p["confirmation_score"],
+            "exit_reason": reason,
+        }
+        try:
+            from .cloud_persistence import get_cloud_store
+            get_cloud_store().record_trade(trade_event)
+        except Exception:
+            # Paper-ledger accounting is authoritative and must not fail because
+            # an optional reporting database or Notion integration is unavailable.
+            pass
+        return {
+            "trade_id": trade_id, "asset": p["asset"],
+            "gross_pnl_usd": gross, "net_pnl_usd": net,
+            "exit_price": exit_price, "exit_reason": reason,
+        }
 
     def state(self) -> dict[str, Any]:
         with self._lock:
