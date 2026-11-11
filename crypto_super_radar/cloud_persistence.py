@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -52,8 +53,10 @@ def _clean_text(value: Any, limit: int = 1800) -> str:
 def _json_safe(value: Any, depth: int = 0) -> Any:
     if depth > 6:
         return _clean_text(value, 500)
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
         return _clean_text(value, 1800)
     if isinstance(value, datetime):
