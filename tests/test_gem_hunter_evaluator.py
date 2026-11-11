@@ -79,6 +79,33 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["filters"]["liquidity_depth"], "UNKNOWN")
         self.assertEqual(set(result["market_data_sources"]), {"DEXSCREENER", "GECKOTERMINAL"})
 
+    def test_turnover_below_point_zero_five_fails_even_when_pool_reconciles(self):
+        item = candidate()
+        item["market_reconciliation"] = {
+            "status": "PASS",
+            "verified_liquidity_usd": 180000,
+            "verified_volume_24h_usd": 8999,
+            "verified_price_usd": 0.01,
+            "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["critical_gates"]["liquidity"], "FAIL")
+        self.assertIn("۰٫۰۵", result["critical_gate_reasons"]["liquidity"])
+        self.assertEqual(result["decision"], "NO_TRADE")
+
+    def test_batch_evaluator_preserves_hard_discovery_exclusion_statuses(self):
+        honeypot = candidate()
+        honeypot["candidate_status"] = "HONEYPOT_SUSPECT"
+        honeypot["risk_flags"] = ["HONEYPOT_SUSPECT"]
+        low_turnover = candidate()
+        low_turnover["candidate_status"] = "REJECTED"
+        low_turnover["risk_flags"] = ["LOW_VOLUME_LIQUIDITY_RATIO"]
+        results = evaluate_discovery_candidates([honeypot, low_turnover], now=NOW)
+        self.assertEqual(results[0]["candidate_status"], "HONEYPOT_SUSPECT")
+        self.assertEqual(results[0]["qualification"]["critical_gates"]["security"], "FAIL")
+        self.assertEqual(results[1]["candidate_status"], "REJECTED")
+        self.assertEqual(results[1]["qualification"]["decision"], "NO_TRADE")
+
     def test_market_data_disagreement_fails_liquidity_and_data_quality(self):
         item = candidate()
         item["market_reconciliation"] = {
