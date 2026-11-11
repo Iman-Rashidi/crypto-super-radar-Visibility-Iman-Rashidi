@@ -24,6 +24,7 @@ from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
 from .gem_hunter_evaluator import evaluate_discovery_candidates
 from .gem_hunter_market_validation import reconcile_discovery_candidates
+from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .providers import _ohlcv_frame
 
@@ -116,6 +117,9 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     # prevent an unbounded burst against public APIs; unchecked rows remain explicit.
     raw_candidates = reconcile_discovery_candidates(
         raw_candidates, getattr(ENGINE.data, "http", None),
+    )
+    raw_candidates = screen_discovery_candidates(
+        raw_candidates, ENGINE.data,
     )
     raw_candidates = evaluate_discovery_candidates(raw_candidates)
     discovered_count = len(raw_candidates)
