@@ -162,8 +162,11 @@ def evaluate_discovery_candidates(candidates: Any, *, now: datetime | None = Non
         if not isinstance(item, dict):
             continue
         row = dict(item)
-        row["qualification"] = evaluate_discovery_candidate(row, now=now)
-        row["candidate_status"] = "UNSCREENED"
-        row["trade_authorization"] = "NO_TRADE"
+        # Existing evaluator output is authoritative input to the strict public
+        # qualification gate; never overwrite or upgrade it here.
+        if not isinstance(row.get("qualification"), dict):
+            row["qualification"] = evaluate_discovery_candidate(row, now=now)
+            row["candidate_status"] = "UNSCREENED"
+            row["trade_authorization"] = "NO_TRADE"
         evaluated.append(row)
     return evaluated
