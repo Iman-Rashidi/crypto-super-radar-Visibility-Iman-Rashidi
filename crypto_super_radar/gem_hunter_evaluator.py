@@ -57,18 +57,23 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
 
     # GeckoTerminal exposes transaction counts, not buy/sell notional volume.
     # Keep that distinction explicit: transaction share is not buy-volume share.
-    if volume is not None and liquidity is not None and liquidity > 0:
+    if reconciliation_status == "FAIL":
+        filters["volume_confirmation"] = "FAIL"
+        reasons["volume_confirmation"] = "Independent exact-pool market reconciliation failed."
+    elif reconciliation_status == "PASS" and volume is not None and liquidity is not None and liquidity > 0:
         filters["volume_confirmation"] = (
             "PASS" if volume >= 100_000 and ratio is not None and 1 <= ratio <= 10
             else "FAIL"
         )
-        reasons["volume_confirmation"] = "24h pool volume and volume/liquidity ratio from discovery aggregates."
+        reasons["volume_confirmation"] = "24h volume and turnover ratio were reconciled for the exact pool across independent sources."
     else:
-        reasons["volume_confirmation"] = "Missing 24h volume or positive liquidity."
+        reasons["volume_confirmation"] = "Volume and liquidity have not been independently reconciled for the exact pool."
 
-    if liquidity is not None and liquidity < 50_000:
+    if reconciliation_status == "FAIL" or (
+        reconciliation_status == "PASS" and liquidity is not None and liquidity < 50_000
+    ):
         filters["liquidity_depth"] = "FAIL"
-        reasons["liquidity_depth"] = "Reported pool liquidity is below the minimum floor."
+        reasons["liquidity_depth"] = "Exact-pool reconciliation failed or verified pool liquidity is below the minimum floor."
     else:
         reasons["liquidity_depth"] = "Pool liquidity aggregate is not executable order-book/pool depth; depth remains UNKNOWN."
 
