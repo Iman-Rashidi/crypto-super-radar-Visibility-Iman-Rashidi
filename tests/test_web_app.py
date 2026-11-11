@@ -231,7 +231,8 @@ class WebAppHttpTests(unittest.TestCase):
         with patch.object(web_app, "discover_gem_candidates", return_value={
             "status": "PASS", "candidate_count": 2,
             "candidates": [good, bad], "trade_authorization": "NO_TRADE",
-        }):
+        }), patch.object(web_app, "reconcile_discovery_candidates", side_effect=lambda rows, http: rows), \
+             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows):
             status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
         result = json.loads(payload)
         self.assertEqual(status, 200)
@@ -258,7 +259,9 @@ class WebAppHttpTests(unittest.TestCase):
             }],
             "trade_authorization": "NO_TRADE",
         }
-        with patch.object(web_app, "discover_gem_candidates", return_value=raw):
+        with patch.object(web_app, "discover_gem_candidates", return_value=raw), \
+             patch.object(web_app, "reconcile_discovery_candidates", side_effect=lambda rows, http: rows), \
+             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows):
             status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
         result = json.loads(payload)
         self.assertEqual(status, 200)
@@ -291,7 +294,9 @@ class WebAppHttpTests(unittest.TestCase):
             }],
             "trade_authorization": "NO_TRADE",
         }
-        with patch.object(web_app, "discover_gem_candidates", return_value=raw):
+        with patch.object(web_app, "discover_gem_candidates", return_value=raw), \
+             patch.object(web_app, "reconcile_discovery_candidates", side_effect=lambda rows, http: rows), \
+             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows):
             status, _, payload = self.request("GET", "/api/gem-hunter/report?limit=50")
         result = json.loads(payload)
         self.assertEqual(status, 200)
