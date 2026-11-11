@@ -198,7 +198,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "reason": "No indexed, attributable token-lifetime swap history is connected.",
     }
     return {
-        "schema_version": "gem-hunter-v1",
+        "schema_version": "gem-hunter-v2",
         "decision": "NO_TRADE",
         "market_type": "SPOT",
         "filters": filters,
