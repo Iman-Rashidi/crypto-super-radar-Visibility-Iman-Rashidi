@@ -1171,7 +1171,7 @@ class Handler(BaseHTTPRequestHandler):
               <span class="exchange-copy"><strong>Binance</strong><span>ورود به بازار Spot ↗</span></span>
             </a>
             <a class="exchange-card" href="https://www.bybit.com/en/trade/spot" target="_blank" rel="noopener noreferrer">
-              <img class="exchange-logo" src="https://cdn.simpleicons.org/bybit/FFFFFF" alt="لوگوی Bybit" loading="lazy">
+              <img class="exchange-logo" src="https://cdn.simpleicons.org/bybit/F7A600" alt="لوگوی Bybit" loading="lazy">
               <span class="exchange-copy"><strong>Bybit</strong><span>ورود به بازار Spot ↗</span></span>
             </a>
             <a class="exchange-card" href="https://www.okx.com/en-eu/trade-spot" target="_blank" rel="noopener noreferrer">
@@ -1242,7 +1242,9 @@ class Handler(BaseHTTPRequestHandler):
           };
           const safeUrl = value => {
             try {
-              const u = new URL(String(value || ''), window.location.origin);
+              const raw = String(value || '').trim();
+              if (!/^https?:\/\//i.test(raw)) return '';
+              const u = new URL(raw);
               return ['http:', 'https:'].includes(u.protocol) ? u.href : '';
             } catch (_) { return ''; }
           };
