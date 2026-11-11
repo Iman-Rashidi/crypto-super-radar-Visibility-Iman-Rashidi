@@ -4,6 +4,7 @@ on:
     branches:
       - main
       - feature/multi-stage-confirmation-engine
+      - fix/cloud-persistence-gemhunter-safety
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
