@@ -16,23 +16,34 @@ def valid_candidate(now=NOW):
     data_as_of = (now - timedelta(seconds=120)).isoformat().replace('+00:00', 'Z')
     whale_time_a = (now - timedelta(seconds=600)).isoformat().replace('+00:00', 'Z')
     whale_time_b = (now - timedelta(seconds=540)).isoformat().replace('+00:00', 'Z')
-    wallet_a = "11111111111111111111111111111111"
-    wallet_b = "22222222222222222222222222222222"
-    tx_a = "3" * 88
-    tx_b = "4" * 88
+    wallet_a = "0x" + "3" * 40
+    wallet_b = "0x" + "4" * 40
+    tx_a = "0x" + "5" * 64
+    tx_b = "0x" + "6" * 64
     filters = {name: "PASS" for name in FILTER_IDS}
     filters["market_regime_validation"] = "UNKNOWN"
     filters["relative_strength"] = "FAIL"
     filters["momentum"] = "FAIL"
     return {
-        "chain": "solana",
-        "token_address": "61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP",
+        "chain": "base",
+        "token_address": "0x" + "1" * 40,
+        "pool_address": "0x" + "2" * 40,
+        "market_reconciliation": {
+            "status": "PASS",
+            "token_address": "0x" + "1" * 40,
+            "pool_address": "0x" + "2" * 40,
+            "source_count": 2,
+            "verified_liquidity_usd": 185000,
+            "verified_volume_24h_usd": 420000,
+            "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
+        },
+        "security_evidence": {"status": "PASS", "provider": "GOPLUS_SOURCIFY"},
         "pool_address": "PoolAddress",
         "dex": "Raydium",
         "candidate_status": "BUY",
         "trade_authorization": "BUY",
         "qualification": {
-            "schema_version": "gem-hunter-v1",
+            "schema_version": "gem-hunter-v2",
             "decision": "BUY",
             "market_type": "SPOT",
             "filters": filters,
