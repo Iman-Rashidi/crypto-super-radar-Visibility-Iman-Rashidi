@@ -79,10 +79,10 @@ def summarize_closed_trades(
 
     wins = [row for row in normalized if row["net"] > 0]
     losses = [row for row in normalized if row["net"] < 0]
-    gross_wins = sum(float(row["net"]) for row in wins)
     gross_losses = sum(float(row["net"]) for row in losses)
     total_net = sum(float(row["net"]) for row in normalized)
     total_gross = sum(float(row["gross"]) for row in normalized)
+    gross_profit = sum(max(0.0, float(row["gross"])) for row in normalized)
     total_fees = sum(float(row["fees"]) for row in normalized)
 
     equity = initial_equity
@@ -117,7 +117,7 @@ def summarize_closed_trades(
         ),
         "total_recorded_fees_usd": round(total_fees, 8),
         "fees_as_pct_of_gross_profit": (
-            round(total_fees / total_gross * 100.0, 4) if total_gross > 0 else None
+            round(total_fees / gross_profit * 100.0, 4) if gross_profit > 0 else None
         ),
         "ending_equity_usd": round(equity, 8),
         "net_return_pct": round((equity / initial_equity - 1.0) * 100.0, 4),
