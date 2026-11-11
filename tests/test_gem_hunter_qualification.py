@@ -38,8 +38,7 @@ def valid_candidate(now=NOW):
             "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
         },
         "security_evidence": {"status": "PASS", "provider": "GOPLUS_SOURCIFY"},
-        "pool_address": "PoolAddress",
-        "dex": "Raydium",
+        "dex": "Uniswap V2",
         "candidate_status": "BUY",
         "trade_authorization": "BUY",
         "qualification": {
@@ -94,6 +93,12 @@ class GemHunterQualificationTests(unittest.TestCase):
         item = valid_candidate()
         self.assertTrue(is_public_buy_candidate(item, now=NOW))
         self.assertEqual(public_buy_candidates([item], now=NOW), [item])
+
+    def test_legacy_candidate_without_v2_market_and_security_evidence_is_rejected(self):
+        item = valid_candidate()
+        item.pop("market_reconciliation")
+        item.pop("security_evidence")
+        self.assertFalse(is_public_buy_candidate(item, now=NOW))
 
     def test_current_unscreened_discovery_candidate_is_never_public(self):
         item = valid_candidate()
