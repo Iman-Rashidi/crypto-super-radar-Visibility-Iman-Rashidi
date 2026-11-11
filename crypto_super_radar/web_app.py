@@ -1415,7 +1415,7 @@ class Handler(BaseHTTPRequestHandler):
                 Number(data.complete_evaluation_count || 0) + ' | ارزیابی ناقص: ' +
                 Number(data.incomplete_evaluation_count || 0) + ' | ارزیابی‌نشده: ' +
                 Number(data.unassessed_candidate_count || 0), 'muted'));
-              const sourceDetails = document.createElement('details'); sourceDetails.appendChild(el('summary', 'سلامت منابع داده'));
+              const sourceDetails = document.createElement('details'); sourceDetails.appendChild(el('summary', 'وضعیت منابع داده'));
               const sourceList = document.createElement('ul');
               Object.entries(data.sources || {}).forEach(([name, source]) => {
                 sourceList.appendChild(el('li', name + ': ' + ((source && source.status) || 'UNKNOWN') +
