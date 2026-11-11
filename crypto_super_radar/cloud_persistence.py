@@ -33,7 +33,7 @@ except ImportError:  # Optional until DATABASE_URL is configured.
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2026-03-11")
 NOTION_BASE_URL = "https://api.notion.com/v1"
 _SECRET_RE = re.compile(
-    r"(?i)\b(api[_ -]?key|access[_ -]?token|password|secret|authorization|bearer)"
+    r"(?i)\b(api[_ -]?key|access[_ -]?token|token|password|secret|authorization|bearer)"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
 _REDACTED = "[REDACTED]"
