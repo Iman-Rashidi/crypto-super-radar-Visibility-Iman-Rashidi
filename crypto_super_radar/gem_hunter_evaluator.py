@@ -41,8 +41,21 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     reconciliation_status = reconciliation.get("status")
     reported_liquidity = _number(candidate.get("liquidity_usd"))
     reported_volume = _number(candidate.get("volume_24h_usd"))
-    verified_liquidity = _number(reconciliation.get("verified_liquidity_usd"))
-    verified_volume = _number(reconciliation.get("verified_volume_24h_usd"))
+    # Values from the reconciliation record count as verified only when its
+    # exact-pool, two-provider status is PASS. Failed/partial observations stay
+    # visible as reported values but never enter verified metrics or BUY inputs.
+    verified_price = (
+        _number(reconciliation.get("verified_price_usd"))
+        if reconciliation_status == "PASS" else None
+    )
+    verified_liquidity = (
+        _number(reconciliation.get("verified_liquidity_usd"))
+        if reconciliation_status == "PASS" else None
+    )
+    verified_volume = (
+        _number(reconciliation.get("verified_volume_24h_usd"))
+        if reconciliation_status == "PASS" else None
+    )
     liquidity = verified_liquidity if verified_liquidity is not None else reported_liquidity
     volume = verified_volume if verified_volume is not None else reported_volume
     ratio = (volume / liquidity if volume is not None and liquidity is not None and liquidity > 0
@@ -126,7 +139,8 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         # matches across DexScreener and GeckoTerminal.
         "liquidity": (
             "FAIL" if reconciliation_status == "FAIL" or (
-                reported_liquidity is not None and reported_liquidity < 50_000
+                reconciliation_status != "PASS"
+                and reported_liquidity is not None and reported_liquidity < 50_000
             )
             else "PASS" if reconciliation_status == "PASS"
             and liquidity is not None and liquidity >= 50_000
@@ -171,12 +185,21 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     sources = sorted({
         str(row.get("provider")) for row in reconciliation.get("sources", [])
         if isinstance(row, dict) and row.get("provider")
-    }) or ["GECKOTERMINAL"]
+    }) if reconciliation_status == "PASS" else []
     metrics = {
-        "price_usd": _number(reconciliation.get("verified_price_usd")) or _number(candidate.get("price_usd")),
-        "liquidity_usd": liquidity,
+        # These canonical fields are verified-only. Raw discovery observations
+        # are exposed separately so the UI cannot label them as cross-checked.
+        "price_usd": verified_price,
+        "verified_price_usd": verified_price,
+        "observed_price_usd": reported_price,
+        "price_verification_status": "PASS" if verified_price is not None and verified_price > 0 else "UNKNOWN",
+        "liquidity_usd": verified_liquidity,
+        "verified_liquidity_usd": verified_liquidity,
+        "observed_liquidity_usd": reported_liquidity,
         "reported_liquidity_usd": reported_liquidity,
-        "volume_24h_usd": volume,
+        "volume_24h_usd": verified_volume,
+        "verified_volume_24h_usd": verified_volume,
+        "observed_volume_24h_usd": reported_volume,
         "reported_volume_24h_usd": reported_volume,
         "market_reconciliation_status": reconciliation_status,
         "volume_to_liquidity_24h": ratio,

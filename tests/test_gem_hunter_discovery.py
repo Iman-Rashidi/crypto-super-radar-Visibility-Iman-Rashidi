@@ -219,7 +219,40 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         recovered = next(item for item in result["candidates"] if item["token_address"] == token)
         self.assertEqual(recovered["source"], "DEXPAPRIKA_BASE_RECOVERY")
         self.assertEqual(recovered["trade_authorization"], "NO_TRADE")
+        self.assertIsNone(recovered["pool_address"])
+        self.assertEqual(recovered["pool_id"], pool_id)
+        self.assertEqual(recovered["pool_identity_status"], "IDENTIFIER_ONLY")
         self.assertIn("younger than one hour", recovered["evidence_caveat"])
+
+    def test_dexpaprika_evm_pool_address_is_used_for_exact_pool_validation(self):
+        token = "0x" + "5" * 40
+        pool_address = "0x" + "d" * 40
+        responses = dict(self.responses)
+        responses["base_trending_pools"] = RuntimeError("HTTP 429")
+
+        class RecoveryHttp(FakeHttp):
+            def get(inner, url, params=None):
+                if url == "https://api.dexpaprika.com/networks/base/pools/search":
+                    return {"results": [{"id": pool_address, "chain": "base"}]}
+                if url.endswith("/pools/" + pool_address):
+                    return {
+                        "id": pool_address, "chain": "base", "base_token_id": token,
+                        "tokens": [
+                            {"id": token, "name": "Address Pool Token", "symbol": "APT", "decimals": 18},
+                            {"id": "0x4200000000000000000000000000000000000006", "name": "WETH", "symbol": "WETH"},
+                        ],
+                        "created_at": "2026-11-10T11:00:00Z", "dex_name": "Uniswap V3",
+                        "last_price_usd": 0.02, "liquidity_usd": 60000,
+                        "1h": {"volume_usd": 12000, "buys": 30, "sells": 10, "last_price_usd_change": 8},
+                        "24h": {"volume_usd": 120000, "buys": 200, "sells": 80},
+                    }
+                return super().get(url, params=params)
+
+        result = discover_gem_candidates(RecoveryHttp(responses), now=self.now)
+        recovered = next(item for item in result["candidates"] if item["token_address"] == token)
+        self.assertEqual(recovered["pool_id"], pool_address)
+        self.assertEqual(recovered["pool_address"], pool_address)
+        self.assertEqual(recovered["pool_identity_status"], "ADDRESS_VERIFIED")
 
     def test_dexpaprika_wrong_chain_is_not_admitted_as_base_candidate(self):
         pool_id = "0x" + "b" * 64

@@ -62,14 +62,34 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
             continue
         liquidity = _number((pair.get("liquidity") or {}).get("usd"))
         volume = _number((pair.get("volume") or {}).get("h24"))
-        price = _number(pair.get("priceUsd")) if _same_address(base.get("address"), token, chain) else None
+        base_is_token = _same_address(base.get("address"), token, chain)
+        quote_is_token = _same_address(quote.get("address"), token, chain)
+        price = None
+        price_source = None
+        if base_is_token:
+            candidate_price = _number(pair.get("priceUsd"))
+            if candidate_price is not None and candidate_price > 0:
+                price = candidate_price
+                price_source = "BASE_PRICE_USD"
+        elif quote_is_token:
+            # DexScreener priceNative is base-token units of the quote token.
+            # Derive the quote token USD price only when both inputs are valid.
+            base_price_usd = _number(pair.get("priceUsd"))
+            base_per_quote = _number(pair.get("priceNative"))
+            if (base_price_usd is not None and base_price_usd > 0
+                    and base_per_quote is not None and base_per_quote > 0):
+                derived_price = base_price_usd / base_per_quote
+                if math.isfinite(derived_price) and derived_price > 0:
+                    price = derived_price
+                    price_source = "DERIVED_QUOTE_PRICE_USD"
         matches.append({
             "provider": "DEXSCREENER",
             "pool_address": pair.get("pairAddress"),
             "token_identity_verified": True,
             "liquidity_usd": liquidity,
             "volume_24h_usd": volume,
-            "price_usd": price if price is not None and price > 0 else None,
+            "price_usd": price,
+            "price_source": price_source,
             "dex_id": pair.get("dexId"),
             "url": pair.get("url"),
         })

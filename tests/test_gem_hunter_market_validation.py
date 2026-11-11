@@ -16,7 +16,8 @@ WETH = "0x4200000000000000000000000000000000000006"
 class FakeHttp:
     def __init__(self, *, dex_liquidity=100000, gecko_liquidity=100000,
                  dex_volume=200000, gecko_volume=200000, dex_pool=POOL,
-                 dex_price="0.01", gecko_price="0.01"):
+                 dex_price="0.01", gecko_price="0.01",
+                 dex_target_side="base", dex_price_native="1"):
         self.dex_liquidity = dex_liquidity
         self.gecko_liquidity = gecko_liquidity
         self.dex_volume = dex_volume
@@ -24,6 +25,8 @@ class FakeHttp:
         self.dex_pool = dex_pool
         self.dex_price = dex_price
         self.gecko_price = gecko_price
+        self.dex_target_side = dex_target_side
+        self.dex_price_native = dex_price_native
         self.calls = []
 
     def get(self, url, params=None):
@@ -32,11 +35,20 @@ class FakeHttp:
             return [{
                 "chainId": "base",
                 "pairAddress": self.dex_pool,
-                "baseToken": {"address": TOKEN, "name": "Test", "symbol": "TST"},
-                "quoteToken": {"address": WETH, "name": "WETH", "symbol": "WETH"},
+                "baseToken": {
+                    "address": TOKEN if self.dex_target_side == "base" else WETH,
+                    "name": "Test" if self.dex_target_side == "base" else "WETH",
+                    "symbol": "TST" if self.dex_target_side == "base" else "WETH",
+                },
+                "quoteToken": {
+                    "address": WETH if self.dex_target_side == "base" else TOKEN,
+                    "name": "WETH" if self.dex_target_side == "base" else "Test",
+                    "symbol": "WETH" if self.dex_target_side == "base" else "TST",
+                },
                 "liquidity": {"usd": str(self.dex_liquidity)},
                 "volume": {"h24": str(self.dex_volume)},
                 "priceUsd": self.dex_price,
+                "priceNative": self.dex_price_native,
                 "dexId": "uniswap",
             }]
         return {
@@ -95,6 +107,14 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("MARKET_DATA_DISAGREEMENT", result["reason_codes"])
         self.assertLess(result["verified_liquidity_usd"], 1)
+
+    def test_dexscreener_quote_side_price_is_derived_from_base_usd_and_native_ratio(self):
+        snapshot = validation._dex_snapshot(
+            FakeHttp(dex_target_side="quote", dex_price="2000", dex_price_native="2000"),
+            "base", TOKEN, POOL,
+        )
+        self.assertAlmostEqual(snapshot["price_usd"], 1.0)
+        self.assertEqual(snapshot["price_source"], "DERIVED_QUOTE_PRICE_USD")
 
     def test_independent_price_disagreement_fails(self):
         result = reconcile_candidate_market_data(

@@ -49,6 +49,10 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["whale_evidence"]["events"], [])
         self.assertEqual(result["decision"], "NO_TRADE")
         self.assertEqual(result["evaluation_status"], "INCOMPLETE")
+        self.assertIsNone(result["market_metrics"]["price_usd"])
+        self.assertAlmostEqual(result["market_metrics"]["observed_price_usd"], 0.01)
+        self.assertEqual(result["market_metrics"]["price_verification_status"], "UNKNOWN")
+        self.assertEqual(result["market_data_sources"], [])
 
     def test_transaction_counts_are_not_misrepresented_as_notional_buy_share(self):
         result = evaluate_discovery_candidate(candidate(), now=NOW)
@@ -78,6 +82,21 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["filters"]["volume_confirmation"], "PASS")
         self.assertEqual(result["filters"]["liquidity_depth"], "UNKNOWN")
         self.assertEqual(set(result["market_data_sources"]), {"DEXSCREENER", "GECKOTERMINAL"})
+
+    def test_verified_liquidity_controls_floor_when_reported_value_is_just_below_floor(self):
+        item = candidate()
+        item["liquidity_usd"] = 49_999
+        item["market_reconciliation"] = {
+            "status": "PASS",
+            "verified_price_usd": 0.01,
+            "verified_liquidity_usd": 50_001,
+            "verified_volume_24h_usd": 360_000,
+            "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["critical_gates"]["liquidity"], "PASS")
+        self.assertEqual(result["market_metrics"]["liquidity_usd"], 50_001)
+        self.assertEqual(result["market_metrics"]["observed_liquidity_usd"], 49_999)
 
     def test_market_data_disagreement_fails_liquidity_and_data_quality(self):
         item = candidate()

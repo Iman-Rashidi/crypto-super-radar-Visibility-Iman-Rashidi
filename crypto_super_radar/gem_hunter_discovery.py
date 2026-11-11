@@ -276,8 +276,11 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         if not isinstance(pool, dict) or str(pool.get("chain", "")).lower() != network:
             continue
         pool_id = pool.get("id")
+        # DexPaprika pool identifiers may be an EVM pair address (20 bytes)
+        # or a bytes32 identifier (e.g. some V4 pools). Keep the latter as an
+        # identifier; it is not automatically a DexScreener/Gecko pool address.
         valid_pool_id = (
-            bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", pool_id))
+            bool(re.fullmatch(r"0x(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})", pool_id))
             if network == "base" and isinstance(pool_id, str)
             else _valid_address(network, pool_id)
         )
@@ -289,6 +292,10 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
             detail_errors += 1
             continue
         if not isinstance(detail, dict) or str(detail.get("chain", "")).lower() != network:
+            detail_errors += 1
+            continue
+        detail_pool_id = detail.get("id")
+        if detail_pool_id is not None and str(detail_pool_id) != str(pool_id):
             detail_errors += 1
             continue
         base_token_id = detail.get("base_token_id")
@@ -376,6 +383,13 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         elif change_1h is not None and change_1h >= 50:
             flags.append("SHARP_1H_PUMP")
         score = _score(age, liquidity, volume_24h, buys, sells, None, None, change_1h, ratio)
+        pool_identifier = str(detail.get("id") or pool_id)
+        reported_pool_address = detail.get("pool_address")
+        pool_address = (
+            reported_pool_address
+            if _valid_address(network, reported_pool_address)
+            else pool_identifier if _valid_address(network, pool_identifier) else None
+        )
         candidates.append({
             "asset": f"{network}:{token_address}",
             "chain": network,
@@ -383,8 +397,9 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
             "token_name": token.get("name"),
             "token_symbol": token.get("symbol"),
             "token_decimals": token.get("decimals"),
-            "pool_address": detail.get("pool_address"),
-            "pool_id": detail.get("id") or pool_id,
+            "pool_address": pool_address,
+            "pool_id": pool_identifier,
+            "pool_identity_status": "ADDRESS_VERIFIED" if pool_address else "IDENTIFIER_ONLY",
             "pool_name": f"{token.get('symbol') or token_address} / {network} pair",
             "dex": detail.get("dex_name") or pool.get("dex_name"),
             "price_usd": price if price is not None and price > 0 else None,
