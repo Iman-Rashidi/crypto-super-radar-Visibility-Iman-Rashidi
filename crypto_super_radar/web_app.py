@@ -1349,7 +1349,7 @@ class Handler(BaseHTTPRequestHandler):
           };
           const renderCandidate = item => {
             const q = item.qualification || {}; const m = q.market_metrics || {};
-            const filters = q.filters || {}; const reasons = q.filter_reasons || {}; const gates = q.critical_gates || {};
+            const filters = q.filters || {}; const gates = q.critical_gates || {};
             const card = document.createElement('article'); card.className = 'gem-candidate';
             card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
             card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · نامزد مرحلهٔ کشف · ' + (item.candidate_status || 'UNKNOWN') + ' · ' + (item.trade_authorization || 'NO_TRADE'), 'candidate-meta'));
@@ -1385,7 +1385,7 @@ class Handler(BaseHTTPRequestHandler):
             Object.keys(filterLabels).forEach(key => {
               const state = filters[key] || 'UNKNOWN'; const row = document.createElement('div'); row.className = 'gem-detail';
               row.appendChild(el('strong', filterLabels[key] + ' · ' + state, 'gem-status-' + String(state).toLowerCase()));
-              row.appendChild(el('span', filterReasonFa(key, state) + (reasons[key] ? ' | جزئیات منبع: ' + reasons[key] : '')));
+              row.appendChild(el('span', filterReasonFa(key, state)));
               filterGrid.appendChild(row);
             });
             details.appendChild(filterGrid); details.appendChild(el('h4', '۴ گیت حیاتی'));
@@ -1397,13 +1397,13 @@ class Handler(BaseHTTPRequestHandler):
               gateGrid.appendChild(row);
             });
             details.appendChild(gateGrid);
-            details.appendChild(el('p', 'وضعیت پرونده: ' + (q.evaluation_status || 'INCOMPLETE') + ' · ' + (q.evaluation_reason || 'دلیل تکمیل‌نشدن پرونده ثبت نشده است.')));
+            details.appendChild(el('p', 'وضعیت پرونده: ' + (q.evaluation_status || 'INCOMPLETE') + ' · علت: شواهد مستقل امنیت، هولدرها، جریان خرید و امکان خروج هنوز کامل نشده‌اند.'));
             details.appendChild(el('p', 'منابع داده: ' + (Array.isArray(q.market_data_sources) ? q.market_data_sources.join(', ') : 'نامشخص') + ' · زمان ارزیابی UTC: ' + (q.data_as_of_utc || 'نامشخص')));
             details.appendChild(el('p', 'پرچم‌های ریسک کشف: ' + ((item.risk_flags || []).join('، ') || 'موردی گزارش نشده است.')));
             const whale = q.whale_evidence || {};
             details.appendChild(el('p', 'وضعیت شواهد Swap نهنگ: ' + (whale.status || 'UNKNOWN') +
               ' · پوشش: ' + (whale.coverage_status || 'UNKNOWN') + ' · خریداران مستقل: ' +
-              (whale.independent_buy_wallets ?? 0) + ' · توضیح: ' + (whale.reason || 'داده‌ای متصل نیست')));
+              (whale.independent_buy_wallets ?? 0) + ' · توضیح: ' + ((whaleEvents.length ? 'رویدادهای ثبت‌شده در فهرست زیر آمده‌اند.' : 'تاریخچهٔ قابل‌ردیابی Swap نهنگ‌ها به منبع داده متصل نیست.'))));
             const whaleEvents = Array.isArray(whale.events) ? whale.events : [];
             if (whaleEvents.length) {
               const eventList = document.createElement('ul');
@@ -1412,7 +1412,7 @@ class Handler(BaseHTTPRequestHandler):
                 li.appendChild(el('span', (event.event_type || 'SWAP') + ' · ' + (event.amount_usd ?? '—') +
                   ' USD · زمان: ' + (event.timestamp_utc || event.timestamp || 'نامشخص') + ' · کیف‌پول: '));
                 const explorer = explorerBase(item.chain);
-                if (event.wallet_address) addLink(li, event.wallet_address, explorer + '/account/' + encodeURIComponent(event.wallet_address));
+                if (event.wallet_address) addLink(li, event.wallet_address, explorer + (item.chain === 'solana' ? '/account/' : '/address/') + encodeURIComponent(event.wallet_address));
                 if (event.tx_hash) {
                   li.appendChild(el('span', ' · تراکنش: '));
                   addLink(li, event.tx_hash, explorer + '/tx/' + encodeURIComponent(event.tx_hash));
