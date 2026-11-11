@@ -69,6 +69,10 @@ def candidate(liquidity=100000, volume=200000):
 
 
 class GemHunterMarketValidationTests(unittest.TestCase):
+    def setUp(self):
+        validation._CACHE.clear()
+        validation._SCAN_OFFSET = 0
+
     def test_matching_exact_pool_sources_pass(self):
         result = reconcile_candidate_market_data(candidate(), FakeHttp())
         self.assertEqual(result["status"], "PASS")
