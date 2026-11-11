@@ -95,6 +95,8 @@ class CloudStore:
             or os.getenv("CSR_DATABASE_URL", "").strip()
         )
         if not self.database_url_present:
+            if os.getenv("CSR_REQUIRE_POSTGRES", "").lower() in {"1", "true", "yes"}:
+                raise RuntimeError("CSR_REQUIRE_POSTGRES is enabled but DATABASE_URL is missing")
             return
         if create_engine is None:
             self.error = "SQLAlchemy is not installed"
@@ -410,12 +412,20 @@ class NotionSink:
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+        self._rate_lock = threading.Lock()
+        self._last_request_at = 0.0
+        self._schema_cache: dict[str, tuple[str, dict[str, Any]]] = {}
 
     @staticmethod
     def _normal(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
     def _request(self, method: str, path: str, payload: dict | None = None) -> dict:
+        with self._rate_lock:
+            delay = 0.4 - (time.monotonic() - self._last_request_at)
+            if delay > 0:
+                time.sleep(delay)
+            self._last_request_at = time.monotonic()
         response = self.session.request(
             method, NOTION_BASE_URL + path, json=payload, timeout=(5, 20),
         )
@@ -484,12 +494,20 @@ class NotionSink:
         properties = {}
         normalized_payload = {self._normal(str(key)): value for key, value in payload.items()}
         aliases = {
-            "name": ("message", "symbol", "token_symbol", "trade_id", "event_id"),
-            "title": ("message", "symbol", "token_symbol", "trade_id", "event_id"),
+            "name": ("message", "symbol", "token_symbol", "trade_id", "event_id", "token_address"),
+            "title": ("message", "symbol", "token_symbol", "trade_id", "event_id", "token_address"),
             "timestamp": ("timestamp", "occurred_at", "discovered_at", "observed_at", "closed_at_utc"),
             "created_at": ("timestamp", "occurred_at", "discovered_at", "observed_at"),
+            "discovered_at": ("timestamp", "observed_at", "pool_created_at_utc"),
+            "pnl": ("pnl_usd", "net_pnl_usd", "gross_pnl_usd"),
+            "pnl_percent": ("pnl_pct", "pnl_percent"),
+            "volume_24h": ("volume_24h_usd",),
+            "liquidity": ("liquidity_usd",),
+            "volume_liquidity": ("volume_to_liquidity_24h",),
+            "honeypot_status": ("honeypot_status", "candidate_status"),
+            "holders": ("holder_count", "holders_count", "top10_holder_pct"),
             "details_json": ("details", "payload"),
-            "security_json": ("security_evidence",),
+            "security_json": ("security_evidence", "security_json"),
             "execution_json": ("execution", "payload"),
         }
         for name, definition in schema.items():
