@@ -31,12 +31,16 @@ def valid_candidate(now=NOW):
         "market_reconciliation": {
             "status": "PASS",
             "checked_at_utc": data_as_of,
+            "chain": "base",
             "token_address": "0x" + "1" * 40,
             "pool_address": "0x" + "2" * 40,
             "source_count": 2,
             "verified_liquidity_usd": 185000,
             "verified_volume_24h_usd": 420000,
-            "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
+            "sources": [
+                {"provider": "DEXSCREENER", "token_identity_verified": True},
+                {"provider": "GECKOTERMINAL", "token_identity_verified": True},
+            ],
         },
         "security_evidence": {"status": "PASS", "provider": "GOPLUS_SOURCIFY", "checked_at_utc": data_as_of},
         "dex": "Uniswap V2",
