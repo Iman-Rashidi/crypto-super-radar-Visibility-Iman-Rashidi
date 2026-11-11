@@ -70,7 +70,8 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         reasons["volume_confirmation"] = "Volume and liquidity have not been independently reconciled for the exact pool."
 
     if reconciliation_status == "FAIL" or (
-        reconciliation_status == "PASS" and liquidity is not None and liquidity < 50_000
+        liquidity is not None and liquidity < 50_000
+        and (reconciliation_status == "PASS" or reported_liquidity is not None)
     ):
         filters["liquidity_depth"] = "FAIL"
         reasons["liquidity_depth"] = "Exact-pool reconciliation failed or verified pool liquidity is below the minimum floor."
@@ -110,7 +111,9 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         # Aggregate liquidity is not trusted until the exact token/pool pair
         # matches across DexScreener and GeckoTerminal.
         "liquidity": (
-            "FAIL" if reconciliation_status == "FAIL"
+            "FAIL" if reconciliation_status == "FAIL" or (
+                reported_liquidity is not None and reported_liquidity < 50_000
+            )
             else "PASS" if reconciliation_status == "PASS"
             and liquidity is not None and liquidity >= 50_000
             and ratio is not None and 1 <= ratio <= 10
