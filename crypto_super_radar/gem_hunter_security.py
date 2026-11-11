@@ -27,6 +27,9 @@ def _cached(key: str):
 
 def _store(key: str, value: dict[str, Any]) -> dict[str, Any]:
     with _CACHE_LOCK:
+        if len(_CACHE) >= 512 and key not in _CACHE:
+            oldest = min(_CACHE, key=lambda item: _CACHE[item][0])
+            _CACHE.pop(oldest, None)
         _CACHE[key] = (time.monotonic() + _CACHE_TTL_SECONDS, dict(value))
     return value
 
