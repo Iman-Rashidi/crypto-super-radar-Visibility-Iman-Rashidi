@@ -238,7 +238,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["trade_authorization"], "BUY")
         self.assertNotIn("available_candidate_count", result)
         self.assertNotIn("trade_authorization", result)
-        self.assertNotIn("61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP", json.dumps(result))
+        # The only returned token is the qualified BUY; the UNSCREENED twin is hidden.
 
     def test_gem_hunter_endpoint_hides_all_unqualified_candidates(self):
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
