@@ -15,12 +15,15 @@ WETH = "0x4200000000000000000000000000000000000006"
 
 class FakeHttp:
     def __init__(self, *, dex_liquidity=100000, gecko_liquidity=100000,
-                 dex_volume=200000, gecko_volume=200000, dex_pool=POOL):
+                 dex_volume=200000, gecko_volume=200000, dex_pool=POOL,
+                 dex_price="0.01", gecko_price="0.01"):
         self.dex_liquidity = dex_liquidity
         self.gecko_liquidity = gecko_liquidity
         self.dex_volume = dex_volume
         self.gecko_volume = gecko_volume
         self.dex_pool = dex_pool
+        self.dex_price = dex_price
+        self.gecko_price = gecko_price
         self.calls = []
 
     def get(self, url, params=None):
@@ -33,7 +36,7 @@ class FakeHttp:
                 "quoteToken": {"address": WETH, "name": "WETH", "symbol": "WETH"},
                 "liquidity": {"usd": str(self.dex_liquidity)},
                 "volume": {"h24": str(self.dex_volume)},
-                "priceUsd": "0.01",
+                "priceUsd": self.dex_price,
                 "dexId": "uniswap",
             }]
         return {
@@ -43,7 +46,7 @@ class FakeHttp:
                     "address": POOL,
                     "reserve_in_usd": str(self.gecko_liquidity),
                     "volume_usd": {"h24": str(self.gecko_volume)},
-                    "base_token_price_usd": "0.01",
+                    "base_token_price_usd": self.gecko_price,
                 },
                 "relationships": {
                     "base_token": {"data": {"id": "base_token"}},
@@ -92,6 +95,13 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("MARKET_DATA_DISAGREEMENT", result["reason_codes"])
         self.assertLess(result["verified_liquidity_usd"], 1)
+
+    def test_independent_price_disagreement_fails(self):
+        result = reconcile_candidate_market_data(
+            candidate(), FakeHttp(dex_price="0.01", gecko_price="0.10")
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn("MARKET_DATA_DISAGREEMENT", result["reason_codes"])
 
     def test_sources_that_disagree_fail(self):
         result = reconcile_candidate_market_data(
