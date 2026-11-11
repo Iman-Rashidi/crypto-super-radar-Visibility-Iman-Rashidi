@@ -108,16 +108,17 @@ def _score(age_hours: Optional[float], liquidity: Optional[float],
     """Bounded research-ordering heuristic with explicit risk penalties; not a signal."""
     if age_hours is None or liquidity is None or liquidity <= 0 or volume_24h is None:
         return None
-    age_points = 25 if age_hours <= 1 else 20 if age_hours <= 6 else 15 if age_hours <= 24 else 8 if age_hours <= 72 else 3
+    # Research ordering must not reward extreme novelty: very young pools
+    # have almost no operating history and therefore receive the fewest points.
+    age_points = 3 if age_hours <= 1 else 8 if age_hours <= 6 else 12 if age_hours <= 24 else 18 if age_hours <= 72 else 25
     liq_points = 2 if liquidity < 5_000 else 5 if liquidity < 25_000 else 10 if liquidity < 100_000 else 15 if liquidity < 250_000 else 20 if liquidity < 1_000_000 else 25
     vol_points = 0 if volume_24h < 1_000 else 4 if volume_24h < 10_000 else 8 if volume_24h < 50_000 else 12 if volume_24h < 250_000 else 16 if volume_24h < 1_000_000 else 20
     tx_total = (buys or 0) + (sells or 0)
     activity_points = 0 if tx_total < 5 else 4 if tx_total < 20 else 8 if tx_total < 75 else 12 if tx_total < 250 else 15
     unique_total = (buyers or 0) + (sellers or 0)
-    buy_share = (buys / tx_total) if tx_total > 0 else None
-    unique_share = (buyers / unique_total) if unique_total > 0 else None
-    pressure = buy_share if buy_share is not None else unique_share
-    pressure_points = 7 if pressure is None else 0 if pressure < 0.35 else 4 if pressure < 0.45 else 8 if pressure < 0.55 else 12 if pressure < 0.65 else 15
+    # Transaction counts and unique-wallet counts do not reveal notional flow.
+    # Keep this component neutral until dollar-denominated buy/sell volume exists.
+    pressure_points = 7
     penalty = 0
     if liquidity < 25_000:
         penalty += 10
@@ -249,7 +250,7 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
             "source": source,
             "sources": [source],
             "discovery_priority_score": score,
-            "score_semantics": "Bounded research-ordering heuristic with penalties for low liquidity, extreme turnover/liquidity, sell pressure and sharp 1h moves; not a probability, safety score, or trade signal.",
+            "score_semantics": "Bounded research-ordering heuristic; pool maturity earns more than novelty, transaction-count ratios do not substitute for notional buy flow, and penalties cover low liquidity, extreme turnover/liquidity and sharp 1h moves; not a probability, safety score, or trade signal.",
             "candidate_status": "UNSCREENED" if score is not None and price is not None and price > 0 and liquidity is not None and liquidity > 0 else "UNKNOWN",
             "trade_authorization": "NO_TRADE",
             "risk_flags": flags,
