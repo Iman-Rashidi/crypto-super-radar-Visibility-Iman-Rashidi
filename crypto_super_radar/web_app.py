@@ -89,6 +89,11 @@ CRYPTO_MARKET_CACHE_LOCK = threading.Lock()
 GEM_HUNTER_CACHE_TTL_SECONDS = 60
 GEM_HUNTER_CACHE = {"expires_at": 0.0, "payload": None}
 GEM_HUNTER_CACHE_LOCK = threading.Lock()
+GEM_HUNTER_RESULT_CACHE_TTL_SECONDS = 90
+GEM_HUNTER_RESULT_CACHE = {
+    "expires_at": 0.0, "payload": None, "refreshing": False, "last_error": None,
+}
+GEM_HUNTER_RESULT_CACHE_LOCK = threading.Lock()
 
 
 def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool = False) -> dict:
@@ -243,6 +248,145 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         "evaluation_completeness_semantics": "STRUCTURAL_RECORD_ONLY; UNKNOWN evidence never qualifies as BUY",
     }
     return result
+
+
+def _gem_hunter_pending_payload(*, refreshing: bool, error: str | None = None) -> dict:
+    """Return an explicit non-tradeable state while the provider pipeline runs."""
+    failed = bool(error)
+    return {
+        "status": "UNKNOWN" if failed else ("STALE" if refreshing else "LOADING"),
+        "generated_at_utc": None,
+        "networks": ["base", "solana"],
+        "source_count": 0,
+        "sources": {},
+        "candidate_count": 0,
+        "candidates": [],
+        "discovered_candidate_count": 0,
+        "evaluation_record_count": 0,
+        "market_reconciliation_counts": {
+            "checked": 0, "PASS": 0, "FAIL": 0, "UNKNOWN": 0, "NOT_CHECKED_BUDGET": 0,
+        },
+        "security_screening_counts": {
+            "PASS": 0, "FAIL": 0, "UNKNOWN": 0, "NOT_CHECKED_BUDGET": 0,
+        },
+        "complete_evaluation_count": 0,
+        "incomplete_evaluation_count": 0,
+        "unassessed_candidate_count": 0,
+        "qualified_buy_count": 0,
+        "qualification_engine_status": "UNKNOWN" if failed else ("REFRESHING" if refreshing else "LOADING"),
+        "signal_status": "DISCOVERY_FEED_DEGRADED" if failed else "REFRESHING",
+        "diagnostic_fa": (
+            "به‌روزرسانی Gem Hunter کامل نشد؛ داده‌ها UNKNOWN می‌مانند و هیچ سیگنال BUY صادر نمی‌شود."
+            if failed else
+            "اسکن کشف و اعتبارسنجی در پس‌زمینه در حال اجراست؛ برای جلوگیری از Timeout، پاسخ اولیه فوراً برمی‌گردد."
+        ),
+        "public_policy": {
+            "qualification_schema": SCHEMA_VERSION,
+            "minimum_passed_filters": 9,
+            "total_filters": len(FILTER_IDS),
+            "minimum_opportunity_score": 80,
+            "critical_gates": list(CRITICAL_GATES),
+            "unknown_or_incomplete_candidates_hidden": True,
+            "discovery_candidates_exposed": False,
+            "aggregate_pipeline_diagnostics_exposed": True,
+            "diagnostic_candidates_are_trade_signals": False,
+            "evaluation_completeness_semantics": "STRUCTURAL_RECORD_ONLY; UNKNOWN evidence never qualifies as BUY",
+        },
+        "refreshing": refreshing,
+        "last_error": error,
+    }
+
+
+def _refresh_gem_hunter_result() -> None:
+    """Run slow public-provider checks off the HTTP request thread."""
+    try:
+        payload = _gem_hunter_discovery_payload(limit=50, include_diagnostics=True)
+        payload["refreshing"] = False
+        payload["stale"] = False
+        payload["last_error"] = None
+        expires_at = time.monotonic() + GEM_HUNTER_RESULT_CACHE_TTL_SECONDS
+    except Exception as exc:
+        error = type(exc).__name__ + ": " + str(exc)[:160]
+        payload = _gem_hunter_pending_payload(refreshing=False, error=error)
+        expires_at = time.monotonic() + GEM_HUNTER_RESULT_CACHE_TTL_SECONDS
+
+    with GEM_HUNTER_RESULT_CACHE_LOCK:
+        GEM_HUNTER_RESULT_CACHE["payload"] = copy.deepcopy(payload)
+        GEM_HUNTER_RESULT_CACHE["expires_at"] = expires_at
+        GEM_HUNTER_RESULT_CACHE["refreshing"] = False
+        GEM_HUNTER_RESULT_CACHE["last_error"] = payload.get("last_error")
+
+
+def _start_gem_hunter_refresh() -> None:
+    """Start at most one bounded Gem Hunter refresh worker per process."""
+    with GEM_HUNTER_RESULT_CACHE_LOCK:
+        if GEM_HUNTER_RESULT_CACHE.get("refreshing"):
+            return
+        GEM_HUNTER_RESULT_CACHE["refreshing"] = True
+        GEM_HUNTER_RESULT_CACHE["last_error"] = None
+
+    worker = threading.Thread(
+        target=_refresh_gem_hunter_result,
+        daemon=True,
+        name="gem-hunter-refresh",
+    )
+    try:
+        worker.start()
+    except Exception as exc:
+        with GEM_HUNTER_RESULT_CACHE_LOCK:
+            GEM_HUNTER_RESULT_CACHE["refreshing"] = False
+            GEM_HUNTER_RESULT_CACHE["last_error"] = type(exc).__name__
+
+
+def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = False) -> dict:
+    """Return a cached Gem Hunter result immediately and refresh expired data in a worker."""
+    limit = max(1, min(int(limit), 50))
+    now = time.monotonic()
+    with GEM_HUNTER_RESULT_CACHE_LOCK:
+        cached = copy.deepcopy(GEM_HUNTER_RESULT_CACHE.get("payload"))
+        expires_at = GEM_HUNTER_RESULT_CACHE.get("expires_at", 0.0)
+        refreshing = GEM_HUNTER_RESULT_CACHE.get("refreshing", False)
+
+    if (cached is None or expires_at <= now) and not refreshing:
+        _start_gem_hunter_refresh()
+
+    with GEM_HUNTER_RESULT_CACHE_LOCK:
+        cached = copy.deepcopy(GEM_HUNTER_RESULT_CACHE.get("payload"))
+        expires_at = GEM_HUNTER_RESULT_CACHE.get("expires_at", 0.0)
+        refreshing = GEM_HUNTER_RESULT_CACHE.get("refreshing", False)
+        last_error = GEM_HUNTER_RESULT_CACHE.get("last_error")
+
+    if cached is None:
+        cached = _gem_hunter_pending_payload(refreshing=refreshing, error=last_error)
+    elif refreshing or expires_at <= time.monotonic():
+        # Never serve a stale BUY or stale token record as current evidence.
+        cached["status"] = "STALE"
+        cached["refreshing"] = True
+        cached["stale"] = True
+        cached["candidates"] = []
+        cached["candidate_count"] = 0
+        cached["qualified_buy_count"] = 0
+        cached["diagnostic_candidates"] = []
+        cached["signal_status"] = "REFRESHING"
+        cached["qualification_engine_status"] = "REFRESHING"
+        cached["diagnostic_fa"] = (
+            "گزارش قبلی منقضی شده است؛ دادهٔ قبلی برای BUY استفاده نمی‌شود و اعتبارسنجی تازه در پس‌زمینه ادامه دارد."
+        )
+    else:
+        cached["refreshing"] = False
+        cached["stale"] = False
+
+    cached["candidates"] = (cached.get("candidates") or [])[:limit]
+    cached["candidate_count"] = len(cached["candidates"])
+    if include_diagnostics:
+        cached["diagnostic_candidates"] = (cached.get("diagnostic_candidates") or [])[:limit]
+        cached["public_policy"] = dict(cached.get("public_policy") or {})
+        cached["public_policy"]["discovery_candidates_exposed"] = True
+    else:
+        cached.pop("diagnostic_candidates", None)
+        cached["public_policy"] = dict(cached.get("public_policy") or {})
+        cached["public_policy"]["discovery_candidates_exposed"] = False
+    return cached
 
 
 def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
@@ -1140,7 +1284,7 @@ class Handler(BaseHTTPRequestHandler):
                 limit = max(1, min(int(raw_limit), 50))
             except (TypeError, ValueError):
                 return self._send(400, b'{"error":"limit must be an integer from 1 to 50"}', "application/json")
-            payload = _gem_hunter_discovery_payload(limit=limit, include_diagnostics=True)
+            payload = _gem_hunter_api_payload(limit=limit, include_diagnostics=True)
             payload["report_mode"] = "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL"
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
@@ -1150,7 +1294,7 @@ class Handler(BaseHTTPRequestHandler):
                 limit = max(1, min(int(raw_limit), 50))
             except (TypeError, ValueError):
                 return self._send(400, b'{"error":"limit must be an integer from 1 to 50"}', "application/json")
-            payload = _gem_hunter_discovery_payload(limit=limit)
+            payload = _gem_hunter_api_payload(limit=limit)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/data-health":
@@ -1519,8 +1663,23 @@ class Handler(BaseHTTPRequestHandler):
             button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت نامزدها و ساخت گزارش فارسی ۱۲ فیلتر و ۴ گیت...'));
             status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
             try {
-              const response = await fetch('/api/gem-hunter/report?limit=50', {cache:'no-store'});
-              const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Discovery report failed');
+              let data = null;
+              for (let attempt = 0; attempt < 30; attempt += 1) {
+                const response = await fetch('/api/gem-hunter/report?limit=50', {cache:'no-store'});
+                data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Discovery report failed');
+                if (!data.refreshing) break;
+                status.textContent = 'اسکن در پس‌زمینه ادامه دارد... (' + (attempt + 1) + '/30)';
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+              if (data && data.refreshing) {
+                status.textContent = 'اعتبارسنجی هنوز ادامه دارد؛ با کلیک دوباره وضعیت تازه را دریافت کن.';
+                results.replaceChildren(
+                  el('p', data.diagnostic_fa || 'اسکن در پس‌زمینه فعال است.', 'muted'),
+                  el('p', 'هنوز نتیجهٔ نهایی آماده نیست. هیچ سیگنال خریدی از دادهٔ ناقص صادر نمی‌شود.', 'muted')
+                );
+                return;
+              }
               const buys = data.candidates || []; const candidates = (data.diagnostic_candidates || []).filter(item => item.trade_authorization !== 'BUY');
               const discovered = Number(data.discovered_candidate_count || candidates.length || 0);
               status.textContent = 'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' +
