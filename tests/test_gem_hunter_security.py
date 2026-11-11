@@ -20,6 +20,16 @@ class FakeSolanaRpc:
         }
 
 
+class FakeRugCheckHttp:
+    def __init__(self, report):
+        self.report = report
+        self.calls = []
+
+    def get(self, url, params=None):
+        self.calls.append(url)
+        return self.report
+
+
 class GemHunterSecurityTests(unittest.TestCase):
     def setUp(self):
         security._CACHE.clear()
@@ -58,6 +68,39 @@ class GemHunterSecurityTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(result["top10_token_account_concentration_pct"], 42.0)
+
+    def test_rugcheck_critical_risk_and_unprotected_lp_fail_solana_screen(self):
+        http = FakeRugCheckHttp({
+            "score": 87,
+            "risks": [{"name": "Suspicious transfer behavior", "level": "critical"}],
+            "lpLocked": False,
+            "lpBurned": False,
+            "topHolders": [{"pct": 0.22}, {"pct": 0.17}],
+        })
+        data = SimpleNamespace(solana_rpc=FakeSolanaRpc(), http=http)
+        result = security.screen_discovery_candidate(
+            {"chain": "solana", "token_address": "So11111111111111111111111111111111111111112"}, data
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["provider"], "SOLANA_RPC+RUGCHECK")
+        self.assertFalse(result["lp_protected"])
+        self.assertEqual(result["rugcheck"]["risk_score"], 87.0)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_rugcheck_without_explicit_danger_does_not_create_false_pass(self):
+        http = FakeRugCheckHttp({
+            "score": 5,
+            "risks": [],
+            "lpLocked": True,
+            "topHolders": [{"pct": 0.2}, {"pct": 0.1}],
+        })
+        data = SimpleNamespace(solana_rpc=FakeSolanaRpc(), http=http)
+        result = security.screen_discovery_candidate(
+            {"chain": "solana", "token_address": "So11111111111111111111111111111111111111111"}, data
+        )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertTrue(result["lp_protected"])
+        self.assertIsNone(result["rugcheck"]["honeypot"])
 
     def test_solana_active_authority_fails_security_gate(self):
         data = SimpleNamespace(solana_rpc=FakeSolanaRpc(mint_active=True))
