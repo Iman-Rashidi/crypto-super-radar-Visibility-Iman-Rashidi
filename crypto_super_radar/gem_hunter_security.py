@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from .evm_security import screen_evm_token
@@ -27,6 +28,8 @@ def _cached(key: str):
 
 
 def _store(key: str, value: dict[str, Any]) -> dict[str, Any]:
+    value = dict(value)
+    value.setdefault("checked_at_utc", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     with _CACHE_LOCK:
         if len(_CACHE) >= 512 and key not in _CACHE:
             oldest = min(_CACHE, key=lambda item: _CACHE[item][0])
