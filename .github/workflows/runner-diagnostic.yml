@@ -20,7 +20,7 @@ concurrency:
 jobs:
   runner-and-offline-tests:
     name: Runner allocation and offline validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Confirm runner reached the first step
@@ -62,7 +62,7 @@ jobs:
       - name: Install declared runtime dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt "streamlit>=1.40"
 
       - name: Compile project and tests
         run: python -m compileall -q crypto_super_radar tests
@@ -84,3 +84,13 @@ jobs:
         run: |
           python -m crypto_super_radar --help
           python scripts/paper_trading_bot.py --help
+
+      - name: Smoke-test optional Streamlit dashboard
+        run: |
+          python - <<'PY'
+          from streamlit.testing.v1 import AppTest
+          app = AppTest.from_file("crypto_super_radar/streamlit_app.py", default_timeout=20).run()
+          assert not app.exception, app.exception
+          assert any("CRYPTO SUPER RADAR" in item.value for item in app.title)
+          assert any("اجرای اسکن پژوهشی" in item.label for item in app.button)
+          PY
