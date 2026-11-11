@@ -101,8 +101,8 @@ def _gecko_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
     if not (_same_address(base_address, token) or _same_address(quote_address, token)):
         raise LookupError("GeckoTerminal pool does not prove the requested token identity")
     returned_pool = attrs.get("address")
-    if returned_pool and not _same_address(returned_pool, pool):
-        raise LookupError("GeckoTerminal returned a different pool address")
+    if not _same_address(returned_pool, pool):
+        raise LookupError("GeckoTerminal did not prove the exact requested pool address")
     price_key = "base_token_price_usd" if _same_address(base_address, token) else "quote_token_price_usd"
     price = _number(attrs.get(price_key))
     return {
@@ -188,6 +188,11 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
         else:
             liquidity_conflict = _ratio_conflict(liquidities)
             volume_conflict = _ratio_conflict(volumes)
+            reported_volume_conflict = (
+                reported_volume is not None
+                and reported_volume >= 0
+                and _ratio_conflict([reported_volume, *volumes])
+            )
             reported_conflict = (
                 reported_liquidity is not None
                 and reported_liquidity >= 0
@@ -205,7 +210,7 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
             base["verified_volume_24h_usd"] = min(volumes)
             prices = [row["price_usd"] for row in snapshots if row["price_usd"] is not None]
             base["verified_price_usd"] = min(prices) if prices else None
-            if liquidity_conflict or volume_conflict or reported_conflict:
+            if liquidity_conflict or volume_conflict or reported_conflict or reported_volume_conflict:
                 base["status"] = "FAIL"
                 base["reason_codes"].append("MARKET_DATA_DISAGREEMENT")
                 base["reason_fa"].append("نقدینگی یا حجم گزارش کشف با منابع مستقل همان استخر اختلاف بیش از حد مجاز دارد.")
