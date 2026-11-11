@@ -171,6 +171,12 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 0)
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
+    def test_transaction_count_split_does_not_masquerade_as_notional_pressure(self):
+        from crypto_super_radar.gem_hunter_discovery import _score
+        buy_heavy = _score(48, 100000, 100000, 150, 50, None, None, 4, 1.0)
+        sell_heavy = _score(48, 100000, 100000, 50, 150, None, None, 4, 1.0)
+        self.assertEqual(buy_heavy, sell_heavy)
+
     def test_research_priority_does_not_reward_extreme_pool_novelty(self):
         from crypto_super_radar.gem_hunter_discovery import _score
         young = _score(0.5, 100000, 100000, 100, 50, None, None, 4, 1.0)
