@@ -142,7 +142,8 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
         return False
     if not isinstance(reconciliation.get("pool_address"), str) or reconciliation.get("pool_address", "").lower() != candidate.get("pool_address", "").lower():
         return False
-    if _finite_number(reconciliation.get("source_count")) is None or reconciliation.get("source_count") < 2:
+    source_count = _finite_number(reconciliation.get("source_count"))
+    if source_count is None or source_count < 2:
         return False
     reconciliation_sources = reconciliation.get("sources")
     providers = {
