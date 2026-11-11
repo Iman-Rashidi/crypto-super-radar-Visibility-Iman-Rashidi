@@ -164,7 +164,7 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
     elif complete_evaluation_count < discovered_count:
         signal_status = "EVALUATION_INCOMPLETE"
         diagnostic_fa = (
-            f"{discovered_count} نامزد کشف شد؛ {complete_evaluation_count} پروندهٔ ارزیابی کامل، "
+            f"{discovered_count} نامزد کشف شد؛ {complete_evaluation_count} پرونده با ساختار ارزیابی کامل، "
             f"{incomplete_evaluation_count} پروندهٔ ناقص و {unassessed_count} نامزدِ ارزیابی‌نشده وجود دارد. "
             "تا تکمیل شواهد، هیچ سیگنال BUY صادر نمی‌شود."
         )
@@ -172,7 +172,7 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
     else:
         signal_status = "NO_QUALIFIED_BUY"
         diagnostic_fa = (
-            f"هر {complete_evaluation_count} نامزد پروندهٔ ارزیابی کامل دارد، اما هیچ‌کدام تمام شروط BUY را نگذرانده‌اند."
+            f"ساختار پروندهٔ ارزیابی برای هر {complete_evaluation_count} نامزد کامل است، اما شواهد یا شروط هیچ‌کدام BUY را تأیید نمی‌کند."
         )
         engine_status = "COMPLETE"
 
@@ -198,6 +198,7 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
         "unknown_or_incomplete_candidates_hidden": True,
         "discovery_candidates_exposed": False,
         "aggregate_pipeline_diagnostics_exposed": True,
+        "evaluation_completeness_semantics": "STRUCTURAL_RECORD_ONLY; UNKNOWN evidence never qualifies as BUY",
     }
     return result
 
@@ -1149,14 +1150,14 @@ class Handler(BaseHTTPRequestHandler):
               const complete = Number(data.complete_evaluation_count || 0);
               status.textContent =
                 'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' + evaluated +
-                ' · ارزیابی کامل: ' + complete + ' · BUY تأییدشده: ' + items.length;
+                ' · ساختار کامل پرونده: ' + complete + ' · BUY تأییدشده: ' + items.length;
               if (!items.length) {
                 const message = cell('p', data.diagnostic_fa ||
                   'سیگنال BUY صادر نشد؛ وضعیت منابع و مراحل ارزیابی را بررسی کنید.');
                 message.className = 'muted';
                 const counts = cell('p',
                   'کشف: ' + discovered + ' | دارای پروندهٔ ارزیابی: ' + evaluated +
-                  ' | ارزیابی کامل: ' + complete + ' | ارزیابی ناقص: ' +
+                  ' | ساختار کامل پرونده: ' + complete + ' | ارزیابی ناقص: ' +
                   Number(data.incomplete_evaluation_count || 0) + ' | ارزیابی‌نشده: ' +
                   Number(data.unassessed_candidate_count || 0));
                 counts.className = 'muted';
