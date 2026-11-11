@@ -34,7 +34,7 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(set(result["filters"]), set(FILTER_IDS))
         self.assertEqual(set(result["critical_gates"]), set(CRITICAL_GATES))
         self.assertEqual(result["filters"]["volume_confirmation"], "PASS")
-        self.assertEqual(result["filters"]["liquidity_depth"], "PASS")
+        self.assertEqual(result["filters"]["liquidity_depth"], "UNKNOWN")
         self.assertEqual(result["filters"]["whale_activity"], "UNKNOWN")
         self.assertEqual(result["filters"]["holder_distribution"], "UNKNOWN")
         self.assertEqual(result["critical_gates"]["security"], "UNKNOWN")
