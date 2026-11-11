@@ -68,7 +68,6 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
             "شواهد امنیت قرارداد ناقص است یا پوشش منبع برای صدور حکم کافی نیست."
         )
     }
-    reasons = {}
 
     # GeckoTerminal exposes transaction counts, not buy/sell notional volume.
     # Keep that distinction explicit: transaction share is not buy-volume share.
@@ -167,8 +166,8 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "exit": "عمق اجرایی و لغزش برای اندازهٔ سفارش مشخص نیست؛ امکان خروج قابل تأیید نیست.",
     }
 
-    # The only current discovery provider is GeckoTerminal. Multiple endpoint
-    # names from one provider are not independent cross-source validation.
+    # Only independently verified exact-pool sources are listed here; discovery
+    # feed provenance remains on the candidate itself.
     sources = sorted({
         str(row.get("provider")) for row in reconciliation.get("sources", [])
         if isinstance(row, dict) and row.get("provider")
