@@ -32,8 +32,11 @@ def _number(value: Any):
     return result if math.isfinite(result) else None
 
 
-def _same_address(left: Any, right: Any) -> bool:
-    return isinstance(left, str) and isinstance(right, str) and left.lower() == right.lower()
+def _same_address(left: Any, right: Any, chain: str) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    # EVM addresses are case-insensitive; Solana base58 addresses are case-sensitive.
+    return left == right if chain == "solana" else left.lower() == right.lower()
 
 
 def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
@@ -47,7 +50,7 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
         raise ValueError("DexScreener pair response schema is invalid")
     matches = []
     for pair in payload:
-        if not isinstance(pair, dict) or not _same_address(pair.get("pairAddress"), pool):
+        if not isinstance(pair, dict) or not _same_address(pair.get("pairAddress"), pool, chain):
             continue
         if str(pair.get("chainId") or "").lower() != chain_id:
             continue
@@ -55,7 +58,7 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
         quote = pair.get("quoteToken") or {}
         if not isinstance(base, dict) or not isinstance(quote, dict):
             continue
-        if not (_same_address(base.get("address"), token) or _same_address(quote.get("address"), token)):
+        if not (_same_address(base.get("address"), token, chain) or _same_address(quote.get("address"), token, chain)):
             continue
         liquidity = _number((pair.get("liquidity") or {}).get("usd"))
         volume = _number((pair.get("volume") or {}).get("h24"))
@@ -103,7 +106,7 @@ def _gecko_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
     if not (_same_address(base_address, token) or _same_address(quote_address, token)):
         raise LookupError("GeckoTerminal pool does not prove the requested token identity")
     returned_pool = attrs.get("address")
-    if not _same_address(returned_pool, pool):
+    if not _same_address(returned_pool, pool, chain):
         raise LookupError("GeckoTerminal did not prove the exact requested pool address")
     price_key = "base_token_price_usd" if _same_address(base_address, token) else "quote_token_price_usd"
     price = _number(attrs.get(price_key))
@@ -155,7 +158,9 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
         base["reason_fa"].append("آدرس Pool یا اتصال منبع داده برای تطبیق مستقل موجود نیست.")
         return base
 
-    key = f"{chain}:{token.lower()}:{pool.lower()}"
+    cache_token = token if chain == "solana" else token.lower()
+    cache_pool = pool if chain == "solana" else pool.lower()
+    key = f"{chain}:{cache_token}:{cache_pool}"
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
         if cached and cached[0] > time.monotonic():
