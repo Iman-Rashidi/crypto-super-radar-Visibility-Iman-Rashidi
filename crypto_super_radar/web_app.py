@@ -150,6 +150,13 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         if complete:
             complete_evaluation_count += 1
 
+    reconciliation_counts = {"PASS": 0, "FAIL": 0, "UNKNOWN": 0, "NOT_CHECKED_BUDGET": 0}
+    for item in raw_candidates:
+        status = (item.get("market_reconciliation") or {}).get("status")
+        if status in reconciliation_counts:
+            reconciliation_counts[status] += 1
+        else:
+            reconciliation_counts["UNKNOWN"] += 1
     evaluation_record_count = len(evaluation_records)
     unassessed_count = max(0, discovered_count - evaluation_record_count)
     incomplete_evaluation_count = max(0, evaluation_record_count - complete_evaluation_count)
@@ -195,6 +202,10 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result["candidate_count"] = len(qualified)
     result["discovered_candidate_count"] = discovered_count
     result["evaluation_record_count"] = evaluation_record_count
+    result["market_reconciliation_counts"] = {
+        "checked": reconciliation_counts["PASS"] + reconciliation_counts["FAIL"] + reconciliation_counts["UNKNOWN"],
+        **reconciliation_counts,
+    }
     result["complete_evaluation_count"] = complete_evaluation_count
     result["incomplete_evaluation_count"] = incomplete_evaluation_count
     result["unassessed_candidate_count"] = unassessed_count
@@ -1486,6 +1497,12 @@ class Handler(BaseHTTPRequestHandler):
                 Number(data.complete_evaluation_count || 0) + ' | ارزیابی ناقص: ' +
                 Number(data.incomplete_evaluation_count || 0) + ' | ارزیابی‌نشده: ' +
                 Number(data.unassessed_candidate_count || 0), 'muted'));
+              const reconciliationCounts = data.market_reconciliation_counts || {};
+              summary.appendChild(el('p', 'تطبیق مستقل Pool: ' +
+                Number(reconciliationCounts.PASS || 0) + ' PASS · ' +
+                Number(reconciliationCounts.FAIL || 0) + ' FAIL · ' +
+                Number(reconciliationCounts.UNKNOWN || 0) + ' UNKNOWN · ' +
+                Number(reconciliationCounts.NOT_CHECKED_BUDGET || 0) + ' در صف بررسی بعدی', 'muted'));
               const sourceDetails = document.createElement('details'); sourceDetails.appendChild(el('summary', 'وضعیت منابع داده'));
               const sourceList = document.createElement('ul');
               Object.entries(data.sources || {}).forEach(([name, source]) => {
