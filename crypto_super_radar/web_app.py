@@ -1234,6 +1234,29 @@ class Handler(BaseHTTPRequestHandler):
             market_regime_validation:'تأیید رژیم بازار'
           };
           const gateLabels = {security:'امنیت', liquidity:'نقدینگی', data_quality:'کیفیت داده', exit:'امکان خروج'};
+          const filterReasonFa = (key, state) => {
+            const map = {
+              trend:'برای تشخیص روند، تاریخچهٔ معتبر قیمت در چند بازهٔ زمانی لازم است؛ عمر استخر به‌تنهایی روند نیست.',
+              momentum:'فقط تغییر قیمت یک‌ساعته در دسترس است؛ برای مومنتوم پایدار، چند بازهٔ زمانی لازم است.',
+              relative_strength:'مقایسهٔ بازده توکن با BTC، ETH یا شاخص بازار هنوز متصل نیست.',
+              volume_confirmation:state === 'PASS' ? 'حجم ۲۴ساعته و نسبت حجم به نقدینگی از دادهٔ تجمیعی عبور کرده‌اند؛ این به‌تنهایی حجم خرید واقعی را ثابت نمی‌کند.' : 'حجم ۲۴ساعته یا نسبت حجم به نقدینگی به حد اولیه نرسیده یا دادهٔ کافی ندارد.',
+              buy_sell_pressure:'سهم دلاری خرید از فروش در دسترس نیست؛ تعداد تراکنش‌ها جایگزین حجم دلاری نیست.',
+              capital_flow:'جریان خالص سرمایه با انتساب مستقل کیف‌پول‌ها هنوز محاسبه نشده است.',
+              whale_activity:'تاریخچهٔ قابل‌ردیابی Swapهای واقعی خرید/فروش نهنگ‌ها متصل نیست.',
+              liquidity_depth:state === 'FAIL' ? 'نقدینگی گزارش‌شده زیر حد اولیه است.' : 'عدد کل نقدینگی استخر عمق قابل‌اجرا و امکان خروج سفارش را اثبات نمی‌کند.',
+              market_integrity:'تعداد تراکنش‌ها به‌تنهایی فعالیت مستقل را ثابت نمی‌کند؛ بررسی Wash Trading و خوشه‌های کیف‌پول متصل نیست.',
+              contract_security:'تحلیل معتبر قرارداد، مالکیت، Honeypot و سابقهٔ سوءاستفاده هنوز متصل نیست.',
+              holder_distribution:'توزیع موجودی هولدرها و خوشه‌بندی مالکیت ذی‌نفعانه در دسترس نیست.',
+              market_regime_validation:'اعتبارسنجی توکن نسبت به شرایط کلی بازار و رژیم ریسک تکمیل نشده است.'
+            };
+            return map[key] || 'برای این فیلتر هنوز دلیل فارسی مستند ثبت نشده است.';
+          };
+          const gateReasonFa = (key, state) => ({
+            security:'بررسی مستقل امنیت قرارداد و ریسک Honeypot هنوز متصل نیست.',
+            liquidity:state === 'PASS' ? 'حد اولیهٔ نقدینگی تجمیعی عبور شده، اما این PASS عمق اجرایی را تضمین نمی‌کند.' : state === 'FAIL' ? 'نقدینگی زیر حداقل آستانهٔ اولیه است.' : 'دادهٔ کافی برای تأیید نقدینگی وجود ندارد.',
+            data_quality:'اعتبارسنجی مستقل چندمنبعی و تازگی تمام شواهد تکمیل نشده است.',
+            exit:'عمق اجرایی و لغزش برای اندازهٔ سفارش مشخص نیست؛ امکان خروج تأیید نشده است.'
+          })[key];
           const el = (tag, value, className) => {
             const node = document.createElement(tag);
             node.textContent = value === null || value === undefined || value === '' ? '—' : String(value);
@@ -1339,12 +1362,19 @@ class Handler(BaseHTTPRequestHandler):
             fact(facts, 'تغییر قیمت ۱ساعته (%)', item.price_change_1h_pct);
             fact(facts, 'عمر استخر (ساعت)', item.pool_age_hours);
             fact(facts, 'خرید / فروش ۲۴ساعته (تعداد)', String(item.buys_24h ?? '—') + ' / ' + String(item.sells_24h ?? '—'));
+            fact(facts, 'تعداد هولدرها', m.holder_count);
+            fact(facts, 'معامله‌گران یکتای ۲۴ساعته', m.unique_traders_24h);
+            fact(facts, 'سهم حجمی خرید (%)', m.buy_volume_share_pct);
+            fact(facts, 'لغزش تخمینی (bps)', m.estimated_slippage_bps);
             fact(facts, 'امتیاز فرصت مستقل', q.opportunity_score);
+            fact(facts, 'امتیاز ریسک مستقل', q.risk_score);
             card.appendChild(facts);
             const addresses = document.createElement('p'); addresses.className = 'candidate-meta';
             addresses.appendChild(el('span', 'Mint / Contract: ')); addresses.appendChild(el('code', item.token_address || '—'));
             addresses.appendChild(el('span', ' · Pool: ')); addresses.appendChild(el('code', item.pool_address || '—'));
             card.appendChild(addresses);
+            card.appendChild(el('p', 'DEX / جفت‌ارز: ' + (item.dex || 'نامشخص') + ' / ' + (item.pool_name || 'نامشخص') +
+              ' · زمان ایجاد استخر: ' + (item.pool_created_at_utc || 'نامشخص') + ' · منبع کشف: ' + (item.source || 'نامشخص'), 'candidate-meta'));
             const links = document.createElement('div'); links.className = 'gem-links';
             if (item.token_address && ['solana','base'].includes(item.chain)) addLink(links, 'اکسپلورر توکن ↗', tokenExplorer(item));
             if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'بازار در DEX Screener ↗', poolUrl(item));
@@ -1355,7 +1385,7 @@ class Handler(BaseHTTPRequestHandler):
             Object.keys(filterLabels).forEach(key => {
               const state = filters[key] || 'UNKNOWN'; const row = document.createElement('div'); row.className = 'gem-detail';
               row.appendChild(el('strong', filterLabels[key] + ' · ' + state, 'gem-status-' + String(state).toLowerCase()));
-              row.appendChild(el('span', reasons[key] || 'برای این فیلتر هنوز دلیل مستند ثبت نشده است.'));
+              row.appendChild(el('span', filterReasonFa(key, state) + (reasons[key] ? ' | جزئیات منبع: ' + reasons[key] : '')));
               filterGrid.appendChild(row);
             });
             details.appendChild(filterGrid); details.appendChild(el('h4', '۴ گیت حیاتی'));
@@ -1363,14 +1393,35 @@ class Handler(BaseHTTPRequestHandler):
             Object.keys(gateLabels).forEach(key => {
               const state = gates[key] || 'UNKNOWN'; const row = document.createElement('div'); row.className = 'gem-detail';
               row.appendChild(el('strong', gateLabels[key] + ' · ' + state, 'gem-status-' + String(state).toLowerCase()));
-              row.appendChild(el('span', state === 'PASS' ? 'شاهد این گیت در پرونده ثبت شده است.' : 'این گیت هنوز با شواهد کافی تأیید نشده است.'));
+              row.appendChild(el('span', (q.critical_gate_reasons || {})[key] || gateReasonFa(key, state)));
               gateGrid.appendChild(row);
             });
             details.appendChild(gateGrid);
             details.appendChild(el('p', 'وضعیت پرونده: ' + (q.evaluation_status || 'INCOMPLETE') + ' · ' + (q.evaluation_reason || 'دلیل تکمیل‌نشدن پرونده ثبت نشده است.')));
             details.appendChild(el('p', 'منابع داده: ' + (Array.isArray(q.market_data_sources) ? q.market_data_sources.join(', ') : 'نامشخص') + ' · زمان ارزیابی UTC: ' + (q.data_as_of_utc || 'نامشخص')));
             details.appendChild(el('p', 'پرچم‌های ریسک کشف: ' + ((item.risk_flags || []).join('، ') || 'موردی گزارش نشده است.')));
-            details.appendChild(el('p', 'شواهد Swap نهنگ: ' + ((q.whale_evidence && q.whale_evidence.reason) || 'داده‌ای متصل نیست') + ' · تعداد رویدادها: ' + (((q.whale_evidence || {}).events || []).length)));
+            const whale = q.whale_evidence || {};
+            details.appendChild(el('p', 'وضعیت شواهد Swap نهنگ: ' + (whale.status || 'UNKNOWN') +
+              ' · پوشش: ' + (whale.coverage_status || 'UNKNOWN') + ' · خریداران مستقل: ' +
+              (whale.independent_buy_wallets ?? 0) + ' · توضیح: ' + (whale.reason || 'داده‌ای متصل نیست')));
+            const whaleEvents = Array.isArray(whale.events) ? whale.events : [];
+            if (whaleEvents.length) {
+              const eventList = document.createElement('ul');
+              whaleEvents.forEach(event => {
+                const li = document.createElement('li');
+                li.appendChild(el('span', (event.event_type || 'SWAP') + ' · ' + (event.amount_usd ?? '—') +
+                  ' USD · زمان: ' + (event.timestamp_utc || event.timestamp || 'نامشخص') + ' · کیف‌پول: '));
+                const explorer = explorerBase(item.chain);
+                if (event.wallet_address) addLink(li, event.wallet_address, explorer + '/account/' + encodeURIComponent(event.wallet_address));
+                if (event.tx_hash) {
+                  li.appendChild(el('span', ' · تراکنش: '));
+                  addLink(li, event.tx_hash, explorer + '/tx/' + encodeURIComponent(event.tx_hash));
+                }
+                if (event.source) li.appendChild(el('span', ' · منبع: ' + event.source));
+                eventList.appendChild(li);
+              });
+              details.appendChild(eventList);
+            } else details.appendChild(el('p', 'هیچ رویداد Swap نهنگ قابل‌ردیابی در پرونده ثبت نشده است.'));
             card.appendChild(details);
             const add = el('button', '＋ افزودن به فهرست زیر نظر'); add.type = 'button'; add.className = 'gem-add-watch';
             add.addEventListener('click', () => addToWatchlist({
