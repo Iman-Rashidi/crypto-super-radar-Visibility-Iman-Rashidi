@@ -48,14 +48,15 @@ COMMON_ASSET_NAMES = {
     "ADA": ("Cardano", "کاردانو"), "AVAX": ("Avalanche", "آوالانچ"),
     "LINK": ("Chainlink", "چین‌لینک"), "DOT": ("Polkadot", "پولکادات"),
     "LTC": ("Litecoin", "لایت‌کوین"), "TRX": ("TRON", "ترون"),
-    "TON": ("Toncoin", "تون‌کوین"), "PEPE": ("Pepe", "پپه"),
+    "TON": ("Gram (formerly Toncoin)", "گرام (تون‌کوین سابق)"),
+    "GRAM": ("Gram (formerly Toncoin)", "گرام (تون‌کوین سابق)"), "PEPE": ("Pepe", "پپه"),
     "SHIB": ("Shiba Inu", "شیبا اینو"),
 }
 ASSET_NAME_ALIASES = {
     "BITCOIN": "BTCUSDT", "ETHEREUM": "ETHUSDT", "RIPPLE": "XRPUSDT",
     "SOLANA": "SOLUSDT", "DOGECOIN": "DOGEUSDT", "CARDANO": "ADAUSDT",
     "AVALANCHE": "AVAXUSDT", "CHAINLINK": "LINKUSDT", "POLKADOT": "DOTUSDT",
-    "LITECOIN": "LTCUSDT", "TRON": "TRXUSDT", "TONCOIN": "TONUSDT",
+    "LITECOIN": "LTCUSDT", "TRON": "TRXUSDT", "TON": "GRAMUSDT", "TONCOIN": "GRAMUSDT", "GRAM": "GRAMUSDT",
 }
 TIMEFRAME_WINDOWS = (("1h", 1), ("6h", 6), ("12h", 12), ("1d", 24), ("1w", 168), ("1mo", 720))
 
@@ -73,7 +74,7 @@ CRYPTO_MARKET_UNIVERSE = (
     ("DOTUSDT", "Polkadot", "پولکادات"),
     ("LTCUSDT", "Litecoin", "لایت‌کوین"),
     ("TRXUSDT", "TRON", "ترون"),
-    ("TONUSDT", "Toncoin", "تون‌کوین"),
+    ("GRAMUSDT", "Gram (formerly Toncoin)", "گرام (تون‌کوین سابق)"),
     ("PEPEUSDT", "Pepe", "پپه"),
     ("SHIBUSDT", "Shiba Inu", "شیبا اینو"),
     ("BCHUSDT", "Bitcoin Cash", "بیت‌کوین کش"),

@@ -235,43 +235,45 @@ class PerpetualProviderTests(unittest.TestCase):
 
 
 class FreeRegionalFallbackTests(unittest.TestCase):
-    def test_bybit_spot_access_denial_uses_public_okx_ticker(self):
+    def test_bybit_spot_access_denial_uses_public_gate_ticker(self):
         http = MagicMock()
         http.get.side_effect = [
             DataProviderError("HTTP 403 from api.bybit.com"),
-            {"code": "0", "data": [{"last": "65000", "volCcy24h": "1200000"}]},
+            [{"currency_pair": "BTC_USDT", "last": "65000",
+              "quote_volume": "1200000"}],
         ]
         result = BybitProvider(http).ticker("BTCUSDT")
-        self.assertEqual(result["provider"], "OKX Spot")
+        self.assertEqual(result["provider"], "Gate.io Spot")
         self.assertEqual(result["price"], 65000)
+        self.assertEqual(result["volume_24h"], 1200000)
         self.assertEqual(http.get.call_count, 2)
 
-    def test_bybit_api_error_uses_exact_okx_instrument_and_keeps_fallback_provenance(self):
-        http = MagicMock()
-        http.get.side_effect = [
-            {"retCode": 10001, "retMsg": "The parameters are invalid", "result": {"list": []}},
-            {"code": "0", "msg": "", "data": [
-                {"instId": "TON-USDT", "last": "1.60", "volCcy24h": "123456"}
-            ]},
-        ]
-        result = BybitProvider(http).ticker("TONUSDT")
-        self.assertEqual(result["provider"], "OKX Spot")
-        self.assertEqual(result["price"], 1.60)
-        self.assertEqual(result["volume_24h"], 123456)
-        self.assertEqual(result["raw"]["instId"], "TON-USDT")
-        self.assertIn("retCode=10001", result["fallback_reason"])
-        self.assertEqual(http.get.call_args_list[1].args[0],
-                         "https://www.okx.com/api/v5/market/ticker")
-        self.assertEqual(http.get.call_args_list[1].args[1], {"instId": "TON-USDT"})
-
-    def test_bybit_api_error_details_survive_when_okx_fallback_fails(self):
+    def test_bybit_api_error_uses_exact_gate_gram_pair_and_keeps_fallback_provenance(self):
         http = MagicMock()
         http.get.side_effect = [
             {"retCode": 170121, "retMsg": "Invalid symbol", "result": {"list": []}},
-            {"code": "51001", "msg": "Instrument ID does not exist", "data": []},
+            [{"currency_pair": "GRAM_USDT", "last": "1.2076",
+              "quote_volume": "13379966.04326"}],
+        ]
+        result = BybitProvider(http).ticker("GRAMUSDT")
+        self.assertEqual(result["provider"], "Gate.io Spot")
+        self.assertEqual(result["price"], 1.2076)
+        self.assertEqual(result["volume_24h"], 13379966.04326)
+        self.assertEqual(result["raw"]["currency_pair"], "GRAM_USDT")
+        self.assertIn("retCode=170121", result["fallback_reason"])
+        self.assertEqual(http.get.call_args_list[1].args[0],
+                         "https://api.gateio.ws/api/v4/spot/tickers")
+        self.assertEqual(http.get.call_args_list[1].args[1],
+                         {"currency_pair": "GRAM_USDT"})
+
+    def test_bybit_api_error_details_survive_when_gate_fallback_fails(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            {"retCode": 170121, "retMsg": "Invalid symbol", "result": {"list": []}},
+            [],
         ]
         with self.assertRaisesRegex(DataProviderError, "retCode=170121.*Invalid symbol"):
-            BybitProvider(http).ticker("TONUSDT")
+            BybitProvider(http).ticker("GRAMUSDT")
 
     def test_binance_perpetual_access_denial_uses_public_gate_ticker(self):
         http = MagicMock()

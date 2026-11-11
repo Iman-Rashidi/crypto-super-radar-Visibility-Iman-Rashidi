@@ -176,8 +176,8 @@ class WebAppHttpTests(unittest.TestCase):
     def test_market_board_lists_actual_cross_validated_provider_names(self):
         board = web_app._market_board_payload(
             [
-                {"symbol": "TONUSDT", "status": "PASS",
-                 "providers": ["Binance Spot", "OKX Spot"]},
+                {"symbol": "GRAMUSDT", "status": "PASS",
+                 "providers": ["Binance Spot", "Gate.io Spot"]},
                 {"symbol": "BTCUSDT", "status": "PASS",
                  "providers": ["Binance Spot", "Bybit Spot"]},
             ],
@@ -185,8 +185,15 @@ class WebAppHttpTests(unittest.TestCase):
         )
         self.assertEqual(
             board["sources"],
-            ["Binance Spot", "OKX Spot", "Bybit Spot"],
+            ["Binance Spot", "Gate.io Spot", "Bybit Spot"],
         )
+
+    def test_market_board_uses_gram_after_ton_exchange_rebrand(self):
+        symbols = [item[0] for item in web_app.CRYPTO_MARKET_UNIVERSE]
+        self.assertIn("GRAMUSDT", symbols)
+        self.assertNotIn("TONUSDT", symbols)
+        self.assertEqual(web_app.ASSET_NAME_ALIASES["TONCOIN"], "GRAMUSDT")
+        self.assertEqual(web_app.ASSET_NAME_ALIASES["GRAM"], "GRAMUSDT")
 
     def test_stale_daily_candles_are_unknown_even_when_hourly_ranges_are_fresh(self):
         gate = SimpleNamespace(

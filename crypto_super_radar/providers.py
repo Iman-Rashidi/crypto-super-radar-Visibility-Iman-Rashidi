@@ -235,20 +235,20 @@ class BinanceProvider:
 
 class BybitProvider:
     BASE = "https://api.bybit.com"
-    OKX = "https://www.okx.com/api/v5"
+    GATE = "https://api.gateio.ws/api/v4"
 
     def __init__(self, http: PublicHttpClient):
         self.http = http
 
     @staticmethod
-    def _okx_instrument(symbol: str) -> str:
-        """Map a USDT-quoted symbol to the exact OKX spot instrument; never guess other quotes."""
+    def _gate_currency_pair(symbol: str) -> str:
+        """Map only an explicit USDT-quoted symbol to Gate's exact spot pair format."""
         normalized = str(symbol).upper()
         if not normalized.endswith("USDT") or len(normalized) <= 4:
             raise DataProviderError(
-                f"OKX spot fallback supports only explicit USDT-quoted symbols: {symbol}"
+                f"Gate.io spot fallback supports only explicit USDT-quoted symbols: {symbol}"
             )
-        return f"{normalized[:-4]}-USDT"
+        return f"{normalized[:-4]}_USDT"
 
     def ticker(self, symbol: str) -> Dict[str, Any]:
         try:
@@ -264,45 +264,39 @@ class BybitProvider:
             if not fallback_eligible:
                 raise
 
-            instrument = self._okx_instrument(symbol)
+            currency_pair = self._gate_currency_pair(symbol)
             try:
                 payload = self.http.get(
-                    f"{self.OKX}/market/ticker", {"instId": instrument}
+                    f"{self.GATE}/spot/tickers",
+                    {"currency_pair": currency_pair},
                 )
-                if not isinstance(payload, dict) or str(payload.get("code")) != "0":
-                    code = payload.get("code") if isinstance(payload, dict) else "INVALID_SCHEMA"
-                    detail = payload.get("msg") if isinstance(payload, dict) else None
+                if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
                     raise DataProviderError(
-                        f"OKX spot fallback API error code={code!r} msg={detail!r} for {instrument}"
+                        f"Gate.io spot fallback returned no unique ticker for {currency_pair}"
                     )
-                items = payload.get("data")
-                if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+                item = payload[0]
+                returned_pair = item.get("currency_pair")
+                if returned_pair != currency_pair:
                     raise DataProviderError(
-                        f"OKX spot fallback returned no unique ticker for {instrument}"
-                    )
-                item = items[0]
-                returned_instrument = item.get("instId")
-                if returned_instrument and returned_instrument != instrument:
-                    raise DataProviderError(
-                        f"OKX spot fallback instrument mismatch: expected {instrument}, "
-                        f"received {returned_instrument}"
+                        f"Gate.io spot fallback pair mismatch: expected {currency_pair}, "
+                        f"received {returned_pair!r}"
                     )
                 price = _positive_float(item.get("last"))
-                volume = _safe_float(item.get("volCcy24h"))
+                volume = _safe_float(item.get("quote_volume"))
                 if price is None or volume is None:
                     raise DataProviderError(
-                        f"OKX spot fallback returned incomplete ticker for {instrument}"
+                        f"Gate.io spot fallback returned incomplete ticker for {currency_pair}"
                     )
                 return {
                     "price": price,
                     "volume_24h": volume,
                     "raw": item,
-                    "provider": "OKX Spot",
+                    "provider": "Gate.io Spot",
                     "fallback_reason": message[:240],
                 }
             except DataProviderError as fallback_error:
                 raise DataProviderError(
-                    f"Bybit spot unavailable ({message}); OKX fallback failed: {fallback_error}"
+                    f"Bybit spot unavailable ({message}); Gate.io fallback failed: {fallback_error}"
                 ) from fallback_error
 
     def _bybit_ticker(self, symbol: str) -> Dict[str, Any]:
@@ -611,7 +605,7 @@ class MarketDataService:
     def security(self, asset: AssetSpec) -> Dict[str, Any]:
         if asset.market_type in {"cex", "perp"}:
             # Only major native assets have an explicit allowlist in this prototype.
-            if asset.symbol in {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT", "TRXUSDT", "TONUSDT"}:
+            if asset.symbol in {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT", "TRXUSDT", "GRAMUSDT"}:
                 return {"status": "PASS", "reason": "Native major asset; token-contract authority checks are not applicable.", "scope": "Exchange/custody and market risks remain; listing is not a guarantee of safety."}
             return {"status": "UNKNOWN", "reason": "CEX instrument is not in the conservative native-asset allowlist."}
         if asset.chain == "solana":
