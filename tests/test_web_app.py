@@ -272,7 +272,10 @@ class WebAppHttpTests(unittest.TestCase):
                 "candidates": [{"trade_authorization": "BUY"}],
                 "candidate_count": 1,
                 "qualified_buy_count": 1,
-                "diagnostic_candidates": [{"trade_authorization": "BUY"}],
+                "diagnostic_candidates": [
+                    {"trade_authorization": "BUY"},
+                    {"trade_authorization": "NO_TRADE", "token_name": "Old Research Token", "token_symbol": "OLD"},
+                ],
                 "public_policy": {"discovery_candidates_exposed": True},
             },
             refreshing=False,
@@ -293,7 +296,82 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["candidate_count"], 0)
         self.assertEqual(result["qualified_buy_count"], 0)
-        self.assertEqual(result["diagnostic_candidates"], [])
+        self.assertEqual(result["diagnostic_freshness"], "STALE_LAST_COMPLETED_SCAN")
+        self.assertEqual(len(result["diagnostic_candidates"]), 1)
+        self.assertEqual(result["diagnostic_candidates"][0]["token_symbol"], "OLD")
+        self.assertNotIn("BUY", [item.get("trade_authorization") for item in result["diagnostic_candidates"]])
+
+    def test_gem_hunter_current_discovery_progress_is_visible_during_validation(self):
+        web_app.GEM_HUNTER_RESULT_CACHE.update(
+            expires_at=0.0,
+            payload={
+                "status": "PARTIAL",
+                "progress_stage": "DISCOVERY_COMPLETE",
+                "diagnostic_freshness": "CURRENT_SCAN_DISCOVERY",
+                "diagnostic_fa": "یک نامزد پیدا شد؛ اعتبارسنجی ادامه دارد.",
+                "refreshing": True,
+                "stale": False,
+                "candidates": [{"trade_authorization": "BUY"}],
+                "candidate_count": 1,
+                "qualified_buy_count": 1,
+                "discovered_candidate_count": 1,
+                "diagnostic_candidates": [
+                    {"trade_authorization": "NO_TRADE", "token_name": "Fresh Token", "token_symbol": "FRESH"}
+                ],
+                "public_policy": {"discovery_candidates_exposed": True},
+            },
+            refreshing=True,
+            last_error=None,
+        )
+        status, _, payload = self.request("GET", "/api/gem-hunter/report?limit=50")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["refreshing"])
+        self.assertFalse(result["stale"])
+        self.assertEqual(result["diagnostic_freshness"], "CURRENT_SCAN_DISCOVERY")
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["qualified_buy_count"], 0)
+        self.assertEqual(result["diagnostic_candidates"][0]["token_symbol"], "FRESH")
+
+    def test_gem_hunter_discovery_publishes_candidates_before_slow_validation(self):
+        web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
+        raw = {
+            "status": "PARTIAL",
+            "candidate_count": 1,
+            "generated_at_utc": "2026-11-11T20:00:00Z",
+            "sources": {"GECKOTERMINAL_NEW_POOLS_SOLANA": {"status": "PASS"}},
+            "candidates": [{
+                "chain": "solana",
+                "token_address": "61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP",
+                "token_name": "Progress Token",
+                "token_symbol": "PROG",
+                "candidate_status": "UNSCREENED",
+                "trade_authorization": "NO_TRADE",
+            }],
+        }
+        progress = []
+
+        def reconcile(rows, http):
+            self.assertEqual(len(progress), 1)
+            self.assertEqual(progress[0]["progress_stage"], "DISCOVERY_COMPLETE")
+            return rows
+
+        with patch.object(web_app, "discover_gem_candidates", return_value=raw), \
+             patch.object(web_app, "reconcile_discovery_candidates", side_effect=reconcile), \
+             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows), \
+             patch.object(web_app, "evaluate_discovery_candidates", side_effect=lambda rows: rows), \
+             patch.object(web_app, "public_buy_candidates", return_value=[]):
+            result = web_app._gem_hunter_discovery_payload(
+                limit=50,
+                include_diagnostics=True,
+                progress_callback=lambda payload: progress.append(payload),
+            )
+        self.assertEqual(progress[0]["discovered_candidate_count"], 1)
+        self.assertEqual(progress[0]["diagnostic_candidates"][0]["token_symbol"], "PROG")
+        self.assertTrue(progress[0]["refreshing"])
+        self.assertEqual(progress[0]["qualified_buy_count"], 0)
+        self.assertEqual(result["progress_stage"], "COMPLETE")
 
     def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
         from test_gem_hunter_qualification import valid_candidate
