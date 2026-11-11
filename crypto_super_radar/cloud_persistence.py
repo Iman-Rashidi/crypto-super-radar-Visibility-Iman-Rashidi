@@ -62,7 +62,7 @@ def _json_safe(value: Any, depth: int = 0) -> Any:
         safe = {}
         for key, item in list(value.items())[:100]:
             name = _clean_text(key, 80)
-            if re.search(r"(?i)(api.?key|password|secret|authorization|access.?token)", name):
+            if re.search(r"(?i)(^token$|api.?key|password|secret|authorization|access.?token)", name):
                 safe[name] = _REDACTED
             else:
                 safe[name] = _json_safe(item, depth + 1)
@@ -533,6 +533,7 @@ class NotionSink:
             "volume_liquidity": ("volume_to_liquidity_24h",),
             "research_score": ("discovery_priority_score",),
             "screening_status": ("candidate_status", "trade_authorization"),
+            "status": ("status", "screening_status", "candidate_status"),
             "honeypot_status": ("honeypot_status", "candidate_status"),
             "holders": ("holder_count", "holders_count", "top10_holder_pct"),
             "details_json": ("details", "payload"),
