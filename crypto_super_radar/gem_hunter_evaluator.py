@@ -160,8 +160,10 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "liquidity": (
             "نقدینگی و حجم Pool دقیق در دو منبع مستقل تطبیق داده شده‌اند؛ این وضعیت عمق اجرایی یا امکان خروج را اثبات نمی‌کند."
             if gates["liquidity"] == "PASS" else
-            "تطبیق مستقل Pool شکست خورده یا نقدینگی تأییدشده زیر حد اولیه است."
+            "نسبت حجم ۲۴ساعته به نقدینگی کمتر از حداقل ۰٫۰۵ است."
             if low_turnover else
+            "تطبیق مستقل Pool شکست خورده یا نقدینگی تأییدشده زیر حد اولیه است."
+            if gates["liquidity"] == "FAIL" else
             "تطبیق دو منبع مستقل برای همین Pool تکمیل نشده؛ نقدینگی تأییدنشده است."
         ),
         "data_quality": (
