@@ -27,6 +27,7 @@ from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .providers import _ohlcv_frame
+from .feed_health import build_feed_health_report
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -1140,6 +1141,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = _gem_hunter_discovery_payload(limit=limit)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/data-health":
+            payload = build_feed_health_report(_crypto_market_board())
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/crypto-markets":
             payload = _crypto_market_board()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -1552,6 +1557,45 @@ class Handler(BaseHTTPRequestHandler):
               results.replaceChildren(el('p', 'گزارش دریافت نشد؛ هیچ سیگنال خریدی از دادهٔ ناقص صادر نمی‌شود.', 'muted'));
             } finally { button.disabled = false; }
           });
+        })();
+        </script>
+        <section class="card" id="data-health">
+          <h2>سلامت منابع داده · Data Health</h2>
+          <p id="data-health-status" class="muted" aria-live="polite">در حال بررسی تازگی و پوشش داده‌ها...</p>
+          <div id="data-health-details" class="grid"></div>
+          <button type="button" id="data-health-refresh">بررسی دوباره سلامت داده</button>
+          <p class="muted">LIVE در این بخش فقط به معنی تازه‌بودن قیمت‌های منتخب و تأیید آن‌ها توسط Binance و Bybit است؛ این وضعیت به معنی پوشش کل بازار یا اتصال WebSocket نیست.</p>
+        </section>
+        <script>
+        (function(){
+          const status=document.getElementById('data-health-status');
+          const details=document.getElementById('data-health-details');
+          const button=document.getElementById('data-health-refresh');
+          if(!status||!details||!button)return;
+          const labels={LIVE:'تازه و تأییدشده',PARTIAL:'پوشش ناقص',STALE:'داده قدیمی',DRIFT:'اختلاف زمان/داده',UNKNOWN:'نامشخص'};
+          async function refresh(){
+            button.disabled=true;status.textContent='در حال دریافت گزارش سلامت...';
+            try{
+              const response=await fetch('/api/data-health',{cache:'no-store'});
+              const data=await response.json();
+              if(!response.ok)throw new Error('HTTP '+response.status);
+              status.textContent='وضعیت: '+(labels[data.status]||data.status)+' · '+(data.reason||'');
+              const rows=[
+                ['نمادهای تأییدشده',String(data.verified_symbols??0)+' / '+String(data.expected_symbols??0)],
+                ['سن مشاهده',data.age_seconds===null?'—':String(data.age_seconds)+' ثانیه'],
+                ['حد تازگی',String(data.stale_after_seconds??'—')+' ثانیه'],
+                ['منابع',Array.isArray(data.providers)?data.providers.join(' + '):'—']
+              ];
+              details.replaceChildren(...rows.map(([label,value])=>{
+                const card=document.createElement('div');card.className='metric';
+                const title=document.createElement('span');title.textContent=label;
+                const content=document.createElement('strong');content.textContent=value;
+                card.append(title,content);return card;
+              }));
+            }catch(error){status.textContent='گزارش سلامت دریافت نشد: '+String(error.message||error);}
+            finally{button.disabled=false;}
+          }
+          button.addEventListener('click',refresh);refresh();
         })();
         </script>
         <section class="card" id="crypto-markets">
