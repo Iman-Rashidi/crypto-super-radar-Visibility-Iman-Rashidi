@@ -1302,7 +1302,7 @@ class Handler(BaseHTTPRequestHandler):
           const safeUrl = value => {
             try {
               const raw = String(value || '').trim();
-              if (!/^https?:\/\//i.test(raw)) return '';
+              if (!/^https?:\\/\\//i.test(raw)) return '';
               const u = new URL(raw);
               return ['http:', 'https:'].includes(u.protocol) ? u.href : '';
             } catch (_) { return ''; }
