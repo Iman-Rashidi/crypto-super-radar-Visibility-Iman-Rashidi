@@ -27,6 +27,9 @@ from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .providers import _ohlcv_frame
+from .cloud_persistence import (
+    configure_cloud_logging, get_cloud_store, initialize_cloud_store,
+)
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -122,6 +125,15 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         raw_candidates, ENGINE.data,
     )
     raw_candidates = evaluate_discovery_candidates(raw_candidates)
+    # Persist each research snapshot and its Notion outbox event when PostgreSQL
+    # is configured. This is best-effort for HTTP availability; the local research
+    # result is still returned if the optional reporting database is unavailable.
+    try:
+        cloud_store = get_cloud_store()
+        for candidate in raw_candidates:
+            cloud_store.record_token_snapshot(candidate)
+    except Exception:
+        pass
     discovered_count = len(raw_candidates)
     evaluation_records = [
         item.get("qualification")
@@ -1116,6 +1128,19 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
+        if parsed.path == "/ready":
+            cloud_status = get_cloud_store().status()
+            postgres_required = os.getenv("CSR_REQUIRE_POSTGRES", "").lower() in {"1", "true", "yes"}
+            ready = not postgres_required or cloud_status["postgres"] == "connected"
+            payload = {
+                "status": "ready" if ready else "degraded",
+                "persistence": cloud_status,
+            }
+            return self._send(
+                200 if ready else 503,
+                json.dumps(payload, separators=(",", ":")).encode(),
+                "application/json",
+            )
         if parsed.path == "/api/dex-search":
             query = parse_qs(parsed.query).get("q", [""])[0]
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
@@ -1945,12 +1970,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, _page(f"<h2>خطا در ورودی</h2><p>{message}</p><a href='/'>بازگشت</a>"))
 
     def log_message(self, fmt, *args):
+        message = fmt % args if args else fmt
+        # Keep normal polling traffic out of the durable event log; persist
+        # client/server HTTP errors without making request handling depend on PG.
+        if re.search(r"HTTP/1\\.[01]\\\"\\s+[45]\\d\\d", message):
+            try:
+                get_cloud_store().record_log(
+                    message, level="WARNING", component="http",
+                    event_type="http_error",
+                )
+            except Exception:
+                pass
         super().log_message(fmt, *args)
 
 
 def main():
     port = int(os.getenv("PORT", "10000"))
     host = os.getenv("HOST", "0.0.0.0")
+    store = initialize_cloud_store()
+    configure_cloud_logging()
+    print("CRYPTO SUPER RADAR persistence:", json.dumps(store.status(), separators=(",", ":")))
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
