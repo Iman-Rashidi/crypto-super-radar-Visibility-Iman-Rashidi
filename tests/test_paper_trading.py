@@ -65,6 +65,15 @@ class PaperCircuitBreakerTests(unittest.TestCase):
         self.assertFalse(result["entry_allowed"])
         self.assertIn("CONSECUTIVE_LOSSES", result["halt_reasons"])
 
+    def test_initial_stop_and_cost_aware_performance_are_persisted(self):
+        self.record_loss(1)
+        state = self.ledger.state()
+        self.assertEqual(state["recent_trades"][0]["initial_stop_loss"], 90.0)
+        self.assertEqual(state["performance"]["sample_size"], 1)
+        self.assertEqual(state["performance"]["status"], "INSUFFICIENT_SAMPLE")
+        self.assertEqual(state["performance"]["r_sample_size"], 1)
+        self.assertFalse(state["performance"]["performance_claim_allowed"])
+
     def test_peak_to_trough_drawdown_circuit_breaker(self):
         self.record_loss(1)
         result = self.ledger.risk_controls(
