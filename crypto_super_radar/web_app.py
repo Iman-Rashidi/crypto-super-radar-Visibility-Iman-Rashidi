@@ -22,6 +22,7 @@ from .models import AssetSpec, GateStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
+from .gem_hunter_evaluator import evaluate_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .providers import _ohlcv_frame
 
@@ -105,6 +106,11 @@ def _gem_hunter_discovery_payload(limit: int = 20) -> dict:
     # qualification engine or that an incomplete record is a completed evaluation.
     raw_candidates = result.get("candidates")
     raw_candidates = raw_candidates if isinstance(raw_candidates, list) else []
+    # Discovery and qualification are separate stages. Attach an explicit,
+    # evidence-bounded first-stage record to every raw discovery candidate.
+    # This evaluator deliberately leaves unavailable security/holder/whale/
+    # slippage evidence UNKNOWN and can never authorize a BUY.
+    raw_candidates = evaluate_discovery_candidates(raw_candidates)
     discovered_count = len(raw_candidates)
     evaluation_records = [
         item.get("qualification")
