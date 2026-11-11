@@ -1,6 +1,7 @@
 """Tests for exact-pool cross-source market-data reconciliation."""
 import unittest
 
+import crypto_super_radar.gem_hunter_market_validation as validation
 from crypto_super_radar.gem_hunter_market_validation import (
     reconcile_candidate_market_data,
     reconcile_discovery_candidates,
@@ -105,6 +106,15 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("VERIFIED_LIQUIDITY_BELOW_FLOOR", result["reason_codes"])
+
+    def test_scan_budget_rotates_to_candidates_beyond_first_batch(self):
+        validation._SCAN_OFFSET = 0
+        rows = [candidate(), dict(candidate(), token_address="0x" + "4" * 40)]
+        first = reconcile_discovery_candidates(rows, FakeHttp(), limit=1)
+        self.assertEqual(first[0]["market_reconciliation"]["status"], "PASS")
+        self.assertEqual(first[1]["market_reconciliation"]["status"], "NOT_CHECKED_BUDGET")
+        second = reconcile_discovery_candidates(rows, FakeHttp(), limit=1)
+        self.assertNotEqual(second[1]["market_reconciliation"]["status"], "NOT_CHECKED_BUDGET")
 
     def test_scan_budget_is_explicit_and_bounded(self):
         rows = [candidate(), dict(candidate(), token_address="0x" + "4" * 40)]
