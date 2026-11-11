@@ -10,7 +10,7 @@ from typing import Any, Mapping, Optional
 import re
 
 
-SCHEMA_VERSION = "gem-hunter-v1"
+SCHEMA_VERSION = "gem-hunter-v2"
 MIN_PASSED_FILTERS = 9
 TOTAL_FILTERS = 12
 MAX_DATA_AGE_SECONDS = 300.0
@@ -129,6 +129,37 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
     if candidate.get("trade_authorization") != "BUY":
         return False
     if candidate.get("candidate_status") != "BUY":
+        return False
+
+    # v2 requires fresh, exact-pool cross-source evidence and an explicit
+    # contract-security PASS. Legacy qualification payloads cannot bypass it.
+    reconciliation = candidate.get("market_reconciliation")
+    if not isinstance(reconciliation, Mapping) or reconciliation.get("status") != "PASS":
+        return False
+    if not _valid_token_identity(chain, reconciliation.get("token_address")):
+        return False
+    if reconciliation.get("token_address", "").lower() != candidate.get("token_address", "").lower():
+        return False
+    if not isinstance(reconciliation.get("pool_address"), str) or reconciliation.get("pool_address", "").lower() != candidate.get("pool_address", "").lower():
+        return False
+    if _finite_number(reconciliation.get("source_count")) is None or reconciliation.get("source_count") < 2:
+        return False
+    reconciliation_sources = reconciliation.get("sources")
+    providers = {
+        str(row.get("provider")) for row in reconciliation_sources
+        if isinstance(row, Mapping) and row.get("provider")
+    } if isinstance(reconciliation_sources, list) else set()
+    if not {"DEXSCREENER", "GECKOTERMINAL"}.issubset(providers):
+        return False
+    verified_liquidity = _finite_number(reconciliation.get("verified_liquidity_usd"))
+    verified_volume = _finite_number(reconciliation.get("verified_volume_24h_usd"))
+    if verified_liquidity is None or verified_liquidity < 50_000:
+        return False
+    if verified_volume is None or verified_volume < 100_000:
+        return False
+
+    security_evidence = candidate.get("security_evidence")
+    if not isinstance(security_evidence, Mapping) or security_evidence.get("status") != "PASS":
         return False
 
     qualification = candidate.get("qualification")
