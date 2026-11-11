@@ -9,6 +9,7 @@ on:
     types: [opened, synchronize, reopened, edited]
     branches:
       - main
+      - feature/multi-stage-confirmation-engine
 jobs:
   test:
     runs-on: ubuntu-latest
