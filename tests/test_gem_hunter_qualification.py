@@ -30,6 +30,7 @@ def valid_candidate(now=NOW):
         "pool_address": "0x" + "2" * 40,
         "market_reconciliation": {
             "status": "PASS",
+            "checked_at_utc": data_as_of,
             "token_address": "0x" + "1" * 40,
             "pool_address": "0x" + "2" * 40,
             "source_count": 2,
@@ -37,7 +38,7 @@ def valid_candidate(now=NOW):
             "verified_volume_24h_usd": 420000,
             "sources": [{"provider": "DEXSCREENER"}, {"provider": "GECKOTERMINAL"}],
         },
-        "security_evidence": {"status": "PASS", "provider": "GOPLUS_SOURCIFY"},
+        "security_evidence": {"status": "PASS", "provider": "GOPLUS_SOURCIFY", "checked_at_utc": data_as_of},
         "dex": "Uniswap V2",
         "candidate_status": "BUY",
         "trade_authorization": "BUY",
