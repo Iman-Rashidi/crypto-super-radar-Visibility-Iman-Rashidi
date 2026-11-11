@@ -38,6 +38,149 @@ def _store(key: str, value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _find_named(value: Any, names: set[str], depth: int = 0):
+    if depth > 5:
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = "".join(character for character in str(key).lower() if character.isalnum())
+            if normalized in names:
+                return item
+        for item in value.values():
+            found = _find_named(item, names, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value[:100]:
+            found = _find_named(item, names, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _explicit_bool(value: Any):
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    return None
+
+
+def _rugcheck_evidence(http, address: str) -> dict[str, Any]:
+    """Read RugCheck's summary report; missing/ambiguous fields remain UNKNOWN."""
+    if http is None:
+        return {"status": "UNKNOWN", "provider": "RUGCHECK", "reason_codes": ["HTTP_UNAVAILABLE"]}
+    try:
+        report = http.get(
+            f"https://api.rugcheck.xyz/v1/tokens/{address}/report/summary"
+        )
+        if not isinstance(report, dict) or not report:
+            raise ValueError("RugCheck summary is not an object")
+        risks = report.get("risks")
+        risks = risks if isinstance(risks, list) else []
+        risk_rows = []
+        high_risk = False
+        for row in risks[:50]:
+            if not isinstance(row, dict):
+                continue
+            level = str(row.get("level") or row.get("severity") or "").strip().lower()
+            name = str(row.get("name") or row.get("description") or "RugCheck risk")
+            if level in {"high", "critical", "danger", "severe"}:
+                high_risk = True
+            risk_rows.append({"name": name[:180], "level": level[:32]})
+
+        honeypot = _explicit_bool(_find_named(
+            report, {"ishoneypot", "honeypot", "is_honeypot"}
+        ))
+        cannot_buy = _explicit_bool(_find_named(report, {"cannotbuy", "cannot_buy"}))
+        cannot_sell = _explicit_bool(_find_named(
+            report, {"cannotsell", "cannotsellall", "cannot_sell", "cannot_sell_all"}
+        ))
+        lp_locked = _explicit_bool(_find_named(
+            report, {"lplocked", "lp_locked", "islocked", "is_locked"}
+        ))
+        lp_burned = _explicit_bool(_find_named(
+            report, {"lpburned", "lp_burned", "isb urned".replace(" ", ""), "is_burned"}
+        ))
+        holders = _find_named(report, {"top_holders", "topholders", "holders"})
+        top10_pct = None
+        if isinstance(holders, list) and holders:
+            percentages = []
+            for holder in holders[:10]:
+                if not isinstance(holder, dict):
+                    continue
+                raw = next((holder.get(key) for key in (
+                    "pct", "percent", "percentage", "ownershipPercentage",
+                    "ownership_percentage",
+                ) if holder.get(key) is not None), None)
+                try:
+                    number = float(raw)
+                except (TypeError, ValueError, OverflowError):
+                    percentages = []
+                    break
+                if not 0 <= number <= 100:
+                    percentages = []
+                    break
+                percentages.append(number)
+            if percentages:
+                top10_pct = sum(percentages)
+                if max(percentages) <= 1.0 and top10_pct <= 1.0:
+                    top10_pct *= 100.0
+
+        score = _find_named(report, {"score", "score_normalised", "scorenormalised"})
+        try:
+            score = float(score) if score is not None else None
+        except (TypeError, ValueError, OverflowError):
+            score = None
+        explicit_unprotected_lp = lp_locked is False and lp_burned is False
+        dangerous = (
+            honeypot is True or cannot_buy is True or cannot_sell is True
+            or high_risk or explicit_unprotected_lp
+        )
+        reasons = []
+        if honeypot is True:
+            reasons.append("RugCheck گزارش Honeypot داده است.")
+        if cannot_buy is True:
+            reasons.append("RugCheck امکان خرید توکن را پرریسک/غیرفعال گزارش کرده است.")
+        if cannot_sell is True:
+            reasons.append("RugCheck امکان فروش توکن را پرریسک/غیرفعال گزارش کرده است.")
+        if high_risk:
+            reasons.append("RugCheck حداقل یک ریسک با شدت High/Critical گزارش کرده است.")
+        if explicit_unprotected_lp:
+            reasons.append("در گزارش RugCheck نه قفل و نه سوزاندن LP تأیید شده است.")
+        if not dangerous:
+            reasons.append("گزارش RugCheck ریسک قطعی High/Critical نشان نداد؛ این داده به‌تنهایی PASS امنیتی صادر نمی‌کند.")
+        return _store("rugcheck:" + address.lower(), {
+            "status": "FAIL" if dangerous else "UNKNOWN",
+            "provider": "RUGCHECK",
+            "risk_score": score,
+            "honeypot": honeypot,
+            "cannot_buy": cannot_buy,
+            "cannot_sell": cannot_sell,
+            "lp_locked": lp_locked,
+            "lp_burned": lp_burned,
+            "lp_protected": True if lp_locked is True or lp_burned is True else (
+                False if explicit_unprotected_lp else None
+            ),
+            "top10_holder_pct": round(top10_pct, 4) if top10_pct is not None else None,
+            "risks": risk_rows,
+            "reason_fa": reasons,
+            "coverage_note": "RugCheck summary; unrecognized or missing fields remain UNKNOWN.",
+        })
+    except Exception as exc:
+        return _store("rugcheck:" + address.lower(), {
+            "status": "UNKNOWN", "provider": "RUGCHECK",
+            "reason_fa": ["گزارش RugCheck دریافت یا تفسیر نشد؛ وضعیت UNKNOWN باقی می‌ماند."],
+            "reason_codes": [type(exc).__name__],
+        })
+
+
 def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
     chain = str(candidate.get("chain") or "").lower()
     address = candidate.get("token_address")
@@ -91,41 +234,57 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
 
     if chain == "solana":
         rpc = getattr(data_service, "solana_rpc", None)
-        if rpc is None:
-            return {"status": "UNKNOWN", "provider": "SOLANA_RPC",
-                    "reason_fa": ["RPC سولانا برای بررسی Mint در دسترس نیست."]}
-        try:
-            result = rpc.token_security(address)
-            mint_active = result.get("mint_authority_active")
-            freeze_active = result.get("freeze_authority_active")
-            concentration = result.get("top10_token_account_concentration_pct")
-            active = mint_active is True or freeze_active is True
-            # Revoked authorities alone cannot prove honeypot/transfer safety.
-            status = "FAIL" if active else "UNKNOWN"
-            reasons = []
-            if mint_active is True:
-                reasons.append("اختیار ضرب توکن هنوز فعال است.")
-            if freeze_active is True:
-                reasons.append("اختیار مسدودسازی حساب‌ها هنوز فعال است.")
-            if concentration is not None:
-                reasons.append(f"تمرکز ۱۰ حساب برتر توکن {concentration:.2f}% است؛ این معادل مالکیت ۱۰ کیف‌پول مستقل نیست.")
-            if not active:
-                reasons.append("اختیارات Mint و Freeze غیرفعال‌اند، اما Honeypot و امنیت انتقال با این داده‌ها اثبات نمی‌شوند.")
-            return _store(key, {
-                "status": status,
-                "provider": "SOLANA_RPC",
-                "mint_authority_active": mint_active,
-                "freeze_authority_active": freeze_active,
-                "top10_token_account_concentration_pct": concentration,
-                "reason_fa": reasons,
-                "coverage_note": result.get("scope_note"),
-            })
-        except Exception as exc:
-            return _store(key, {
-                "status": "UNKNOWN", "provider": "SOLANA_RPC",
-                "reason_fa": ["بررسی Mint در RPC سولانا کامل نشد؛ وضعیت UNKNOWN باقی می‌ماند."],
-                "reason_codes": [type(exc).__name__],
-            })
+        http = getattr(data_service, "http", None)
+        rpc_result = {}
+        rpc_error = None
+        if rpc is not None:
+            try:
+                response = rpc.token_security(address)
+                rpc_result = response if isinstance(response, dict) else {}
+            except Exception as exc:
+                rpc_error = type(exc).__name__
+
+        rugcheck = _rugcheck_evidence(http, address)
+        mint_active = rpc_result.get("mint_authority_active")
+        freeze_active = rpc_result.get("freeze_authority_active")
+        rpc_top10 = rpc_result.get("top10_token_account_concentration_pct")
+        top10 = rpc_top10 if rpc_top10 is not None else rugcheck.get("top10_holder_pct")
+        active_authority = mint_active is True or freeze_active is True
+        status = "FAIL" if active_authority or rugcheck.get("status") == "FAIL" else "UNKNOWN"
+
+        reasons = []
+        if mint_active is True:
+            reasons.append("اختیار ضرب توکن هنوز فعال است.")
+        if freeze_active is True:
+            reasons.append("اختیار مسدودسازی حساب‌ها هنوز فعال است.")
+        if top10 is not None:
+            reasons.append(
+                f"تمرکز ۱۰ هولدر گزارش‌شده {float(top10):.2f}% است؛ "
+                "این عدد لزوماً مالکیت ۱۰ کیف‌پول مستقل را نشان نمی‌دهد."
+            )
+        reasons.extend(rugcheck.get("reason_fa") or [])
+        if rpc_error:
+            reasons.append("دادهٔ RPC سولانا دریافت نشد؛ بررسی باقیمانده ناقص است.")
+        if status != "FAIL":
+            reasons.append("اطلاعات موجود برای PASS امنیتی کامل کافی نیست؛ وضعیت UNKNOWN حفظ شد.")
+
+        return _store(key, {
+            "status": status,
+            "provider": "SOLANA_RPC+RUGCHECK" if http is not None else "SOLANA_RPC",
+            "mint_authority_active": mint_active,
+            "freeze_authority_active": freeze_active,
+            "top10_token_account_concentration_pct": top10,
+            "lp_locked": rugcheck.get("lp_locked"),
+            "lp_burned": rugcheck.get("lp_burned"),
+            "lp_protected": rugcheck.get("lp_protected"),
+            "rugcheck": rugcheck,
+            "reason_fa": reasons,
+            "reason_codes": ([rpc_error] if rpc_error else []),
+            "coverage_note": (
+                "Solana RPC mint/freeze authority checks plus RugCheck summary; "
+                "not a full contract or transfer-simulation audit."
+            ),
+        })
 
     return {"status": "UNKNOWN", "provider": "UNSUPPORTED",
             "reason_fa": ["شبکه برای بررسی امنیت قرارداد پشتیبانی نمی‌شود."]}
