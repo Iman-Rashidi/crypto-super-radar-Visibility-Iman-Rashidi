@@ -509,6 +509,8 @@ class NotionSink:
             return {"date": {"start": date_value}} if date_value else None
         if prop_type == "select":
             return {"select": {"name": _clean_text(value, 100)}} if str(value).strip() else None
+        if prop_type == "status":
+            return {"status": {"name": _clean_text(value, 100)}} if str(value).strip() else None
         if prop_type == "multi_select":
             values = value if isinstance(value, list) else [value]
             return {"multi_select": [{"name": _clean_text(item, 100)} for item in values if str(item).strip()]}
