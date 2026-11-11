@@ -115,7 +115,6 @@ def _score(age_hours: Optional[float], liquidity: Optional[float],
     vol_points = 0 if volume_24h < 1_000 else 4 if volume_24h < 10_000 else 8 if volume_24h < 50_000 else 12 if volume_24h < 250_000 else 16 if volume_24h < 1_000_000 else 20
     tx_total = (buys or 0) + (sells or 0)
     activity_points = 0 if tx_total < 5 else 4 if tx_total < 20 else 8 if tx_total < 75 else 12 if tx_total < 250 else 15
-    unique_total = (buyers or 0) + (sellers or 0)
     # Transaction counts and unique-wallet counts do not reveal notional flow.
     # Keep this component neutral until dollar-denominated buy/sell volume exists.
     pressure_points = 7
@@ -124,8 +123,6 @@ def _score(age_hours: Optional[float], liquidity: Optional[float],
         penalty += 10
     if volume_to_liquidity is not None and volume_to_liquidity > 10:
         penalty += 20
-    if buys is not None and sells is not None and sells > buys:
-        penalty += 8
     if price_change_1h is not None:
         if price_change_1h <= -20:
             penalty += 20
