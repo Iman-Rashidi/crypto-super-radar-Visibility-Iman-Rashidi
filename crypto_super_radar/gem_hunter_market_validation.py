@@ -18,6 +18,7 @@ CACHE_TTL_SECONDS = 45.0
 MAX_CANDIDATES_PER_SCAN = 10
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_LOCK = threading.RLock()
+_SCAN_OFFSET = 0
 
 
 def _number(value: Any):
@@ -238,15 +239,21 @@ def reconcile_discovery_candidates(candidates: Any, http, *, limit: int = MAX_CA
         key=lambda row: _number(row.get("discovery_priority_score")) or 0.0,
         reverse=True,
     )
-    bounded = max(0, min(int(limit), MAX_CANDIDATES_PER_SCAN))
+    bounded = max(0, min(int(limit), MAX_CANDIDATES_PER_SCAN, len(valid)))
+    global _SCAN_OFFSET
+    with _CACHE_LOCK:
+        start = (_SCAN_OFFSET % len(valid)) if valid and bounded else 0
+        if valid and bounded:
+            _SCAN_OFFSET = (start + bounded) % len(valid)
+    selected = {(start + offset) % len(valid) for offset in range(bounded)} if valid else set()
     for index, row in enumerate(valid):
-        if index < bounded:
+        if index in selected:
             row["market_reconciliation"] = reconcile_candidate_market_data(row, http)
         else:
             row["market_reconciliation"] = {
                 "status": "NOT_CHECKED_BUDGET",
                 "reason_codes": ["SCAN_BUDGET_EXHAUSTED"],
-                "reason_fa": ["این نامزد در این نوبت به‌دلیل محدودیت درخواست API تطبیق مستقل نشده است."],
+                "reason_fa": ["این نامزد در این نوبت به‌دلیل محدودیت درخواست API در صف بررسی بعدی قرار گرفت."],
                 "source_count": 0,
                 "sources": [],
             }
