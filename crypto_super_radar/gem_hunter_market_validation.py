@@ -233,7 +233,7 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
             if price_conflict or reported_price_conflict or liquidity_conflict or volume_conflict or reported_conflict or reported_volume_conflict:
                 base["status"] = "FAIL"
                 base["reason_codes"].append("MARKET_DATA_DISAGREEMENT")
-                base["reason_fa"].append("نقدینگی یا حجم گزارش کشف با منابع مستقل همان استخر اختلاف بیش از حد مجاز دارد.")
+                base["reason_fa"].append("قیمت، نقدینگی یا حجم گزارش کشف با منابع مستقل همان استخر اختلاف بیش از حد مجاز دارد.")
             elif min(liquidities) < 50_000:
                 base["status"] = "FAIL"
                 base["reason_codes"].append("VERIFIED_LIQUIDITY_BELOW_FLOOR")
@@ -241,7 +241,7 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
             else:
                 base["status"] = "PASS"
                 base["reason_codes"].append("EXACT_POOL_CROSS_SOURCE_MATCH")
-                base["reason_fa"].append("هویت توکن و Pool و دادهٔ نقدینگی/حجم در دو منبع مستقل تطبیق داده شد.")
+                base["reason_fa"].append("هویت توکن و Pool و قیمت، نقدینگی و حجم در دو منبع مستقل تطبیق داده شد.")
             result = base
 
     with _CACHE_LOCK:
