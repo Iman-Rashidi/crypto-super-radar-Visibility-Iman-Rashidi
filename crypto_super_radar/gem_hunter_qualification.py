@@ -54,6 +54,12 @@ def _valid_token_identity(chain: str, address: Any) -> bool:
     return False
 
 
+def _same_chain_address(chain: str, left: Any, right: Any) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    return left == right if chain == "solana" else left.lower() == right.lower()
+
+
 def _valid_wallet(chain: str, address: Any) -> bool:
     return _valid_token_identity(chain, address)
 
@@ -138,9 +144,9 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
         return False
     if not _valid_token_identity(chain, reconciliation.get("token_address")):
         return False
-    if reconciliation.get("token_address", "").lower() != candidate.get("token_address", "").lower():
+    if not _same_chain_address(chain, reconciliation.get("token_address"), candidate.get("token_address")):
         return False
-    if not isinstance(reconciliation.get("pool_address"), str) or reconciliation.get("pool_address", "").lower() != candidate.get("pool_address", "").lower():
+    if not _same_chain_address(chain, reconciliation.get("pool_address"), candidate.get("pool_address")):
         return False
     source_count = _finite_number(reconciliation.get("source_count"))
     if source_count is None or source_count < 2:
