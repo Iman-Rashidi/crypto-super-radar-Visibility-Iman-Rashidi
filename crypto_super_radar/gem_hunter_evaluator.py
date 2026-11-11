@@ -39,6 +39,8 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     reconciliation = candidate.get("market_reconciliation")
     reconciliation = reconciliation if isinstance(reconciliation, dict) else {}
     reconciliation_status = reconciliation.get("status")
+    # Keep the source-reported price visible separately; it is not verified evidence.
+    reported_price = _number(candidate.get("price_usd"))
     reported_liquidity = _number(candidate.get("liquidity_usd"))
     reported_volume = _number(candidate.get("volume_24h_usd"))
     # Values from the reconciliation record count as verified only when its
