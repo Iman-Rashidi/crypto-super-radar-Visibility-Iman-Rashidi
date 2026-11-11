@@ -272,6 +272,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("شواهد", result["diagnostic_fa"])
         self.assertEqual(result["qualified_buy_count"], 0)
         self.assertEqual(result["candidates"], [])
+        self.assertFalse(result["public_policy"]["discovery_candidates_exposed"])
         self.assertNotIn("available_candidate_count", result)
         self.assertNotIn("61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP", json.dumps(result))
 
@@ -295,6 +296,8 @@ class WebAppHttpTests(unittest.TestCase):
         result = json.loads(payload)
         self.assertEqual(status, 200)
         self.assertEqual(result["report_mode"], "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL")
+        self.assertTrue(result["public_policy"]["discovery_candidates_exposed"])
+        self.assertFalse(result["public_policy"]["diagnostic_candidates_are_trade_signals"])
         self.assertEqual(result["discovered_candidate_count"], 1)
         self.assertEqual(result["candidates"], [])
         self.assertEqual(len(result["diagnostic_candidates"]), 1)
