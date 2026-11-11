@@ -58,19 +58,15 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     else:
         reasons["volume_confirmation"] = "Missing 24h volume or positive liquidity."
 
-    if liquidity is not None and ratio is not None:
-        filters["liquidity_depth"] = (
-            "PASS" if liquidity >= 50_000 and 1 <= ratio <= 10 else "FAIL"
-        )
-        reasons["liquidity_depth"] = "Pool liquidity and turnover ratio only; executable depth is not yet measured."
+    if liquidity is not None and liquidity < 50_000:
+        filters["liquidity_depth"] = "FAIL"
+        reasons["liquidity_depth"] = "Reported pool liquidity is below the minimum floor."
     else:
-        reasons["liquidity_depth"] = "Liquidity depth cannot be established from missing pool aggregates."
+        reasons["liquidity_depth"] = "Pool liquidity aggregate is not executable order-book/pool depth; depth remains UNKNOWN."
 
-    if age is not None:
-        filters["trend"] = "PASS" if age >= 24 else "FAIL"
-        reasons["trend"] = "Pool age is known; this is not a price-trend confirmation."
-    else:
-        reasons["trend"] = "Pool creation timestamp is missing or invalid."
+    # Pool age is not a trend signal. A price series with multiple timeframes
+    # is required before this filter can pass or fail.
+    reasons["trend"] = "Pool age is not a trend signal; verified multi-timeframe price history is not connected."
 
     if change is not None:
         filters["momentum"] = "FAIL" if change <= -20 or change >= 50 else "UNKNOWN"
@@ -87,9 +83,6 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
             reasons["market_integrity"] = "Observed 24h transaction count is below the 200-transaction floor."
     else:
         reasons["market_integrity"] = "24h buy/sell transaction counts are incomplete."
-
-    if liquidity is not None and liquidity < 50_000:
-        filters["liquidity_depth"] = "FAIL"
 
     reasons.setdefault("buy_sell_pressure", "Notional buy-volume share is unavailable; transaction counts are not a substitute.")
     reasons.setdefault("relative_strength", "No verified benchmark-relative price series is available.")
