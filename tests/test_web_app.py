@@ -243,9 +243,64 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(gate.evidence["volume_cross_validation_status"], "UNKNOWN")
         self.assertIn("اختلاف حجم مستقل", gate.reason_fa)
 
+    def test_gem_hunter_endpoint_returns_loading_without_waiting_for_providers(self):
+        web_app.GEM_HUNTER_RESULT_CACHE.update(
+            expires_at=0.0, payload=None, refreshing=False, last_error=None,
+        )
+
+        def mark_refreshing():
+            with web_app.GEM_HUNTER_RESULT_CACHE_LOCK:
+                web_app.GEM_HUNTER_RESULT_CACHE["refreshing"] = True
+
+        with patch.object(web_app, "_start_gem_hunter_refresh", side_effect=mark_refreshing):
+            status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["refreshing"])
+        self.assertEqual(result["signal_status"], "REFRESHING")
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["qualified_buy_count"], 0)
+
+    def test_gem_hunter_never_serves_expired_buy_evidence_during_refresh(self):
+        web_app.GEM_HUNTER_RESULT_CACHE.update(
+            expires_at=0.0,
+            payload={
+                "status": "PASS",
+                "signal_status": "BUY_FOUND",
+                "qualification_engine_status": "COMPLETE",
+                "candidates": [{"trade_authorization": "BUY"}],
+                "candidate_count": 1,
+                "qualified_buy_count": 1,
+                "diagnostic_candidates": [{"trade_authorization": "BUY"}],
+                "public_policy": {"discovery_candidates_exposed": True},
+            },
+            refreshing=False,
+            last_error=None,
+        )
+
+        def mark_refreshing():
+            with web_app.GEM_HUNTER_RESULT_CACHE_LOCK:
+                web_app.GEM_HUNTER_RESULT_CACHE["refreshing"] = True
+
+        with patch.object(web_app, "_start_gem_hunter_refresh", side_effect=mark_refreshing):
+            status, _, payload = self.request("GET", "/api/gem-hunter/report?limit=50")
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["refreshing"])
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["signal_status"], "REFRESHING")
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["qualified_buy_count"], 0)
+        self.assertEqual(result["diagnostic_candidates"], [])
+
     def test_gem_hunter_endpoint_exposes_only_qualified_buy_candidates(self):
         from test_gem_hunter_qualification import valid_candidate
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
+        web_app.GEM_HUNTER_RESULT_CACHE.update(
+            expires_at=0.0, payload=None, refreshing=False, last_error=None,
+        )
         good = valid_candidate(now=datetime.now(timezone.utc))
         bad = dict(good)
         bad["candidate_status"] = "UNSCREENED"
@@ -254,7 +309,8 @@ class WebAppHttpTests(unittest.TestCase):
             "status": "PASS", "candidate_count": 2,
             "candidates": [good, bad], "trade_authorization": "NO_TRADE",
         }), patch.object(web_app, "reconcile_discovery_candidates", side_effect=lambda rows, http: rows), \
-             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows):
+             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows), \
+             patch.object(web_app, "_start_gem_hunter_refresh", side_effect=web_app._refresh_gem_hunter_result):
             status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
         result = json.loads(payload)
         self.assertEqual(status, 200)
@@ -273,6 +329,9 @@ class WebAppHttpTests(unittest.TestCase):
 
     def test_gem_hunter_endpoint_hides_all_unqualified_candidates(self):
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
+        web_app.GEM_HUNTER_RESULT_CACHE.update(
+            expires_at=0.0, payload=None, refreshing=False, last_error=None,
+        )
         raw = {
             "status": "PASS", "candidate_count": 1,
             "candidates": [{
@@ -283,7 +342,8 @@ class WebAppHttpTests(unittest.TestCase):
         }
         with patch.object(web_app, "discover_gem_candidates", return_value=raw), \
              patch.object(web_app, "reconcile_discovery_candidates", side_effect=lambda rows, http: rows), \
-             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows):
+             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows), \
+             patch.object(web_app, "_start_gem_hunter_refresh", side_effect=web_app._refresh_gem_hunter_result):
             status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
         result = json.loads(payload)
         self.assertEqual(status, 200)
@@ -303,6 +363,9 @@ class WebAppHttpTests(unittest.TestCase):
 
     def test_gem_hunter_report_exposes_research_candidates_separately_from_public_buy_api(self):
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
+        web_app.GEM_HUNTER_RESULT_CACHE.update(
+            expires_at=0.0, payload=None, refreshing=False, last_error=None,
+        )
         address = "61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP"
         raw = {
             "status": "PASS", "candidate_count": 1,
@@ -318,7 +381,8 @@ class WebAppHttpTests(unittest.TestCase):
         }
         with patch.object(web_app, "discover_gem_candidates", return_value=raw), \
              patch.object(web_app, "reconcile_discovery_candidates", side_effect=lambda rows, http: rows), \
-             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows):
+             patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows), \
+             patch.object(web_app, "_start_gem_hunter_refresh", side_effect=web_app._refresh_gem_hunter_result):
             status, _, payload = self.request("GET", "/api/gem-hunter/report?limit=50")
         result = json.loads(payload)
         self.assertEqual(status, 200)
