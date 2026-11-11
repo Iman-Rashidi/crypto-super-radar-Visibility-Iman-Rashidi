@@ -96,8 +96,8 @@ GEM_HUNTER_RESULT_CACHE = {
 GEM_HUNTER_RESULT_CACHE_LOCK = threading.Lock()
 
 
-def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool = False) -> dict:
-    """Return strict BUYs plus aggregate-only diagnostics for every pipeline stage."""
+def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool = False, progress_callback=None) -> dict:
+    """Return strict BUYs and optionally publish discovery-only progress before validation."""
     limit = max(1, min(int(limit), 50))
     with GEM_HUNTER_CACHE_LOCK:
         now = time.monotonic()
@@ -115,6 +115,33 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     # qualification engine or that an incomplete record is a completed evaluation.
     raw_candidates = result.get("candidates")
     raw_candidates = raw_candidates if isinstance(raw_candidates, list) else []
+    if callable(progress_callback):
+        progress_candidates = []
+        for item in raw_candidates[:limit]:
+            if not isinstance(item, dict) or item.get("trade_authorization") == "BUY":
+                continue
+            progress_item = copy.deepcopy(item)
+            progress_item.setdefault("trade_authorization", "NO_TRADE")
+            progress_candidates.append(progress_item)
+        progress_payload = _gem_hunter_pending_payload(refreshing=True)
+        progress_payload.update({
+            "status": result.get("status", "UNKNOWN"),
+            "generated_at_utc": result.get("generated_at_utc"),
+            "networks": copy.deepcopy(result.get("networks") or ["base", "solana"]),
+            "source_count": result.get("source_count", 0),
+            "sources": copy.deepcopy(result.get("sources") or {}),
+            "discovered_candidate_count": len(raw_candidates),
+            "diagnostic_candidates": progress_candidates,
+            "progress_stage": "DISCOVERY_COMPLETE",
+            "diagnostic_freshness": "CURRENT_SCAN_DISCOVERY",
+            "diagnostic_fa": (
+                f"کشف اولیه پایان یافت؛ {len(raw_candidates)} نامزد پیدا شد. "
+                "تطبیق مستقل بازار و غربال امنیت هنوز در حال اجراست؛ این فهرست سیگنال BUY نیست."
+            ),
+        })
+        progress_payload["public_policy"]["discovery_candidates_exposed"] = True
+        progress_payload["public_policy"]["unknown_or_incomplete_candidates_hidden"] = True
+        progress_callback(progress_payload)
     # Discovery and qualification are separate stages. Attach an explicit,
     # evidence-bounded first-stage record to every raw discovery candidate.
     # This evaluator deliberately leaves unavailable security/holder/whale/
@@ -235,6 +262,8 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     if include_diagnostics:
         # Separate research-only report; this never upgrades a candidate to BUY.
         result["diagnostic_candidates"] = copy.deepcopy(raw_candidates[:limit])
+    result["progress_stage"] = "COMPLETE"
+    result["diagnostic_freshness"] = "CURRENT_SCAN"
     result["public_policy"] = {
         "qualification_schema": SCHEMA_VERSION,
         "minimum_passed_filters": 9,
@@ -275,6 +304,9 @@ def _gem_hunter_pending_payload(*, refreshing: bool, error: str | None = None) -
         "qualified_buy_count": 0,
         "qualification_engine_status": "UNKNOWN" if failed else ("REFRESHING" if refreshing else "LOADING"),
         "signal_status": "DISCOVERY_FEED_DEGRADED" if failed else "REFRESHING",
+        "progress_stage": "FAILED" if failed else "WAITING_FOR_DISCOVERY",
+        "diagnostic_freshness": "NONE",
+        "diagnostic_candidates": [],
         "diagnostic_fa": (
             "به‌روزرسانی Gem Hunter کامل نشد؛ داده‌ها UNKNOWN می‌مانند و هیچ سیگنال BUY صادر نمی‌شود."
             if failed else
@@ -297,17 +329,54 @@ def _gem_hunter_pending_payload(*, refreshing: bool, error: str | None = None) -
     }
 
 
+def _publish_gem_hunter_progress(progress_payload: dict) -> None:
+    """Publish current-scan discovery rows without ever publishing a BUY decision."""
+    payload = copy.deepcopy(progress_payload)
+    payload["refreshing"] = True
+    payload["stale"] = False
+    payload["candidates"] = []
+    payload["candidate_count"] = 0
+    payload["qualified_buy_count"] = 0
+    payload["signal_status"] = "REFRESHING"
+    payload["qualification_engine_status"] = "REFRESHING"
+    payload["diagnostic_freshness"] = "CURRENT_SCAN_DISCOVERY"
+    with GEM_HUNTER_RESULT_CACHE_LOCK:
+        if not GEM_HUNTER_RESULT_CACHE.get("refreshing"):
+            return
+        GEM_HUNTER_RESULT_CACHE["payload"] = payload
+        GEM_HUNTER_RESULT_CACHE["expires_at"] = time.monotonic() + GEM_HUNTER_RESULT_CACHE_TTL_SECONDS
+        GEM_HUNTER_RESULT_CACHE["last_error"] = None
+
+
 def _refresh_gem_hunter_result() -> None:
     """Run slow public-provider checks off the HTTP request thread."""
     try:
-        payload = _gem_hunter_discovery_payload(limit=50, include_diagnostics=True)
+        payload = _gem_hunter_discovery_payload(
+            limit=50,
+            include_diagnostics=True,
+            progress_callback=_publish_gem_hunter_progress,
+        )
         payload["refreshing"] = False
         payload["stale"] = False
+        payload["progress_stage"] = "COMPLETE"
+        payload["diagnostic_freshness"] = "CURRENT_SCAN"
         payload["last_error"] = None
         expires_at = time.monotonic() + GEM_HUNTER_RESULT_CACHE_TTL_SECONDS
     except Exception as exc:
         error = type(exc).__name__ + ": " + str(exc)[:160]
         payload = _gem_hunter_pending_payload(refreshing=False, error=error)
+        with GEM_HUNTER_RESULT_CACHE_LOCK:
+            previous = GEM_HUNTER_RESULT_CACHE.get("payload") or {}
+        if previous.get("progress_stage") == "DISCOVERY_COMPLETE":
+            prior_diagnostics = [
+                copy.deepcopy(item)
+                for item in previous.get("diagnostic_candidates", [])
+                if isinstance(item, dict) and item.get("trade_authorization") != "BUY"
+            ]
+            payload["diagnostic_candidates"] = prior_diagnostics
+            payload["discovered_candidate_count"] = len(prior_diagnostics)
+            payload["progress_stage"] = "FAILED_AFTER_DISCOVERY"
+            payload["diagnostic_freshness"] = "CURRENT_SCAN_INCOMPLETE"
         expires_at = time.monotonic() + GEM_HUNTER_RESULT_CACHE_TTL_SECONDS
 
     with GEM_HUNTER_RESULT_CACHE_LOCK:
@@ -324,6 +393,9 @@ def _start_gem_hunter_refresh() -> None:
             return
         GEM_HUNTER_RESULT_CACHE["refreshing"] = True
         GEM_HUNTER_RESULT_CACHE["last_error"] = None
+        previous = GEM_HUNTER_RESULT_CACHE.get("payload")
+        if isinstance(previous, dict):
+            previous["progress_stage"] = "STALE_LAST_COMPLETED_SCAN"
 
     worker = threading.Thread(
         target=_refresh_gem_hunter_result,
@@ -359,19 +431,36 @@ def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = Fals
     if cached is None:
         cached = _gem_hunter_pending_payload(refreshing=refreshing, error=last_error)
     elif refreshing:
-        # Never serve a stale BUY or stale token record as current evidence.
-        cached["status"] = "STALE"
+        # A current-scan discovery snapshot is safe to show as research-only;
+        # old BUY decisions are always removed while validation is running.
         cached["refreshing"] = True
-        cached["stale"] = True
         cached["candidates"] = []
         cached["candidate_count"] = 0
         cached["qualified_buy_count"] = 0
-        cached["diagnostic_candidates"] = []
         cached["signal_status"] = "REFRESHING"
         cached["qualification_engine_status"] = "REFRESHING"
-        cached["diagnostic_fa"] = (
-            "گزارش قبلی منقضی شده است؛ دادهٔ قبلی برای BUY استفاده نمی‌شود و اعتبارسنجی تازه در پس‌زمینه ادامه دارد."
-        )
+        if cached.get("progress_stage") == "DISCOVERY_COMPLETE":
+            cached["status"] = cached.get("status") or "LOADING"
+            cached["stale"] = False
+            cached["diagnostic_freshness"] = "CURRENT_SCAN_DISCOVERY"
+            cached["diagnostic_fa"] = (
+                f"{int(cached.get('discovered_candidate_count') or 0)} نامزد در اسکن جاری پیدا شد؛ "
+                "اعتبارسنجی بازار و امنیت ادامه دارد. فعلاً هیچ BUY تأیید نشده است."
+            )
+        else:
+            cached["status"] = "STALE"
+            cached["stale"] = True
+            cached["diagnostic_candidates"] = [
+                item for item in (cached.get("diagnostic_candidates") or [])
+                if isinstance(item, dict) and item.get("trade_authorization") != "BUY"
+            ]
+            cached["diagnostic_freshness"] = (
+                "STALE_LAST_COMPLETED_SCAN" if cached["diagnostic_candidates"] else "NONE"
+            )
+            cached["diagnostic_fa"] = (
+                "گزارش قبلی منقضی است؛ نامزدهای آخرین اسکن فقط با برچسب دادهٔ قدیمی نمایش داده می‌شوند. "
+                "اعتبارسنجی تازه در پس‌زمینه ادامه دارد و هیچ BUY قدیمی استفاده نمی‌شود."
+            )
     elif expires_at <= time.monotonic():
         # If a worker could not be started, report UNKNOWN rather than pretending
         # that a refresh is active or exposing expired evidence.
@@ -1380,7 +1469,7 @@ class Handler(BaseHTTPRequestHandler):
         </section>
         <section class="card" id="gem-hunter-panel">
           <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
-          <p class="muted">توکن‌های تازهٔ Solana و Base را در مرحلهٔ کشف شناسایی می‌کند. فقط BUYهایی نمایش داده می‌شوند که پروندهٔ ارزیابی نسخه‌دار، حداقل ۹ فیلتر از ۱۲، عبور همهٔ ۴ گیت حیاتی و شواهد تازه و قابل‌ردیابی بازار و Swapهای واقعی نهنگ را داشته باشند. کشف توکن به‌تنهایی سیگنال خرید نیست؛ نامزدهای ارزیابی‌نشده، ردشده یا دارای دادهٔ ناقص پنهان می‌مانند. در هر نوبت حداکثر ۱۰ استخر و ۵ قرارداد به‌صورت چرخشی بررسی می‌شوند تا محدودیت API رعایت شود؛ بقیه در صف بررسی نوبت‌های بعدی می‌مانند. شمارش هر مرحله و سلامت منابع برای آشکارشدن نقص اتصال ارزیابی گزارش می‌شود.</p>
+          <p class="muted">توکن‌های تازهٔ Solana و Base را در مرحلهٔ کشف شناسایی می‌کند. فقط BUYهایی نمایش داده می‌شوند که پروندهٔ ارزیابی نسخه‌دار، حداقل ۹ فیلتر از ۱۲، عبور همهٔ ۴ گیت حیاتی و شواهد تازه و قابل‌ردیابی بازار و Swapهای واقعی نهنگ را داشته باشند. نامزدهای کشف‌شده نیز جداگانه در فهرست پژوهشی نمایش داده می‌شوند؛ حتی اگر هنوز ارزیابی نشده، رد شده یا دارای دادهٔ ناقص باشند. این فهرست سیگنال خرید نیست و دادهٔ قدیمی با برچسب مشخص می‌شود. در هر نوبت حداکثر ۱۰ استخر و ۵ قرارداد به‌صورت چرخشی بررسی می‌شوند؛ بقیه در صف بررسی نوبت‌های بعدی می‌مانند.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="gem-hunter-run" type="button">شروع کشف کاندیداها</button>
             <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن کشف اجرا نشده است.</span>
@@ -1665,27 +1754,55 @@ class Handler(BaseHTTPRequestHandler):
             watchForm.reset();
           });
           renderWatchlist();
-          button.addEventListener('click', async () => {
+          const renderPendingReport = data => {{
+            const pendingCandidates = (data.diagnostic_candidates || [])
+              .filter(item => item && item.trade_authorization !== 'BUY');
+            const discovered = Number(data.discovered_candidate_count || pendingCandidates.length || 0);
+            const isStale = data.diagnostic_freshness === 'STALE_LAST_COMPLETED_SCAN';
+            const summary = document.createElement('div');
+            summary.appendChild(el('p', data.diagnostic_fa || 'اعتبارسنجی در پس‌زمینه ادامه دارد.', 'muted'));
+            summary.appendChild(el('p',
+              isStale
+                ? 'این‌ها نامزدهای آخرین اسکن کامل‌شده‌اند؛ دادهٔ آن‌ها قدیمی است و فقط برای پیگیری نمایش داده می‌شوند.'
+                : 'این‌ها نامزدهای اسکن جاری‌اند؛ مرحلهٔ تطبیق بازار و غربال امنیت هنوز کامل نشده است.',
+              'muted'));
+            results.replaceChildren(summary);
+            if (pendingCandidates.length) {{
+              results.appendChild(el('h3', isStale
+                ? 'آخرین نامزدهای کشف‌شده · دادهٔ قدیمی'
+                : 'نامزدهای کشف‌شده · در انتظار اعتبارسنجی'));
+              const list = document.createElement('div'); list.className = 'gem-report-list';
+              pendingCandidates.forEach(item => list.appendChild(renderCandidate(item)));
+              results.appendChild(list);
+            }} else {{
+              results.appendChild(el('p', discovered
+                ? discovered + ' نامزد پیدا شده؛ جزئیات آن هنوز به پاسخ گزارش نرسیده است.'
+                : 'هنوز نامزدی دریافت نشده است؛ به‌محض پایان مرحلهٔ کشف، فهرست در همین‌جا ظاهر می‌شود.',
+                'muted'));
+            }}
+            results.appendChild(el('p',
+              'هیچ سیگنال BUY از دادهٔ ناقص یا منقضی صادر نمی‌شود.',
+              'candidate-meta'));
+          }};
+          button.addEventListener('click', async () => {{
             button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت نامزدها و ساخت گزارش فارسی ۱۲ فیلتر و ۴ گیت...'));
             status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
-            try {
+            try {{
               let data = null;
-              for (let attempt = 0; attempt < 30; attempt += 1) {
-                const response = await fetch('/api/gem-hunter/report?limit=50', {cache:'no-store'});
+              for (let attempt = 0; attempt < 180; attempt += 1) {{
+                const response = await fetch('/api/gem-hunter/report?limit=50', {{cache:'no-store'}});
                 data = await response.json();
                 if (!response.ok) throw new Error(data.error || 'Discovery report failed');
                 if (!data.refreshing) break;
-                status.textContent = 'اسکن در پس‌زمینه ادامه دارد... (' + (attempt + 1) + '/30)';
+                status.textContent = 'اسکن در پس‌زمینه ادامه دارد... (' + (attempt + 1) + '/180)';
+                renderPendingReport(data);
                 await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-              if (data && data.refreshing) {
-                status.textContent = 'اعتبارسنجی هنوز ادامه دارد؛ با کلیک دوباره وضعیت تازه را دریافت کن.';
-                results.replaceChildren(
-                  el('p', data.diagnostic_fa || 'اسکن در پس‌زمینه فعال است.', 'muted'),
-                  el('p', 'هنوز نتیجهٔ نهایی آماده نیست. هیچ سیگنال خریدی از دادهٔ ناقص صادر نمی‌شود.', 'muted')
-                );
+              }}
+              if (data && data.refreshing) {{
+                status.textContent = 'اسکن هنوز ادامه دارد؛ نامزدهای پیدا‌شده در همین پنل نمایش داده می‌شوند. برای دریافت نتیجهٔ نهایی دوباره کلیک کن.';
+                renderPendingReport(data);
                 return;
-              }
+              }}
               const buys = data.candidates || []; const candidates = (data.diagnostic_candidates || []).filter(item => item.trade_authorization !== 'BUY');
               const discovered = Number(data.discovered_candidate_count || candidates.length || 0);
               status.textContent = 'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' +
