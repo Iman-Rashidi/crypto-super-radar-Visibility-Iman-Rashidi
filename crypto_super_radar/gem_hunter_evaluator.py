@@ -36,9 +36,17 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         now = now.replace(tzinfo=timezone.utc)
     now = now.astimezone(timezone.utc)
 
-    liquidity = _number(candidate.get("liquidity_usd"))
-    volume = _number(candidate.get("volume_24h_usd"))
-    ratio = _number(candidate.get("volume_to_liquidity_24h"))
+    reconciliation = candidate.get("market_reconciliation")
+    reconciliation = reconciliation if isinstance(reconciliation, dict) else {}
+    reconciliation_status = reconciliation.get("status")
+    reported_liquidity = _number(candidate.get("liquidity_usd"))
+    reported_volume = _number(candidate.get("volume_24h_usd"))
+    verified_liquidity = _number(reconciliation.get("verified_liquidity_usd"))
+    verified_volume = _number(reconciliation.get("verified_volume_24h_usd"))
+    liquidity = verified_liquidity if verified_liquidity is not None else reported_liquidity
+    volume = verified_volume if verified_volume is not None else reported_volume
+    ratio = (volume / liquidity if volume is not None and liquidity is not None and liquidity > 0
+             else _number(candidate.get("volume_to_liquidity_24h")))
     age = _number(candidate.get("pool_age_hours"))
     buys = _number(candidate.get("buys_24h"))
     sells = _number(candidate.get("sells_24h"))
@@ -94,35 +102,55 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
 
     gates = {
         "security": "UNKNOWN",
+        # Aggregate liquidity is not trusted until the exact token/pool pair
+        # matches across DexScreener and GeckoTerminal.
         "liquidity": (
-            "PASS" if liquidity is not None and liquidity >= 50_000 and ratio is not None and 1 <= ratio <= 10
-            else "FAIL" if liquidity is not None and liquidity < 50_000
+            "FAIL" if reconciliation_status == "FAIL"
+            else "PASS" if reconciliation_status == "PASS"
+            and liquidity is not None and liquidity >= 50_000
+            and ratio is not None and 1 <= ratio <= 10
             else "UNKNOWN"
         ),
-        "data_quality": "UNKNOWN",
+        "data_quality": (
+            "PASS" if reconciliation_status == "PASS"
+            else "FAIL" if reconciliation_status == "FAIL"
+            else "UNKNOWN"
+        ),
         "exit": "UNKNOWN",
     }
 
     gate_reasons = {
         "security": "ارزیابی مستقل قرارداد، مالکیت، Honeypot و سوابق سوءاستفاده به منبع معتبر متصل نیست.",
         "liquidity": (
-            "نقدینگی تجمیعی و نسبت حجم به نقدینگی از حد اولیه عبور کرده‌اند؛ این وضعیت عمق اجرایی یا امکان خروج را اثبات نمی‌کند."
+            "نقدینگی و حجم Pool دقیق در دو منبع مستقل تطبیق داده شده‌اند؛ این وضعیت عمق اجرایی یا امکان خروج را اثبات نمی‌کند."
             if gates["liquidity"] == "PASS" else
-            "نقدینگی گزارش‌شده زیر حد اولیه است."
+            "تطبیق مستقل Pool شکست خورده یا نقدینگی تأییدشده زیر حد اولیه است."
             if gates["liquidity"] == "FAIL" else
-            "دادهٔ نقدینگی یا نسبت حجم به نقدینگی برای ارزیابی اولیه کافی نیست."
+            "تطبیق دو منبع مستقل برای همین Pool تکمیل نشده؛ نقدینگی تأییدنشده است."
         ),
-        "data_quality": "فقط یک ارائه‌دهندهٔ داده در دسترس است؛ اعتبارسنجی مستقل بین چند منبع و تازگی همهٔ شواهد تکمیل نشده است.",
+        "data_quality": (
+            "هویت توکن و Pool و نقدینگی/حجم در دو منبع مستقل تطبیق داده شده است؛ سایر شواهد همچنان باید تازه‌سازی شوند."
+            if gates["data_quality"] == "PASS" else
+            "اختلاف داده یا هویت Pool بین منابع مستقل شناسایی شد."
+            if gates["data_quality"] == "FAIL" else
+            "تطبیق دو منبع مستقل برای همین Pool هنوز کامل نیست."
+        ),
         "exit": "عمق اجرایی و لغزش برای اندازهٔ سفارش مشخص نیست؛ امکان خروج قابل تأیید نیست.",
     }
 
     # The only current discovery provider is GeckoTerminal. Multiple endpoint
     # names from one provider are not independent cross-source validation.
-    sources = ["GECKOTERMINAL"]
+    sources = sorted({
+        str(row.get("provider")) for row in reconciliation.get("sources", [])
+        if isinstance(row, dict) and row.get("provider")
+    }) or ["GECKOTERMINAL"]
     metrics = {
-        "price_usd": _number(candidate.get("price_usd")),
+        "price_usd": _number(reconciliation.get("verified_price_usd")) or _number(candidate.get("price_usd")),
         "liquidity_usd": liquidity,
+        "reported_liquidity_usd": reported_liquidity,
         "volume_24h_usd": volume,
+        "reported_volume_24h_usd": reported_volume,
+        "market_reconciliation_status": reconciliation_status,
         "volume_to_liquidity_24h": ratio,
         "holder_count": None,
         "unique_traders_24h": None,
@@ -156,7 +184,8 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "market_metrics": metrics,
         "whale_evidence": whale,
         "evaluation_status": "INCOMPLETE",
-        "evaluation_reason": "Discovery currently supplies one DEX aggregate source only; independent market, security, holder, whale-swap and exit evidence are not connected.",
+        "market_reconciliation": reconciliation,
+        "evaluation_reason": "Exact-pool market data is independently reconciled where available; contract security, holder ownership, notional flow, attributable whale swaps and executable exit depth still require separate evidence.",
     }
 
 
