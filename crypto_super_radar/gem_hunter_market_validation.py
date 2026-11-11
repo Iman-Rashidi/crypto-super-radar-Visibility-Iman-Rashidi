@@ -134,6 +134,7 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
     chain = str(candidate.get("chain") or "").lower()
     token = candidate.get("token_address")
     pool = candidate.get("pool_address")
+    reported_price = _number(candidate.get("price_usd"))
     reported_liquidity = _number(candidate.get("liquidity_usd"))
     reported_volume = _number(candidate.get("volume_24h_usd"))
     base = {
@@ -142,6 +143,7 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
         "pool_address": pool,
         "token_address": token,
         "chain": chain,
+        "reported_price_usd": reported_price,
         "reported_liquidity_usd": reported_liquidity,
         "reported_volume_24h_usd": reported_volume,
         "verified_liquidity_usd": None,
@@ -183,9 +185,14 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
             base["source_errors"] = errors
         result = base
     else:
+        prices = [row["price_usd"] for row in snapshots]
         liquidities = [row["liquidity_usd"] for row in snapshots]
         volumes = [row["volume_24h_usd"] for row in snapshots]
-        if any(value is None or value < 0 for value in liquidities):
+        if any(value is None or value <= 0 for value in prices):
+            base["reason_codes"].append("SOURCE_PRICE_MISSING")
+            base["reason_fa"].append("قیمت معتبر توکن در هر دو منبع مستقل برای همین Pool موجود نیست.")
+            result = base
+        elif any(value is None or value < 0 for value in liquidities):
             base["reason_codes"].append("SOURCE_LIQUIDITY_MISSING")
             base["reason_fa"].append("حداقل یکی از منابع نقدینگی معتبر برای Pool ارائه نکرده است.")
             result = base
@@ -194,6 +201,12 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
             base["reason_fa"].append("حجم ۲۴ساعتهٔ هر دو منبع برای مقایسه موجود نیست.")
             result = base
         else:
+            price_conflict = _ratio_conflict(prices)
+            reported_price_conflict = (
+                reported_price is not None
+                and reported_price > 0
+                and _ratio_conflict([reported_price, *prices])
+            )
             liquidity_conflict = _ratio_conflict(liquidities)
             volume_conflict = _ratio_conflict(volumes)
             reported_volume_conflict = (
@@ -216,9 +229,8 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
             base["max_source_disagreement_ratio"] = max(ratios) if ratios else 1.0
             base["verified_liquidity_usd"] = min(liquidities)
             base["verified_volume_24h_usd"] = min(volumes)
-            prices = [row["price_usd"] for row in snapshots if row["price_usd"] is not None]
-            base["verified_price_usd"] = min(prices) if prices else None
-            if liquidity_conflict or volume_conflict or reported_conflict or reported_volume_conflict:
+            base["verified_price_usd"] = min(prices)
+            if price_conflict or reported_price_conflict or liquidity_conflict or volume_conflict or reported_conflict or reported_volume_conflict:
                 base["status"] = "FAIL"
                 base["reason_codes"].append("MARKET_DATA_DISAGREEMENT")
                 base["reason_fa"].append("نقدینگی یا حجم گزارش کشف با منابع مستقل همان استخر اختلاف بیش از حد مجاز دارد.")
