@@ -161,6 +161,13 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
             reconciliation_counts[status] += 1
         else:
             reconciliation_counts["UNKNOWN"] += 1
+    security_counts = {"PASS": 0, "FAIL": 0, "UNKNOWN": 0, "NOT_CHECKED_BUDGET": 0}
+    for item in raw_candidates:
+        status = (item.get("security_evidence") or {}).get("status")
+        if status in security_counts:
+            security_counts[status] += 1
+        else:
+            security_counts["UNKNOWN"] += 1
     evaluation_record_count = len(evaluation_records)
     unassessed_count = max(0, discovered_count - evaluation_record_count)
     incomplete_evaluation_count = max(0, evaluation_record_count - complete_evaluation_count)
@@ -210,6 +217,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         "checked": reconciliation_counts["PASS"] + reconciliation_counts["FAIL"] + reconciliation_counts["UNKNOWN"],
         **reconciliation_counts,
     }
+    result["security_screening_counts"] = security_counts
     result["complete_evaluation_count"] = complete_evaluation_count
     result["incomplete_evaluation_count"] = incomplete_evaluation_count
     result["unassessed_candidate_count"] = unassessed_count
@@ -1513,6 +1521,12 @@ class Handler(BaseHTTPRequestHandler):
                 Number(reconciliationCounts.FAIL || 0) + ' FAIL · ' +
                 Number(reconciliationCounts.UNKNOWN || 0) + ' UNKNOWN · ' +
                 Number(reconciliationCounts.NOT_CHECKED_BUDGET || 0) + ' در صف بررسی بعدی', 'muted'));
+              const securityCounts = data.security_screening_counts || {};
+              summary.appendChild(el('p', 'بررسی امنیت قرارداد: ' +
+                Number(securityCounts.PASS || 0) + ' PASS · ' +
+                Number(securityCounts.FAIL || 0) + ' FAIL · ' +
+                Number(securityCounts.UNKNOWN || 0) + ' UNKNOWN · ' +
+                Number(securityCounts.NOT_CHECKED_BUDGET || 0) + ' در صف بررسی بعدی', 'muted'));
               const sourceDetails = document.createElement('details'); sourceDetails.appendChild(el('summary', 'وضعیت منابع داده'));
               const sourceList = document.createElement('ul');
               Object.entries(data.sources || {}).forEach(([name, source]) => {
