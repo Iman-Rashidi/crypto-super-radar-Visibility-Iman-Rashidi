@@ -227,6 +227,15 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
     if age_seconds < -30 or age_seconds > MAX_DATA_AGE_SECONDS:
         return False
 
+    # Cross-source pool and contract-security evidence must also be fresh.
+    for evidence in (reconciliation, security_evidence):
+        checked_at = _parse_timestamp(evidence.get("checked_at_utc"))
+        if checked_at is None:
+            return False
+        evidence_age = (now.astimezone(timezone.utc) - checked_at).total_seconds()
+        if evidence_age < -30 or evidence_age > MAX_DATA_AGE_SECONDS:
+            return False
+
     return _valid_whale_evidence(chain, qualification.get("whale_evidence"))
 
 
