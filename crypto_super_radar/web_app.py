@@ -205,8 +205,9 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         "minimum_opportunity_score": 80,
         "critical_gates": list(CRITICAL_GATES),
         "unknown_or_incomplete_candidates_hidden": True,
-        "discovery_candidates_exposed": False,
+        "discovery_candidates_exposed": bool(include_diagnostics),
         "aggregate_pipeline_diagnostics_exposed": True,
+        "diagnostic_candidates_are_trade_signals": False,
         "evaluation_completeness_semantics": "STRUCTURAL_RECORD_ONLY; UNKNOWN evidence never qualifies as BUY",
     }
     return result
