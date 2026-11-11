@@ -1598,6 +1598,50 @@ class Handler(BaseHTTPRequestHandler):
           button.addEventListener('click',refresh);refresh();
         })();
         </script>
+        <section class="card" id="paper-performance">
+          <h2>ارزیابی عملکرد معاملات آزمایشی</h2>
+          <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت گزارش معاملات بسته‌شده...</p>
+          <div id="paper-performance-metrics" class="grid"></div>
+          <button type="button" id="paper-performance-refresh">به‌روزرسانی عملکرد</button>
+          <p class="muted">این گزارش فقط معاملات بسته‌شدهٔ Paper Trading را می‌سنجد. تا ثبت حداقل ۳۰ معامله، نمونه برای ارزیابی کافی نیست؛ حتی پس از آن نیز عملکرد گذشته تضمین سود آینده نیست. لغزش قیمت جداگانه از قیمت اجرای شبیه‌سازی‌شده تفکیک نشده است.</p>
+        </section>
+        <script>
+        (function(){
+          const status=document.getElementById('paper-performance-status');
+          const metrics=document.getElementById('paper-performance-metrics');
+          const button=document.getElementById('paper-performance-refresh');
+          if(!status||!metrics||!button)return;
+          const fmt=(value,suffix='')=>value===null||value===undefined?'—':Number(value).toLocaleString(undefined,{maximumFractionDigits:4})+suffix;
+          async function refresh(){
+            button.disabled=true;status.textContent='در حال دریافت دفتر معاملات آزمایشی...';
+            try{
+              const response=await fetch('/paper-bot/status',{cache:'no-store'});
+              const data=await response.json();
+              if(!response.ok)throw new Error('HTTP '+response.status);
+              const p=data.performance||{};
+              status.textContent=(p.status==='REVIEWABLE'?'نمونه به حداقل تعداد رسیده؛ نیازمند بررسی مستقل است.':'نمونه هنوز کافی نیست.')+' '+(p.reason||'');
+              const rows=[
+                ['تعداد معاملات بسته‌شده',fmt(p.sample_size)+' / '+fmt(p.minimum_sample_size)],
+                ['نرخ برد',fmt(p.win_rate_pct,'%')],
+                ['امید ریاضی خالص هر معامله',fmt(p.net_expectancy_usd_per_trade,' USD')],
+                ['Profit Factor خالص',fmt(p.profit_factor_net)],
+                ['حداکثر افت سرمایه تحقق‌یافته',fmt(p.max_realized_drawdown_pct,'%')],
+                ['سود/زیان خالص تحقق‌یافته',fmt(p.net_pnl_usd,' USD')],
+                ['کارمزد ثبت‌شده',fmt(p.total_recorded_fees_usd,' USD')],
+                ['نمونهٔ معتبر R',fmt(p.r_sample_size)+' · Expectancy R: '+fmt(p.net_expectancy_r)]
+              ];
+              metrics.replaceChildren(...rows.map(([label,value])=>{
+                const card=document.createElement('div');card.className='metric';
+                const title=document.createElement('span');title.textContent=label;
+                const content=document.createElement('strong');content.textContent=value;
+                card.append(title,content);return card;
+              }));
+            }catch(error){status.textContent='گزارش عملکرد دریافت نشد: '+String(error.message||error);}
+            finally{button.disabled=false;}
+          }
+          button.addEventListener('click',refresh);refresh();
+        })();
+        </script>
         <section class="card" id="crypto-markets">
           <h2>بازار رمزارزها</h2>
           <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
