@@ -1,21 +1,5 @@
 name: live-provider-acceptance
 on:
-  push:
-    branches:
-      - feature/multi-stage-confirmation-engine
-    paths:
-      - scripts/live_provider_acceptance.py
-      - scripts/live_research_scan.py
-      - scripts/rebuild_source_archive.py
-      - tests/test_live_provider_acceptance.py
-      - tests/test_live_research_scan.py
-      - crypto_super_radar/config.py
-      - crypto_super_radar/providers.py
-      - crypto_super_radar/cex_whales.py
-      - crypto_super_radar/evm_transfers.py
-      - crypto_super_radar/integrated_engine.py
-      - docs/LIVE_PROVIDER_ACCEPTANCE.md
-      - .github/workflows/live-provider-acceptance.yml
   pull_request:
     branches:
       - main
