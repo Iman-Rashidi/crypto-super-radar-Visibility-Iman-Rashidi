@@ -138,6 +138,13 @@ def _rugcheck_evidence(http, address: str) -> dict[str, Any]:
             score = float(score) if score is not None else None
         except (TypeError, ValueError, OverflowError):
             score = None
+        holder_count = _find_named(report, {"holdercount", "totalholders", "holderscount"})
+        try:
+            holder_count = int(holder_count) if holder_count is not None else None
+            if holder_count is not None and holder_count < 0:
+                holder_count = None
+        except (TypeError, ValueError, OverflowError):
+            holder_count = None
         explicit_unprotected_lp = lp_locked is False and lp_burned is False
         dangerous = (
             honeypot is True or cannot_buy is True or cannot_sell is True
@@ -169,6 +176,7 @@ def _rugcheck_evidence(http, address: str) -> dict[str, Any]:
                 False if explicit_unprotected_lp else None
             ),
             "top10_holder_pct": round(top10_pct, 4) if top10_pct is not None else None,
+            "holder_count": holder_count,
             "risks": risk_rows,
             "reason_fa": reasons,
             "coverage_note": "RugCheck summary; unrecognized or missing fields remain UNKNOWN.",
@@ -274,6 +282,7 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
             "mint_authority_active": mint_active,
             "freeze_authority_active": freeze_active,
             "top10_token_account_concentration_pct": top10,
+            "holder_count": rugcheck.get("holder_count"),
             "lp_locked": rugcheck.get("lp_locked"),
             "lp_burned": rugcheck.get("lp_burned"),
             "lp_protected": rugcheck.get("lp_protected"),
