@@ -254,7 +254,7 @@ def _gem_hunter_pending_payload(*, refreshing: bool, error: str | None = None) -
     """Return an explicit non-tradeable state while the provider pipeline runs."""
     failed = bool(error)
     return {
-        "status": "UNKNOWN" if failed else ("STALE" if refreshing else "LOADING"),
+        "status": "UNKNOWN" if failed else "LOADING",
         "generated_at_utc": None,
         "networks": ["base", "solana"],
         "source_count": 0,
@@ -358,7 +358,7 @@ def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = Fals
 
     if cached is None:
         cached = _gem_hunter_pending_payload(refreshing=refreshing, error=last_error)
-    elif refreshing or expires_at <= time.monotonic():
+    elif refreshing:
         # Never serve a stale BUY or stale token record as current evidence.
         cached["status"] = "STALE"
         cached["refreshing"] = True
@@ -371,6 +371,12 @@ def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = Fals
         cached["qualification_engine_status"] = "REFRESHING"
         cached["diagnostic_fa"] = (
             "گزارش قبلی منقضی شده است؛ دادهٔ قبلی برای BUY استفاده نمی‌شود و اعتبارسنجی تازه در پس‌زمینه ادامه دارد."
+        )
+    elif expires_at <= time.monotonic():
+        # If a worker could not be started, report UNKNOWN rather than pretending
+        # that a refresh is active or exposing expired evidence.
+        cached = _gem_hunter_pending_payload(
+            refreshing=False, error=last_error or "Gem Hunter refresh unavailable",
         )
     else:
         cached["refreshing"] = False
