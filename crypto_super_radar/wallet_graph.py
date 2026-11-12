@@ -59,6 +59,7 @@ class WalletEvent:
     instruction_index: int | None = None
     inner_instruction_index: int | None = None
     block_hash: str | None = None
+    counterparty_wallet: str | None = None
 
     @classmethod
     def from_mapping(cls, row: Mapping[str, Any]) -> "WalletEvent":
@@ -97,6 +98,10 @@ class WalletEvent:
             block_hash=(
                 None if row.get("block_hash") in (None, "")
                 else _normalize_chain_address(chain, row.get("block_hash"))
+            ),
+            counterparty_wallet=(
+                None if row.get("counterparty_wallet") in (None, "")
+                else _normalize_chain_address(chain, row.get("counterparty_wallet"))
             ),
         )
 
@@ -352,6 +357,18 @@ class WalletGraphAnalytics:
             if len(candidates) >= self.max_candidate_pairs:
                 break
 
+        # Direct counterparty links add graph edges, but one transfer is never
+        # treated as Sybil evidence or as a suspicious wallet cluster by itself.
+        for wallet, rows in wallets.items():
+            for row in rows:
+                peer = row.counterparty_wallet
+                if peer and peer in wallets and peer != wallet:
+                    candidates.add(tuple(sorted((wallet, peer))))
+                    if len(candidates) >= self.max_candidate_pairs:
+                        break
+            if len(candidates) >= self.max_candidate_pairs:
+                break
+
         evidence: list[dict[str, Any]] = []
         suspicious_pairs = 0
         for left, right in sorted(candidates):
@@ -389,6 +406,26 @@ class WalletGraphAnalytics:
 
             temporal_rate = temporal_matches / max(1, len(left_rows))
             amount_similarity = (sum(amount_scores) / len(amount_scores)) if amount_scores else None
+            direct_transfer_tx_hashes = {
+                row.tx_hash for row in left_rows
+                if row.counterparty_wallet == right and row.tx_hash
+            } | {
+                row.tx_hash for row in right_rows
+                if row.counterparty_wallet == left and row.tx_hash
+            }
+            distinct_left_transactions = {row.tx_hash for row in left_rows if row.tx_hash}
+            distinct_right_transactions = {row.tx_hash for row in right_rows if row.tx_hash}
+            repeated_direct_transfer = len(direct_transfer_tx_hashes) >= 2
+            repeated_temporal_pattern = (
+                temporal_matches >= 2 and len(left_rows) >= 2
+                and amount_similarity is not None and amount_similarity >= 0.9
+                and (
+                    not distinct_left_transactions or len(distinct_left_transactions) >= 2
+                )
+                and (
+                    not distinct_right_transactions or len(distinct_right_transactions) >= 2
+                )
+            )
             shared_private_funder = any(
                 a.funding_source and a.funding_source_type not in PUBLIC_FUNDING_TYPES
                 and any(a.funding_source == b.funding_source and
@@ -397,8 +434,10 @@ class WalletGraphAnalytics:
             )
             deployer_link = left in deployer_wallets or right in deployer_wallets
             reasons = []
-            if temporal_rate >= 0.8 and amount_similarity is not None and amount_similarity >= 0.9:
+            if repeated_temporal_pattern:
                 reasons.append("repeated_temporal_and_amount_similarity")
+            if repeated_direct_transfer:
+                reasons.append("repeated_direct_counterparty_transfers")
             if shared_private_funder:
                 reasons.append("shared_non_public_funding_source")
             if deployer_link:
@@ -407,6 +446,7 @@ class WalletGraphAnalytics:
             is_suspicious = (
                 "deployer_linked_wallet" in reasons
                 or "repeated_temporal_and_amount_similarity" in reasons
+                or "repeated_direct_counterparty_transfers" in reasons
                 or ("shared_non_public_funding_source" in reasons and temporal_rate >= 0.5)
             )
             if is_suspicious:
