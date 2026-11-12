@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 import unittest
 
 from crypto_super_radar.order_flow import VenueOrderFlow
+from crypto_super_radar.order_flow_store import OrderFlowEventStore
 from crypto_super_radar.order_flow_adapters import (
     OrderFlowAdapterError,
     ingest_binance_spot_message,
@@ -223,6 +225,90 @@ class BybitSpotTradeAdapterTests(unittest.TestCase):
         )
         self.assertEqual(result["rejected"], 1)
         self.assertEqual(venue.snapshot(1_700)["status"], "DISCONNECTED")
+
+
+class OrderFlowAdapterPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.connection = sqlite3.connect(":memory:")
+        self.store = OrderFlowEventStore(self.connection)
+
+    def tearDown(self):
+        self.connection.close()
+
+    def test_binance_accepted_trade_is_persisted_with_venue_and_symbol_scope(self):
+        venue = VenueOrderFlow("binance", window_ms=10_000)
+        venue.connect(1_000)
+        result = ingest_binance_spot_message(
+            venue,
+            {
+                "e": "aggTrade", "s": "BTCUSDT", "a": 7,
+                "p": "65000", "q": "0.01", "T": 1_500, "m": False,
+            },
+            channel_type="spot",
+            received_at_ms=1_600,
+            expected_symbol="BTCUSDT",
+            event_store=self.store,
+        )
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["persisted"], 1)
+        rows = self.store.read_window(
+            venue="binance", symbol="BTCUSDT",
+            start_event_time_ms=1_000, end_event_time_ms=2_000,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trade_id"], "7")
+        self.assertEqual(rows[0]["aggressor_side"], "BUY")
+
+    def test_bybit_batch_is_persisted_once_after_full_normalization(self):
+        venue = VenueOrderFlow("bybit", window_ms=10_000)
+        venue.connect(1_000)
+        result = ingest_bybit_spot_message(
+            venue,
+            {
+                "topic": "publicTrade.BTCUSDT",
+                "type": "snapshot",
+                "data": [
+                    {"T": 1_500, "s": "BTCUSDT", "S": "Buy", "v": "0.01", "p": "65000", "i": "b-1"},
+                    {"T": 1_510, "s": "BTCUSDT", "S": "Sell", "v": "0.02", "p": "65001", "i": "b-2"},
+                ],
+            },
+            channel_type="spot",
+            received_at_ms=1_600,
+            expected_symbol="BTCUSDT",
+            event_store=self.store,
+        )
+        self.assertEqual(result["accepted"], 2)
+        self.assertEqual(result["persisted"], 2)
+        rows = self.store.read_window(
+            venue="bybit", symbol="BTCUSDT",
+            start_event_time_ms=1_000, end_event_time_ms=2_000,
+        )
+        self.assertEqual([row["trade_id"] for row in rows], ["b-1", "b-2"])
+
+    def test_persistence_failure_freezes_venue_and_disables_cvd(self):
+        class FailingStore:
+            def append_many(self, events):
+                raise OSError("storage unavailable")
+
+        venue = VenueOrderFlow("binance", window_ms=10_000)
+        venue.connect(1_000)
+        result = ingest_binance_spot_message(
+            venue,
+            {
+                "e": "aggTrade", "s": "BTCUSDT", "a": 8,
+                "p": "65000", "q": "0.01", "T": 1_500, "m": False,
+            },
+            channel_type="spot",
+            received_at_ms=1_600,
+            expected_symbol="BTCUSDT",
+            event_store=FailingStore(),
+        )
+        snapshot = venue.snapshot(1_700)
+        self.assertEqual(result["reason"], "DOWNSTREAM_FAILURE")
+        self.assertEqual(snapshot["status"], "FROZEN")
+        self.assertIsNone(snapshot["cvd_base"])
+
+
 
 
 if __name__ == "__main__":
