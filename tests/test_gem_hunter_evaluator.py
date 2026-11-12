@@ -374,5 +374,28 @@ class GemHunterEvaluatorTests(unittest.TestCase):
 
 
 
+    def test_inconsistent_trade_flow_arithmetic_cannot_upgrade_pressure(self):
+        item = candidate()
+        item["pool_trade_evidence"] = {
+            "schema_version": "gem-hunter-pool-trades-v1",
+            "status": "COMPLETE",
+            "coverage_status": "COMPLETE",
+            "chain": item["chain"],
+            "token_address": item["token_address"],
+            "pool_address": item["pool_address"],
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "source": "GECKOTERMINAL",
+            "buy_sell_pressure_status": "PASS",
+            "buy_volume_usd": 80000.0,
+            "sell_volume_usd": 20000.0,
+            "total_volume_usd": 99999.0,
+            "net_swap_flow_usd": 60000.0,
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["buy_sell_pressure"], "UNKNOWN")
+        self.assertEqual(result["market_metrics"]["pool_trade_evidence_status"], "UNKNOWN")
+
+
+
 if __name__ == "__main__":
     unittest.main()
