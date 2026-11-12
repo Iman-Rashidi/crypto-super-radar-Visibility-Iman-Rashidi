@@ -169,6 +169,7 @@ class PaperLedger:
                     exit_slippage_cost_usd REAL NOT NULL DEFAULT 0,
                     exit_spread_cost_usd REAL NOT NULL DEFAULT 0,
                     exit_quote_source TEXT
+                )
             """)
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS paper_trades (
