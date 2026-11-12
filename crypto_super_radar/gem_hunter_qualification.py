@@ -188,6 +188,19 @@ def is_public_buy_candidate(candidate: Any, *, now: Optional[datetime] = None) -
     if qualification.get("decision") != "BUY" or qualification.get("market_type") != "SPOT":
         return False
 
+    token_risk = qualification.get("token_risk_assessment")
+    if not isinstance(token_risk, Mapping):
+        return False
+    if (
+        token_risk.get("security_gate_status") != "PASS"
+        or token_risk.get("required_check_count") != 5
+        or token_risk.get("passed_check_count") != 5
+        or token_risk.get("incomplete_check_count") != 0
+        or token_risk.get("failed_check_count") != 0
+        or token_risk.get("trade_authorization") != "NO_TRADE"
+    ):
+        return False
+
     filters = qualification.get("filters")
     if not isinstance(filters, Mapping) or set(filters.keys()) != set(FILTER_IDS):
         return False
