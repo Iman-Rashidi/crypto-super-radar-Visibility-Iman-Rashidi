@@ -65,7 +65,7 @@ class PaperExecutionAdapter:
         best_bid: Any, best_ask: Any, available_liquidity_qty: Any,
         max_participation_pct: Any = 0.10,
         fee_rate: Any = 0.0008, slippage_bps: Any = 10.0,
-        observed_at_ms: Any = None, now_ms: int | None = None,
+        observed_at_ms: Any = None,
         max_quote_age_ms: int = 5_000,
         occurred_at: int | None = None,
     ) -> dict[str, Any]:
@@ -88,9 +88,7 @@ class PaperExecutionAdapter:
         fees = _positive(fee_rate, "fee_rate", allow_zero=True)
         slip = _positive(slippage_bps, "slippage_bps", allow_zero=True)
         observed_at = _positive(observed_at_ms, "observed_at_ms")
-        current_ms = int(time.time() * 1000) if now_ms is None else now_ms
-        if isinstance(current_ms, bool) or not isinstance(current_ms, int) or current_ms <= 0:
-            raise ValueError("now_ms must be a positive integer timestamp")
+        current_ms = int(time.time() * 1000)
         if isinstance(max_quote_age_ms, bool) or not isinstance(max_quote_age_ms, int) or max_quote_age_ms < 0:
             raise ValueError("max_quote_age_ms must be a non-negative integer")
         quote_age = current_ms - int(observed_at)

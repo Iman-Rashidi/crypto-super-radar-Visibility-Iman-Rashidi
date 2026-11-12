@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from crypto_super_radar.paper_execution import IdempotencyConflict, PaperExecutionEventLedger
 from crypto_super_radar.paper_execution_adapter import PaperExecutionAdapter
@@ -28,9 +29,13 @@ class PaperExecutionAdapterTests(unittest.TestCase):
         self.db.close()
 
     def simulate(self, **kwargs):
+        test_now_ms = kwargs.pop("test_now_ms", 1_000_100)
         kwargs.setdefault("observed_at_ms", 1_000_000)
-        kwargs.setdefault("now_ms", 1_000_100)
-        return self.adapter.simulate_fill(**kwargs)
+        with patch(
+            "crypto_super_radar.paper_execution_adapter.time.time",
+            return_value=test_now_ms / 1000.0,
+        ):
+            return self.adapter.simulate_fill(**kwargs)
 
     def test_partial_then_full_fill_respects_participation_limit(self):
         partial = self.simulate(
@@ -106,7 +111,7 @@ class PaperExecutionAdapterTests(unittest.TestCase):
         stale = self.simulate(
             client_order_id="paper-depth-1", snapshot_id="stale",
             best_bid=100, best_ask=101, available_liquidity_qty=10,
-            observed_at_ms=994_100, now_ms=1_000_100,
+            observed_at_ms=994_100, test_now_ms=1_000_100,
         )
         empty = self.simulate(
             client_order_id="paper-depth-1", snapshot_id="empty",
@@ -147,7 +152,7 @@ class PaperExecutionAdapterTests(unittest.TestCase):
         result = self.simulate(
             client_order_id="paper-depth-1", snapshot_id="future-book",
             best_bid=100, best_ask=101, available_liquidity_qty=10,
-            observed_at_ms=1_010_000, now_ms=1_000_100,
+            observed_at_ms=1_010_000, test_now_ms=1_000_100,
         )
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(self.ledger.order_state("paper-depth-1")["filled_quantity"], 0.0)
@@ -157,6 +162,16 @@ class PaperExecutionAdapterTests(unittest.TestCase):
             self.adapter.simulate_fill(
                 client_order_id="paper-depth-1", snapshot_id="missing-time",
                 best_bid=100, best_ask=101, available_liquidity_qty=10,
+            )
+
+
+
+    def test_caller_cannot_override_freshness_clock(self):
+        with self.assertRaises(TypeError):
+            self.adapter.simulate_fill(
+                client_order_id="paper-depth-1", snapshot_id="caller-clock",
+                best_bid=100, best_ask=101, available_liquidity_qty=10,
+                observed_at_ms=1_000_000, now_ms=1_000_100,
             )
 
 
