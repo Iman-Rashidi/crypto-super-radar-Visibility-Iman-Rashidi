@@ -17,42 +17,51 @@ INCLUDE = "base_token,quote_token,dex"
 MAX_CANDIDATES = 50
 MAX_POOL_AGE_HOURS = 168.0
 
-# Trending pools are a slower-moving supplementary signal. Cache successful
-# payloads for five minutes and rate-limit failures for two minutes so repeated
-# dashboard scans do not exhaust GeckoTerminal's shared public quota.
-_TRENDING_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
+# Cache all GeckoTerminal new/trending pool feeds, not only trending lists.
+# Successful payloads live for five minutes; failed requests enter a two-minute
+# cooldown. This reduces repeated 429s without treating failed/cooldown sources
+# as complete evidence or allowing fallback data to upgrade GeckoTerminal status.
+_GECKOTERMINAL_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
+# Backward-compatible alias used by existing tests and diagnostics.
+_TRENDING_SOURCE_CACHE = _GECKOTERMINAL_SOURCE_CACHE
 _TRENDING_CACHE_TTL_SECONDS = 300.0
 _TRENDING_ERROR_COOLDOWN_SECONDS = 120.0
 
 
-def _get_trending_payload(http, url: str, params: dict[str, Any], source: str,
-                          now: datetime) -> tuple[Any, dict[str, Any]]:
+def _get_cached_geckoterminal_payload(http, url: str, params: dict[str, Any], source: str,
+                                      now: datetime) -> tuple[Any, dict[str, Any]]:
     current = time.monotonic()
-    cached = _TRENDING_SOURCE_CACHE.get(source)
+    cached = _GECKOTERMINAL_SOURCE_CACHE.get(source)
     if cached and cached.get("expires_at", 0.0) > current:
         age = max(0.0, (now - cached["fetched_at"]).total_seconds())
         if cached.get("status") == "PASS":
             return copy.deepcopy(cached["payload"]), {
                 "cached": True, "data_age_seconds": round(age, 1)
             }
-        raise RuntimeError(f"Cached rate-limit cooldown: {cached.get('error', 'source unavailable')}")
+        raise RuntimeError(
+            f"Cached rate-limit cooldown: {cached.get('error', 'source unavailable')}"
+        )
     try:
         payload = http.get(url, params=params)
     except Exception as exc:
-        _TRENDING_SOURCE_CACHE[source] = {
+        _GECKOTERMINAL_SOURCE_CACHE[source] = {
             "status": "UNKNOWN",
             "error": f"{type(exc).__name__}: {str(exc)[:160]}",
             "fetched_at": now,
             "expires_at": current + _TRENDING_ERROR_COOLDOWN_SECONDS,
         }
         raise
-    _TRENDING_SOURCE_CACHE[source] = {
+    _GECKOTERMINAL_SOURCE_CACHE[source] = {
         "status": "PASS",
         "payload": copy.deepcopy(payload),
         "fetched_at": now,
         "expires_at": current + _TRENDING_CACHE_TTL_SECONDS,
     }
     return payload, {"cached": False, "data_age_seconds": 0.0}
+
+
+# Keep the old private helper name available for callers that used it.
+_get_trending_payload = _get_cached_geckoterminal_payload
 
 
 # Only canonical native/wrapped assets are excluded. Symbols alone are not trusted.
@@ -452,12 +461,10 @@ def discover_gem_candidates(http, *, limit: int = 20,
             source = f"GECKOTERMINAL_{source_suffix}_{network.upper()}"
             url = f"{BASE_URL}/networks/{network}/{endpoint}"
             try:
-                cache_metadata = {}
                 params = {"page": 1, "include": INCLUDE}
-                if source_suffix == "TRENDING_POOLS":
-                    payload, cache_metadata = _get_trending_payload(http, url, params, source, now)
-                else:
-                    payload = http.get(url, params=params)
+                payload, cache_metadata = _get_cached_geckoterminal_payload(
+                    http, url, params, source, now
+                )
                 rows = _rows(payload, source, now)
                 sources[source] = {"status": "PASS", "candidate_rows": len(rows), **cache_metadata}
                 for row in rows:
