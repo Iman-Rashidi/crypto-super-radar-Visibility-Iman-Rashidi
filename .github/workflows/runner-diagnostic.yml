@@ -3,11 +3,13 @@ name: runner-diagnostic
 on:
   push:
     branches:
+      - feature/tradingagents-paperbot-integration
       - feature/multi-stage-confirmation-engine
   pull_request:
     types: [opened, synchronize, reopened]
     branches:
       - main
+      - feature/multi-stage-confirmation-engine
   workflow_dispatch:
 
 permissions:
