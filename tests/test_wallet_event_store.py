@@ -55,6 +55,12 @@ class WalletEventStoreTests(unittest.TestCase):
             chain="solana", wallet_address="walletAa111111111111111111111111111111"
         )), 1)
 
+    def test_counterparty_address_is_persisted_and_retrieved(self):
+        row = event()
+        self.store.append_many([row])
+        saved = self.store.token_events(chain="solana", token_address=row["token_address"])
+        self.assertEqual(saved[0]["counterparty_address"], row["counterparty_address"])
+
     def test_invalid_batch_is_rejected_before_any_write(self):
         with self.assertRaisesRegex(ValueError, "event_index"):
             self.store.append_many([event(), event(event_index=-1)])
