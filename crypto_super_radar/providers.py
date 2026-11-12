@@ -164,6 +164,23 @@ class GeckoTerminalProvider:
             raise DataProviderError("GeckoTerminal returned no pool with a verifiable token-side USD price")
         return max(candidates, key=lambda item: item["liquidity"])
 
+    def trades(self, chain: str, pool_address: str, token_address: str) -> list[dict[str, Any]]:
+        """Fetch the provider's bounded recent-trades window for one exact pool."""
+        network = NETWORKS[chain]
+        url = f"{self.BASE}/networks/{network}/pools/{pool_address}/trades"
+        payload = self.http.get(url, params={"token": token_address})
+        if not isinstance(payload, dict):
+            raise DataProviderError("GeckoTerminal trades response has an invalid schema")
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise DataProviderError("GeckoTerminal trades response omitted its data list")
+        normalized = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict) or not isinstance(row.get("attributes"), dict):
+                raise DataProviderError(f"GeckoTerminal trade row {index} has an invalid schema")
+            normalized.append(dict(row["attributes"]))
+        return normalized
+
     def candles(self, chain: str, pool_address: str, token_address: Optional[str] = None, timeframe: str = "day", aggregate: int = 1, limit: int = 365) -> pd.DataFrame:
         network = NETWORKS[chain]
         url = f"{self.BASE}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe}"
