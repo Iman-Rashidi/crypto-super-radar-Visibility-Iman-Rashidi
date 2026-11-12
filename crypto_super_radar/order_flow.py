@@ -181,6 +181,8 @@ class VenueOrderFlow:
         if event_ts > receive_ts + self.future_skew_ms:
             self._freeze("FUTURE_EVENT_TIMESTAMP")
             return {"accepted": False, "reason": "FUTURE_EVENT_TIMESTAMP"}
+        if self._connected_at_ms is not None and event_ts < self._connected_at_ms:
+            return {"accepted": False, "reason": "EVENT_PRECEDES_CURRENT_CONNECTION"}
 
         self._prune(receive_ts)
         if event_ts < receive_ts - self.window_ms:
@@ -231,7 +233,15 @@ class VenueOrderFlow:
         else:
             status = "LIVE"
 
-        ordered = sorted(self._events.values(), key=lambda event: (event.event_time_ms, event.trade_id))
+        # A reconnect does not repair the uncovered part of the current window.
+        # Exclude pre-connection events even if they remain inside the rolling TTL.
+        ordered = sorted(
+            (
+                event for event in self._events.values()
+                if event.event_time_ms >= coverage_start
+            ),
+            key=lambda event: (event.event_time_ms, event.trade_id),
+        )
         buy = [event for event in ordered if event.side == "BUY"]
         sell = [event for event in ordered if event.side == "SELL"]
         observed_buy_base = sum(event.base_quantity for event in buy)
