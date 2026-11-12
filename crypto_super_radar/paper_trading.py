@@ -17,6 +17,8 @@ from .database import connect_database, storage_backend
 from .signal_performance import summarize_closed_trades
 from .execution_costs import calculate_fill_costs
 from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
+from .paper_execution_adapter import PaperExecutionAdapter
+from .paper_fill_simulator import PaperFillSimulator
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -65,6 +67,46 @@ def _extract_observed_quote(snapshot: Any, *, max_age_ms: int = 60_000) -> Optio
     return None
 
 
+def _extract_order_book(
+    data: Any, asset: AssetSpec, *, max_age_ms: int = 5_000,
+) -> Optional[dict[str, Any]]:
+    """Return a fresh, validated public Binance Spot top-of-book snapshot."""
+    getter = getattr(data, "order_book_snapshot", None)
+    if not callable(getter):
+        return None
+    try:
+        raw = getter(asset)
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or raw.get("symbol") != asset.symbol:
+        return None
+    if raw.get("timestamp_kind") != "LOCAL_RECEIVED_AT" or raw.get("orders_submitted") is not False:
+        return None
+    bid = _number(raw.get("best_bid"))
+    ask = _number(raw.get("best_ask"))
+    bid_qty = _number(raw.get("available_liquidity_sell_qty"))
+    ask_qty = _number(raw.get("available_liquidity_buy_qty"))
+    observed_at = _number(raw.get("observed_at_ms"))
+    source = raw.get("source")
+    if (
+        bid is None or ask is None or bid_qty is None or ask_qty is None
+        or observed_at is None or bid <= 0 or ask < bid
+        or bid_qty < 0 or ask_qty < 0 or observed_at <= 0
+        or not isinstance(source, str) or not source.strip()
+    ):
+        return None
+    age_ms = int(time.time() * 1000) - int(observed_at)
+    if age_ms < -2_000 or age_ms > max_age_ms:
+        return None
+    return {
+        "symbol": asset.symbol, "bid": bid, "ask": ask,
+        "available_sell_quantity": bid_qty, "available_buy_quantity": ask_qty,
+        "observed_at_ms": int(observed_at), "age_ms": age_ms,
+        "source": source.strip(), "timestamp_kind": "LOCAL_RECEIVED_AT",
+        "orders_submitted": False,
+    }
+
+
 class PaperLedger:
     """Minimal paper account and immutable closed-trade journal in SQLite."""
 
@@ -78,6 +120,8 @@ class PaperLedger:
         self._db = connect_database(self.path)
         with self._db:
             self.execution_ledger = PaperExecutionEventLedger(self._db, lock=self._lock)
+            self.execution_adapter = PaperExecutionAdapter(self.execution_ledger)
+            self.fill_simulator = PaperFillSimulator(self.execution_ledger)
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS paper_account (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -209,44 +253,55 @@ class PaperLedger:
                 "SELECT 1 FROM paper_positions WHERE asset=? AND signal_bar=? LIMIT 1",
                 (asset, signal_bar),
             ).fetchone()
-        return bool(closed or opened)
+        entry_order_id = make_paper_client_order_id(asset, signal_bar, "ENTRY")
+        execution_order = self.execution_ledger.order_state(entry_order_id)
+        return bool(closed or opened or execution_order)
+
+    def _insert_open_position_projection(
+        self, position: dict[str, Any], debit: float,
+    ) -> bool:
+        """Apply the filled entry to cash/position; caller owns the DB transaction."""
+        account = self._db.execute(
+            "SELECT cash_balance FROM paper_account WHERE id=1"
+        ).fetchone()
+        active = self._db.execute("SELECT 1 FROM paper_positions LIMIT 1").fetchone()
+        duplicate = self._db.execute(
+            "SELECT 1 FROM paper_trades WHERE asset=? AND signal_bar=? LIMIT 1",
+            (position["asset"], position["signal_bar"]),
+        ).fetchone()
+        if active or duplicate or account is None or debit > float(account["cash_balance"]):
+            return False
+        self._db.execute("""
+            INSERT INTO paper_positions
+            (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
+             opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
+             initial_stop_loss, max_holding_days, peak_price,
+             entry_reference_price, entry_slippage_usd, entry_spread_cost_usd,
+             entry_quote_source)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            position["asset"], position["quantity"], position["entry_price"],
+            position["stop_loss"], position["take_profit"], position["entry_fee"],
+            position["opened_at"], position["signal_bar"],
+            position["confirmation_score"], position["risk_budget"],
+            position["entry_price"], position["initial_stop_loss"],
+            position["max_holding_days"], position["entry_price"],
+            position.get("entry_reference_price"),
+            position.get("entry_slippage_usd"),
+            position.get("entry_spread_cost_usd"),
+            position.get("entry_quote_source"),
+        ))
+        self._db.execute(
+            "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
+            (debit, int(time.time())),
+        )
+        return True
 
     def open_position(self, position: dict[str, Any], debit: float) -> bool:
+        """Legacy atomic immediate-fill entry, retained for existing callers/tests."""
         with self._lock, self._db:
-            account = self._db.execute(
-                "SELECT cash_balance FROM paper_account WHERE id=1"
-            ).fetchone()
-            active = self._db.execute("SELECT 1 FROM paper_positions LIMIT 1").fetchone()
-            duplicate = self._db.execute(
-                "SELECT 1 FROM paper_trades WHERE asset=? AND signal_bar=? LIMIT 1",
-                (position["asset"], position["signal_bar"]),
-            ).fetchone()
-            if active or duplicate or account is None or debit > float(account["cash_balance"]):
+            if not self._insert_open_position_projection(position, debit):
                 return False
-            self._db.execute("""
-                INSERT INTO paper_positions
-                (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
-                 opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
-                 initial_stop_loss, max_holding_days, peak_price,
-                 entry_reference_price, entry_slippage_usd, entry_spread_cost_usd,
-                 entry_quote_source)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                position["asset"], position["quantity"], position["entry_price"],
-                position["stop_loss"], position["take_profit"], position["entry_fee"],
-                position["opened_at"], position["signal_bar"],
-                position["confirmation_score"], position["risk_budget"],
-                position["entry_price"], position["initial_stop_loss"],
-                position["max_holding_days"], position["entry_price"],
-                position.get("entry_reference_price"),
-                position.get("entry_slippage_usd"),
-                position.get("entry_spread_cost_usd"),
-                position.get("entry_quote_source"),
-            ))
-            self._db.execute(
-                "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
-                (debit, int(time.time())),
-            )
             self.execution_ledger.record_simulated_fill(
                 client_order_id=make_paper_client_order_id(
                     position["asset"], position["signal_bar"], "ENTRY"
@@ -260,6 +315,95 @@ class PaperLedger:
                 reason="PAPER_ENTRY", occurred_at=position["opened_at"],
             )
         return True
+
+    def execute_entry_order(
+        self, *,
+        position: dict[str, Any],
+        client_order_id: str,
+        requested_quantity: float,
+        order_book: dict[str, Any],
+        fee_bps: float,
+        adverse_impact_bps: float,
+        max_participation_rate: float,
+        fill_fractions: tuple[float, ...],
+        max_quote_age_ms: int,
+        simulated_latency_ms: int = 200,
+    ) -> dict[str, Any]:
+        """Simulate adapter-accepted entry fills and atomically project actual fill."""
+        with self._lock, self._db:
+            self.execution_adapter.submit_order(
+                client_order_id=client_order_id, asset=position["asset"],
+                side="BUY", quantity=requested_quantity,
+                occurred_at=position["opened_at"],
+            )
+            simulation = self.fill_simulator.simulate_order(
+                client_order_id=client_order_id,
+                asset=position["asset"],
+                side="BUY",
+                requested_quantity=requested_quantity,
+                bid=order_book["bid"],
+                ask=order_book["ask"],
+                available_liquidity_quantity=order_book["available_buy_quantity"],
+                max_participation_rate=max_participation_rate,
+                fee_bps=fee_bps,
+                adverse_impact_bps=adverse_impact_bps,
+                simulated_latency_ms=simulated_latency_ms,
+                fill_fractions=fill_fractions,
+                quote_quality="OBSERVED",
+                quote_source=order_book["source"],
+                quote_timestamp_ms=order_book["observed_at_ms"],
+                max_quote_age_ms=max_quote_age_ms,
+                cancel_unfilled_remainder=False,
+                reason="PAPER_BOT_ENTRY",
+            )
+            requested = float(requested_quantity)
+            filled = float(simulation["filled_quantity"])
+            remaining = float(simulation["remaining_quantity"])
+            tolerance = max(1e-12, requested * 1e-12)
+            if remaining > tolerance:
+                self.execution_adapter.cancel_order(
+                    client_order_id=client_order_id,
+                    reason="PAPER_ENTRY_UNFILLED_REMAINDER_CANCELED",
+                    occurred_at=int(time.time()),
+                )
+            if filled <= tolerance:
+                return {
+                    "status": "CANCELED", "client_order_id": client_order_id,
+                    "requested_quantity": requested, "filled_quantity": 0.0,
+                    "remaining_quantity": requested, "average_fill_price": None,
+                    "fee_paid_usd": 0.0, "simulation": simulation,
+                    "mode": "PAPER_ONLY", "orders_submitted": False,
+                }
+
+            average_price = _number(simulation.get("average_fill_price"))
+            cumulative_fee = _number(simulation.get("cumulative_fee_paid_usd"))
+            if average_price is None or average_price <= 0 or cumulative_fee is None or cumulative_fee < 0:
+                raise RuntimeError("Paper fill simulator returned incomplete cumulative fill economics")
+            applied = dict(position)
+            applied["quantity"] = filled
+            applied["entry_price"] = average_price
+            applied["entry_fee"] = cumulative_fee
+            costs = calculate_fill_costs(
+                side="BUY", quantity=filled,
+                bid=order_book["bid"], ask=order_book["ask"],
+                fill_price=average_price, fee_paid_usd=cumulative_fee,
+                funding_applicable=False, quote_quality="OBSERVED",
+            )
+            applied["entry_reference_price"] = order_book["ask"]
+            applied["entry_slippage_usd"] = costs["slippage_cost_usd"]
+            applied["entry_spread_cost_usd"] = costs["spread_cost_usd"]
+            applied["entry_quote_source"] = order_book["source"]
+            debit = filled * average_price + cumulative_fee
+            if not self._insert_open_position_projection(applied, debit):
+                raise RuntimeError("Paper ledger rejected filled entry projection; execution transaction rolled back")
+            return {
+                "status": simulation["status"], "client_order_id": client_order_id,
+                "requested_quantity": requested, "filled_quantity": filled,
+                "remaining_quantity": remaining, "average_fill_price": average_price,
+                "fee_paid_usd": cumulative_fee, "debit_usd": debit,
+                "position": applied, "simulation": simulation,
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
 
     def update_management(self, price: float, stop_loss: float) -> None:
         with self._lock, self._db:
@@ -686,13 +830,17 @@ class PaperTradingBot:
         max_consecutive_losses: int = 3,
         cooldown_hours_after_loss: float = 24.0,
         min_net_reward_risk: float = 1.8,
+        max_order_participation_rate: float = 0.10,
+        fill_fractions: tuple[float, ...] = (0.40, 0.35, 0.25),
+        max_order_book_age_ms: int = 5_000,
+        simulated_execution_latency_ms: int = 200,
     ):
         self.engine = engine
         self.ledger = ledger or PaperLedger()
         values = (risk_per_trade_pct, max_position_notional_pct, max_risk_score,
                   min_confirmation_score, fee_bps_per_side, slippage_bps_per_side,
                   daily_loss_limit_pct, max_drawdown_pct, cooldown_hours_after_loss,
-                  min_net_reward_risk)
+                  min_net_reward_risk, max_order_participation_rate)
         if not all(math.isfinite(float(x)) for x in values):
             raise ValueError("Paper trading configuration must be finite.")
         if not 0 < risk_per_trade_pct <= 0.02:
@@ -718,6 +866,31 @@ class PaperTradingBot:
         self.max_consecutive_losses = max_consecutive_losses
         self.cooldown_hours_after_loss = cooldown_hours_after_loss
         self.min_net_reward_risk = min_net_reward_risk
+        if not 0 < max_order_participation_rate <= 1:
+            raise ValueError("Order-book participation rate must be in (0, 1].")
+        if (
+            not isinstance(max_order_book_age_ms, int)
+            or isinstance(max_order_book_age_ms, bool)
+            or max_order_book_age_ms <= 0
+        ):
+            raise ValueError("Maximum order-book age must be a positive integer.")
+        if (
+            not isinstance(simulated_execution_latency_ms, int)
+            or isinstance(simulated_execution_latency_ms, bool)
+            or simulated_execution_latency_ms < 0
+        ):
+            raise ValueError("Simulated execution latency must be a non-negative integer.")
+        fractions = tuple(float(value) for value in fill_fractions)
+        if (
+            not fractions or len(fractions) > 20
+            or any(not math.isfinite(value) or value <= 0 for value in fractions)
+            or not math.isclose(sum(fractions), 1.0, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            raise ValueError("Fill fractions must be positive and sum to 1.0.")
+        self.max_order_participation_rate = max_order_participation_rate
+        self.fill_fractions = fractions
+        self.max_order_book_age_ms = max_order_book_age_ms
+        self.simulated_execution_latency_ms = simulated_execution_latency_ms
 
     def state(self) -> dict[str, Any]:
         state = self.ledger.state()
@@ -856,14 +1029,18 @@ class PaperTradingBot:
                 or stop is None or target is None):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Score, risk or stop/target plan did not pass paper safety limits."}
-        entry_quote = _extract_observed_quote(snapshot)
-        entry_reference = (
-            max(price, float(entry_quote["ask"])) if entry_quote is not None else price
+        entry_quote = _extract_order_book(
+            data, asset, max_age_ms=self.max_order_book_age_ms,
         )
+        if entry_quote is None:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": "A complete, fresh public Spot order-book snapshot is required; no paper order was created.",
+            }
+        entry_reference = float(entry_quote["ask"])
         entry = entry_reference * (1.0 + self.slippage_rate)
         half_spread_per_unit = (
             (float(entry_quote["ask"]) - float(entry_quote["bid"])) / 2.0
-            if entry_quote is not None else 0.0
         )
         exit_at_stop = (
             (stop - half_spread_per_unit) * (1.0 - self.slippage_rate)
@@ -923,20 +1100,15 @@ class PaperTradingBot:
         debit = notional + entry_fee
         if not math.isfinite(quantity) or quantity <= 0 or debit > cash:
             return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Position sizing returned no safe quantity."}
-        if entry_quote is not None:
-            entry_costs = calculate_fill_costs(
-                side="BUY", quantity=quantity, bid=entry_quote["bid"],
-                ask=entry_quote["ask"], fill_price=entry,
-                fee_paid_usd=entry_fee, funding_applicable=False,
-                quote_quality="OBSERVED",
-            )
-            entry_slippage = entry_costs["slippage_cost_usd"]
-            entry_spread_cost = entry_costs["spread_cost_usd"]
-            entry_quote_source = entry_quote["source"]
-        else:
-            entry_slippage = quantity * max(0.0, entry - price)
-            entry_spread_cost = None
-            entry_quote_source = None
+        entry_costs = calculate_fill_costs(
+            side="BUY", quantity=quantity, bid=entry_quote["bid"],
+            ask=entry_quote["ask"], fill_price=entry,
+            fee_paid_usd=entry_fee, funding_applicable=False,
+            quote_quality="OBSERVED",
+        )
+        entry_slippage = entry_costs["slippage_cost_usd"]
+        entry_spread_cost = entry_costs["spread_cost_usd"]
+        entry_quote_source = entry_quote["source"]
         record = {
             "asset": asset.raw, "quantity": quantity, "entry_price": entry,
             "stop_loss": stop, "initial_stop_loss": stop,
@@ -949,12 +1121,48 @@ class PaperTradingBot:
             "entry_spread_cost_usd": entry_spread_cost,
             "entry_quote_source": entry_quote_source,
         }
-        if not self.ledger.open_position(record, debit):
-            return {"status": "NO_TRADE", "asset": asset.raw,
-                    "reason": "Paper ledger rejected duplicate, concurrent or unaffordable entry."}
-        return {"status": "OPENED", "asset": asset.raw, "side": "LONG",
-                "quantity": quantity, "entry_price": entry, "stop_loss": stop,
-                "take_profit": target, "risk_budget_usd": risk_budget,
-                "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
-                "max_holding_days": max_holding_days, "fee_usd": entry_fee,
-                "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False}
+        client_order_id = make_paper_client_order_id(asset.raw, signal_bar, "ENTRY")
+        try:
+            execution = self.ledger.execute_entry_order(
+                position=record,
+                client_order_id=client_order_id,
+                requested_quantity=quantity,
+                order_book=entry_quote,
+                fee_bps=self.fee_rate * 10_000.0,
+                adverse_impact_bps=self.slippage_rate * 10_000.0,
+                max_participation_rate=self.max_order_participation_rate,
+                fill_fractions=self.fill_fractions,
+                max_quote_age_ms=self.max_order_book_age_ms,
+                simulated_latency_ms=self.simulated_execution_latency_ms,
+            )
+        except Exception as exc:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": f"Paper entry execution/projection failed atomically ({type(exc).__name__}).",
+            }
+        if float(execution["filled_quantity"]) <= 0:
+            return {
+                "status": "NO_TRADE", "asset": asset.raw,
+                "reason": "The public order book supplied no executable liquidity; the paper order remainder was canceled.",
+                "client_order_id": client_order_id,
+                "execution_status": execution["status"],
+                "remaining_quantity": execution["remaining_quantity"],
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
+        return {
+            "status": "OPENED" if execution["status"] == "FILLED" else "PARTIALLY_OPENED",
+            "asset": asset.raw, "side": "LONG",
+            "quantity": execution["filled_quantity"],
+            "requested_quantity": quantity,
+            "remaining_quantity": execution["remaining_quantity"],
+            "entry_price": execution["average_fill_price"],
+            "stop_loss": stop, "take_profit": target,
+            "risk_budget_usd": risk_budget,
+            "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
+            "max_holding_days": max_holding_days,
+            "fee_usd": execution["fee_paid_usd"],
+            "client_order_id": client_order_id,
+            "execution_status": execution["status"],
+            "execution_fill_count": execution["simulation"]["fill_count"],
+            "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False,
+        }
