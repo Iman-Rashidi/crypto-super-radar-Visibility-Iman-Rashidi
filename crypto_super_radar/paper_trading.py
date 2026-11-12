@@ -488,40 +488,84 @@ class PaperLedger:
                 (asset,),
             ).fetchone()
         partial_daily_net = 0.0
+        # Build original-entry economics for both open and already closed positions.
+        # Daily risk must follow the timestamp of each incremental exit fill, not
+        # the eventual trade-close date; otherwise multi-day partial exits are
+        # either omitted before close or double-counted on the final close day.
+        exit_bases: dict[str, tuple[float, float, float]] = {}
+        with self._lock:
+            projections = self._db.execute(
+                "SELECT asset, signal_bar, entry_price, quantity, entry_fee "
+                "FROM paper_trades"
+            ).fetchall()
+            sell_orders = self._db.execute(
+                "SELECT DISTINCT client_order_id FROM paper_execution_events WHERE side='SELL'"
+            ).fetchall()
+        for row in projections:
+            qty = float(row["quantity"])
+            if qty > 0:
+                base_id = make_paper_client_order_id(
+                    str(row["asset"]), str(row["signal_bar"]), "EXIT"
+                )
+                exit_bases[base_id] = (
+                    float(row["entry_price"]), qty, float(row["entry_fee"]),
+                )
         open_position = state.get("open_position")
-        if open_position and float(open_position.get("exit_filled_quantity") or 0.0) > 0:
-            base_exit_id = make_paper_client_order_id(
-                str(open_position["asset"]), str(open_position["signal_bar"]), "EXIT"
+        if open_position:
+            qty = float(
+                open_position.get("original_entry_quantity")
+                or open_position["quantity"]
             )
-            with self._lock:
-                exit_rows = self._db.execute(
-                    "SELECT DISTINCT client_order_id FROM paper_execution_events "
-                    "WHERE client_order_id=? OR client_order_id LIKE ?",
-                    (base_exit_id, f"{base_exit_id}-%"),
-                ).fetchall()
-            original_quantity = float(open_position.get("original_entry_quantity") or 0.0)
-            original_fee = float(open_position.get("original_entry_fee") or 0.0)
-            entry_fee_per_unit = original_fee / original_quantity if original_quantity > 0 else 0.0
-            for exit_row in exit_rows:
-                exit_events = self.execution_ledger.recent_events(
-                    1000, client_order_id=str(exit_row["client_order_id"])
+            if qty > 0:
+                base_id = make_paper_client_order_id(
+                    str(open_position["asset"]), str(open_position["signal_bar"]), "EXIT"
                 )
-                last_fill = next(
-                    (
-                        event for event in exit_events
-                        if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+                exit_bases[base_id] = (
+                    float(open_position["entry_price"]),
+                    qty,
+                    float(
+                        open_position.get("original_entry_fee")
+                        if open_position.get("original_entry_fee") is not None
+                        else open_position["entry_fee"]
                     ),
-                    None,
                 )
-                if last_fill is None or int(last_fill["occurred_at"]) < day_start:
+        for order_row in sell_orders:
+            order_id = str(order_row["client_order_id"])
+            economics = next(
+                (
+                    value for base_id, value in exit_bases.items()
+                    if order_id == base_id or order_id.startswith(base_id + "-")
+                ),
+                None,
+            )
+            if economics is None:
+                continue
+            entry_price, original_qty, original_entry_fee = economics
+            entry_fee_per_unit = original_entry_fee / original_qty if original_qty > 0 else 0.0
+            events = self.execution_ledger.recent_events(
+                1000, client_order_id=order_id,
+            )
+            prior_qty = 0.0
+            prior_notional = 0.0
+            prior_fee = 0.0
+            # recent_events is newest-first; replay fill deltas chronologically.
+            for event in reversed(events):
+                if event["status"] not in {"PARTIALLY_FILLED", "FILLED"}:
                     continue
-                sold = float(last_fill["filled_quantity"])
-                average_exit = float(last_fill["fill_price"])
-                fee_paid = float(last_fill["fee_paid_usd"])
-                partial_daily_net += (
-                    sold * (average_exit - float(open_position["entry_price"]))
-                    - sold * entry_fee_per_unit - fee_paid
-                )
+                cumulative_qty = float(event["filled_quantity"])
+                cumulative_notional = cumulative_qty * float(event["fill_price"])
+                cumulative_fee = float(event["fee_paid_usd"])
+                delta_qty = max(0.0, cumulative_qty - prior_qty)
+                delta_notional = cumulative_notional - prior_notional
+                delta_fee = cumulative_fee - prior_fee
+                if delta_qty > 0 and int(event["occurred_at"]) >= day_start:
+                    partial_daily_net += (
+                        delta_notional - delta_qty * entry_price
+                        - delta_qty * entry_fee_per_unit - delta_fee
+                    )
+                prior_qty = cumulative_qty
+                prior_notional = cumulative_notional
+                prior_fee = cumulative_fee
         daily_net += partial_daily_net
         consecutive = 0
         for row in recent:
