@@ -185,3 +185,14 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - `gem_hunter_security.py` / `evm_security.py` already reflect Solbeam-inspired fail-closed security semantics: missing mandatory EVM evidence yields UNKNOWN; missing Solana authority evidence does not produce PASS; top-10 token-account concentration is explicitly not described as independent wallet ownership. No source code was copied from Solbeam.
 - Current feature-branch HEAD: `e83365b6ebfa6af57f7023b4fdf547181dd68e18`.
 - Latest checks on that HEAD: [offline-tests #820](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43153821049) and [runner-diagnostic #25](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43153821039) failed before the first step; their jobs expose `steps=null` and `logs_url=null`. No full test pass is claimed.
+
+
+## UI integration and latest runner observation — 2026-11-12
+
+- The Paper Performance dashboard now renders `fee_data_status`, `fee_coverage_pct`, `fee_incomplete_rows`, and a separately labeled partial sum when fee coverage is incomplete. The full total remains null when any valid trade row lacks a valid fee component.
+- `tests/test_web_app.py` now asserts that the homepage includes the fee-coverage disclosure and that the empty paper ledger reports `fee_data_status=NO_DATA`.
+- `summarize_liquidation_events` now rejects non-mapping rows safely; a malformed row is counted as invalid and produces `PARTIAL`, not a crash or `NO_DATA`.
+- Follow-up commits: `9337d26b9bfc0baa48aa534d455ce4260b32dcda` (UI fee coverage), `7217e62f928b5f678fbc60ea9a26d5ef6cb2f8e1` (UI regression checks), `84a9f21b02c30e6ae70e6b2067238a2a63bf0b37` (malformed liquidation handling), and `5ace4d470c439d42f65735252ab11eda7cb35d7f` (regression test).
+- Current Feature HEAD: `5ace4d470c439d42f65735252ab11eda7cb35d7f`. PR #1 remains Open/Draft against `main` and mergeable; PR #2 remains Open/Draft and not mergeable.
+- Latest GitHub Actions runs associated with the current head: [offline-tests #825](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154603929), [runner-diagnostic #34](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154572330), [live-provider-acceptance #282](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154572355), and [offline-tests #824](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154572256). All jobs returned `steps=null` and `logs_url=null`; no project test step is evidenced. Do not claim these runs tested the new source.
+- Render's attached service still has Auto Deploy off and remains live on `97df9f7854a5df3f99213f019df95cd97ec77a7d`. No new deploy occurred; current Feature commits are not live.
