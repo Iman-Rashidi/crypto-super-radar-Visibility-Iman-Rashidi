@@ -167,4 +167,12 @@ class OrderFlowEventStore:
             (venue.strip(), symbol.strip().upper(), start_event_time_ms,
              end_event_time_ms, limit),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        columns = [column[0] for column in (cursor.description or ())]
+        rows = cursor.fetchall()
+        normalized_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, Mapping):
+                normalized_rows.append(dict(row))
+            else:
+                normalized_rows.append(dict(zip(columns, row)))
+        return normalized_rows
