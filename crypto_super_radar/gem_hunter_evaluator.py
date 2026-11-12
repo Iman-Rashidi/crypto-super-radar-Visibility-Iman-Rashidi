@@ -87,6 +87,49 @@ def _validated_technical_evidence(candidate: dict, evidence: Any,
     return evidence
 
 
+def _validated_pool_trade_evidence(candidate: dict, evidence: Any,
+                                   now: datetime) -> dict[str, Any]:
+    """Accept fresh trade observations only for the same exact Pool/token."""
+    if not isinstance(evidence, dict):
+        return {}
+    if evidence.get("schema_version") != "gem-hunter-pool-trades-v1":
+        return {}
+    if evidence.get("status") not in {"COMPLETE", "PARTIAL"}:
+        return {}
+    if evidence.get("source") != "GECKOTERMINAL":
+        return {}
+    chain = str(candidate.get("chain") or "").lower()
+    if str(evidence.get("chain") or "").lower() != chain:
+        return {}
+    for key in ("token_address", "pool_address"):
+        left, right = candidate.get(key), evidence.get(key)
+        if not isinstance(left, str) or not isinstance(right, str):
+            return {}
+        same_address = left == right if chain == "solana" else left.lower() == right.lower()
+        if not same_address:
+            return {}
+    checked_raw = evidence.get("checked_at_utc")
+    if not isinstance(checked_raw, str):
+        return {}
+    try:
+        checked = datetime.fromisoformat(checked_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return {}
+    if checked.tzinfo is None:
+        return {}
+    age = (now - checked.astimezone(timezone.utc)).total_seconds()
+    if age < -30 or age > 300:
+        return {}
+    pressure_status = evidence.get("buy_sell_pressure_status")
+    if pressure_status not in {"PASS", "FAIL", "UNKNOWN"}:
+        return {}
+    for key in ("buy_volume_usd", "sell_volume_usd", "total_volume_usd", "net_swap_flow_usd"):
+        value = _number(evidence.get(key))
+        if value is None or value < 0 and key != "net_swap_flow_usd":
+            return {}
+    return evidence
+
+
 def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None) -> dict:
     """Attach a conservative, explicit qualification record; never authorizes BUY."""
     now = now or datetime.now(timezone.utc)
@@ -126,6 +169,9 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     change = _number(candidate.get("price_change_1h_pct"))
     technical_evidence = _validated_technical_evidence(
         candidate, candidate.get("technical_evidence"), now,
+    )
+    pool_trade_evidence = _validated_pool_trade_evidence(
+        candidate, candidate.get("pool_trade_evidence"), now,
     )
     technical_filters = technical_evidence.get("filters", {})
     security_evidence = candidate.get("security_evidence")
@@ -237,7 +283,10 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         reasons["trend"] = "Pool age یا تغییر یک‌ساعته روند محسوب نمی‌شود؛ تاریخچهٔ چندبازه‌ای تازه و کامل متصل نیست."
         reasons["momentum"] = "شتاب فقط با OHLCV بسته‌شدهٔ ۱۵دقیقه‌ای و ۴ساعته و RSI14 ارزیابی می‌شود؛ شواهد کامل در دسترس نیست."
 
-    if buys is not None and sells is not None:
+    if pool_trade_evidence.get("wash_trading_signal") == "SUSPECTED":
+        filters["market_integrity"] = "UNKNOWN"
+        reasons["market_integrity"] = "الگوی تکرار یک معامله‌گر در نمونه مشکوک است؛ انتساب مالک ذی‌نفع و شواهد مستقل برای رد/تأیید Wash Trading کافی نیست."
+    elif buys is not None and sells is not None:
         if buys + sells >= 200 and buys + sells > 0:
             filters["market_integrity"] = "UNKNOWN"
             reasons["market_integrity"] = "Transaction count exists, but wash-trading and independent activity checks are absent."
@@ -247,9 +296,19 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     else:
         reasons["market_integrity"] = "24h buy/sell transaction counts are incomplete."
 
-    reasons.setdefault("buy_sell_pressure", "Notional buy-volume share is unavailable; transaction counts are not a substitute.")
+    if pool_trade_evidence and pool_trade_evidence.get("status") == "COMPLETE":
+        filters["buy_sell_pressure"] = pool_trade_evidence["buy_sell_pressure_status"]
+        reasons["buy_sell_pressure"] = (
+            "سهم دلاری خرید از کل حجم خرید و فروش Pool در پنجرهٔ کامل ۲۴ساعته محاسبه شد."
+            if filters["buy_sell_pressure"] == "PASS" else
+            "سهم دلاری خرید در پنجرهٔ کامل ۲۴ساعته زیر آستانهٔ فروش‌محور است."
+            if filters["buy_sell_pressure"] == "FAIL" else
+            "سهم دلاری خرید در محدودهٔ خنثی است یا تعداد معاملات برای طبقه‌بندی کافی نیست."
+        )
+    else:
+        reasons["buy_sell_pressure"] = "معاملات Pool از نظر پوشش/تازگی کامل نیستند؛ حجم دلاری مشاهده‌شده به‌عنوان فیلتر تأییدشده استفاده نمی‌شود."
     reasons.setdefault("relative_strength", "No verified benchmark-relative price series is available.")
-    reasons.setdefault("capital_flow", "No independently attributed net capital-flow evidence is available.")
+    reasons.setdefault("capital_flow", "Net buy-minus-sell is a Pool swap-flow measure, not project-wide net capital inflow or wallet-attributed capital movement.")
     reasons.setdefault("whale_activity", "No attributable on-chain SWAP_BUY/SWAP_SELL history is connected.")
     reasons.setdefault("contract_security", "No verified contract bytecode, ownership, exploit, or honeypot assessment is connected.")
     reasons.setdefault("holder_distribution", "No independent holder balances or beneficial-owner clustering data is connected.")
@@ -337,13 +396,26 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "technical_evidence_status": technical_evidence.get("status", "UNKNOWN") if technical_evidence else "UNKNOWN",
         "technical_metrics": technical_evidence.get("metrics", {}) if technical_evidence else {},
         "technical_timeframes": technical_evidence.get("timeframes", {}) if technical_evidence else {},
+        "pool_trade_evidence_status": pool_trade_evidence.get("coverage_status", "UNKNOWN") if pool_trade_evidence else "UNKNOWN",
+        "pool_trade_count": pool_trade_evidence.get("trade_count") if pool_trade_evidence else None,
+        "pool_unique_trader_count": pool_trade_evidence.get("unique_trader_count") if pool_trade_evidence else None,
+        "pool_buy_volume_usd": pool_trade_evidence.get("buy_volume_usd") if pool_trade_evidence else None,
+        "pool_sell_volume_usd": pool_trade_evidence.get("sell_volume_usd") if pool_trade_evidence else None,
+        "pool_net_swap_flow_usd": pool_trade_evidence.get("net_swap_flow_usd") if pool_trade_evidence else None,
+        "pool_whale_buy_count_24h": pool_trade_evidence.get("whale_buy_count") if pool_trade_evidence else None,
+        "pool_whale_sell_count_24h": pool_trade_evidence.get("whale_sell_count") if pool_trade_evidence else None,
+        "pool_wash_trading_signal": pool_trade_evidence.get("wash_trading_signal", "UNKNOWN") if pool_trade_evidence else "UNKNOWN",
     }
     whale = {
         "status": "UNKNOWN",
-        "coverage_status": "UNKNOWN",
+        "coverage_status": "PARTIAL_24H_SAMPLE" if pool_trade_evidence else "UNKNOWN",
         "independent_buy_wallets": 0,
-        "events": [],
-        "reason": "No indexed, attributable token-lifetime swap history is connected.",
+        "events": pool_trade_evidence.get("whale_events", []) if pool_trade_evidence else [],
+        "reason": (
+            "Recent GeckoTerminal Pool swaps provide a bounded 24h sample only; complete token-lifetime whale history and independent beneficial-wallet attribution are not established."
+            if pool_trade_evidence else
+            "No indexed, attributable token-lifetime swap history is connected."
+        ),
     }
     return {
         "schema_version": "gem-hunter-v2",
