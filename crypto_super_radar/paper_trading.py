@@ -1120,6 +1120,12 @@ class PaperLedger:
                 - float(open_position["entry_fee"])
             )
         realized = float(realized_total)
+        if open_position:
+            realized += (
+                float(open_position.get("exit_gross_pnl_usd") or 0.0)
+                - float(open_position.get("exit_entry_fee_allocated_usd") or 0.0)
+                - float(open_position.get("exit_fee_paid_usd") or 0.0)
+            )
         return {
             "mode": "PAPER_ONLY",
             "live_orders_enabled": False,
