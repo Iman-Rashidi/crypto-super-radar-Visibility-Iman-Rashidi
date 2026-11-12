@@ -15,6 +15,7 @@ from typing import Any, Optional
 from .models import AssetSpec
 from .database import connect_database, storage_backend
 from .signal_performance import summarize_closed_trades
+from .execution_costs import calculate_fill_costs
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -30,6 +31,37 @@ def _number(value: Any) -> Optional[float]:
 
 def _status(value: Any) -> str:
     return str(getattr(value, "value", value)).upper()
+
+
+def _extract_observed_quote(snapshot: Any, *, max_age_ms: int = 60_000) -> Optional[dict[str, Any]]:
+    """Read a fresh, source-attributed CEX bid/ask pair from a market snapshot."""
+    raw = getattr(snapshot, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+    now_ms = int(time.time() * 1000)
+    for key in ("provider_a", "provider_b"):
+        provider = raw.get(key)
+        if not isinstance(provider, dict):
+            continue
+        bid = _number(provider.get("bid_price"))
+        ask = _number(provider.get("ask_price"))
+        timestamp = _number(provider.get("quote_timestamp_ms"))
+        if (
+            bid is None or ask is None or timestamp is None
+            or bid <= 0 or ask < bid or timestamp <= 0
+        ):
+            continue
+        age_ms = now_ms - int(timestamp)
+        if age_ms < -5_000 or age_ms > max_age_ms:
+            continue
+        source = provider.get("provider")
+        if not isinstance(source, str) or not source.strip():
+            source = str(getattr(snapshot, "provider_a" if key == "provider_a" else "provider_b", key))
+        return {
+            "bid": bid, "ask": ask, "timestamp_ms": int(timestamp),
+            "age_ms": age_ms, "source": source,
+        }
+    return None
 
 
 class PaperLedger:
@@ -70,7 +102,9 @@ class PaperLedger:
                     max_holding_days INTEGER NOT NULL DEFAULT 14,
                     peak_price REAL NOT NULL DEFAULT 0,
                     entry_reference_price REAL,
-                    entry_slippage_usd REAL
+                    entry_slippage_usd REAL,
+                    entry_spread_cost_usd REAL,
+                    entry_quote_source TEXT
                 )
             """)
             self._db.execute("""
@@ -98,6 +132,10 @@ class PaperLedger:
                     entry_slippage_usd REAL,
                     exit_slippage_usd REAL,
                     spread_cost_usd REAL,
+                    entry_spread_cost_usd REAL,
+                    exit_spread_cost_usd REAL,
+                    entry_quote_source TEXT,
+                    exit_quote_source TEXT,
                     funding_cost_usd REAL NOT NULL DEFAULT 0,
                     funding_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE',
                     UNIQUE(asset, signal_bar)
@@ -116,6 +154,10 @@ class PaperLedger:
                 ("entry_slippage_usd", "REAL"),
                 ("exit_slippage_usd", "REAL"),
                 ("spread_cost_usd", "REAL"),
+                ("entry_spread_cost_usd", "REAL"),
+                ("exit_spread_cost_usd", "REAL"),
+                ("entry_quote_source", "TEXT"),
+                ("exit_quote_source", "TEXT"),
                 ("funding_cost_usd", "REAL NOT NULL DEFAULT 0"),
                 ("funding_status", "TEXT NOT NULL DEFAULT 'NOT_APPLICABLE'"),
             ):
@@ -132,6 +174,8 @@ class PaperLedger:
                 ("peak_price", "REAL NOT NULL DEFAULT 0"),
                 ("entry_reference_price", "REAL"),
                 ("entry_slippage_usd", "REAL"),
+                ("entry_spread_cost_usd", "REAL"),
+                ("entry_quote_source", "TEXT"),
             ):
                 if name not in position_columns:
                     self._db.execute(
@@ -182,8 +226,9 @@ class PaperLedger:
                 (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
                  opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
                  initial_stop_loss, max_holding_days, peak_price,
-                 entry_reference_price, entry_slippage_usd)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 entry_reference_price, entry_slippage_usd, entry_spread_cost_usd,
+                 entry_quote_source)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 position["asset"], position["quantity"], position["entry_price"],
                 position["stop_loss"], position["take_profit"], position["entry_fee"],
@@ -193,6 +238,8 @@ class PaperLedger:
                 position["max_holding_days"], position["entry_price"],
                 position.get("entry_reference_price"),
                 position.get("entry_slippage_usd"),
+                position.get("entry_spread_cost_usd"),
+                position.get("entry_quote_source"),
             ))
             self._db.execute(
                 "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
@@ -295,6 +342,9 @@ class PaperLedger:
         reason: str,
         *,
         exit_reference_price: Optional[float] = None,
+        exit_bid: Optional[float] = None,
+        exit_ask: Optional[float] = None,
+        exit_quote_source: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         with self._lock, self._db:
             row = self._db.execute("SELECT * FROM paper_positions WHERE id=1").fetchone()
@@ -305,9 +355,34 @@ class PaperLedger:
             gross = p["quantity"] * (exit_price - p["entry_price"])
             net = gross - p["entry_fee"] - exit_fee
             reference_exit = _number(exit_reference_price)
-            exit_slippage = (
-                max(0.0, (reference_exit - exit_price) * p["quantity"])
-                if reference_exit is not None and reference_exit > 0
+            normalized_bid = _number(exit_bid)
+            normalized_ask = _number(exit_ask)
+            if normalized_bid is not None and normalized_ask is not None:
+                exit_costs = calculate_fill_costs(
+                    side="SELL", quantity=p["quantity"], bid=normalized_bid,
+                    ask=normalized_ask, fill_price=exit_price,
+                    fee_paid_usd=exit_fee, funding_applicable=False,
+                    quote_quality="OBSERVED",
+                )
+                exit_slippage = exit_costs["slippage_cost_usd"]
+                exit_spread = exit_costs["spread_cost_usd"]
+                normalized_quote_source = (
+                    exit_quote_source.strip()
+                    if isinstance(exit_quote_source, str) and exit_quote_source.strip()
+                    else None
+                )
+            else:
+                exit_slippage = (
+                    max(0.0, (reference_exit - exit_price) * p["quantity"])
+                    if reference_exit is not None and reference_exit > 0
+                    else None
+                )
+                exit_spread = None
+                normalized_quote_source = None
+            entry_spread = _number(p.get("entry_spread_cost_usd"))
+            total_spread = (
+                entry_spread + exit_spread
+                if entry_spread is not None and exit_spread is not None
                 else None
             )
             self._db.execute(
@@ -320,8 +395,9 @@ class PaperLedger:
                  take_profit, entry_fee, exit_fee, gross_pnl, net_pnl, opened_at, closed_at,
                  signal_bar, confirmation_score, exit_reason, entry_reference_price,
                  exit_reference_price, entry_slippage_usd, exit_slippage_usd,
-                 spread_cost_usd, funding_cost_usd, funding_status)
-                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 spread_cost_usd, entry_spread_cost_usd, exit_spread_cost_usd,
+                 entry_quote_source, exit_quote_source, funding_cost_usd, funding_status)
+                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 p["asset"], p["quantity"], p["entry_price"], exit_price,
                 p["stop_loss"], p.get("initial_stop_loss") or p["stop_loss"],
@@ -329,7 +405,9 @@ class PaperLedger:
                 gross, net, p["opened_at"], int(time.time()), p["signal_bar"],
                 p["confirmation_score"], reason,
                 p.get("entry_reference_price"), reference_exit, p.get("entry_slippage_usd"),
-                exit_slippage, None, 0.0, "NOT_APPLICABLE",
+                exit_slippage, total_spread, entry_spread, exit_spread,
+                p.get("entry_quote_source"), normalized_quote_source,
+                0.0, "NOT_APPLICABLE",
             ))
             self._db.execute("DELETE FROM paper_positions WHERE id=1")
         return {
@@ -337,8 +415,12 @@ class PaperLedger:
             "exit_price": exit_price, "exit_reason": reason,
             "entry_slippage_usd": p.get("entry_slippage_usd"),
             "exit_slippage_usd": exit_slippage,
-            "spread_cost_usd": None,
-            "spread_attribution": "NOT_RECORDED",
+            "entry_spread_cost_usd": entry_spread,
+            "exit_spread_cost_usd": exit_spread,
+            "spread_cost_usd": total_spread,
+            "entry_quote_source": p.get("entry_quote_source"),
+            "exit_quote_source": normalized_quote_source,
+            "spread_attribution": "COMPLETE" if total_spread is not None else "INCOMPLETE",
         }
 
     def state(self) -> dict[str, Any]:
