@@ -572,7 +572,7 @@ class PaperLedger:
             result_status = "FAIL"
         elif missing_events or missing_projections:
             result_status = "INCOMPLETE"
-        elif not trade_rows and not position and replay["event_count"] == 0:
+        elif not trade_rows and not position and not expected_order_ids:
             result_status = "NO_DATA"
         else:
             result_status = "PASS"
