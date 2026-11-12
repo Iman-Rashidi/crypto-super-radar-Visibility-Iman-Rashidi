@@ -209,3 +209,14 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - Provider contracts reviewed against the official [Binance Spot aggregate-trade stream](https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md) and [Bybit V5 public trade stream](https://bybit-exchange.github.io/docs/v5/websocket/public/trade).
 
 - Additional safety boundary: both provider adapters now require an explicit `channel_type="spot"` from the owning connection configuration. This prevents reusing a Bybit/ Binance Spot quantity normalizer against Linear/Perpetual contract-size messages.
+
+
+## Durable order-flow event ledger — 2026-11-12
+
+- Added `crypto_super_radar/order_flow_store.py`, a SQLite-compatible append-only observation ledger for normalized public Spot trades.
+- Primary key is `(venue, symbol, trade_id)`: provider-native IDs are deduplicated within their venue and symbol namespace, while equal IDs from different venues remain independent.
+- Batch writes validate all rows before beginning the transaction; invalid rows reject the whole batch. Valid duplicates are idempotently ignored.
+- Readback is scoped by venue, symbol and exchange event-time range, ordered by event time, with an explicit limit.
+- Added `tests/test_order_flow_store.py` for idempotency, venue-scoped IDs, event-time ordering, whole-batch validation and query scope.
+- The store accepts the project's SQLite-compatible connection abstraction, including local SQLite and the configured Turso adapter.
+- **Safety boundary:** persistence is not proof of stream continuity, completeness, heartbeat freshness or CVD readiness. It is not yet wired into the WebSocket adapter callbacks or the 12-gate engine. Existing UNKNOWN/NO TRADE behavior remains mandatory until a separate consumer validates connection lifecycle and coverage.
