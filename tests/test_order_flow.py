@@ -133,6 +133,24 @@ class LiquidationEvidenceTests(unittest.TestCase):
         self.assertEqual(report["estimated_large_print_count"], 1)
         self.assertEqual(report["estimated_large_print_notional_usd"], 50_000)
 
+    def test_estimated_only_input_is_not_reported_as_confirmed_observation(self):
+        report = summarize_liquidation_events([{
+            "venue": "binance", "event_id": "trade-1", "event_time_ms": 1_100,
+            "notional_usd": 50_000, "evidence_class": "ESTIMATED_LARGE_PRINT",
+            "source": "large-trade-proxy",
+        }])
+        self.assertEqual(report["status"], "ESTIMATED_ONLY")
+        self.assertEqual(report["confirmed_liquidation_count"], 0)
+        self.assertIsNone(report["confirmed_liquidation_notional_usd"])
+
+    def test_invalid_only_input_is_partial_not_no_data(self):
+        report = summarize_liquidation_events([{"venue": "binance"}])
+        self.assertEqual(report["status"], "PARTIAL")
+        self.assertEqual(report["invalid_rows"], 1)
+
+    def test_empty_input_is_no_data(self):
+        self.assertEqual(summarize_liquidation_events([])["status"], "NO_DATA")
+
     def test_liquidation_events_are_deduplicated_per_venue(self):
         event = {
             "venue": "hyperliquid", "event_id": "liq-1", "event_time_ms": 1_000,
