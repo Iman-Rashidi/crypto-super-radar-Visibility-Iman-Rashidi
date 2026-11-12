@@ -628,6 +628,7 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertIn("pollAttempts=0", scan_page)
             self.assertIn("setTimeout(poll,delay)", scan_page)
             self.assertIn("pollStarted", scan_page)
+            self.assertIn("CryptoRadar.scanning('radar-asset-scan'", scan_page)
             self.assertEqual(second_status, 202)
             self.assertEqual(first_id, second_id)
             self.assertEqual(web_app.SCAN_QUEUE.qsize(), 1)
