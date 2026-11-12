@@ -50,6 +50,14 @@ def valid_candidate(now=NOW):
             "schema_version": "gem-hunter-v2",
             "decision": "BUY",
             "market_type": "SPOT",
+            "token_risk_assessment": {
+                "security_gate_status": "PASS",
+                "required_check_count": 5,
+                "passed_check_count": 5,
+                "failed_check_count": 0,
+                "incomplete_check_count": 0,
+                "trade_authorization": "NO_TRADE",
+            },
             "filters": filters,
             "critical_gates": {
                 "security": "PASS",
@@ -111,6 +119,15 @@ class GemHunterQualificationTests(unittest.TestCase):
         item["trade_authorization"] = "NO_TRADE"
         self.assertFalse(is_public_buy_candidate(item, now=NOW))
         self.assertEqual(public_buy_candidates([item], now=NOW), [])
+
+    def test_missing_or_incomplete_token_risk_evidence_is_rejected(self):
+        item = valid_candidate()
+        del item["qualification"]["token_risk_assessment"]
+        self.assertFalse(is_public_buy_candidate(item, now=NOW))
+        item = valid_candidate()
+        item["qualification"]["token_risk_assessment"]["incomplete_check_count"] = 1
+        item["qualification"]["token_risk_assessment"]["passed_check_count"] = 4
+        self.assertFalse(is_public_buy_candidate(item, now=NOW))
 
     def test_less_than_nine_passes_is_rejected(self):
         item = valid_candidate()
