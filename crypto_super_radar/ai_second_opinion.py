@@ -279,6 +279,18 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
         }
 
     asset_name = str(getattr(asset, "raw", asset) or getattr(result, "asset", "unknown"))
+    native_review = build_native_agent_council_review(result)
+    if native_review.get("status") != "APPROVED":
+        return {
+            "provider": "OpenRouter",
+            "model": _model(),
+            "status": "VETO" if native_review.get("status") == "VETO" else "UNKNOWN",
+            "status_fa": "شورای تخصصی بومی رادار تأیید کامل نداده است؛ درخواست AI برای ورود اجرا نشد.",
+            "reason": "Native evidence council did not approve all mandatory checks.",
+            "native_council": native_review,
+            "paper_entry_eligible": False,
+            "cost_usd": 0.0,
+        }
     evidence = _build_review_input(result, asset_name)
     model = _model()
     digest = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
