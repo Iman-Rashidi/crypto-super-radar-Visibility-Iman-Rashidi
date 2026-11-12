@@ -21,7 +21,7 @@ TIMEFRAMES = {
            "interval": timedelta(hours=4), "max_age": timedelta(hours=12),
            "minimum_bars": 60},
     "1d": {"provider_timeframe": "day", "aggregate": 1, "limit": 90,
-           "interval": timedelta(days=1), "max_age": timedelta(hours=36),
+           "interval": timedelta(days=1), "max_age": timedelta(hours=60),
            "minimum_bars": 60},
 }
 CACHE_TTL_SECONDS = 300.0
@@ -152,6 +152,12 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
             "relative_strength": "UNKNOWN",
             "market_regime_validation": "UNKNOWN",
         },
+        "filter_coverage": {
+            "trend": False,
+            "momentum": False,
+            "relative_strength": False,
+            "market_regime_validation": False,
+        },
         "metrics": {},
         "reason_codes": [],
         "reason_fa": [],
@@ -191,8 +197,19 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
         except Exception as exc:
             errors.append(f"{symbol}:{type(exc).__name__}")
 
-    if len(pool_close) == len(TIMEFRAMES) and len(benchmark_close) == 2:
-        m15 = evidence["timeframes"]["15m"]
+    has_4h_and_daily = "4h" in pool_close and "1d" in pool_close
+    has_15m_and_4h = "15m" in pool_close and "4h" in pool_close
+    has_both_benchmarks = len(benchmark_close) == 2
+    has_daily_token_and_benchmarks = "1d" in pool_close and has_both_benchmarks
+
+    evidence["filter_coverage"] = {
+        "trend": has_4h_and_daily,
+        "momentum": has_15m_and_4h,
+        "relative_strength": has_daily_token_and_benchmarks,
+        "market_regime_validation": has_both_benchmarks,
+    }
+
+    if has_4h_and_daily:
         h4 = evidence["timeframes"]["4h"]
         d1 = evidence["timeframes"]["1d"]
         directions = (h4["direction"], d1["direction"])
@@ -201,6 +218,9 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
         elif directions == ("BEARISH", "BEARISH"):
             evidence["filters"]["trend"] = "FAIL"
 
+    if has_15m_and_4h:
+        m15 = evidence["timeframes"]["15m"]
+        h4 = evidence["timeframes"]["4h"]
         short_positive = (
             m15["return_24h_pct"] is not None and m15["return_24h_pct"] > 0
             and m15["rsi14"] is not None and 50 < m15["rsi14"] < 80
@@ -218,6 +238,8 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
         elif short_negative:
             evidence["filters"]["momentum"] = "FAIL"
 
+    if has_daily_token_and_benchmarks:
+        d1 = evidence["timeframes"]["1d"]
         token_7d = d1["return_7d_pct"]
         token_30d = d1["return_30d_pct"]
         btc = evidence["metrics"]["BTCUSDT"]
@@ -236,13 +258,6 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
             token_30d < value for value in benchmarks_30d
         ):
             evidence["filters"]["relative_strength"] = "FAIL"
-
-        regime = (btc["direction"], eth["direction"])
-        if regime == ("BULLISH", "BULLISH"):
-            evidence["filters"]["market_regime_validation"] = "PASS"
-        elif regime == ("BEARISH", "BEARISH"):
-            evidence["filters"]["market_regime_validation"] = "FAIL"
-
         evidence["metrics"].update({
             "token_return_7d_pct": token_7d,
             "token_return_30d_pct": token_30d,
@@ -254,21 +269,32 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
                 token_7d - eth["return_7d_pct"]
                 if token_7d is not None and eth["return_7d_pct"] is not None else None
             ),
-            "market_regime": (
-                "BULLISH" if regime == ("BULLISH", "BULLISH")
-                else "BEARISH" if regime == ("BEARISH", "BEARISH")
-                else "MIXED"
-            ),
         })
+
+    if has_both_benchmarks:
+        btc = evidence["metrics"]["BTCUSDT"]
+        eth = evidence["metrics"]["ETHUSDT"]
+        regime = (btc["direction"], eth["direction"])
+        if regime == ("BULLISH", "BULLISH"):
+            evidence["filters"]["market_regime_validation"] = "PASS"
+        elif regime == ("BEARISH", "BEARISH"):
+            evidence["filters"]["market_regime_validation"] = "FAIL"
+        evidence["metrics"]["market_regime"] = (
+            "BULLISH" if regime == ("BULLISH", "BULLISH")
+            else "BEARISH" if regime == ("BEARISH", "BEARISH")
+            else "MIXED"
+        )
+
+    if len(pool_close) == len(TIMEFRAMES) and has_both_benchmarks:
         evidence["coverage_status"] = "COMPLETE"
         evidence["status"] = "COMPLETE"
         evidence["reason_codes"].append("MULTI_TIMEFRAME_OHLCV_VALIDATED")
         evidence["reason_fa"].append("کندل‌های بسته‌شدهٔ ۱۵دقیقه، ۴ساعته و روزانه و دادهٔ روزانهٔ BTC/ETH از نظر تازگی و پوشش معتبرند.")
     else:
         evidence["coverage_status"] = "PARTIAL" if pool_close or benchmark_close else "UNKNOWN"
-        evidence["status"] = "UNKNOWN"
+        evidence["status"] = evidence["coverage_status"]
         evidence["reason_codes"].append("MULTI_TIMEFRAME_COVERAGE_INCOMPLETE")
-        evidence["reason_fa"].append("تاریخچهٔ کافی و تازه برای تمام بازه‌ها و دو benchmark در دسترس نیست.")
+        evidence["reason_fa"].append("بعضی شاخص‌ها با شواهد موجود محاسبه شدند؛ تاریخچهٔ کامل تمام بازه‌ها و دو benchmark هنوز موجود نیست.")
     evidence["source_errors"] = errors
     evidence["coverage"] = {
         "pool_timeframes_present": sorted(pool_close),
