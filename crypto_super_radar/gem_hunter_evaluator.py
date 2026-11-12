@@ -37,7 +37,9 @@ def _validated_technical_evidence(candidate: dict, evidence: Any,
         return {}
     if evidence.get("schema_version") != "gem-hunter-technical-v1":
         return {}
-    if evidence.get("status") != "COMPLETE" or evidence.get("coverage_status") != "COMPLETE":
+    if evidence.get("status") not in {"COMPLETE", "PARTIAL"}:
+        return {}
+    if evidence.get("coverage_status") not in {"COMPLETE", "PARTIAL"}:
         return {}
     chain = str(candidate.get("chain") or "").lower()
     if str(evidence.get("chain") or "").lower() != chain:
@@ -65,12 +67,13 @@ def _validated_technical_evidence(candidate: dict, evidence: Any,
     if age < -30 or age > 300:
         return {}
     filters = evidence.get("filters")
-    if not isinstance(filters, dict):
+    coverage = evidence.get("filter_coverage")
+    required_filters = ("trend", "momentum", "relative_strength", "market_regime_validation")
+    if not isinstance(filters, dict) or not isinstance(coverage, dict):
         return {}
     allowed = {"PASS", "FAIL", "UNKNOWN"}
-    if any(filters.get(key) not in allowed for key in (
-        "trend", "momentum", "relative_strength", "market_regime_validation"
-    )):
+    if any(filters.get(key) not in allowed or not isinstance(coverage.get(key), bool)
+           for key in required_filters):
         return {}
     return evidence
 
@@ -188,7 +191,11 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     # multi-timeframe OHLCV plus BTC/ETH benchmark evidence.
     if technical_evidence:
         for filter_id in ("trend", "momentum", "relative_strength", "market_regime_validation"):
-            filters[filter_id] = technical_filters[filter_id]
+            filters[filter_id] = (
+                technical_filters[filter_id]
+                if technical_evidence.get("filter_coverage", {}).get(filter_id) is True
+                else "UNKNOWN"
+            )
         reasons["trend"] = (
             "روند با EMA20/EMA50 روی کندل‌های بسته‌شدهٔ ۴ساعته و روزانه تأیید شد."
             if filters["trend"] == "PASS" else
