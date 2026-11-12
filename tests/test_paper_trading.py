@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import time
 from types import SimpleNamespace
 
 import pandas as pd
@@ -113,6 +114,43 @@ class PaperTradingBotTests(unittest.TestCase):
         position = self.ledger.position()
         self.assertEqual(position["entry_reference_price"], 100.0)
         self.assertGreater(position["entry_slippage_usd"], 0.0)
+
+    def test_fresh_observed_bid_ask_records_spread_and_slippage_per_fill(self):
+        snapshot = self.engine.data.snapshots["cex:BTCUSDT"]
+        snapshot.raw = {
+            "provider_a": {
+                "bid_price": 99.9,
+                "ask_price": 100.1,
+                "quote_timestamp_ms": int(time.time() * 1000),
+                "provider": "TestExchange",
+            }
+        }
+        opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        position = self.ledger.position()
+        self.assertEqual(position["entry_quote_source"], "TestExchange")
+        self.assertGreater(position["entry_spread_cost_usd"], 0.0)
+        self.assertGreater(position["entry_slippage_usd"], 0.0)
+
+        snapshot.price_usd = 125.0
+        snapshot.raw["provider_a"].update({
+            "bid_price": 119.9,
+            "ask_price": 120.1,
+            "quote_timestamp_ms": int(time.time() * 1000),
+        })
+        closed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(closed["status"], "CLOSED")
+        trade = self.ledger.state()["recent_trades"][0]
+        self.assertGreater(trade["entry_spread_cost_usd"], 0.0)
+        self.assertGreater(trade["exit_spread_cost_usd"], 0.0)
+        self.assertGreater(trade["spread_cost_usd"], 0.0)
+        self.assertEqual(trade["entry_quote_source"], "TestExchange")
+        self.assertEqual(trade["exit_quote_source"], "TestExchange")
+        self.assertEqual(self.ledger.state()["performance"]["spread_data_status"], "COMPLETE")
+        self.assertEqual(
+            self.ledger.state()["performance"]["execution_cost_attribution_status"],
+            "COMPLETE",
+        )
 
     def test_unknown_gate_blocks_entry(self):
         self.engine.result.gates[-1].status = "UNKNOWN"
