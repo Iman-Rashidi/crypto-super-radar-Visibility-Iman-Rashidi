@@ -100,7 +100,6 @@ def summarize_closed_trades(
     total_net = sum(float(row["net"]) for row in normalized)
     total_gross = sum(float(row["gross"]) for row in normalized)
     gross_profit = sum(max(0.0, float(row["gross"])) for row in normalized)
-    total_fees = sum(float(row["fees"]) for row in normalized)
 
     equity = initial_equity
     peak = initial_equity
