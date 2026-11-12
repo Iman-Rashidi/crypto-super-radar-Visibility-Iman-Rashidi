@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 import unittest
 
 from crypto_super_radar.paper_execution import PaperExecutionEventLedger
@@ -137,6 +139,30 @@ class PaperFillSimulatorTests(unittest.TestCase):
         values["quote_timestamp_ms"] = None
         result = self.simulator.simulate_order(**values)
         self.assertEqual(result["quote"]["quality"], "MODELLED")
+
+
+    def test_simulated_fill_events_survive_database_reconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "simulated-execution.sqlite3")
+            first_db = sqlite3.connect(path)
+            first_db.row_factory = sqlite3.Row
+            first_ledger = PaperExecutionEventLedger(first_db)
+            with first_db:
+                result = PaperFillSimulator(first_ledger).simulate_order(
+                    **self.quote, fill_fractions=(0.25, 0.75)
+                )
+                self.assertEqual(result["status"], "FILLED")
+            first_db.close()
+
+            second_db = sqlite3.connect(path)
+            second_db.row_factory = sqlite3.Row
+            second_ledger = PaperExecutionEventLedger(second_db)
+            state = second_ledger.order_state("paper-fill-test")
+            self.assertEqual(state["status"], "FILLED")
+            self.assertAlmostEqual(state["filled_quantity"], 1.0)
+            self.assertEqual(second_ledger.replay_order_states()["status"], "PASS")
+            second_db.close()
+
 
 
 if __name__ == "__main__":

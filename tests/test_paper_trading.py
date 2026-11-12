@@ -364,5 +364,33 @@ class PaperTradingBotTests(unittest.TestCase):
 
 
 
+    def test_close_projection_and_exit_event_roll_back_together(self):
+        position = {
+            "asset": "cex:BTCUSDT", "quantity": 1.0, "entry_price": 100.0,
+            "stop_loss": 90.0, "initial_stop_loss": 90.0, "take_profit": 120.0,
+            "entry_fee": 0.08, "opened_at": 123, "signal_bar": "close-atomic-bar",
+            "confirmation_score": 80.0, "risk_budget": 50.0, "max_holding_days": 14,
+        }
+        self.assertTrue(self.ledger.open_position(position, 100.08))
+        before_cash = self.ledger.state()["account"]["cash_balance_usd"]
+        before_events = self.ledger.execution_ledger.event_count()
+        original = self.ledger.execution_ledger.record_simulated_fill
+        self.ledger.execution_ledger.record_simulated_fill = lambda **kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected exit-journal failure")
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "injected exit-journal failure"):
+                self.ledger.close_position(110.0, 0.0008, "TEST_EXIT")
+        finally:
+            self.ledger.execution_ledger.record_simulated_fill = original
+        self.assertIsNotNone(self.ledger.position())
+        after_cash = self.ledger.state()["account"]["cash_balance_usd"]
+        self.assertEqual(after_cash, before_cash)
+        self.assertEqual(self.ledger.execution_ledger.event_count(), before_events)
+        trade_count = self.ledger._db.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+        self.assertEqual(trade_count, 0)
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()

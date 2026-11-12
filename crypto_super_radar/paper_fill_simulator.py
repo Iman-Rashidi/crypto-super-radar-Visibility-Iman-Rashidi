@@ -43,7 +43,12 @@ def _schedule(values: Sequence[float]) -> tuple[float, ...]:
 
 
 class PaperFillSimulator:
-    """Simulate deterministic top-of-book fills and optionally persist events."""
+    """Simulate deterministic top-of-book fills and optionally persist events.
+
+        When an event ledger is supplied, the caller owns the surrounding DB
+        transaction. Wrap the whole simulation in the connection context so an
+        incomplete event sequence cannot be committed independently of its projection.
+        """
 
     def __init__(self, event_ledger: PaperExecutionEventLedger | None = None):
         self.event_ledger = event_ledger
