@@ -4,6 +4,7 @@ import unittest
 import time
 import os
 import tempfile
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import pandas as pd
@@ -464,6 +465,47 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertGreater(trade["exit_fee"], 0.0)
         self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
 
+    def test_daily_risk_uses_fill_dates_not_later_trade_close_date(self):
+        self.bot.max_order_participation_rate = 1.0
+        now = int(time.time())
+        day_start = now // 86_400 * 86_400
+
+        with patch("time.time", return_value=day_start - 30):
+            opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        original_quantity = self.ledger.position()["quantity"]
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
+        self.engine.data.order_book_sell_qty = original_quantity * 0.80
+        with patch("time.time", return_value=day_start - 10):
+            first_exit = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(first_exit["status"], "PARTIALLY_CLOSED")
+        self.assertAlmostEqual(
+            first_exit["execution"]["filled_quantity"],
+            original_quantity * 0.80,
+            places=7,
+        )
+
+        remaining = self.ledger.position()["quantity"]
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = remaining * 2.0
+        with patch("time.time", return_value=day_start + 10):
+            final_exit = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(final_exit["status"], "CLOSED")
+
+        # The prior day's loss must not be re-counted on the day the trade completes.
+        controls = self.ledger.risk_controls(
+            asset="cex:BTCUSDT",
+            daily_loss_limit_pct=0.0001,
+            max_drawdown_pct=0.50,
+            max_consecutive_losses=10,
+            cooldown_hours_after_loss=0.0,
+            now=day_start + 100,
+        )
+        self.assertGreater(controls["daily_exit_fill_pnl_usd"], 0.0)
+        self.assertEqual(controls["daily_realized_loss_pct"], 0.0)
+        self.assertNotIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
+
     def test_partial_exit_realized_loss_counts_toward_daily_risk_limit(self):
         bot = PaperTradingBot(
             self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001,
@@ -476,7 +518,7 @@ class PaperTradingBotTests(unittest.TestCase):
         controls = bot.state()["risk_controls"]
         self.assertFalse(controls["entry_allowed"])
         self.assertIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
-        self.assertLess(controls["daily_partial_exit_pnl_usd"], 0.0)
+        self.assertLess(controls["daily_exit_fill_pnl_usd"], 0.0)
 
     def test_zero_liquidity_exit_leaves_position_unchanged(self):
         self.bot.run_once("cex:BTCUSDT")
