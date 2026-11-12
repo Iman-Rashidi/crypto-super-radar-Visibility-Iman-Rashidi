@@ -82,6 +82,12 @@ def _extract_order_book(
         return None
     if raw.get("timestamp_kind") != "LOCAL_RECEIVED_AT" or raw.get("orders_submitted") is not False:
         return None
+    numeric_fields = (
+        "best_bid", "best_ask", "available_liquidity_sell_qty",
+        "available_liquidity_buy_qty", "observed_at_ms",
+    )
+    if any(isinstance(raw.get(field), bool) for field in numeric_fields):
+        return None
     bid = _number(raw.get("best_bid"))
     ask = _number(raw.get("best_ask"))
     bid_qty = _number(raw.get("available_liquidity_sell_qty"))
@@ -360,7 +366,7 @@ class PaperLedger:
             filled = float(simulation["filled_quantity"])
             remaining = float(simulation["remaining_quantity"])
             tolerance = max(1e-12, requested * 1e-12)
-            if remaining > tolerance:
+            if simulation["status"] not in {"FILLED", "CANCELED"}:
                 self.execution_adapter.cancel_order(
                     client_order_id=client_order_id,
                     reason="PAPER_ENTRY_UNFILLED_REMAINDER_CANCELED",
