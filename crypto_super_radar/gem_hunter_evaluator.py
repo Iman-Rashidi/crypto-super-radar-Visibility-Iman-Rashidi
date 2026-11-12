@@ -92,7 +92,9 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
                 "value": {
                     "flags": security_evidence.get("flags"),
                     "reason_codes": security_evidence.get("reason_codes"),
-                    "reasons": security_evidence.get("reasons") or security_evidence.get("reason"),
+                    "reasons": security_evidence.get("reasons") or security_evidence.get("reason") or security_evidence.get("reason_fa"),
+                    "mint_authority_active": security_evidence.get("mint_authority_active"),
+                    "freeze_authority_active": security_evidence.get("freeze_authority_active"),
                 },
                 "reason": "A limited provider check identified an explicit security disqualifier.",
             }
