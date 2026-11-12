@@ -218,14 +218,30 @@ def _validated_review(document: dict[str, Any], model: str, asset: str) -> dict[
         raise ValueError("Risk flags have an invalid format")
     risk_flags = [x.strip()[:180] for x in risk_flags[:8] if x.strip()]
 
+    allowed_views = {
+        "market_regime": {"BULLISH", "BEARISH", "NEUTRAL", "UNKNOWN"},
+        "technical": {"BULLISH", "BEARISH", "NEUTRAL", "UNKNOWN"},
+        "news_sentiment": {"BULLISH", "BEARISH", "NEUTRAL", "UNKNOWN"},
+        "bull_researcher": {"SUPPORT", "OPPOSE", "UNCERTAIN"},
+        "bear_researcher": {"SUPPORT", "OPPOSE", "UNCERTAIN"},
+        "trader": {"LONG", "NO_TRADE"},
+        "risk_manager": {"APPROVE", "REJECT", "INSUFFICIENT_DATA"},
+        "portfolio_manager": {"APPROVE", "REJECT", "INSUFFICIENT_DATA"},
+    }
     clean_specialists = {}
     for key in sorted(required):
         view = specialists.get(key)
         if not isinstance(view, dict):
             raise ValueError("Invalid specialist view")
+        raw_view = str(view.get("view") or view.get("proposal") or view.get("verdict") or "").upper()
+        if raw_view not in allowed_views[key]:
+            raise ValueError("Invalid specialist verdict")
+        reason = view.get("reason_fa")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Specialist explanation is missing")
         clean_specialists[key] = {
-            "view": str(view.get("view") or view.get("proposal") or view.get("verdict") or "UNKNOWN")[:40],
-            "reason_fa": str(view.get("reason_fa") or "توضیح ارائه نشده است.")[:360],
+            "view": raw_view,
+            "reason_fa": reason.strip()[:360],
         }
 
     risk_verdict = str((specialists["risk_manager"] or {}).get("verdict") or "").upper()
@@ -315,7 +331,7 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
         "model": model,
         "messages": _prompt_messages(evidence),
         "temperature": 0.1,
-        "max_tokens": 1_200,
+        "max_tokens": 1_800,
     }
     headers = {
         "Authorization": f"Bearer {key}",
