@@ -257,7 +257,7 @@ class GemHunterEvaluatorTests(unittest.TestCase):
             "token_address": item["token_address"],
             "pool_address": item["pool_address"],
             "checked_at_utc": "2026-11-11T11:59:00Z",
-            "sources": ["GECKOTERMINAL", "BINANCE_SPOT"],
+            "sources": ["GECKOTERMINAL"],
             "filters": {
                 "trend": "PASS", "momentum": "PASS",
                 "relative_strength": "UNKNOWN",
