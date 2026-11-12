@@ -7,6 +7,7 @@ import unittest
 
 from crypto_super_radar.paper_execution import PaperExecutionEventLedger
 from crypto_super_radar.paper_fill_simulator import PaperFillSimulationError, PaperFillSimulator
+from crypto_super_radar.paper_execution_adapter import PaperExecutionAdapter
 
 
 class PaperFillSimulatorTests(unittest.TestCase):
@@ -40,6 +41,33 @@ class PaperFillSimulatorTests(unittest.TestCase):
         self.assertEqual(self.ledger.order_state("paper-fill-test")["status"], "FILLED")
         self.assertEqual(self.ledger.replay_order_states()["status"], "PASS")
         self.assertFalse(result["orders_submitted"])
+
+    def test_simulator_consumes_adapter_accepted_order_lifecycle(self):
+        adapter = PaperExecutionAdapter(self.ledger)
+        adapter.submit_order(
+            client_order_id="paper-adapter-simulator",
+            asset="cex:BTCUSDT", side="BUY", quantity=1.0,
+            occurred_at=100,
+        )
+        result = self.simulator.simulate_order(
+            **{
+                **self.quote,
+                "client_order_id": "paper-adapter-simulator",
+            },
+            fill_fractions=(0.5, 0.5),
+        )
+        self.assertEqual(result["status"], "FILLED")
+        history = self.ledger.recent_events(
+            20, client_order_id="paper-adapter-simulator"
+        )
+        self.assertEqual(
+            [event["status"] for event in reversed(history)],
+            [
+                "CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED",
+                "PARTIALLY_FILLED", "FILLED",
+            ],
+        )
+        self.assertEqual(self.ledger.replay_order_states()["status"], "PASS")
 
     def test_liquidity_and_participation_cap_produce_partial_fill(self):
         values = dict(self.quote)
