@@ -1521,6 +1521,9 @@ class Handler(BaseHTTPRequestHandler):
             market_regime_validation:'تأیید رژیم بازار'
           };
           const gateLabels = {security:'امنیت', liquidity:'نقدینگی', data_quality:'کیفیت داده', exit:'امکان خروج'};
+          // Preserve expanded candidate reports when the background poll refreshes the DOM.
+          const expandedReportKeys = new Set();
+          const candidateReportKey = item => [item.chain || '', item.token_address || '', item.pool_address || '', item.token_symbol || item.token_name || ''].join('|').toLowerCase();
           const filterReasonFa = (key, state) => {
             const map = {
               trend:'برای تشخیص روند، تاریخچهٔ معتبر قیمت در چند بازهٔ زمانی لازم است؛ عمر استخر به‌تنهایی روند نیست.',
@@ -1670,7 +1673,22 @@ class Handler(BaseHTTPRequestHandler):
             if (item.token_address && ['solana','base'].includes(item.chain)) addLink(links, 'اکسپلورر توکن ↗', tokenExplorer(item));
             if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'بازار در DEX Screener ↗', poolUrl(item));
             card.appendChild(links);
-            const details = document.createElement('details'); details.appendChild(el('summary', 'گزارش کامل ۱۲ فیلتر و ۴ گیت'));
+            const details = document.createElement('details');
+            const reportKey = candidateReportKey(item);
+            details.dataset.reportKey = reportKey;
+            details.open = expandedReportKeys.has(reportKey);
+            // Capture the user's intent before the browser dispatches the async toggle event.
+            details.addEventListener('click', event => {
+              if (event.target.closest('summary')) {
+                if (details.open) expandedReportKeys.delete(reportKey);
+                else expandedReportKeys.add(reportKey);
+              }
+            });
+            details.addEventListener('toggle', () => {
+              if (details.open) expandedReportKeys.add(reportKey);
+              else expandedReportKeys.delete(reportKey);
+            });
+            details.appendChild(el('summary', 'گزارش کامل ۱۲ فیلتر و ۴ گیت'));
             details.appendChild(el('h4', '۱۲ فیلتر مستقل'));
             const filterGrid = document.createElement('div'); filterGrid.className = 'gem-detail-grid';
             Object.keys(filterLabels).forEach(key => {
