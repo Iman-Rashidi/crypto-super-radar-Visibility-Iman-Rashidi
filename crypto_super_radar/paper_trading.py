@@ -587,28 +587,53 @@ class PaperTradingBot:
             self.ledger.update_management(price, managed_stop)
             managed_position = self.ledger.position() or position
             active_stop = float(managed_position["stop_loss"])
+            exit_quote = _extract_observed_quote(snapshot)
             if price <= active_stop:
                 reference_exit = min(price, active_stop)
-                fill = reference_exit * (1.0 - self.slippage_rate)
+                sell_reference = (
+                    min(reference_exit, float(exit_quote["bid"]))
+                    if exit_quote is not None else reference_exit
+                )
+                fill = sell_reference * (1.0 - self.slippage_rate)
                 initial_stop = float(managed_position.get("initial_stop_loss") or active_stop)
                 exit_reason = "TRAILING_STOP" if active_stop > initial_stop else "STOP_LOSS"
                 closed = self.ledger.close_position(
-                    fill, self.fee_rate, exit_reason, exit_reference_price=reference_exit
+                    fill, self.fee_rate, exit_reason,
+                    exit_reference_price=reference_exit,
+                    exit_bid=exit_quote["bid"] if exit_quote else None,
+                    exit_ask=exit_quote["ask"] if exit_quote else None,
+                    exit_quote_source=exit_quote["source"] if exit_quote else None,
                 )
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             if price >= float(position["take_profit"]):
                 reference_exit = float(position["take_profit"])
-                fill = reference_exit * (1.0 - self.slippage_rate)
+                sell_reference = (
+                    min(reference_exit, float(exit_quote["bid"]))
+                    if exit_quote is not None else reference_exit
+                )
+                fill = sell_reference * (1.0 - self.slippage_rate)
                 closed = self.ledger.close_position(
-                    fill, self.fee_rate, "TAKE_PROFIT", exit_reference_price=reference_exit
+                    fill, self.fee_rate, "TAKE_PROFIT",
+                    exit_reference_price=reference_exit,
+                    exit_bid=exit_quote["bid"] if exit_quote else None,
+                    exit_ask=exit_quote["ask"] if exit_quote else None,
+                    exit_quote_source=exit_quote["source"] if exit_quote else None,
                 )
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             max_holding = max(1, int(position.get("max_holding_days") or 14))
             if int(time.time()) - int(position["opened_at"]) >= max_holding * 86_400:
                 reference_exit = price
-                fill = reference_exit * (1.0 - self.slippage_rate)
+                sell_reference = (
+                    min(reference_exit, float(exit_quote["bid"]))
+                    if exit_quote is not None else reference_exit
+                )
+                fill = sell_reference * (1.0 - self.slippage_rate)
                 closed = self.ledger.close_position(
-                    fill, self.fee_rate, "TIME_EXIT", exit_reference_price=reference_exit
+                    fill, self.fee_rate, "TIME_EXIT",
+                    exit_reference_price=reference_exit,
+                    exit_bid=exit_quote["bid"] if exit_quote else None,
+                    exit_ask=exit_quote["ask"] if exit_quote else None,
+                    exit_quote_source=exit_quote["source"] if exit_quote else None,
                 )
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             return {"status": "HOLDING", "asset": asset.raw, "mark_price": price,
