@@ -65,7 +65,8 @@ class PaperExecutionAdapter:
         best_bid: Any, best_ask: Any, available_liquidity_qty: Any,
         max_participation_pct: Any = 0.10,
         fee_rate: Any = 0.0008, slippage_bps: Any = 10.0,
-        quote_age_ms: Any = 0, max_quote_age_ms: int = 5_000,
+        observed_at_ms: Any = None, now_ms: int | None = None,
+        max_quote_age_ms: int = 5_000,
         occurred_at: int | None = None,
     ) -> dict[str, Any]:
         order_id = str(client_order_id or "").strip()
@@ -86,7 +87,13 @@ class PaperExecutionAdapter:
             raise ValueError("max_participation_pct cannot exceed 1.0")
         fees = _positive(fee_rate, "fee_rate", allow_zero=True)
         slip = _positive(slippage_bps, "slippage_bps", allow_zero=True)
-        age = _positive(quote_age_ms, "quote_age_ms", allow_zero=True)
+        observed_at = _positive(observed_at_ms, "observed_at_ms")
+        current_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        if isinstance(current_ms, bool) or not isinstance(current_ms, int) or current_ms <= 0:
+            raise ValueError("now_ms must be a positive integer timestamp")
+        if isinstance(max_quote_age_ms, bool) or not isinstance(max_quote_age_ms, int) or max_quote_age_ms < 0:
+            raise ValueError("max_quote_age_ms must be a non-negative integer")
+        quote_age = current_ms - int(observed_at)
         if slip >= 10_000:
             raise ValueError("slippage_bps must be below 10000")
 
@@ -113,13 +120,13 @@ class PaperExecutionAdapter:
         if fill_quantity <= 1e-12:
             if prior_event:
                 raise IdempotencyConflict("snapshot id was reused with zero available fill quantity")
-            if age > max_quote_age_ms:
-                return {"status": "UNKNOWN", "reason": "quote snapshot is stale; no fill was simulated"}
+            if (quote_age < -2_000 or quote_age > max_quote_age_ms):
+                return {"status": "UNKNOWN", "reason": "quote snapshot is stale or from the future; no fill was simulated", "observed_at_ms": int(observed_at), "quote_age_ms": quote_age}
             if state["status"] not in {"ACCEPTED", "PARTIALLY_FILLED"}:
                 return {"status": "BLOCKED", "reason": "order is not in a fillable state"}
             return {"status": "NO_FILL", "filled_quantity": already_filled, "remaining_quantity": remaining}
         if age > max_quote_age_ms and not prior_event:
-            return {"status": "UNKNOWN", "reason": "quote snapshot is stale; no fill was simulated"}
+            return {"status": "UNKNOWN", "reason": "quote snapshot is stale or from the future; no fill was simulated", "observed_at_ms": int(observed_at), "quote_age_ms": quote_age}
         if not prior_event and state["status"] not in {"ACCEPTED", "PARTIALLY_FILLED"}:
             return {"status": "BLOCKED", "reason": "order is not in a fillable state"}
 
@@ -147,7 +154,10 @@ class PaperExecutionAdapter:
             quantity=requested, filled_quantity=cumulative,
             fill_price=fill_price, fee_paid_usd=cumulative_fee_paid,
             source="PAPER_ORDER_BOOK_SNAPSHOT",
-            reason="SIMULATED_PARTIAL_FILL" if status == "PARTIALLY_FILLED" else "SIMULATED_COMPLETE_FILL",
+            reason=(
+                f"{'SIMULATED_PARTIAL_FILL' if status == 'PARTIALLY_FILLED' else 'SIMULATED_COMPLETE_FILL'}"
+                f":snapshot_id={snapshot}:observed_at_ms={int(observed_at)}"
+            ),
             occurred_at=(prior_event["occurred_at"] if prior_event and occurred_at is None else occurred_at),
         )
         if not event.get("inserted", False):
@@ -161,5 +171,6 @@ class PaperExecutionAdapter:
             "filled_quantity": cumulative, "remaining_quantity": max(0.0, requested - cumulative),
             "fill_price": fill_price, "fee_paid_usd": fee_paid,
             "cumulative_fee_paid_usd": cumulative_fee_paid,
+            "observed_at_ms": int(observed_at), "quote_age_ms": quote_age,
             "source": "PAPER_ORDER_BOOK_SNAPSHOT", "orders_submitted": False,
         }
