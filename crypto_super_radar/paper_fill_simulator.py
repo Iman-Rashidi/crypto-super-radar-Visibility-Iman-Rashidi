@@ -131,6 +131,7 @@ class PaperFillSimulator:
         events: list[dict[str, Any]] = [
             {"status": "CREATED", "occurred_at_ms": start_ms},
             {"status": "VALIDATED", "occurred_at_ms": start_ms},
+            {"status": "SUBMITTED", "occurred_at_ms": start_ms},
             {"status": "ACCEPTED", "occurred_at_ms": start_ms},
         ]
         if self.event_ledger is not None:
@@ -142,6 +143,11 @@ class PaperFillSimulator:
             self.event_ledger.append_event(
                 client_order_id=order_id, idempotency_key=f"{order_id}:validated",
                 asset=asset_value, side=side_value, status="VALIDATED", quantity=qty,
+                source="PAPER_FILL_SIMULATOR", reason=reason_value, occurred_at=start_ms // 1000,
+            )
+            self.event_ledger.append_event(
+                client_order_id=order_id, idempotency_key=f"{order_id}:submitted",
+                asset=asset_value, side=side_value, status="SUBMITTED", quantity=qty,
                 source="PAPER_FILL_SIMULATOR", reason=reason_value, occurred_at=start_ms // 1000,
             )
             self.event_ledger.append_event(

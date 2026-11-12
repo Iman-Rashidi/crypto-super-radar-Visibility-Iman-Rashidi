@@ -33,7 +33,7 @@ class PaperFillSimulatorTests(unittest.TestCase):
         self.assertAlmostEqual(result["filled_quantity"], 1.0)
         self.assertEqual(
             [event["status"] for event in result["simulated_events"]],
-            ["CREATED", "VALIDATED", "ACCEPTED", "PARTIALLY_FILLED", "FILLED"],
+            ["CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED", "PARTIALLY_FILLED", "FILLED"],
         )
         self.assertEqual(self.ledger.order_state("paper-fill-test")["status"], "FILLED")
         self.assertEqual(self.ledger.replay_order_states()["status"], "PASS")
