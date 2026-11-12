@@ -52,8 +52,6 @@ def _validated_technical_evidence(candidate: dict, evidence: Any,
         if not same_address:
             return {}
     sources = set(evidence.get("sources") or [])
-    if not {"GECKOTERMINAL", "BINANCE_SPOT"}.issubset(sources):
-        return {}
     raw_timestamp = evidence.get("checked_at_utc")
     if not isinstance(raw_timestamp, str):
         return {}
@@ -74,6 +72,17 @@ def _validated_technical_evidence(candidate: dict, evidence: Any,
     allowed = {"PASS", "FAIL", "UNKNOWN"}
     if any(filters.get(key) not in allowed or not isinstance(coverage.get(key), bool)
            for key in required_filters):
+        return {}
+    source_requirements = {
+        "trend": {"GECKOTERMINAL"},
+        "momentum": {"GECKOTERMINAL"},
+        "relative_strength": {"GECKOTERMINAL", "BINANCE_SPOT"},
+        "market_regime_validation": {"BINANCE_SPOT"},
+    }
+    if any(
+        coverage[key] and not source_requirements[key].issubset(sources)
+        for key in required_filters
+    ):
         return {}
     return evidence
 
