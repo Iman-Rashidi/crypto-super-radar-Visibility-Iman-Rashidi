@@ -1176,6 +1176,54 @@ class PaperTradingBot:
         )
         return state
 
+    def _execute_managed_exit(
+        self, *, asset: AssetSpec, data: Any, reason: str,
+    ) -> dict[str, Any]:
+        """Route a triggered exit through the same public-book paper execution path."""
+        order_book = _extract_order_book(
+            data, asset, max_age_ms=self.max_order_book_age_ms,
+        )
+        if order_book is None:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": "A complete, fresh public Spot order book is required for paper exit; position remains open.",
+            }
+        try:
+            execution = self.ledger.execute_exit_order(
+                order_book=order_book,
+                fee_bps=self.fee_rate * 10_000.0,
+                adverse_impact_bps=self.slippage_rate * 10_000.0,
+                max_participation_rate=self.max_order_participation_rate,
+                fill_fractions=self.fill_fractions,
+                max_quote_age_ms=self.max_order_book_age_ms,
+                simulated_latency_ms=self.simulated_execution_latency_ms,
+                reason=reason,
+            )
+        except Exception as exc:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": f"Paper exit execution/projection failed atomically ({type(exc).__name__}); position remains open.",
+            }
+        if execution["status"] == "CLOSED":
+            return {
+                "status": "CLOSED", "asset": asset.raw,
+                "trade": execution["trade"], "execution": execution,
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
+        if execution["status"] == "PARTIALLY_CLOSED":
+            remaining = self.ledger.position()
+            return {
+                "status": "PARTIALLY_CLOSED", "asset": asset.raw,
+                "execution": execution, "remaining_position": remaining,
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
+        return {
+            "status": "EXIT_UNFILLED", "asset": asset.raw,
+            "execution": execution,
+            "reason": "No executable sell-side liquidity was available; the paper position remains open.",
+            "mode": "PAPER_ONLY", "orders_submitted": False,
+        }
+
     def run_once(self, asset_input: str | AssetSpec) -> dict[str, Any]:
         asset = asset_input if isinstance(asset_input, AssetSpec) else AssetSpec.parse(asset_input)
         if asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS:
@@ -1209,61 +1257,28 @@ class PaperTradingBot:
                 managed_stop = max(managed_stop, break_even)
             if initial_risk > 0 and peak >= entry + 1.5 * initial_risk:
                 managed_stop = max(managed_stop, peak - initial_risk)
-            exit_quote = _extract_observed_quote(snapshot)
+            mark_quote = _extract_observed_quote(snapshot)
             liquidation_mark = (
-                min(price, float(exit_quote["bid"])) if exit_quote is not None else price
+                min(price, float(mark_quote["bid"])) if mark_quote is not None else price
             )
             self.ledger.update_management(liquidation_mark, managed_stop)
             managed_position = self.ledger.position() or position
             active_stop = float(managed_position["stop_loss"])
             if price <= active_stop:
-                reference_exit = min(price, active_stop)
-                sell_reference = (
-                    min(reference_exit, float(exit_quote["bid"]))
-                    if exit_quote is not None else reference_exit
-                )
-                fill = sell_reference * (1.0 - self.slippage_rate)
                 initial_stop = float(managed_position.get("initial_stop_loss") or active_stop)
                 exit_reason = "TRAILING_STOP" if active_stop > initial_stop else "STOP_LOSS"
-                closed = self.ledger.close_position(
-                    fill, self.fee_rate, exit_reason,
-                    exit_reference_price=reference_exit,
-                    exit_bid=exit_quote["bid"] if exit_quote else None,
-                    exit_ask=exit_quote["ask"] if exit_quote else None,
-                    exit_quote_source=exit_quote["source"] if exit_quote else None,
+                return self._execute_managed_exit(
+                    asset=asset, data=data, reason=exit_reason,
                 )
-                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             if price >= float(position["take_profit"]):
-                reference_exit = float(position["take_profit"])
-                sell_reference = (
-                    min(reference_exit, float(exit_quote["bid"]))
-                    if exit_quote is not None else reference_exit
+                return self._execute_managed_exit(
+                    asset=asset, data=data, reason="TAKE_PROFIT",
                 )
-                fill = sell_reference * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(
-                    fill, self.fee_rate, "TAKE_PROFIT",
-                    exit_reference_price=reference_exit,
-                    exit_bid=exit_quote["bid"] if exit_quote else None,
-                    exit_ask=exit_quote["ask"] if exit_quote else None,
-                    exit_quote_source=exit_quote["source"] if exit_quote else None,
-                )
-                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             max_holding = max(1, int(position.get("max_holding_days") or 14))
             if int(time.time()) - int(position["opened_at"]) >= max_holding * 86_400:
-                reference_exit = price
-                sell_reference = (
-                    min(reference_exit, float(exit_quote["bid"]))
-                    if exit_quote is not None else reference_exit
+                return self._execute_managed_exit(
+                    asset=asset, data=data, reason="TIME_EXIT",
                 )
-                fill = sell_reference * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(
-                    fill, self.fee_rate, "TIME_EXIT",
-                    exit_reference_price=reference_exit,
-                    exit_bid=exit_quote["bid"] if exit_quote else None,
-                    exit_ask=exit_quote["ask"] if exit_quote else None,
-                    exit_quote_source=exit_quote["source"] if exit_quote else None,
-                )
-                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             return {"status": "HOLDING", "asset": asset.raw, "mark_price": price,
                     "active_stop_loss": active_stop,
                     "unrealized_pnl_usd": self.ledger.state()["account"]["unrealized_pnl_usd"]}
