@@ -165,6 +165,35 @@ class PaperExecutionEventLedgerTests(unittest.TestCase):
             self.assertEqual(second.event_count(), 3)
             second_db.close()
 
+    def test_replay_reconciles_valid_event_history(self):
+        self.ledger.record_simulated_fill(
+            client_order_id="paper-replay", asset="cex:BTCUSDT", side="BUY",
+            quantity=1.0, fill_price=101.0, fee_paid_usd=0.1,
+            source="PAPER_SIMULATOR", reason="REPLAY_TEST", occurred_at=123,
+        )
+        result = self.ledger.replay_order_states()
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["event_count"], 3)
+        self.assertEqual(result["order_count"], 1)
+        self.assertEqual(result["orders"]["paper-replay"]["status"], "FILLED")
+        self.assertEqual(result["errors"], [])
+
+    def test_replay_detects_payload_tampering_without_rewriting_history(self):
+        self.ledger.record_simulated_fill(
+            client_order_id="paper-tamper", asset="cex:BTCUSDT", side="BUY",
+            quantity=1.0, fill_price=101.0, fee_paid_usd=0.1,
+            source="PAPER_SIMULATOR", reason="TAMPER_TEST", occurred_at=123,
+        )
+        # Simulate external file corruption after dropping only the test DB trigger.
+        self.db.execute("DROP TRIGGER paper_execution_events_no_update")
+        self.db.execute(
+            "UPDATE paper_execution_events SET payload_json='{}' WHERE idempotency_key=?",
+            ("paper-tamper:filled",),
+        )
+        result = self.ledger.replay_order_states()
+        self.assertEqual(result["status"], "FAIL")
+        self.assertTrue(any("payload does not match" in error for error in result["errors"]))
+
     def test_client_order_id_is_stable_and_leg_scoped(self):
         entry = make_paper_client_order_id(
             "cex:BTCUSDT", "2026-11-12T00:00:00+00:00", "ENTRY"

@@ -275,6 +275,80 @@ class PaperExecutionEventLedger:
             ).fetchone()
         return int(row["event_count"])
 
+    def replay_order_states(self) -> dict[str, Any]:
+        """Replay the append-only journal and verify every lifecycle transition.
+
+        This validates the event stream itself. It does not fabricate missing
+        events for legacy positions/trades, and it never repairs history in place.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM paper_execution_events ORDER BY sequence ASC"
+            ).fetchall()
+
+        states: dict[str, dict[str, Any]] = {}
+        errors: list[str] = []
+        for row in rows:
+            record = self._as_dict(row)
+            order_id = record["client_order_id"]
+            key = record["idempotency_key"]
+            expected_event_id = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            if record["event_id"] != expected_event_id:
+                errors.append(f"{order_id}: event_id does not match idempotency key")
+
+            expected_payload = {
+                "client_order_id": record["client_order_id"],
+                "asset": record["asset"],
+                "side": record["side"],
+                "status": record["status"],
+                "quantity": float(record["quantity"]),
+                "filled_quantity": float(record["filled_quantity"]),
+                "fill_price": record["fill_price"],
+                "fee_paid_usd": record["fee_paid_usd"],
+                "source": record["source"],
+                "reason": record["reason"],
+                "occurred_at": int(record["occurred_at"]),
+            }
+            expected_json = json.dumps(
+                expected_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+            stored_row = self._db.execute(
+                "SELECT payload_json FROM paper_execution_events WHERE sequence=?",
+                (record["sequence"],),
+            ).fetchone()
+            if stored_row is None or stored_row["payload_json"] != expected_json:
+                errors.append(f"{order_id}: event payload does not match normalized columns")
+
+            previous = states.get(order_id)
+            previous_status = previous["status"] if previous else None
+            if record["status"] not in _ALLOWED_TRANSITIONS.get(previous_status, set()):
+                errors.append(
+                    f"{order_id}: invalid replay transition "
+                    f"{previous_status or 'NONE'} -> {record['status']}"
+                )
+            if previous:
+                if record["asset"] != previous["asset"] or record["side"] != previous["side"]:
+                    errors.append(f"{order_id}: asset or side changed during replay")
+                if not math.isclose(
+                    float(record["quantity"]), float(previous["quantity"]),
+                    rel_tol=1e-9, abs_tol=1e-12,
+                ):
+                    errors.append(f"{order_id}: quantity changed during replay")
+                if float(record["filled_quantity"]) < float(previous["filled_quantity"]):
+                    errors.append(f"{order_id}: cumulative fill moved backwards")
+            elif record["status"] != "CREATED":
+                errors.append(f"{order_id}: first event was not CREATED")
+
+            states[order_id] = record
+
+        return {
+            "status": "NO_DATA" if not rows else "PASS" if not errors else "FAIL",
+            "event_count": len(rows),
+            "order_count": len(states),
+            "errors": errors,
+            "orders": states,
+        }
+
     @staticmethod
     def _as_dict(row: Any, *, inserted: bool | None = None) -> dict[str, Any]:
         result = dict(row)
