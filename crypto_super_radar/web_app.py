@@ -1914,6 +1914,10 @@ class Handler(BaseHTTPRequestHandler):
               if(!response.ok)throw new Error('HTTP '+response.status);
               const p=data.performance||{};
               status.textContent=(p.status==='REVIEWABLE'?'نمونه به حداقل تعداد رسیده؛ نیازمند بررسی مستقل است.':'نمونه هنوز کافی نیست.')+' '+(p.reason||'');
+              const feeStatus=p.fee_data_status==='COMPLETE'?'کامل':p.fee_data_status==='INCOMPLETE'?'ناقص':'بدون داده';
+              const feeRows=p.fee_data_status==='INCOMPLETE'
+                ? [['اجزای کارمزد مشاهده‌شده (جمع جزئی)',fmt(p.known_recorded_fees_usd,' USD')]]
+                : [];
               const rows=[
                 ['تعداد معاملات بسته‌شده',fmt(p.sample_size)+' / '+fmt(p.minimum_sample_size)],
                 ['نرخ برد',fmt(p.win_rate_pct,'%')],
@@ -1921,7 +1925,9 @@ class Handler(BaseHTTPRequestHandler):
                 ['Profit Factor خالص',fmt(p.profit_factor_net)],
                 ['حداکثر افت سرمایه تحقق‌یافته',fmt(p.max_realized_drawdown_pct,'%')],
                 ['سود/زیان خالص تحقق‌یافته',fmt(p.net_pnl_usd,' USD')],
-                ['کارمزد ثبت‌شده',fmt(p.total_recorded_fees_usd,' USD')],
+                ['پوشش دادهٔ کارمزد',feeStatus+' · '+fmt(p.fee_coverage_pct,'%')+' · ردیف ناقص: '+fmt(p.fee_incomplete_rows)],
+                ['کل کارمزد ثبت‌شده (فقط با پوشش کامل)',fmt(p.total_recorded_fees_usd,' USD')],
+                ...feeRows,
                 ['نمونهٔ معتبر R',fmt(p.r_sample_size)+' · Expectancy R: '+fmt(p.net_expectancy_r)]
               ];
               metrics.replaceChildren(...rows.map(([label,value])=>{
