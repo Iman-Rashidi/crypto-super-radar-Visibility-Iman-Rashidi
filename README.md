@@ -414,3 +414,28 @@ Keep the token only in Render's private environment variables. Never commit it t
 
 The scan queue and in-progress browser job registry are still in-memory and are not durable across a process restart. Market prices and provider evidence are fetched live; no synthetic historical market dataset is seeded into the database. There is no historical database file in the repository to import, so the new cloud database begins empty and accumulates real observations after activation.
 
+
+
+## Required free AI second opinion for Paper Trading
+
+The Spot paper bot now requires a real hosted LLM review before opening **any new** paper position. It uses the OpenRouter OpenAI-compatible API with the free NVIDIA Nemotron model variant:
+
+```text
+OPENROUTER_API_KEY=<your-free-openrouter-key>
+CSR_AI_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
+```
+
+1. Create a free OpenRouter account and API key at <https://openrouter.ai/keys>.
+2. Add `OPENROUTER_API_KEY` to the server environment (Render → service → Environment). Do not add it to Git, source files, browser code, dashboard forms or issue reports.
+3. Keep the default model ID ending in `:free`. The adapter rejects model IDs without that suffix, preventing an accidental switch to paid inference.
+4. The dashboard reports whether a key is configured. A successful connection is confirmed only after the first real review.
+
+OpenRouter currently lists free model variants at $0 per input/output token and a free-account limit of 50 requests/day; free variants with the `:free` suffix do not require a credit purchase. The app adds a conservative in-process quota cap and a four-hour evidence cache. Actual provider availability, daily limits and free model availability can change; a provider 429, outage, invalid response, missing key or quota exhaustion produces `UNKNOWN`/blocked entry, never a fallback to paid inference.
+
+The AI acts as one language model taking eight specialist roles (market regime, technical, news/sentiment, bull researcher, bear researcher, trader, risk manager and portfolio manager). This is an evidence-bounded, single-model committee emulation, **not** eight independent models and not the original TradingAgents model weights. The local deterministic council independently checks the exact 12-gate set before any LLM request. Only a strict, valid Buy/Overweight response with explicit trader LONG, risk-manager APPROVE, portfolio-manager APPROVE and no risk flags can pass the additional AI veto. The existing radar gates, paper sizing, execution-cost model and circuit breakers remain independently mandatory.
+
+Existing open paper positions continue to be managed and can be closed using the radar's existing stop/target/time rules even when the AI key is missing or the free service is unavailable. The AI key is needed only for new paper entries.
+
+Only a compact allowlist of public market evidence and gate statuses is sent to the model. Wallet addresses, balances, holdings, exchange credentials, API keys and private user data are not sent. **Provider data-use notice:** the free NVIDIA endpoint page says requests may be logged for security and used to improve NVIDIA products. Do not send confidential information to this free endpoint. The bot's request contains public market statistics, but users should review the provider's current terms.
+
+The optional Gemini headline-enrichment section elsewhere in this README is a separate feature; it is not required by this Paper Trading AI integration.
