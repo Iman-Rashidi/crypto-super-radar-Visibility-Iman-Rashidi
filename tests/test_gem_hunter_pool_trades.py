@@ -86,11 +86,13 @@ class GemHunterPoolTradeTests(unittest.TestCase):
         self.assertEqual(result["wallet_attribution_status"], "COMPLETE_FOR_RETURNED_SAMPLE")
 
     def test_repeated_round_trip_wallets_are_flagged_as_suspected_not_proven(self):
-        wallet = "0x" + "a" * 40
         rows = []
-        for i in range(30):
-            rows.append(trade("buy" if i % 2 == 0 else "sell", 100 + i, i,
-                              wallet=wallet, minutes_ago=i + 1))
+        for wallet_index in range(5):
+            wallet = "0x" + f"{wallet_index + 1:040x}"
+            for offset in range(6):
+                rows.append(trade("buy" if offset % 2 == 0 else "sell",
+                                  100 + offset, wallet_index * 6 + offset,
+                                  wallet=wallet, minutes_ago=wallet_index * 6 + offset + 1))
         result = self.analyze(rows)
         self.assertEqual(result["wash_trading_signal"], "SUSPECTED")
         self.assertIn("CONCENTRATED_REPEAT_TRADER_PATTERN", result["reason_codes"])
