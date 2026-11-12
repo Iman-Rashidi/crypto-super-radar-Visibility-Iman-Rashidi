@@ -65,6 +65,7 @@ def _symbol(value: Any, expected_symbol: str | None) -> str:
 def normalize_binance_spot_agg_trade(
     payload: Mapping[str, Any],
     *,
+    channel_type: str,
     received_at_ms: int,
     expected_symbol: str | None = None,
 ) -> dict[str, Any]:
@@ -74,6 +75,8 @@ def normalize_binance_spot_agg_trade(
     taker/aggressor. The exchange trade timestamp T, not local receive time E,
     determines event-time CVD membership.
     """
+    if not isinstance(channel_type, str) or channel_type.strip().lower() != "spot":
+        raise OrderFlowAdapterError("SPOT_CHANNEL_REQUIRED")
     if not isinstance(payload, Mapping) or payload.get("e") != "aggTrade":
         raise OrderFlowAdapterError("UNEXPECTED_BINANCE_EVENT")
     _symbol(payload.get("s"), expected_symbol)
@@ -94,10 +97,13 @@ def normalize_binance_spot_agg_trade(
 def normalize_bybit_spot_public_trade_message(
     payload: Mapping[str, Any],
     *,
+    channel_type: str,
     received_at_ms: int,
     expected_symbol: str,
 ) -> list[dict[str, Any]]:
     """Normalize all trades in one Bybit V5 publicTrade.{symbol} message."""
+    if not isinstance(channel_type, str) or channel_type.strip().lower() != "spot":
+        raise OrderFlowAdapterError("SPOT_CHANNEL_REQUIRED")
     if not isinstance(payload, Mapping):
         raise OrderFlowAdapterError("INVALID_BYBIT_MESSAGE")
     symbol = _symbol(expected_symbol, expected_symbol)
@@ -139,6 +145,7 @@ def ingest_binance_spot_message(
     venue: VenueOrderFlow,
     payload: Mapping[str, Any],
     *,
+    channel_type: str,
     received_at_ms: int,
     expected_symbol: str,
 ) -> dict[str, Any]:
@@ -152,6 +159,7 @@ def ingest_binance_spot_message(
             message = payload.get("data")
         event = normalize_binance_spot_agg_trade(
             message,
+            channel_type=channel_type,
             received_at_ms=received_at_ms,
             expected_symbol=expected_symbol,
         )
@@ -164,6 +172,7 @@ def ingest_bybit_spot_message(
     venue: VenueOrderFlow,
     payload: Mapping[str, Any],
     *,
+    channel_type: str,
     received_at_ms: int,
     expected_symbol: str,
 ) -> dict[str, Any]:
@@ -171,6 +180,7 @@ def ingest_bybit_spot_message(
     try:
         events = normalize_bybit_spot_public_trade_message(
             payload,
+            channel_type=channel_type,
             received_at_ms=received_at_ms,
             expected_symbol=expected_symbol,
         )
