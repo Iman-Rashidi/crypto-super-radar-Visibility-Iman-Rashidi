@@ -196,3 +196,14 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - Current Feature HEAD: `5ace4d470c439d42f65735252ab11eda7cb35d7f`. PR #1 remains Open/Draft against `main` and mergeable; PR #2 remains Open/Draft and not mergeable.
 - Latest GitHub Actions runs associated with the current head: [offline-tests #825](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154603929), [runner-diagnostic #34](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154572330), [live-provider-acceptance #282](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154572355), and [offline-tests #824](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43154572256). All jobs returned `steps=null` and `logs_url=null`; no project test step is evidenced. Do not claim these runs tested the new source.
 - Render's attached service still has Auto Deploy off and remains live on `97df9f7854a5df3f99213f019df95cd97ec77a7d`. No new deploy occurred; current Feature commits are not live.
+
+
+## Live trade-stream adapter groundwork — 2026-11-12
+
+- Added `crypto_super_radar/order_flow_adapters.py` for raw Binance Spot `@aggTrade` and Bybit V5 Spot `publicTrade.{symbol}` WebSocket messages.
+- Binance `m=true` is normalized as SELL aggressor (buyer is maker); `T` remains the exchange trade timestamp, `a` the venue-native aggregate trade ID, and `q` the base-asset quantity.
+- Bybit `S` is the taker side; `T` is the exchange trade timestamp, `i` is the venue-native trade ID, and `v` is the spot trade size in base units. Messages are validated against the configured topic and symbol.
+- Malformed adapter payloads explicitly freeze the affected venue until reconnect. Valid adapter messages do not automatically connect a venue, mark an unobserved heartbeat, or bypass the existing warm-up/freshness checks.
+- Added `tests/test_order_flow_adapters.py` for maker/taker direction, timestamp provenance, symbol/topic validation, native-ID deduplication, malformed-message freeze, and disconnected behavior.
+- **Boundary:** these are message normalizers/ingestion bridges only. No WebSocket client, reconnect supervisor, event persistence, UI, or 12-gate integration is added in this step. A continuous consumer must own connection lifecycle and feed messages before CVD can become LIVE.
+- Provider contracts reviewed against the official [Binance Spot aggregate-trade stream](https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md) and [Bybit V5 public trade stream](https://bybit-exchange.github.io/docs/v5/websocket/public/trade).

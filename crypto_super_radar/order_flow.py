@@ -113,6 +113,23 @@ class VenueOrderFlow:
         self._frozen_reason = reason
         self._rejected_count += 1
 
+    def reject_payload(self, reason: str) -> dict[str, Any]:
+        """Freeze this venue after an adapter detects a malformed provider message.
+
+        The transport adapter owns schema validation; this method ensures that
+        malformed messages cannot leave a previously healthy venue marked LIVE.
+        An explicit reconnect is required before this venue can become usable.
+        """
+        if not self._connected:
+            return {"accepted": False, "reason": "DISCONNECTED"}
+        if self._frozen_reason:
+            return {"accepted": False, "reason": "FROZEN", "detail": self._frozen_reason}
+        code = reason.strip() if isinstance(reason, str) else ""
+        if not code:
+            code = "UNSPECIFIED_ADAPTER_ERROR"
+        self._freeze(f"INVALID_PROVIDER_PAYLOAD:{code[:120]}")
+        return {"accepted": False, "reason": "INVALID_PROVIDER_PAYLOAD", "detail": self._frozen_reason}
+
     def _prune(self, now_ms: int) -> None:
         cutoff = now_ms - self.window_ms
         expired = [
