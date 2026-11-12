@@ -95,7 +95,10 @@ cp "$ROOT/README.md" "$ROOT/pyproject.toml" "$ROOT/requirements.txt" "$RENDER_RO
   clean_env "$PYTHON" -m pip install -r requirements.txt
   clean_env "$PYTHON" -m compileall -q .
   PORT="$(clean_env "$PYTHON" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
-  clean_env PORT="$PORT" CSR_DB_PATH="$TMP_DIR/render-overlay/csr-test.sqlite3" \
+  env -i \
+    PATH="$PATH" HOME="$TMP_DIR/home" TMPDIR="$TMP_DIR" LANG=C.UTF-8 \
+    PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONNOUSERSITE=1 \
+    PORT="$PORT" CSR_DB_PATH="$TMP_DIR/render-overlay/csr-test.sqlite3" \
     "$PYTHON" -m crypto_super_radar.web_app > "$TMP_DIR/server.log" 2>&1 &
   server_pid=$!
   trap 'kill "$server_pid" 2>/dev/null || true' EXIT
