@@ -592,6 +592,11 @@ class PaperLedger:
                 0.0, cooldown_hours_after_loss * 3600.0 - (now - int(last_asset["closed_at"]))
             ) / 3600.0
         reasons = []
+        reconciliation_status = str(
+            (state.get("reconciliation") or {}).get("status", "INCOMPLETE")
+        ).upper()
+        if reconciliation_status not in {"PASS", "NO_DATA"}:
+            reasons.append("LEDGER_RECONCILIATION_NOT_PASS")
         if daily_loss_pct >= daily_loss_limit_pct * 100.0:
             reasons.append("DAILY_LOSS_LIMIT")
         if drawdown_pct >= max_drawdown_pct * 100.0:
