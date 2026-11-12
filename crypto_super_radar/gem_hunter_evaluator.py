@@ -96,6 +96,8 @@ def _validated_pool_trade_evidence(candidate: dict, evidence: Any,
         return {}
     if evidence.get("status") not in {"COMPLETE", "PARTIAL"}:
         return {}
+    if evidence.get("coverage_status") != evidence.get("status"):
+        return {}
     if evidence.get("source") != "GECKOTERMINAL":
         return {}
     chain = str(candidate.get("chain") or "").lower()
@@ -123,10 +125,21 @@ def _validated_pool_trade_evidence(candidate: dict, evidence: Any,
     pressure_status = evidence.get("buy_sell_pressure_status")
     if pressure_status not in {"PASS", "FAIL", "UNKNOWN"}:
         return {}
-    for key in ("buy_volume_usd", "sell_volume_usd", "total_volume_usd", "net_swap_flow_usd"):
-        value = _number(evidence.get(key))
-        if value is None or value < 0 and key != "net_swap_flow_usd":
-            return {}
+    values = {
+        key: _number(evidence.get(key))
+        for key in ("buy_volume_usd", "sell_volume_usd", "total_volume_usd", "net_swap_flow_usd")
+    }
+    if any(value is None for value in values.values()):
+        return {}
+    if any(values[key] < 0 for key in ("buy_volume_usd", "sell_volume_usd", "total_volume_usd")):
+        return {}
+    expected_total = values["buy_volume_usd"] + values["sell_volume_usd"]
+    expected_net = values["buy_volume_usd"] - values["sell_volume_usd"]
+    tolerance = max(1e-6, expected_total * 1e-8)
+    if abs(values["total_volume_usd"] - expected_total) > tolerance:
+        return {}
+    if abs(values["net_swap_flow_usd"] - expected_net) > tolerance:
+        return {}
     return evidence
 
 
