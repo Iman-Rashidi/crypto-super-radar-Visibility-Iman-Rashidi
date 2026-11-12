@@ -1002,7 +1002,7 @@ class PaperLedger:
                     missing_events.append(f"{label}:{order_id}")
                     continue
                 actual_filled = float(order["filled_quantity"])
-                if actual_filled <= 1e-12 and order["status"] == "CANCELED":
+                if actual_filled <= 1e-12 and order["status"] in {"CANCELED", "REJECTED"}:
                     expected_order_ids.add(order_id)
                     continue
                 fill_event = next(
