@@ -148,6 +148,11 @@ class LiquidationEvidenceTests(unittest.TestCase):
         self.assertEqual(report["status"], "PARTIAL")
         self.assertEqual(report["invalid_rows"], 1)
 
+    def test_non_mapping_liquidation_row_is_rejected_without_crashing(self):
+        report = summarize_liquidation_events([None])
+        self.assertEqual(report["status"], "PARTIAL")
+        self.assertEqual(report["invalid_rows"], 1)
+
     def test_empty_input_is_no_data(self):
         self.assertEqual(summarize_liquidation_events([])["status"], "NO_DATA")
 
