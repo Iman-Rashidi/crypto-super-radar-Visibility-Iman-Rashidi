@@ -60,6 +60,7 @@ class WalletEvent:
     inner_instruction_index: int | None = None
     block_hash: str | None = None
     counterparty_wallet: str | None = None
+    amount_tokens: float | None = None
 
     @classmethod
     def from_mapping(cls, row: Mapping[str, Any]) -> "WalletEvent":
@@ -76,6 +77,8 @@ class WalletEvent:
         received_at = None if received is None else _nonnegative_int(received, "received_at")
         amount = row.get("amount_usd")
         amount_usd = None if amount is None else _finite_nonnegative(amount, "amount_usd")
+        token_amount = row.get("amount_tokens")
+        amount_tokens = None if token_amount is None else _finite_nonnegative(token_amount, "amount_tokens")
         funding = row.get("funding_source")
         funding_type = str(row.get("funding_source_type") or "unknown").strip().lower()
         tx_hash_value = row.get("tx_hash") or row.get("signature")
@@ -103,6 +106,7 @@ class WalletEvent:
                 None if row.get("counterparty_wallet") in (None, "")
                 else _normalize_chain_address(chain, row.get("counterparty_wallet"))
             ),
+            amount_tokens=amount_tokens,
         )
 
 
@@ -399,7 +403,14 @@ class WalletGraphAnalytics:
                 ]
                 if nearby:
                     temporal_matches += 1
-                    scores = [_amount_similarity(a.amount_usd, b.amount_usd) for b in nearby]
+                    left_amount = a.amount_usd if a.amount_usd is not None else a.amount_tokens
+                    scores = [
+                        _amount_similarity(
+                            left_amount,
+                            b.amount_usd if b.amount_usd is not None else b.amount_tokens,
+                        )
+                        for b in nearby
+                    ]
                     known_scores = [score for score in scores if score is not None]
                     if known_scores:
                         amount_scores.append(max(known_scores))
