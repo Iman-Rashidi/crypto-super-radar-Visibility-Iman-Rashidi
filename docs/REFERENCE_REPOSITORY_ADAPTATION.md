@@ -229,3 +229,51 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - If the event store is unavailable, raises during write, or returns an invalid count, the venue is frozen with a downstream-failure reason. Its usable CVD becomes unavailable until explicit reconnect; later messages cannot silently conceal a persistence gap.
 - Added adapter persistence tests for Binance readback, Bybit batch persistence and fail-closed storage failure. The ledger readback now supports both mapping-style rows and ordinary DB-API tuple rows.
 - **Boundary:** this is persistence integration at the message-adapter seam, not a WebSocket lifecycle manager. It does not establish continuity across disconnects, recover missing intervals, hydrate the in-memory CVD window from historical rows, or connect order flow to the 12-gate decision engine. Feed readiness remains UNKNOWN until those controls are separately implemented and validated.
+
+
+## Integrated implementation increment — 2026-11-12
+
+This update closes several previously identified source-code gaps while keeping live acceptance and release status separate from implementation.
+
+### HyperData-inspired public Spot order-flow runtime
+
+- Added crypto_super_radar/order_flow_runtime.py: a reconnecting async consumer for Binance Spot @aggTrade and Bybit V5 Spot publicTrade.{symbol}. It validates and normalizes messages through the existing provider adapters, persists accepted trades through OrderFlowEventStore, uses bounded exponential reconnect backoff, and freezes a venue on malformed messages or persistence failure.
+- Added crypto_super_radar/order_flow_service.py and the crypto-super-radar-orderflow console entry point. The standalone supervisor defaults to Binance + Bybit and BTCUSDT/ETHUSDT/SOLUSDT, writes to the configured SQLite/Turso database, prints per-venue status and always reports NO_TRADE.
+- Added websockets>=12.0 to requirements.txt and pyproject.toml; the offline workflow now checks the service CLI help.
+- Added tests/test_order_flow_runtime.py and tests/test_order_flow_service.py.
+- Operational boundary: the worker is an installable, explicitly invoked background process; it is not automatically started by the HTTP dashboard or Render service. Its per-venue CVD and feed-health data are not yet consumed by the 12-filter decision engine or shown as a live CVD panel. Reconnect warm-up and in-memory coverage checks do not yet implement historical gap backfill/reconciliation. No live stream session or provider-acceptance pass is claimed.
+
+### million-inspired durable wallet-event path
+
+- Added crypto_super_radar/wallet_event_store.py: append-only, idempotent wallet observations keyed by (chain, tx_signature, wallet_address, event_index), with EVM address normalization and case-sensitive Solana Base58 addresses, counterparties, event timestamps/slots and source/evidence provenance.
+- crypto_super_radar/integrated_engine.py now owns a shared database connection/store and passes it to SolanaWhaleScanner.
+- crypto_super_radar/solana_whales.py now persists both sides of observed wallet-to-wallet token movements with counterparty links. Unmatched mint/burn residuals remain explicitly MINT/BURN; transfers are not re-labelled as buys or sells. Timestamp-missing observations are not assigned synthetic times.
+- The scanner reloads bounded durable token history into WalletGraphAnalytics. crypto_super_radar/wallet_graph.py compares token quantities when historical USD valuation is unavailable and requires repeated corroborating activity before a direct transfer pair is treated as suspicious. A single transfer is not Sybil evidence.
+- Wallet graph status, coverage, event counts and persistence status are exposed in the integrated engine metrics and the web report.
+- Added tests/test_wallet_event_store.py and tests/test_solana_wallet_persistence.py; extended tests/test_wallet_graph.py.
+- Coverage boundary: the public Solana RPC scanner still samples largest token accounts and a bounded recent-signature window (not a full token-lifetime index). Account-level ownership, beneficial-owner clustering and complete wallet history remain unproven; wallet_graph_coverage=PARTIAL_RECENT_SAMPLE and NO_TRADE are preserved. The service uses a process-owned connection; a production multi-process deployment needs an appropriately configured shared database and load test.
+
+### Solbeam-inspired complete token-risk sub-gate
+
+- Added crypto_super_radar/token_risk.py with five mandatory evidence records: contract_authority, holder_concentration, deployer_history, launch_bundle, and liquidity_exit.
+- Every PASS requires a named source, timezone-aware timestamp, 100% declared coverage and an explicit observed value. PASS/FAIL evidence older than 300 seconds or more than 30 seconds in the future becomes STALE. Missing/partial/budget-deferred evidence remains non-passing; a source-backed hard disqualifier remains FAIL.
+- gem_hunter_evaluator.py now requires this five-part sub-gate for the critical security gate. A limited GoPlus/Sourcify PASS is not promoted to a full token-risk PASS. Explicit Solana mint/freeze authority failures are preserved when source timestamp and authority evidence are present.
+- gem_hunter_qualification.py requires all five checks to pass before any public BUY candidate can pass the qualification gate.
+- Added/extended tests/test_token_risk.py, tests/test_gem_hunter_evaluator.py and tests/test_gem_hunter_qualification.py.
+- Provider boundary: the five-part contract is implemented, but every external data collector for holder ownership, deployer history, launch bundles and executable liquidity/exit is not yet wired into all discovery records. In those cases the evaluator deliberately returns UNKNOWN and the public result remains NO_TRADE. A security sub-gate PASS is not an audit or complete trade authorization.
+
+### TradeClaw-inspired execution-cost accounting
+
+- Added crypto_super_radar/execution_costs.py for separate per-fill half-spread, adverse slippage, fees and funding attribution. Quote provenance must be explicit (OBSERVED or MODELLED); missing components do not become zero.
+- providers.py now carries source bid/ask and quote timestamps from supported CEX Spot ticker responses when available.
+- paper_trading.py uses a fresh (maximum 60-second age) timestamped quote when present, includes the observed spread in entry/exit fills and risk/reward, marks open paper positions against the bid, and stores entry/exit spread and slippage separately. If a quote is absent/stale, spread coverage remains INCOMPLETE instead of being fabricated.
+- signal_performance.py now exposes per-component coverage and totals for fee, slippage, spread and funding. The total execution-cost attribution status is COMPLETE only when all required components are complete. The paper ledger is Spot-only, so funding is explicitly NOT_APPLICABLE there; perpetual backtests still require historical funding data.
+- Added/extended tests/test_execution_costs.py, tests/test_paper_trading.py and tests/test_signal_performance.py.
+- Execution boundary: no exchange order endpoint or real-order mode is present. The CEX ticker quote is a sampled public best bid/ask, not a guaranteed fill or a full depth/slippage curve. Pool-based DEX exit simulation for arbitrary order sizes is not implemented by this increment.
+
+### Validation and release status
+
+- The implementation and regression tests are present on feature/multi-stage-confirmation-engine; the exact branch head and current workflow attempts are recorded in the project tracker.
+- GitHub Actions has repeatedly failed before the first step with steps=null and logs_url=null, including after a retry. This is classified as CI_BLOCKED_BEFORE_STEPS / TESTS_NOT_EXECUTED, not as a Python assertion failure and not as a passing test run. No complete repository test suite, compile/source-archive check, Streamlit AppTest or live WebSocket acceptance is claimed.
+- main, PR merge state, Render configuration, environment variables/secrets and production deployment were not changed. No deploy, real order, wallet signing or private-key use occurred.
+- Release gate remains CLOSED until a runner completes the first step, the full offline suite and Streamlit/source-bundle checks pass on an exact SHA, and separately scoped provider/WebSocket acceptance and gap-coverage checks are recorded.
