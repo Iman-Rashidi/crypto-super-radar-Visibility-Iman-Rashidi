@@ -421,5 +421,21 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertIn(order_id, report["missing_projections"])
 
 
+    def test_orphan_execution_adapter_order_is_incomplete(self):
+        with self.ledger._lock, self.ledger._db:
+            for status in ("CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED"):
+                self.ledger.execution_ledger.append_event(
+                    client_order_id="adapter-order-unprojected",
+                    idempotency_key=f"adapter-order-unprojected:{status.lower()}",
+                    asset="cex:BTCUSDT", side="BUY", status=status,
+                    quantity=1.0, source="PAPER_EXECUTION_ADAPTER",
+                    reason="ORPHAN_ADAPTER_TEST", occurred_at=123,
+                )
+        report = self.ledger.reconciliation()
+        self.assertEqual(report["status"], "INCOMPLETE")
+        self.assertIn("adapter-order-unprojected", report["missing_projections"])
+
+
+
 if __name__ == "__main__":
     unittest.main()

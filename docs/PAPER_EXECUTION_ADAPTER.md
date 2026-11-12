@@ -16,7 +16,7 @@ Each snapshot requires a stable \`snapshot_id\`. Reprocessing the same snapshot 
 
 - BUY fills reference best ask; SELL fills reference best bid.
 - Adverse slippage is applied in basis points in the trade direction.
-- Fees are calculated per incremental fill.
+- Fees are calculated per incremental fill. The adapter response returns the incremental amount as `fee_paid_usd` and the running total as `cumulative_fee_paid_usd`; each journal fill event persists the cumulative total in `fee_paid_usd` so it is monotonic across partial fills.
 - Filled base quantity cannot exceed \`available_liquidity_qty × max_participation_pct\`.
 - Participation is bounded to 100% of the explicitly supplied liquidity.
 - The event ledger stores cumulative filled quantity; \`fee_paid_usd\` and \`fill_price\` belong to the incremental fill event.

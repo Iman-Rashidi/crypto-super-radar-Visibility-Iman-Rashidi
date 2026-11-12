@@ -568,7 +568,10 @@ class PaperLedger:
             source = str(order.get("source") or "")
             is_paper_projection_event = (
                 order_id.startswith(("paper-entry-", "paper-exit-"))
-                or source.startswith(("PAPER_SIMULATOR", "PAPER_FILL_SIMULATOR"))
+                or source.startswith((
+                    "PAPER_SIMULATOR", "PAPER_FILL_SIMULATOR",
+                    "PAPER_EXECUTION_ADAPTER", "PAPER_ORDER_BOOK_SNAPSHOT",
+                ))
             )
             if is_paper_projection_event and order_id not in expected_order_ids:
                 missing_projections.append(order_id)
