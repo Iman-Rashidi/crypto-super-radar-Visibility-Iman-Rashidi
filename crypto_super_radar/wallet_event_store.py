@@ -7,6 +7,7 @@ Solana Base58 addresses are case-sensitive; EVM addresses are normalized.
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -87,6 +88,7 @@ class WalletEventStore:
         if connection is None or not callable(getattr(connection, "execute", None)):
             raise ValueError("a SQLite-compatible connection is required")
         self._db = connection
+        self._lock = threading.RLock()
         self._db.execute(
             """
             CREATE TABLE IF NOT EXISTS wallet_event_observations (
@@ -135,10 +137,11 @@ class WalletEventStore:
         if not rows:
             return {"inserted": 0, "duplicates": 0}
         inserted = 0
-        cursor = self._db.cursor()
-        try:
-            for row in rows:
-                cursor.execute(
+        with self._lock:
+            cursor = self._db.cursor()
+            try:
+                for row in rows:
+                    cursor.execute(
                     """
                     INSERT OR IGNORE INTO wallet_event_observations (
                         chain, tx_signature, wallet_address, event_index,
@@ -146,24 +149,25 @@ class WalletEventStore:
                         slot, token_delta, quote_delta, quote_symbol, source, evidence_status
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    tuple(row[key] for key in (
-                        "chain", "tx_signature", "wallet_address", "event_index",
-                        "token_address", "counterparty_address", "event_type", "event_time_ms", "received_at_ms",
-                        "slot", "token_delta", "quote_delta", "quote_symbol", "source", "evidence_status"
-                    )),
-                )
-                inserted += max(0, int(cursor.rowcount or 0))
-            self._db.commit()
-        except Exception:
-            self._db.rollback()
-            raise
+                        tuple(row[key] for key in (
+                            "chain", "tx_signature", "wallet_address", "event_index",
+                            "token_address", "counterparty_address", "event_type", "event_time_ms", "received_at_ms",
+                            "slot", "token_delta", "quote_delta", "quote_symbol", "source", "evidence_status"
+                        )),
+                    )
+                    inserted += max(0, int(cursor.rowcount or 0))
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
         return {"inserted": inserted, "duplicates": len(rows) - inserted}
 
     def _read(self, where: str, values: tuple[Any, ...], *, limit: int) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        cursor = self._db.execute(
-            f"""
+        with self._lock:
+            cursor = self._db.execute(
+                f"""
             SELECT chain, tx_signature, wallet_address, event_index, token_address,
                    counterparty_address, event_type, event_time_ms, received_at_ms, slot, token_delta,
                    quote_delta, quote_symbol, source, evidence_status
@@ -174,8 +178,8 @@ class WalletEventStore:
             """,
             (*values, min(limit, 100_000)),
         )
-        names = [col[0] for col in (cursor.description or ())]
-        return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row)) for row in cursor.fetchall()]
+            names = [col[0] for col in (cursor.description or ())]
+            return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row)) for row in cursor.fetchall()]
 
     def wallet_history(self, *, chain: str, wallet_address: str, limit: int = 5000) -> list[dict[str, Any]]:
         chain_name = _required_text(chain, "chain").lower()
