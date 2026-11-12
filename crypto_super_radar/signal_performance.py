@@ -39,6 +39,8 @@ def summarize_closed_trades(
 
     normalized: list[dict[str, float | None]] = []
     invalid_rows = 0
+    fee_incomplete_rows = 0
+    known_recorded_fees = 0.0
     for trade in trades:
         net = _finite(trade.get("net_pnl"))
         gross = _finite(trade.get("gross_pnl"))
@@ -50,7 +52,17 @@ def summarize_closed_trades(
         quantity = _finite(trade.get("quantity"))
         entry = _finite(trade.get("entry_price"))
         initial_stop = _finite(trade.get("initial_stop_loss"))
-        fee_total = (entry_fee or 0.0) + (exit_fee or 0.0)
+        # A missing/invalid component is UNKNOWN, not a zero-fee observation.
+        known_recorded_fees += sum(
+            fee for fee in (entry_fee, exit_fee) if fee is not None
+        )
+        fee_total = (
+            entry_fee + exit_fee
+            if entry_fee is not None and exit_fee is not None
+            else None
+        )
+        if fee_total is None:
+            fee_incomplete_rows += 1
         risk_usd = (
             quantity * abs(entry - initial_stop)
             if quantity is not None and quantity > 0
@@ -73,6 +85,11 @@ def summarize_closed_trades(
             "minimum_sample_size": min_sample_size,
             "invalid_rows_excluded": invalid_rows,
             "performance_claim_allowed": False,
+            "fee_data_status": "NO_DATA",
+            "fee_coverage_pct": None,
+            "fee_incomplete_rows": 0,
+            "known_recorded_fees_usd": None,
+            "total_recorded_fees_usd": None,
             "reason": "No valid closed paper trades are recorded yet.",
             "slippage_attribution": "NOT_SEPARATELY_RECORDED",
         }
@@ -115,9 +132,17 @@ def summarize_closed_trades(
             round(sum(float(row["net"]) for row in wins) / abs(gross_losses), 6)
             if gross_losses < 0 else None
         ),
-        "total_recorded_fees_usd": round(total_fees, 8),
+        "fee_data_status": "COMPLETE" if fee_incomplete_rows == 0 else "INCOMPLETE",
+        "fee_coverage_pct": round((count - fee_incomplete_rows) / count * 100.0, 4),
+        "fee_incomplete_rows": fee_incomplete_rows,
+        # Partial observed components are visible, but never mislabeled as a total.
+        "known_recorded_fees_usd": round(known_recorded_fees, 8),
+        "total_recorded_fees_usd": (
+            round(known_recorded_fees, 8) if fee_incomplete_rows == 0 else None
+        ),
         "fees_as_pct_of_gross_profit": (
-            round(total_fees / gross_profit * 100.0, 4) if gross_profit > 0 else None
+            round(known_recorded_fees / gross_profit * 100.0, 4)
+            if fee_incomplete_rows == 0 and gross_profit > 0 else None
         ),
         "ending_equity_usd": round(equity, 8),
         "net_return_pct": round((equity / initial_equity - 1.0) * 100.0, 4),
