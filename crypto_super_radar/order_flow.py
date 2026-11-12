@@ -340,6 +340,9 @@ def summarize_liquidation_events(
 
     for event in events:
         input_rows += 1
+        if not isinstance(event, Mapping):
+            invalid_rows += 1
+            continue
         venue = event.get("venue")
         event_id = event.get("event_id")
         timestamp = _timestamp_ms(event.get("event_time_ms"))
