@@ -650,27 +650,52 @@ class PaperLedger:
         ) -> None:
             nonlocal matched_fills
             expected_order_ids.add(order_id)
-            event = self.execution_ledger.order_state(order_id)
-            if event is None:
+            order = self.execution_ledger.order_state(order_id)
+            if order is None:
                 missing_events.append(f"{label}:{order_id}")
                 return
-            if event["status"] != "FILLED":
-                errors.append(f"{label}:{order_id} has status {event['status']}, expected FILLED")
+            if order["status"] not in {"FILLED", "CANCELED"}:
+                errors.append(
+                    f"{label}:{order_id} has terminal status {order['status']}, expected FILLED or CANCELED"
+                )
+                return
+            fill_event = next(
+                (
+                    event for event in self.execution_ledger.recent_events(
+                        1000, client_order_id=order_id
+                    )
+                    if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+                ),
+                None,
+            )
+            if fill_event is None:
+                errors.append(f"{label}:{order_id} has no recorded fill event")
                 return
             for field, actual, expected in (
-                ("asset", str(event["asset"]), asset),
-                ("side", str(event["side"]), side),
+                ("asset", str(order["asset"]), asset),
+                ("side", str(order["side"]), side),
+                ("fill_asset", str(fill_event["asset"]), asset),
+                ("fill_side", str(fill_event["side"]), side),
             ):
                 if actual != expected:
                     errors.append(f"{label}:{order_id} {field} mismatch")
+            requested = float(order["quantity"])
+            if quantity > requested + max(1e-12, requested * 1e-9):
+                errors.append(f"{label}:{order_id} projected fill exceeds accepted order quantity")
             for field, actual, expected in (
-                ("quantity", float(event["quantity"]), quantity),
-                ("filled_quantity", float(event["filled_quantity"]), quantity),
-                ("fill_price", float(event["fill_price"]), price),
-                ("fee_paid_usd", float(event["fee_paid_usd"]), fee),
+                ("filled_quantity", float(order["filled_quantity"]), quantity),
+                ("fill_event_quantity", float(fill_event["filled_quantity"]), quantity),
+                ("fill_price", float(fill_event["fill_price"]), price),
+                ("fee_paid_usd", float(fill_event["fee_paid_usd"]), fee),
             ):
                 if not math.isclose(actual, expected, rel_tol=1e-8, abs_tol=1e-8):
                     errors.append(f"{label}:{order_id} {field} mismatch")
+            if not math.isclose(
+                float(order["filled_quantity"]),
+                float(fill_event["filled_quantity"]),
+                rel_tol=1e-9, abs_tol=1e-12,
+            ):
+                errors.append(f"{label}:{order_id} final order state differs from last fill event")
             if not any(message.startswith(f"{label}:{order_id} ") for message in errors):
                 matched_fills += 1
 
@@ -718,7 +743,12 @@ class PaperLedger:
                 ))
             )
             if is_paper_projection_event and order_id not in expected_order_ids:
-                missing_projections.append(order_id)
+                zero_fill_terminal = (
+                    order.get("status") in {"CANCELED", "REJECTED"}
+                    and float(order.get("filled_quantity") or 0.0) <= 1e-12
+                )
+                if not zero_fill_terminal:
+                    missing_projections.append(order_id)
 
         if errors:
             result_status = "FAIL"
