@@ -1,16 +1,19 @@
-"""Best-effort Solana SPL token flow scanner using public Solana JSON-RPC.
+"""Best-effort Solana SPL token flow scanner with durable wallet event evidence.
 
-It inspects a bounded sample of largest token accounts and recent signatures.
-Coverage is explicitly PARTIAL: this is not a complete historical indexer and
-account-level changes are not proof of beneficial ownership or exchange trading.
+The scanner samples largest token accounts and a bounded recent-signature window.
+Coverage remains PARTIAL: transfers are not inferred to be buys/sells, and this
+is not a complete token-lifetime indexer or beneficial-owner graph.
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Mapping, Optional
 
 import requests
 
+from .database import connect_database
 from .rate_limiter import SharedRateLimiter
+from .wallet_event_store import WalletEventStore
 from .whale_intelligence import analyze_whale_activity
 
 
@@ -24,6 +27,7 @@ class SolanaWhaleScanner:
         max_accounts: int = 10,
         signatures_per_account: int = 20,
         limiter: Optional[SharedRateLimiter] = None,
+        wallet_event_store: Optional[WalletEventStore] = None,
     ):
         self.rpc_url = rpc_url
         self.session = session or requests.Session()
@@ -31,6 +35,12 @@ class SolanaWhaleScanner:
         self.max_accounts = max(1, min(int(max_accounts), 20))
         self.signatures_per_account = max(1, min(int(signatures_per_account), 100))
         self.limiter = limiter or SharedRateLimiter()
+        self._wallet_db = None
+        if wallet_event_store is None:
+            self._wallet_db = connect_database()
+            self.wallet_event_store = WalletEventStore(self._wallet_db)
+        else:
+            self.wallet_event_store = wallet_event_store
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
         self.limiter.wait(self.rpc_url)
@@ -57,7 +67,9 @@ class SolanaWhaleScanner:
             return {"status": "FAIL", "reason": "Invalid Solana mint address."}
         if price_usd is not None and price_usd <= 0:
             return {"status": "UNKNOWN", "reason": "USD price must be positive or unavailable."}
-        labels = {k.lower(): v for k, v in (address_labels or {}).items()}
+
+        # Solana addresses are Base58 and case-sensitive. Do not lowercase them.
+        labels = dict(address_labels or {})
         try:
             largest = self._rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
             accounts = largest.get("value", [])[:self.max_accounts]
@@ -65,14 +77,13 @@ class SolanaWhaleScanner:
                 return {"status": "UNKNOWN", "reason": "No token accounts returned for this mint."}
             signatures: dict[str, int] = {}
             watchlist = []
-            labels = dict(labels)
             for account in accounts:
                 try:
                     info = self._rpc("getAccountInfo", [
                         account["address"], {"encoding": "jsonParsed", "commitment": "confirmed"}
                     ])
                     parsed = (((info or {}).get("value") or {}).get("data") or {}).get("parsed") or {}
-                    owner = str((parsed.get("info") or {}).get("owner") or "").lower()
+                    owner = str((parsed.get("info") or {}).get("owner") or "")
                     ui_amount = account.get("uiAmount")
                     if ui_amount is None and account.get("uiAmountString") is not None:
                         ui_amount = float(account["uiAmountString"])
@@ -85,8 +96,9 @@ class SolanaWhaleScanner:
                         if balance_usd >= whale_threshold_usd and owner not in labels:
                             labels[owner] = "whale"
                 except Exception:
-                    # Keep scanning signatures, but do not invent the owner label.
+                    # Keep the bounded scan going, but never invent the owner label.
                     continue
+
             for account in accounts:
                 result = self._rpc("getSignaturesForAddress", [
                     account["address"],
@@ -95,7 +107,10 @@ class SolanaWhaleScanner:
                 for item in result:
                     if item.get("signature") and item.get("err") is None:
                         signatures[item["signature"]] = int(item.get("blockTime") or 0)
-            events = []
+
+            events: list[dict[str, Any]] = []
+            wallet_rows: list[dict[str, Any]] = []
+            timestamp_missing_count = 0
             for signature, block_time in signatures.items():
                 tx = self._rpc("getTransaction", [
                     signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
@@ -104,7 +119,8 @@ class SolanaWhaleScanner:
                 if not tx:
                     continue
                 meta = tx.get("meta") or {}
-                pre, post = meta.get("preTokenBalances") or [], meta.get("postTokenBalances") or []
+                pre = meta.get("preTokenBalances") or []
+                post = meta.get("postTokenBalances") or []
                 deltas: dict[str, float] = {}
                 for balances, sign in ((pre, -1.0), (post, 1.0)):
                     for balance in balances:
@@ -113,8 +129,37 @@ class SolanaWhaleScanner:
                         amount = (balance.get("uiTokenAmount") or {}).get("uiAmount")
                         if amount is None:
                             continue
-                        owner = str(balance["owner"]).lower()
+                        owner = str(balance["owner"])
                         deltas[owner] = deltas.get(owner, 0.0) + sign * float(amount)
+
+                if block_time <= 0:
+                    timestamp_missing_count += len([delta for delta in deltas.values() if abs(delta) > 1e-12])
+                else:
+                    event_time_ms = block_time * 1000
+                    received_at_ms = int(time.time() * 1000)
+                    slot = tx.get("slot")
+                    # Aggregate net token delta per owner for this transaction.
+                    # The event stays TRANSFER_IN/OUT, never an inferred BUY/SELL.
+                    for event_index, (owner, delta) in enumerate(sorted(deltas.items())):
+                        if abs(delta) <= 1e-12:
+                            continue
+                        wallet_rows.append({
+                            "chain": "solana",
+                            "tx_signature": signature,
+                            "wallet_address": owner,
+                            "token_address": mint,
+                            "event_type": "TRANSFER_IN" if delta > 0 else "TRANSFER_OUT",
+                            "event_index": event_index,
+                            "event_time_ms": event_time_ms,
+                            "received_at_ms": received_at_ms,
+                            "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
+                            "token_delta": delta,
+                            "quote_delta": None,
+                            "quote_symbol": None,
+                            "source": "public_solana_json_rpc",
+                            "evidence_status": "OBSERVED",
+                        })
+
                 senders = [[owner, -delta] for owner, delta in deltas.items() if delta < 0]
                 receivers = [[owner, delta] for owner, delta in deltas.items() if delta > 0]
                 si = ri = 0
@@ -137,20 +182,53 @@ class SolanaWhaleScanner:
                         si += 1
                     if receivers[ri][1] <= 1e-12:
                         ri += 1
+
+            persistence = {"status": "NOT_CONFIGURED", "inserted": 0, "duplicates": 0}
+            if wallet_rows:
+                try:
+                    persistence = {
+                        "status": "COMPLETE",
+                        **self.wallet_event_store.append_many(wallet_rows),
+                    }
+                except Exception as exc:
+                    persistence = {
+                        "status": "FAILED",
+                        "inserted": 0,
+                        "duplicates": 0,
+                        "reason": type(exc).__name__,
+                    }
+
             summary = analyze_whale_activity(events, whale_threshold_usd)
             summary.update({
                 "chain": "solana", "mint": mint, "sampled_token_accounts": len(accounts),
                 "sampled_transactions": len(signatures), "whale_watchlist": watchlist,
                 "coverage": "PARTIAL_RECENT_SAMPLE",
                 "source": "public_solana_json_rpc",
-                "caveat": "Recent transactions for largest token accounts only; no complete history, beneficial-owner clustering, or proof of exchange classification.",
+                "wallet_event_persistence": persistence,
+                "wallet_events_observed": len(wallet_rows),
+                "wallet_event_timestamps_missing": timestamp_missing_count,
+                "caveat": (
+                    "Recent transactions for largest token accounts only; no complete history, "
+                    "beneficial-owner clustering, or proof of exchange classification. "
+                    "Observed token movements are transfers, not inferred buys or sells."
+                ),
             })
+            # This scanner is explicitly partial regardless of successful persistence.
+            summary["status"] = "PARTIAL"
+            if persistence["status"] == "FAILED":
+                summary["persistence_warning"] = "Wallet observations were not durably saved."
             if price_usd is None:
-                summary["status"] = "PARTIAL"
                 summary["interpretation"] = "Recent token-account movements observed, but USD valuation is unavailable."
-            else:
-                summary["status"] = "PARTIAL"
             return summary
         except Exception as exc:
-            return {"status": "UNKNOWN", "reason": f"Solana public RPC scan failed: {type(exc).__name__}",
-                    "chain": "solana", "mint": mint}
+            return {
+                "status": "UNKNOWN",
+                "reason": f"Solana public RPC scan failed: {type(exc).__name__}",
+                "chain": "solana", "mint": mint,
+                "trade_authorization": "NO_TRADE",
+            }
+
+    def close(self) -> None:
+        if self._wallet_db is not None:
+            self._wallet_db.close()
+            self._wallet_db = None
