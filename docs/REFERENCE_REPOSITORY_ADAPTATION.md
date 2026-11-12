@@ -11,7 +11,7 @@ The four repositories are useful, but they do not provide four production-ready 
 
 | Reference | Useful contribution | Existing target implementation | Remaining gap / decision |
 |---|---|---|---|
-| [HyperData Terminal](https://github.com/Co-Messi/HyperData-Terminal) | Per-venue CVD/order flow, funding and OI normalization, liquidation evidence classes, freshness and coverage | `providers.py`, `market_intelligence.py`, `feed_health.py`, `walk_forward.py` | Funding/OI and health semantics exist. A real trade-level CVD stream and liquidation event feed with per-venue coverage are not established by the current target modules. Add only with event-time, deduplication, warm-up and stale/partial states. |
+| [HyperData Terminal](https://github.com/Co-Messi/HyperData-Terminal) | Per-venue CVD/order flow, funding and OI normalization, liquidation evidence classes, freshness and coverage | `providers.py`, `market_intelligence.py`, `feed_health.py`, `walk_forward.py`, new `order_flow.py` | A transport-agnostic per-venue CVD/coverage contract and confirmed-vs-estimated liquidation classifier now exist with regression tests. They are not yet connected to live provider streams, the integrated decision engine or dashboard. No live CVD/liquidation coverage is claimed. |
 | [million](https://github.com/Kelows/million) | Wallet ⇄ token discovery, wallet quality, owner/cluster inference, event-driven ingestion | `wallet_graph.py`, `whale_intelligence.py`, `solana_whales.py`, `whale_store.py`, Gem Hunter discovery modules | Existing Solana scan is deliberately partial. No claim of full token-lifetime wallet history. Adopt robust event ingestion and reconciliation only after durable/idempotent design. |
 | [TradeClaw](https://github.com/tradeclaw-labs/tradeclaw) | Strategy simulation skeleton, trade safety limits, simulation-first workflow | `walk_forward.py`, `signal_performance.py`, `paper_trading.py`, `indicators.py` | Target already has stronger cost-aware OOS and paper-ledger metrics. TradeClaw's inspected backtest engine does not model fees or slippage; do not use its raw return calculations as a performance benchmark. |
 | [Solbeam](https://github.com/CodeMuscle/solbeam) | Explainable weighted score, hard disqualifiers, holder and deployer risk concepts | `gem_hunter_security.py`, `evm_security.py`, `wallet_graph.py`, `solana_whales.py`, mandatory security gates | Reimplement only independently from documented concepts. The reviewed repository has no declared license, and its token route contains placeholder/default inputs; no source code may be copied. |
@@ -33,7 +33,8 @@ The four repositories are useful, but they do not provide four production-ready 
 ### Target status
 
 - **Already present:** cross-provider funding/OI retrieval and checks in `providers.py`; CoinGlass funding median, OI and large Hyperliquid position evidence in `market_intelligence.py`; market-board freshness/coverage in `feed_health.py`; historical funding-aware walk-forward validation in `walk_forward.py`.
-- **Not yet present as verified functionality:** continuous trade-level CVD with per-venue event IDs and coverage; multi-venue liquidation event ingestion with confirmed/estimated separation.
+- **Implemented as an isolated contract (not live functionality):** `order_flow.py` normalizes per-venue trade events, deduplicates venue-native IDs, uses exchange event time for window membership, tracks connection coverage/freshness, freezes on malformed payloads, excludes events from uncovered reconnect gaps, and suppresses usable CVD until coverage passes. Multi-venue directional agreement becomes UNKNOWN unless every configured venue is LIVE. The liquidation summarizer keeps confirmed liquidation events separate from estimated large-print proxies.
+- **Still not verified/integrated:** websocket/provider adapters, live trade subscriptions, durable deduplication across process restarts, historical replay/backfill, event-stream persistence, integrated-engine gates, dashboard display, and real liquidation event feeds. Unit tests were added but GitHub Actions currently fails before its first step, so no CI PASS is claimed.
 - **Do not infer:** CoinGlass OI/funding snapshots are not a substitute for trade-level CVD or a complete liquidation tape.
 
 ### Proposed acceptance tests
@@ -128,7 +129,7 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 ## Implementation order for Crypto Super Radar
 
 1. **Preserve the existing architecture.** Continue using Python provider adapters, typed models, hard gates, paper ledger and test suite. Do not import the Node/NestJS, Next.js or Supabase application stacks.
-2. **Market flow extension.** Design and test per-venue CVD and confirmed/estimated liquidation contracts before connecting them to the decision engine.
+2. **Market flow extension.** The transport-agnostic CVD/evidence-class contract is now implemented and regression tests are added. Next: connect one public provider at a time, preserve provider-native timestamps/IDs, add live acceptance tests, and only then connect an explicit engine gate.
 3. **Wallet event integrity.** Add durable, replay-safe wallet events and reconciliation before expanding smart-money discovery claims.
 4. **Risk evidence completeness.** Ensure every holder/deployer/authority field carries value, source, timestamp, coverage and status; missing inputs block rather than improve a score.
 5. **Backtest evidence.** Extend per-trade cost attribution and chronological OOS validation; reject fee-free headline metrics.
@@ -139,4 +140,38 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - Research and paper trading only. No real orders, signing, private keys, seed phrases or production wallet access.
 - No merge to `main`, no production migration, no secrets/config changes and no Render deploy as part of this reference audit.
 - `UNKNOWN`, stale, partial or conflicting evidence never becomes zero, `PASS` or `BUY`.
-- This document records a source audit and implementation plan; it does not claim that the missing CVD, liquidation stream, durable wallet event pipeline or full-history wallet graph has been implemented.
+- This document records a source audit and an evolving implementation plan. A standalone CVD/evidence-class contract is now in the Python codebase, but no live CVD stream, connected liquidation feed, durable wallet event pipeline or full-history wallet graph is claimed.
+
+
+## Implementation progress — 2026-11-12
+
+### TradeClaw-inspired paper-performance correction (F-34)
+
+- Updated `crypto_super_radar/signal_performance.py`: fee components are now treated as unknown when absent or invalid, rather than substituted with zero.
+- Complete fee totals and fee-to-gross-profit ratios are emitted only when every valid closed trade has both valid fee components. Partial known fee components remain separately visible as `known_recorded_fees_usd`; `total_recorded_fees_usd` remains null when coverage is incomplete.
+- Added tests for missing fee, explicitly zero fees and invalid fee values.
+- Local isolated logic checks passed for four fee-attribution scenarios. Full project test suite remains unverified because the GitHub Actions runner jobs terminate before their first step.
+
+### HyperData-inspired per-venue order flow contract
+
+- Added `crypto_super_radar/order_flow.py` and `tests/test_order_flow.py`.
+- The module is transport-agnostic and accepts normalized base quantity, venue-native trade ID, source and exchange event timestamp. It does not fetch data or open network connections.
+- CVD is kept per venue. Deduplication is per venue; event time determines window membership; receive time determines freshness; reconnect gaps are not filled with old observations; warm-up, stale, frozen, silent and disconnected states suppress usable CVD.
+- Cross-venue alignment is UNKNOWN unless every configured venue is LIVE. No aggregate CVD is emitted.
+- Liquidation records must be explicitly classified. `ESTIMATED_LARGE_PRINT` is kept separate and is never added to confirmed liquidation notional.
+- The new tests cover duplicate trade IDs, out-of-order arrivals, warm-up, stale venues, malformed sides, future timestamps, missing base quantity, reconnect gaps and confirmed/estimated liquidation separation.
+
+### Commits on the feature branch
+
+- `fdf6e280ba0f74215c09e5c431c82032b923396b` — fail-closed fee completeness.
+- `d64ff88d496e22b5115ff6bbde327e245ff01e2b` — fee regression tests.
+- `80a8c16840254a89a38c63c359b78bf46658a4d9` — remove aggregation of unknown fee rows.
+- `6ceb81b8e5f29391fb753c7ecfa97d600b9f078e` / `357017b2757827f8dd524a1878dd30a504beb783` — initial order-flow contract and tests.
+- `e0ab2615d611f9b89621b4f10f56261038177db7` / `7dd449c464dc280a50ac7da7a2b02523b367e40b` — reconnect-gap correctness and regression tests. Current feature-branch HEAD at this documentation point: `7dd449c464dc280a50ac7da7a2b02523b367e40b`.
+
+### Validation status and boundary
+
+- GitHub Actions on HEAD `7dd449c464dc280a50ac7da7a2b02523b367e40b`: offline-tests #818 and runner-diagnostic #20 failed before any step; their jobs expose `steps=null` and `logs_url=null`. The live-provider workflow also failed before usable job evidence.
+- Consequently, no automated unit/integration/Streamlit CI pass is claimed. The local fee logic checks are narrow, not a substitute for repository tests.
+- No provider adapter, integrated engine, dashboard, database schema, secrets, Render configuration or deployed service was changed. No deploy, merge, live order, wallet connection or signing occurred.
+- Next acceptance sequence: restore a functioning runner; run all offline tests and Streamlit smoke tests on the exact HEAD; then wire one provider at a time to the new order-flow contract with timestamp, source and coverage tests; only afterwards add an explicit engine gate and UI view.
