@@ -112,15 +112,54 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["filters"]["volume_confirmation"], "FAIL")
         self.assertEqual(result["decision"], "NO_TRADE")
 
-    def test_security_evidence_controls_security_filter_and_gate(self):
+    def test_limited_provider_pass_is_not_full_token_security_pass(self):
         item = candidate()
-        item["security_evidence"] = {"status": "FAIL", "provider": "GOPLUS_SOURCIFY"}
+        item["security_evidence"] = {
+            "status": "PASS", "provider": "GOPLUS_SOURCIFY",
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "source_verified": True, "flags": {"is_honeypot": False},
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["contract_security"], "UNKNOWN")
+        self.assertEqual(result["critical_gates"]["security"], "UNKNOWN")
+        self.assertEqual(result["token_risk_assessment"]["incomplete_check_count"], 5)
+
+    def test_source_backed_security_failure_is_preserved(self):
+        item = candidate()
+        item["security_evidence"] = {
+            "status": "FAIL", "provider": "GOPLUS_SOURCIFY",
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "flags": {"is_honeypot": True},
+        }
         result = evaluate_discovery_candidate(item, now=NOW)
         self.assertEqual(result["filters"]["contract_security"], "FAIL")
         self.assertEqual(result["critical_gates"]["security"], "FAIL")
-        item["security_evidence"] = {"status": "UNKNOWN", "provider": "SOLANA_RPC"}
+
+    def test_all_five_complete_token_risk_checks_can_pass_security_subgate(self):
+        item = candidate()
+        item["token_risk_evidence"] = {
+            name: {
+                "status": "PASS", "source": "verified-provider-" + name,
+                "checked_at": "2026-11-11T11:59:00Z", "coverage_pct": 100,
+                "value": {"observed": True},
+            }
+            for name in (
+                "contract_authority", "holder_concentration", "deployer_history",
+                "launch_bundle", "liquidity_exit",
+            )
+        }
         result = evaluate_discovery_candidate(item, now=NOW)
-        self.assertEqual(result["filters"]["contract_security"], "UNKNOWN")
+        self.assertEqual(result["critical_gates"]["security"], "PASS")
+        self.assertEqual(result["token_risk_assessment"]["passed_check_count"], 5)
+        self.assertEqual(result["token_risk_assessment"]["trade_authorization"], "NO_TRADE")
+
+    def test_missing_timestamp_does_not_support_source_backed_fail(self):
+        item = candidate()
+        item["security_evidence"] = {
+            "status": "FAIL", "provider": "GOPLUS_SOURCIFY",
+            "flags": {"is_honeypot": True},
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
         self.assertEqual(result["critical_gates"]["security"], "UNKNOWN")
 
     def test_batch_evaluator_keeps_discovery_untradeable_and_preserves_existing_records(self):
