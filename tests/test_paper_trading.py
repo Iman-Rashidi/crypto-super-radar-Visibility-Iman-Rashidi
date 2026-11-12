@@ -464,6 +464,20 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertGreater(trade["exit_fee"], 0.0)
         self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
 
+    def test_partial_exit_realized_loss_counts_toward_daily_risk_limit(self):
+        bot = PaperTradingBot(
+            self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001,
+        )
+        self.assertEqual(bot.run_once("cex:BTCUSDT")["status"], "OPENED")
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
+        self.engine.data.order_book_sell_qty = 20.0
+        partial = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+        controls = bot.state()["risk_controls"]
+        self.assertFalse(controls["entry_allowed"])
+        self.assertIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
+        self.assertLess(controls["daily_partial_exit_pnl_usd"], 0.0)
+
     def test_zero_liquidity_exit_leaves_position_unchanged(self):
         self.bot.run_once("cex:BTCUSDT")
         before = self.ledger.position()
