@@ -141,6 +141,44 @@ def _freeze_adapter_error(venue: VenueOrderFlow, error: OrderFlowAdapterError) -
     return venue.reject_payload(error.args[0] if error.args else "UNSPECIFIED_ADAPTER_ERROR")
 
 
+def _persist_accepted_events(
+    venue: VenueOrderFlow,
+    events: list[dict[str, Any]],
+    *,
+    event_store: Any,
+    symbol: str,
+) -> dict[str, int] | dict[str, Any]:
+    """Persist accepted observations; freeze the venue if durability is lost."""
+    if not events:
+        return {"persisted": 0, "persisted_duplicates": 0}
+    append_many = getattr(event_store, "append_many", None)
+    if not callable(append_many):
+        return venue.fail_closed("INVALID_ORDER_FLOW_EVENT_STORE")
+    rows = [
+        {
+            **event,
+            "venue": venue.venue,
+            "symbol": symbol.strip().upper(),
+        }
+        for event in events
+    ]
+    try:
+        result = append_many(rows)
+    except Exception:
+        return venue.fail_closed("ORDER_FLOW_EVENT_STORE_WRITE_FAILED")
+    if not isinstance(result, Mapping):
+        return venue.fail_closed("INVALID_ORDER_FLOW_EVENT_STORE_RESULT")
+    inserted = result.get("inserted")
+    duplicates = result.get("duplicates")
+    if (
+        isinstance(inserted, bool) or not isinstance(inserted, int) or inserted < 0
+        or isinstance(duplicates, bool) or not isinstance(duplicates, int) or duplicates < 0
+        or inserted + duplicates != len(rows)
+    ):
+        return venue.fail_closed("INVALID_ORDER_FLOW_EVENT_STORE_RESULT")
+    return {"persisted": inserted, "persisted_duplicates": duplicates}
+
+
 def ingest_binance_spot_message(
     venue: VenueOrderFlow,
     payload: Mapping[str, Any],
@@ -148,8 +186,13 @@ def ingest_binance_spot_message(
     channel_type: str,
     received_at_ms: int,
     expected_symbol: str,
+    event_store: Any | None = None,
 ) -> dict[str, Any]:
-    """Normalize and ingest one raw or combined Binance Spot aggTrade message."""
+    """Normalize and ingest one raw or combined Binance Spot aggTrade message.
+
+    When event_store is supplied, accepted observations are durably appended
+    before the adapter reports success. A persistence failure freezes the venue.
+    """
     try:
         message: Any = payload
         if isinstance(payload, Mapping) and "data" in payload:
@@ -165,7 +208,15 @@ def ingest_binance_spot_message(
         )
     except OrderFlowAdapterError as exc:
         return _freeze_adapter_error(venue, exc)
-    return venue.ingest_trade(**event)
+    result = venue.ingest_trade(**event)
+    if not result.get("accepted") or event_store is None:
+        return result
+    persisted = _persist_accepted_events(
+        venue, [event], event_store=event_store, symbol=expected_symbol
+    )
+    if persisted.get("reason"):
+        return persisted
+    return {**result, **persisted}
 
 
 def ingest_bybit_spot_message(
@@ -175,8 +226,13 @@ def ingest_bybit_spot_message(
     channel_type: str,
     received_at_ms: int,
     expected_symbol: str,
+    event_store: Any | None = None,
 ) -> dict[str, Any]:
-    """Normalize and ingest a Bybit Spot publicTrade message (one or many trades)."""
+    """Normalize and ingest a Bybit Spot publicTrade message (one or many trades).
+
+    When event_store is supplied, accepted observations are persisted as one
+    batch. A persistence failure freezes the venue and makes its CVD unusable.
+    """
     try:
         events = normalize_bybit_spot_public_trade_message(
             payload,
@@ -191,9 +247,26 @@ def ingest_bybit_spot_message(
         venue.ingest_trade(**event)
         for event in events
     ]
+    accepted_events = [
+        event for event, result in zip(events, results) if result.get("accepted")
+    ]
+    persistence: dict[str, Any] = {}
+    if event_store is not None and accepted_events:
+        persistence = _persist_accepted_events(
+            venue, accepted_events, event_store=event_store,
+            symbol=expected_symbol,
+        )
+        if persistence.get("reason"):
+            return {
+                **persistence,
+                "accepted": 0,
+                "rejected": len(accepted_events),
+                "results": results,
+            }
     return {
         "accepted": sum(bool(item.get("accepted")) for item in results),
         "duplicates": sum(item.get("reason") == "DUPLICATE_TRADE_ID" for item in results),
         "rejected": sum(not item.get("accepted") and item.get("reason") != "DUPLICATE_TRADE_ID" for item in results),
         "results": results,
+        **persistence,
     }
