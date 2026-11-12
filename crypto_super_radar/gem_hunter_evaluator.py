@@ -30,6 +30,49 @@ def _number(value: Any):
         return None
     return result if result == result and abs(result) != float("inf") else None
 
+def _validated_technical_evidence(candidate: dict, evidence: Any,
+                                  now: datetime) -> dict[str, Any]:
+    """Accept only fresh, complete OHLCV evidence for this exact token and pool."""
+    if not isinstance(evidence, dict):
+        return {}
+    if evidence.get("schema_version") != "gem-hunter-technical-v1":
+        return {}
+    if evidence.get("status") != "COMPLETE" or evidence.get("coverage_status") != "COMPLETE":
+        return {}
+    chain = str(candidate.get("chain") or "").lower()
+    if str(evidence.get("chain") or "").lower() != chain:
+        return {}
+    for key in ("token_address", "pool_address"):
+        left, right = candidate.get(key), evidence.get(key)
+        if not isinstance(left, str) or not isinstance(right, str):
+            return {}
+        if (left != right) if chain == "solana" else (left.lower() != right.lower()):
+            return {}
+    sources = set(evidence.get("sources") or [])
+    if not {"GECKOTERMINAL", "BINANCE_SPOT"}.issubset(sources):
+        return {}
+    raw_timestamp = evidence.get("checked_at_utc")
+    if not isinstance(raw_timestamp, str):
+        return {}
+    try:
+        checked = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return {}
+    if checked.tzinfo is None:
+        return {}
+    age = (now - checked.astimezone(timezone.utc)).total_seconds()
+    if age < -30 or age > 300:
+        return {}
+    filters = evidence.get("filters")
+    if not isinstance(filters, dict):
+        return {}
+    allowed = {"PASS", "FAIL", "UNKNOWN"}
+    if any(filters.get(key) not in allowed for key in (
+        "trend", "momentum", "relative_strength", "market_regime_validation"
+    )):
+        return {}
+    return evidence
+
 
 def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None) -> dict:
     """Attach a conservative, explicit qualification record; never authorizes BUY."""
@@ -68,6 +111,10 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     buys = _number(candidate.get("buys_24h"))
     sells = _number(candidate.get("sells_24h"))
     change = _number(candidate.get("price_change_1h_pct"))
+    technical_evidence = _validated_technical_evidence(
+        candidate, candidate.get("technical_evidence"), now,
+    )
+    technical_filters = technical_evidence.get("filters", {})
     security_evidence = candidate.get("security_evidence")
     security_evidence = security_evidence if isinstance(security_evidence, dict) else {}
     token_risk_evidence = candidate.get("token_risk_evidence")
@@ -136,15 +183,42 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     else:
         reasons["liquidity_depth"] = "Pool liquidity aggregate is not executable order-book/pool depth; depth remains UNKNOWN."
 
-    # Pool age is not a trend signal. A price series with multiple timeframes
-    # is required before this filter can pass or fail.
-    reasons["trend"] = "Pool age is not a trend signal; verified multi-timeframe price history is not connected."
-
-    if change is not None:
-        filters["momentum"] = "FAIL" if change <= -20 or change >= 50 else "UNKNOWN"
-        reasons["momentum"] = "Only 1h price change is available; multi-timeframe momentum is not established."
+    # Technical filters are upgraded only from fresh, complete, exact-pool
+    # multi-timeframe OHLCV plus BTC/ETH benchmark evidence.
+    if technical_evidence:
+        for filter_id in ("trend", "momentum", "relative_strength", "market_regime_validation"):
+            filters[filter_id] = technical_filters[filter_id]
+        reasons["trend"] = (
+            "روند با EMA20/EMA50 روی کندل‌های بسته‌شدهٔ ۴ساعته و روزانه تأیید شد."
+            if filters["trend"] == "PASS" else
+            "روند چندبازه‌ای نزولی است."
+            if filters["trend"] == "FAIL" else
+            "جهت روند در بازه‌های ۴ساعته و روزانه هم‌جهت نیست."
+        )
+        reasons["momentum"] = (
+            "شتاب با بازده و RSI14 در بازه‌های ۱۵دقیقه و ۴ساعت تأیید شد."
+            if filters["momentum"] == "PASS" else
+            "شتاب در هر دو بازهٔ کوتاه‌مدت و میان‌مدت منفی است."
+            if filters["momentum"] == "FAIL" else
+            "شرایط شتاب در تمام بازه‌های لازم هم‌جهت نیست."
+        )
+        reasons["relative_strength"] = (
+            "بازده ۷ و ۳۰روزهٔ توکن از BTC و ETH در هر دو پنجره بیشتر است."
+            if filters["relative_strength"] == "PASS" else
+            "بازده ۷ و ۳۰روزهٔ توکن از BTC و ETH در هر دو پنجره کمتر است."
+            if filters["relative_strength"] == "FAIL" else
+            "قدرت نسبی در بازه‌های ۷ و ۳۰روزه با هر دو benchmark هم‌جهت نیست."
+        )
+        reasons["market_regime_validation"] = (
+            "رژیم روزانهٔ BTC و ETH هر دو صعودی است."
+            if filters["market_regime_validation"] == "PASS" else
+            "رژیم روزانهٔ BTC و ETH هر دو نزولی است."
+            if filters["market_regime_validation"] == "FAIL" else
+            "رژیم BTC و ETH برای تأیید یک جهت مشترک هم‌سو نیست."
+        )
     else:
-        reasons["momentum"] = "1h price change is unavailable."
+        reasons["trend"] = "Pool age یا تغییر یک‌ساعته روند محسوب نمی‌شود؛ تاریخچهٔ چندبازه‌ای تازه و کامل متصل نیست."
+        reasons["momentum"] = "شتاب فقط با OHLCV بسته‌شدهٔ ۱۵دقیقه‌ای و ۴ساعته و RSI14 ارزیابی می‌شود؛ شواهد کامل در دسترس نیست."
 
     if buys is not None and sells is not None:
         if buys + sells >= 200 and buys + sells > 0:
@@ -243,6 +317,9 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "top10_independent_holders_pct": None,
         "related_wallet_cluster_pct": None,
         "estimated_slippage_bps": None,
+        "technical_evidence_status": technical_evidence.get("status", "UNKNOWN") if technical_evidence else "UNKNOWN",
+        "technical_metrics": technical_evidence.get("metrics", {}) if technical_evidence else {},
+        "technical_timeframes": technical_evidence.get("timeframes", {}) if technical_evidence else {},
     }
     whale = {
         "status": "UNKNOWN",
