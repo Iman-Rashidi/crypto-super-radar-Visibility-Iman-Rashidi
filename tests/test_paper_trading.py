@@ -315,5 +315,54 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertEqual(self.ledger.execution_ledger.event_count(), 0)
 
 
+    def test_projection_reconciliation_passes_for_open_and_closed_position(self):
+        opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        open_check = self.ledger.reconciliation()
+        self.assertEqual(open_check["status"], "PASS")
+        self.assertEqual(open_check["matched_fills"], 1)
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        closed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(closed["status"], "CLOSED")
+        closed_check = self.ledger.reconciliation()
+        self.assertEqual(closed_check["status"], "PASS")
+        self.assertEqual(closed_check["matched_fills"], 2)
+        self.assertAlmostEqual(closed_check["cash_delta_usd"], 0.0, places=6)
+
+    def test_legacy_position_without_execution_events_is_incomplete(self):
+        original = self.ledger.execution_ledger.record_simulated_fill
+        self.ledger.execution_ledger.record_simulated_fill = lambda **kwargs: None
+        position = {
+            "asset": "cex:BTCUSDT", "quantity": 1.0, "entry_price": 100.0,
+            "stop_loss": 90.0, "initial_stop_loss": 90.0, "take_profit": 120.0,
+            "entry_fee": 0.1, "opened_at": 123, "signal_bar": "legacy-bar",
+            "confirmation_score": 80.0, "risk_budget": 50.0, "max_holding_days": 14,
+        }
+        try:
+            self.assertTrue(self.ledger.open_position(position, 100.1))
+        finally:
+            self.ledger.execution_ledger.record_simulated_fill = original
+        result = self.ledger.reconciliation()
+        self.assertEqual(result["status"], "INCOMPLETE")
+        self.assertEqual(len(result["missing_events"]), 1)
+        self.assertIn("open-position-entry", result["missing_events"][0])
+
+    def test_cash_projection_drift_is_a_reconciliation_failure(self):
+        with self.ledger._lock, self.ledger._db:
+            self.ledger._db.execute(
+                "UPDATE paper_account SET cash_balance=cash_balance-5.0 WHERE id=1"
+            )
+        result = self.ledger.reconciliation()
+        self.assertEqual(result["status"], "FAIL")
+        self.assertTrue(any("cash projection mismatch" in error for error in result["errors"]))
+
+    def test_empty_paper_account_reconciliation_returns_no_data(self):
+        result = self.ledger.reconciliation()
+        self.assertEqual(result["status"], "NO_DATA")
+        self.assertEqual(result["event_count"], 0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

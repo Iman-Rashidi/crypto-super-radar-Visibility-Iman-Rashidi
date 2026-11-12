@@ -450,6 +450,148 @@ class PaperLedger:
             "spread_attribution": "COMPLETE" if total_spread is not None else "INCOMPLETE",
         }
 
+    def reconciliation(self) -> dict[str, Any]:
+        """Compare account projections with immutable execution events.
+
+        Missing events on legacy rows are INCOMPLETE, never reconstructed.
+        Cash consistency uses initial equity + realized PnL - open-position debit.
+        """
+        with self._lock:
+            account = self._db.execute(
+                "SELECT initial_equity, cash_balance FROM paper_account WHERE id=1"
+            ).fetchone()
+            position_row = self._db.execute(
+                "SELECT * FROM paper_positions WHERE id=1"
+            ).fetchone()
+            trade_rows = self._db.execute(
+                "SELECT * FROM paper_trades ORDER BY closed_at ASC, id ASC"
+            ).fetchall()
+
+        replay = self.execution_ledger.replay_order_states()
+        errors: list[str] = []
+        missing_events: list[str] = []
+        missing_projections: list[str] = []
+        matched_fills = 0
+        expected_order_ids: set[str] = set()
+
+        if account is None:
+            return {
+                "status": "FAIL", "errors": ["paper_account row is missing"],
+                "missing_events": [], "missing_projections": [],
+                "event_replay_status": replay["status"],
+            }
+        if replay["status"] == "FAIL":
+            errors.extend(replay["errors"])
+
+        initial = float(account["initial_equity"])
+        cash = float(account["cash_balance"])
+        realized = sum(float(row["net_pnl"]) for row in trade_rows)
+        position = dict(position_row) if position_row else None
+        open_debit = (
+            float(position["quantity"]) * float(position["entry_price"])
+            + float(position["entry_fee"])
+            if position else 0.0
+        )
+        expected_cash = initial + realized - open_debit
+        cash_delta = cash - expected_cash
+        cash_tolerance = max(0.01, abs(expected_cash) * 1e-8)
+        if abs(cash_delta) > cash_tolerance:
+            errors.append(
+                f"cash projection mismatch: actual={cash:.8f}, expected={expected_cash:.8f}"
+            )
+
+        def verify_fill(
+            *, order_id: str, asset: str, side: str, quantity: float,
+            price: float, fee: float, label: str,
+        ) -> None:
+            nonlocal matched_fills
+            expected_order_ids.add(order_id)
+            event = self.execution_ledger.order_state(order_id)
+            if event is None:
+                missing_events.append(f"{label}:{order_id}")
+                return
+            if event["status"] != "FILLED":
+                errors.append(f"{label}:{order_id} has status {event['status']}, expected FILLED")
+                return
+            for field, actual, expected in (
+                ("asset", str(event["asset"]), asset),
+                ("side", str(event["side"]), side),
+            ):
+                if actual != expected:
+                    errors.append(f"{label}:{order_id} {field} mismatch")
+            for field, actual, expected in (
+                ("quantity", float(event["quantity"]), quantity),
+                ("filled_quantity", float(event["filled_quantity"]), quantity),
+                ("fill_price", float(event["fill_price"]), price),
+                ("fee_paid_usd", float(event["fee_paid_usd"]), fee),
+            ):
+                if not math.isclose(actual, expected, rel_tol=1e-8, abs_tol=1e-8):
+                    errors.append(f"{label}:{order_id} {field} mismatch")
+            if not any(message.startswith(f"{label}:{order_id} ") for message in errors):
+                matched_fills += 1
+
+        for row in trade_rows:
+            trade = dict(row)
+            asset = str(trade["asset"])
+            signal_bar = str(trade["signal_bar"])
+            quantity = float(trade["quantity"])
+            verify_fill(
+                order_id=make_paper_client_order_id(asset, signal_bar, "ENTRY"),
+                asset=asset, side="BUY", quantity=quantity,
+                price=float(trade["entry_price"]), fee=float(trade["entry_fee"]),
+                label=f"trade-{trade['id']}-entry",
+            )
+            verify_fill(
+                order_id=make_paper_client_order_id(asset, signal_bar, "EXIT"),
+                asset=asset, side="SELL", quantity=quantity,
+                price=float(trade["exit_price"]), fee=float(trade["exit_fee"]),
+                label=f"trade-{trade['id']}-exit",
+            )
+
+        if position:
+            asset = str(position["asset"])
+            signal_bar = str(position["signal_bar"])
+            quantity = float(position["quantity"])
+            entry_id = make_paper_client_order_id(asset, signal_bar, "ENTRY")
+            exit_id = make_paper_client_order_id(asset, signal_bar, "EXIT")
+            verify_fill(
+                order_id=entry_id, asset=asset, side="BUY", quantity=quantity,
+                price=float(position["entry_price"]), fee=float(position["entry_fee"]),
+                label="open-position-entry",
+            )
+            exit_event = self.execution_ledger.order_state(exit_id)
+            if exit_event is not None and exit_event["status"] == "FILLED":
+                errors.append(f"open position still exists after filled exit order {exit_id}")
+
+        for order in replay["orders"].values():
+            order_id = str(order["client_order_id"])
+            if order_id.startswith(("paper-entry-", "paper-exit-")) and order_id not in expected_order_ids:
+                missing_projections.append(order_id)
+
+        if errors:
+            result_status = "FAIL"
+        elif missing_events or missing_projections:
+            result_status = "INCOMPLETE"
+        elif not trade_rows and not position and replay["event_count"] == 0:
+            result_status = "NO_DATA"
+        else:
+            result_status = "PASS"
+
+        return {
+            "status": result_status,
+            "positions_checked": 1 if position else 0,
+            "closed_trades_checked": len(trade_rows),
+            "matched_fills": matched_fills,
+            "event_count": replay["event_count"],
+            "event_replay_status": replay["status"],
+            "cash_balance_usd": round(cash, 8),
+            "expected_cash_balance_usd": round(expected_cash, 8),
+            "cash_delta_usd": round(cash_delta, 8),
+            "missing_events": missing_events,
+            "missing_projections": missing_projections,
+            "errors": errors,
+        }
+
     def state(self) -> dict[str, Any]:
         with self._lock:
             account = self._db.execute("SELECT * FROM paper_account WHERE id=1").fetchone()
@@ -502,6 +644,7 @@ class PaperLedger:
                 "append_only": True,
                 "mode": "PAPER_ONLY",
             },
+            "reconciliation": self.reconciliation(),
             "performance": performance,
             "execution_cost_notes": {
                 "entry_exit_slippage": "Observed against fresh best ask/bid when available; otherwise modelled versus the cross-validated reference price. Already embedded in fills and not deducted twice.",
