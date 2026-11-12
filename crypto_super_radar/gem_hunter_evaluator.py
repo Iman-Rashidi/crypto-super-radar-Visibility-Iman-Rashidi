@@ -96,7 +96,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
                 },
                 "reason": "A limited provider check identified an explicit security disqualifier.",
             }
-    token_risk_assessment = evaluate_token_security(token_risk_evidence)
+    token_risk_assessment = evaluate_token_security(token_risk_evidence, now=now)
     security_status = token_risk_assessment["security_gate_status"]
 
     filters = {name: "UNKNOWN" for name in FILTER_IDS}
