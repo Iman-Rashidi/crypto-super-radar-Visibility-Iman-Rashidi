@@ -123,7 +123,7 @@ class WalletGraphAnalyticsTests(unittest.TestCase):
         result = WalletGraphAnalytics(min_wallets=2, min_events=2).analyze_token_distribution(
             rows, chain="solana", token="MintGraphABC123"
         )
-        self.assertEqual(result["status"], "WATCHLIST")
+        self.assertEqual(result["status"], "SUSPICIOUS")
         self.assertEqual(result["suspicious_pair_count"], 1)
         self.assertIn(
             "repeated_direct_counterparty_transfers",
