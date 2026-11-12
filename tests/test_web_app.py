@@ -496,6 +496,98 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["performance"]["fee_data_status"], "NO_DATA")
         self.assertIsNone(result["performance"]["fee_coverage_pct"])
 
+    def test_paper_bot_cycle_report_translates_no_trade_and_performance_into_persian(self):
+        cycle = {
+            "status": "NO_TRADE",
+            "asset": "cex:SOLUSDT",
+            "reason": "Every mandatory signal gate must PASS before paper entry.",
+        }
+        paper_state = {
+            "account": {
+                "initial_equity_usd": 10000.0,
+                "cash_balance_usd": 10000.0,
+                "equity_usd": 10000.0,
+                "realized_pnl_usd": 0.0,
+                "unrealized_pnl_usd": 0.0,
+                "total_return_pct": 0.0,
+            },
+            "open_position": None,
+            "recent_trades": [],
+            "performance": {
+                "status": "INSUFFICIENT_SAMPLE",
+                "sample_size": 0,
+                "minimum_sample_size": 30,
+                "performance_claim_allowed": False,
+                "fee_data_status": "NO_DATA",
+                "slippage_data_status": "NO_DATA",
+                "spread_data_status": "NO_DATA",
+                "funding_data_status": "NO_DATA",
+                "execution_cost_attribution_status": "NO_DATA",
+                "reason": "No valid closed paper trades are recorded yet.",
+            },
+        }
+        safety = {
+            "read_only": True,
+            "paper_only": True,
+            "wallet_credentials_used": False,
+            "private_exchange_credentials_used": False,
+            "orders_submitted": False,
+            "transactions_signed": False,
+        }
+        report = web_app._paper_tick_report_fa(cycle, paper_state, safety)
+        self.assertEqual(report["cycle"][0]["value"], "معامله‌ای انجام نشد")
+        self.assertEqual(report["cycle"][1]["value"], "SOLUSDT")
+        self.assertIn("تمام دروازه‌های اجباری سیگنال", report["cycle"][2]["value"])
+        self.assertEqual(report["performance"][0]["value"], "تعداد نمونهٔ آماری کافی نیست")
+        self.assertEqual(report["performance"][1]["value"], 0)
+        self.assertEqual(report["performance"][2]["value"], 30)
+        self.assertEqual(report["performance"][3]["value"], "مجاز نیست")
+        self.assertIn("معاملهٔ آزمایشیِ بسته‌شده", report["performance"][-1]["value"])
+        self.assertIn("هیچ موقعیت بازی", report["open_position"]["note"])
+        self.assertIn("هیچ سفارش واقعی", " ".join(report["execution_cost_notes"]))
+        self.assertNotIn("Every mandatory signal gate", json.dumps(report, ensure_ascii=False))
+
+    def test_paper_tick_worker_attaches_persian_report_without_changing_no_trade(self):
+        job_id = "paper-cycle-persian-test"
+        old_job = web_app.JOBS.get(job_id)
+        cycle = {
+            "status": "NO_TRADE",
+            "asset": "cex:SOLUSDT",
+            "reason": "Every mandatory signal gate must PASS before paper entry.",
+        }
+        paper_state = {
+            "mode": "PAPER_ONLY",
+            "account": {"initial_equity_usd": 10000.0, "cash_balance_usd": 10000.0,
+                        "equity_usd": 10000.0, "realized_pnl_usd": 0.0,
+                        "unrealized_pnl_usd": 0.0, "total_return_pct": 0.0},
+            "open_position": None,
+            "recent_trades": [],
+            "performance": {"status": "INSUFFICIENT_SAMPLE", "sample_size": 0,
+                            "minimum_sample_size": 30, "performance_claim_allowed": False,
+                            "reason": "No valid closed paper trades are recorded yet."},
+        }
+        try:
+            with patch.object(web_app.PAPER_BOT, "run_once", return_value=cycle), \\
+                 patch.object(web_app.PAPER_BOT, "state", return_value=paper_state):
+                web_app._run_paper_tick(job_id, "cex:SOLUSDT")
+            job = web_app.JOBS[job_id]
+            self.assertEqual(job["status"], "completed")
+            self.assertEqual(job["result"]["cycle"]["status"], "NO_TRADE")
+            self.assertIn("reason_fa", job["result"]["cycle"])
+            self.assertEqual(job["result"]["report_fa"]["cycle"][0]["value"], "معامله‌ای انجام نشد")
+            self.assertFalse(job["result"]["safety"]["orders_submitted"])
+        finally:
+            web_app.JOBS.pop(job_id, None)
+            if old_job is not None:
+                web_app.JOBS[job_id] = old_job
+
+    def test_paper_tick_result_page_renders_persian_report_not_raw_json(self):
+        script = web_app._paper_tick_page_script("test-cycle-id")
+        self.assertIn("renderPaperBotReport", script)
+        self.assertIn("گزارش فارسی از سرور دریافت نشد", script)
+        self.assertIn("همان چرخه به‌طور خودکار دوباره بررسی می‌شود", script)
+        self.assertNotIn("JSON.stringify", script)
+
     def test_history_endpoint_returns_local_sqlite_summary(self):
         status, headers, payload = self.request(
             "GET", "/history?asset=" + quote("cex:BTCUSDT", safe="")
