@@ -72,6 +72,10 @@ def summarize_closed_trades(
 
         entry_slippage = _finite(trade.get("entry_slippage_usd"))
         exit_slippage = _finite(trade.get("exit_slippage_usd"))
+        if entry_slippage is not None and entry_slippage < 0:
+            entry_slippage = None
+        if exit_slippage is not None and exit_slippage < 0:
+            exit_slippage = None
         slippage_total = (
             entry_slippage + exit_slippage
             if entry_slippage is not None and exit_slippage is not None
@@ -84,16 +88,19 @@ def summarize_closed_trades(
             slippage_incomplete_rows += 1
 
         spread_cost = _finite(trade.get("spread_cost_usd"))
-        if spread_cost is None:
+        if spread_cost is None or spread_cost < 0:
+            spread_cost = None
             spread_incomplete_rows += 1
         else:
             known_recorded_spread += spread_cost
 
         funding_status = str(trade.get("funding_status") or "").strip().upper()
         funding_cost = _finite(trade.get("funding_cost_usd"))
-        if funding_status == "NOT_APPLICABLE" and funding_cost == 0:
-            funding_cost = 0.0
-        elif funding_cost is None:
+        if not (
+            (funding_status == "NOT_APPLICABLE" and funding_cost == 0)
+            or (funding_status == "RECORDED" and funding_cost is not None)
+        ):
+            funding_cost = None
             funding_incomplete_rows += 1
         if funding_cost is not None:
             known_recorded_funding += funding_cost
