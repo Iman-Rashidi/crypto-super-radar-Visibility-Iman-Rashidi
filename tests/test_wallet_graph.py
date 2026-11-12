@@ -77,6 +77,59 @@ class WalletGraphAnalyticsTests(unittest.TestCase):
         self.assertIn(result["status"], {"WATCHLIST", "SUSPICIOUS"})
         self.assertGreater(result["suspicious_pair_count"], 0)
 
+    def test_single_direct_transfer_between_two_wallets_is_not_sybil_evidence(self):
+        rows = _rows(wallet_count=2)
+        rows = [
+            {
+                "chain": "solana", "wallet": "WalletSenderABC123",
+                "token": "MintGraphABC123", "event_type": "transfer",
+                "timestamp": 1_700_000_000, "amount_tokens": 5.0,
+                "counterparty_wallet": "WalletReceiverXYZ789",
+                "tx_hash": "SingleTransferSignature",
+                "instruction_index": 0,
+            },
+            {
+                "chain": "solana", "wallet": "WalletReceiverXYZ789",
+                "token": "MintGraphABC123", "event_type": "transfer",
+                "timestamp": 1_700_000_000, "amount_tokens": 5.0,
+                "counterparty_wallet": "WalletSenderABC123",
+                "tx_hash": "SingleTransferSignature",
+                "instruction_index": 0,
+            },
+        ]
+        result = WalletGraphAnalytics(min_wallets=2, min_events=2).analyze_token_distribution(
+            rows, chain="solana", token="MintGraphABC123"
+        )
+        self.assertEqual(result["status"], "NO_ANOMALY_DETECTED")
+        self.assertEqual(result["suspicious_pair_count"], 0)
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
+
+    def test_repeated_direct_counterparty_transfers_are_explainable_graph_evidence(self):
+        rows = []
+        for index in range(3):
+            signature = f"TransferSignature{index}"
+            timestamp = 1_700_000_000 + index * 60
+            for wallet, peer, delta in (
+                ("WalletSenderABC123", "WalletReceiverXYZ789", -5.0),
+                ("WalletReceiverXYZ789", "WalletSenderABC123", 5.0),
+            ):
+                rows.append({
+                    "chain": "solana", "wallet": wallet,
+                    "token": "MintGraphABC123", "event_type": "transfer",
+                    "timestamp": timestamp, "amount_tokens": abs(delta),
+                    "counterparty_wallet": peer, "tx_hash": signature,
+                    "instruction_index": index,
+                })
+        result = WalletGraphAnalytics(min_wallets=2, min_events=2).analyze_token_distribution(
+            rows, chain="solana", token="MintGraphABC123"
+        )
+        self.assertEqual(result["status"], "WATCHLIST")
+        self.assertEqual(result["suspicious_pair_count"], 1)
+        self.assertIn(
+            "repeated_direct_counterparty_transfers",
+            result["evidence"][0]["reasons"],
+        )
+
     def test_deployer_wallets_are_counted_uniquely(self):
         rows = _rows()
         for row in rows[:2]:
