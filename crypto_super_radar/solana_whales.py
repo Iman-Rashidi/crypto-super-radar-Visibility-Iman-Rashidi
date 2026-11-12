@@ -214,6 +214,15 @@ class SolanaWhaleScanner:
                     }
 
             summary = analyze_whale_activity(events, whale_threshold_usd)
+            # Rebuild the graph from the durable history, not only this scan's
+            # in-memory sample. Token units are compared directly; historical USD
+            # valuations are deliberately not invented from today's price.
+            try:
+                persisted_wallet_rows = self.wallet_event_store.token_events(
+                    chain="solana", token_address=mint, limit=100_000,
+                )
+            except Exception:
+                persisted_wallet_rows = []
             wallet_graph_events = [
                 {
                     "chain": row["chain"],
@@ -221,16 +230,16 @@ class SolanaWhaleScanner:
                     "token": row["token_address"],
                     "event_type": "transfer",
                     "timestamp": row["event_time_ms"] // 1000,
-                    "amount_usd": (
-                        None if price_usd is None or row.get("token_delta") is None
-                        else abs(float(row["token_delta"]) * price_usd)
+                    "amount_tokens": (
+                        None if row.get("token_delta") is None
+                        else abs(float(row["token_delta"]))
                     ),
                     "counterparty_wallet": row.get("counterparty_address"),
                     "tx_hash": row["tx_signature"],
                     "received_at": row["received_at_ms"] // 1000,
                     "instruction_index": row["event_index"],
                 }
-                for row in wallet_rows
+                for row in persisted_wallet_rows
             ]
             if len(wallet_graph_events) >= 1:
                 wallet_graph = WalletGraphAnalytics().analyze_token_distribution(
@@ -252,6 +261,8 @@ class SolanaWhaleScanner:
                 "wallet_event_persistence": persistence,
                 "wallet_events_observed": len(wallet_rows),
                 "wallet_event_timestamps_missing": timestamp_missing_count,
+                "wallet_graph_events_loaded_from_history": len(wallet_graph_events),
+                "wallet_graph_coverage": "PARTIAL_RECENT_SAMPLE",
                 "wallet_graph_analysis": wallet_graph,
                 "caveat": (
                     "Recent transactions for largest token accounts only; no complete history, "
