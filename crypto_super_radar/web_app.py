@@ -1852,7 +1852,7 @@ class Handler(BaseHTTPRequestHandler):
                 const message = String(error && error.message || error);
                 const retryable = error instanceof TypeError ||
                   (error && error.name === 'AbortError') ||
-                  /^HTTP (429|5\\d\\d)$/.test(message);
+                  /^HTTP (429|5\d\d)$/.test(message);
                 if (!retryable) throw error;
               }
               if (retry === 3) break;
@@ -1901,7 +1901,6 @@ class Handler(BaseHTTPRequestHandler):
               let data = null;
               for (let attempt = 0; attempt < 180; attempt += 1) {
                 data = await fetchGemHunterReport();
-                if (!response.ok) throw new Error(data.error || 'Discovery report failed');
                 if (!data.refreshing) break;
                 status.textContent = 'اسکن در پس‌زمینه ادامه دارد... (' + (attempt + 1) + '/180)';
                 renderPendingReport(data);
