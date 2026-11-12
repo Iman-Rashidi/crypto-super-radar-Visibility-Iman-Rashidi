@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import time
+import os
+import tempfile
 from types import SimpleNamespace
 
 import pandas as pd
@@ -35,13 +37,14 @@ class FakeEngine:
         self.data.order_book_ask = 100.0
         self.data.order_book_buy_qty = 100.0
         self.data.order_book_sell_qty = 100.0
+        self.data.order_book_age_ms = 0
         self.data.order_book_snapshot = lambda asset: {
             "symbol": asset.symbol,
             "best_bid": self.data.order_book_bid,
             "best_ask": self.data.order_book_ask,
             "available_liquidity_buy_qty": self.data.order_book_buy_qty,
             "available_liquidity_sell_qty": self.data.order_book_sell_qty,
-            "observed_at_ms": int(time.time() * 1000),
+            "observed_at_ms": int(time.time() * 1000) - self.data.order_book_age_ms,
             "timestamp_kind": "LOCAL_RECEIVED_AT",
             "source": self.data.order_book_source,
             "orders_submitted": False,
@@ -171,6 +174,99 @@ class PaperTradingBotTests(unittest.TestCase):
             self.ledger.state()["performance"]["execution_cost_attribution_status"],
             "COMPLETE",
         )
+
+    def test_stale_order_book_blocks_entry_without_creating_an_order(self):
+        self.engine.data.order_book_age_ms = 6_000
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(self.ledger.position())
+        self.assertEqual(self.ledger.execution_ledger.event_count(), 0)
+        self.assertFalse(self.ledger.state()["orders_submitted"])
+
+    def test_partial_entry_projects_only_actual_fills_and_cancels_remainder(self):
+        self.engine.data.order_book_buy_qty = 0.25
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "PARTIALLY_OPENED")
+        position = self.ledger.position()
+        self.assertIsNotNone(position)
+        self.assertLess(position["quantity"], result["requested_quantity"])
+        self.assertAlmostEqual(position["quantity"], result["quantity"])
+        self.assertAlmostEqual(position["entry_price"], result["entry_price"])
+        self.assertAlmostEqual(position["entry_fee"], result["fee_usd"])
+
+        order = self.ledger.execution_ledger.order_state(result["client_order_id"])
+        self.assertEqual(order["status"], "CANCELED")
+        self.assertAlmostEqual(order["filled_quantity"], position["quantity"])
+        fills = [
+            event for event in self.ledger.execution_ledger.recent_events(
+                20, client_order_id=result["client_order_id"]
+            )
+            if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+        ]
+        self.assertTrue(fills)
+        self.assertAlmostEqual(fills[0]["filled_quantity"], position["quantity"])
+        self.assertAlmostEqual(fills[0]["fee_paid_usd"], position["entry_fee"])
+        reconciliation = self.ledger.reconciliation()
+        self.assertEqual(reconciliation["status"], "PASS")
+        self.assertEqual(reconciliation["matched_fills"], 1)
+        self.assertFalse(result["orders_submitted"])
+
+    def test_zero_liquidity_cancels_order_without_opening_position_or_retrying_bar(self):
+        self.engine.data.order_book_buy_qty = 0.0
+        first = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(first["status"], "NO_TRADE")
+        self.assertEqual(first["execution_status"], "CANCELED")
+        self.assertIsNone(self.ledger.position())
+        order = self.ledger.execution_ledger.order_state(first["client_order_id"])
+        self.assertEqual(order["status"], "CANCELED")
+        self.assertEqual(order["filled_quantity"], 0.0)
+        event_count = self.ledger.execution_ledger.event_count()
+
+        repeated = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(repeated["status"], "NO_TRADE")
+        self.assertEqual(self.ledger.execution_ledger.event_count(), event_count)
+        self.assertIsNone(self.ledger.position())
+
+    def test_entry_events_and_partial_position_survive_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "paper-account.sqlite3")
+            first_ledger = PaperLedger(path)
+            first_bot = PaperTradingBot(self.engine, ledger=first_ledger)
+            self.engine.data.order_book_buy_qty = 0.25
+            opened = first_bot.run_once("cex:BTCUSDT")
+            self.assertEqual(opened["status"], "PARTIALLY_OPENED")
+            expected_quantity = opened["quantity"]
+            expected_fee = opened["fee_usd"]
+            order_id = opened["client_order_id"]
+            first_ledger.close()
+
+            recovered = PaperLedger(path)
+            try:
+                position = recovered.position()
+                self.assertAlmostEqual(position["quantity"], expected_quantity)
+                self.assertAlmostEqual(position["entry_fee"], expected_fee)
+                order = recovered.execution_ledger.order_state(order_id)
+                self.assertEqual(order["status"], "CANCELED")
+                self.assertAlmostEqual(order["filled_quantity"], expected_quantity)
+                self.assertEqual(recovered.reconciliation()["status"], "PASS")
+                self.assertEqual(recovered.execution_ledger.replay_order_states()["status"], "PASS")
+            finally:
+                recovered.close()
+
+    def test_entry_execution_and_projection_roll_back_in_one_transaction(self):
+        before_cash = self.ledger.state()["account"]["cash_balance_usd"]
+        original = self.ledger._insert_open_position_projection
+        self.ledger._insert_open_position_projection = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected projection failure")
+        )
+        try:
+            result = self.bot.run_once("cex:BTCUSDT")
+        finally:
+            self.ledger._insert_open_position_projection = original
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(self.ledger.position())
+        self.assertEqual(self.ledger.execution_ledger.event_count(), 0)
+        self.assertEqual(self.ledger.state()["account"]["cash_balance_usd"], before_cash)
 
     def test_unknown_gate_blocks_entry(self):
         self.engine.result.gates[-1].status = "UNKNOWN"
