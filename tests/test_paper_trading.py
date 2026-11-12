@@ -506,6 +506,42 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertEqual(controls["daily_realized_loss_pct"], 0.0)
         self.assertNotIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
 
+    def test_daily_loss_uses_exit_fill_dates_after_trade_closes_later(self):
+        self.bot.max_order_participation_rate = 1.0
+        now = int(time.time())
+        day_start = now // 86_400 * 86_400
+
+        with patch("time.time", return_value=day_start - 30):
+            opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        original_quantity = self.ledger.position()["quantity"]
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
+        self.engine.data.order_book_sell_qty = original_quantity * 0.80
+        with patch("time.time", return_value=day_start - 10):
+            partial = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+
+        remaining = self.ledger.position()["quantity"]
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = remaining * 2.0
+        with patch("time.time", return_value=day_start + 10):
+            completed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(completed["status"], "CLOSED")
+
+        # The earlier day's loss must not be counted again on today's close date.
+        controls = self.ledger.risk_controls(
+            asset="cex:BTCUSDT",
+            daily_loss_limit_pct=0.0001,
+            max_drawdown_pct=0.50,
+            max_consecutive_losses=10,
+            cooldown_hours_after_loss=0.0,
+            now=day_start + 100,
+        )
+        self.assertGreater(controls["daily_exit_fill_pnl_usd"], 0.0)
+        self.assertEqual(controls["daily_realized_loss_pct"], 0.0)
+        self.assertNotIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
+
     def test_partial_exit_realized_loss_counts_toward_daily_risk_limit(self):
         bot = PaperTradingBot(
             self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001,
