@@ -445,6 +445,8 @@ class PaperTradingBotTests(unittest.TestCase):
         first_exit = self.ledger.execution_ledger.order_state(first_exit_id)
         self.assertEqual(first_exit["status"], "CANCELED")
         self.assertGreater(first_exit["filled_quantity"], 0.0)
+        self.assertEqual(partial["execution"]["execution_status"], "CANCELED")
+        self.assertEqual(partial["execution"]["fill_status"], "PARTIALLY_FILLED")
         self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
 
         self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 130.0
@@ -476,6 +478,20 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertEqual(
             self.ledger.state()["account"]["cash_balance_usd"], cash_before
         )
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+    def test_stale_order_book_blocks_exit_and_preserves_position(self):
+        self.bot.run_once("cex:BTCUSDT")
+        before = self.ledger.position()
+        event_count = self.ledger.execution_ledger.event_count()
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_age_ms = 6_000
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "UNKNOWN")
+        after = self.ledger.position()
+        self.assertIsNotNone(after)
+        self.assertEqual(after["quantity"], before["quantity"])
+        self.assertEqual(self.ledger.execution_ledger.event_count(), event_count)
         self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
 
     def test_partial_exit_projection_survives_sqlite_restart(self):
@@ -510,6 +526,13 @@ class PaperTradingBotTests(unittest.TestCase):
                 self.assertEqual(
                     recovered.execution_ledger.replay_order_states()["status"], "PASS"
                 )
+                self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 130.0
+                self.engine.data.order_book_sell_qty = 100.0
+                recovered_bot = PaperTradingBot(self.engine, ledger=recovered)
+                completed = recovered_bot.run_once("cex:BTCUSDT")
+                self.assertEqual(completed["status"], "CLOSED")
+                self.assertTrue(completed["execution"]["client_order_id"].endswith("-2"))
+                self.assertEqual(recovered.reconciliation()["status"], "PASS")
             finally:
                 recovered.close()
 
