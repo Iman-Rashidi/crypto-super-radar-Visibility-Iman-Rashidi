@@ -19,6 +19,8 @@ from .market_behavior import analyze_market_behavior
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
 from .solana_whales import SolanaWhaleScanner
+from .database import connect_database
+from .wallet_event_store import WalletEventStore
 from .walk_forward import WalkForwardConfig, walk_forward_validate
 from .whale_store import WhaleStore
 from .whale_intelligence import (
@@ -37,6 +39,12 @@ class WhaleAwareMarketDataService(MarketDataService):
         self.whale_evidence: dict[str, dict[str, Any]] = {}
         self.candle_frames: dict[str, pd.DataFrame] = {}
         self.funding_frames: dict[str, pd.Series] = {}
+        self.wallet_event_db = connect_database()
+        self.wallet_event_store = WalletEventStore(self.wallet_event_db)
+
+    def close(self) -> None:
+        """Release the shared durable wallet-event connection."""
+        self.wallet_event_db.close()
 
     def candles(self, asset: AssetSpec, snapshot):
         frame = completed_daily_candles(super().candles(asset, snapshot))
@@ -115,10 +123,12 @@ class WhaleAwareMarketDataService(MarketDataService):
             try:
                 if snapshot is None:
                     raise ValueError("Validated market snapshot is unavailable for whale valuation")
-                whale = SolanaWhaleScanner(
+                scanner = SolanaWhaleScanner(
                     timeout=self.config.request_timeout_seconds,
                     limiter=self.http.limiter,
-                ).scan_mint(asset.address or "", price_usd=snapshot.price_usd)
+                    wallet_event_store=self.wallet_event_store,
+                )
+                whale = scanner.scan_mint(asset.address or "", price_usd=snapshot.price_usd)
                 self.whale_evidence[asset.raw] = whale
             except Exception as exc:
                 self.whale_evidence[asset.raw] = {
