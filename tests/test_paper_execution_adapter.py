@@ -176,5 +176,56 @@ class PaperExecutionAdapterTests(unittest.TestCase):
 
 
 
+    def test_cancel_partial_order_preserves_filled_quantity_and_blocks_more_fills(self):
+        partial = self.simulate(
+            client_order_id="paper-depth-1", snapshot_id="cancel-after-partial",
+            best_bid=100, best_ask=101, available_liquidity_qty=0.4,
+            max_participation_pct=0.5, fee_rate=0.001, slippage_bps=0,
+        )
+        self.assertEqual(partial["status"], "PARTIALLY_FILLED")
+        canceled = self.adapter.cancel_order(
+            client_order_id="paper-depth-1", reason="RISK_REMAINDER_CANCEL", occurred_at=102
+        )
+        self.assertEqual(canceled["status"], "CANCELED")
+        self.assertAlmostEqual(canceled["filled_quantity"], 0.2)
+        self.assertAlmostEqual(canceled["remaining_quantity"], 0.8)
+        repeated = self.adapter.cancel_order(client_order_id="paper-depth-1")
+        self.assertEqual(repeated["status"], "ALREADY_CANCELED")
+        blocked = self.simulate(
+            client_order_id="paper-depth-1", snapshot_id="after-cancel",
+            best_bid=100, best_ask=101, available_liquidity_qty=10,
+        )
+        self.assertEqual(blocked["status"], "BLOCKED")
+        state = self.ledger.order_state("paper-depth-1")
+        self.assertEqual(state["status"], "CANCELED")
+        self.assertAlmostEqual(state["filled_quantity"], 0.2)
+        self.assertEqual(self.ledger.replay_order_states()["status"], "PASS")
+
+    def test_cancel_empty_order_and_filled_order_are_handled(self):
+        empty = self.adapter.cancel_order(client_order_id="paper-depth-1")
+        self.assertEqual(empty["status"], "CANCELED")
+        self.assertEqual(empty["filled_quantity"], 0.0)
+        self.assertEqual(empty["remaining_quantity"], 1.0)
+
+        self.adapter.submit_order(
+            client_order_id="paper-already-filled", asset="cex:ETHUSDT",
+            side="BUY", quantity=0.5, occurred_at=200,
+        )
+        filled = self.simulate(
+            client_order_id="paper-already-filled", snapshot_id="all-depth",
+            best_bid=2000, best_ask=2001, available_liquidity_qty=1,
+            max_participation_pct=1.0,
+        )
+        self.assertEqual(filled["status"], "FILLED")
+        blocked = self.adapter.cancel_order(client_order_id="paper-already-filled")
+        self.assertEqual(blocked["status"], "BLOCKED")
+
+    def test_cancel_unknown_order_is_read_only(self):
+        result = self.adapter.cancel_order(client_order_id="missing-order")
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(self.ledger.event_count(), 4)
+
+
+
 if __name__ == "__main__":
     unittest.main()

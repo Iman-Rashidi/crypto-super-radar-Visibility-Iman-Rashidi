@@ -12,6 +12,8 @@ An internal paper intent moves through \`CREATED → VALIDATED → SUBMITTED →
 
 Each fill requires a stable \`snapshot_id\` and a positive \`observed_at_ms\` local receive timestamp. The adapter computes quote age against its local clock; quotes older than \`max_quote_age_ms\` or more than two seconds in the future return \`UNKNOWN\` without a fill. This is the local receive time, not an exchange event timestamp. Reprocessing the same snapshot is idempotent; reusing its ID with different fill inputs is rejected by the event ledger. Zero available liquidity produces \`NO_FILL\` and leaves the state unchanged.
 
+A caller may cancel the remaining quantity on an accepted or partially filled order. Cancellation preserves the cumulative filled quantity, records a terminal \\`CANCELED\\` event and blocks all later fills; it never reverses already simulated fills.
+
 ## Fill model
 
 - BUY fills reference best ask; SELL fills reference best bid.

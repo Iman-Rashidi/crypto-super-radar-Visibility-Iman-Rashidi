@@ -60,6 +60,59 @@ class PaperExecutionAdapter:
             )
         return self.ledger.order_state(order_id) or {}
 
+    def cancel_order(
+        self, *, client_order_id: str, reason: str = "CALLER_CANCELED_REMAINDER",
+        occurred_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Cancel only the unfilled remainder of an accepted/partial paper order."""
+        order_id = str(client_order_id or "").strip()
+        if not order_id:
+            raise ValueError("client_order_id is required")
+        state = self.ledger.order_state(order_id)
+        if state is None:
+            return {"status": "UNKNOWN", "reason": "paper order does not exist"}
+        status = str(state["status"])
+        quantity = float(state["quantity"])
+        filled = float(state["filled_quantity"])
+        remaining = max(0.0, quantity - filled)
+        if status == "CANCELED":
+            return {
+                "status": "ALREADY_CANCELED",
+                "client_order_id": order_id,
+                "filled_quantity": filled,
+                "remaining_quantity": remaining,
+            }
+        if status == "FILLED":
+            return {
+                "status": "BLOCKED", "client_order_id": order_id,
+                "reason": "fully filled order cannot be canceled",
+                "filled_quantity": filled, "remaining_quantity": 0.0,
+            }
+        if status not in {"ACCEPTED", "PARTIALLY_FILLED"}:
+            return {
+                "status": "BLOCKED", "client_order_id": order_id,
+                "reason": f"order in state {status} cannot be canceled",
+                "filled_quantity": filled, "remaining_quantity": remaining,
+            }
+        timestamp = int(time.time()) if occurred_at is None else int(occurred_at)
+        event = self.ledger.append_event(
+            client_order_id=order_id,
+            idempotency_key=f"{order_id}:cancel",
+            asset=state["asset"], side=state["side"], status="CANCELED",
+            quantity=quantity, filled_quantity=filled,
+            source="PAPER_EXECUTION_ADAPTER",
+            reason=str(reason or "CALLER_CANCELED_REMAINDER"),
+            occurred_at=timestamp,
+        )
+        return {
+            "status": "CANCELED",
+            "client_order_id": order_id,
+            "event_id": event["event_id"],
+            "filled_quantity": filled,
+            "remaining_quantity": remaining,
+            "orders_submitted": False,
+        }
+
     def simulate_fill(
         self, *, client_order_id: str, snapshot_id: str,
         best_bid: Any, best_ask: Any, available_liquidity_qty: Any,
