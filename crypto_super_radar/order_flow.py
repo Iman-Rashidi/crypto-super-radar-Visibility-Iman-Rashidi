@@ -130,6 +130,22 @@ class VenueOrderFlow:
         self._freeze(f"INVALID_PROVIDER_PAYLOAD:{code[:120]}")
         return {"accepted": False, "reason": "INVALID_PROVIDER_PAYLOAD", "detail": self._frozen_reason}
 
+    def fail_closed(self, reason: str) -> dict[str, Any]:
+        """Freeze the venue after a downstream durability failure.
+
+        A persistence outage creates an unobservable gap. The feed must not
+        remain LIVE merely because later messages continue arriving.
+        """
+        if not self._connected:
+            return {"accepted": False, "reason": "DISCONNECTED"}
+        if self._frozen_reason:
+            return {"accepted": False, "reason": "FROZEN", "detail": self._frozen_reason}
+        code = reason.strip() if isinstance(reason, str) else ""
+        if not code:
+            code = "UNSPECIFIED_DOWNSTREAM_FAILURE"
+        self._freeze(f"DOWNSTREAM_FAILURE:{code[:120]}")
+        return {"accepted": False, "reason": "DOWNSTREAM_FAILURE", "detail": self._frozen_reason}
+
     def _prune(self, now_ms: int) -> None:
         cutoff = now_ms - self.window_ms
         expired = [
