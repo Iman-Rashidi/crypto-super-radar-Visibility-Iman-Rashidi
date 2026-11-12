@@ -206,6 +206,10 @@ class GemHunterEvaluatorTests(unittest.TestCase):
                 "relative_strength": "FAIL",
                 "market_regime_validation": "UNKNOWN",
             },
+            "filter_coverage": {
+                "trend": True, "momentum": True,
+                "relative_strength": True, "market_regime_validation": True,
+            },
             "metrics": {"token_return_7d_pct": 12.0},
             "timeframes": {"4h": {"bars": 120}, "1d": {"bars": 90}},
         }
@@ -240,6 +244,37 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         evidence["checked_at_utc"] = "2026-11-11T10:00:00Z"
         result = evaluate_discovery_candidate(item, now=NOW)
         self.assertEqual(result["filters"]["trend"], "UNKNOWN")
+
+
+
+    def test_partial_technical_evidence_only_upgrades_covered_filters(self):
+        item = candidate()
+        item["technical_evidence"] = {
+            "schema_version": "gem-hunter-technical-v1",
+            "status": "PARTIAL",
+            "coverage_status": "PARTIAL",
+            "chain": item["chain"],
+            "token_address": item["token_address"],
+            "pool_address": item["pool_address"],
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "sources": ["GECKOTERMINAL", "BINANCE_SPOT"],
+            "filters": {
+                "trend": "PASS", "momentum": "PASS",
+                "relative_strength": "UNKNOWN",
+                "market_regime_validation": "UNKNOWN",
+            },
+            "filter_coverage": {
+                "trend": True, "momentum": True,
+                "relative_strength": False, "market_regime_validation": False,
+            },
+            "metrics": {}, "timeframes": {},
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["trend"], "PASS")
+        self.assertEqual(result["filters"]["momentum"], "PASS")
+        self.assertEqual(result["filters"]["relative_strength"], "UNKNOWN")
+        self.assertEqual(result["filters"]["market_regime_validation"], "UNKNOWN")
+        self.assertEqual(result["market_metrics"]["technical_evidence_status"], "PARTIAL")
 
 
 
