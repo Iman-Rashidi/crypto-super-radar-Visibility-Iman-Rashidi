@@ -299,7 +299,7 @@ class BybitProvider:
                     "volume_24h": volume,
                     "bid_price": _positive_float(item.get("highest_bid")),
                     "ask_price": _positive_float(item.get("lowest_ask")),
-                    "quote_timestamp_ms": _safe_float(item.get("update_id")),
+                    "quote_timestamp_ms": _safe_float(item.get("time")) * 1000 if _safe_float(item.get("time")) is not None else None,
                     "raw": item,
                     "provider": "Gate.io Spot",
                     "fallback_reason": message[:240],
