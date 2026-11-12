@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import unittest
 
-from crypto_super_radar.paper_execution import PaperExecutionEventLedger
+from crypto_super_radar.paper_execution import IdempotencyConflict, PaperExecutionEventLedger
 from crypto_super_radar.paper_execution_adapter import PaperExecutionAdapter
 
 
@@ -67,7 +67,7 @@ class PaperExecutionAdapterTests(unittest.TestCase):
         self.assertEqual(repeated["status"], "DUPLICATE_SNAPSHOT")
         self.assertEqual(self.ledger.event_count(), 5)
         self.assertEqual(self.ledger.order_state("paper-depth-1")["filled_quantity"], 1.0)
-        with self.assertRaises(Exception):
+        with self.assertRaises(IdempotencyConflict):
             self.adapter.simulate_fill(
                 client_order_id="paper-depth-1", snapshot_id="same-book",
                 best_bid=100, best_ask=102, available_liquidity_qty=10,
