@@ -487,6 +487,42 @@ class PaperLedger:
                 "ORDER BY closed_at DESC, id DESC LIMIT 1",
                 (asset,),
             ).fetchone()
+        partial_daily_net = 0.0
+        open_position = state.get("open_position")
+        if open_position and float(open_position.get("exit_filled_quantity") or 0.0) > 0:
+            base_exit_id = make_paper_client_order_id(
+                str(open_position["asset"]), str(open_position["signal_bar"]), "EXIT"
+            )
+            with self._lock:
+                exit_rows = self._db.execute(
+                    "SELECT DISTINCT client_order_id FROM paper_execution_events "
+                    "WHERE client_order_id=? OR client_order_id LIKE ?",
+                    (base_exit_id, f"{base_exit_id}-%"),
+                ).fetchall()
+            original_quantity = float(open_position.get("original_entry_quantity") or 0.0)
+            original_fee = float(open_position.get("original_entry_fee") or 0.0)
+            entry_fee_per_unit = original_fee / original_quantity if original_quantity > 0 else 0.0
+            for exit_row in exit_rows:
+                exit_events = self.execution_ledger.recent_events(
+                    1000, client_order_id=str(exit_row["client_order_id"])
+                )
+                last_fill = next(
+                    (
+                        event for event in exit_events
+                        if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+                    ),
+                    None,
+                )
+                if last_fill is None or int(last_fill["occurred_at"]) < day_start:
+                    continue
+                sold = float(last_fill["filled_quantity"])
+                average_exit = float(last_fill["fill_price"])
+                fee_paid = float(last_fill["fee_paid_usd"])
+                partial_daily_net += (
+                    sold * (average_exit - float(open_position["entry_price"]))
+                    - sold * entry_fee_per_unit - fee_paid
+                )
+        daily_net += partial_daily_net
         consecutive = 0
         for row in recent:
             if float(row["net_pnl"]) >= 0:
@@ -527,6 +563,7 @@ class PaperLedger:
             "entry_allowed": not reasons,
             "halt_reasons": reasons,
             "daily_realized_loss_pct": round(daily_loss_pct, 4),
+            "daily_partial_exit_pnl_usd": round(partial_daily_net, 8),
             "max_equity_drawdown_pct": round(drawdown_pct, 4),
             "consecutive_losses": consecutive,
             "cooldown_hours_remaining": round(cooldown_remaining, 2),
