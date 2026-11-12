@@ -68,7 +68,9 @@ class PaperLedger:
                     mark_price REAL NOT NULL,
                     initial_stop_loss REAL NOT NULL DEFAULT 0,
                     max_holding_days INTEGER NOT NULL DEFAULT 14,
-                    peak_price REAL NOT NULL DEFAULT 0
+                    peak_price REAL NOT NULL DEFAULT 0,
+                    entry_reference_price REAL,
+                    entry_slippage_usd REAL
                 )
             """)
             self._db.execute("""
@@ -91,6 +93,13 @@ class PaperLedger:
                     signal_bar TEXT NOT NULL,
                     confirmation_score REAL NOT NULL,
                     exit_reason TEXT NOT NULL,
+                    entry_reference_price REAL,
+                    exit_reference_price REAL,
+                    entry_slippage_usd REAL,
+                    exit_slippage_usd REAL,
+                    spread_cost_usd REAL,
+                    funding_cost_usd REAL NOT NULL DEFAULT 0,
+                    funding_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE',
                     UNIQUE(asset, signal_bar)
                 )
             """)
@@ -101,6 +110,19 @@ class PaperLedger:
                 self._db.execute(
                     "ALTER TABLE paper_trades ADD COLUMN initial_stop_loss REAL NOT NULL DEFAULT 0"
                 )
+            for name, declaration in (
+                ("entry_reference_price", "REAL"),
+                ("exit_reference_price", "REAL"),
+                ("entry_slippage_usd", "REAL"),
+                ("exit_slippage_usd", "REAL"),
+                ("spread_cost_usd", "REAL"),
+                ("funding_cost_usd", "REAL NOT NULL DEFAULT 0"),
+                ("funding_status", "TEXT NOT NULL DEFAULT 'NOT_APPLICABLE'"),
+            ):
+                if name not in trade_columns:
+                    self._db.execute(
+                        f"ALTER TABLE paper_trades ADD COLUMN {name} {declaration}"
+                    )
             position_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(paper_positions)")
             }
@@ -108,6 +130,8 @@ class PaperLedger:
                 ("initial_stop_loss", "REAL NOT NULL DEFAULT 0"),
                 ("max_holding_days", "INTEGER NOT NULL DEFAULT 14"),
                 ("peak_price", "REAL NOT NULL DEFAULT 0"),
+                ("entry_reference_price", "REAL"),
+                ("entry_slippage_usd", "REAL"),
             ):
                 if name not in position_columns:
                     self._db.execute(
@@ -157,8 +181,9 @@ class PaperLedger:
                 INSERT INTO paper_positions
                 (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
                  opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
-                 initial_stop_loss, max_holding_days, peak_price)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 initial_stop_loss, max_holding_days, peak_price,
+                 entry_reference_price, entry_slippage_usd)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 position["asset"], position["quantity"], position["entry_price"],
                 position["stop_loss"], position["take_profit"], position["entry_fee"],
@@ -166,6 +191,8 @@ class PaperLedger:
                 position["confirmation_score"], position["risk_budget"],
                 position["entry_price"], position["initial_stop_loss"],
                 position["max_holding_days"], position["entry_price"],
+                position.get("entry_reference_price"),
+                position.get("entry_slippage_usd"),
             ))
             self._db.execute(
                 "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
@@ -261,7 +288,14 @@ class PaperLedger:
             },
         }
 
-    def close_position(self, exit_price: float, exit_fee_rate: float, reason: str) -> Optional[dict[str, Any]]:
+    def close_position(
+        self,
+        exit_price: float,
+        exit_fee_rate: float,
+        reason: str,
+        *,
+        exit_reference_price: Optional[float] = None,
+    ) -> Optional[dict[str, Any]]:
         with self._lock, self._db:
             row = self._db.execute("SELECT * FROM paper_positions WHERE id=1").fetchone()
             if row is None:
@@ -270,6 +304,12 @@ class PaperLedger:
             exit_fee = p["quantity"] * exit_price * exit_fee_rate
             gross = p["quantity"] * (exit_price - p["entry_price"])
             net = gross - p["entry_fee"] - exit_fee
+            reference_exit = _number(exit_reference_price)
+            exit_slippage = (
+                max(0.0, (reference_exit - exit_price) * p["quantity"])
+                if reference_exit is not None and reference_exit > 0
+                else None
+            )
             self._db.execute(
                 "UPDATE paper_account SET cash_balance=cash_balance+?, updated_at=? WHERE id=1",
                 (p["quantity"] * exit_price - exit_fee, int(time.time())),
@@ -278,18 +318,28 @@ class PaperLedger:
                 INSERT INTO paper_trades
                 (asset, side, quantity, entry_price, exit_price, stop_loss, initial_stop_loss,
                  take_profit, entry_fee, exit_fee, gross_pnl, net_pnl, opened_at, closed_at,
-                 signal_bar, confirmation_score, exit_reason)
-                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 signal_bar, confirmation_score, exit_reason, entry_reference_price,
+                 exit_reference_price, entry_slippage_usd, exit_slippage_usd,
+                 spread_cost_usd, funding_cost_usd, funding_status)
+                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 p["asset"], p["quantity"], p["entry_price"], exit_price,
                 p["stop_loss"], p.get("initial_stop_loss") or p["stop_loss"],
                 p["take_profit"], p["entry_fee"], exit_fee,
                 gross, net, p["opened_at"], int(time.time()), p["signal_bar"],
                 p["confirmation_score"], reason,
+                p.get("entry_reference_price"), reference_exit, p.get("entry_slippage_usd"),
+                exit_slippage, None, 0.0, "NOT_APPLICABLE",
             ))
             self._db.execute("DELETE FROM paper_positions WHERE id=1")
-        return {"asset": p["asset"], "gross_pnl_usd": gross, "net_pnl_usd": net,
-                "exit_price": exit_price, "exit_reason": reason}
+        return {
+            "asset": p["asset"], "gross_pnl_usd": gross, "net_pnl_usd": net,
+            "exit_price": exit_price, "exit_reason": reason,
+            "entry_slippage_usd": p.get("entry_slippage_usd"),
+            "exit_slippage_usd": exit_slippage,
+            "spread_cost_usd": None,
+            "spread_attribution": "NOT_RECORDED",
+        }
 
     def state(self) -> dict[str, Any]:
         with self._lock:
@@ -318,8 +368,10 @@ class PaperLedger:
             mark = float(open_position["mark_price"])
             qty = float(open_position["quantity"])
             equity += qty * mark
-            unrealized = (qty * (mark - float(open_position["entry_price"]))
-                      - float(open_position["entry_fee"]) - qty * mark * 0.0008)
+            unrealized = (
+                qty * (mark - float(open_position["entry_price"]))
+                - float(open_position["entry_fee"])
+            )
         realized = float(realized_total)
         return {
             "mode": "PAPER_ONLY",
@@ -336,6 +388,11 @@ class PaperLedger:
             "open_position": open_position,
             "recent_trades": [dict(row) for row in trades],
             "performance": performance,
+            "execution_cost_notes": {
+                "entry_exit_slippage": "Recorded as separate per-fill attribution; already embedded in fill prices and not deducted twice.",
+                "spread": "NOT_RECORDED because this paper price source does not provide a synchronized bid/ask quote.",
+                "funding": "NOT_APPLICABLE for this Spot-only paper ledger.",
+            },
             "storage": storage_backend(),
         }
 
@@ -449,19 +506,28 @@ class PaperTradingBot:
             managed_position = self.ledger.position() or position
             active_stop = float(managed_position["stop_loss"])
             if price <= active_stop:
-                fill = min(price, active_stop) * (1.0 - self.slippage_rate)
+                reference_exit = min(price, active_stop)
+                fill = reference_exit * (1.0 - self.slippage_rate)
                 initial_stop = float(managed_position.get("initial_stop_loss") or active_stop)
                 exit_reason = "TRAILING_STOP" if active_stop > initial_stop else "STOP_LOSS"
-                closed = self.ledger.close_position(fill, self.fee_rate, exit_reason)
+                closed = self.ledger.close_position(
+                    fill, self.fee_rate, exit_reason, exit_reference_price=reference_exit
+                )
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             if price >= float(position["take_profit"]):
-                fill = float(position["take_profit"]) * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(fill, self.fee_rate, "TAKE_PROFIT")
+                reference_exit = float(position["take_profit"])
+                fill = reference_exit * (1.0 - self.slippage_rate)
+                closed = self.ledger.close_position(
+                    fill, self.fee_rate, "TAKE_PROFIT", exit_reference_price=reference_exit
+                )
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             max_holding = max(1, int(position.get("max_holding_days") or 14))
             if int(time.time()) - int(position["opened_at"]) >= max_holding * 86_400:
-                fill = price * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(fill, self.fee_rate, "TIME_EXIT")
+                reference_exit = price
+                fill = reference_exit * (1.0 - self.slippage_rate)
+                closed = self.ledger.close_position(
+                    fill, self.fee_rate, "TIME_EXIT", exit_reference_price=reference_exit
+                )
                 return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             return {"status": "HOLDING", "asset": asset.raw, "mark_price": price,
                     "active_stop_loss": active_stop,
@@ -560,6 +626,8 @@ class PaperTradingBot:
             "opened_at": int(time.time()), "signal_bar": signal_bar,
             "confirmation_score": score, "risk_budget": risk_budget,
             "max_holding_days": max_holding_days,
+            "entry_reference_price": price,
+            "entry_slippage_usd": quantity * max(0.0, entry - price),
         }
         if not self.ledger.open_position(record, debit):
             return {"status": "NO_TRADE", "asset": asset.raw,
