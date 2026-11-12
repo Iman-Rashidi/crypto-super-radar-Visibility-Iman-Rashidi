@@ -46,7 +46,8 @@ def _validated_technical_evidence(candidate: dict, evidence: Any,
         left, right = candidate.get(key), evidence.get(key)
         if not isinstance(left, str) or not isinstance(right, str):
             return {}
-        if (left != right) if chain == "solana" else (left.lower() != right.lower()):
+        same_address = left == right if chain == "solana" else left.lower() == right.lower()
+        if not same_address:
             return {}
     sources = set(evidence.get("sources") or [])
     if not {"GECKOTERMINAL", "BINANCE_SPOT"}.issubset(sources):
