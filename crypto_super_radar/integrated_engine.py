@@ -514,8 +514,19 @@ class WhaleAwareConfirmationEngine:
                 max(0.0, min(100.0, float(result.opportunity_rank) + opportunity_adjustment)), 2
             )
 
+        wallet_graph = whale.get("wallet_graph_analysis") or {}
+        wallet_graph = wallet_graph if isinstance(wallet_graph, dict) else {}
         result.metrics.update({
             "whale_status": whale_status, "whale_bias": whale_bias,
+            "wallet_graph_status": wallet_graph.get("status", "UNKNOWN"),
+            "wallet_graph_event_count": wallet_graph.get("event_count"),
+            "wallet_graph_unique_wallet_count": wallet_graph.get("unique_wallet_count"),
+            "wallet_graph_suspicious_pair_count": wallet_graph.get("suspicious_pair_count"),
+            "wallet_graph_coverage": whale.get("wallet_graph_coverage", "UNKNOWN"),
+            "wallet_event_persistence_status": (
+                (whale.get("wallet_event_persistence") or {}).get("status", "UNKNOWN")
+                if isinstance(whale.get("wallet_event_persistence"), dict) else "UNKNOWN"
+            ),
             "whale_history_count": whale_history["observation_count"],
             "whale_recent_history_bias": whale_history["recent_bias"],
             "whale_exchange_net_flow_usd": exchange_net,
