@@ -17,6 +17,7 @@ from .database import connect_database, storage_backend
 from .signal_performance import summarize_closed_trades
 from .execution_costs import calculate_fill_costs
 from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
+from .ai_second_opinion import ai_connection_status, run_free_ai_second_opinion
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -686,8 +687,10 @@ class PaperTradingBot:
         max_consecutive_losses: int = 3,
         cooldown_hours_after_loss: float = 24.0,
         min_net_reward_risk: float = 1.8,
+        ai_reviewer=None,
     ):
         self.engine = engine
+        self.ai_reviewer = ai_reviewer or run_free_ai_second_opinion
         self.ledger = ledger or PaperLedger()
         values = (risk_per_trade_pct, max_position_notional_pct, max_risk_score,
                   min_confirmation_score, fee_bps_per_side, slippage_bps_per_side,
@@ -721,6 +724,7 @@ class PaperTradingBot:
 
     def state(self) -> dict[str, Any]:
         state = self.ledger.state()
+        state["ai_connection"] = ai_connection_status()
         position = state.get("open_position")
         recent_trades = state.get("recent_trades") or []
         control_asset = (position or {}).get("asset") or (
@@ -856,6 +860,34 @@ class PaperTradingBot:
                 or stop is None or target is None):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Score, risk or stop/target plan did not pass paper safety limits."}
+        try:
+            ai_review = self.ai_reviewer(result, asset)
+        except Exception as exc:
+            ai_review = {
+                "provider": "OpenRouter",
+                "status": "UNKNOWN",
+                "status_fa": "بررسی هوش مصنوعی ناموفق بود؛ ورود جدید متوقف شد.",
+                "reason": "Free AI reviewer failed.",
+                "error_type": type(exc).__name__,
+                "paper_entry_eligible": False,
+                "cost_usd": 0.0,
+            }
+        if (
+            not isinstance(ai_review, dict)
+            or str(ai_review.get("status", "UNKNOWN")).upper() != "APPROVED"
+            or ai_review.get("paper_entry_eligible") is not True
+        ):
+            return {
+                "status": "AI_BLOCKED",
+                "asset": asset.raw,
+                "reason": "A valid approval from the configured free AI reviewer is mandatory for every new paper entry.",
+                "ai_review": ai_review if isinstance(ai_review, dict) else {
+                    "status": "UNKNOWN", "paper_entry_eligible": False,
+                },
+                "mode": "PAPER_ONLY",
+                "orders_submitted": False,
+            }
+
         entry_quote = _extract_observed_quote(snapshot)
         entry_reference = (
             max(price, float(entry_quote["ask"])) if entry_quote is not None else price
@@ -957,4 +989,5 @@ class PaperTradingBot:
                 "take_profit": target, "risk_budget_usd": risk_budget,
                 "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
                 "max_holding_days": max_holding_days, "fee_usd": entry_fee,
-                "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False}
+                "risk_controls": controls, "ai_review": ai_review,
+                "mode": "PAPER_ONLY", "orders_submitted": False}
