@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import unittest
 import time
+import os
+import tempfile
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import pandas as pd
@@ -30,6 +33,29 @@ class FakeEngine:
                 )
             },
         )
+        self.data.order_book_source = "Fake Binance Spot bookTicker"
+        self.data.order_book_bid = 99.9
+        self.data.order_book_ask = 100.0
+        self.data.order_book_buy_qty = 100.0
+        self.data.order_book_sell_qty = 100.0
+        self.data.order_book_age_ms = 0
+        self.data.order_book_override = False
+        def order_book_snapshot(asset):
+            market_price = self.data.snapshots[asset.raw].price_usd
+            bid = self.data.order_book_bid if self.data.order_book_override else max(0.01, market_price - 0.1)
+            ask = self.data.order_book_ask if self.data.order_book_override else market_price
+            return {
+                "symbol": asset.symbol,
+                "best_bid": bid,
+                "best_ask": ask,
+                "available_liquidity_buy_qty": self.data.order_book_buy_qty,
+                "available_liquidity_sell_qty": self.data.order_book_sell_qty,
+                "observed_at_ms": int(time.time() * 1000) - self.data.order_book_age_ms,
+                "timestamp_kind": "LOCAL_RECEIVED_AT",
+                "source": self.data.order_book_source,
+                "orders_submitted": False,
+            }
+        self.data.order_book_snapshot = order_book_snapshot
 
     def analyze(self, asset):
         return self.result
@@ -118,6 +144,10 @@ class PaperTradingBotTests(unittest.TestCase):
 
     def test_fresh_observed_bid_ask_records_spread_and_slippage_per_fill(self):
         snapshot = self.engine.data.snapshots["cex:BTCUSDT"]
+        self.engine.data.order_book_bid = 99.9
+        self.engine.data.order_book_ask = 100.1
+        self.engine.data.order_book_source = "TestExchange"
+        self.engine.data.order_book_override = True
         snapshot.raw = {
             "provider_a": {
                 "bid_price": 99.9,
@@ -152,6 +182,99 @@ class PaperTradingBotTests(unittest.TestCase):
             self.ledger.state()["performance"]["execution_cost_attribution_status"],
             "COMPLETE",
         )
+
+    def test_stale_order_book_blocks_entry_without_creating_an_order(self):
+        self.engine.data.order_book_age_ms = 6_000
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(self.ledger.position())
+        self.assertEqual(self.ledger.execution_ledger.event_count(), 0)
+        self.assertFalse(self.ledger.state()["orders_submitted"])
+
+    def test_partial_entry_projects_only_actual_fills_and_cancels_remainder(self):
+        self.engine.data.order_book_buy_qty = 0.25
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "PARTIALLY_OPENED")
+        position = self.ledger.position()
+        self.assertIsNotNone(position)
+        self.assertLess(position["quantity"], result["requested_quantity"])
+        self.assertAlmostEqual(position["quantity"], result["quantity"])
+        self.assertAlmostEqual(position["entry_price"], result["entry_price"])
+        self.assertAlmostEqual(position["entry_fee"], result["fee_usd"])
+
+        order = self.ledger.execution_ledger.order_state(result["client_order_id"])
+        self.assertEqual(order["status"], "CANCELED")
+        self.assertAlmostEqual(order["filled_quantity"], position["quantity"])
+        fills = [
+            event for event in self.ledger.execution_ledger.recent_events(
+                20, client_order_id=result["client_order_id"]
+            )
+            if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+        ]
+        self.assertTrue(fills)
+        self.assertAlmostEqual(fills[0]["filled_quantity"], position["quantity"])
+        self.assertAlmostEqual(fills[0]["fee_paid_usd"], position["entry_fee"])
+        reconciliation = self.ledger.reconciliation()
+        self.assertEqual(reconciliation["status"], "PASS")
+        self.assertEqual(reconciliation["matched_fills"], 1)
+        self.assertFalse(result["orders_submitted"])
+
+    def test_zero_liquidity_cancels_order_without_opening_position_or_retrying_bar(self):
+        self.engine.data.order_book_buy_qty = 0.0
+        first = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(first["status"], "NO_TRADE")
+        self.assertEqual(first["execution_status"], "CANCELED")
+        self.assertIsNone(self.ledger.position())
+        order = self.ledger.execution_ledger.order_state(first["client_order_id"])
+        self.assertEqual(order["status"], "CANCELED")
+        self.assertEqual(order["filled_quantity"], 0.0)
+        event_count = self.ledger.execution_ledger.event_count()
+
+        repeated = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(repeated["status"], "NO_TRADE")
+        self.assertEqual(self.ledger.execution_ledger.event_count(), event_count)
+        self.assertIsNone(self.ledger.position())
+
+    def test_entry_events_and_partial_position_survive_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "paper-account.sqlite3")
+            first_ledger = PaperLedger(path)
+            first_bot = PaperTradingBot(self.engine, ledger=first_ledger)
+            self.engine.data.order_book_buy_qty = 0.25
+            opened = first_bot.run_once("cex:BTCUSDT")
+            self.assertEqual(opened["status"], "PARTIALLY_OPENED")
+            expected_quantity = opened["quantity"]
+            expected_fee = opened["fee_usd"]
+            order_id = opened["client_order_id"]
+            first_ledger.close()
+
+            recovered = PaperLedger(path)
+            try:
+                position = recovered.position()
+                self.assertAlmostEqual(position["quantity"], expected_quantity)
+                self.assertAlmostEqual(position["entry_fee"], expected_fee)
+                order = recovered.execution_ledger.order_state(order_id)
+                self.assertEqual(order["status"], "CANCELED")
+                self.assertAlmostEqual(order["filled_quantity"], expected_quantity)
+                self.assertEqual(recovered.reconciliation()["status"], "PASS")
+                self.assertEqual(recovered.execution_ledger.replay_order_states()["status"], "PASS")
+            finally:
+                recovered.close()
+
+    def test_entry_execution_and_projection_roll_back_in_one_transaction(self):
+        before_cash = self.ledger.state()["account"]["cash_balance_usd"]
+        original = self.ledger._insert_open_position_projection
+        self.ledger._insert_open_position_projection = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected projection failure")
+        )
+        try:
+            result = self.bot.run_once("cex:BTCUSDT")
+        finally:
+            self.ledger._insert_open_position_projection = original
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(self.ledger.position())
+        self.assertEqual(self.ledger.execution_ledger.event_count(), 0)
+        self.assertEqual(self.ledger.state()["account"]["cash_balance_usd"], before_cash)
 
     def test_unknown_gate_blocks_entry(self):
         self.engine.result.gates[-1].status = "UNKNOWN"
@@ -269,7 +392,10 @@ class PaperTradingBotTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["status"] for row in reversed(entry_events)],
-            ["CREATED", "VALIDATED", "FILLED"],
+            [
+                "CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED",
+                "PARTIALLY_FILLED", "PARTIALLY_FILLED", "FILLED",
+            ],
         )
         self.assertEqual(entry_events[0]["side"], "BUY")
 
@@ -284,13 +410,239 @@ class PaperTradingBotTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["status"] for row in reversed(exit_events)],
-            ["CREATED", "VALIDATED", "FILLED"],
+            [
+                "CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED",
+                "PARTIALLY_FILLED", "PARTIALLY_FILLED", "FILLED",
+            ],
         )
         self.assertEqual(exit_events[0]["side"], "SELL")
         state = self.ledger.state()
-        self.assertEqual(state["execution_ledger"]["event_count"], 6)
+        self.assertEqual(state["execution_ledger"]["event_count"], 14)
         self.assertTrue(state["execution_ledger"]["append_only"])
         self.assertFalse(state["orders_submitted"])
+
+    def test_partial_exit_keeps_remaining_position_and_retries_with_new_order_id(self):
+        opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        initial_position = self.ledger.position()
+        initial_quantity = initial_position["quantity"]
+        cash_before_exit = self.ledger.state()["account"]["cash_balance_usd"]
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = 0.25
+        partial = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+        remaining = self.ledger.position()
+        self.assertIsNotNone(remaining)
+        self.assertLess(remaining["quantity"], initial_quantity)
+        self.assertAlmostEqual(
+            remaining["quantity"] + remaining["exit_filled_quantity"],
+            initial_quantity,
+        )
+        self.assertGreater(
+            self.ledger.state()["account"]["cash_balance_usd"], cash_before_exit
+        )
+        first_exit_id = partial["execution"]["client_order_id"]
+        first_exit = self.ledger.execution_ledger.order_state(first_exit_id)
+        self.assertEqual(first_exit["status"], "CANCELED")
+        self.assertGreater(first_exit["filled_quantity"], 0.0)
+        self.assertEqual(partial["execution"]["execution_status"], "CANCELED")
+        self.assertEqual(partial["execution"]["fill_status"], "PARTIALLY_FILLED")
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 130.0
+        self.engine.data.order_book_sell_qty = 100.0
+        completed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(completed["status"], "CLOSED")
+        self.assertIsNone(self.ledger.position())
+        second_exit_id = completed["execution"]["client_order_id"]
+        self.assertNotEqual(first_exit_id, second_exit_id)
+        self.assertTrue(second_exit_id.endswith("-2"))
+        trade = self.ledger._db.execute(
+            "SELECT * FROM paper_trades WHERE asset='cex:BTCUSDT'"
+        ).fetchone()
+        self.assertAlmostEqual(trade["quantity"], initial_quantity)
+        self.assertGreater(trade["exit_fee"], 0.0)
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+    def test_daily_risk_uses_fill_dates_not_later_trade_close_date(self):
+        self.bot.max_order_participation_rate = 1.0
+        now = int(time.time())
+        day_start = now // 86_400 * 86_400
+
+        with patch("time.time", return_value=day_start - 30):
+            opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        original_quantity = self.ledger.position()["quantity"]
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
+        self.engine.data.order_book_sell_qty = original_quantity * 0.80
+        with patch("time.time", return_value=day_start - 10):
+            first_exit = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(first_exit["status"], "PARTIALLY_CLOSED")
+        self.assertAlmostEqual(
+            first_exit["execution"]["filled_quantity"],
+            original_quantity * 0.80,
+            places=7,
+        )
+
+        remaining = self.ledger.position()["quantity"]
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = remaining * 2.0
+        with patch("time.time", return_value=day_start + 10):
+            final_exit = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(final_exit["status"], "CLOSED")
+
+        # The prior day's loss must not be re-counted on the day the trade completes.
+        controls = self.ledger.risk_controls(
+            asset="cex:BTCUSDT",
+            daily_loss_limit_pct=0.0001,
+            max_drawdown_pct=0.50,
+            max_consecutive_losses=10,
+            cooldown_hours_after_loss=0.0,
+            now=day_start + 100,
+        )
+        self.assertGreater(controls["daily_exit_fill_pnl_usd"], 0.0)
+        self.assertEqual(controls["daily_realized_loss_pct"], 0.0)
+        self.assertNotIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
+
+    def test_new_entries_fail_closed_when_ledger_reconciliation_is_incomplete(self):
+        original = self.ledger.reconciliation
+        self.ledger.reconciliation = lambda: {"status": "INCOMPLETE"}
+        try:
+            result = self.ledger.risk_controls(
+                asset="cex:BTCUSDT",
+                daily_loss_limit_pct=0.015,
+                max_drawdown_pct=0.10,
+                max_consecutive_losses=3,
+                cooldown_hours_after_loss=24.0,
+            )
+        finally:
+            self.ledger.reconciliation = original
+        self.assertFalse(result["entry_allowed"])
+        self.assertIn("LEDGER_RECONCILIATION_NOT_PASS", result["halt_reasons"])
+
+    def test_daily_loss_uses_exit_fill_dates_after_trade_closes_later(self):
+        self.bot.max_order_participation_rate = 1.0
+        now = int(time.time())
+        day_start = now // 86_400 * 86_400
+
+        with patch("time.time", return_value=day_start - 30):
+            opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        original_quantity = self.ledger.position()["quantity"]
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
+        self.engine.data.order_book_sell_qty = original_quantity * 0.80
+        with patch("time.time", return_value=day_start - 10):
+            partial = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+
+        remaining = self.ledger.position()["quantity"]
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = remaining * 2.0
+        with patch("time.time", return_value=day_start + 10):
+            completed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(completed["status"], "CLOSED")
+
+        # The earlier day's loss must not be counted again on today's close date.
+        controls = self.ledger.risk_controls(
+            asset="cex:BTCUSDT",
+            daily_loss_limit_pct=0.0001,
+            max_drawdown_pct=0.50,
+            max_consecutive_losses=10,
+            cooldown_hours_after_loss=0.0,
+            now=day_start + 100,
+        )
+        self.assertGreater(controls["daily_exit_fill_pnl_usd"], 0.0)
+        self.assertEqual(controls["daily_realized_loss_pct"], 0.0)
+        self.assertNotIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
+
+    def test_partial_exit_realized_loss_counts_toward_daily_risk_limit(self):
+        bot = PaperTradingBot(
+            self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001,
+        )
+        self.assertEqual(bot.run_once("cex:BTCUSDT")["status"], "OPENED")
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
+        self.engine.data.order_book_sell_qty = 20.0
+        partial = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+        controls = bot.state()["risk_controls"]
+        self.assertFalse(controls["entry_allowed"])
+        self.assertIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
+        self.assertLess(controls["daily_exit_fill_pnl_usd"], 0.0)
+
+    def test_zero_liquidity_exit_leaves_position_unchanged(self):
+        self.bot.run_once("cex:BTCUSDT")
+        before = self.ledger.position()
+        cash_before = self.ledger.state()["account"]["cash_balance_usd"]
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = 0.0
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "EXIT_UNFILLED")
+        after = self.ledger.position()
+        self.assertIsNotNone(after)
+        self.assertAlmostEqual(after["quantity"], before["quantity"])
+        self.assertEqual(
+            self.ledger.state()["account"]["cash_balance_usd"], cash_before
+        )
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+    def test_stale_order_book_blocks_exit_and_preserves_position(self):
+        self.bot.run_once("cex:BTCUSDT")
+        before = self.ledger.position()
+        event_count = self.ledger.execution_ledger.event_count()
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_age_ms = 6_000
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "UNKNOWN")
+        after = self.ledger.position()
+        self.assertIsNotNone(after)
+        self.assertEqual(after["quantity"], before["quantity"])
+        self.assertEqual(self.ledger.execution_ledger.event_count(), event_count)
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+    def test_partial_exit_projection_survives_sqlite_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = os.path.join(directory, "paper-exit.sqlite3")
+            ledger = PaperLedger(db_path)
+            bot = PaperTradingBot(self.engine, ledger=ledger)
+            self.assertEqual(bot.run_once("cex:BTCUSDT")["status"], "OPENED")
+            original_quantity = ledger.position()["quantity"]
+            self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+            self.engine.data.order_book_sell_qty = 0.25
+            partial = bot.run_once("cex:BTCUSDT")
+            self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+            expected_remaining = ledger.position()["quantity"]
+            expected_realized = ledger.state()["account"]["realized_pnl_usd"]
+            ledger.close()
+
+            recovered = PaperLedger(db_path)
+            try:
+                position = recovered.position()
+                self.assertIsNotNone(position)
+                self.assertAlmostEqual(position["quantity"], expected_remaining)
+                self.assertAlmostEqual(
+                    position["quantity"] + position["exit_filled_quantity"],
+                    original_quantity,
+                )
+                self.assertAlmostEqual(
+                    recovered.state()["account"]["realized_pnl_usd"],
+                    expected_realized,
+                )
+                self.assertEqual(recovered.reconciliation()["status"], "PASS")
+                self.assertEqual(
+                    recovered.execution_ledger.replay_order_states()["status"], "PASS"
+                )
+                self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 130.0
+                self.engine.data.order_book_sell_qty = 100.0
+                recovered_bot = PaperTradingBot(self.engine, ledger=recovered)
+                completed = recovered_bot.run_once("cex:BTCUSDT")
+                self.assertEqual(completed["status"], "CLOSED")
+                self.assertTrue(completed["execution"]["client_order_id"].endswith("-2"))
+                self.assertEqual(recovered.reconciliation()["status"], "PASS")
+            finally:
+                recovered.close()
 
     def test_entry_projection_and_execution_events_roll_back_together(self):
         position = {

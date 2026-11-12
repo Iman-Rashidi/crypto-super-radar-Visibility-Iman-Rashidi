@@ -17,6 +17,8 @@ from .database import connect_database, storage_backend
 from .signal_performance import summarize_closed_trades
 from .execution_costs import calculate_fill_costs
 from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
+from .paper_execution_adapter import PaperExecutionAdapter
+from .paper_fill_simulator import PaperFillSimulator
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -65,6 +67,52 @@ def _extract_observed_quote(snapshot: Any, *, max_age_ms: int = 60_000) -> Optio
     return None
 
 
+def _extract_order_book(
+    data: Any, asset: AssetSpec, *, max_age_ms: int = 5_000,
+) -> Optional[dict[str, Any]]:
+    """Return a fresh, validated public Binance Spot top-of-book snapshot."""
+    getter = getattr(data, "order_book_snapshot", None)
+    if not callable(getter):
+        return None
+    try:
+        raw = getter(asset)
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or raw.get("symbol") != asset.symbol:
+        return None
+    if raw.get("timestamp_kind") != "LOCAL_RECEIVED_AT" or raw.get("orders_submitted") is not False:
+        return None
+    numeric_fields = (
+        "best_bid", "best_ask", "available_liquidity_sell_qty",
+        "available_liquidity_buy_qty", "observed_at_ms",
+    )
+    if any(isinstance(raw.get(field), bool) for field in numeric_fields):
+        return None
+    bid = _number(raw.get("best_bid"))
+    ask = _number(raw.get("best_ask"))
+    bid_qty = _number(raw.get("available_liquidity_sell_qty"))
+    ask_qty = _number(raw.get("available_liquidity_buy_qty"))
+    observed_at = _number(raw.get("observed_at_ms"))
+    source = raw.get("source")
+    if (
+        bid is None or ask is None or bid_qty is None or ask_qty is None
+        or observed_at is None or bid <= 0 or ask < bid
+        or bid_qty < 0 or ask_qty < 0 or observed_at <= 0
+        or not isinstance(source, str) or not source.strip()
+    ):
+        return None
+    age_ms = int(time.time() * 1000) - int(observed_at)
+    if age_ms < -2_000 or age_ms > max_age_ms:
+        return None
+    return {
+        "symbol": asset.symbol, "bid": bid, "ask": ask,
+        "available_sell_quantity": bid_qty, "available_buy_quantity": ask_qty,
+        "observed_at_ms": int(observed_at), "age_ms": age_ms,
+        "source": source.strip(), "timestamp_kind": "LOCAL_RECEIVED_AT",
+        "orders_submitted": False,
+    }
+
+
 class PaperLedger:
     """Minimal paper account and immutable closed-trade journal in SQLite."""
 
@@ -78,6 +126,8 @@ class PaperLedger:
         self._db = connect_database(self.path)
         with self._db:
             self.execution_ledger = PaperExecutionEventLedger(self._db, lock=self._lock)
+            self.execution_adapter = PaperExecutionAdapter(self.execution_ledger)
+            self.fill_simulator = PaperFillSimulator(self.execution_ledger)
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS paper_account (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -106,7 +156,19 @@ class PaperLedger:
                     entry_reference_price REAL,
                     entry_slippage_usd REAL,
                     entry_spread_cost_usd REAL,
-                    entry_quote_source TEXT
+                    entry_quote_source TEXT,
+                    original_entry_quantity REAL NOT NULL DEFAULT 0,
+                    original_entry_fee REAL NOT NULL DEFAULT 0,
+                    exit_attempt_count INTEGER NOT NULL DEFAULT 0,
+                    exit_filled_quantity REAL NOT NULL DEFAULT 0,
+                    exit_filled_notional REAL NOT NULL DEFAULT 0,
+                    exit_fee_paid_usd REAL NOT NULL DEFAULT 0,
+                    exit_gross_pnl_usd REAL NOT NULL DEFAULT 0,
+                    exit_entry_fee_allocated_usd REAL NOT NULL DEFAULT 0,
+                    exit_reference_notional REAL NOT NULL DEFAULT 0,
+                    exit_slippage_cost_usd REAL NOT NULL DEFAULT 0,
+                    exit_spread_cost_usd REAL NOT NULL DEFAULT 0,
+                    exit_quote_source TEXT
                 )
             """)
             self._db.execute("""
@@ -178,6 +240,18 @@ class PaperLedger:
                 ("entry_slippage_usd", "REAL"),
                 ("entry_spread_cost_usd", "REAL"),
                 ("entry_quote_source", "TEXT"),
+                ("original_entry_quantity", "REAL NOT NULL DEFAULT 0"),
+                ("original_entry_fee", "REAL NOT NULL DEFAULT 0"),
+                ("exit_attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("exit_filled_quantity", "REAL NOT NULL DEFAULT 0"),
+                ("exit_filled_notional", "REAL NOT NULL DEFAULT 0"),
+                ("exit_fee_paid_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_gross_pnl_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_entry_fee_allocated_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_reference_notional", "REAL NOT NULL DEFAULT 0"),
+                ("exit_slippage_cost_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_spread_cost_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_quote_source", "TEXT"),
             ):
                 if name not in position_columns:
                     self._db.execute(
@@ -188,6 +262,12 @@ class PaperLedger:
             )
             self._db.execute(
                 "UPDATE paper_positions SET peak_price=entry_price WHERE peak_price<=0"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET original_entry_quantity=quantity WHERE original_entry_quantity<=0"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET original_entry_fee=entry_fee WHERE original_entry_fee<=0 AND entry_fee>0"
             )
             self._db.execute(
                 "INSERT OR IGNORE INTO paper_account(id, initial_equity, cash_balance, updated_at) VALUES (1, ?, ?, ?)",
@@ -209,44 +289,57 @@ class PaperLedger:
                 "SELECT 1 FROM paper_positions WHERE asset=? AND signal_bar=? LIMIT 1",
                 (asset, signal_bar),
             ).fetchone()
-        return bool(closed or opened)
+        entry_order_id = make_paper_client_order_id(asset, signal_bar, "ENTRY")
+        execution_order = self.execution_ledger.order_state(entry_order_id)
+        return bool(closed or opened or execution_order)
+
+    def _insert_open_position_projection(
+        self, position: dict[str, Any], debit: float,
+    ) -> bool:
+        """Apply the filled entry to cash/position; caller owns the DB transaction."""
+        account = self._db.execute(
+            "SELECT cash_balance FROM paper_account WHERE id=1"
+        ).fetchone()
+        active = self._db.execute("SELECT 1 FROM paper_positions LIMIT 1").fetchone()
+        duplicate = self._db.execute(
+            "SELECT 1 FROM paper_trades WHERE asset=? AND signal_bar=? LIMIT 1",
+            (position["asset"], position["signal_bar"]),
+        ).fetchone()
+        if active or duplicate or account is None or debit > float(account["cash_balance"]):
+            return False
+        self._db.execute("""
+            INSERT INTO paper_positions
+            (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
+             opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
+             initial_stop_loss, max_holding_days, peak_price,
+             entry_reference_price, entry_slippage_usd, entry_spread_cost_usd,
+             entry_quote_source, original_entry_quantity, original_entry_fee)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            position["asset"], position["quantity"], position["entry_price"],
+            position["stop_loss"], position["take_profit"], position["entry_fee"],
+            position["opened_at"], position["signal_bar"],
+            position["confirmation_score"], position["risk_budget"],
+            position["entry_price"], position["initial_stop_loss"],
+            position["max_holding_days"], position["entry_price"],
+            position.get("entry_reference_price"),
+            position.get("entry_slippage_usd"),
+            position.get("entry_spread_cost_usd"),
+            position.get("entry_quote_source"),
+            position.get("original_entry_quantity", position["quantity"]),
+            position.get("original_entry_fee", position["entry_fee"]),
+        ))
+        self._db.execute(
+            "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
+            (debit, int(time.time())),
+        )
+        return True
 
     def open_position(self, position: dict[str, Any], debit: float) -> bool:
+        """Legacy atomic immediate-fill entry, retained for existing callers/tests."""
         with self._lock, self._db:
-            account = self._db.execute(
-                "SELECT cash_balance FROM paper_account WHERE id=1"
-            ).fetchone()
-            active = self._db.execute("SELECT 1 FROM paper_positions LIMIT 1").fetchone()
-            duplicate = self._db.execute(
-                "SELECT 1 FROM paper_trades WHERE asset=? AND signal_bar=? LIMIT 1",
-                (position["asset"], position["signal_bar"]),
-            ).fetchone()
-            if active or duplicate or account is None or debit > float(account["cash_balance"]):
+            if not self._insert_open_position_projection(position, debit):
                 return False
-            self._db.execute("""
-                INSERT INTO paper_positions
-                (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
-                 opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
-                 initial_stop_loss, max_holding_days, peak_price,
-                 entry_reference_price, entry_slippage_usd, entry_spread_cost_usd,
-                 entry_quote_source)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                position["asset"], position["quantity"], position["entry_price"],
-                position["stop_loss"], position["take_profit"], position["entry_fee"],
-                position["opened_at"], position["signal_bar"],
-                position["confirmation_score"], position["risk_budget"],
-                position["entry_price"], position["initial_stop_loss"],
-                position["max_holding_days"], position["entry_price"],
-                position.get("entry_reference_price"),
-                position.get("entry_slippage_usd"),
-                position.get("entry_spread_cost_usd"),
-                position.get("entry_quote_source"),
-            ))
-            self._db.execute(
-                "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
-                (debit, int(time.time())),
-            )
             self.execution_ledger.record_simulated_fill(
                 client_order_id=make_paper_client_order_id(
                     position["asset"], position["signal_bar"], "ENTRY"
@@ -260,6 +353,102 @@ class PaperLedger:
                 reason="PAPER_ENTRY", occurred_at=position["opened_at"],
             )
         return True
+
+    def execute_entry_order(
+        self, *,
+        position: dict[str, Any],
+        client_order_id: str,
+        requested_quantity: float,
+        order_book: dict[str, Any],
+        fee_bps: float,
+        adverse_impact_bps: float,
+        max_participation_rate: float,
+        fill_fractions: tuple[float, ...],
+        max_quote_age_ms: int,
+        simulated_latency_ms: int = 200,
+    ) -> dict[str, Any]:
+        """Simulate adapter-accepted entry fills and atomically project actual fill."""
+        with self._lock, self._db:
+            self.execution_adapter.submit_order(
+                client_order_id=client_order_id, asset=position["asset"],
+                side="BUY", quantity=requested_quantity,
+                occurred_at=position["opened_at"],
+            )
+            simulation = self.fill_simulator.simulate_order(
+                client_order_id=client_order_id,
+                asset=position["asset"],
+                side="BUY",
+                requested_quantity=requested_quantity,
+                bid=order_book["bid"],
+                ask=order_book["ask"],
+                available_liquidity_quantity=order_book["available_buy_quantity"],
+                max_participation_rate=max_participation_rate,
+                fee_bps=fee_bps,
+                adverse_impact_bps=adverse_impact_bps,
+                simulated_latency_ms=simulated_latency_ms,
+                fill_fractions=fill_fractions,
+                quote_quality="OBSERVED",
+                quote_source=order_book["source"],
+                quote_timestamp_ms=order_book["observed_at_ms"],
+                max_quote_age_ms=max_quote_age_ms,
+                cancel_unfilled_remainder=False,
+                reason="PAPER_BOT_ENTRY",
+            )
+            requested = float(requested_quantity)
+            filled = float(simulation["filled_quantity"])
+            remaining = float(simulation["remaining_quantity"])
+            tolerance = max(1e-12, requested * 1e-12)
+            if simulation["status"] not in {"FILLED", "CANCELED"}:
+                self.execution_adapter.cancel_order(
+                    client_order_id=client_order_id,
+                    reason="PAPER_ENTRY_UNFILLED_REMAINDER_CANCELED",
+                    occurred_at=int(time.time()),
+                )
+            if filled <= tolerance:
+                return {
+                    "status": "CANCELED", "fill_status": simulation["status"],
+                    "client_order_id": client_order_id,
+                    "requested_quantity": requested, "filled_quantity": 0.0,
+                    "remaining_quantity": requested, "average_fill_price": None,
+                    "fee_paid_usd": 0.0, "simulation": simulation,
+                    "mode": "PAPER_ONLY", "orders_submitted": False,
+                }
+
+            average_price = _number(simulation.get("average_fill_price"))
+            cumulative_fee = _number(simulation.get("cumulative_fee_paid_usd"))
+            if average_price is None or average_price <= 0 or cumulative_fee is None or cumulative_fee < 0:
+                raise RuntimeError("Paper fill simulator returned incomplete cumulative fill economics")
+            applied = dict(position)
+            applied["quantity"] = filled
+            applied["entry_price"] = average_price
+            applied["entry_fee"] = cumulative_fee
+            applied["original_entry_quantity"] = filled
+            applied["original_entry_fee"] = cumulative_fee
+            costs = calculate_fill_costs(
+                side="BUY", quantity=filled,
+                bid=order_book["bid"], ask=order_book["ask"],
+                fill_price=average_price, fee_paid_usd=cumulative_fee,
+                funding_applicable=False, quote_quality="OBSERVED",
+            )
+            applied["entry_reference_price"] = order_book["ask"]
+            applied["entry_slippage_usd"] = costs["slippage_cost_usd"]
+            applied["entry_spread_cost_usd"] = costs["spread_cost_usd"]
+            applied["entry_quote_source"] = order_book["source"]
+            debit = filled * average_price + cumulative_fee
+            if not self._insert_open_position_projection(applied, debit):
+                raise RuntimeError("Paper ledger rejected filled entry projection; execution transaction rolled back")
+            final_order = self.execution_ledger.order_state(client_order_id)
+            if final_order is None:
+                raise RuntimeError("Paper order disappeared before transactional projection completed")
+            return {
+                "status": final_order["status"], "fill_status": simulation["status"],
+                "client_order_id": client_order_id,
+                "requested_quantity": requested, "filled_quantity": filled,
+                "remaining_quantity": remaining, "average_fill_price": average_price,
+                "fee_paid_usd": cumulative_fee, "debit_usd": debit,
+                "position": applied, "simulation": simulation,
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
 
     def update_management(self, price: float, stop_loss: float) -> None:
         with self._lock, self._db:
@@ -282,10 +471,7 @@ class PaperLedger:
         initial = float(state["account"]["initial_equity_usd"])
         equity = float(state["account"]["equity_usd"])
         with self._lock:
-            daily_net = float(self._db.execute(
-                "SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE closed_at>=?",
-                (day_start,),
-            ).fetchone()[0])
+            daily_net = 0.0
             recent = self._db.execute(
                 "SELECT net_pnl FROM paper_trades ORDER BY closed_at DESC, id DESC LIMIT ?",
                 (int(max_consecutive_losses),),
@@ -298,6 +484,86 @@ class PaperLedger:
                 "ORDER BY closed_at DESC, id DESC LIMIT 1",
                 (asset,),
             ).fetchone()
+        daily_exit_fill_net = 0.0
+        # Build original-entry economics for both open and already closed positions.
+        # Daily risk must follow the timestamp of each incremental exit fill, not
+        # the eventual trade-close date; otherwise multi-day partial exits are
+        # either omitted before close or double-counted on the final close day.
+        exit_bases: dict[str, tuple[float, float, float]] = {}
+        with self._lock:
+            projections = self._db.execute(
+                "SELECT asset, signal_bar, entry_price, quantity, entry_fee "
+                "FROM paper_trades"
+            ).fetchall()
+            sell_orders = self._db.execute(
+                "SELECT DISTINCT client_order_id FROM paper_execution_events WHERE side='SELL'"
+            ).fetchall()
+        for row in projections:
+            qty = float(row["quantity"])
+            if qty > 0:
+                base_id = make_paper_client_order_id(
+                    str(row["asset"]), str(row["signal_bar"]), "EXIT"
+                )
+                exit_bases[base_id] = (
+                    float(row["entry_price"]), qty, float(row["entry_fee"]),
+                )
+        open_position = state.get("open_position")
+        if open_position:
+            qty = float(
+                open_position.get("original_entry_quantity")
+                or open_position["quantity"]
+            )
+            if qty > 0:
+                base_id = make_paper_client_order_id(
+                    str(open_position["asset"]), str(open_position["signal_bar"]), "EXIT"
+                )
+                exit_bases[base_id] = (
+                    float(open_position["entry_price"]),
+                    qty,
+                    float(
+                        open_position.get("original_entry_fee")
+                        if open_position.get("original_entry_fee") is not None
+                        else open_position["entry_fee"]
+                    ),
+                )
+        for order_row in sell_orders:
+            order_id = str(order_row["client_order_id"])
+            economics = next(
+                (
+                    value for base_id, value in exit_bases.items()
+                    if order_id == base_id or order_id.startswith(base_id + "-")
+                ),
+                None,
+            )
+            if economics is None:
+                continue
+            entry_price, original_qty, original_entry_fee = economics
+            entry_fee_per_unit = original_entry_fee / original_qty if original_qty > 0 else 0.0
+            events = self.execution_ledger.recent_events(
+                1000, client_order_id=order_id,
+            )
+            prior_qty = 0.0
+            prior_notional = 0.0
+            prior_fee = 0.0
+            # recent_events is newest-first; replay fill deltas chronologically.
+            for event in reversed(events):
+                if event["status"] not in {"PARTIALLY_FILLED", "FILLED"}:
+                    continue
+                cumulative_qty = float(event["filled_quantity"])
+                cumulative_notional = cumulative_qty * float(event["fill_price"])
+                cumulative_fee = float(event["fee_paid_usd"])
+                delta_qty = max(0.0, cumulative_qty - prior_qty)
+                delta_notional = cumulative_notional - prior_notional
+                delta_fee = cumulative_fee - prior_fee
+                if delta_qty > 0 and int(event["occurred_at"]) >= day_start:
+                    daily_exit_fill_net += (
+                        delta_notional - delta_qty * entry_price
+                        - delta_qty * entry_fee_per_unit - delta_fee
+                    )
+                prior_qty = cumulative_qty
+                prior_notional = cumulative_notional
+                prior_fee = cumulative_fee
+        daily_net += daily_exit_fill_net
         consecutive = 0
         for row in recent:
             if float(row["net_pnl"]) >= 0:
@@ -326,6 +592,11 @@ class PaperLedger:
                 0.0, cooldown_hours_after_loss * 3600.0 - (now - int(last_asset["closed_at"]))
             ) / 3600.0
         reasons = []
+        reconciliation_status = str(
+            (state.get("reconciliation") or {}).get("status", "INCOMPLETE")
+        ).upper()
+        if reconciliation_status not in {"PASS", "NO_DATA"}:
+            reasons.append("LEDGER_RECONCILIATION_NOT_PASS")
         if daily_loss_pct >= daily_loss_limit_pct * 100.0:
             reasons.append("DAILY_LOSS_LIMIT")
         if drawdown_pct >= max_drawdown_pct * 100.0:
@@ -338,6 +609,7 @@ class PaperLedger:
             "entry_allowed": not reasons,
             "halt_reasons": reasons,
             "daily_realized_loss_pct": round(daily_loss_pct, 4),
+            "daily_exit_fill_pnl_usd": round(daily_exit_fill_net, 8),
             "max_equity_drawdown_pct": round(drawdown_pct, 4),
             "consecutive_losses": consecutive,
             "cooldown_hours_remaining": round(cooldown_remaining, 2),
@@ -348,6 +620,200 @@ class PaperLedger:
                 "cooldown_hours_after_loss": cooldown_hours_after_loss,
             },
         }
+
+    def execute_exit_order(
+        self, *,
+        order_book: dict[str, Any],
+        fee_bps: float,
+        adverse_impact_bps: float,
+        max_participation_rate: float,
+        fill_fractions: tuple[float, ...],
+        max_quote_age_ms: int,
+        simulated_latency_ms: int = 200,
+        reason: str = "PAPER_EXIT",
+    ) -> dict[str, Any]:
+        """Execute a SELL against public top-of-book liquidity and project actual fills."""
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT * FROM paper_positions WHERE id=1"
+            ).fetchone()
+            if row is None:
+                return {"status": "NO_POSITION", "mode": "PAPER_ONLY", "orders_submitted": False}
+            position = dict(row)
+            requested = float(position["quantity"])
+            attempt = int(position.get("exit_attempt_count") or 0) + 1
+            base_order_id = make_paper_client_order_id(
+                position["asset"], position["signal_bar"], "EXIT"
+            )
+            client_order_id = (
+                base_order_id if attempt == 1 else f"{base_order_id}-{attempt}"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET exit_attempt_count=? WHERE id=1",
+                (attempt,),
+            )
+            self.execution_adapter.submit_order(
+                client_order_id=client_order_id, asset=position["asset"],
+                side="SELL", quantity=requested,
+                occurred_at=int(time.time()),
+            )
+            simulation = self.fill_simulator.simulate_order(
+                client_order_id=client_order_id,
+                asset=position["asset"],
+                side="SELL",
+                requested_quantity=requested,
+                bid=order_book["bid"],
+                ask=order_book["ask"],
+                available_liquidity_quantity=order_book["available_sell_quantity"],
+                max_participation_rate=max_participation_rate,
+                fee_bps=fee_bps,
+                adverse_impact_bps=adverse_impact_bps,
+                simulated_latency_ms=simulated_latency_ms,
+                fill_fractions=fill_fractions,
+                quote_quality="OBSERVED",
+                quote_source=order_book["source"],
+                quote_timestamp_ms=order_book["observed_at_ms"],
+                max_quote_age_ms=max_quote_age_ms,
+                cancel_unfilled_remainder=False,
+                reason=f"PAPER_BOT_EXIT:{reason}",
+            )
+            filled = float(simulation["filled_quantity"])
+            residual = max(0.0, requested - filled)
+            tolerance = max(1e-12, requested * 1e-12)
+            if simulation["status"] not in {"FILLED", "CANCELED"}:
+                self.execution_adapter.cancel_order(
+                    client_order_id=client_order_id,
+                    reason="PAPER_EXIT_UNFILLED_REMAINDER_CANCELED",
+                    occurred_at=int(time.time()),
+                )
+            final_order = self.execution_ledger.order_state(client_order_id)
+            if final_order is None:
+                raise RuntimeError("Paper exit order disappeared before projection")
+            if filled <= tolerance:
+                return {
+                    "status": "NO_FILL", "execution_status": final_order["status"],
+                    "fill_status": simulation["status"], "client_order_id": client_order_id,
+                    "requested_quantity": requested, "filled_quantity": 0.0,
+                    "remaining_quantity": requested, "fee_paid_usd": 0.0,
+                    "mode": "PAPER_ONLY", "orders_submitted": False,
+                }
+
+            average_price = _number(simulation.get("average_fill_price"))
+            fee_paid = _number(simulation.get("cumulative_fee_paid_usd"))
+            if average_price is None or average_price <= 0 or fee_paid is None or fee_paid < 0:
+                raise RuntimeError("Paper exit simulator returned incomplete fill economics")
+            was_final = residual <= tolerance
+            if was_final:
+                filled = requested
+                residual = 0.0
+            allocated_entry_fee = (
+                float(position["entry_fee"]) if was_final
+                else float(position["entry_fee"]) * filled / requested
+            )
+            remaining_entry_fee = max(0.0, float(position["entry_fee"]) - allocated_entry_fee)
+            prior_exit_qty = float(position.get("exit_filled_quantity") or 0.0)
+            prior_exit_notional = float(position.get("exit_filled_notional") or 0.0)
+            prior_exit_fee = float(position.get("exit_fee_paid_usd") or 0.0)
+            prior_exit_gross = float(position.get("exit_gross_pnl_usd") or 0.0)
+            prior_entry_fee_allocated = float(position.get("exit_entry_fee_allocated_usd") or 0.0)
+            prior_reference_notional = float(position.get("exit_reference_notional") or 0.0)
+            prior_slippage = float(position.get("exit_slippage_cost_usd") or 0.0)
+            prior_spread = float(position.get("exit_spread_cost_usd") or 0.0)
+            reference_bid = float(order_book["bid"])
+            costs = calculate_fill_costs(
+                side="SELL", quantity=filled,
+                bid=order_book["bid"], ask=order_book["ask"],
+                fill_price=average_price, fee_paid_usd=fee_paid,
+                funding_applicable=False, quote_quality="OBSERVED",
+            )
+            exit_qty_total = prior_exit_qty + filled
+            exit_notional_total = prior_exit_notional + filled * average_price
+            exit_fee_total = prior_exit_fee + fee_paid
+            exit_gross_total = prior_exit_gross + filled * (average_price - float(position["entry_price"]))
+            allocated_entry_fee_total = prior_entry_fee_allocated + allocated_entry_fee
+            reference_notional_total = prior_reference_notional + filled * reference_bid
+            exit_slippage_total = prior_slippage + float(costs["slippage_cost_usd"])
+            exit_spread_total = prior_spread + float(costs["spread_cost_usd"])
+            previous_source = position.get("exit_quote_source")
+            current_source = str(order_book["source"])
+            quote_sources = list(dict.fromkeys(
+                [part for part in (str(previous_source or "").split("|") + [current_source]) if part]
+            ))
+            combined_source = "|".join(quote_sources)
+            self._db.execute(
+                "UPDATE paper_account SET cash_balance=cash_balance+?, updated_at=? WHERE id=1",
+                (filled * average_price - fee_paid, int(time.time())),
+            )
+
+            if was_final:
+                total_entry_fee = allocated_entry_fee_total
+                total_exit_qty = exit_qty_total
+                average_exit_price = exit_notional_total / total_exit_qty
+                exit_reference = reference_notional_total / total_exit_qty
+                entry_spread = _number(position.get("entry_spread_cost_usd"))
+                total_spread = (
+                    entry_spread + exit_spread_total
+                    if entry_spread is not None else None
+                )
+                closed_at = int(time.time())
+                net = exit_gross_total - total_entry_fee - exit_fee_total
+                self._db.execute("""
+                    INSERT INTO paper_trades
+                    (asset, side, quantity, entry_price, exit_price, stop_loss, initial_stop_loss,
+                     take_profit, entry_fee, exit_fee, gross_pnl, net_pnl, opened_at, closed_at,
+                     signal_bar, confirmation_score, exit_reason, entry_reference_price,
+                     exit_reference_price, entry_slippage_usd, exit_slippage_usd,
+                     spread_cost_usd, entry_spread_cost_usd, exit_spread_cost_usd,
+                     entry_quote_source, exit_quote_source, funding_cost_usd, funding_status)
+                    VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    position["asset"], total_exit_qty, position["entry_price"],
+                    average_exit_price, position["stop_loss"],
+                    position.get("initial_stop_loss") or position["stop_loss"],
+                    position["take_profit"], total_entry_fee, exit_fee_total,
+                    exit_gross_total, net, position["opened_at"], closed_at,
+                    position["signal_bar"], position["confirmation_score"], reason,
+                    position.get("entry_reference_price"), exit_reference,
+                    position.get("entry_slippage_usd"), exit_slippage_total,
+                    total_spread, entry_spread, exit_spread_total,
+                    position.get("entry_quote_source"), combined_source,
+                    0.0, "NOT_APPLICABLE",
+                ))
+                self._db.execute("DELETE FROM paper_positions WHERE id=1")
+                status = "CLOSED"
+                trade = {
+                    "asset": position["asset"], "gross_pnl_usd": exit_gross_total,
+                    "net_pnl_usd": net, "exit_price": average_exit_price,
+                    "exit_reason": reason, "exit_fee_usd": exit_fee_total,
+                    "entry_fee_usd": total_entry_fee,
+                }
+            else:
+                self._db.execute("""
+                    UPDATE paper_positions
+                    SET quantity=?, entry_fee=?,
+                        exit_filled_quantity=?, exit_filled_notional=?,
+                        exit_fee_paid_usd=?, exit_gross_pnl_usd=?,
+                        exit_entry_fee_allocated_usd=?, exit_reference_notional=?,
+                        exit_slippage_cost_usd=?, exit_spread_cost_usd=?,
+                        exit_quote_source=?
+                    WHERE id=1
+                """, (
+                    residual, remaining_entry_fee, exit_qty_total,
+                    exit_notional_total, exit_fee_total, exit_gross_total,
+                    allocated_entry_fee_total, reference_notional_total,
+                    exit_slippage_total, exit_spread_total, combined_source,
+                ))
+                status = "PARTIALLY_CLOSED"
+                trade = None
+
+            return {
+                "status": status, "execution_status": final_order["status"],
+                "fill_status": simulation["status"], "client_order_id": client_order_id,
+                "requested_quantity": requested, "filled_quantity": filled,
+                "remaining_quantity": residual, "average_fill_price": average_price,
+                "fee_paid_usd": fee_paid, "cumulative_exit_quantity": exit_qty_total,
+                "trade": trade, "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
 
     def close_position(
         self,
@@ -487,6 +953,13 @@ class PaperLedger:
         cash = float(account["cash_balance"])
         realized = sum(float(row["net_pnl"]) for row in trade_rows)
         position = dict(position_row) if position_row else None
+        partial_realized = (
+            float(position.get("exit_gross_pnl_usd") or 0.0)
+            - float(position.get("exit_entry_fee_allocated_usd") or 0.0)
+            - float(position.get("exit_fee_paid_usd") or 0.0)
+            if position else 0.0
+        )
+        realized += partial_realized
         open_debit = (
             float(position["quantity"]) * float(position["entry_price"])
             + float(position["entry_fee"])
@@ -506,29 +979,102 @@ class PaperLedger:
         ) -> None:
             nonlocal matched_fills
             expected_order_ids.add(order_id)
-            event = self.execution_ledger.order_state(order_id)
-            if event is None:
+            order = self.execution_ledger.order_state(order_id)
+            if order is None:
                 missing_events.append(f"{label}:{order_id}")
                 return
-            if event["status"] != "FILLED":
-                errors.append(f"{label}:{order_id} has status {event['status']}, expected FILLED")
+            if order["status"] not in {"FILLED", "CANCELED"}:
+                errors.append(
+                    f"{label}:{order_id} has terminal status {order['status']}, expected FILLED or CANCELED"
+                )
+                return
+            fill_event = next(
+                (
+                    event for event in self.execution_ledger.recent_events(
+                        1000, client_order_id=order_id
+                    )
+                    if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+                ),
+                None,
+            )
+            if fill_event is None:
+                errors.append(f"{label}:{order_id} has no recorded fill event")
                 return
             for field, actual, expected in (
-                ("asset", str(event["asset"]), asset),
-                ("side", str(event["side"]), side),
+                ("asset", str(order["asset"]), asset),
+                ("side", str(order["side"]), side),
+                ("fill_asset", str(fill_event["asset"]), asset),
+                ("fill_side", str(fill_event["side"]), side),
             ):
                 if actual != expected:
                     errors.append(f"{label}:{order_id} {field} mismatch")
+            requested = float(order["quantity"])
+            if quantity > requested + max(1e-12, requested * 1e-9):
+                errors.append(f"{label}:{order_id} projected fill exceeds accepted order quantity")
             for field, actual, expected in (
-                ("quantity", float(event["quantity"]), quantity),
-                ("filled_quantity", float(event["filled_quantity"]), quantity),
-                ("fill_price", float(event["fill_price"]), price),
-                ("fee_paid_usd", float(event["fee_paid_usd"]), fee),
+                ("filled_quantity", float(order["filled_quantity"]), quantity),
+                ("fill_event_quantity", float(fill_event["filled_quantity"]), quantity),
+                ("fill_price", float(fill_event["fill_price"]), price),
+                ("fee_paid_usd", float(fill_event["fee_paid_usd"]), fee),
             ):
                 if not math.isclose(actual, expected, rel_tol=1e-8, abs_tol=1e-8):
                     errors.append(f"{label}:{order_id} {field} mismatch")
+            if not math.isclose(
+                float(order["filled_quantity"]),
+                float(fill_event["filled_quantity"]),
+                rel_tol=1e-9, abs_tol=1e-12,
+            ):
+                errors.append(f"{label}:{order_id} final order state differs from last fill event")
             if not any(message.startswith(f"{label}:{order_id} ") for message in errors):
                 matched_fills += 1
+
+        def verify_exit_orders(
+            *, asset: str, signal_bar: str, label: str,
+        ) -> tuple[float, float, float]:
+            base_id = make_paper_client_order_id(asset, signal_bar, "EXIT")
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT DISTINCT client_order_id FROM paper_execution_events "
+                    "WHERE client_order_id=? OR client_order_id LIKE ?",
+                    (base_id, f"{base_id}-%"),
+                ).fetchall()
+            total_quantity = 0.0
+            total_notional = 0.0
+            total_fee = 0.0
+            for row in rows:
+                order_id = str(row["client_order_id"])
+                order = self.execution_ledger.order_state(order_id)
+                if order is None:
+                    missing_events.append(f"{label}:{order_id}")
+                    continue
+                actual_filled = float(order["filled_quantity"])
+                if actual_filled <= 1e-12 and order["status"] in {"CANCELED", "REJECTED"}:
+                    expected_order_ids.add(order_id)
+                    continue
+                fill_event = next(
+                    (
+                        event for event in self.execution_ledger.recent_events(
+                            1000, client_order_id=order_id
+                        )
+                        if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+                    ),
+                    None,
+                )
+                if fill_event is None:
+                    errors.append(f"{label}:{order_id} has no recorded fill event")
+                    expected_order_ids.add(order_id)
+                    continue
+                verify_fill(
+                    order_id=order_id, asset=asset, side="SELL",
+                    quantity=actual_filled,
+                    price=float(fill_event["fill_price"]),
+                    fee=float(fill_event["fee_paid_usd"]),
+                    label=label,
+                )
+                total_quantity += actual_filled
+                total_notional += actual_filled * float(fill_event["fill_price"])
+                total_fee += float(fill_event["fee_paid_usd"])
+            return total_quantity, total_notional, total_fee
 
         for row in trade_rows:
             trade = dict(row)
@@ -541,12 +1087,19 @@ class PaperLedger:
                 price=float(trade["entry_price"]), fee=float(trade["entry_fee"]),
                 label=f"trade-{trade['id']}-entry",
             )
-            verify_fill(
-                order_id=make_paper_client_order_id(asset, signal_bar, "EXIT"),
-                asset=asset, side="SELL", quantity=quantity,
-                price=float(trade["exit_price"]), fee=float(trade["exit_fee"]),
+            exit_quantity, exit_notional, exit_fee = verify_exit_orders(
+                asset=asset, signal_bar=signal_bar,
                 label=f"trade-{trade['id']}-exit",
             )
+            if not math.isclose(exit_quantity, quantity, rel_tol=1e-8, abs_tol=1e-8):
+                errors.append(f"trade-{trade['id']} cumulative exit quantity mismatch")
+            if exit_quantity > 0 and not math.isclose(
+                exit_notional / exit_quantity, float(trade["exit_price"]),
+                rel_tol=1e-8, abs_tol=1e-8,
+            ):
+                errors.append(f"trade-{trade['id']} weighted exit price mismatch")
+            if not math.isclose(exit_fee, float(trade["exit_fee"]), rel_tol=1e-8, abs_tol=1e-8):
+                errors.append(f"trade-{trade['id']} cumulative exit fee mismatch")
 
         if position:
             asset = str(position["asset"])
@@ -554,14 +1107,27 @@ class PaperLedger:
             quantity = float(position["quantity"])
             entry_id = make_paper_client_order_id(asset, signal_bar, "ENTRY")
             exit_id = make_paper_client_order_id(asset, signal_bar, "EXIT")
-            verify_fill(
-                order_id=entry_id, asset=asset, side="BUY", quantity=quantity,
-                price=float(position["entry_price"]), fee=float(position["entry_fee"]),
-                label="open-position-entry",
+            entry_order = self.execution_ledger.order_state(entry_id)
+            if entry_order is None:
+                missing_events.append(f"open-position-entry:{entry_id}")
+            else:
+                verify_fill(
+                    order_id=entry_id, asset=asset, side="BUY",
+                    quantity=float(position.get("original_entry_quantity") or entry_order["filled_quantity"]),
+                    price=float(position["entry_price"]),
+                    fee=float(position.get("original_entry_fee") or 0.0),
+                    label="open-position-entry",
+                )
+            exit_quantity, exit_notional, exit_fee = verify_exit_orders(
+                asset=asset, signal_bar=signal_bar, label="open-position-exit",
             )
-            exit_event = self.execution_ledger.order_state(exit_id)
-            if exit_event is not None and exit_event["status"] == "FILLED":
-                errors.append(f"open position still exists after filled exit order {exit_id}")
+            for field, actual, expected in (
+                ("quantity", exit_quantity, float(position.get("exit_filled_quantity") or 0.0)),
+                ("notional", exit_notional, float(position.get("exit_filled_notional") or 0.0)),
+                ("fee", exit_fee, float(position.get("exit_fee_paid_usd") or 0.0)),
+            ):
+                if not math.isclose(actual, expected, rel_tol=1e-8, abs_tol=1e-8):
+                    errors.append(f"open-position cumulative exit {field} mismatch")
 
         for order in replay["orders"].values():
             order_id = str(order["client_order_id"])
@@ -574,7 +1140,12 @@ class PaperLedger:
                 ))
             )
             if is_paper_projection_event and order_id not in expected_order_ids:
-                missing_projections.append(order_id)
+                zero_fill_terminal = (
+                    order.get("status") in {"CANCELED", "REJECTED"}
+                    and float(order.get("filled_quantity") or 0.0) <= 1e-12
+                )
+                if not zero_fill_terminal:
+                    missing_projections.append(order_id)
 
         if errors:
             result_status = "FAIL"
@@ -589,6 +1160,7 @@ class PaperLedger:
             "status": result_status,
             "positions_checked": 1 if position else 0,
             "closed_trades_checked": len(trade_rows),
+            "partial_exit_realized_pnl_usd": round(partial_realized, 8),
             "matched_fills": matched_fills,
             "event_count": replay["event_count"],
             "event_replay_status": replay["status"],
@@ -632,6 +1204,12 @@ class PaperLedger:
                 - float(open_position["entry_fee"])
             )
         realized = float(realized_total)
+        if open_position:
+            realized += (
+                float(open_position.get("exit_gross_pnl_usd") or 0.0)
+                - float(open_position.get("exit_entry_fee_allocated_usd") or 0.0)
+                - float(open_position.get("exit_fee_paid_usd") or 0.0)
+            )
         return {
             "mode": "PAPER_ONLY",
             "live_orders_enabled": False,
@@ -686,13 +1264,17 @@ class PaperTradingBot:
         max_consecutive_losses: int = 3,
         cooldown_hours_after_loss: float = 24.0,
         min_net_reward_risk: float = 1.8,
+        max_order_participation_rate: float = 0.10,
+        fill_fractions: tuple[float, ...] = (0.40, 0.35, 0.25),
+        max_order_book_age_ms: int = 5_000,
+        simulated_execution_latency_ms: int = 200,
     ):
         self.engine = engine
         self.ledger = ledger or PaperLedger()
         values = (risk_per_trade_pct, max_position_notional_pct, max_risk_score,
                   min_confirmation_score, fee_bps_per_side, slippage_bps_per_side,
                   daily_loss_limit_pct, max_drawdown_pct, cooldown_hours_after_loss,
-                  min_net_reward_risk)
+                  min_net_reward_risk, max_order_participation_rate)
         if not all(math.isfinite(float(x)) for x in values):
             raise ValueError("Paper trading configuration must be finite.")
         if not 0 < risk_per_trade_pct <= 0.02:
@@ -718,6 +1300,31 @@ class PaperTradingBot:
         self.max_consecutive_losses = max_consecutive_losses
         self.cooldown_hours_after_loss = cooldown_hours_after_loss
         self.min_net_reward_risk = min_net_reward_risk
+        if not 0 < max_order_participation_rate <= 1:
+            raise ValueError("Order-book participation rate must be in (0, 1].")
+        if (
+            not isinstance(max_order_book_age_ms, int)
+            or isinstance(max_order_book_age_ms, bool)
+            or max_order_book_age_ms <= 0
+        ):
+            raise ValueError("Maximum order-book age must be a positive integer.")
+        if (
+            not isinstance(simulated_execution_latency_ms, int)
+            or isinstance(simulated_execution_latency_ms, bool)
+            or simulated_execution_latency_ms < 0
+        ):
+            raise ValueError("Simulated execution latency must be a non-negative integer.")
+        fractions = tuple(float(value) for value in fill_fractions)
+        if (
+            not fractions or len(fractions) > 20
+            or any(not math.isfinite(value) or value <= 0 for value in fractions)
+            or not math.isclose(sum(fractions), 1.0, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            raise ValueError("Fill fractions must be positive and sum to 1.0.")
+        self.max_order_participation_rate = max_order_participation_rate
+        self.fill_fractions = fractions
+        self.max_order_book_age_ms = max_order_book_age_ms
+        self.simulated_execution_latency_ms = simulated_execution_latency_ms
 
     def state(self) -> dict[str, Any]:
         state = self.ledger.state()
@@ -734,6 +1341,54 @@ class PaperTradingBot:
             cooldown_hours_after_loss=self.cooldown_hours_after_loss,
         )
         return state
+
+    def _execute_managed_exit(
+        self, *, asset: AssetSpec, data: Any, reason: str,
+    ) -> dict[str, Any]:
+        """Route a triggered exit through the same public-book paper execution path."""
+        order_book = _extract_order_book(
+            data, asset, max_age_ms=self.max_order_book_age_ms,
+        )
+        if order_book is None:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": "A complete, fresh public Spot order book is required for paper exit; position remains open.",
+            }
+        try:
+            execution = self.ledger.execute_exit_order(
+                order_book=order_book,
+                fee_bps=self.fee_rate * 10_000.0,
+                adverse_impact_bps=self.slippage_rate * 10_000.0,
+                max_participation_rate=self.max_order_participation_rate,
+                fill_fractions=self.fill_fractions,
+                max_quote_age_ms=self.max_order_book_age_ms,
+                simulated_latency_ms=self.simulated_execution_latency_ms,
+                reason=reason,
+            )
+        except Exception as exc:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": f"Paper exit execution/projection failed atomically ({type(exc).__name__}); position remains open.",
+            }
+        if execution["status"] == "CLOSED":
+            return {
+                "status": "CLOSED", "asset": asset.raw,
+                "trade": execution["trade"], "execution": execution,
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
+        if execution["status"] == "PARTIALLY_CLOSED":
+            remaining = self.ledger.position()
+            return {
+                "status": "PARTIALLY_CLOSED", "asset": asset.raw,
+                "execution": execution, "remaining_position": remaining,
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
+        return {
+            "status": "EXIT_UNFILLED", "asset": asset.raw,
+            "execution": execution,
+            "reason": "No executable sell-side liquidity was available; the paper position remains open.",
+            "mode": "PAPER_ONLY", "orders_submitted": False,
+        }
 
     def run_once(self, asset_input: str | AssetSpec) -> dict[str, Any]:
         asset = asset_input if isinstance(asset_input, AssetSpec) else AssetSpec.parse(asset_input)
@@ -768,61 +1423,28 @@ class PaperTradingBot:
                 managed_stop = max(managed_stop, break_even)
             if initial_risk > 0 and peak >= entry + 1.5 * initial_risk:
                 managed_stop = max(managed_stop, peak - initial_risk)
-            exit_quote = _extract_observed_quote(snapshot)
+            mark_quote = _extract_observed_quote(snapshot)
             liquidation_mark = (
-                min(price, float(exit_quote["bid"])) if exit_quote is not None else price
+                min(price, float(mark_quote["bid"])) if mark_quote is not None else price
             )
             self.ledger.update_management(liquidation_mark, managed_stop)
             managed_position = self.ledger.position() or position
             active_stop = float(managed_position["stop_loss"])
             if price <= active_stop:
-                reference_exit = min(price, active_stop)
-                sell_reference = (
-                    min(reference_exit, float(exit_quote["bid"]))
-                    if exit_quote is not None else reference_exit
-                )
-                fill = sell_reference * (1.0 - self.slippage_rate)
                 initial_stop = float(managed_position.get("initial_stop_loss") or active_stop)
                 exit_reason = "TRAILING_STOP" if active_stop > initial_stop else "STOP_LOSS"
-                closed = self.ledger.close_position(
-                    fill, self.fee_rate, exit_reason,
-                    exit_reference_price=reference_exit,
-                    exit_bid=exit_quote["bid"] if exit_quote else None,
-                    exit_ask=exit_quote["ask"] if exit_quote else None,
-                    exit_quote_source=exit_quote["source"] if exit_quote else None,
+                return self._execute_managed_exit(
+                    asset=asset, data=data, reason=exit_reason,
                 )
-                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             if price >= float(position["take_profit"]):
-                reference_exit = float(position["take_profit"])
-                sell_reference = (
-                    min(reference_exit, float(exit_quote["bid"]))
-                    if exit_quote is not None else reference_exit
+                return self._execute_managed_exit(
+                    asset=asset, data=data, reason="TAKE_PROFIT",
                 )
-                fill = sell_reference * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(
-                    fill, self.fee_rate, "TAKE_PROFIT",
-                    exit_reference_price=reference_exit,
-                    exit_bid=exit_quote["bid"] if exit_quote else None,
-                    exit_ask=exit_quote["ask"] if exit_quote else None,
-                    exit_quote_source=exit_quote["source"] if exit_quote else None,
-                )
-                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             max_holding = max(1, int(position.get("max_holding_days") or 14))
             if int(time.time()) - int(position["opened_at"]) >= max_holding * 86_400:
-                reference_exit = price
-                sell_reference = (
-                    min(reference_exit, float(exit_quote["bid"]))
-                    if exit_quote is not None else reference_exit
+                return self._execute_managed_exit(
+                    asset=asset, data=data, reason="TIME_EXIT",
                 )
-                fill = sell_reference * (1.0 - self.slippage_rate)
-                closed = self.ledger.close_position(
-                    fill, self.fee_rate, "TIME_EXIT",
-                    exit_reference_price=reference_exit,
-                    exit_bid=exit_quote["bid"] if exit_quote else None,
-                    exit_ask=exit_quote["ask"] if exit_quote else None,
-                    exit_quote_source=exit_quote["source"] if exit_quote else None,
-                )
-                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
             return {"status": "HOLDING", "asset": asset.raw, "mark_price": price,
                     "active_stop_loss": active_stop,
                     "unrealized_pnl_usd": self.ledger.state()["account"]["unrealized_pnl_usd"]}
@@ -856,14 +1478,18 @@ class PaperTradingBot:
                 or stop is None or target is None):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Score, risk or stop/target plan did not pass paper safety limits."}
-        entry_quote = _extract_observed_quote(snapshot)
-        entry_reference = (
-            max(price, float(entry_quote["ask"])) if entry_quote is not None else price
+        entry_quote = _extract_order_book(
+            data, asset, max_age_ms=self.max_order_book_age_ms,
         )
+        if entry_quote is None:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": "A complete, fresh public Spot order-book snapshot is required; no paper order was created.",
+            }
+        entry_reference = float(entry_quote["ask"])
         entry = entry_reference * (1.0 + self.slippage_rate)
         half_spread_per_unit = (
             (float(entry_quote["ask"]) - float(entry_quote["bid"])) / 2.0
-            if entry_quote is not None else 0.0
         )
         exit_at_stop = (
             (stop - half_spread_per_unit) * (1.0 - self.slippage_rate)
@@ -923,20 +1549,15 @@ class PaperTradingBot:
         debit = notional + entry_fee
         if not math.isfinite(quantity) or quantity <= 0 or debit > cash:
             return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Position sizing returned no safe quantity."}
-        if entry_quote is not None:
-            entry_costs = calculate_fill_costs(
-                side="BUY", quantity=quantity, bid=entry_quote["bid"],
-                ask=entry_quote["ask"], fill_price=entry,
-                fee_paid_usd=entry_fee, funding_applicable=False,
-                quote_quality="OBSERVED",
-            )
-            entry_slippage = entry_costs["slippage_cost_usd"]
-            entry_spread_cost = entry_costs["spread_cost_usd"]
-            entry_quote_source = entry_quote["source"]
-        else:
-            entry_slippage = quantity * max(0.0, entry - price)
-            entry_spread_cost = None
-            entry_quote_source = None
+        entry_costs = calculate_fill_costs(
+            side="BUY", quantity=quantity, bid=entry_quote["bid"],
+            ask=entry_quote["ask"], fill_price=entry,
+            fee_paid_usd=entry_fee, funding_applicable=False,
+            quote_quality="OBSERVED",
+        )
+        entry_slippage = entry_costs["slippage_cost_usd"]
+        entry_spread_cost = entry_costs["spread_cost_usd"]
+        entry_quote_source = entry_quote["source"]
         record = {
             "asset": asset.raw, "quantity": quantity, "entry_price": entry,
             "stop_loss": stop, "initial_stop_loss": stop,
@@ -949,12 +1570,49 @@ class PaperTradingBot:
             "entry_spread_cost_usd": entry_spread_cost,
             "entry_quote_source": entry_quote_source,
         }
-        if not self.ledger.open_position(record, debit):
-            return {"status": "NO_TRADE", "asset": asset.raw,
-                    "reason": "Paper ledger rejected duplicate, concurrent or unaffordable entry."}
-        return {"status": "OPENED", "asset": asset.raw, "side": "LONG",
-                "quantity": quantity, "entry_price": entry, "stop_loss": stop,
-                "take_profit": target, "risk_budget_usd": risk_budget,
-                "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
-                "max_holding_days": max_holding_days, "fee_usd": entry_fee,
-                "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False}
+        client_order_id = make_paper_client_order_id(asset.raw, signal_bar, "ENTRY")
+        try:
+            execution = self.ledger.execute_entry_order(
+                position=record,
+                client_order_id=client_order_id,
+                requested_quantity=quantity,
+                order_book=entry_quote,
+                fee_bps=self.fee_rate * 10_000.0,
+                adverse_impact_bps=self.slippage_rate * 10_000.0,
+                max_participation_rate=self.max_order_participation_rate,
+                fill_fractions=self.fill_fractions,
+                max_quote_age_ms=self.max_order_book_age_ms,
+                simulated_latency_ms=self.simulated_execution_latency_ms,
+            )
+        except Exception as exc:
+            return {
+                "status": "UNKNOWN", "asset": asset.raw,
+                "reason": f"Paper entry execution/projection failed atomically ({type(exc).__name__}).",
+            }
+        if float(execution["filled_quantity"]) <= 0:
+            return {
+                "status": "NO_TRADE", "asset": asset.raw,
+                "reason": "The public order book supplied no executable liquidity; the paper order remainder was canceled.",
+                "client_order_id": client_order_id,
+                "execution_status": execution["status"],
+                "remaining_quantity": execution["remaining_quantity"],
+                "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
+        return {
+            "status": "OPENED" if execution["status"] == "FILLED" else "PARTIALLY_OPENED",
+            "asset": asset.raw, "side": "LONG",
+            "quantity": execution["filled_quantity"],
+            "requested_quantity": quantity,
+            "remaining_quantity": execution["remaining_quantity"],
+            "entry_price": execution["average_fill_price"],
+            "stop_loss": stop, "take_profit": target,
+            "risk_budget_usd": risk_budget,
+            "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
+            "max_holding_days": max_holding_days,
+            "fee_usd": execution["fee_paid_usd"],
+            "client_order_id": client_order_id,
+            "execution_status": execution["status"],
+            "fill_status": execution["fill_status"],
+            "execution_fill_count": execution["simulation"]["fill_count"],
+            "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False,
+        }

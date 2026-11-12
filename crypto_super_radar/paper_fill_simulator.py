@@ -140,26 +140,35 @@ class PaperFillSimulator:
             {"status": "ACCEPTED", "occurred_at_ms": start_ms},
         ]
         if self.event_ledger is not None:
-            self.event_ledger.append_event(
-                client_order_id=order_id, idempotency_key=f"{order_id}:created",
-                asset=asset_value, side=side_value, status="CREATED", quantity=qty,
-                source="PAPER_FILL_SIMULATOR", reason=reason_value, occurred_at=start_ms // 1000,
-            )
-            self.event_ledger.append_event(
-                client_order_id=order_id, idempotency_key=f"{order_id}:validated",
-                asset=asset_value, side=side_value, status="VALIDATED", quantity=qty,
-                source="PAPER_FILL_SIMULATOR", reason=reason_value, occurred_at=start_ms // 1000,
-            )
-            self.event_ledger.append_event(
-                client_order_id=order_id, idempotency_key=f"{order_id}:submitted",
-                asset=asset_value, side=side_value, status="SUBMITTED", quantity=qty,
-                source="PAPER_FILL_SIMULATOR", reason=reason_value, occurred_at=start_ms // 1000,
-            )
-            self.event_ledger.append_event(
-                client_order_id=order_id, idempotency_key=f"{order_id}:accepted",
-                asset=asset_value, side=side_value, status="ACCEPTED", quantity=qty,
-                source="PAPER_FILL_SIMULATOR", reason=reason_value, occurred_at=start_ms // 1000,
-            )
+            existing = self.event_ledger.order_state(order_id)
+            if existing is None:
+                # Standalone simulator use owns the order lifecycle.
+                for status in ("CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED"):
+                    self.event_ledger.append_event(
+                        client_order_id=order_id,
+                        idempotency_key=f"{order_id}:{status.lower()}",
+                        asset=asset_value, side=side_value, status=status,
+                        quantity=qty, source="PAPER_FILL_SIMULATOR",
+                        reason=reason_value, occurred_at=start_ms // 1000,
+                    )
+            else:
+                # The bot may first accept the internal intent through
+                # PaperExecutionAdapter; the simulator then appends only fills.
+                if (
+                    existing["asset"] != asset_value
+                    or existing["side"] != side_value
+                    or not math.isclose(
+                        float(existing["quantity"]), qty,
+                        rel_tol=1e-9, abs_tol=1e-12,
+                    )
+                ):
+                    raise PaperFillSimulationError(
+                        "existing paper order does not match the simulated intent"
+                    )
+                if existing["status"] != "ACCEPTED":
+                    raise PaperFillSimulationError(
+                        f"paper order is not ready for first simulation: {existing['status']}"
+                    )
 
         fills: list[dict[str, Any]] = []
         cumulative_qty = 0.0
@@ -256,6 +265,10 @@ class PaperFillSimulator:
             "client_order_id": order_id, "asset": asset_value, "side": side_value,
             "status": final_status, "requested_quantity": qty,
             "filled_quantity": cumulative_qty, "remaining_quantity": unfilled,
+            "average_fill_price": (
+                cumulative_notional / cumulative_qty if cumulative_qty > 0 else None
+            ),
+            "cumulative_fee_paid_usd": cumulative_fee,
             "fill_count": len(fills), "fills": fills, "simulated_events": events,
             "quote": {
                 "bid": best_bid, "ask": best_ask, "quality": quality, "source": source_value,
