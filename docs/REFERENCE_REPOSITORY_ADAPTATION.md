@@ -220,3 +220,12 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - Added `tests/test_order_flow_store.py` for idempotency, venue-scoped IDs, event-time ordering, whole-batch validation and query scope.
 - The store accepts the project's SQLite-compatible connection abstraction, including local SQLite and the configured Turso adapter.
 - **Safety boundary:** persistence is not proof of stream continuity, completeness, heartbeat freshness or CVD readiness. It is not yet wired into the WebSocket adapter callbacks or the 12-gate engine. Existing UNKNOWN/NO TRADE behavior remains mandatory until a separate consumer validates connection lifecycle and coverage.
+
+## Adapter-to-ledger persistence bridge — 2026-11-12
+
+- Binance Spot and Bybit Spot ingestion functions now accept an optional `OrderFlowEventStore`-compatible `event_store`.
+- Only observations accepted by the in-memory venue validator are written. Bybit messages are normalized as a complete batch first; accepted rows are then persisted through one batch call.
+- The durable key remains `(venue, symbol, trade_id)`. A duplicate already present in storage is reported as an idempotent persistence duplicate, not as a new database insert.
+- If the event store is unavailable, raises during write, or returns an invalid count, the venue is frozen with a downstream-failure reason. Its usable CVD becomes unavailable until explicit reconnect; later messages cannot silently conceal a persistence gap.
+- Added adapter persistence tests for Binance readback, Bybit batch persistence and fail-closed storage failure. The ledger readback now supports both mapping-style rows and ordinary DB-API tuple rows.
+- **Boundary:** this is persistence integration at the message-adapter seam, not a WebSocket lifecycle manager. It does not establish continuity across disconnects, recover missing intervals, hydrate the in-memory CVD window from historical rows, or connect order flow to the 12-gate decision engine. Feed readiness remains UNKNOWN until those controls are separately implemented and validated.
