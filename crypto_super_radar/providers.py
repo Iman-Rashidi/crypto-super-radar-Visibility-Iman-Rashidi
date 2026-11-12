@@ -226,7 +226,14 @@ class BinanceProvider:
         vol = _safe_float(stats.get("quoteVolume"))
         if p is None or vol is None:
             raise DataProviderError(f"Binance returned incomplete ticker for {symbol}")
-        return {"price": p, "volume_24h": vol, "raw": stats}
+        return {
+            "price": p,
+            "volume_24h": vol,
+            "bid_price": _positive_float(stats.get("bidPrice")),
+            "ask_price": _positive_float(stats.get("askPrice")),
+            "quote_timestamp_ms": _safe_float(stats.get("closeTime")),
+            "raw": stats,
+        }
 
     def candles(self, symbol: str, interval: str = "1d", limit: int = 365) -> pd.DataFrame:
         payload = self.http.get(f"{self.BASE}/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
@@ -290,6 +297,9 @@ class BybitProvider:
                 return {
                     "price": price,
                     "volume_24h": volume,
+                    "bid_price": _positive_float(item.get("highest_bid")),
+                    "ask_price": _positive_float(item.get("lowest_ask")),
+                    "quote_timestamp_ms": _safe_float(item.get("update_id")),
                     "raw": item,
                     "provider": "Gate.io Spot",
                     "fallback_reason": message[:240],
@@ -342,7 +352,14 @@ class BybitProvider:
         volume = _safe_float(item.get("turnover24h"))
         if price is None or volume is None:
             raise DataProviderError(f"Bybit returned incomplete ticker for {symbol}")
-        return {"price": price, "volume_24h": volume, "raw": item}
+        return {
+            "price": price,
+            "volume_24h": volume,
+            "bid_price": _positive_float(item.get("bid1Price")),
+            "ask_price": _positive_float(item.get("ask1Price")),
+            "quote_timestamp_ms": _safe_float(payload.get("time")),
+            "raw": item,
+        }
 
     def candles(self, symbol: str, interval: str = "D", limit: int = 365) -> pd.DataFrame:
         payload = self.http.get(f"{self.BASE}/v5/market/kline", {"category": "spot", "symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
