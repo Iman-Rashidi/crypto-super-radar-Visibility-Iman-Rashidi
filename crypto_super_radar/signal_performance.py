@@ -41,6 +41,12 @@ def summarize_closed_trades(
     invalid_rows = 0
     fee_incomplete_rows = 0
     known_recorded_fees = 0.0
+    slippage_incomplete_rows = 0
+    known_recorded_slippage = 0.0
+    spread_incomplete_rows = 0
+    known_recorded_spread = 0.0
+    funding_incomplete_rows = 0
+    known_recorded_funding = 0.0
     for trade in trades:
         net = _finite(trade.get("net_pnl"))
         gross = _finite(trade.get("gross_pnl"))
@@ -63,6 +69,35 @@ def summarize_closed_trades(
         )
         if fee_total is None:
             fee_incomplete_rows += 1
+
+        entry_slippage = _finite(trade.get("entry_slippage_usd"))
+        exit_slippage = _finite(trade.get("exit_slippage_usd"))
+        slippage_total = (
+            entry_slippage + exit_slippage
+            if entry_slippage is not None and exit_slippage is not None
+            else None
+        )
+        known_recorded_slippage += sum(
+            value for value in (entry_slippage, exit_slippage) if value is not None
+        )
+        if slippage_total is None:
+            slippage_incomplete_rows += 1
+
+        spread_cost = _finite(trade.get("spread_cost_usd"))
+        if spread_cost is None:
+            spread_incomplete_rows += 1
+        else:
+            known_recorded_spread += spread_cost
+
+        funding_status = str(trade.get("funding_status") or "").strip().upper()
+        funding_cost = _finite(trade.get("funding_cost_usd"))
+        if funding_status == "NOT_APPLICABLE" and funding_cost == 0:
+            funding_cost = 0.0
+        elif funding_cost is None:
+            funding_incomplete_rows += 1
+        if funding_cost is not None:
+            known_recorded_funding += funding_cost
+
         risk_usd = (
             quantity * abs(entry - initial_stop)
             if quantity is not None and quantity > 0
@@ -74,6 +109,11 @@ def summarize_closed_trades(
             "net": net,
             "gross": gross,
             "fees": fee_total,
+            "entry_slippage": entry_slippage,
+            "exit_slippage": exit_slippage,
+            "slippage": slippage_total,
+            "spread": spread_cost,
+            "funding": funding_cost,
             "risk_usd": risk_usd,
         })
 
@@ -90,8 +130,22 @@ def summarize_closed_trades(
             "fee_incomplete_rows": 0,
             "known_recorded_fees_usd": None,
             "total_recorded_fees_usd": None,
+            "slippage_data_status": "NO_DATA",
+            "slippage_coverage_pct": None,
+            "slippage_incomplete_rows": 0,
+            "known_recorded_slippage_usd": None,
+            "total_recorded_slippage_usd": None,
+            "spread_data_status": "NO_DATA",
+            "spread_coverage_pct": None,
+            "known_recorded_spread_usd": None,
+            "total_recorded_spread_usd": None,
+            "funding_data_status": "NO_DATA",
+            "funding_coverage_pct": None,
+            "known_recorded_funding_usd": None,
+            "total_recorded_funding_usd": None,
+            "execution_cost_attribution_status": "NO_DATA",
             "reason": "No valid closed paper trades are recorded yet.",
-            "slippage_attribution": "NOT_SEPARATELY_RECORDED",
+            "slippage_attribution": "NO_DATA",
         }
 
     wins = [row for row in normalized if row["net"] > 0]
@@ -143,6 +197,30 @@ def summarize_closed_trades(
             round(known_recorded_fees / gross_profit * 100.0, 4)
             if fee_incomplete_rows == 0 and gross_profit > 0 else None
         ),
+        "slippage_data_status": "COMPLETE" if slippage_incomplete_rows == 0 else "INCOMPLETE",
+        "slippage_coverage_pct": round((count - slippage_incomplete_rows) / count * 100.0, 4),
+        "slippage_incomplete_rows": slippage_incomplete_rows,
+        "known_recorded_slippage_usd": round(known_recorded_slippage, 8),
+        "total_recorded_slippage_usd": (
+            round(known_recorded_slippage, 8) if slippage_incomplete_rows == 0 else None
+        ),
+        "spread_data_status": "COMPLETE" if spread_incomplete_rows == 0 else "INCOMPLETE",
+        "spread_coverage_pct": round((count - spread_incomplete_rows) / count * 100.0, 4),
+        "known_recorded_spread_usd": round(known_recorded_spread, 8),
+        "total_recorded_spread_usd": (
+            round(known_recorded_spread, 8) if spread_incomplete_rows == 0 else None
+        ),
+        "funding_data_status": "COMPLETE" if funding_incomplete_rows == 0 else "INCOMPLETE",
+        "funding_coverage_pct": round((count - funding_incomplete_rows) / count * 100.0, 4),
+        "known_recorded_funding_usd": round(known_recorded_funding, 8),
+        "total_recorded_funding_usd": (
+            round(known_recorded_funding, 8) if funding_incomplete_rows == 0 else None
+        ),
+        "execution_cost_attribution_status": (
+            "COMPLETE" if fee_incomplete_rows == 0 and slippage_incomplete_rows == 0
+            and spread_incomplete_rows == 0 and funding_incomplete_rows == 0
+            else "INCOMPLETE"
+        ),
         "ending_equity_usd": round(equity, 8),
         "net_return_pct": round((equity / initial_equity - 1.0) * 100.0, 4),
         "max_realized_drawdown_pct": round(max_drawdown_pct, 4),
@@ -155,6 +233,11 @@ def summarize_closed_trades(
             f"Need at least {min_sample_size} valid closed trades before performance review."
         ),
         "slippage_attribution": (
-            "NOT_SEPARATELY_RECORDED; any modeled slippage embedded in fill prices cannot be isolated here."
+            "RECORDED_PER_FILL" if slippage_incomplete_rows == 0
+            else "INCOMPLETE; missing entry or exit slippage is not treated as zero."
+        ),
+        "spread_attribution": (
+            "RECORDED_PER_FILL" if spread_incomplete_rows == 0
+            else "INCOMPLETE; current paper spot source does not provide a bid/ask spread quote."
         ),
     }
