@@ -336,26 +336,59 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual(recovered["trade_authorization"], "NO_TRADE")
 
 
-    def test_trending_feeds_are_cached_across_repeated_discovery_scans(self):
-        from crypto_super_radar import gem_hunter_discovery as discovery
-        discovery._TRENDING_SOURCE_CACHE.clear()
+    def test_all_gecko_feeds_are_cached_across_repeated_discovery_scans(self):
+        discovery._GECKOTERMINAL_SOURCE_CACHE.clear()
+
         class CountingHttp(FakeHttp):
             def __init__(inner, responses):
                 super().__init__(responses)
                 inner.url_counts = {}
+
             def get(inner, url, params=None):
                 inner.url_counts[url] = inner.url_counts.get(url, 0) + 1
                 return super().get(url, params=params)
+
         http = CountingHttp(self.responses)
         first = discover_gem_candidates(http, now=self.now)
         second = discover_gem_candidates(http, now=self.now)
         self.assertEqual(first["status"], "PASS")
         self.assertEqual(second["status"], "PASS")
-        trending_calls = sum(count for url, count in http.url_counts.items() if "trending_pools" in url)
-        self.assertEqual(trending_calls, 2)
-        self.assertTrue(second["sources"]["GECKOTERMINAL_TRENDING_POOLS_BASE"]["cached"])
-        self.assertTrue(second["sources"]["GECKOTERMINAL_TRENDING_POOLS_SOLANA"]["cached"])
-        discovery._TRENDING_SOURCE_CACHE.clear()
+
+        for network in ("base", "solana"):
+            for endpoint in ("new_pools", "trending_pools"):
+                url = f"https://api.geckoterminal.com/api/v2/networks/{network}/{endpoint}"
+                self.assertEqual(http.url_counts[url], 1)
+                source = f"GECKOTERMINAL_{endpoint.upper()}_{network.upper()}"
+                self.assertTrue(second["sources"][source]["cached"])
+        discovery._GECKOTERMINAL_SOURCE_CACHE.clear()
+
+    def test_new_pool_429_is_cached_during_error_cooldown(self):
+        responses = dict(self.responses)
+        responses["base_new_pools"] = RuntimeError("HTTP 429")
+
+        class CountingHttp(FakeHttp):
+            def __init__(inner, values):
+                super().__init__(values)
+                inner.url_counts = {}
+
+            def get(inner, url, params=None):
+                inner.url_counts[url] = inner.url_counts.get(url, 0) + 1
+                return super().get(url, params=params)
+
+        http = CountingHttp(responses)
+        first = discover_gem_candidates(http, now=self.now)
+        second = discover_gem_candidates(http, now=self.now)
+        failed_url = "https://api.geckoterminal.com/api/v2/networks/base/new_pools"
+
+        self.assertEqual(http.url_counts[failed_url], 1)
+        self.assertEqual(
+            first["sources"]["GECKOTERMINAL_NEW_POOLS_BASE"]["status"], "UNKNOWN"
+        )
+        self.assertEqual(
+            second["sources"]["GECKOTERMINAL_NEW_POOLS_BASE"]["status"], "UNKNOWN"
+        )
+        self.assertEqual(first["trade_authorization"], "NO_TRADE")
+        self.assertEqual(second["trade_authorization"], "NO_TRADE")
 
 
 if __name__ == "__main__":
