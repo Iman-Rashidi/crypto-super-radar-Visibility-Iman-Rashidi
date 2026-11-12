@@ -110,6 +110,9 @@ class GemHunterTechnicalTests(unittest.TestCase):
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(result["coverage_status"], "PARTIAL")
         self.assertEqual(result["filters"]["trend"], "UNKNOWN")
+        self.assertEqual(result["filters"]["momentum"], "PASS")
+        self.assertTrue(result["filter_coverage"]["momentum"])
+        self.assertFalse(result["filter_coverage"]["trend"])
         self.assertIn("MULTI_TIMEFRAME_COVERAGE_INCOMPLETE", result["reason_codes"])
 
     def test_naive_timestamps_are_rejected(self):
@@ -129,6 +132,26 @@ class GemHunterTechnicalTests(unittest.TestCase):
                 frame, interval=timedelta(days=1),
                 max_age=timedelta(hours=36), minimum_bars=60, now=NOW,
             )
+
+
+    def test_pool_trend_and_momentum_survive_missing_one_benchmark(self):
+        pool, benchmarks = self._inputs()
+        benchmarks.pop("ETHUSDT")
+        result = analyze_multi_timeframe_market(
+            pool, benchmarks, chain="base",
+            token_address="0x" + "1" * 40,
+            pool_address="0x" + "2" * 40,
+            now=NOW,
+        )
+        self.assertEqual(result["coverage_status"], "PARTIAL")
+        self.assertEqual(result["filters"]["trend"], "PASS")
+        self.assertEqual(result["filters"]["momentum"], "PASS")
+        self.assertEqual(result["filters"]["relative_strength"], "UNKNOWN")
+        self.assertEqual(result["filters"]["market_regime_validation"], "UNKNOWN")
+        self.assertTrue(result["filter_coverage"]["trend"])
+        self.assertTrue(result["filter_coverage"]["momentum"])
+        self.assertFalse(result["filter_coverage"]["relative_strength"])
+
 
 
 if __name__ == "__main__":
