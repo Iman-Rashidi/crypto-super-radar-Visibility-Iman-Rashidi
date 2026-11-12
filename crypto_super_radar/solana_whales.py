@@ -14,6 +14,7 @@ import requests
 from .database import connect_database
 from .rate_limiter import SharedRateLimiter
 from .wallet_event_store import WalletEventStore
+from .wallet_graph import WalletGraphAnalytics
 from .whale_intelligence import analyze_whale_activity
 
 
@@ -132,33 +133,14 @@ class SolanaWhaleScanner:
                         owner = str(balance["owner"])
                         deltas[owner] = deltas.get(owner, 0.0) + sign * float(amount)
 
-                if block_time <= 0:
+                timestamp_valid = block_time > 0
+                if not timestamp_valid:
                     timestamp_missing_count += len([delta for delta in deltas.values() if abs(delta) > 1e-12])
                 else:
                     event_time_ms = block_time * 1000
                     received_at_ms = int(time.time() * 1000)
-                    slot = tx.get("slot")
-                    # Aggregate net token delta per owner for this transaction.
-                    # The event stays TRANSFER_IN/OUT, never an inferred BUY/SELL.
-                    for event_index, (owner, delta) in enumerate(sorted(deltas.items())):
-                        if abs(delta) <= 1e-12:
-                            continue
-                        wallet_rows.append({
-                            "chain": "solana",
-                            "tx_signature": signature,
-                            "wallet_address": owner,
-                            "token_address": mint,
-                            "event_type": "TRANSFER_IN" if delta > 0 else "TRANSFER_OUT",
-                            "event_index": event_index,
-                            "event_time_ms": event_time_ms,
-                            "received_at_ms": received_at_ms,
-                            "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
-                            "token_delta": delta,
-                            "quote_delta": None,
-                            "quote_symbol": None,
-                            "source": "public_solana_json_rpc",
-                            "evidence_status": "OBSERVED",
-                        })
+                slot = tx.get("slot")
+                owner_event_indices: dict[str, int] = {}
 
                 senders = [[owner, -delta] for owner, delta in deltas.items() if delta < 0]
                 receivers = [[owner, delta] for owner, delta in deltas.items() if delta > 0]
@@ -176,6 +158,39 @@ class SolanaWhaleScanner:
                             "from_label": labels.get(source), "to_label": labels.get(destination),
                             "chain": "solana",
                         })
+                        # Persist each matched transfer leg with its counterparty.
+                        # It remains a transfer observation, never an inferred swap.
+                        if timestamp_valid:
+                            source_index = owner_event_indices.get(source, 0)
+                            destination_index = owner_event_indices.get(destination, 0)
+                            owner_event_indices[source] = source_index + 1
+                            owner_event_indices[destination] = destination_index + 1
+                            common = {
+                                "chain": "solana",
+                                "tx_signature": signature,
+                                "token_address": mint,
+                                "event_time_ms": event_time_ms,
+                                "received_at_ms": received_at_ms,
+                                "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
+                                "quote_delta": None,
+                                "quote_symbol": None,
+                                "source": "public_solana_json_rpc",
+                                "evidence_status": "OBSERVED",
+                            }
+                            wallet_rows.extend([
+                                {
+                                    **common, "wallet_address": source,
+                                    "counterparty_address": destination,
+                                    "event_type": "TRANSFER_OUT", "event_index": source_index,
+                                    "token_delta": -moved,
+                                },
+                                {
+                                    **common, "wallet_address": destination,
+                                    "counterparty_address": source,
+                                    "event_type": "TRANSFER_IN", "event_index": destination_index,
+                                    "token_delta": moved,
+                                },
+                            ])
                     senders[si][1] -= moved
                     receivers[ri][1] -= moved
                     if senders[si][1] <= 1e-12:
@@ -199,6 +214,36 @@ class SolanaWhaleScanner:
                     }
 
             summary = analyze_whale_activity(events, whale_threshold_usd)
+            wallet_graph_events = [
+                {
+                    "chain": row["chain"],
+                    "wallet": row["wallet_address"],
+                    "token": row["token_address"],
+                    "event_type": "transfer",
+                    "timestamp": row["event_time_ms"] // 1000,
+                    "amount_usd": (
+                        None if price_usd is None or row.get("token_delta") is None
+                        else abs(float(row["token_delta"]) * price_usd)
+                    ),
+                    "counterparty_wallet": row.get("counterparty_address"),
+                    "tx_hash": row["tx_signature"],
+                    "received_at": row["received_at_ms"] // 1000,
+                    "instruction_index": row["event_index"],
+                }
+                for row in wallet_rows
+            ]
+            if len(wallet_graph_events) >= 1:
+                wallet_graph = WalletGraphAnalytics().analyze_token_distribution(
+                    wallet_graph_events, chain="solana", token=mint,
+                )
+            else:
+                wallet_graph = {
+                    "status": "INSUFFICIENT_DATA",
+                    "event_count": 0,
+                    "unique_wallet_count": 0,
+                    "trade_authorization": "NO_TRADE",
+                    "reason": "No timestamped wallet transfer observations were available for graph analysis.",
+                }
             summary.update({
                 "chain": "solana", "mint": mint, "sampled_token_accounts": len(accounts),
                 "sampled_transactions": len(signatures), "whale_watchlist": watchlist,
@@ -207,6 +252,7 @@ class SolanaWhaleScanner:
                 "wallet_event_persistence": persistence,
                 "wallet_events_observed": len(wallet_rows),
                 "wallet_event_timestamps_missing": timestamp_missing_count,
+                "wallet_graph_analysis": wallet_graph,
                 "caveat": (
                     "Recent transactions for largest token accounts only; no complete history, "
                     "beneficial-owner clustering, or proof of exchange classification. "
