@@ -412,7 +412,7 @@ class PaperLedger:
                  exit_reference_price, entry_slippage_usd, exit_slippage_usd,
                  spread_cost_usd, entry_spread_cost_usd, exit_spread_cost_usd,
                  entry_quote_source, exit_quote_source, funding_cost_usd, funding_status)
-                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 p["asset"], p["quantity"], p["entry_price"], exit_price,
                 p["stop_loss"], p.get("initial_stop_loss") or p["stop_loss"],
