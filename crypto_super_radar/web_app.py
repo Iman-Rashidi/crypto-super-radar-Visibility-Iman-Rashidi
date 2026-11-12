@@ -24,6 +24,7 @@ from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
 from .gem_hunter_evaluator import evaluate_discovery_candidates
 from .gem_hunter_technical import enrich_discovery_candidates_with_technicals
+from .gem_hunter_pool_trades import enrich_discovery_candidates_with_pool_trades
 from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
@@ -160,6 +161,10 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     # The technical module caches complete evidence and rotates one candidate
     # per scan to respect the free public GeckoTerminal request budget.
     raw_candidates = enrich_discovery_candidates_with_technicals(
+        raw_candidates, ENGINE.data, limit=1,
+    )
+    # Collect a separate bounded sample of actual swaps for the same validated Pool.
+    raw_candidates = enrich_discovery_candidates_with_pool_trades(
         raw_candidates, ENGINE.data, limit=1,
     )
     raw_candidates = evaluate_discovery_candidates(raw_candidates)
