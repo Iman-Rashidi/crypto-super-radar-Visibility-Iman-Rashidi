@@ -1084,6 +1084,9 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                 key: result.metrics.get(key) for key in (
                     "whale_status", "whale_bias", "whale_history_count",
                     "whale_recent_history_bias", "whale_alignment", "sentiment_alignment",
+                    "wallet_graph_status", "wallet_graph_event_count",
+                    "wallet_graph_unique_wallet_count", "wallet_graph_suspicious_pair_count",
+                    "wallet_graph_coverage", "wallet_event_persistence_status",
                     "market_sentiment_score", "fear_greed_value", "fear_greed_attribution",
                     "walk_forward_status", "walk_forward_fold_count", "risk_score",
                     "opportunity_rank", "confidence_level_pct", "evidence_confidence_pct",
