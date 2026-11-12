@@ -42,3 +42,16 @@ All colors, spacing, borders, and focus styles are implemented with CSS variable
 | Fail | `--red` | `#ff7b85` |
 
 No external design reference was supplied; these tokens are the project's proposed visual system, not extracted brand measurements.
+
+
+## Shared animated crypto radar
+
+The market board, Gem Hunter discovery, DEX token search, and per-asset scan result reuse one radar component. The sweep animation is presentation only; radar dots and counters are fed by the existing API responses and the completed analysis job.
+
+Signal mapping is deliberately conservative:
+- `LONG` / `BUY` is shown in green.
+- `SHORT` / `SELL` is shown in red.
+- `NO_TRADE`, confirmed market-data rows, and unscored discovery results are not promoted to BUY/SELL.
+- Missing, stale, or failed provider data remains unknown.
+
+The public market board and DEX search can display discovered assets, but they do not manufacture directional signals. BUY/SELL dots only appear when the corresponding backend result explicitly carries that decision. The radar does not place orders.

@@ -496,7 +496,181 @@ def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = Fals
     return cached
 
 
+def _radar_panel(radar_id: str, heading: str, note: str) -> str:
+    """Render the shared radar UI used by every market-discovery surface."""
+    safe_id = html.escape(radar_id, quote=True)
+    safe_heading = html.escape(heading)
+    safe_note = html.escape(note)
+    return f"""
+    <section class="crypto-radar" id="{safe_id}" data-radar-id="{safe_id}" data-radar-state="idle">
+      <div class="radar-heading">
+        <div><strong>{safe_heading}</strong><p>{safe_note}</p></div>
+        <span class="radar-state" data-radar-state-label>آمادهٔ اسکن</span>
+      </div>
+      <div class="radar-layout">
+        <div class="radar-scope" role="img" aria-label="رادار چرخان شناسایی رمزارزها">
+          <div class="radar-grid"></div>
+          <div class="radar-sweep"></div>
+          <svg class="radar-points" viewBox="0 0 320 320" aria-hidden="true"></svg>
+          <div class="radar-center"><span>CSR</span></div>
+        </div>
+        <div class="radar-readout">
+          <div class="radar-readout-title"><span class="radar-led"></span><strong>خلاصهٔ شناسایی</strong><small data-radar-total>۰ دارایی</small></div>
+          <div class="radar-counts">
+            <div class="radar-count radar-buy"><span>BUY · خرید</span><strong data-radar-count="BUY">۰</strong></div>
+            <div class="radar-count radar-sell"><span>SELL · فروش</span><strong data-radar-count="SELL">۰</strong></div>
+            <div class="radar-count radar-neutral"><span>خنثی / بدون معامله</span><strong data-radar-count="NEUTRAL">۰</strong></div>
+            <div class="radar-count radar-unknown"><span>نامشخص / در انتظار</span><strong data-radar-count="UNKNOWN">۰</strong></div>
+          </div>
+          <p class="radar-caption" data-radar-caption>هنوز داده‌ای برای نمایش روی رادار دریافت نشده است.</p>
+          <div class="radar-legend">
+            <span><i class="radar-legend-dot radar-buy-dot"></i>خرید</span>
+            <span><i class="radar-legend-dot radar-sell-dot"></i>فروش</span>
+            <span><i class="radar-legend-dot radar-neutral-dot"></i>خنثی</span>
+            <span><i class="radar-legend-dot radar-unknown-dot"></i>نامشخص</span>
+          </div>
+        </div>
+      </div>
+    </section>
+    """
+
+
+def _radar_css() -> str:
+    return """
+    .crypto-radar{margin:14px 0 18px;padding:16px;border:1px solid #245064;border-radius:16px;background:linear-gradient(135deg,#081a25,#0b1d2b 58%,#0a1725);box-shadow:inset 0 0 26px #0c4b4b18}
+    .radar-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}
+    .radar-heading strong{font-size:1rem;color:#d9fff6}
+    .radar-heading p{margin:3px 0 0;color:var(--muted);font-size:.82rem}
+    .radar-state{flex:0 0 auto;padding:5px 9px;border:1px solid #2c5964;border-radius:999px;background:#0c2b35;color:#9ff3dd;font-size:.78rem;font-weight:700}
+    .radar-layout{display:grid;grid-template-columns:minmax(190px,310px) minmax(0,1fr);gap:18px;align-items:center}
+    .radar-scope{position:relative;width:min(100%,310px);aspect-ratio:1;margin:auto;overflow:hidden;border:1px solid #24635e;border-radius:50%;background:radial-gradient(circle at center,#123d3b 0,#0b282e 45%,#07161f 74%,#06121b 100%);box-shadow:0 0 25px #27d7a326,inset 0 0 38px #2bbd9e18}
+    .radar-grid{position:absolute;inset:0;border-radius:50%;background:repeating-radial-gradient(circle at center,transparent 0 19%,#5ad9b52b 19.4% 19.8%,transparent 20.2% 39%,#5ad9b526 39.4% 39.8%,transparent 40.2% 59%,#5ad9b522 59.4% 59.8%,transparent 60.2% 79%,#5ad9b51e 79.4% 79.8%,transparent 80.2%),linear-gradient(90deg,transparent 49.7%,#5ad9b52b 49.9%,#5ad9b52b 50.1%,transparent 50.3%),linear-gradient(0deg,transparent 49.7%,#5ad9b52b 49.9%,#5ad9b52b 50.1%,transparent 50.3%)}
+    .radar-sweep{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,transparent 0deg 298deg,#2be0a006 322deg,#36e9ad24 345deg,#42ffb46b 359deg,#42ffb400 360deg);animation:crypto-radar-spin 5.2s linear infinite;mix-blend-mode:screen}
+    .radar-scope:after{content:"";position:absolute;z-index:1;left:50%;top:50%;width:8px;height:8px;transform:translate(-50%,-50%);border-radius:50%;background:#9affd7;box-shadow:0 0 10px 4px #53d6a0a8}
+    .radar-points{position:absolute;z-index:2;inset:0;width:100%;height:100%;overflow:visible}
+    .radar-dot{stroke:#05131a;stroke-width:1.8;opacity:.95;animation:crypto-radar-blip 2.4s ease-in-out infinite}
+    .radar-dot-buy{fill:#53d6a0;filter:drop-shadow(0 0 5px #53d6a0)}
+    .radar-dot-sell{fill:#ff7b85;filter:drop-shadow(0 0 5px #ff7b85)}
+    .radar-dot-neutral{fill:#72a7ff;filter:drop-shadow(0 0 4px #72a7ff)}
+    .radar-dot-unknown{fill:#ffc66d;filter:drop-shadow(0 0 4px #ffc66d)}
+    .radar-center{position:absolute;z-index:3;inset:0;display:grid;place-items:center;pointer-events:none}
+    .radar-center span{margin-top:18px;color:#9ff3dd;font-size:.57rem;font-weight:800;letter-spacing:.15em;text-shadow:0 0 9px #53d6a0}
+    .radar-readout{min-width:0}
+    .radar-readout-title{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+    .radar-readout-title strong{font-size:.94rem}
+    .radar-readout-title small{margin-right:auto;color:var(--muted)}
+    .radar-led{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+    .radar-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .radar-count{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px;border:1px solid #263e50;border-radius:11px;background:#091824;min-width:0}
+    .radar-count span{font-size:.78rem;color:var(--muted)}
+    .radar-count strong{font-size:1.1rem;font-variant-numeric:tabular-nums}
+    .radar-buy strong{color:var(--green)} .radar-sell strong{color:var(--red)} .radar-neutral strong{color:var(--blue)} .radar-unknown strong{color:var(--amber)}
+    .radar-caption{min-height:44px;margin:12px 0 8px;color:#c2d4e1;font-size:.84rem;overflow-wrap:anywhere}
+    .radar-legend{display:flex;flex-wrap:wrap;gap:12px;color:var(--muted);font-size:.76rem}
+    .radar-legend span{display:inline-flex;align-items:center;gap:5px}
+    .radar-legend-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+    .radar-buy-dot{background:var(--green)} .radar-sell-dot{background:var(--red)} .radar-neutral-dot{background:var(--blue)} .radar-unknown-dot{background:var(--amber)}
+    .crypto-radar[data-radar-state="scanning"] .radar-state{color:#baf8e5;border-color:#39836f;background:#103b35}
+    .crypto-radar[data-radar-state="error"] .radar-state{color:#ffb9bd;border-color:#75424a;background:#351c27}
+    .crypto-radar[data-radar-state="error"] .radar-led{background:var(--red);box-shadow:0 0 10px var(--red)}
+    @keyframes crypto-radar-spin{to{transform:rotate(360deg)}}
+    @keyframes crypto-radar-blip{0%,100%{opacity:.7}50%{opacity:1}}
+    @media(max-width:720px){.radar-layout{grid-template-columns:minmax(0,1fr)}.radar-scope{width:min(100%,270px)}.radar-readout{width:100%}}
+    @media(prefers-reduced-motion:reduce){.radar-sweep,.radar-dot{animation:none!important}}
+    """
+
+
+def _radar_runtime() -> str:
+    return r"""<script>
+    (() => {
+      const labels = {BUY:'خرید', SELL:'فروش', NEUTRAL:'خنثی / بدون معامله', UNKNOWN:'نامشخص / در انتظار'};
+      const stateLabels = {idle:'آمادهٔ اسکن', scanning:'رادار در حال اسکن', complete:'آخرین نتایج شناسایی شد', error:'خطا در دریافت داده'};
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const signalOf = item => {
+        const explicit = String(item.trade_authorization || item.radar_signal || item.signal || item.action || item.recommendation || '').toUpperCase().replace(/-/g, '_');
+        if (explicit === 'BUY' || explicit === 'LONG') return 'BUY';
+        if (explicit === 'SELL' || explicit === 'SHORT') return 'SELL';
+        if (['NO_TRADE','NO TRADE','HOLD','NEUTRAL'].includes(explicit)) return 'NEUTRAL';
+        const status = String(item.status || item.candidate_status || '').toUpperCase();
+        if (['PASS','VERIFIED','DISCOVERED'].includes(status)) return 'NEUTRAL';
+        return 'UNKNOWN';
+      };
+      const pointLabel = item => String(item.symbol || item.token_symbol || item.name || item.token_name || item.asset || 'رمزارز').slice(0, 48);
+      function update(id, items, options = {}) {
+        const root = document.getElementById(id);
+        if (!root) return;
+        const safeItems = Array.isArray(items) ? items.filter(item => item && typeof item === 'object').slice(0, 48) : [];
+        root._radarItems = safeItems;
+        const svg = root.querySelector('.radar-points');
+        if (!svg) return;
+        svg.replaceChildren();
+        const counts = {BUY:0, SELL:0, NEUTRAL:0, UNKNOWN:0};
+        safeItems.forEach((item, index) => {
+          const signal = signalOf(item);
+          counts[signal] += 1;
+          let hash = 0;
+          const label = pointLabel(item);
+          for (let i = 0; i < label.length; i += 1) hash = (hash * 31 + label.charCodeAt(i)) >>> 0;
+          const angle = ((index * 137.507764 + (hash % 360)) % 360) * Math.PI / 180;
+          const radius = 37 + ((index * 29 + (hash % 83)) % 91);
+          const cx = 160 + Math.cos(angle) * radius;
+          const cy = 160 + Math.sin(angle) * radius;
+          const dot = document.createElementNS(svgNS, 'circle');
+          dot.setAttribute('cx', cx.toFixed(2));
+          dot.setAttribute('cy', cy.toFixed(2));
+          dot.setAttribute('r', signal === 'BUY' || signal === 'SELL' ? '5.2' : '4.2');
+          dot.setAttribute('class', 'radar-dot radar-dot-' + signal.toLowerCase());
+          const title = document.createElementNS(svgNS, 'title');
+          title.textContent = label + ' · ' + labels[signal];
+          dot.appendChild(title);
+          svg.appendChild(dot);
+        });
+        Object.entries(counts).forEach(([key, value]) => {
+          const output = root.querySelector('[data-radar-count="' + key + '"]');
+          if (output) output.textContent = String(value);
+        });
+        const total = root.querySelector('[data-radar-total]');
+        if (total) total.textContent = safeItems.length.toLocaleString('fa-IR') + ' دارایی';
+        const state = options.state || 'complete';
+        root.dataset.radarState = state;
+        const stateOutput = root.querySelector('[data-radar-state-label]');
+        if (stateOutput) stateOutput.textContent = options.stateText || stateLabels[state] || stateLabels.idle;
+        const caption = root.querySelector('[data-radar-caption]');
+        if (caption) caption.textContent = options.caption || (safeItems.length
+          ? 'نقاط بر اساس آخرین دادهٔ دریافتی رسم شده‌اند؛ رنگ‌ها وضعیت همان منبع را نشان می‌دهند.'
+          : 'هنوز داده‌ای برای نمایش روی رادار دریافت نشده است.');
+      }
+      function scanning(id, message) {
+        const root = document.getElementById(id);
+        update(id, root && root._radarItems || [], {state:'scanning', caption:message || 'در حال دریافت و بررسی داده‌های بازار...'});
+      }
+      function error(id, message) {
+        const root = document.getElementById(id);
+        update(id, root && root._radarItems || [], {state:'error', stateText:'خطا در اسکن', caption:message || 'داده از منبع اسکن دریافت نشد؛ سیگنالی تولید نشده است.'});
+      }
+      window.CryptoRadar = {update, scanning, error};
+    })();
+    </script>"""
+
 def _page(body: str, title: str = "CRYPTO SUPER RADAR") -> bytes:
+    body = (
+        body.replace("<!--RADAR_GEM_HUNTER-->", _radar_panel(
+            "radar-gem-hunter", "رادار کشف توکن‌های تازه",
+            "نقاط زندهٔ مرحلهٔ کشف و ارزیابی؛ BUY فقط پس از تأیید کامل موتور نمایش داده می‌شود."
+        ))
+        .replace("<!--RADAR_MARKET-->", _radar_panel(
+            "radar-market", "رادار بازار رمزارزها",
+            "آبی یعنی دادهٔ قیمت از منابع مستقل تأیید شده؛ این بخش به‌تنهایی سیگنال خرید یا فروش صادر نمی‌کند."
+        ))
+        .replace("<!--RADAR_DEX_SEARCH-->", _radar_panel(
+            "radar-dex-search", "رادار جست‌وجوی DEX",
+            "توکن‌های پیدا‌شده روی رادار به‌عنوان نامزد شناسایی نمایش داده می‌شوند، نه سیگنال معاملاتی."
+        ))
+        .replace("<!--RADAR_ASSET_SCAN-->", _radar_panel(
+            "radar-asset-scan", "رادار اسکن اختصاصی دارایی",
+            "وضعیت نهایی فقط بعد از دریافت پاسخ کامل موتور تحلیل روی رادار ثبت می‌شود."
+        ))
+    )
     return f"""<!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -628,7 +802,8 @@ pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px
 canvas{{width:100%;height:300px;background:#08101d;border-radius:12px}}
 .calc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}}
 @media(max-width:680px){{body{{padding:20px 12px 32px}}.app-header{{gap:11px;align-items:flex-start}}.brand-mark{{width:44px;height:44px;border-radius:14px;font-size:23px}}.mode-pill{{font-size:.72rem;padding:5px 8px}}.card{{padding:17px 14px;border-radius:15px}}table{{font-size:.84rem}}td,th{{padding:10px 8px}}button.market-scan-button{{min-width:116px;padding:8px;font-size:.8rem}}}}
-</style></head><body><main>{body}<script>
+{_radar_css()}
+</style></head><body><main>{_radar_runtime()}{body}<script>
 (function(){{
   const source=document.getElementById('crypto-market-search-activity');
   if(!source)return;
@@ -1832,6 +2007,7 @@ class Handler(BaseHTTPRequestHandler):
           </div>
         </section>
         <section class="card" id="gem-hunter-panel">
+          <!--RADAR_GEM_HUNTER-->
           <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
           <p class="muted">توکن‌های تازهٔ Solana و Base را در مرحلهٔ کشف شناسایی می‌کند. فقط BUYهایی نمایش داده می‌شوند که پروندهٔ ارزیابی نسخه‌دار، حداقل ۹ فیلتر از ۱۲، عبور همهٔ ۴ گیت حیاتی و شواهد تازه و قابل‌ردیابی بازار و Swapهای واقعی نهنگ را داشته باشند. نامزدهای کشف‌شده نیز جداگانه در فهرست پژوهشی نمایش داده می‌شوند؛ حتی اگر هنوز ارزیابی نشده، رد شده یا دارای دادهٔ ناقص باشند. این فهرست سیگنال خرید نیست و دادهٔ قدیمی با برچسب مشخص می‌شود. در هر نوبت حداکثر ۱۰ استخر و ۵ قرارداد به‌صورت چرخشی بررسی می‌شوند؛ بقیه در صف بررسی نوبت‌های بعدی می‌مانند.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
@@ -2217,6 +2393,7 @@ class Handler(BaseHTTPRequestHandler):
             const pendingCandidates = (data.diagnostic_candidates || [])
               .filter(item => item && item.trade_authorization !== 'BUY');
             const discovered = Number(data.discovered_candidate_count || pendingCandidates.length || 0);
+             window.CryptoRadar.update('radar-gem-hunter', [...(data.candidates || []), ...pendingCandidates], {state:data.refreshing ? 'scanning' : 'complete', caption:'کشف‌شده: ' + discovered + ' · BUY تأییدشده: ' + Number(data.qualified_buy_count || 0) + ' · نامزدهای فاقد تأیید کامل به‌عنوان BUY نمایش داده نمی‌شوند.'});
             const isStale = data.diagnostic_freshness === 'STALE_LAST_COMPLETED_SCAN';
             const summary = document.createElement('div');
             summary.appendChild(el('p', data.diagnostic_fa || 'اعتبارسنجی در پس‌زمینه ادامه دارد.', 'muted'));
@@ -2245,6 +2422,7 @@ class Handler(BaseHTTPRequestHandler):
           };
           button.addEventListener('click', async () => {
             button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت نامزدها و ساخت گزارش فارسی ۱۲ فیلتر و ۴ گیت...'));
+             window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana و Base...');
             status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
             try {
               let data = null;
@@ -2305,6 +2483,7 @@ class Handler(BaseHTTPRequestHandler):
                 ' · این گزارش برای تحقیق است و سفارش یا تراکنش ارسال نمی‌کند.', 'candidate-meta'));
             } catch (error) {
               status.textContent = 'خطا در دریافت داده: ' + error.message;
+               window.CryptoRadar.error('radar-gem-hunter', 'دریافت گزارش Gem Hunter ناموفق بود؛ هیچ سیگنالی از دادهٔ ناقص تولید نشده است.');
               results.replaceChildren(el('p', 'گزارش دریافت نشد؛ هیچ سیگنال خریدی از دادهٔ ناقص صادر نمی‌شود.', 'muted'));
             } finally { button.disabled = false; }
           });
@@ -2400,6 +2579,7 @@ class Handler(BaseHTTPRequestHandler):
         })();
         </script>
         <section class="card" id="crypto-markets">
+          <!--RADAR_MARKET-->
           <h2>بازار رمزارزها</h2>
           <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ نرخ‌ها فقط زمانی نمایش داده می‌شوند که هر دو منبع پاسخ معتبر بدهند. رتبه‌بندی ارزش بازار نیست.</p>
           <p id="crypto-market-status" class="muted" aria-live="polite">در حال دریافت دادهٔ عمومی بازار...</p>
@@ -2525,18 +2705,19 @@ class Handler(BaseHTTPRequestHandler):
             tr.appendChild(td);rows.replaceChildren(tr);
           }}
           async function refresh(){
-            button.disabled=true;status.textContent='در حال دریافت قیمت‌های عمومی...';showMarketLoading();
+            button.disabled=true;status.textContent='در حال دریافت قیمت‌های عمومی...';showMarketLoading();window.CryptoRadar.scanning('radar-market', 'در حال دریافت قیمت و تطبیق منابع عمومی بازار...');
             try{
               const response=await fetch('/api/crypto-markets');
               const data=await response.json();
               if(!response.ok)throw new Error('HTTP '+response.status);
               marketItems=data.items||[];
+              window.CryptoRadar.update('radar-market', marketItems, {state:data.refreshing?'scanning':'complete', caption:'آبی: قیمت تأییدشده از دو منبع مستقل · زرد: دادهٔ نامشخص. این رادار جهت خرید/فروش تولید نمی‌کند.'});
               renderRows();
               const received=new Date(data.updated_at_utc).toLocaleString();
               status.textContent='منابع: '+(data.sources||[]).join(' و ')+' · دریافت: '+received+
                 ' · وضعیت کلی: '+data.status+' · cache: '+data.cache_ttl_seconds+' ثانیه';
             }catch(error){
-              status.textContent='دادهٔ بازار در دسترس نیست: '+String(error.message||error);
+              status.textContent='دادهٔ بازار در دسترس نیست: '+String(error.message||error);window.CryptoRadar.error('radar-market', 'دریافت قیمت بازار ناموفق بود؛ وضعیت قبلی به‌عنوان سیگنال تازه تلقی نمی‌شود.');
             }finally{button.disabled=false;}
           }
           search.addEventListener('input',()=>{
@@ -2588,6 +2769,7 @@ class Handler(BaseHTTPRequestHandler):
             <p class="muted">توکن را با نام، نماد، شبکه و آدرس قرارداد انتخاب کن. شبکه‌های جست‌وجو: Ethereum، Base و Solana.</p>
             <div id="dex-search-status" class="muted" aria-live="polite">نمادهای تکراری ممکن است قراردادهای متفاوت داشته باشند.</div>
             <div id="dex-search-results"></div>
+            <!--RADAR_DEX_SEARCH-->
           </div>
           <form method="post" action="/scan">
             <label>بازار و نماد / آدرس</label>
@@ -2609,6 +2791,7 @@ class Handler(BaseHTTPRequestHandler):
             const term=(q.value||'').trim();if(term.length<2){st.textContent='حداقل دو نویسه وارد کن.';return;}
             b.disabled=true;st.textContent='در حال جست‌وجو...';out.replaceChildren();
             try{const r=await fetch('/api/dex-search?q='+encodeURIComponent(term));const data=await r.json();
+              window.CryptoRadar.update('radar-dex-search', (data.results || []).map(item=>({...item, radar_signal:'NEUTRAL'})), {state:'complete', caption:'نتایج جست‌وجوی توکن روی رادار قرار گرفتند؛ این نتایج هنوز سیگنال خرید یا فروش نیستند.'});
               if(!Array.isArray(data.results)||!data.results.length){st.textContent=data.reason||'نتیجه‌ای پیدا نشد.';return;}
               st.textContent='قرارداد دقیق و شبکه موردنظر را انتخاب کن.';
               data.results.forEach(item=>{const opt=document.createElement('button');opt.type='button';opt.textContent=item.name+' ('+item.symbol+') · '+item.chain+' · '+item.address;opt.addEventListener('click',()=>{asset.value=item.asset;st.textContent='انتخاب شد: '+item.chain+' / '+item.address;out.replaceChildren();});out.appendChild(opt);});
@@ -2752,6 +2935,7 @@ class Handler(BaseHTTPRequestHandler):
             body = (
                 "<h2>اسکن آغاز شد</h2><p>شناسه کار: <code>" + job_id + "</code></p>"
                 "<p id='state'>در حال جمع‌آوری داده‌های بازار، نهنگ‌ها و احساسات...</p>"
+                 "<!--RADAR_ASSET_SCAN-->"
                 "<section class='card'><h3 id='diagnosis-title'>تشخیص نهایی</h3><div id='diagnosis-headline' class='metric'></div><div id='diagnosis-short' class='grid'></div><div id='diagnosis-long' class='grid'></div><div id='diagnosis-reasons'></div></section>"
                 "<section class='card'><h3>کف و سقف در بازه‌های مختلف</h3><div id='timeframe-range-table'></div><p id='candle-age-note' class='muted'></p></section>"
                 "<section class='card'><h3>نمای کلی بازار و نمودار</h3><div id='market-summary' class='grid'></div>"
@@ -2776,9 +2960,10 @@ class Handler(BaseHTTPRequestHandler):
                 "function renderDiagnosis(d){const title=document.getElementById('diagnosis-title'),head=document.getElementById('diagnosis-headline');title.textContent='تشخیص نهایی · '+(d.coin_name||'رمزارز')+' ('+(d.symbol||'')+')';head.replaceChildren(cell('strong',d.final_recommendation||'تشخیص در دسترس نیست'),cell('div','وضعیت کلی: '+(d.overall_signal_fa||'خنثی')+' · '+(d.explanation||'')));const makeCard=(label,item)=>{const box=document.createElement('div');box.className='metric';box.appendChild(cell('strong',label));box.appendChild(cell('div',item.action_fa||'ناموجود'));(item.reasons||[]).forEach(reason=>{const p=cell('p','• '+reason);box.appendChild(p);});return box;};document.getElementById('diagnosis-short').replaceChildren(makeCard('تصمیم کوتاه‌مدت',d.short_term||{}));document.getElementById('diagnosis-long').replaceChildren(makeCard('تصمیم بلندمدت / نگهداری',d.long_term||{}));const list=document.createElement('ul');(d.blockers||[]).forEach(row=>{const li=cell('li',(row.name?row.name+' — ':'')+row.reason+' ['+row.status+']');list.appendChild(li);});const reasons=document.getElementById('diagnosis-reasons');reasons.replaceChildren(cell('h4','چرا خرید توصیه می‌شود یا نمی‌شود؟'),list);document.getElementById('candle-age-note').textContent=d.candle_age_text||'سن کندل در دسترس نیست.';}"
                 "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};"
                 "const w=c.whale_intelligence||{};const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['وضعیت Whale API',w.status],['پوزیشن‌های نهنگ Hyperliquid',w.position_count],['کیف‌پول‌های نهنگ',w.wallet_count],['ارزش پوزیشن لانگ (USD)',w.long_notional_usd],['ارزش پوزیشن شورت (USD)',w.short_notional_usd],['خالص مواجهه جهت‌دار (USD)',w.net_directional_notional_usd],['هشدارهای ورود',w.open_alert_count],['هشدارهای خروج',w.close_alert_count],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const whaleWallets=(w.positions||[]).slice(0,5).map(x=>'نهنگ '+(x.wallet||'آدرس نامشخص')+' · '+x.direction+' · '+(x.position_value_usd??'—')+' USD · اهرم '+(x.leverage??'—')+'x · PnL '+(x.unrealized_pnl_usd??'—'));const whaleAlerts=(w.alerts||[]).slice(0,5).map(x=>'هشدار '+x.action+' '+x.direction+' · '+(x.wallet||'آدرس نامشخص')+' · '+(x.position_value_usd??'—')+' USD');const notes=[...(s.notes||[]),d.reason,c.reason,w.reason,w.coverage,...whaleWallets,...whaleAlerts,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
-                "let pollAttempts=0;const pollStarted=Date.now();async function poll(){try{const r=await fetch('/jobs/'+job,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();pollAttempts=0;document.getElementById('state').textContent=j.status;"
-                "if(j.status==='completed'){renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز خام تأیید (مجوز ورود نیست)',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
-                "if(j.status==='failed'){document.getElementById('state').textContent='اسکن ناموفق بود: '+j.error;return;}"
+                "window.CryptoRadar.scanning('radar-asset-scan', 'در حال جمع‌آوری داده و اجرای فیلترهای تحلیلی...');
+                 let pollAttempts=0;const pollStarted=Date.now();async function poll(){try{const r=await fetch('/jobs/'+job,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();pollAttempts=0;document.getElementById('state').textContent=j.status;"
+                "if(j.status==='completed'){const s=j.result||{};window.CryptoRadar.update('radar-asset-scan',[{symbol:s.symbol||s.asset,name:s.coin_name,signal:s.signal}],{state:'complete',caption:'نتیجهٔ واقعی موتور تحلیل: '+String(s.signal||'UNKNOWN')+' · امتیاز تأیید به‌تنهایی مجوز ورود نیست.'});renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز خام تأیید (مجوز ورود نیست)',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
+                "if(j.status==='failed'){document.getElementById('state').textContent='اسکن ناموفق بود: '+j.error;window.CryptoRadar.error('radar-asset-scan','اسکن کامل نشد؛ هیچ سیگنال خرید یا فروشی ثبت نشده است.');return;}"
                 "if(Date.now()-pollStarted>=1800000){document.getElementById('state').textContent='مهلت پیگیری تمام شد؛ برای ادامه وضعیت همین شناسه را بررسی کنید: /jobs/'+job;return;}"
                 "}catch(e){pollAttempts+=1;const elapsed=Date.now()-pollStarted;if(elapsed>=1800000){document.getElementById('state').textContent='مهلت بازیابی ارتباط تمام شد؛ شناسهٔ همان اسکن: '+job;return;}const delay=Math.min(30000,2500*Math.pow(2,Math.min(pollAttempts,4)));document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ تلاش مجدد خودکار برای همان شناسه در '+Math.ceil(delay/1000)+' ثانیه...';setTimeout(poll,delay);return;}"
                 "setTimeout(poll,2500);}poll();</script>"
