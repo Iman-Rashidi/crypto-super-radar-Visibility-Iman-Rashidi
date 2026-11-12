@@ -60,3 +60,14 @@ For fully automatic CI without GitHub-hosted private compute, an owner-authorize
 - The Billing page and repository Actions settings were not inspectable through the connected session, so the billing/policy sub-cause remains unresolved.
 - No payment, budget, plan, repository visibility, runner, secret, Actions setting, merge, or deployment was changed.
 - F-49 remains PARTIAL until the exact current HEAD receives actual test evidence. PR #4 remains Draft; PR #1 and `main` remain untouched. `PAPER_ONLY` / `NO_TRADE` and the closed Release Gate remain in force.
+
+## Billing documentation note — checked 2026-11-12
+
+GitHub's current documentation says standard hosted runners are free for public repositories, while private repositories draw runner costs from the account's included monthly compute usage; overage is metered. A budget with **Stop usage when budget limit is reached** can block further hosted-runner use after its applicable budget is exhausted. The included compute allowance is described in monetary terms in the current billing model, so inspect the actual included-usage and budget screens rather than relying only on a historical "minutes remaining" figure.
+
+References:
+- https://docs.github.com/en/actions/concepts/billing-and-usage
+- https://docs.github.com/en/billing/concepts/product-billing/github-actions
+- https://github.com/github/docs/blob/main/content/billing/how-tos/set-up-budgets.md
+
+This documentation confirms that an account-level compute/budget block is a plausible mechanism. It does not identify which, if any, applies to this repository owner; only the account's Billing and Actions settings or GitHub Support can establish that.
