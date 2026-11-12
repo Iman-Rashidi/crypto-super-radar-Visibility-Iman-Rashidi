@@ -175,3 +175,13 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - Consequently, no automated unit/integration/Streamlit CI pass is claimed. The local fee logic checks are narrow, not a substitute for repository tests.
 - No provider adapter, integrated engine, dashboard, database schema, secrets, Render configuration or deployed service was changed. No deploy, merge, live order, wallet connection or signing occurred.
 - Next acceptance sequence: restore a functioning runner; run all offline tests and Streamlit smoke tests on the exact HEAD; then wire one provider at a time to the new order-flow contract with timestamp, source and coverage tests; only afterwards add an explicit engine gate and UI view.
+
+
+## Follow-on review — 2026-11-12 (post initial implementation)
+
+- Liquidation summarization now returns `ESTIMATED_ONLY` when the input contains only large-trade proxies and no confirmed liquidation records. Invalid-only input is `PARTIAL`, not `NO_DATA`; empty input alone is `NO_DATA`. Confirmed notional stays null when no confirmed liquidation record exists.
+- Added regression tests for estimated-only, invalid-only and empty liquidation inputs.
+- The `wallet_graph.py` implementation already applies several million-inspired safeguards: chain-aware address normalization, bounded candidate generation, event-level deduplication, temporal/amount evidence and no ownership inference from a public exchange funder alone. It remains bounded analysis, not a durable live event ledger.
+- `gem_hunter_security.py` / `evm_security.py` already reflect Solbeam-inspired fail-closed security semantics: missing mandatory EVM evidence yields UNKNOWN; missing Solana authority evidence does not produce PASS; top-10 token-account concentration is explicitly not described as independent wallet ownership. No source code was copied from Solbeam.
+- Current feature-branch HEAD: `e83365b6ebfa6af57f7023b4fdf547181dd68e18`.
+- Latest checks on that HEAD: [offline-tests #820](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43153821049) and [runner-diagnostic #25](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/43153821039) failed before the first step; their jobs expose `steps=null` and `logs_url=null`. No full test pass is claimed.
