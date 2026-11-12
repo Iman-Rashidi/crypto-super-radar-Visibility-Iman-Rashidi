@@ -178,7 +178,11 @@ class GeckoTerminalProvider:
         for index, row in enumerate(rows):
             if not isinstance(row, dict) or not isinstance(row.get("attributes"), dict):
                 raise DataProviderError(f"GeckoTerminal trade row {index} has an invalid schema")
-            normalized.append(dict(row["attributes"]))
+            attributes = dict(row["attributes"])
+            trade_id = row.get("id")
+            if isinstance(trade_id, str) and trade_id:
+                attributes["__trade_id"] = trade_id
+            normalized.append(attributes)
         return normalized
 
     def candles(self, chain: str, pool_address: str, token_address: Optional[str] = None, timeframe: str = "day", aggregate: int = 1, limit: int = 365) -> pd.DataFrame:
