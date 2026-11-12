@@ -1823,6 +1823,47 @@ class Handler(BaseHTTPRequestHandler):
             if (outcome === 'added') watchForm.reset();
           });
           renderWatchlist();
+          const fetchGemHunterReport = async () => {
+            let lastError = null;
+            for (let retry = 0; retry < 4; retry += 1) {
+              try {
+                const response = await fetch('/api/gem-hunter/report?limit=50', {
+                  cache: 'no-store',
+                  credentials: 'same-origin',
+                  headers: { 'Accept': 'application/json' }
+                });
+                if (response.status === 429 || response.status >= 500) {
+                  lastError = new Error('HTTP ' + response.status);
+                } else {
+                  const raw = await response.text();
+                  let payload;
+                  try {
+                    payload = JSON.parse(raw);
+                  } catch (_) {
+                    throw new Error('پاسخ API معتبر نیست (HTTP ' + response.status + ')');
+                  }
+                  if (!response.ok) {
+                    throw new Error(payload.error || 'HTTP ' + response.status);
+                  }
+                  return payload;
+                }
+              } catch (error) {
+                lastError = error;
+                const message = String(error && error.message || error);
+                const retryable = error instanceof TypeError ||
+                  (error && error.name === 'AbortError') ||
+                  /^HTTP (429|5\\d\\d)$/.test(message);
+                if (!retryable) throw error;
+              }
+              if (retry === 3) break;
+              const delay = 1000 * (2 ** retry);
+              status.textContent = 'ارتباط با API موقتاً قطع/کند شد؛ تلاش مجدد خودکار (' +
+                (retry + 1) + '/3)...';
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            throw new Error('API پس از ۴ تلاش پاسخ نداد: ' +
+              String(lastError && lastError.message || lastError || 'network error'));
+          };
           const renderPendingReport = data => {
             const pendingCandidates = (data.diagnostic_candidates || [])
               .filter(item => item && item.trade_authorization !== 'BUY');
@@ -1859,8 +1900,7 @@ class Handler(BaseHTTPRequestHandler):
             try {
               let data = null;
               for (let attempt = 0; attempt < 180; attempt += 1) {
-                const response = await fetch('/api/gem-hunter/report?limit=50', {cache:'no-store'});
-                data = await response.json();
+                data = await fetchGemHunterReport();
                 if (!response.ok) throw new Error(data.error || 'Discovery report failed');
                 if (!data.refreshing) break;
                 status.textContent = 'اسکن در پس‌زمینه ادامه دارد... (' + (attempt + 1) + '/180)';
