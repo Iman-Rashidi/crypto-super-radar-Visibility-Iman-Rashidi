@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .token_risk import evaluate_token_security
+
 
 FILTER_IDS = (
     "trend", "momentum", "relative_strength", "volume_confirmation",
@@ -68,9 +70,30 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
     change = _number(candidate.get("price_change_1h_pct"))
     security_evidence = candidate.get("security_evidence")
     security_evidence = security_evidence if isinstance(security_evidence, dict) else {}
-    security_status = security_evidence.get("status")
-    if security_status not in {"PASS", "FAIL"}:
-        security_status = "UNKNOWN"
+    token_risk_evidence = candidate.get("token_risk_evidence")
+    if not isinstance(token_risk_evidence, dict):
+        token_risk_evidence = {}
+        # Preserve an explicit source-backed disqualifier, but do not translate
+        # a limited provider PASS into full token-risk PASS.
+        if (
+            security_evidence.get("status") == "FAIL"
+            and security_evidence.get("provider")
+            and security_evidence.get("checked_at_utc")
+            and (security_evidence.get("flags") or security_evidence.get("reason_codes"))
+        ):
+            token_risk_evidence["contract_authority"] = {
+                "status": "FAIL",
+                "source": security_evidence.get("provider"),
+                "checked_at": security_evidence.get("checked_at_utc"),
+                "coverage_pct": None,
+                "value": {
+                    "flags": security_evidence.get("flags"),
+                    "reason_codes": security_evidence.get("reason_codes"),
+                },
+                "reason": "A limited provider check identified an explicit security disqualifier.",
+            }
+    token_risk_assessment = evaluate_token_security(token_risk_evidence)
+    security_status = token_risk_assessment["security_gate_status"]
 
     filters = {name: "UNKNOWN" for name in FILTER_IDS}
     filters["contract_security"] = security_status
@@ -239,7 +262,8 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "evaluation_status": "INCOMPLETE",
         "market_reconciliation": reconciliation,
         "security_evidence": security_evidence,
-        "evaluation_reason": "Exact-pool market data is independently reconciled where available; contract security, holder ownership, notional flow, attributable whale swaps and executable exit depth still require separate evidence.",
+        "token_risk_assessment": token_risk_assessment,
+        "evaluation_reason": "Exact-pool market data is independently reconciled where available; complete source-backed contract, holder, deployer, launch-bundle and executable-exit evidence is required for the security sub-gate.",
     }
 
 
