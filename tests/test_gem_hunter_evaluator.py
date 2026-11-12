@@ -189,5 +189,59 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(preserved[0]["qualification"], {"schema_version": "existing"})
 
 
+    def test_fresh_complete_exact_pool_technical_evidence_populates_four_filters(self):
+        item = candidate()
+        item["technical_evidence"] = {
+            "schema_version": "gem-hunter-technical-v1",
+            "status": "COMPLETE",
+            "coverage_status": "COMPLETE",
+            "chain": item["chain"],
+            "token_address": item["token_address"],
+            "pool_address": item["pool_address"],
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "sources": ["GECKOTERMINAL", "BINANCE_SPOT"],
+            "filters": {
+                "trend": "PASS",
+                "momentum": "PASS",
+                "relative_strength": "FAIL",
+                "market_regime_validation": "UNKNOWN",
+            },
+            "metrics": {"token_return_7d_pct": 12.0},
+            "timeframes": {"4h": {"bars": 120}, "1d": {"bars": 90}},
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["trend"], "PASS")
+        self.assertEqual(result["filters"]["momentum"], "PASS")
+        self.assertEqual(result["filters"]["relative_strength"], "FAIL")
+        self.assertEqual(result["filters"]["market_regime_validation"], "UNKNOWN")
+        self.assertEqual(result["market_metrics"]["technical_evidence_status"], "COMPLETE")
+        self.assertEqual(result["market_metrics"]["technical_metrics"]["token_return_7d_pct"], 12.0)
+
+    def test_stale_or_wrong_pool_technical_evidence_cannot_upgrade_filters(self):
+        item = candidate()
+        evidence = {
+            "schema_version": "gem-hunter-technical-v1",
+            "status": "COMPLETE",
+            "coverage_status": "COMPLETE",
+            "chain": item["chain"],
+            "token_address": item["token_address"],
+            "pool_address": "DifferentPool",
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "sources": ["GECKOTERMINAL", "BINANCE_SPOT"],
+            "filters": {
+                "trend": "PASS", "momentum": "PASS",
+                "relative_strength": "PASS", "market_regime_validation": "PASS",
+            },
+        }
+        item["technical_evidence"] = evidence
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["trend"], "UNKNOWN")
+        evidence["pool_address"] = item["pool_address"]
+        evidence["checked_at_utc"] = "2026-11-11T10:00:00Z"
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["trend"], "UNKNOWN")
+
+
+
 if __name__ == "__main__":
     unittest.main()
