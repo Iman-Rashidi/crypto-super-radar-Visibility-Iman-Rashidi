@@ -110,6 +110,9 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertLessEqual(result["quantity"] * result["entry_price"], 1_000.0)
         self.assertGreater(result["quantity"], 0)
         self.assertIsNotNone(self.ledger.position())
+        position = self.ledger.position()
+        self.assertEqual(position["entry_reference_price"], 100.0)
+        self.assertGreater(position["entry_slippage_usd"], 0.0)
 
     def test_unknown_gate_blocks_entry(self):
         self.engine.result.gates[-1].status = "UNKNOWN"
@@ -130,6 +133,13 @@ class PaperTradingBotTests(unittest.TestCase):
         closed = self.bot.run_once("cex:BTCUSDT")
         self.assertEqual(closed["status"], "CLOSED")
         self.assertEqual(closed["trade"]["exit_reason"], "TAKE_PROFIT")
+        self.assertGreater(closed["trade"]["trade"]["entry_slippage_usd"], 0.0)
+        self.assertGreater(closed["trade"]["trade"]["exit_slippage_usd"], 0.0)
+        self.assertIsNone(closed["trade"]["trade"]["spread_cost_usd"])
+        persisted = self.ledger.state()["recent_trades"][0]
+        self.assertEqual(persisted["funding_status"], "NOT_APPLICABLE")
+        self.assertEqual(persisted["exit_reference_price"], 120.0)
+        self.assertEqual(self.ledger.state()["performance"]["spread_data_status"], "INCOMPLETE")
         self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 100.0
         duplicate = self.bot.run_once("cex:BTCUSDT")
         self.assertEqual(duplicate["status"], "NO_TRADE")
