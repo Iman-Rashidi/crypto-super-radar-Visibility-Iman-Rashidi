@@ -133,9 +133,9 @@ class PaperTradingBotTests(unittest.TestCase):
         closed = self.bot.run_once("cex:BTCUSDT")
         self.assertEqual(closed["status"], "CLOSED")
         self.assertEqual(closed["trade"]["exit_reason"], "TAKE_PROFIT")
-        self.assertGreater(closed["trade"]["trade"]["entry_slippage_usd"], 0.0)
-        self.assertGreater(closed["trade"]["trade"]["exit_slippage_usd"], 0.0)
-        self.assertIsNone(closed["trade"]["trade"]["spread_cost_usd"])
+        self.assertGreater(closed["trade"]["entry_slippage_usd"], 0.0)
+        self.assertGreater(closed["trade"]["exit_slippage_usd"], 0.0)
+        self.assertIsNone(closed["trade"]["spread_cost_usd"])
         persisted = self.ledger.state()["recent_trades"][0]
         self.assertEqual(persisted["funding_status"], "NOT_APPLICABLE")
         self.assertEqual(persisted["exit_reference_price"], 120.0)
