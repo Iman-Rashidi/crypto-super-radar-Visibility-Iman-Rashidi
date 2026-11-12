@@ -119,7 +119,7 @@ def _summary(close: pd.Series, *, interval_bars_per_day: int) -> dict[str, Any]:
         "ema50": slow,
         "rsi14": _rsi(close),
         "direction": direction,
-        "return_24h_pct": _return_pct(close, 24 * interval_bars_per_day),
+        "return_24h_pct": _return_pct(close, interval_bars_per_day),
         "return_7d_pct": _return_pct(close, 7 * interval_bars_per_day),
         "return_30d_pct": _return_pct(close, 30 * interval_bars_per_day),
     }
@@ -196,6 +196,12 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
             evidence["metrics"][symbol] = _summary(close, interval_bars_per_day=1)
         except Exception as exc:
             errors.append(f"{symbol}:{type(exc).__name__}")
+
+    evidence["sources"] = []
+    if pool_close:
+        evidence["sources"].append("GECKOTERMINAL")
+    if benchmark_close:
+        evidence["sources"].append("BINANCE_SPOT")
 
     has_4h_and_daily = "4h" in pool_close and "1d" in pool_close
     has_15m_and_4h = "15m" in pool_close and "4h" in pool_close
