@@ -314,6 +314,7 @@ def enrich_discovery_candidates_with_technicals(candidates: Any, data_service,
     eligible = [
         index for index, row in enumerate(rows)
         if (row.get("market_reconciliation") or {}).get("status") == "PASS"
+        and not isinstance(row.get("qualification"), dict)
         and isinstance(row.get("token_address"), str)
         and isinstance(row.get("pool_address"), str)
         and row.get("chain") in {"base", "solana"}
