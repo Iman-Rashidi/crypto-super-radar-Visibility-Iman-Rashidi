@@ -53,6 +53,7 @@ jobs:
           python -m compileall -q .
           python -m unittest discover -s tests -v
           python -m crypto_super_radar --help
+          python -m crypto_super_radar.order_flow_service --help
           python scripts/paper_trading_bot.py --help
       - uses: actions/upload-artifact@v4
         with:
