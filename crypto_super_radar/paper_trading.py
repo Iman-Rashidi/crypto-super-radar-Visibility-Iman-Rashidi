@@ -374,7 +374,8 @@ class PaperLedger:
                 )
             if filled <= tolerance:
                 return {
-                    "status": "CANCELED", "client_order_id": client_order_id,
+                    "status": "CANCELED", "fill_status": simulation["status"],
+                    "client_order_id": client_order_id,
                     "requested_quantity": requested, "filled_quantity": 0.0,
                     "remaining_quantity": requested, "average_fill_price": None,
                     "fee_paid_usd": 0.0, "simulation": simulation,
@@ -402,8 +403,12 @@ class PaperLedger:
             debit = filled * average_price + cumulative_fee
             if not self._insert_open_position_projection(applied, debit):
                 raise RuntimeError("Paper ledger rejected filled entry projection; execution transaction rolled back")
+            final_order = self.execution_ledger.order_state(client_order_id)
+            if final_order is None:
+                raise RuntimeError("Paper order disappeared before transactional projection completed")
             return {
-                "status": simulation["status"], "client_order_id": client_order_id,
+                "status": final_order["status"], "fill_status": simulation["status"],
+                "client_order_id": client_order_id,
                 "requested_quantity": requested, "filled_quantity": filled,
                 "remaining_quantity": remaining, "average_fill_price": average_price,
                 "fee_paid_usd": cumulative_fee, "debit_usd": debit,
@@ -1199,6 +1204,7 @@ class PaperTradingBot:
             "fee_usd": execution["fee_paid_usd"],
             "client_order_id": client_order_id,
             "execution_status": execution["status"],
+            "fill_status": execution["fill_status"],
             "execution_fill_count": execution["simulation"]["fill_count"],
             "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False,
         }
