@@ -77,6 +77,7 @@ class GemHunterTechnicalTests(unittest.TestCase):
         self.assertEqual(result["filters"]["relative_strength"], "PASS")
         self.assertEqual(result["filters"]["market_regime_validation"], "PASS")
         self.assertEqual(result["timeframes"]["15m"]["bars"], 140)
+        self.assertIsNotNone(result["timeframes"]["15m"]["return_24h_pct"])
         self.assertEqual(result["coverage"]["benchmarks_present"], ["BTCUSDT", "ETHUSDT"])
 
     def test_bearish_pool_and_benchmarks_are_classified_without_false_pass(self):
@@ -151,6 +152,7 @@ class GemHunterTechnicalTests(unittest.TestCase):
         self.assertTrue(result["filter_coverage"]["trend"])
         self.assertTrue(result["filter_coverage"]["momentum"])
         self.assertFalse(result["filter_coverage"]["relative_strength"])
+        self.assertEqual(result["sources"], ["GECKOTERMINAL"])
 
 
 
