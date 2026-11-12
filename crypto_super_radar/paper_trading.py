@@ -644,8 +644,18 @@ class PaperTradingBot:
                 or stop is None or target is None):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Score, risk or stop/target plan did not pass paper safety limits."}
-        entry = price * (1.0 + self.slippage_rate)
-        exit_at_stop = stop * (1.0 - self.slippage_rate)
+        entry_quote = _extract_observed_quote(snapshot)
+        entry_reference = (
+            max(price, float(entry_quote["ask"])) if entry_quote is not None else price
+        )
+        entry = entry_reference * (1.0 + self.slippage_rate)
+        half_spread_per_unit = (
+            (float(entry_quote["ask"]) - float(entry_quote["bid"])) / 2.0
+            if entry_quote is not None else 0.0
+        )
+        exit_at_stop = (
+            (stop - half_spread_per_unit) * (1.0 - self.slippage_rate)
+        )
         if not (0 < exit_at_stop < entry < target):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Spot entry, stop-loss and take-profit levels are not ordered safely."}
@@ -677,7 +687,7 @@ class PaperTradingBot:
             return {"status": "UNKNOWN", "asset": asset.raw, "reason": "Paper account balance is invalid."}
         risk_budget = equity * self.risk_per_trade_pct
         unit_risk = entry - exit_at_stop + entry * self.fee_rate + exit_at_stop * self.fee_rate
-        target_fill = target * (1.0 - self.slippage_rate)
+        target_fill = (target - half_spread_per_unit) * (1.0 - self.slippage_rate)
         unit_reward = target_fill - entry - entry * self.fee_rate - target_fill * self.fee_rate
         net_reward_risk = unit_reward / unit_risk if unit_risk > 0 else None
         if unit_risk <= 0 or unit_reward <= 0 or net_reward_risk is None:
@@ -701,6 +711,20 @@ class PaperTradingBot:
         debit = notional + entry_fee
         if not math.isfinite(quantity) or quantity <= 0 or debit > cash:
             return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Position sizing returned no safe quantity."}
+        if entry_quote is not None:
+            entry_costs = calculate_fill_costs(
+                side="BUY", quantity=quantity, bid=entry_quote["bid"],
+                ask=entry_quote["ask"], fill_price=entry,
+                fee_paid_usd=entry_fee, funding_applicable=False,
+                quote_quality="OBSERVED",
+            )
+            entry_slippage = entry_costs["slippage_cost_usd"]
+            entry_spread_cost = entry_costs["spread_cost_usd"]
+            entry_quote_source = entry_quote["source"]
+        else:
+            entry_slippage = quantity * max(0.0, entry - price)
+            entry_spread_cost = None
+            entry_quote_source = None
         record = {
             "asset": asset.raw, "quantity": quantity, "entry_price": entry,
             "stop_loss": stop, "initial_stop_loss": stop,
@@ -708,8 +732,10 @@ class PaperTradingBot:
             "opened_at": int(time.time()), "signal_bar": signal_bar,
             "confirmation_score": score, "risk_budget": risk_budget,
             "max_holding_days": max_holding_days,
-            "entry_reference_price": price,
-            "entry_slippage_usd": quantity * max(0.0, entry - price),
+            "entry_reference_price": entry_reference,
+            "entry_slippage_usd": entry_slippage,
+            "entry_spread_cost_usd": entry_spread_cost,
+            "entry_quote_source": entry_quote_source,
         }
         if not self.ledger.open_position(record, debit):
             return {"status": "NO_TRADE", "asset": asset.raw,
