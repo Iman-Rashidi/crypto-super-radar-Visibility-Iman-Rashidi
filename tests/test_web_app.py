@@ -81,6 +81,8 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('crypto-super-radar.gem-hunter-watchlist.v1', page)
         self.assertIn("ربات معامله‌گر آزمایشی", page)
         self.assertIn("سقف زیان روزانه", page)
+        self.assertIn("پوشش دادهٔ کارمزد", page)
+        self.assertIn("اجزای کارمزد مشاهده‌شده", page)
         self.assertIn('action="/paper-bot/tick"', page)
         self.assertIn("python scripts/paper_trading_bot.py", page)
         self.assertIn("ماشین‌حساب حرفه‌ای سناریوی Spot", page)
@@ -486,6 +488,8 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(result["live_orders_enabled"])
         self.assertFalse(result["orders_submitted"])
         self.assertEqual(result["storage"], "LOCAL_SQLITE")
+        self.assertEqual(result["performance"]["fee_data_status"], "NO_DATA")
+        self.assertIsNone(result["performance"]["fee_coverage_pct"])
 
     def test_history_endpoint_returns_local_sqlite_summary(self):
         status, headers, payload = self.request(
