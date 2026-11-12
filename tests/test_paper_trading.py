@@ -165,6 +165,32 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertEqual(result["status"], "NO_TRADE")
         self.assertIsNone(self.ledger.position())
 
+    def test_missing_or_non_approving_ai_blocks_new_paper_entry(self):
+        bot = PaperTradingBot(
+            self.engine,
+            ledger=self.ledger,
+            ai_reviewer=lambda result, asset: {
+                "status": "UNKNOWN",
+                "paper_entry_eligible": False,
+                "status_fa": "کلید AI ثبت نشده است.",
+            },
+        )
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "AI_BLOCKED")
+        self.assertFalse(result["ai_review"]["paper_entry_eligible"])
+        self.assertIsNone(self.ledger.position())
+
+    def test_existing_position_is_managed_without_requiring_a_new_ai_review(self):
+        opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        self.bot.ai_reviewer = lambda result, asset: {
+            "status": "UNKNOWN", "paper_entry_eligible": False,
+        }
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        closed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(closed["status"], "CLOSED")
+        self.assertEqual(closed["trade"]["exit_reason"], "TAKE_PROFIT")
+
     def test_spot_short_is_never_opened(self):
         self.engine.result.signal = "SHORT"
         result = self.bot.run_once("cex:BTCUSDT")
