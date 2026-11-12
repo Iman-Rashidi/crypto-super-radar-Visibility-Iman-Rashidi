@@ -363,5 +363,16 @@ class GemHunterEvaluatorTests(unittest.TestCase):
 
 
 
+    def test_low_transaction_count_is_not_mislabeled_as_wash_trading_failure(self):
+        item = candidate()
+        item["buys_24h"] = 20
+        item["sells_24h"] = 15
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["market_integrity"], "UNKNOWN")
+        self.assertEqual(result["market_metrics"]["transaction_activity_floor_status"], "FAIL")
+        self.assertIn("کمبود فعالیت", result["filter_reasons"]["market_integrity"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
