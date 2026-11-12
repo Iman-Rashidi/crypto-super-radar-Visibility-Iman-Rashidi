@@ -207,5 +207,3 @@ No Solbeam source code is copied. Its publicly described ideas may be independen
 - Added `tests/test_order_flow_adapters.py` for maker/taker direction, timestamp provenance, symbol/topic validation, native-ID deduplication, malformed-message freeze, and disconnected behavior.
 - **Boundary:** these are message normalizers/ingestion bridges only. No WebSocket client, reconnect supervisor, event persistence, UI, or 12-gate integration is added in this step. A continuous consumer must own connection lifecycle and feed messages before CVD can become LIVE.
 - Provider contracts reviewed against the official [Binance Spot aggregate-trade stream](https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md) and [Bybit V5 public trade stream](https://bybit-exchange.github.io/docs/v5/websocket/public/trade).
-
-- Additional safety boundary: both provider adapters now require an explicit `channel_type="spot"` from the owning connection configuration. This prevents reusing a Bybit/ Binance Spot quantity normalizer against Linear/Perpetual contract-size messages.

@@ -86,7 +86,7 @@ class BinanceSpotTradeAdapterTests(unittest.TestCase):
             normalize_binance_spot_agg_trade(
                 {"e": "aggTrade", "s": "ETHUSDT", "a": 1, "p": "10", "q": "1", "T": 1000, "m": False},
                 channel_type="spot",
-            received_at_ms=1001,
+                received_at_ms=1001,
                 expected_symbol="BTCUSDT",
             )
 
@@ -171,6 +171,42 @@ class BybitSpotTradeAdapterTests(unittest.TestCase):
                 received_at_ms=1001,
                 expected_symbol="BTCUSDT",
             )
+
+
+    def test_malformed_row_rejects_entire_batch_without_partial_ingestion(self):
+        venue = VenueOrderFlow("bybit", window_ms=10_000)
+        venue.connect(1_000)
+        result = ingest_bybit_spot_message(
+            venue,
+            {
+                "topic": "publicTrade.BTCUSDT",
+                "type": "snapshot",
+                "data": [
+                    {"T": 1_500, "s": "BTCUSDT", "S": "Buy", "v": "0.01", "p": "65000", "i": "valid-1"},
+                    {"T": 1_510, "s": "BTCUSDT", "S": "Sell", "v": "0.02", "p": "65000"},
+                ],
+            },
+            channel_type="spot",
+            received_at_ms=1_600,
+            expected_symbol="BTCUSDT",
+        )
+        self.assertEqual(result["reason"], "INVALID_PROVIDER_PAYLOAD")
+        snapshot = venue.snapshot(1_700)
+        self.assertEqual(snapshot["event_count"], 0)
+        self.assertEqual(snapshot["status"], "FROZEN")
+
+    def test_non_spot_channel_freezes_connected_venue(self):
+        venue = VenueOrderFlow("binance", window_ms=10_000)
+        venue.connect(1_000)
+        result = ingest_binance_spot_message(
+            venue,
+            {"e": "aggTrade", "s": "BTCUSDT", "a": 1, "p": "10", "q": "1", "T": 1_500, "m": False},
+            channel_type="linear",
+            received_at_ms=1_600,
+            expected_symbol="BTCUSDT",
+        )
+        self.assertEqual(result["reason"], "INVALID_PROVIDER_PAYLOAD")
+        self.assertEqual(venue.snapshot(1_700)["status"], "FROZEN")
 
     def test_adapter_does_not_invent_a_connection(self):
         venue = VenueOrderFlow("bybit", window_ms=10_000)
