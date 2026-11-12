@@ -99,7 +99,13 @@ class PaperTradingBotTests(unittest.TestCase):
     def setUp(self):
         self.ledger = PaperLedger(":memory:")
         self.engine = FakeEngine()
-        self.bot = PaperTradingBot(self.engine, ledger=self.ledger)
+        self.bot = PaperTradingBot(
+            self.engine, ledger=self.ledger,
+            ai_reviewer=lambda result, asset: {
+                "status": "APPROVED", "paper_entry_eligible": True,
+                "provider": "test", "final_rating": "Buy", "cost_usd": 0.0,
+            },
+        )
 
     def tearDown(self):
         self.ledger.close()
@@ -234,7 +240,11 @@ class PaperTradingBotTests(unittest.TestCase):
 
     def test_daily_loss_circuit_halts_new_entries(self):
         bot = PaperTradingBot(
-            self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001
+            self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001,
+            ai_reviewer=lambda result, asset: {
+                "status": "APPROVED", "paper_entry_eligible": True,
+                "provider": "test", "final_rating": "Buy", "cost_usd": 0.0,
+            },
         )
         bot.run_once("cex:BTCUSDT")
         self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
