@@ -869,6 +869,13 @@ class PaperLedger:
         cash = float(account["cash_balance"])
         realized = sum(float(row["net_pnl"]) for row in trade_rows)
         position = dict(position_row) if position_row else None
+        partial_realized = (
+            float(position.get("exit_gross_pnl_usd") or 0.0)
+            - float(position.get("exit_entry_fee_allocated_usd") or 0.0)
+            - float(position.get("exit_fee_paid_usd") or 0.0)
+            if position else 0.0
+        )
+        realized += partial_realized
         open_debit = (
             float(position["quantity"]) * float(position["entry_price"])
             + float(position["entry_fee"])
@@ -937,6 +944,54 @@ class PaperLedger:
             if not any(message.startswith(f"{label}:{order_id} ") for message in errors):
                 matched_fills += 1
 
+        def verify_exit_orders(
+            *, asset: str, signal_bar: str, label: str,
+        ) -> tuple[float, float, float]:
+            base_id = make_paper_client_order_id(asset, signal_bar, "EXIT")
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT DISTINCT client_order_id FROM paper_execution_events "
+                    "WHERE client_order_id=? OR client_order_id LIKE ?",
+                    (base_id, f"{base_id}-%"),
+                ).fetchall()
+            total_quantity = 0.0
+            total_notional = 0.0
+            total_fee = 0.0
+            for row in rows:
+                order_id = str(row["client_order_id"])
+                order = self.execution_ledger.order_state(order_id)
+                if order is None:
+                    missing_events.append(f"{label}:{order_id}")
+                    continue
+                actual_filled = float(order["filled_quantity"])
+                if actual_filled <= 1e-12 and order["status"] == "CANCELED":
+                    expected_order_ids.add(order_id)
+                    continue
+                fill_event = next(
+                    (
+                        event for event in self.execution_ledger.recent_events(
+                            1000, client_order_id=order_id
+                        )
+                        if event["status"] in {"PARTIALLY_FILLED", "FILLED"}
+                    ),
+                    None,
+                )
+                if fill_event is None:
+                    errors.append(f"{label}:{order_id} has no recorded fill event")
+                    expected_order_ids.add(order_id)
+                    continue
+                verify_fill(
+                    order_id=order_id, asset=asset, side="SELL",
+                    quantity=actual_filled,
+                    price=float(fill_event["fill_price"]),
+                    fee=float(fill_event["fee_paid_usd"]),
+                    label=label,
+                )
+                total_quantity += actual_filled
+                total_notional += actual_filled * float(fill_event["fill_price"])
+                total_fee += float(fill_event["fee_paid_usd"])
+            return total_quantity, total_notional, total_fee
+
         for row in trade_rows:
             trade = dict(row)
             asset = str(trade["asset"])
@@ -948,12 +1003,19 @@ class PaperLedger:
                 price=float(trade["entry_price"]), fee=float(trade["entry_fee"]),
                 label=f"trade-{trade['id']}-entry",
             )
-            verify_fill(
-                order_id=make_paper_client_order_id(asset, signal_bar, "EXIT"),
-                asset=asset, side="SELL", quantity=quantity,
-                price=float(trade["exit_price"]), fee=float(trade["exit_fee"]),
+            exit_quantity, exit_notional, exit_fee = verify_exit_orders(
+                asset=asset, signal_bar=signal_bar,
                 label=f"trade-{trade['id']}-exit",
             )
+            if not math.isclose(exit_quantity, quantity, rel_tol=1e-8, abs_tol=1e-8):
+                errors.append(f"trade-{trade['id']} cumulative exit quantity mismatch")
+            if exit_quantity > 0 and not math.isclose(
+                exit_notional / exit_quantity, float(trade["exit_price"]),
+                rel_tol=1e-8, abs_tol=1e-8,
+            ):
+                errors.append(f"trade-{trade['id']} weighted exit price mismatch")
+            if not math.isclose(exit_fee, float(trade["exit_fee"]), rel_tol=1e-8, abs_tol=1e-8):
+                errors.append(f"trade-{trade['id']} cumulative exit fee mismatch")
 
         if position:
             asset = str(position["asset"])
@@ -961,14 +1023,27 @@ class PaperLedger:
             quantity = float(position["quantity"])
             entry_id = make_paper_client_order_id(asset, signal_bar, "ENTRY")
             exit_id = make_paper_client_order_id(asset, signal_bar, "EXIT")
-            verify_fill(
-                order_id=entry_id, asset=asset, side="BUY", quantity=quantity,
-                price=float(position["entry_price"]), fee=float(position["entry_fee"]),
-                label="open-position-entry",
+            entry_order = self.execution_ledger.order_state(entry_id)
+            if entry_order is None:
+                missing_events.append(f"open-position-entry:{entry_id}")
+            else:
+                verify_fill(
+                    order_id=entry_id, asset=asset, side="BUY",
+                    quantity=float(position.get("original_entry_quantity") or entry_order["filled_quantity"]),
+                    price=float(position["entry_price"]),
+                    fee=float(position.get("original_entry_fee") or 0.0),
+                    label="open-position-entry",
+                )
+            exit_quantity, exit_notional, exit_fee = verify_exit_orders(
+                asset=asset, signal_bar=signal_bar, label="open-position-exit",
             )
-            exit_event = self.execution_ledger.order_state(exit_id)
-            if exit_event is not None and exit_event["status"] == "FILLED":
-                errors.append(f"open position still exists after filled exit order {exit_id}")
+            for field, actual, expected in (
+                ("quantity", exit_quantity, float(position.get("exit_filled_quantity") or 0.0)),
+                ("notional", exit_notional, float(position.get("exit_filled_notional") or 0.0)),
+                ("fee", exit_fee, float(position.get("exit_fee_paid_usd") or 0.0)),
+            ):
+                if not math.isclose(actual, expected, rel_tol=1e-8, abs_tol=1e-8):
+                    errors.append(f"open-position cumulative exit {field} mismatch")
 
         for order in replay["orders"].values():
             order_id = str(order["client_order_id"])
@@ -1001,6 +1076,7 @@ class PaperLedger:
             "status": result_status,
             "positions_checked": 1 if position else 0,
             "closed_trades_checked": len(trade_rows),
+            "partial_exit_realized_pnl_usd": round(partial_realized, 8),
             "matched_fills": matched_fills,
             "event_count": replay["event_count"],
             "event_replay_status": replay["status"],
