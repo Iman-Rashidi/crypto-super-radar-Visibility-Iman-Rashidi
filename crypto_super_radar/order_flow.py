@@ -336,8 +336,10 @@ def summarize_liquidation_events(
     invalid_rows = 0
     unknown_evidence_rows = 0
     duplicate_rows = 0
+    input_rows = 0
 
     for event in events:
+        input_rows += 1
         venue = event.get("venue")
         event_id = event.get("event_id")
         timestamp = _timestamp_ms(event.get("event_time_ms"))
@@ -367,8 +369,9 @@ def summarize_liquidation_events(
 
     valid_count = len(confirmed) + len(estimated)
     status = (
-        "NO_DATA" if not seen
+        "NO_DATA" if input_rows == 0
         else "PARTIAL" if invalid_rows or unknown_evidence_rows
+        else "ESTIMATED_ONLY" if estimated and not confirmed
         else "OBSERVED"
     )
     return {
