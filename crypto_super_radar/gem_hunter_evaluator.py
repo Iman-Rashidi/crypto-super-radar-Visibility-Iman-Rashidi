@@ -283,18 +283,24 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         reasons["trend"] = "Pool age یا تغییر یک‌ساعته روند محسوب نمی‌شود؛ تاریخچهٔ چندبازه‌ای تازه و کامل متصل نیست."
         reasons["momentum"] = "شتاب فقط با OHLCV بسته‌شدهٔ ۱۵دقیقه‌ای و ۴ساعته و RSI14 ارزیابی می‌شود؛ شواهد کامل در دسترس نیست."
 
+    transaction_activity_floor_status = (
+        "PASS" if buys is not None and sells is not None and buys + sells >= 200
+        else "FAIL" if buys is not None and sells is not None
+        else "UNKNOWN"
+    )
+    # A low transaction count is a separate activity-floor observation, not
+    # proof of wash trading or invalid market integrity.
+    filters["market_integrity"] = "UNKNOWN"
     if pool_trade_evidence.get("wash_trading_signal") == "SUSPECTED":
-        filters["market_integrity"] = "UNKNOWN"
-        reasons["market_integrity"] = "الگوی تکرار یک معامله‌گر در نمونه مشکوک است؛ انتساب مالک ذی‌نفع و شواهد مستقل برای رد/تأیید Wash Trading کافی نیست."
+        reasons["market_integrity"] = "الگوی تکرار و تمرکز معامله‌گر در نمونه مشکوک است؛ انتساب مالک ذی‌نفع و شواهد مستقل برای اثبات Wash Trading کافی نیست."
     elif buys is not None and sells is not None:
-        if buys + sells >= 200 and buys + sells > 0:
-            filters["market_integrity"] = "UNKNOWN"
-            reasons["market_integrity"] = "Transaction count exists, but wash-trading and independent activity checks are absent."
-        else:
-            filters["market_integrity"] = "FAIL"
-            reasons["market_integrity"] = "Observed 24h transaction count is below the 200-transaction floor."
+        reasons["market_integrity"] = (
+            "تعداد معاملات از کف فعالیت عبور کرده، اما استقلال معامله‌گران و خوشه‌های مالکیت هنوز بررسی نشده است."
+            if transaction_activity_floor_status == "PASS" else
+            "تعداد معاملات زیر کف اولیه است؛ این موضوع کمبود فعالیت را نشان می‌دهد، نه اثبات Wash Trading."
+        )
     else:
-        reasons["market_integrity"] = "24h buy/sell transaction counts are incomplete."
+        reasons["market_integrity"] = "تعداد معاملات ۲۴ساعته ناقص است و شواهد مستقل برای سلامت بازار وجود ندارد."
 
     if pool_trade_evidence and pool_trade_evidence.get("status") == "COMPLETE":
         filters["buy_sell_pressure"] = pool_trade_evidence["buy_sell_pressure_status"]
@@ -388,6 +394,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
         "unique_traders_24h": None,
         "buy_volume_share_pct": None,
         "transactions_24h": (buys + sells) if buys is not None and sells is not None else None,
+        "transaction_activity_floor_status": transaction_activity_floor_status,
         "pool_age_hours": age,
         "top1_independent_holder_pct": None,
         "top10_independent_holders_pct": None,
