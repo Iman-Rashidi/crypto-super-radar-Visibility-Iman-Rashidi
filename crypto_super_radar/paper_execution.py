@@ -184,6 +184,14 @@ class PaperExecutionEventLedger:
                 previous_filled = float(previous["filled_quantity"])
                 if filled < previous_filled:
                     raise OrderStateTransitionError("cumulative filled quantity cannot decrease")
+                if status_value == "PARTIALLY_FILLED" and filled <= previous_filled:
+                    raise OrderStateTransitionError("each partial fill must increase cumulative filled quantity")
+                if status_value == "FILLED" and filled <= previous_filled:
+                    raise OrderStateTransitionError("final fill must increase cumulative filled quantity")
+                previous_fee = previous["fee_paid_usd"]
+                if status_value in {"PARTIALLY_FILLED", "FILLED"} and previous_fee is not None:
+                    if fee is None or fee < float(previous_fee):
+                        raise OrderStateTransitionError("cumulative fee cannot decrease")
                 if status_value not in {"PARTIALLY_FILLED", "FILLED"} and not math.isclose(
                     filled, previous_filled, rel_tol=1e-9, abs_tol=1e-12
                 ):
@@ -334,8 +342,20 @@ class PaperExecutionEventLedger:
                     rel_tol=1e-9, abs_tol=1e-12,
                 ):
                     errors.append(f"{order_id}: quantity changed during replay")
-                if float(record["filled_quantity"]) < float(previous["filled_quantity"]):
+                previous_filled = float(previous["filled_quantity"])
+                current_filled = float(record["filled_quantity"])
+                if current_filled < previous_filled:
                     errors.append(f"{order_id}: cumulative fill moved backwards")
+                if record["status"] in {"PARTIALLY_FILLED", "FILLED"} and current_filled <= previous_filled:
+                    errors.append(f"{order_id}: fill event did not increase cumulative quantity")
+                previous_fee = previous["fee_paid_usd"]
+                current_fee = record["fee_paid_usd"]
+                if (
+                    record["status"] in {"PARTIALLY_FILLED", "FILLED"}
+                    and previous_fee is not None
+                    and (current_fee is None or float(current_fee) < float(previous_fee))
+                ):
+                    errors.append(f"{order_id}: cumulative fee moved backwards")
             elif record["status"] != "CREATED":
                 errors.append(f"{order_id}: first event was not CREATED")
 

@@ -392,6 +392,20 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
 
 
+
+    def test_orphan_fill_simulator_event_without_projection_is_incomplete(self):
+        with self.ledger._lock, self.ledger._db:
+            self.ledger.execution_ledger.record_simulated_fill(
+                client_order_id="paper-fill-unprojected",
+                asset="cex:BTCUSDT", side="BUY", quantity=1.0,
+                fill_price=100.0, fee_paid_usd=0.08,
+                source="PAPER_SIMULATOR:TEST_BOOK",
+                reason="ORPHAN_SIMULATOR_TEST", occurred_at=123,
+            )
+        report = self.ledger.reconciliation()
+        self.assertEqual(report["status"], "INCOMPLETE")
+        self.assertIn("paper-fill-unprojected", report["missing_projections"])
+
     def test_orphan_paper_entry_event_is_incomplete(self):
         order_id = make_paper_client_order_id(
             "cex:BTCUSDT", "orphan-bar", "ENTRY"

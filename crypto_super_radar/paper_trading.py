@@ -565,7 +565,12 @@ class PaperLedger:
 
         for order in replay["orders"].values():
             order_id = str(order["client_order_id"])
-            if order_id.startswith(("paper-entry-", "paper-exit-")) and order_id not in expected_order_ids:
+            source = str(order.get("source") or "")
+            is_paper_projection_event = (
+                order_id.startswith(("paper-entry-", "paper-exit-"))
+                or source.startswith(("PAPER_SIMULATOR", "PAPER_FILL_SIMULATOR"))
+            )
+            if is_paper_projection_event and order_id not in expected_order_ids:
                 missing_projections.append(order_id)
 
         if errors:

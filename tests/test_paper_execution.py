@@ -212,5 +212,30 @@ class PaperExecutionEventLedgerTests(unittest.TestCase):
         )
 
 
+    def test_cumulative_partial_fill_and_fee_must_strictly_progress(self):
+        order_id = "paper-monotonic-fill"
+        self.create_and_validate(order_id=order_id, quantity=2.0)
+        self.ledger.append_event(
+            client_order_id=order_id, idempotency_key=f"{order_id}:partial-1",
+            asset="cex:BTCUSDT", side="BUY", status="PARTIALLY_FILLED",
+            quantity=2.0, filled_quantity=0.5, fill_price=100.0,
+            fee_paid_usd=0.05, source="PAPER_SIMULATOR", occurred_at=101,
+        )
+        with self.assertRaisesRegex(OrderStateTransitionError, "must increase cumulative filled quantity"):
+            self.ledger.append_event(
+                client_order_id=order_id, idempotency_key=f"{order_id}:partial-duplicate",
+                asset="cex:BTCUSDT", side="BUY", status="PARTIALLY_FILLED",
+                quantity=2.0, filled_quantity=0.5, fill_price=100.0,
+                fee_paid_usd=0.05, source="PAPER_SIMULATOR", occurred_at=102,
+            )
+        with self.assertRaisesRegex(OrderStateTransitionError, "cumulative fee cannot decrease"):
+            self.ledger.append_event(
+                client_order_id=order_id, idempotency_key=f"{order_id}:partial-fee-regress",
+                asset="cex:BTCUSDT", side="BUY", status="PARTIALLY_FILLED",
+                quantity=2.0, filled_quantity=1.0, fill_price=100.0,
+                fee_paid_usd=0.04, source="PAPER_SIMULATOR", occurred_at=103,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
