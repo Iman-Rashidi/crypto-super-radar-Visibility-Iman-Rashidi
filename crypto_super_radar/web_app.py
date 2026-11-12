@@ -1521,9 +1521,23 @@ class Handler(BaseHTTPRequestHandler):
             market_regime_validation:'تأیید رژیم بازار'
           };
           const gateLabels = {security:'امنیت', liquidity:'نقدینگی', data_quality:'کیفیت داده', exit:'امکان خروج'};
-          // Preserve expanded candidate reports when the background poll refreshes the DOM.
-          const expandedReportKeys = new Set();
-          const candidateReportKey = item => [item.chain || '', item.token_address || '', item.pool_address || '', item.token_symbol || item.token_name || ''].join('|').toLowerCase();
+          // Persist expanded reports across polling DOM replacement and page refreshes.
+          const REPORT_OPEN_KEY = 'crypto-super-radar.gem-hunter-open-reports.v1';
+          const readExpandedReportKeys = () => {
+            try {
+              const saved = JSON.parse(sessionStorage.getItem(REPORT_OPEN_KEY) || '[]');
+              return new Set(Array.isArray(saved) ? saved.filter(value => typeof value === 'string') : []);
+            } catch (_) { return new Set(); }
+          };
+          const expandedReportKeys = readExpandedReportKeys();
+          const persistExpandedReportKeys = () => {
+            try { sessionStorage.setItem(REPORT_OPEN_KEY, JSON.stringify(Array.from(expandedReportKeys))); }
+            catch (_) { /* The current DOM still keeps the open state if session storage is unavailable. */ }
+          };
+          const candidateReportKey = item => [
+            item.chain || '', item.token_address || '', item.pool_address || '',
+            item.candidate_id || item.id || item.token_symbol || item.token_name || ''
+          ].join('|').toLowerCase();
           const filterReasonFa = (key, state) => {
             const map = {
               trend:'برای تشخیص روند، تاریخچهٔ معتبر قیمت در چند بازهٔ زمانی لازم است؛ عمر استخر به‌تنهایی روند نیست.',
@@ -1587,16 +1601,30 @@ class Handler(BaseHTTPRequestHandler):
               return false;
             }
           };
+          const watchlistIdentity = item => [
+            String(item.chain || 'unknown').trim().toLowerCase(),
+            String(item.token_address || item.pool_address || item.reference_url || '').trim().toLowerCase()
+          ].join(':');
           const addToWatchlist = item => {
             const list = readWatchlist();
-            const key = [item.chain || '', item.token_address || item.reference_url || item.pool_address || ''].join(':').toLowerCase();
-            const exists = list.some(x => [x.chain || '', x.token_address || x.reference_url || x.pool_address || ''].join(':').toLowerCase() === key);
-            if (exists) { watchStatus.textContent = 'این توکن از قبل در فهرست زیر نظر وجود دارد.'; return; }
+            const key = watchlistIdentity(item);
+            if (!key.split(':')[1]) {
+              watchStatus.textContent = 'افزودن انجام نشد: آدرس قرارداد، Pool یا لینک معتبر موجود نیست.';
+              return 'invalid';
+            }
+            const exists = list.some(x => watchlistIdentity(x) === key);
+            if (exists) {
+              watchStatus.textContent = 'این توکن از قبل در فهرست زیر نظر وجود دارد.';
+              return 'exists';
+            }
             list.unshift(Object.assign({
               id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8),
               added_at: new Date().toISOString(), next_check_at: '', notes: '', status: 'WATCH'
             }, item));
-            if (writeWatchlist(list)) renderWatchlist();
+            if (!writeWatchlist(list)) return 'error';
+            renderWatchlist();
+            watchStatus.textContent = '✓ مورد با موفقیت در فهرست زیر نظر همین مرورگر ذخیره شد.';
+            return 'added';
           };
           const renderWatchlist = () => {
             const list = readWatchlist();
@@ -1678,15 +1706,10 @@ class Handler(BaseHTTPRequestHandler):
             details.dataset.reportKey = reportKey;
             details.open = expandedReportKeys.has(reportKey);
             // Capture the user's intent before the browser dispatches the async toggle event.
-            details.addEventListener('click', event => {
-              if (event.target.closest('summary')) {
-                if (details.open) expandedReportKeys.delete(reportKey);
-                else expandedReportKeys.add(reportKey);
-              }
-            });
             details.addEventListener('toggle', () => {
               if (details.open) expandedReportKeys.add(reportKey);
               else expandedReportKeys.delete(reportKey);
+              persistExpandedReportKeys();
             });
             details.appendChild(el('summary', 'گزارش کامل ۱۲ فیلتر و ۴ گیت'));
             details.appendChild(el('h4', '۱۲ فیلتر مستقل'));
@@ -1748,13 +1771,26 @@ class Handler(BaseHTTPRequestHandler):
             } else details.appendChild(el('p', 'هیچ رویداد Swap نهنگ قابل‌ردیابی در پرونده ثبت نشده است.'));
             card.appendChild(details);
             const add = el('button', '＋ افزودن به فهرست زیر نظر'); add.type = 'button'; add.className = 'gem-add-watch';
-            add.addEventListener('click', () => addToWatchlist({
-              chain: item.chain, token_name: item.token_name, token_symbol: item.token_symbol,
-              token_address: item.token_address, pool_address: item.pool_address, dex: item.dex,
-              discovery_priority_score: item.discovery_priority_score, price_usd: item.price_usd,
-              liquidity_usd: item.liquidity_usd, volume_24h_usd: item.volume_24h_usd,
-              reference_url: item.pool_address ? poolUrl(item) : tokenExplorer(item)
-            }));
+            add.addEventListener('click', event => {
+              event.preventDefault();
+              event.stopPropagation();
+              const outcome = addToWatchlist({
+                chain: item.chain, token_name: item.token_name, token_symbol: item.token_symbol,
+                token_address: item.token_address, pool_address: item.pool_address, dex: item.dex,
+                discovery_priority_score: item.discovery_priority_score, price_usd: item.price_usd,
+                liquidity_usd: item.liquidity_usd, volume_24h_usd: item.volume_24h_usd,
+                reference_url: item.pool_address ? poolUrl(item) : (item.token_address ? tokenExplorer(item) : '')
+              });
+              if (outcome === 'added') {
+                add.textContent = '✓ اضافه شد';
+                add.disabled = true;
+              } else if (outcome === 'exists') {
+                add.textContent = 'قبلاً اضافه شده';
+                add.disabled = true;
+              } else {
+                add.textContent = 'افزودن ناموفق؛ جزئیات را بررسی کنید';
+              }
+            });
             card.appendChild(add); return card;
           };
           watchForm.addEventListener('submit', event => {
@@ -1763,13 +1799,13 @@ class Handler(BaseHTTPRequestHandler):
             const chain = document.getElementById('watch-manual-chain').value;
             const url = safeUrl(reference);
             if (!reference) { watchStatus.textContent = 'ابتدا آدرس قرارداد یا لینک معتبر را وارد کنید.'; return; }
-            addToWatchlist({
+            const outcome = addToWatchlist({
               chain, token_name: document.getElementById('watch-manual-name').value.trim() || 'توکن پیگیری دستی',
               token_symbol: '', token_address: url ? '' : reference, reference_url: url || '',
               next_check_at: document.getElementById('watch-manual-next-check').value,
               notes: document.getElementById('watch-manual-notes').value.trim()
             });
-            watchForm.reset();
+            if (outcome === 'added') watchForm.reset();
           });
           renderWatchlist();
           const renderPendingReport = data => {
