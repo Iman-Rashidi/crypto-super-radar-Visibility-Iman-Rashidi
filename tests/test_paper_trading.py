@@ -506,6 +506,22 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertEqual(controls["daily_realized_loss_pct"], 0.0)
         self.assertNotIn("DAILY_LOSS_LIMIT", controls["halt_reasons"])
 
+    def test_new_entries_fail_closed_when_ledger_reconciliation_is_incomplete(self):
+        original = self.ledger.reconciliation
+        self.ledger.reconciliation = lambda: {"status": "INCOMPLETE"}
+        try:
+            result = self.ledger.risk_controls(
+                asset="cex:BTCUSDT",
+                daily_loss_limit_pct=0.015,
+                max_drawdown_pct=0.10,
+                max_consecutive_losses=3,
+                cooldown_hours_after_loss=24.0,
+            )
+        finally:
+            self.ledger.reconciliation = original
+        self.assertFalse(result["entry_allowed"])
+        self.assertIn("LEDGER_RECONCILIATION_NOT_PASS", result["halt_reasons"])
+
     def test_daily_loss_uses_exit_fill_dates_after_trade_closes_later(self):
         self.bot.max_order_participation_rate = 1.0
         now = int(time.time())
