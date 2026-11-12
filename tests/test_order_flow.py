@@ -66,6 +66,27 @@ class VenueOrderFlowTests(unittest.TestCase):
         self.assertEqual(report["directional_alignment"], "UNKNOWN")
         self.assertIsNone(report["aggregate_cvd"])
 
+    def test_reconnect_does_not_reuse_events_from_uncovered_gap(self):
+        venue = self.make_venue(connected_at=0)
+        self.add_trade(venue, "before-gap", 70_000, 70_000)
+        venue.disconnect()
+        venue.connect(80_000)
+        self.add_trade(venue, "after-reconnect", 90_000, 90_000, "SELL", 2.0)
+
+        snapshot = venue.snapshot(95_000)
+
+        self.assertEqual(snapshot["status"], "WARMING_UP")
+        self.assertEqual(snapshot["event_count"], 1)
+        self.assertIsNone(snapshot["cvd_base"])
+        self.assertEqual(snapshot["observed_cvd_base"], -2.0)
+
+    def test_pre_connection_backfill_is_not_misrepresented_as_live_flow(self):
+        venue = self.make_venue(connected_at=80_000)
+        result = self.add_trade(venue, "old-backfill", 70_000, 90_000)
+
+        self.assertEqual(result["reason"], "EVENT_PRECEDES_CURRENT_CONNECTION")
+        self.assertEqual(venue.snapshot(95_000)["event_count"], 0)
+
     def test_invalid_aggressor_side_freezes_venue(self):
         venue = self.make_venue()
         result = venue.ingest_trade(
