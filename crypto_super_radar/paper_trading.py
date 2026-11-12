@@ -471,10 +471,7 @@ class PaperLedger:
         initial = float(state["account"]["initial_equity_usd"])
         equity = float(state["account"]["equity_usd"])
         with self._lock:
-            daily_net = float(self._db.execute(
-                "SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE closed_at>=?",
-                (day_start,),
-            ).fetchone()[0])
+            daily_net = 0.0
             recent = self._db.execute(
                 "SELECT net_pnl FROM paper_trades ORDER BY closed_at DESC, id DESC LIMIT ?",
                 (int(max_consecutive_losses),),
@@ -487,7 +484,7 @@ class PaperLedger:
                 "ORDER BY closed_at DESC, id DESC LIMIT 1",
                 (asset,),
             ).fetchone()
-        partial_daily_net = 0.0
+        daily_exit_fill_net = 0.0
         # Build original-entry economics for both open and already closed positions.
         # Daily risk must follow the timestamp of each incremental exit fill, not
         # the eventual trade-close date; otherwise multi-day partial exits are
@@ -559,14 +556,14 @@ class PaperLedger:
                 delta_notional = cumulative_notional - prior_notional
                 delta_fee = cumulative_fee - prior_fee
                 if delta_qty > 0 and int(event["occurred_at"]) >= day_start:
-                    partial_daily_net += (
+                    daily_exit_fill_net += (
                         delta_notional - delta_qty * entry_price
                         - delta_qty * entry_fee_per_unit - delta_fee
                     )
                 prior_qty = cumulative_qty
                 prior_notional = cumulative_notional
                 prior_fee = cumulative_fee
-        daily_net += partial_daily_net
+        daily_net += daily_exit_fill_net
         consecutive = 0
         for row in recent:
             if float(row["net_pnl"]) >= 0:
@@ -607,7 +604,7 @@ class PaperLedger:
             "entry_allowed": not reasons,
             "halt_reasons": reasons,
             "daily_realized_loss_pct": round(daily_loss_pct, 4),
-            "daily_partial_exit_pnl_usd": round(partial_daily_net, 8),
+            "daily_exit_fill_pnl_usd": round(daily_exit_fill_net, 8),
             "max_equity_drawdown_pct": round(drawdown_pct, 4),
             "consecutive_losses": consecutive,
             "cooldown_hours_remaining": round(cooldown_remaining, 2),
