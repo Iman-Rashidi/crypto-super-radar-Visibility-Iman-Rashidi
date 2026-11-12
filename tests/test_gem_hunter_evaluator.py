@@ -278,5 +278,90 @@ class GemHunterEvaluatorTests(unittest.TestCase):
 
 
 
+    def test_complete_exact_pool_trade_evidence_computes_buy_sell_pressure(self):
+        item = candidate()
+        item["pool_trade_evidence"] = {
+            "schema_version": "gem-hunter-pool-trades-v1",
+            "status": "COMPLETE",
+            "coverage_status": "COMPLETE",
+            "chain": item["chain"],
+            "token_address": item["token_address"],
+            "pool_address": item["pool_address"],
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "source": "GECKOTERMINAL",
+            "buy_sell_pressure_status": "PASS",
+            "trade_count": 40,
+            "unique_trader_count": 35,
+            "buy_volume_usd": 80000.0,
+            "sell_volume_usd": 20000.0,
+            "total_volume_usd": 100000.0,
+            "net_swap_flow_usd": 60000.0,
+            "whale_buy_count": 2,
+            "whale_sell_count": 1,
+            "whale_events": [{"event_type": "SWAP_BUY", "amount_usd": 5000.0}],
+            "wash_trading_signal": "NO_STRONG_PATTERN_IN_SAMPLE",
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["buy_sell_pressure"], "PASS")
+        self.assertEqual(result["market_metrics"]["pool_trade_evidence_status"], "COMPLETE")
+        self.assertEqual(result["market_metrics"]["pool_net_swap_flow_usd"], 60000.0)
+        self.assertEqual(result["filters"]["capital_flow"], "UNKNOWN")
+        self.assertEqual(result["filters"]["whale_activity"], "UNKNOWN")
+        self.assertEqual(result["whale_evidence"]["coverage_status"], "PARTIAL_24H_SAMPLE")
+        self.assertEqual(result["whale_evidence"]["events"][0]["event_type"], "SWAP_BUY")
+
+    def test_partial_stale_or_wrong_pool_trade_evidence_cannot_upgrade_pressure(self):
+        item = candidate()
+        evidence = {
+            "schema_version": "gem-hunter-pool-trades-v1",
+            "status": "PARTIAL",
+            "coverage_status": "PARTIAL",
+            "chain": item["chain"],
+            "token_address": item["token_address"],
+            "pool_address": "DifferentPool",
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "source": "GECKOTERMINAL",
+            "buy_sell_pressure_status": "PASS",
+            "buy_volume_usd": 90000.0,
+            "sell_volume_usd": 10000.0,
+            "total_volume_usd": 100000.0,
+            "net_swap_flow_usd": 80000.0,
+        }
+        item["pool_trade_evidence"] = evidence
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["buy_sell_pressure"], "UNKNOWN")
+        evidence["pool_address"] = item["pool_address"]
+        evidence["status"] = "COMPLETE"
+        evidence["coverage_status"] = "COMPLETE"
+        evidence["checked_at_utc"] = "2026-11-11T10:00:00Z"
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["buy_sell_pressure"], "UNKNOWN")
+
+    def test_suspected_wash_pattern_is_warning_not_automated_proof(self):
+        item = candidate()
+        item["pool_trade_evidence"] = {
+            "schema_version": "gem-hunter-pool-trades-v1",
+            "status": "COMPLETE",
+            "coverage_status": "COMPLETE",
+            "chain": item["chain"],
+            "token_address": item["token_address"],
+            "pool_address": item["pool_address"],
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "source": "GECKOTERMINAL",
+            "buy_sell_pressure_status": "UNKNOWN",
+            "buy_volume_usd": 5000.0,
+            "sell_volume_usd": 5000.0,
+            "total_volume_usd": 10000.0,
+            "net_swap_flow_usd": 0.0,
+            "wash_trading_signal": "SUSPECTED",
+            "whale_events": [],
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["filters"]["market_integrity"], "UNKNOWN")
+        self.assertIn("مشکوک", result["filter_reasons"]["market_integrity"])
+        self.assertEqual(result["filters"]["buy_sell_pressure"], "UNKNOWN")
+
+
+
 if __name__ == "__main__":
     unittest.main()
