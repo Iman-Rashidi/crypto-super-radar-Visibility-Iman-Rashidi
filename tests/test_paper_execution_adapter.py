@@ -74,6 +74,29 @@ class PaperExecutionAdapterTests(unittest.TestCase):
                 max_participation_pct=0.5,
             )
 
+    def test_cumulative_fee_remains_monotonic_when_later_incremental_fee_is_smaller(self):
+        first = self.adapter.simulate_fill(
+            client_order_id="paper-depth-1", snapshot_id="large-first-fill",
+            best_bid=100.0, best_ask=101.0, available_liquidity_qty=0.8,
+            max_participation_pct=1.0, fee_rate=0.001, slippage_bps=0,
+            occurred_at=101,
+        )
+        self.assertEqual(first["status"], "PARTIALLY_FILLED")
+        self.assertAlmostEqual(first["fee_paid_usd"], 0.0808)
+
+        second = self.adapter.simulate_fill(
+            client_order_id="paper-depth-1", snapshot_id="small-final-fill",
+            best_bid=100.0, best_ask=101.0, available_liquidity_qty=0.2,
+            max_participation_pct=1.0, fee_rate=0.001, slippage_bps=0,
+            occurred_at=102,
+        )
+        self.assertEqual(second["status"], "FILLED")
+        self.assertAlmostEqual(second["fee_paid_usd"], 0.0202)
+        self.assertAlmostEqual(second["cumulative_fee_paid_usd"], 0.101)
+        state = self.ledger.order_state("paper-depth-1")
+        self.assertAlmostEqual(state["fee_paid_usd"], 0.101)
+        self.assertEqual(self.ledger.replay_order_states()["status"], "PASS")
+
     def test_stale_quote_and_empty_liquidity_do_not_fill(self):
         stale = self.adapter.simulate_fill(
             client_order_id="paper-depth-1", snapshot_id="stale",

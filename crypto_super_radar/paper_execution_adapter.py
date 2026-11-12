@@ -130,6 +130,14 @@ class PaperExecutionAdapter:
         if fill_price <= 0 or not math.isfinite(fill_price):
             raise ValueError("simulated fill price is invalid")
         fee_paid = fill_quantity * fill_price * fees
+        previous_fee = (
+            previous_event.get("fee_paid_usd")
+            if prior_event and previous_event is not None
+            else state.get("fee_paid_usd") if not prior_event else None
+        )
+        cumulative_fee_paid = (
+            float(previous_fee) if previous_fee is not None else 0.0
+        ) + fee_paid
         cumulative = min(requested, already_filled + fill_quantity)
         status = "FILLED" if math.isclose(cumulative, requested, rel_tol=1e-9, abs_tol=1e-12) else "PARTIALLY_FILLED"
         event = self.ledger.append_event(
@@ -137,7 +145,7 @@ class PaperExecutionAdapter:
             idempotency_key=idempotency_key,
             asset=asset, side=side, status=status,
             quantity=requested, filled_quantity=cumulative,
-            fill_price=fill_price, fee_paid_usd=fee_paid,
+            fill_price=fill_price, fee_paid_usd=cumulative_fee_paid,
             source="PAPER_ORDER_BOOK_SNAPSHOT",
             reason="SIMULATED_PARTIAL_FILL" if status == "PARTIALLY_FILLED" else "SIMULATED_COMPLETE_FILL",
             occurred_at=(prior_event["occurred_at"] if prior_event and occurred_at is None else occurred_at),
@@ -152,5 +160,6 @@ class PaperExecutionAdapter:
             "event_id": event["event_id"], "new_fill_quantity": fill_quantity,
             "filled_quantity": cumulative, "remaining_quantity": max(0.0, requested - cumulative),
             "fill_price": fill_price, "fee_paid_usd": fee_paid,
+            "cumulative_fee_paid_usd": cumulative_fee_paid,
             "source": "PAPER_ORDER_BOOK_SNAPSHOT", "orders_submitted": False,
         }
