@@ -198,6 +198,34 @@ class SolanaWhaleScanner:
                     if receivers[ri][1] <= 1e-12:
                         ri += 1
 
+                # Net residuals without a matched counterparty are explicit mint/burn
+                # observations, not fabricated wallet-to-wallet transfers.
+                if timestamp_valid:
+                    residuals = (
+                        [(owner, -amount, "BURN") for owner, amount in senders[si:] if amount > 1e-12]
+                        + [(owner, amount, "MINT") for owner, amount in receivers[ri:] if amount > 1e-12]
+                    )
+                    for owner, amount_delta, event_type in residuals:
+                        event_index = owner_event_indices.get(owner, 0)
+                        owner_event_indices[owner] = event_index + 1
+                        wallet_rows.append({
+                            "chain": "solana",
+                            "tx_signature": signature,
+                            "wallet_address": owner,
+                            "token_address": mint,
+                            "counterparty_address": None,
+                            "event_type": event_type,
+                            "event_index": event_index,
+                            "event_time_ms": event_time_ms,
+                            "received_at_ms": received_at_ms,
+                            "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
+                            "token_delta": amount_delta,
+                            "quote_delta": None,
+                            "quote_symbol": None,
+                            "source": "public_solana_json_rpc",
+                            "evidence_status": "OBSERVED",
+                        })
+
             persistence = {"status": "NOT_CONFIGURED", "inserted": 0, "duplicates": 0}
             if wallet_rows:
                 try:
@@ -228,7 +256,12 @@ class SolanaWhaleScanner:
                     "chain": row["chain"],
                     "wallet": row["wallet_address"],
                     "token": row["token_address"],
-                    "event_type": "transfer",
+                    "event_type": (
+                        "transfer" if str(row.get("event_type", "")).startswith("TRANSFER_")
+                        else "mint" if row.get("event_type") == "MINT"
+                        else "burn" if row.get("event_type") == "BURN"
+                        else "other"
+                    ),
                     "timestamp": row["event_time_ms"] // 1000,
                     "amount_tokens": (
                         None if row.get("token_delta") is None
