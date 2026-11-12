@@ -156,8 +156,19 @@ class PaperLedger:
                     entry_reference_price REAL,
                     entry_slippage_usd REAL,
                     entry_spread_cost_usd REAL,
-                    entry_quote_source TEXT
-                )
+                    entry_quote_source TEXT,
+                    original_entry_quantity REAL NOT NULL DEFAULT 0,
+                    original_entry_fee REAL NOT NULL DEFAULT 0,
+                    exit_attempt_count INTEGER NOT NULL DEFAULT 0,
+                    exit_filled_quantity REAL NOT NULL DEFAULT 0,
+                    exit_filled_notional REAL NOT NULL DEFAULT 0,
+                    exit_fee_paid_usd REAL NOT NULL DEFAULT 0,
+                    exit_gross_pnl_usd REAL NOT NULL DEFAULT 0,
+                    exit_entry_fee_allocated_usd REAL NOT NULL DEFAULT 0,
+                    exit_reference_notional REAL NOT NULL DEFAULT 0,
+                    exit_slippage_cost_usd REAL NOT NULL DEFAULT 0,
+                    exit_spread_cost_usd REAL NOT NULL DEFAULT 0,
+                    exit_quote_source TEXT
             """)
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS paper_trades (
@@ -228,6 +239,18 @@ class PaperLedger:
                 ("entry_slippage_usd", "REAL"),
                 ("entry_spread_cost_usd", "REAL"),
                 ("entry_quote_source", "TEXT"),
+                ("original_entry_quantity", "REAL NOT NULL DEFAULT 0"),
+                ("original_entry_fee", "REAL NOT NULL DEFAULT 0"),
+                ("exit_attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("exit_filled_quantity", "REAL NOT NULL DEFAULT 0"),
+                ("exit_filled_notional", "REAL NOT NULL DEFAULT 0"),
+                ("exit_fee_paid_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_gross_pnl_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_entry_fee_allocated_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_reference_notional", "REAL NOT NULL DEFAULT 0"),
+                ("exit_slippage_cost_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_spread_cost_usd", "REAL NOT NULL DEFAULT 0"),
+                ("exit_quote_source", "TEXT"),
             ):
                 if name not in position_columns:
                     self._db.execute(
@@ -238,6 +261,12 @@ class PaperLedger:
             )
             self._db.execute(
                 "UPDATE paper_positions SET peak_price=entry_price WHERE peak_price<=0"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET original_entry_quantity=quantity WHERE original_entry_quantity<=0"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET original_entry_fee=entry_fee WHERE original_entry_fee<=0 AND entry_fee>0"
             )
             self._db.execute(
                 "INSERT OR IGNORE INTO paper_account(id, initial_equity, cash_balance, updated_at) VALUES (1, ?, ?, ?)",
@@ -283,8 +312,8 @@ class PaperLedger:
              opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
              initial_stop_loss, max_holding_days, peak_price,
              entry_reference_price, entry_slippage_usd, entry_spread_cost_usd,
-             entry_quote_source)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             entry_quote_source, original_entry_quantity, original_entry_fee)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             position["asset"], position["quantity"], position["entry_price"],
             position["stop_loss"], position["take_profit"], position["entry_fee"],
@@ -296,6 +325,8 @@ class PaperLedger:
             position.get("entry_slippage_usd"),
             position.get("entry_spread_cost_usd"),
             position.get("entry_quote_source"),
+            position.get("original_entry_quantity", position["quantity"]),
+            position.get("original_entry_fee", position["entry_fee"]),
         ))
         self._db.execute(
             "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
@@ -390,6 +421,8 @@ class PaperLedger:
             applied["quantity"] = filled
             applied["entry_price"] = average_price
             applied["entry_fee"] = cumulative_fee
+            applied["original_entry_quantity"] = filled
+            applied["original_entry_fee"] = cumulative_fee
             costs = calculate_fill_costs(
                 side="BUY", quantity=filled,
                 bid=order_book["bid"], ask=order_book["ask"],
@@ -503,6 +536,200 @@ class PaperLedger:
                 "cooldown_hours_after_loss": cooldown_hours_after_loss,
             },
         }
+
+    def execute_exit_order(
+        self, *,
+        order_book: dict[str, Any],
+        fee_bps: float,
+        adverse_impact_bps: float,
+        max_participation_rate: float,
+        fill_fractions: tuple[float, ...],
+        max_quote_age_ms: int,
+        simulated_latency_ms: int = 200,
+        reason: str = "PAPER_EXIT",
+    ) -> dict[str, Any]:
+        """Execute a SELL against public top-of-book liquidity and project actual fills."""
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT * FROM paper_positions WHERE id=1"
+            ).fetchone()
+            if row is None:
+                return {"status": "NO_POSITION", "mode": "PAPER_ONLY", "orders_submitted": False}
+            position = dict(row)
+            requested = float(position["quantity"])
+            attempt = int(position.get("exit_attempt_count") or 0) + 1
+            base_order_id = make_paper_client_order_id(
+                position["asset"], position["signal_bar"], "EXIT"
+            )
+            client_order_id = (
+                base_order_id if attempt == 1 else f"{base_order_id}-{attempt}"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET exit_attempt_count=? WHERE id=1",
+                (attempt,),
+            )
+            self.execution_adapter.submit_order(
+                client_order_id=client_order_id, asset=position["asset"],
+                side="SELL", quantity=requested,
+                occurred_at=int(time.time()),
+            )
+            simulation = self.fill_simulator.simulate_order(
+                client_order_id=client_order_id,
+                asset=position["asset"],
+                side="SELL",
+                requested_quantity=requested,
+                bid=order_book["bid"],
+                ask=order_book["ask"],
+                available_liquidity_quantity=order_book["available_sell_quantity"],
+                max_participation_rate=max_participation_rate,
+                fee_bps=fee_bps,
+                adverse_impact_bps=adverse_impact_bps,
+                simulated_latency_ms=simulated_latency_ms,
+                fill_fractions=fill_fractions,
+                quote_quality="OBSERVED",
+                quote_source=order_book["source"],
+                quote_timestamp_ms=order_book["observed_at_ms"],
+                max_quote_age_ms=max_quote_age_ms,
+                cancel_unfilled_remainder=False,
+                reason=f"PAPER_BOT_EXIT:{reason}",
+            )
+            filled = float(simulation["filled_quantity"])
+            residual = max(0.0, requested - filled)
+            tolerance = max(1e-12, requested * 1e-12)
+            if simulation["status"] not in {"FILLED", "CANCELED"}:
+                self.execution_adapter.cancel_order(
+                    client_order_id=client_order_id,
+                    reason="PAPER_EXIT_UNFILLED_REMAINDER_CANCELED",
+                    occurred_at=int(time.time()),
+                )
+            final_order = self.execution_ledger.order_state(client_order_id)
+            if final_order is None:
+                raise RuntimeError("Paper exit order disappeared before projection")
+            if filled <= tolerance:
+                return {
+                    "status": "NO_FILL", "execution_status": final_order["status"],
+                    "fill_status": simulation["status"], "client_order_id": client_order_id,
+                    "requested_quantity": requested, "filled_quantity": 0.0,
+                    "remaining_quantity": requested, "fee_paid_usd": 0.0,
+                    "mode": "PAPER_ONLY", "orders_submitted": False,
+                }
+
+            average_price = _number(simulation.get("average_fill_price"))
+            fee_paid = _number(simulation.get("cumulative_fee_paid_usd"))
+            if average_price is None or average_price <= 0 or fee_paid is None or fee_paid < 0:
+                raise RuntimeError("Paper exit simulator returned incomplete fill economics")
+            was_final = residual <= tolerance
+            if was_final:
+                filled = requested
+                residual = 0.0
+            allocated_entry_fee = (
+                float(position["entry_fee"]) if was_final
+                else float(position["entry_fee"]) * filled / requested
+            )
+            remaining_entry_fee = max(0.0, float(position["entry_fee"]) - allocated_entry_fee)
+            prior_exit_qty = float(position.get("exit_filled_quantity") or 0.0)
+            prior_exit_notional = float(position.get("exit_filled_notional") or 0.0)
+            prior_exit_fee = float(position.get("exit_fee_paid_usd") or 0.0)
+            prior_exit_gross = float(position.get("exit_gross_pnl_usd") or 0.0)
+            prior_entry_fee_allocated = float(position.get("exit_entry_fee_allocated_usd") or 0.0)
+            prior_reference_notional = float(position.get("exit_reference_notional") or 0.0)
+            prior_slippage = float(position.get("exit_slippage_cost_usd") or 0.0)
+            prior_spread = float(position.get("exit_spread_cost_usd") or 0.0)
+            reference_bid = float(order_book["bid"])
+            costs = calculate_fill_costs(
+                side="SELL", quantity=filled,
+                bid=order_book["bid"], ask=order_book["ask"],
+                fill_price=average_price, fee_paid_usd=fee_paid,
+                funding_applicable=False, quote_quality="OBSERVED",
+            )
+            exit_qty_total = prior_exit_qty + filled
+            exit_notional_total = prior_exit_notional + filled * average_price
+            exit_fee_total = prior_exit_fee + fee_paid
+            exit_gross_total = prior_exit_gross + filled * (average_price - float(position["entry_price"]))
+            allocated_entry_fee_total = prior_entry_fee_allocated + allocated_entry_fee
+            reference_notional_total = prior_reference_notional + filled * reference_bid
+            exit_slippage_total = prior_slippage + float(costs["slippage_cost_usd"])
+            exit_spread_total = prior_spread + float(costs["spread_cost_usd"])
+            previous_source = position.get("exit_quote_source")
+            current_source = str(order_book["source"])
+            quote_sources = list(dict.fromkeys(
+                [part for part in (str(previous_source or "").split("|") + [current_source]) if part]
+            ))
+            combined_source = "|".join(quote_sources)
+            self._db.execute(
+                "UPDATE paper_account SET cash_balance=cash_balance+?, updated_at=? WHERE id=1",
+                (filled * average_price - fee_paid, int(time.time())),
+            )
+
+            if was_final:
+                total_entry_fee = allocated_entry_fee_total
+                total_exit_qty = exit_qty_total
+                average_exit_price = exit_notional_total / total_exit_qty
+                exit_reference = reference_notional_total / total_exit_qty
+                entry_spread = _number(position.get("entry_spread_cost_usd"))
+                total_spread = (
+                    entry_spread + exit_spread_total
+                    if entry_spread is not None else None
+                )
+                closed_at = int(time.time())
+                net = exit_gross_total - total_entry_fee - exit_fee_total
+                self._db.execute("""
+                    INSERT INTO paper_trades
+                    (asset, side, quantity, entry_price, exit_price, stop_loss, initial_stop_loss,
+                     take_profit, entry_fee, exit_fee, gross_pnl, net_pnl, opened_at, closed_at,
+                     signal_bar, confirmation_score, exit_reason, entry_reference_price,
+                     exit_reference_price, entry_slippage_usd, exit_slippage_usd,
+                     spread_cost_usd, entry_spread_cost_usd, exit_spread_cost_usd,
+                     entry_quote_source, exit_quote_source, funding_cost_usd, funding_status)
+                    VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    position["asset"], total_exit_qty, position["entry_price"],
+                    average_exit_price, position["stop_loss"],
+                    position.get("initial_stop_loss") or position["stop_loss"],
+                    position["take_profit"], total_entry_fee, exit_fee_total,
+                    exit_gross_total, net, position["opened_at"], closed_at,
+                    position["signal_bar"], position["confirmation_score"], reason,
+                    position.get("entry_reference_price"), exit_reference,
+                    position.get("entry_slippage_usd"), exit_slippage_total,
+                    total_spread, entry_spread, exit_spread_total,
+                    position.get("entry_quote_source"), combined_source,
+                    0.0, "NOT_APPLICABLE",
+                ))
+                self._db.execute("DELETE FROM paper_positions WHERE id=1")
+                status = "CLOSED"
+                trade = {
+                    "asset": position["asset"], "gross_pnl_usd": exit_gross_total,
+                    "net_pnl_usd": net, "exit_price": average_exit_price,
+                    "exit_reason": reason, "exit_fee_usd": exit_fee_total,
+                    "entry_fee_usd": total_entry_fee,
+                }
+            else:
+                self._db.execute("""
+                    UPDATE paper_positions
+                    SET quantity=?, entry_fee=?,
+                        exit_filled_quantity=?, exit_filled_notional=?,
+                        exit_fee_paid_usd=?, exit_gross_pnl_usd=?,
+                        exit_entry_fee_allocated_usd=?, exit_reference_notional=?,
+                        exit_slippage_cost_usd=?, exit_spread_cost_usd=?,
+                        exit_quote_source=?
+                    WHERE id=1
+                """, (
+                    residual, remaining_entry_fee, exit_qty_total,
+                    exit_notional_total, exit_fee_total, exit_gross_total,
+                    allocated_entry_fee_total, reference_notional_total,
+                    exit_slippage_total, exit_spread_total, combined_source,
+                ))
+                status = "PARTIALLY_CLOSED"
+                trade = None
+
+            return {
+                "status": status, "execution_status": final_order["status"],
+                "fill_status": simulation["status"], "client_order_id": client_order_id,
+                "requested_quantity": requested, "filled_quantity": filled,
+                "remaining_quantity": residual, "average_fill_price": average_price,
+                "fee_paid_usd": fee_paid, "cumulative_exit_quantity": exit_qty_total,
+                "trade": trade, "mode": "PAPER_ONLY", "orders_submitted": False,
+            }
 
     def close_position(
         self,
