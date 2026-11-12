@@ -38,17 +38,23 @@ class FakeEngine:
         self.data.order_book_buy_qty = 100.0
         self.data.order_book_sell_qty = 100.0
         self.data.order_book_age_ms = 0
-        self.data.order_book_snapshot = lambda asset: {
-            "symbol": asset.symbol,
-            "best_bid": self.data.order_book_bid,
-            "best_ask": self.data.order_book_ask,
-            "available_liquidity_buy_qty": self.data.order_book_buy_qty,
-            "available_liquidity_sell_qty": self.data.order_book_sell_qty,
-            "observed_at_ms": int(time.time() * 1000) - self.data.order_book_age_ms,
-            "timestamp_kind": "LOCAL_RECEIVED_AT",
-            "source": self.data.order_book_source,
-            "orders_submitted": False,
-        }
+        self.data.order_book_override = False
+        def order_book_snapshot(asset):
+            market_price = self.data.snapshots[asset.raw].price_usd
+            bid = self.data.order_book_bid if self.data.order_book_override else max(0.01, market_price - 0.1)
+            ask = self.data.order_book_ask if self.data.order_book_override else market_price
+            return {
+                "symbol": asset.symbol,
+                "best_bid": bid,
+                "best_ask": ask,
+                "available_liquidity_buy_qty": self.data.order_book_buy_qty,
+                "available_liquidity_sell_qty": self.data.order_book_sell_qty,
+                "observed_at_ms": int(time.time() * 1000) - self.data.order_book_age_ms,
+                "timestamp_kind": "LOCAL_RECEIVED_AT",
+                "source": self.data.order_book_source,
+                "orders_submitted": False,
+            }
+        self.data.order_book_snapshot = order_book_snapshot
 
     def analyze(self, asset):
         return self.result
@@ -140,6 +146,7 @@ class PaperTradingBotTests(unittest.TestCase):
         self.engine.data.order_book_bid = 99.9
         self.engine.data.order_book_ask = 100.1
         self.engine.data.order_book_source = "TestExchange"
+        self.engine.data.order_book_override = True
         snapshot.raw = {
             "provider_a": {
                 "bid_price": 99.9,
@@ -402,13 +409,109 @@ class PaperTradingBotTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["status"] for row in reversed(exit_events)],
-            ["CREATED", "VALIDATED", "FILLED"],
+            [
+                "CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED",
+                "PARTIALLY_FILLED", "PARTIALLY_FILLED", "FILLED",
+            ],
         )
         self.assertEqual(exit_events[0]["side"], "SELL")
         state = self.ledger.state()
-        self.assertEqual(state["execution_ledger"]["event_count"], 10)
+        self.assertEqual(state["execution_ledger"]["event_count"], 14)
         self.assertTrue(state["execution_ledger"]["append_only"])
         self.assertFalse(state["orders_submitted"])
+
+    def test_partial_exit_keeps_remaining_position_and_retries_with_new_order_id(self):
+        opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        initial_position = self.ledger.position()
+        initial_quantity = initial_position["quantity"]
+        cash_before_exit = self.ledger.state()["account"]["cash_balance_usd"]
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = 0.25
+        partial = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+        remaining = self.ledger.position()
+        self.assertIsNotNone(remaining)
+        self.assertLess(remaining["quantity"], initial_quantity)
+        self.assertAlmostEqual(
+            remaining["quantity"] + remaining["exit_filled_quantity"],
+            initial_quantity,
+        )
+        self.assertGreater(
+            self.ledger.state()["account"]["cash_balance_usd"], cash_before_exit
+        )
+        first_exit_id = partial["execution"]["client_order_id"]
+        first_exit = self.ledger.execution_ledger.order_state(first_exit_id)
+        self.assertEqual(first_exit["status"], "CANCELED")
+        self.assertGreater(first_exit["filled_quantity"], 0.0)
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 130.0
+        self.engine.data.order_book_sell_qty = 100.0
+        completed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(completed["status"], "CLOSED")
+        self.assertIsNone(self.ledger.position())
+        second_exit_id = completed["execution"]["client_order_id"]
+        self.assertNotEqual(first_exit_id, second_exit_id)
+        self.assertTrue(second_exit_id.endswith("-2"))
+        trade = self.ledger._db.execute(
+            "SELECT * FROM paper_trades WHERE asset='cex:BTCUSDT'"
+        ).fetchone()
+        self.assertAlmostEqual(trade["quantity"], initial_quantity)
+        self.assertGreater(trade["exit_fee"], 0.0)
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+    def test_zero_liquidity_exit_leaves_position_unchanged(self):
+        self.bot.run_once("cex:BTCUSDT")
+        before = self.ledger.position()
+        cash_before = self.ledger.state()["account"]["cash_balance_usd"]
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        self.engine.data.order_book_sell_qty = 0.0
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "EXIT_UNFILLED")
+        after = self.ledger.position()
+        self.assertIsNotNone(after)
+        self.assertAlmostEqual(after["quantity"], before["quantity"])
+        self.assertEqual(
+            self.ledger.state()["account"]["cash_balance_usd"], cash_before
+        )
+        self.assertEqual(self.ledger.reconciliation()["status"], "PASS")
+
+    def test_partial_exit_projection_survives_sqlite_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = os.path.join(directory, "paper-exit.sqlite3")
+            ledger = PaperLedger(db_path)
+            bot = PaperTradingBot(self.engine, ledger=ledger)
+            self.assertEqual(bot.run_once("cex:BTCUSDT")["status"], "OPENED")
+            original_quantity = ledger.position()["quantity"]
+            self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+            self.engine.data.order_book_sell_qty = 0.25
+            partial = bot.run_once("cex:BTCUSDT")
+            self.assertEqual(partial["status"], "PARTIALLY_CLOSED")
+            expected_remaining = ledger.position()["quantity"]
+            expected_realized = ledger.state()["account"]["realized_pnl_usd"]
+            ledger.close()
+
+            recovered = PaperLedger(db_path)
+            try:
+                position = recovered.position()
+                self.assertIsNotNone(position)
+                self.assertAlmostEqual(position["quantity"], expected_remaining)
+                self.assertAlmostEqual(
+                    position["quantity"] + position["exit_filled_quantity"],
+                    original_quantity,
+                )
+                self.assertAlmostEqual(
+                    recovered.state()["account"]["realized_pnl_usd"],
+                    expected_realized,
+                )
+                self.assertEqual(recovered.reconciliation()["status"], "PASS")
+                self.assertEqual(
+                    recovered.execution_ledger.replay_order_states()["status"], "PASS"
+                )
+            finally:
+                recovered.close()
 
     def test_entry_projection_and_execution_events_roll_back_together(self):
         position = {
