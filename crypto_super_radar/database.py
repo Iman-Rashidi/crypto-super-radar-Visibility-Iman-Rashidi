@@ -47,8 +47,31 @@ class _HybridRow(dict):
 
 
 class _CursorAdapter:
-    def __init__(self, cursor: Any):
+    def __init__(self, cursor: Any, connection: "_ConnectionAdapter | None" = None):
         self._cursor = cursor
+        self._connection = connection
+
+    def execute(self, sql: str, parameters: Any = ()):
+        if self._connection is None:
+            self._cursor.execute(sql, parameters)
+        else:
+            result = self._connection._execute_with_stream_recovery(
+                self._cursor.execute, sql, parameters
+            )
+            if result is not None:
+                self._cursor = result
+        return self
+
+    def executemany(self, sql: str, seq_of_parameters: Any):
+        if self._connection is None:
+            self._cursor.executemany(sql, seq_of_parameters)
+        else:
+            result = self._connection._execute_with_stream_recovery(
+                self._cursor.executemany, sql, seq_of_parameters
+            )
+            if result is not None:
+                self._cursor = result
+        return self
 
     def _row(self, values: Any) -> Any:
         if values is None or isinstance(values, _HybridRow):
@@ -77,17 +100,51 @@ class _CursorAdapter:
         return getattr(self._cursor, name)
 
 
+def _is_expired_stream_error(error: BaseException) -> bool:
+    """Return True only for Turso's explicit expired/unknown stream response."""
+    message = str(error).lower()
+    return (
+        "404" in message
+        and "stream" in message
+        and ("not found" in message or "expired" in message)
+    )
+
+
 class _ConnectionAdapter:
-    """Small DB-API adapter for sqlite3-style rows and transaction context managers."""
+    """Small DB-API adapter with safe recovery from idle Turso HTTP streams."""
 
     def __init__(self, connection: Any):
         self._connection = connection
 
+    def _execute_with_stream_recovery(self, operation, *args, **kwargs):
+        # Replaying a statement after a lost stream is safe only when no
+        # transaction was open before the request. Turso resets an expired
+        # stream (and rolls back its transaction) before returning HTTP 404.
+        # In a transaction we must surface the failure to the caller instead
+        # of replaying only part of a multi-statement unit of work.
+        try:
+            was_in_transaction = bool(self._connection.in_transaction)
+        except Exception:
+            was_in_transaction = True
+
+        try:
+            return operation(*args, **kwargs)
+        except Exception as error:
+            if was_in_transaction or not _is_expired_stream_error(error):
+                raise
+            # The turso_serverless session clears its stale baton on HTTP
+            # errors. The same connection can therefore open a fresh stream
+            # when the exact same, not-yet-executed statement is retried.
+            return operation(*args, **kwargs)
+
     def execute(self, sql: str, parameters: Any = ()):
-        return _CursorAdapter(self._connection.execute(sql, parameters))
+        cursor = self._execute_with_stream_recovery(
+            self._connection.execute, sql, parameters
+        )
+        return _CursorAdapter(cursor, self)
 
     def cursor(self, *args, **kwargs):
-        return _CursorAdapter(self._connection.cursor(*args, **kwargs))
+        return _CursorAdapter(self._connection.cursor(*args, **kwargs), self)
 
     def __enter__(self):
         return self
