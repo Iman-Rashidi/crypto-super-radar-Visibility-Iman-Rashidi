@@ -153,6 +153,22 @@ class GemHunterEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["token_risk_assessment"]["passed_check_count"], 5)
         self.assertEqual(result["token_risk_assessment"]["trade_authorization"], "NO_TRADE")
 
+    def test_solana_mint_or_freeze_authority_failure_is_preserved(self):
+        item = candidate()
+        item["security_evidence"] = {
+            "status": "FAIL", "provider": "SOLANA_RPC",
+            "checked_at_utc": "2026-11-11T11:59:00Z",
+            "mint_authority_active": True,
+            "freeze_authority_active": False,
+            "reason_fa": ["اختیار ضرب فعال است."],
+        }
+        result = evaluate_discovery_candidate(item, now=NOW)
+        self.assertEqual(result["critical_gates"]["security"], "FAIL")
+        self.assertEqual(
+            result["token_risk_assessment"]["failed_checks"],
+            ["contract_authority"],
+        )
+
     def test_missing_timestamp_does_not_support_source_backed_fail(self):
         item = candidate()
         item["security_evidence"] = {
