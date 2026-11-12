@@ -30,6 +30,22 @@ class FakeEngine:
                 )
             },
         )
+        self.data.order_book_source = "Fake Binance Spot bookTicker"
+        self.data.order_book_bid = 99.9
+        self.data.order_book_ask = 100.0
+        self.data.order_book_buy_qty = 100.0
+        self.data.order_book_sell_qty = 100.0
+        self.data.order_book_snapshot = lambda asset: {
+            "symbol": asset.symbol,
+            "best_bid": self.data.order_book_bid,
+            "best_ask": self.data.order_book_ask,
+            "available_liquidity_buy_qty": self.data.order_book_buy_qty,
+            "available_liquidity_sell_qty": self.data.order_book_sell_qty,
+            "observed_at_ms": int(time.time() * 1000),
+            "timestamp_kind": "LOCAL_RECEIVED_AT",
+            "source": self.data.order_book_source,
+            "orders_submitted": False,
+        }
 
     def analyze(self, asset):
         return self.result
@@ -118,6 +134,9 @@ class PaperTradingBotTests(unittest.TestCase):
 
     def test_fresh_observed_bid_ask_records_spread_and_slippage_per_fill(self):
         snapshot = self.engine.data.snapshots["cex:BTCUSDT"]
+        self.engine.data.order_book_bid = 99.9
+        self.engine.data.order_book_ask = 100.1
+        self.engine.data.order_book_source = "TestExchange"
         snapshot.raw = {
             "provider_a": {
                 "bid_price": 99.9,
@@ -269,7 +288,10 @@ class PaperTradingBotTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["status"] for row in reversed(entry_events)],
-            ["CREATED", "VALIDATED", "FILLED"],
+            [
+                "CREATED", "VALIDATED", "SUBMITTED", "ACCEPTED",
+                "PARTIALLY_FILLED", "PARTIALLY_FILLED", "FILLED",
+            ],
         )
         self.assertEqual(entry_events[0]["side"], "BUY")
 
@@ -288,7 +310,7 @@ class PaperTradingBotTests(unittest.TestCase):
         )
         self.assertEqual(exit_events[0]["side"], "SELL")
         state = self.ledger.state()
-        self.assertEqual(state["execution_ledger"]["event_count"], 6)
+        self.assertEqual(state["execution_ledger"]["event_count"], 10)
         self.assertTrue(state["execution_ledger"]["append_only"])
         self.assertFalse(state["orders_submitted"])
 
