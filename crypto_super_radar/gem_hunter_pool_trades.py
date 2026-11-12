@@ -128,8 +128,12 @@ def analyze_pool_trade_evidence(
         if wallet is not None:
             # EVM wallets are normalized; Solana base58 addresses remain case-sensitive.
             wallet = wallet if chain == "solana" else wallet.lower()
-        identity = (tx_hash.strip().lower() if chain != "solana" else tx_hash.strip(),
-                    stamp.isoformat(), kind, amount, wallet)
+        provider_trade_id = row.get("__trade_id")
+        identity = (
+            ("provider-id", provider_trade_id) if isinstance(provider_trade_id, str) and provider_trade_id
+            else ("observation", tx_hash.strip().lower() if chain != "solana" else tx_hash.strip(),
+                  stamp.isoformat(), kind, amount, wallet)
+        )
         if identity in seen_observations:
             invalid_rows.append("DUPLICATE_TRADE_OBSERVATION")
             continue
