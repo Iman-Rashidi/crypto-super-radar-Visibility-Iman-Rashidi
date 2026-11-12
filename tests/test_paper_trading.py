@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from crypto_super_radar.paper_trading import PaperLedger, PaperTradingBot
+from crypto_super_radar.paper_execution import make_paper_client_order_id
 
 
 class FakeEngine:
@@ -254,6 +255,64 @@ class PaperTradingBotTests(unittest.TestCase):
     def test_non_spot_asset_is_rejected(self):
         result = self.bot.run_once("perp:BTCUSDT")
         self.assertEqual(result["status"], "SKIPPED")
+
+
+    def test_entry_and_exit_are_recorded_in_append_only_execution_ledger(self):
+        opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        position = self.ledger.position()
+        entry_id = make_paper_client_order_id(
+            position["asset"], position["signal_bar"], "ENTRY"
+        )
+        entry_events = self.ledger.execution_ledger.recent_events(
+            10, client_order_id=entry_id
+        )
+        self.assertEqual(
+            [row["status"] for row in reversed(entry_events)],
+            ["CREATED", "VALIDATED", "FILLED"],
+        )
+        self.assertEqual(entry_events[0]["side"], "BUY")
+
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        closed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(closed["status"], "CLOSED")
+        exit_id = make_paper_client_order_id(
+            position["asset"], position["signal_bar"], "EXIT"
+        )
+        exit_events = self.ledger.execution_ledger.recent_events(
+            10, client_order_id=exit_id
+        )
+        self.assertEqual(
+            [row["status"] for row in reversed(exit_events)],
+            ["CREATED", "VALIDATED", "FILLED"],
+        )
+        self.assertEqual(exit_events[0]["side"], "SELL")
+        state = self.ledger.state()
+        self.assertEqual(state["execution_ledger"]["event_count"], 6)
+        self.assertTrue(state["execution_ledger"]["append_only"])
+        self.assertFalse(state["orders_submitted"])
+
+    def test_entry_projection_and_execution_events_roll_back_together(self):
+        position = {
+            "asset": "cex:BTCUSDT", "quantity": 1.0, "entry_price": 100.0,
+            "stop_loss": 90.0, "initial_stop_loss": 90.0, "take_profit": 120.0,
+            "entry_fee": 0.1, "opened_at": 123, "signal_bar": "atomic-test-bar",
+            "confirmation_score": 80.0, "risk_budget": 50.0, "max_holding_days": 14,
+        }
+        before = self.ledger.state()["account"]["cash_balance_usd"]
+        original = self.ledger.execution_ledger.record_simulated_fill
+        self.ledger.execution_ledger.record_simulated_fill = lambda **kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected journal failure")
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "injected journal failure"):
+                self.ledger.open_position(position, 100.1)
+        finally:
+            self.ledger.execution_ledger.record_simulated_fill = original
+        after = self.ledger.state()["account"]["cash_balance_usd"]
+        self.assertIsNone(self.ledger.position())
+        self.assertEqual(after, before)
+        self.assertEqual(self.ledger.execution_ledger.event_count(), 0)
 
 
 if __name__ == "__main__":

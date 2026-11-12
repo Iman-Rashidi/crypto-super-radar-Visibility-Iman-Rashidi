@@ -16,6 +16,7 @@ from .models import AssetSpec
 from .database import connect_database, storage_backend
 from .signal_performance import summarize_closed_trades
 from .execution_costs import calculate_fill_costs
+from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -76,6 +77,7 @@ class PaperLedger:
         self._lock = threading.RLock()
         self._db = connect_database(self.path)
         with self._db:
+            self.execution_ledger = PaperExecutionEventLedger(self._db, lock=self._lock)
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS paper_account (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -245,6 +247,18 @@ class PaperLedger:
                 "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
                 (debit, int(time.time())),
             )
+            self.execution_ledger.record_simulated_fill(
+                client_order_id=make_paper_client_order_id(
+                    position["asset"], position["signal_bar"], "ENTRY"
+                ),
+                asset=position["asset"], side="BUY", quantity=position["quantity"],
+                fill_price=position["entry_price"], fee_paid_usd=position["entry_fee"],
+                source=(
+                    "OBSERVED_QUOTE_PAPER_FILL"
+                    if position.get("entry_quote_source") else "MODELLED_PAPER_FILL"
+                ),
+                reason="PAPER_ENTRY", occurred_at=position["opened_at"],
+            )
         return True
 
     def update_management(self, price: float, stop_loss: float) -> None:
@@ -351,6 +365,7 @@ class PaperLedger:
             if row is None:
                 return None
             p = dict(row)
+            closed_at = int(time.time())
             exit_fee = p["quantity"] * exit_price * exit_fee_rate
             gross = p["quantity"] * (exit_price - p["entry_price"])
             net = gross - p["entry_fee"] - exit_fee
@@ -402,7 +417,7 @@ class PaperLedger:
                 p["asset"], p["quantity"], p["entry_price"], exit_price,
                 p["stop_loss"], p.get("initial_stop_loss") or p["stop_loss"],
                 p["take_profit"], p["entry_fee"], exit_fee,
-                gross, net, p["opened_at"], int(time.time()), p["signal_bar"],
+                gross, net, p["opened_at"], closed_at, p["signal_bar"],
                 p["confirmation_score"], reason,
                 p.get("entry_reference_price"), reference_exit, p.get("entry_slippage_usd"),
                 exit_slippage, total_spread, entry_spread, exit_spread,
@@ -410,6 +425,18 @@ class PaperLedger:
                 0.0, "NOT_APPLICABLE",
             ))
             self._db.execute("DELETE FROM paper_positions WHERE id=1")
+            self.execution_ledger.record_simulated_fill(
+                client_order_id=make_paper_client_order_id(
+                    p["asset"], p["signal_bar"], "EXIT"
+                ),
+                asset=p["asset"], side="SELL", quantity=p["quantity"],
+                fill_price=exit_price, fee_paid_usd=exit_fee,
+                source=(
+                    "OBSERVED_QUOTE_PAPER_FILL"
+                    if normalized_quote_source else "MODELLED_PAPER_FILL"
+                ),
+                reason=f"PAPER_EXIT:{reason}", occurred_at=closed_at,
+            )
         return {
             "asset": p["asset"], "gross_pnl_usd": gross, "net_pnl_usd": net,
             "exit_price": exit_price, "exit_reason": reason,
@@ -469,6 +496,12 @@ class PaperLedger:
             },
             "open_position": open_position,
             "recent_trades": [dict(row) for row in trades],
+            "execution_ledger": {
+                "event_count": self.execution_ledger.event_count(),
+                "recent_orders": self.execution_ledger.latest_orders(20),
+                "append_only": True,
+                "mode": "PAPER_ONLY",
+            },
             "performance": performance,
             "execution_cost_notes": {
                 "entry_exit_slippage": "Observed against fresh best ask/bid when available; otherwise modelled versus the cross-validated reference price. Already embedded in fills and not deducted twice.",
