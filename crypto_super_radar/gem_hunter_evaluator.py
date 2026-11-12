@@ -79,7 +79,10 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
             security_evidence.get("status") == "FAIL"
             and security_evidence.get("provider")
             and security_evidence.get("checked_at_utc")
-            and (security_evidence.get("flags") or security_evidence.get("reason_codes"))
+            and (
+                security_evidence.get("flags") or security_evidence.get("reason_codes")
+                or security_evidence.get("reasons") or security_evidence.get("reason")
+            )
         ):
             token_risk_evidence["contract_authority"] = {
                 "status": "FAIL",
@@ -89,6 +92,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
                 "value": {
                     "flags": security_evidence.get("flags"),
                     "reason_codes": security_evidence.get("reason_codes"),
+                    "reasons": security_evidence.get("reasons") or security_evidence.get("reason"),
                 },
                 "reason": "A limited provider check identified an explicit security disqualifier.",
             }
