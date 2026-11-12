@@ -471,9 +471,9 @@ class PaperLedger:
             "recent_trades": [dict(row) for row in trades],
             "performance": performance,
             "execution_cost_notes": {
-                "entry_exit_slippage": "Recorded as separate per-fill attribution; already embedded in fill prices and not deducted twice.",
-                "spread": "NOT_RECORDED because this paper price source does not provide a synchronized bid/ask quote.",
-                "funding": "NOT_APPLICABLE for this Spot-only paper ledger.",
+                "entry_exit_slippage": "Observed against fresh best ask/bid when available; otherwise modelled versus the cross-validated reference price. Already embedded in fills and not deducted twice.",
+                "spread": "Recorded per fill when a fresh timestamped bid/ask quote is available; missing quote coverage remains INCOMPLETE.",
+                "funding": "NOT_APPLICABLE for this Spot-only paper ledger. Perpetual backtests require complete historical funding.",
             },
             "storage": storage_backend(),
         }
@@ -584,10 +584,13 @@ class PaperTradingBot:
                 managed_stop = max(managed_stop, break_even)
             if initial_risk > 0 and peak >= entry + 1.5 * initial_risk:
                 managed_stop = max(managed_stop, peak - initial_risk)
-            self.ledger.update_management(price, managed_stop)
+            exit_quote = _extract_observed_quote(snapshot)
+            liquidation_mark = (
+                min(price, float(exit_quote["bid"])) if exit_quote is not None else price
+            )
+            self.ledger.update_management(liquidation_mark, managed_stop)
             managed_position = self.ledger.position() or position
             active_stop = float(managed_position["stop_loss"])
-            exit_quote = _extract_observed_quote(snapshot)
             if price <= active_stop:
                 reference_exit = min(price, active_stop)
                 sell_reference = (
