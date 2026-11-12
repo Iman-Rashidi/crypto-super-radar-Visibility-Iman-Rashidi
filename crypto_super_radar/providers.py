@@ -256,6 +256,50 @@ class BinanceProvider:
             "raw": stats,
         }
 
+    def order_book_top(self, symbol: str) -> Dict[str, Any]:
+        """Return a timestamped Binance Spot best-bid/ask snapshot with base sizes.
+
+        Binance's bookTicker response has no exchange event timestamp. The
+        returned observed_at_ms is the local receive time, explicitly labelled
+        as such; it must not be represented as the exchange's event time.
+        """
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or not normalized.isascii() or not normalized.isalnum():
+            raise DataProviderError("Invalid Binance Spot symbol for order-book request")
+        payload = self.http.get(
+            f"{self.BASE}/api/v3/ticker/bookTicker", {"symbol": normalized}
+        )
+        if not isinstance(payload, dict):
+            raise DataProviderError("Binance Spot bookTicker returned an invalid response schema")
+        if payload.get("symbol") != normalized:
+            raise DataProviderError(
+                f"Binance Spot bookTicker symbol mismatch for {normalized}"
+            )
+        bid = _positive_float(payload.get("bidPrice"))
+        ask = _positive_float(payload.get("askPrice"))
+        bid_qty = _positive_float(payload.get("bidQty"))
+        ask_qty = _positive_float(payload.get("askQty"))
+        if any(value is None for value in (bid, ask, bid_qty, ask_qty)):
+            raise DataProviderError(
+                f"Binance Spot bookTicker omitted a positive price or base quantity for {normalized}"
+            )
+        if ask < bid:
+            raise DataProviderError(f"Binance Spot bookTicker returned a crossed book for {normalized}")
+        observed_at_ms = int(time.time() * 1000)
+        return {
+            "symbol": normalized,
+            "best_bid": bid,
+            "best_ask": ask,
+            "bid_quantity": bid_qty,
+            "ask_quantity": ask_qty,
+            "available_liquidity_buy_qty": ask_qty,
+            "available_liquidity_sell_qty": bid_qty,
+            "observed_at_ms": observed_at_ms,
+            "timestamp_kind": "LOCAL_RECEIVED_AT",
+            "source": "Binance Spot bookTicker",
+            "orders_submitted": False,
+        }
+
     def candles(self, symbol: str, interval: str = "1d", limit: int = 365) -> pd.DataFrame:
         payload = self.http.get(f"{self.BASE}/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
         return _ohlcv_frame(payload)
@@ -552,6 +596,17 @@ class MarketDataService:
         self.bybit = BybitProvider(http)
         self.solana_rpc = SolanaRpcProvider(http)
         self.perpetual = PerpetualMarketProvider(http)
+
+    def order_book_snapshot(self, asset: AssetSpec) -> Dict[str, Any]:
+        """Fetch explicit Binance Spot top-of-book prices and base-asset sizes.
+
+        Depth is a separate execution input, not a substitute for the
+        cross-validated price snapshot used by the signal engine. Only the
+        explicitly supported CEX spot market is accepted here.
+        """
+        if asset.market_type != "cex" or not asset.symbol:
+            raise DataProviderError("Top-of-book liquidity is available only for CEX Spot assets")
+        return self.binance.order_book_top(asset.symbol)
 
     def snapshot(self, asset: AssetSpec) -> MarketSnapshot:
         from concurrent.futures import ThreadPoolExecutor
