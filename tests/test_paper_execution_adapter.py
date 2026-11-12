@@ -30,7 +30,7 @@ class PaperExecutionAdapterTests(unittest.TestCase):
     def simulate(self, **kwargs):
         kwargs.setdefault("observed_at_ms", 1_000_000)
         kwargs.setdefault("now_ms", 1_000_100)
-        return self.simulate(**kwargs)
+        return self.adapter.simulate_fill(**kwargs)
 
     def test_partial_then_full_fill_respects_participation_limit(self):
         partial = self.simulate(

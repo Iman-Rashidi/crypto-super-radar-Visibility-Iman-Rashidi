@@ -10,7 +10,7 @@ This adapter is not yet wired to the production \`PaperTradingBot\` cycle. The c
 
 An internal paper intent moves through \`CREATED → VALIDATED → SUBMITTED → ACCEPTED\`. Supplied book snapshots can then append \`PARTIALLY_FILLED\` events until cumulative filled quantity equals the requested quantity, at which point the order becomes \`FILLED\`.
 
-Each snapshot requires a stable \`snapshot_id\`. Reprocessing the same snapshot is idempotent; reusing its ID with different fill inputs is rejected by the event ledger. A stale quote produces \`UNKNOWN\` without a fill. Zero available liquidity produces \`NO_FILL\` and leaves the state unchanged.
+Each fill requires a stable \`snapshot_id\` and a positive \`observed_at_ms\` local receive timestamp. The adapter computes quote age against its local clock; quotes older than \`max_quote_age_ms\` or more than two seconds in the future return \`UNKNOWN\` without a fill. This is the local receive time, not an exchange event timestamp. Reprocessing the same snapshot is idempotent; reusing its ID with different fill inputs is rejected by the event ledger. Zero available liquidity produces \`NO_FILL\` and leaves the state unchanged.
 
 ## Fill model
 

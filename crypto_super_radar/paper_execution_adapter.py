@@ -125,7 +125,7 @@ class PaperExecutionAdapter:
             if state["status"] not in {"ACCEPTED", "PARTIALLY_FILLED"}:
                 return {"status": "BLOCKED", "reason": "order is not in a fillable state"}
             return {"status": "NO_FILL", "filled_quantity": already_filled, "remaining_quantity": remaining}
-        if age > max_quote_age_ms and not prior_event:
+        if (quote_age < -2_000 or quote_age > max_quote_age_ms) and not prior_event:
             return {"status": "UNKNOWN", "reason": "quote snapshot is stale or from the future; no fill was simulated", "observed_at_ms": int(observed_at), "quote_age_ms": quote_age}
         if not prior_event and state["status"] not in {"ACCEPTED", "PARTIALLY_FILLED"}:
             return {"status": "BLOCKED", "reason": "order is not in a fillable state"}
