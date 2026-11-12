@@ -1117,21 +1117,370 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
 
 
 
+
+_PAPER_CYCLE_STATUS_FA = {
+    "NO_TRADE": "معامله‌ای انجام نشد",
+    "OPENED": "موقعیت آزمایشی باز شد",
+    "CLOSED": "موقعیت آزمایشی بسته شد",
+    "HOLDING": "موقعیت آزمایشی همچنان باز است",
+    "BLOCKED": "چرخه مسدود شد",
+    "SKIPPED": "دارایی از چرخه کنار گذاشته شد",
+    "UNKNOWN": "وضعیت نامشخص",
+    "RISK_HALT": "ورود به‌دلیل محدودیت ریسک متوقف شد",
+}
+_PAPER_REASON_FA = {
+    "Paper bot currently accepts only BTC, ETH and SOL spot symbols.":
+        "این ربات فعلاً فقط بازار اسپات بیت‌کوین، اتریوم و سولانا را پشتیبانی می‌کند.",
+    "One paper position is already open; manage it before scanning another asset.":
+        "یک موقعیت آزمایشی باز وجود دارد؛ پیش از بررسی دارایی دیگر، ابتدا همان موقعیت مدیریت شود.",
+    "Fresh price unavailable; open paper position was left unchanged.":
+        "قیمت تازه در دسترس نبود؛ موقعیت آزمایشی باز بدون تغییر باقی ماند.",
+    "Fresh cross-validated price is invalid; position was left unchanged.":
+        "قیمت تازه و تأییدشده معتبر نیست؛ موقعیت باز بدون تغییر باقی ماند.",
+    "Market scan failed; paper state was not changed ({type(exc).__name__}).":
+        "تحلیل بازار با خطا روبه‌رو شد؛ وضعیت حساب آزمایشی تغییر نکرد.",
+    "A fresh cross-validated public spot price is unavailable.":
+        "قیمت عمومی و تازهٔ بازار اسپات که با منابع مستقل تطبیق داده شده باشد، در دسترس نیست.",
+    "Every mandatory signal gate must PASS before paper entry.":
+        "برای ورود آزمایشی، تمام دروازه‌های اجباری سیگنال باید تأیید شوند؛ دست‌کم یک شرط هنوز تأیید نشده است.",
+    "Paper spot bot opens LONG signals only; short and neutral outputs are skipped.":
+        "ربات اسپات فقط موقعیت خرید (Long) باز می‌کند؛ سیگنال‌های فروش یا خنثی نادیده گرفته می‌شوند.",
+    "Score, risk or stop/target plan did not pass paper safety limits.":
+        "امتیاز تأیید، سطح ریسک یا برنامهٔ حد ضرر و حد سود از حدود ایمنی حساب آزمایشی عبور نکرد.",
+    "Spot entry, stop-loss and take-profit levels are not ordered safely.":
+        "ترتیب قیمت ورود، حد ضرر و حد سود برای اجرای ایمن معامله مناسب نیست.",
+    "A timestamped completed candle is required to prevent duplicate entries.":
+        "برای جلوگیری از ورود تکراری، وجود یک کندل تکمیل‌شده با زمان ثبت معتبر الزامی است.",
+    "This completed-candle signal was already paper-traded.":
+        "سیگنال مربوط به این کندل قبلاً در حساب آزمایشی اجرا شده است.",
+    "Paper entries paused by risk circuit breaker.":
+        "مدار قطع‌کنندهٔ ریسک، ورودهای جدید حساب آزمایشی را موقتاً متوقف کرده است.",
+    "Paper account balance is invalid.":
+        "موجودی حساب آزمایشی معتبر نیست.",
+    "Net reward/risk is invalid after costs.":
+        "نسبت بازده به ریسک پس از محاسبهٔ هزینه‌ها معتبر نیست.",
+    "Net reward/risk after fees and slippage is below the minimum.":
+        "نسبت بازده به ریسک خالص پس از کارمزد و لغزش قیمت، کمتر از حداقل مجاز است.",
+    "A valid maximum holding period is required for paper entry.":
+        "برای ورود آزمایشی باید حداکثر مدت نگهداری معتبر مشخص شده باشد.",
+    "Position sizing returned no safe quantity.":
+        "محاسبهٔ اندازهٔ موقعیت، مقدار امن و قابل اجرا تولید نکرد.",
+    "Paper ledger rejected duplicate, concurrent or unaffordable entry.":
+        "دفترکل حساب آزمایشی به‌دلیل تکراری بودن، اجرای هم‌زمان یا کافی نبودن موجودی، ورود را نپذیرفت.",
+}
+_PAPER_ENUM_FA = {
+    "INSUFFICIENT_SAMPLE": "تعداد نمونهٔ آماری کافی نیست",
+    "NO_DATA": "داده‌ای ثبت نشده است",
+    "INCOMPLETE": "ناقص",
+    "COMPLETE": "کامل",
+    "NOT_APPLICABLE": "قابل اعمال نیست",
+    "UNKNOWN": "نامشخص",
+    "PASS": "تأیید",
+    "FAIL": "رد",
+    "PARTIAL": "جزئی",
+    "KNOWN": "موجود و معتبر",
+    "LONG": "خرید (Long)",
+    "SHORT": "فروش (Short)",
+    "TAKE_PROFIT": "رسیدن به حد سود",
+    "STOP_LOSS": "فعال شدن حد ضرر",
+    "TRAILING_STOP": "فعال شدن حد ضرر شناور",
+    "TIME_EXIT": "خروج بر اساس محدودیت زمانی",
+}
+def _paper_reason_fa(reason: Any) -> str:
+    if not isinstance(reason, str) or not reason.strip():
+        return "دلیل تکمیلی برای این وضعیت ثبت نشده است."
+    if reason in _PAPER_REASON_FA:
+        return _PAPER_REASON_FA[reason]
+    if reason.startswith("Market scan failed"):
+        return "تحلیل بازار با خطا روبه‌رو شد؛ وضعیت حساب آزمایشی تغییر نکرد."
+    return "جزئیات علت در گزارش فنی موجود است؛ برای جلوگیری از ترجمهٔ نادرست، متن ناشناخته نمایش داده نمی‌شود."
+
+
+def _paper_enum_fa(value: Any) -> str:
+    if value is None:
+        return "ثبت نشده"
+    normalized = str(getattr(value, "value", value)).upper()
+    return _PAPER_ENUM_FA.get(normalized, normalized if normalized.isdigit() else "نامشخص")
+
+
+def _paper_tick_report_fa(cycle: dict, paper_state: dict, safety: dict) -> dict:
+    """Build a Persian, user-facing report without changing trading decisions or raw API fields."""
+    cycle = cycle if isinstance(cycle, dict) else {}
+    paper_state = paper_state if isinstance(paper_state, dict) else {}
+    safety = safety if isinstance(safety, dict) else {}
+
+    def row(label: str, value: Any, unit: Optional[str] = None) -> dict:
+        return {"label": label, "value": value, "unit": unit}
+
+    status = str(cycle.get("status") or "UNKNOWN").upper()
+    asset = str(cycle.get("asset") or "نامشخص").split(":")[-1]
+    reason = cycle.get("reason")
+    cycle_rows = [
+        row("وضعیت چرخه", _PAPER_CYCLE_STATUS_FA.get(status, "وضعیت نامشخص")),
+        row("دارایی بررسی‌شده", asset),
+    ]
+    if reason:
+        cycle_rows.append(row("دلیل تصمیم", _paper_reason_fa(reason)))
+    for key, label, unit in (
+        ("side", "جهت موقعیت", None),
+        ("quantity", "مقدار دارایی", None),
+        ("entry_price", "قیمت ورود", "USD"),
+        ("exit_price", "قیمت خروج", "USD"),
+        ("mark_price", "قیمت فعلی ثبت‌شده", "USD"),
+        ("active_stop_loss", "حد ضرر فعال", "USD"),
+        ("stop_loss", "حد ضرر", "USD"),
+        ("take_profit", "حد سود", "USD"),
+        ("risk_budget_usd", "بودجهٔ ریسک", "USD"),
+        ("confirmation_score", "امتیاز تأیید", None),
+        ("net_reward_risk", "نسبت بازده به ریسک خالص", None),
+        ("unrealized_pnl_usd", "سود/زیان تحقق‌نیافته", "USD"),
+        ("max_holding_days", "حداکثر مدت نگهداری", "روز"),
+        ("fee_usd", "کارمزد ثبت‌شده", "USD"),
+    ):
+        if key in cycle and cycle.get(key) is not None:
+            value = cycle.get(key)
+            if key == "side":
+                value = _paper_enum_fa(value)
+            cycle_rows.append(row(label, value, unit))
+
+    trade = cycle.get("trade")
+    if isinstance(trade, dict):
+        for key, label, unit in (
+            ("gross_pnl_usd", "سود/زیان ناخالص معاملهٔ بسته‌شده", "USD"),
+            ("net_pnl_usd", "سود/زیان خالص معاملهٔ بسته‌شده", "USD"),
+            ("exit_price", "قیمت خروج", "USD"),
+            ("exit_reason", "علت خروج", None),
+        ):
+            if trade.get(key) is not None:
+                value = _paper_enum_fa(trade[key]) if key == "exit_reason" else trade[key]
+                cycle_rows.append(row(label, value, unit))
+
+    safety_rows = [
+        row("حالت فقط‌خواندنی", "فعال" if safety.get("read_only") else "غیرفعال"),
+        row("حالت فقط حساب آزمایشی", "فعال" if safety.get("paper_only") else "غیرفعال"),
+        row("استفاده از اعتبارنامهٔ کیف‌پول", "استفاده نشده" if not safety.get("wallet_credentials_used") else "استفاده شده"),
+        row("استفاده از اعتبارنامهٔ خصوصی صرافی", "استفاده نشده" if not safety.get("private_exchange_credentials_used") else "استفاده شده"),
+        row("ارسال سفارش واقعی", "انجام نشده" if not safety.get("orders_submitted") else "انجام شده"),
+        row("امضای تراکنش بلاک‌چین", "انجام نشده" if not safety.get("transactions_signed") else "انجام شده"),
+    ]
+
+    account = paper_state.get("account") or {}
+    account_rows = []
+    for key, label, unit in (
+        ("initial_equity_usd", "سرمایهٔ اولیهٔ حساب", "USD"),
+        ("cash_balance_usd", "موجودی نقدی", "USD"),
+        ("equity_usd", "ارزش کل حساب", "USD"),
+        ("realized_pnl_usd", "سود/زیان تحقق‌یافته", "USD"),
+        ("unrealized_pnl_usd", "سود/زیان تحقق‌نیافته", "USD"),
+        ("total_return_pct", "بازده کل", "%"),
+    ):
+        if key in account:
+            account_rows.append(row(label, account.get(key), unit))
+
+    position = paper_state.get("open_position")
+    if isinstance(position, dict):
+        position_rows = [
+            row("دارایی", str(position.get("asset") or "").split(":")[-1]),
+            row("مقدار", position.get("quantity")),
+            row("قیمت ورود", position.get("entry_price"), "USD"),
+            row("قیمت مبنا", position.get("mark_price"), "USD"),
+            row("حد ضرر", position.get("stop_loss"), "USD"),
+            row("حد سود", position.get("take_profit"), "USD"),
+            row("سود/زیان تحقق‌نیافته", paper_state.get("account", {}).get("unrealized_pnl_usd"), "USD"),
+        ]
+        position_note = None
+    else:
+        position_rows = []
+        position_note = "در حال حاضر هیچ موقعیت بازی در حساب آزمایشی وجود ندارد."
+
+    recent_trades = []
+    for item in paper_state.get("recent_trades") or []:
+        if not isinstance(item, dict):
+            continue
+        trade_rows = []
+        for key, label, unit in (
+            ("side", "جهت", None),
+            ("quantity", "مقدار", None),
+            ("entry_price", "قیمت ورود", "USD"),
+            ("exit_price", "قیمت خروج", "USD"),
+            ("gross_pnl", "سود/زیان ناخالص", "USD"),
+            ("net_pnl", "سود/زیان خالص", "USD"),
+            ("entry_fee", "کارمزد ورود", "USD"),
+            ("exit_fee", "کارمزد خروج", "USD"),
+        ):
+            if key in item:
+                value = _paper_enum_fa(item[key]) if key == "side" else item.get(key)
+                trade_rows.append(row(label, value, unit))
+        if item.get("exit_reason"):
+            trade_rows.append(row("علت خروج", _paper_enum_fa(item["exit_reason"])))
+        recent_trades.append({
+            "title": str(item.get("asset") or "دارایی نامشخص").split(":")[-1],
+            "rows": trade_rows,
+        })
+
+    performance = paper_state.get("performance") or {}
+    performance_rows = [
+        row("وضعیت ارزیابی عملکرد", _paper_enum_fa(performance.get("status"))),
+        row("تعداد معاملات معتبر بسته‌شده", performance.get("sample_size")),
+        row("حداقل نمونهٔ لازم", performance.get("minimum_sample_size")),
+        row("اجازهٔ ادعای عملکرد آماری", "مجاز" if performance.get("performance_claim_allowed") else "مجاز نیست"),
+    ]
+    for prefix, label in (
+        ("fee", "کارمزد"),
+        ("slippage", "لغزش قیمت"),
+        ("spread", "اسپرد"),
+        ("funding", "هزینهٔ تأمین مالی"),
+    ):
+        status_key = prefix + "_data_status"
+        if status_key in performance:
+            performance_rows.append(row("وضعیت دادهٔ " + label, _paper_enum_fa(performance.get(status_key))))
+        coverage_key = prefix + "_coverage_pct"
+        if coverage_key in performance:
+            performance_rows.append(row("پوشش دادهٔ " + label, performance.get(coverage_key), "%"))
+        total_key = "total_recorded_" + ("fees" if prefix == "fee" else "slippage" if prefix == "slippage" else "spread" if prefix == "spread" else "funding") + "_usd"
+        if total_key in performance:
+            performance_rows.append(row("مجموع " + label + " ثبت‌شده", performance.get(total_key), "USD"))
+    if "execution_cost_attribution_status" in performance:
+        performance_rows.append(row("وضعیت انتساب هزینه‌های اجرا", _paper_enum_fa(performance.get("execution_cost_attribution_status"))))
+    if performance.get("reason"):
+        performance_rows.append(row("توضیح ارزیابی عملکرد", "هنوز معاملهٔ آزمایشیِ بسته‌شده و معتبری ثبت نشده است." if performance["reason"] == "No valid closed paper trades are recorded yet." else "اطلاعات تکمیلی در دسترس نیست."))
+
+    risk = paper_state.get("risk_controls") or cycle.get("risk_controls") or {}
+    risk_rows = []
+    if risk:
+        risk_rows = [
+            row("اجازهٔ ورود جدید", "مجاز" if risk.get("entry_allowed") else "متوقف"),
+            row("زیان تحقق‌یافتهٔ روزانه", risk.get("daily_realized_loss_pct"), "%"),
+            row("بیشترین افت ارزش حساب", risk.get("max_equity_drawdown_pct"), "%"),
+            row("تعداد زیان‌های پیاپی", risk.get("consecutive_losses")),
+            row("زمان باقی‌ماندهٔ توقف", risk.get("cooldown_hours_remaining"), "ساعت"),
+            row("علت‌های توقف", "، ".join(_PAPER_ENUM_FA.get(str(x).upper(), "محدودیت ریسک") for x in risk.get("halt_reasons", [])) or "محدودیتی ثبت نشده است"),
+        ]
+
+    notes = [
+        "لغزش قیمت ورود و خروج، در صورت وجود مظنهٔ تازه، از بهترین قیمت خرید/فروش مشاهده‌شده محاسبه می‌شود؛ در غیر این صورت قیمت مرجعِ تطبیق‌یافته مبناست. این هزینه در قیمت اجرای شبیه‌سازی‌شده لحاظ شده و دوباره از سود/زیان کسر نمی‌شود.",
+        "هزینهٔ اسپرد فقط وقتی ثبت می‌شود که مظنهٔ خرید و فروشِ تازه و زمان‌دار موجود باشد؛ نبود پوشش کامل به‌عنوان دادهٔ ناقص گزارش می‌شود.",
+        "هزینهٔ تأمین مالی برای این دفترکلِ اسپات کاربرد ندارد؛ در بک‌تست قراردادهای دائمی، تاریخچهٔ کامل Funding لازم است.",
+    ]
+
+    return {
+        "title": "گزارش فارسی چرخهٔ ربات آزمایشی",
+        "cycle": cycle_rows,
+        "safety": safety_rows,
+        "account": account_rows,
+        "open_position": {"rows": position_rows, "note": position_note},
+        "recent_trades": recent_trades,
+        "recent_trades_note": None if recent_trades else "هنوز معاملهٔ آزمایشیِ بسته‌شده‌ای در دفترکل ثبت نشده است.",
+        "performance": performance_rows,
+        "risk_controls": risk_rows,
+        "execution_cost_notes": notes,
+    }
+
+
+def _paper_tick_page_script(job_id: str) -> str:
+    return r"""
+<script>
+const job='__JOB_ID__';
+const root=document.getElementById('result');
+function el(tag,text){const node=document.createElement(tag);node.textContent=text===null||text===undefined?'ثبت نشده':String(text);return node;}
+function valueText(row){
+  const value=row.value;
+  let rendered;
+  if(value===null||value===undefined) rendered='ثبت نشده';
+  else if(typeof value==='number') rendered=new Intl.NumberFormat('fa-IR',{maximumFractionDigits:6}).format(value);
+  else rendered=String(value);
+  return row.unit ? rendered+' '+row.unit : rendered;
+}
+function addRows(parent,title,rows,note){
+  const section=document.createElement('section');section.className='card';
+  section.appendChild(el('h3',title));
+  if(note) section.appendChild(el('p',note));
+  if(Array.isArray(rows)&&rows.length){
+    const table=document.createElement('table'),body=document.createElement('tbody');
+    rows.forEach(row=>{
+      const tr=document.createElement('tr'),label=document.createElement('th'),value=document.createElement('td');
+      label.textContent=row.label||'جزئیات';value.textContent=valueText(row);
+      tr.append(label,value);body.appendChild(tr);
+    });
+    table.appendChild(body);section.appendChild(table);
+  } else if(!note) section.appendChild(el('p','داده‌ای برای نمایش ثبت نشده است.'));
+  parent.appendChild(section);
+}
+function renderPaperBotReport(result){
+  const report=result&&result.report_fa;
+  root.replaceChildren();
+  if(!report){root.appendChild(el('p','گزارش فارسی از سرور دریافت نشد؛ صفحه را تازه‌سازی کنید.'));return;}
+  root.appendChild(el('h2',report.title||'گزارش چرخهٔ ربات آزمایشی'));
+  addRows(root,'نتیجهٔ چرخه',report.cycle);
+  addRows(root,'وضعیت ایمنی',report.safety);
+  addRows(root,'وضعیت حساب آزمایشی',report.account);
+  addRows(root,'موقعیت باز',report.open_position&&report.open_position.rows,report.open_position&&report.open_position.note);
+  if(report.recent_trades&&report.recent_trades.length){
+    report.recent_trades.forEach((trade,index)=>addRows(root,'معاملهٔ ثبت‌شدهٔ '+(index+1)+' · '+trade.title,trade.rows));
+  } else addRows(root,'سوابق معاملات',[],report.recent_trades_note||'معامله‌ای ثبت نشده است.');
+  addRows(root,'ارزیابی عملکرد آماری',report.performance);
+  if(report.risk_controls&&report.risk_controls.length)addRows(root,'کنترل‌های ریسک',report.risk_controls);
+  if(report.execution_cost_notes&&report.execution_cost_notes.length){
+    const section=document.createElement('section');section.className='card';
+    section.appendChild(el('h3','توضیح هزینه‌های اجرا'));
+    const list=document.createElement('ul');
+    report.execution_cost_notes.forEach(note=>list.appendChild(el('li',note)));
+    section.appendChild(list);root.appendChild(section);
+  }
+  const safety=document.createElement('p');safety.className='muted';
+  safety.textContent='این گزارش صرفاً مربوط به حساب آزمایشی است؛ هیچ سفارش واقعی ارسال نشده و هیچ تراکنشی امضا نشده است.';
+  root.appendChild(safety);
+}
+let pollAttempts=0;
+const pollStarted=Date.now();
+async function poll(){
+  try{
+    const response=await fetch('/jobs/'+job,{cache:'no-store'});
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    const jobData=await response.json();
+    pollAttempts=0;
+    const states={queued:'در صف اجرا',running:'در حال اجرا',completed:'تکمیل شد',failed:'ناموفق'};
+    document.getElementById('state').textContent=states[jobData.status]||'در حال پردازش';
+    if(jobData.status==='completed'){renderPaperBotReport(jobData.result);return;}
+    if(jobData.status==='failed'){root.replaceChildren(el('p','اجرای چرخه ناموفق بود. خطای فنی: '+(jobData.error||'نامشخص')));return;}
+    if(Date.now()-pollStarted>=1800000){document.getElementById('state').textContent='مهلت پیگیری پایان یافت؛ شناسهٔ چرخه: '+job;return;}
+  }catch(error){
+    pollAttempts+=1;
+    if(Date.now()-pollStarted>=1800000){document.getElementById('state').textContent='مهلت بازیابی ارتباط پایان یافت؛ شناسهٔ چرخه: '+job;return;}
+    const delay=Math.min(30000,1500*Math.pow(2,Math.min(pollAttempts,4)));
+    document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ همان چرخه به‌طور خودکار دوباره بررسی می‌شود ('+Math.ceil(delay/1000)+' ثانیهٔ دیگر).';
+    setTimeout(poll,delay);return;
+  }
+  setTimeout(poll,2500);
+}
+poll();
+</script>
+""".replace("__JOB_ID__", job_id)
+
+
 def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
     global SCAN_RUNNING
     try:
         result = PAPER_BOT.run_once(asset)
+        paper_state = PAPER_BOT.state()
+        safety = {
+            "read_only": True,
+            "paper_only": True,
+            "wallet_credentials_used": False,
+            "private_exchange_credentials_used": False,
+            "orders_submitted": False,
+            "transactions_signed": False,
+        }
+        cycle = dict(result) if isinstance(result, dict) else {"status": "UNKNOWN"}
+        cycle["status_fa"] = _PAPER_CYCLE_STATUS_FA.get(
+            str(cycle.get("status") or "UNKNOWN").upper(), "وضعیت نامشخص"
+        )
+        cycle["reason_fa"] = _paper_reason_fa(cycle.get("reason")) if cycle.get("reason") else None
         payload = {
-            "safety": {
-                "read_only": True,
-                "paper_only": True,
-                "wallet_credentials_used": False,
-                "private_exchange_credentials_used": False,
-                "orders_submitted": False,
-                "transactions_signed": False,
-            },
-            "cycle": result,
-            "paper_state": PAPER_BOT.state(),
+            "safety": safety,
+            "cycle": cycle,
+            "paper_state": paper_state,
+            "report_fa": _paper_tick_report_fa(cycle, paper_state, safety),
         }
         with LOCK:
             JOBS[job_id] = {"status": "completed", "result": payload}
@@ -2394,9 +2743,10 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/paper-bot/tick":
                 body = (
                     "<h2>چرخهٔ ربات آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
-                    "<p id='state'>در حال ارزیابی دادهٔ بازار و مدیریت موقعیت کاغذی...</p>"
-                    "<pre id='result'>هیچ سفارش واقعی ارسال نمی‌شود.</pre><p><a href='/'>بازگشت</a></p>"
-                    "<script>const job='" + job_id + "';async function poll(){try{const r=await fetch('/jobs/'+job);const j=await r.json();document.getElementById('state').textContent=j.status;if(j.status==='completed'){document.getElementById('result').textContent=JSON.stringify(j.result,null,2);return;}if(j.status==='failed'){document.getElementById('result').textContent=j.error;return;}}catch(e){document.getElementById('state').textContent='ارتباط قطع شد؛ وضعیت در /paper-bot/status موجود است';return;}setTimeout(poll,2500);}poll();</script>"
+                    "<p id='state' aria-live='polite'>در حال ارزیابی دادهٔ بازار و مدیریت موقعیت کاغذی...</p>"
+                    "<div id='result' aria-live='polite'><p>نتیجه پس از تکمیل چرخه به فارسی نمایش داده می‌شود.</p></div>"
+                    "<p><a href='/'>بازگشت به داشبورد</a></p>"
+                    + _paper_tick_page_script(job_id)
                 )
                 return self._send(202, _page(body, "Paper Bot Cycle"))
             body = (
