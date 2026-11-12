@@ -67,7 +67,12 @@ def _normalize(event: Mapping[str, Any]) -> dict[str, Any]:
         quote_symbol = _required_text(quote_symbol, "quote_symbol").upper()
     return {
         "chain": chain, "tx_signature": tx, "wallet_address": wallet,
-        "token_address": token, "event_type": event_type, "event_index": index,
+        "token_address": token,
+        "counterparty_address": (
+            _address(chain, event.get("counterparty_address"), "counterparty_address")
+            if event.get("counterparty_address") not in (None, "") else None
+        ),
+        "event_type": event_type, "event_index": index,
         "event_time_ms": timestamp, "received_at_ms": received, "slot": slot,
         "token_delta": _finite_optional(event.get("token_delta"), "token_delta"),
         "quote_delta": _finite_optional(event.get("quote_delta"), "quote_delta"),
@@ -90,6 +95,7 @@ class WalletEventStore:
                 wallet_address TEXT NOT NULL,
                 event_index INTEGER NOT NULL,
                 token_address TEXT NOT NULL,
+                counterparty_address TEXT,
                 event_type TEXT NOT NULL,
                 event_time_ms INTEGER NOT NULL,
                 received_at_ms INTEGER NOT NULL,
@@ -103,6 +109,11 @@ class WalletEventStore:
             )
             """
         )
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(wallet_event_observations)")}
+        if "counterparty_address" not in columns:
+            self._db.execute(
+                "ALTER TABLE wallet_event_observations ADD COLUMN counterparty_address TEXT"
+            )
         self._db.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_wallet_event_history
@@ -131,13 +142,13 @@ class WalletEventStore:
                     """
                     INSERT OR IGNORE INTO wallet_event_observations (
                         chain, tx_signature, wallet_address, event_index,
-                        token_address, event_type, event_time_ms, received_at_ms,
+                        token_address, counterparty_address, event_type, event_time_ms, received_at_ms,
                         slot, token_delta, quote_delta, quote_symbol, source, evidence_status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     tuple(row[key] for key in (
                         "chain", "tx_signature", "wallet_address", "event_index",
-                        "token_address", "event_type", "event_time_ms", "received_at_ms",
+                        "token_address", "counterparty_address", "event_type", "event_time_ms", "received_at_ms",
                         "slot", "token_delta", "quote_delta", "quote_symbol", "source", "evidence_status"
                     )),
                 )
@@ -154,7 +165,7 @@ class WalletEventStore:
         cursor = self._db.execute(
             f"""
             SELECT chain, tx_signature, wallet_address, event_index, token_address,
-                   event_type, event_time_ms, received_at_ms, slot, token_delta,
+                   counterparty_address, event_type, event_time_ms, received_at_ms, slot, token_delta,
                    quote_delta, quote_symbol, source, evidence_status
             FROM wallet_event_observations
             WHERE {where}
