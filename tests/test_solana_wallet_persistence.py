@@ -87,7 +87,7 @@ class SolanaWalletPersistenceTests(unittest.TestCase):
         mint = "TokenMintABC123456789ABCDEFGHJKLMNPQR"
         responses = [
             {"result": {"value": [{"address": "TokenAccount111111111111111111111111111"}]}},
-            {"result": {"value": {"data": {"parsed": {"info": {"owner": "WalletOwner111111111111111111111111111"}}}}},
+            {"result": {"value": {"data": {"parsed": {"info": {"owner": "WalletOwner111111111111111111111111111"}}}}}},
             {"result": [{"signature": "TxWithoutBlockTime", "blockTime": None, "err": None}]},
             {"result": {
                 "slot": 123,
