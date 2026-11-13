@@ -34,6 +34,7 @@ from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
+from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -48,6 +49,98 @@ LOCK = threading.RLock()
 SCAN_RUNNING = False
 SCAN_QUEUE = queue.Queue(maxsize=50)
 SCAN_WORKER_STARTED = False
+
+BLOFIN_STATUS_CACHE = {"expires_at": 0.0, "payload": None}
+BLOFIN_STATUS_LOCK = threading.Lock()
+
+
+def _blofin_demo_connection_status() -> dict:
+    """Return a rate-limited, non-sensitive read-only BloFin Demo connectivity result."""
+    with BLOFIN_STATUS_LOCK:
+        now = time.monotonic()
+        cached = BLOFIN_STATUS_CACHE.get("payload")
+        if isinstance(cached, dict) and BLOFIN_STATUS_CACHE.get("expires_at", 0.0) > now:
+            return copy.deepcopy(cached)
+
+        credential_names = (
+            "BLOFIN_DEMO_API_KEY",
+            "BLOFIN_DEMO_API_SECRET",
+            "BLOFIN_DEMO_PASSPHRASE",
+        )
+        configured = all(bool(os.getenv(name, "").strip()) for name in credential_names)
+        if not configured:
+            payload = {
+                "status": "NOT_CONFIGURED",
+                "environment": "BLOFIN_DEMO",
+                "permission_mode": "READ_ONLY",
+                "market_data": "NOT_CHECKED",
+                "private_api": "NOT_CHECKED",
+                "orders_enabled": False,
+                "message_fa": "سه متغیر API Key، Secret Key و Passphrase باید در Environment همین سرویس تنظیم شوند.",
+            }
+            cache_seconds = 15
+        else:
+            try:
+                client = BloFinDemoReadOnly(timeout=8.0)
+                tickers = client.get_tickers(inst_id="BTC-USDT")
+                if not isinstance(tickers, list) or not tickers or not isinstance(tickers[0], dict):
+                    raise BloFinDemoResponseError("BloFin Demo ticker response is unavailable.")
+                balance = client.get_futures_balance(product_type="USDT-FUTURES")
+                if not isinstance(balance, dict):
+                    raise BloFinDemoResponseError("BloFin Demo futures balance response is invalid.")
+                positions = client.get_positions()
+                orders = client.get_open_orders()
+                if not isinstance(positions, list) or not isinstance(orders, list):
+                    raise BloFinDemoResponseError("BloFin Demo account read response is invalid.")
+                payload = {
+                    "status": "CONNECTED_READ_ONLY",
+                    "environment": "BLOFIN_DEMO",
+                    "permission_mode": "READ_ONLY",
+                    "market_data": "PASS",
+                    "private_api": "PASS",
+                    "orders_enabled": False,
+                    "message_fa": "اتصال Demo و احراز هویت API موفق است. ربات هنوز فقط اطلاعات را می‌خواند و هیچ سفارشی ارسال نمی‌کند.",
+                }
+                cache_seconds = 60
+            except BloFinDemoAuthError:
+                payload = {
+                    "status": "AUTH_FAILED",
+                    "environment": "BLOFIN_DEMO",
+                    "permission_mode": "READ_ONLY",
+                    "market_data": "UNKNOWN",
+                    "private_api": "FAIL",
+                    "orders_enabled": False,
+                    "message_fa": "احراز هویت ناموفق بود؛ کلید، Secret، Passphrase و مجوز READ را در Render بررسی کن.",
+                }
+                cache_seconds = 20
+            except BloFinDemoError as exc:
+                payload = {
+                    "status": "CONNECTION_FAILED",
+                    "environment": "BLOFIN_DEMO",
+                    "permission_mode": "READ_ONLY",
+                    "market_data": "UNKNOWN",
+                    "private_api": "UNKNOWN",
+                    "orders_enabled": False,
+                    "message_fa": "ارتباط با BloFin Demo کامل نشد. دسترسی شبکه، محدودیت IP و وضعیت API را بررسی کن.",
+                    "error_type": type(exc).__name__,
+                }
+                cache_seconds = 20
+            except Exception as exc:
+                payload = {
+                    "status": "UNKNOWN",
+                    "environment": "BLOFIN_DEMO",
+                    "permission_mode": "READ_ONLY",
+                    "market_data": "UNKNOWN",
+                    "private_api": "UNKNOWN",
+                    "orders_enabled": False,
+                    "message_fa": "آزمون اتصال با خطای پیش‌بینی‌نشده متوقف شد؛ جزئیات داخلی در پاسخ عمومی نمایش داده نمی‌شود.",
+                    "error_type": type(exc).__name__,
+                }
+                cache_seconds = 20
+
+        BLOFIN_STATUS_CACHE["payload"] = copy.deepcopy(payload)
+        BLOFIN_STATUS_CACHE["expires_at"] = time.monotonic() + cache_seconds
+        return copy.deepcopy(payload)
 
 COMMON_ASSET_NAMES = {
     "BTC": ("Bitcoin", "بیت‌کوین"), "ETH": ("Ethereum", "اتریوم"),
@@ -2078,6 +2171,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
+        if parsed.path == "/api/blofin/demo/status":
+            payload = _blofin_demo_connection_status()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/dex-search":
             query = parse_qs(parsed.query).get("q", [""])[0]
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
@@ -2188,6 +2285,45 @@ class Handler(BaseHTTPRequestHandler):
               <a class="analysis-link" href="https://dexscreener.com/" target="_blank" rel="noopener noreferrer">باز کردن DEX Screener ↗</a>
             </article>
           </div>
+        </section>
+        <section class="card" id="blofin-demo-panel">
+          <h2>BloFin Demo Futures · اتصال API</h2>
+          <p class="muted">آزمون اتصال به محیط آزمایشی BloFin با مجوز فقط‌خواندنی. پاسخ داشبورد هیچ کلید، موجودی یا جزئیات خصوصی حساب را نمایش نمی‌دهد.</p>
+          <div class="grid" style="align-items:center;margin:12px 0">
+            <button id="blofin-demo-check" type="button">بررسی اتصال BloFin Demo</button>
+            <span id="blofin-demo-status" class="muted" aria-live="polite">اتصال هنوز بررسی نشده است.</span>
+          </div>
+          <p class="muted" id="blofin-demo-safety">وضعیت سفارش: غیرفعال · هیچ سفارش یا انتقال وجهی ارسال نمی‌شود.</p>
+          <script>
+          (function(){
+            const button=document.getElementById('blofin-demo-check');
+            const status=document.getElementById('blofin-demo-status');
+            const safety=document.getElementById('blofin-demo-safety');
+            if(!button||!status||!safety)return;
+            button.addEventListener('click',async function(){
+              button.disabled=true;
+              status.textContent='در حال بررسی اتصال امن به BloFin Demo...';
+              try{
+                const response=await fetch('/api/blofin/demo/status',{cache:'no-store'});
+                if(!response.ok)throw new Error('HTTP '+response.status);
+                const result=await response.json();
+                const messages={
+                  CONNECTED_READ_ONLY:'اتصال موفق است؛ احراز هویت و خواندن اطلاعات حساب تأیید شد.',
+                  NOT_CONFIGURED:'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
+                  AUTH_FAILED:'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
+                  CONNECTION_FAILED:'اتصال به BloFin Demo برقرار نشد؛ شبکه یا محدودیت IP را بررسی کن.',
+                  UNKNOWN:'نتیجه آزمون نامشخص است؛ آزمون را بعداً تکرار کن.'
+                };
+                status.textContent=messages[result.status]||messages.UNKNOWN;
+                safety.textContent='محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال';
+              }catch(error){
+                status.textContent='دریافت نتیجه آزمون ممکن نشد؛ اتصال داشبورد را بررسی کن.';
+              }finally{
+                button.disabled=false;
+              }
+            });
+          })();
+          </script>
         </section>
         <section class="card" id="exchange-shortcuts">
           <h2>ورود سریع به صرافی‌ها</h2>
