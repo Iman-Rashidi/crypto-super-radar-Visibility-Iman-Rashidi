@@ -68,13 +68,16 @@ def _blofin_demo_connection_status() -> dict:
             "BLOFIN_DEMO_PASSPHRASE",
         )
         configured = all(bool(os.getenv(name, "").strip()) for name in credential_names)
+        stage = "ENVIRONMENT_CHECK"
+        market_data = "NOT_CHECKED"
+        private_api = "NOT_CHECKED"
         if not configured:
             payload = {
                 "status": "NOT_CONFIGURED",
                 "environment": "BLOFIN_DEMO",
                 "permission_mode": "READ_ONLY",
-                "market_data": "NOT_CHECKED",
-                "private_api": "NOT_CHECKED",
+                "market_data": market_data,
+                "private_api": private_api,
                 "orders_enabled": False,
                 "message_fa": "سه متغیر API Key، Secret Key و Passphrase باید در Environment همین سرویس تنظیم شوند.",
             }
@@ -82,22 +85,36 @@ def _blofin_demo_connection_status() -> dict:
         else:
             try:
                 client = BloFinDemoReadOnly(timeout=8.0)
+
+                stage = "PUBLIC_MARKET_TICKER"
                 tickers = client.get_tickers(inst_id="BTC-USDT")
                 if not isinstance(tickers, list) or not tickers or not isinstance(tickers[0], dict):
                     raise BloFinDemoResponseError("BloFin Demo ticker response is unavailable.")
+                market_data = "PASS"
+
+                stage = "PRIVATE_FUTURES_BALANCE"
+                private_api = "IN_PROGRESS"
                 balance = client.get_futures_balance(product_type="USDT-FUTURES")
                 if not isinstance(balance, dict):
                     raise BloFinDemoResponseError("BloFin Demo futures balance response is invalid.")
+
+                stage = "PRIVATE_POSITIONS"
                 positions = client.get_positions()
+                if not isinstance(positions, list):
+                    raise BloFinDemoResponseError("BloFin Demo positions response is invalid.")
+
+                stage = "PRIVATE_OPEN_ORDERS"
                 orders = client.get_open_orders()
-                if not isinstance(positions, list) or not isinstance(orders, list):
-                    raise BloFinDemoResponseError("BloFin Demo account read response is invalid.")
+                if not isinstance(orders, list):
+                    raise BloFinDemoResponseError("BloFin Demo open-orders response is invalid.")
+
+                private_api = "PASS"
                 payload = {
                     "status": "CONNECTED_READ_ONLY",
                     "environment": "BLOFIN_DEMO",
                     "permission_mode": "READ_ONLY",
-                    "market_data": "PASS",
-                    "private_api": "PASS",
+                    "market_data": market_data,
+                    "private_api": private_api,
                     "orders_enabled": False,
                     "message_fa": "اتصال Demo و احراز هویت API موفق است. ربات هنوز فقط اطلاعات را می‌خواند و هیچ سفارشی ارسال نمی‌کند.",
                 }
@@ -107,22 +124,35 @@ def _blofin_demo_connection_status() -> dict:
                     "status": "AUTH_FAILED",
                     "environment": "BLOFIN_DEMO",
                     "permission_mode": "READ_ONLY",
-                    "market_data": "UNKNOWN",
-                    "private_api": "FAIL",
+                    "market_data": market_data,
+                    "private_api": "FAIL" if stage.startswith("PRIVATE_") else "NOT_CHECKED",
                     "orders_enabled": False,
-                    "message_fa": "احراز هویت ناموفق بود؛ کلید، Secret، Passphrase و مجوز READ را در Render بررسی کن.",
+                    "failed_stage": stage,
+                    "message_fa": "BloFin احراز هویت API را رد کرد؛ API Key، Secret، Passphrase و مجوز READ را بررسی کن.",
                 }
                 cache_seconds = 20
             except BloFinDemoError as exc:
+                cause = getattr(exc, "__cause__", None)
+                response = getattr(cause, "response", None)
+                http_status = getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+                if http_status == 403:
+                    message_fa = "BloFin درخواست را با HTTP 403 رد کرده است؛ محدودیت Firewall یا IP بررسی شود و از تکرار سریع درخواست خودداری کن."
+                elif http_status == 429:
+                    message_fa = "BloFin محدودیت تعداد درخواست اعمال کرده است؛ پیش از آزمایش بعدی مکث کن."
+                else:
+                    message_fa = "درخواست به BloFin کامل نشد؛ مرحله و نوع خطای فنی برای تشخیص دقیق ثبت شده است."
                 payload = {
                     "status": "CONNECTION_FAILED",
                     "environment": "BLOFIN_DEMO",
                     "permission_mode": "READ_ONLY",
-                    "market_data": "UNKNOWN",
-                    "private_api": "UNKNOWN",
+                    "market_data": "FAIL" if stage == "PUBLIC_MARKET_TICKER" else market_data,
+                    "private_api": "FAIL" if stage.startswith("PRIVATE_") else private_api,
                     "orders_enabled": False,
-                    "message_fa": "ارتباط با BloFin Demo کامل نشد. دسترسی شبکه، محدودیت IP و وضعیت API را بررسی کن.",
+                    "failed_stage": stage,
                     "error_type": type(exc).__name__,
+                    "cause_type": type(cause).__name__ if cause is not None else None,
+                    "http_status": http_status,
+                    "message_fa": message_fa,
                 }
                 cache_seconds = 20
             except Exception as exc:
@@ -130,11 +160,12 @@ def _blofin_demo_connection_status() -> dict:
                     "status": "UNKNOWN",
                     "environment": "BLOFIN_DEMO",
                     "permission_mode": "READ_ONLY",
-                    "market_data": "UNKNOWN",
-                    "private_api": "UNKNOWN",
+                    "market_data": market_data,
+                    "private_api": private_api,
                     "orders_enabled": False,
-                    "message_fa": "آزمون اتصال با خطای پیش‌بینی‌نشده متوقف شد؛ جزئیات داخلی در پاسخ عمومی نمایش داده نمی‌شود.",
+                    "failed_stage": stage,
                     "error_type": type(exc).__name__,
+                    "message_fa": "آزمون اتصال با خطای پیش‌بینی‌نشده متوقف شد؛ اطلاعات محرمانه در پاسخ عمومی نمایش داده نمی‌شود.",
                 }
                 cache_seconds = 20
 
