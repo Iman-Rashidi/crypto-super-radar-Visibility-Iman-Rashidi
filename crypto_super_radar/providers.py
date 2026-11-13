@@ -810,12 +810,15 @@ class PerpetualMarketProvider:
         """Return independently checked USD-M/Bybit mark, funding and top-of-book data."""
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             binance_book_future = executor.submit(
                 self.http.get, f"{self.BINANCE}/fapi/v1/ticker/bookTicker", {"symbol": symbol}
             )
             binance_mark_future = executor.submit(
                 self.http.get, f"{self.BINANCE}/fapi/v1/premiumIndex", {"symbol": symbol}
+            )
+            binance_oi_future = executor.submit(
+                self.http.get, f"{self.BINANCE}/fapi/v1/openInterest", {"symbol": symbol}
             )
             bybit_future = executor.submit(
                 self.http.get, f"{self.BYBIT}/v5/market/tickers",
@@ -823,9 +826,10 @@ class PerpetualMarketProvider:
             )
             book = binance_book_future.result()
             premium = binance_mark_future.result()
+            binance_oi = binance_oi_future.result()
             bybit_payload = bybit_future.result()
 
-        if not isinstance(book, dict) or not isinstance(premium, dict):
+        if not isinstance(book, dict) or not isinstance(premium, dict) or not isinstance(binance_oi, dict):
             raise DataProviderError("Binance perpetual order-book/mark response has an invalid schema")
         if not isinstance(bybit_payload, dict) or bybit_payload.get("retCode") not in (0, "0"):
             raise DataProviderError("Bybit perpetual ticker returned an API error")
@@ -847,6 +851,7 @@ class PerpetualMarketProvider:
             "bybit_ask": _positive_float(bybit.get("ask1Price")),
             "bybit_funding": _finite_float(bybit.get("fundingRate")),
             "bybit_time": _positive_float(bybit_payload.get("time")),
+            "binance_open_interest": _positive_float(binance_oi.get("openInterest")),
             "bybit_open_interest": _positive_float(bybit.get("openInterest")),
         }
         if any(value is None for value in values.values()):
@@ -886,7 +891,7 @@ class PerpetualMarketProvider:
             "best_ask": best_ask,
             "funding_rate": (values["binance_funding"] + values["bybit_funding"]) / 2.0,
             "funding_interval_hours": funding_interval,
-            "open_interest_binance": None,
+            "open_interest_binance": values["binance_open_interest"],
             "open_interest_bybit": values["bybit_open_interest"],
             "mark_price_discrepancy_pct": mark_discrepancy,
             "index_price_discrepancy_pct": index_discrepancy,
