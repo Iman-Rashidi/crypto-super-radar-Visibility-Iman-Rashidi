@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import hashlib
+import hmac
 import copy
 import concurrent.futures
 import json
@@ -184,6 +185,98 @@ def _blofin_demo_connection_status() -> dict:
         BLOFIN_STATUS_CACHE["payload"] = copy.deepcopy(payload)
         BLOFIN_STATUS_CACHE["expires_at"] = time.monotonic() + cache_seconds
         return copy.deepcopy(payload)
+
+
+def _blofin_dashboard_token_valid(auth_header: str, expected_token: str) -> bool:
+    """Validate the separate dashboard token without logging or exposing it."""
+    if not expected_token or not isinstance(auth_header, str):
+        return False
+    scheme, separator, supplied = auth_header.partition(" ")
+    return bool(
+        separator
+        and scheme.lower() == "bearer"
+        and supplied
+        and hmac.compare_digest(supplied, expected_token)
+    )
+
+
+def _blofin_demo_account_snapshot() -> dict:
+    """Fetch a deliberately whitelisted read-only account snapshot from BloFin Demo."""
+    try:
+        client = BloFinDemoReadOnly(timeout=8.0)
+        balance = client.get_futures_balance(product_type="USDT-FUTURES")
+        positions = client.get_positions()
+        open_orders = client.get_open_orders()
+        if not isinstance(balance, dict) or not isinstance(positions, list) or not isinstance(open_orders, list):
+            raise BloFinDemoResponseError("BloFin account response has an unexpected shape.")
+
+        def pick(row: dict, allowed: tuple[str, ...]) -> dict:
+            return {key: row[key] for key in allowed if key in row}
+
+        details = balance.get("details")
+        details = details if isinstance(details, list) else []
+        position_fields = (
+            "instId", "marginMode", "positionSide", "leverage", "positions",
+            "availablePositions", "averagePrice", "markPrice", "liquidationPrice",
+            "unrealizedPnl", "unrealizedPnlRatio", "initialMargin",
+            "maintenanceMargin", "createTime", "updateTime",
+        )
+        order_fields = (
+            "instId", "side", "positionSide", "orderType", "price", "size",
+            "filledSize", "filledAmount", "state", "createTime", "updateTime",
+        )
+        balance_fields = (
+            "currency", "equity", "balance", "available", "availableEquity",
+            "frozen", "orderFrozen", "equityUsd", "isolatedUnrealizedPnl", "bonus",
+        )
+        return {
+            "status": "CONNECTED_READ_ONLY",
+            "environment": "BLOFIN_DEMO",
+            "permission_mode": "READ_ONLY",
+            "orders_enabled": False,
+            "balance": {
+                "ts": balance.get("ts"),
+                "totalEquity": balance.get("totalEquity"),
+                "isolatedEquity": balance.get("isolatedEquity"),
+                "details": [
+                    pick(row, balance_fields) for row in details if isinstance(row, dict)
+                ],
+            },
+            "positions": [
+                pick(row, position_fields) for row in positions if isinstance(row, dict)
+            ],
+            "open_orders": [
+                pick(row, order_fields) for row in open_orders if isinstance(row, dict)
+            ],
+            "message_fa": "اطلاعات حساب Demo فقط خوانده شده است؛ هیچ سفارش یا تغییری ارسال نشده است.",
+        }
+    except BloFinDemoAuthError:
+        return {
+            "status": "AUTH_FAILED",
+            "environment": "BLOFIN_DEMO",
+            "permission_mode": "READ_ONLY",
+            "orders_enabled": False,
+            "message_fa": "BloFin احراز هویت درخواست خواندن حساب را رد کرد.",
+        }
+    except BloFinDemoError as exc:
+        return {
+            "status": "READ_FAILED",
+            "environment": "BLOFIN_DEMO",
+            "permission_mode": "READ_ONLY",
+            "orders_enabled": False,
+            "error_type": type(exc).__name__,
+            "message_fa": "خواندن اطلاعات حساب از BloFin Demo کامل نشد.",
+        }
+    except Exception as exc:
+        return {
+            "status": "UNKNOWN",
+            "environment": "BLOFIN_DEMO",
+            "permission_mode": "READ_ONLY",
+            "orders_enabled": False,
+            "error_type": type(exc).__name__,
+            "message_fa": "خواندن حساب با خطای پیش‌بینی‌نشده متوقف شد.",
+        }
+
 
 COMMON_ASSET_NAMES = {
     "BTC": ("Bitcoin", "بیت‌کوین"), "ETH": ("Ethereum", "اتریوم"),
@@ -2218,6 +2311,22 @@ class Handler(BaseHTTPRequestHandler):
             payload = _blofin_demo_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/blofin/demo/account":
+            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+            if not expected_token:
+                payload = {"status": "ACCESS_NOT_CONFIGURED", "orders_enabled": False,
+                           "message_fa": "توکن دسترسی پنل حساب در Environment تنظیم نشده است."}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                payload = {"status": "UNAUTHORIZED", "orders_enabled": False,
+                           "message_fa": "توکن دسترسی پنل معتبر نیست."}
+                return self._send(401, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            payload = _blofin_demo_account_snapshot()
+            status_code = 200 if payload.get("status") == "CONNECTED_READ_ONLY" else 502
+            return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/dex-search":
             query = parse_qs(parsed.query).get("q", [""])[0]
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
@@ -2330,28 +2439,41 @@ class Handler(BaseHTTPRequestHandler):
           </div>
         </section>
         <section class="card" id="blofin-demo-panel">
-          <h2>BloFin Demo Futures · اتصال API</h2>
-          <p class="muted">آزمون اتصال به محیط آزمایشی BloFin با مجوز فقط‌خواندنی. پاسخ داشبورد هیچ کلید، موجودی یا جزئیات خصوصی حساب را نمایش نمی‌دهد.</p>
+          <h2>BloFin Demo Futures · اتصال و حساب فقط‌خواندنی</h2>
+          <p class="muted">اتصال API به‌صورت خودکار بررسی می‌شود. برای دیدن موجودی، پوزیشن‌ها و سفارش‌های باز، توکن مستقل پنل را وارد کن. این توکن در مرورگر ذخیره نمی‌شود.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="blofin-demo-check" type="button">بررسی اتصال BloFin Demo</button>
             <span id="blofin-demo-status" class="muted" aria-live="polite">اتصال هنوز بررسی نشده است.</span>
           </div>
-          <p class="muted" id="blofin-demo-safety">وضعیت سفارش: غیرفعال · هیچ سفارش یا انتقال وجهی ارسال نمی‌شود.</p>
+          <div class="grid" style="align-items:center;margin:12px 0">
+            <input id="blofin-dashboard-token" type="password" autocomplete="off" placeholder="توکن دسترسی پنل حساب" aria-label="توکن دسترسی پنل حساب">
+            <button id="blofin-demo-account-read" type="button">خواندن اطلاعات حساب</button>
+            <button id="blofin-demo-account-clear" type="button">پاک‌کردن توکن و اطلاعات</button>
+          </div>
+          <p class="muted" id="blofin-demo-account-status" aria-live="polite">اطلاعات خصوصی حساب تا زمان تأیید توکن نمایش داده نمی‌شود.</p>
+          <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
+          <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال</p>
           <script>
           (function(){
-            const button=document.getElementById('blofin-demo-check');
+            const checkButton=document.getElementById('blofin-demo-check');
             const status=document.getElementById('blofin-demo-status');
+            const accountButton=document.getElementById('blofin-demo-account-read');
+            const clearButton=document.getElementById('blofin-demo-account-clear');
+            const tokenInput=document.getElementById('blofin-dashboard-token');
+            const accountStatus=document.getElementById('blofin-demo-account-status');
+            const accountView=document.getElementById('blofin-demo-account-view');
             const safety=document.getElementById('blofin-demo-safety');
-            if(!button||!status||!safety)return;
-            button.addEventListener('click',async function(){
-              button.disabled=true;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety)return;
+
+            checkButton.addEventListener('click',async function(){
+              checkButton.disabled=true;
               status.textContent='در حال بررسی اتصال امن به BloFin Demo...';
               try{
                 const response=await fetch('/api/blofin/demo/status',{cache:'no-store'});
                 if(!response.ok)throw new Error('HTTP '+response.status);
                 const result=await response.json();
                 const messages={
-                  CONNECTED_READ_ONLY:'اتصال موفق است؛ احراز هویت و خواندن اطلاعات حساب تأیید شد.',
+                  CONNECTED_READ_ONLY:'اتصال موفق است؛ بازار، موجودی Futures، پوزیشن‌ها و سفارش‌های باز با مجوز فقط‌خواندنی تأیید شدند.',
                   NOT_CONFIGURED:'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
                   AUTH_FAILED:'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
                   CONNECTION_FAILED:'اتصال به BloFin Demo برقرار نشد؛ شبکه یا محدودیت IP را بررسی کن.',
@@ -2362,8 +2484,104 @@ class Handler(BaseHTTPRequestHandler):
               }catch(error){
                 status.textContent='دریافت نتیجه آزمون ممکن نشد؛ اتصال داشبورد را بررسی کن.';
               }finally{
-                button.disabled=false;
+                checkButton.disabled=false;
               }
+            });
+
+            function addText(parent,tag,value){
+              const node=document.createElement(tag);
+              node.textContent=value===null||value===undefined||value===''?'—':String(value);
+              parent.appendChild(node);
+              return node;
+            }
+            function renderAccount(result){
+              accountView.replaceChildren();
+              const balance=result.balance||{};
+              const summary=document.createElement('div');
+              summary.className='grid';
+              [['ارزش کل حساب (USD)',balance.totalEquity],['ارزش مارجین ایزوله',balance.isolatedEquity],
+               ['تعداد پوزیشن‌ها',(result.positions||[]).length],['سفارش‌های باز',(result.open_orders||[]).length]]
+                .forEach(([label,value])=>{
+                  const metric=document.createElement('div');
+                  metric.className='metric';
+                  addText(metric,'span',label);
+                  addText(metric,'strong',value);
+                  summary.appendChild(metric);
+                });
+              accountView.appendChild(summary);
+
+              function table(title,rows,columns){
+                const heading=document.createElement('h3');
+                heading.textContent=title;
+                accountView.appendChild(heading);
+                if(!rows||!rows.length){
+                  addText(accountView,'p','موردی ثبت نشده است.');
+                  return;
+                }
+                const wrapper=document.createElement('div');
+                wrapper.style.overflowX='auto';
+                const tbl=document.createElement('table');
+                const head=document.createElement('tr');
+                columns.forEach(([key,label])=>addText(head,'th',label));
+                tbl.appendChild(head);
+                rows.forEach(row=>{
+                  const tr=document.createElement('tr');
+                  columns.forEach(([key])=>addText(tr,'td',row[key]));
+                  tbl.appendChild(tr);
+                });
+                wrapper.appendChild(tbl);
+                accountView.appendChild(wrapper);
+              }
+              table('دارایی‌های Futures',balance.details||[],[
+                ['currency','ارز'],['equity','Equity'],['balance','Balance'],
+                ['available','Available'],['frozen','Frozen'],['equityUsd','ارزش دلاری']
+              ]);
+              table('پوزیشن‌های باز',result.positions||[],[
+                ['instId','نماد'],['positionSide','جهت'],['positions','حجم'],
+                ['averagePrice','قیمت ورود'],['markPrice','Mark Price'],
+                ['unrealizedPnl','سود/زیان شناور'],['leverage','اهرم'],['liquidationPrice','قیمت لیکویید']
+              ]);
+              table('سفارش‌های باز',result.open_orders||[],[
+                ['instId','نماد'],['side','سمت'],['orderType','نوع'],
+                ['price','قیمت'],['size','حجم'],['filledSize','پرشده'],['state','وضعیت']
+              ]);
+            }
+
+            accountButton.addEventListener('click',async function(){
+              const token=tokenInput.value.trim();
+              if(!token){
+                accountStatus.textContent='ابتدا توکن پنل را وارد کن.';
+                return;
+              }
+              accountButton.disabled=true;
+              accountStatus.textContent='در حال خواندن امن اطلاعات حساب...';
+              accountView.replaceChildren();
+              try{
+                const response=await fetch('/api/blofin/demo/account',{
+                  method:'GET',cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                });
+                const result=await response.json();
+                if(!response.ok){
+                  accountStatus.textContent=result.message_fa||'خواندن اطلاعات حساب ناموفق بود.';
+                  return;
+                }
+                if(result.status!=='CONNECTED_READ_ONLY'){
+                  accountStatus.textContent=result.message_fa||'پاسخ حساب معتبر نیست.';
+                  return;
+                }
+                renderAccount(result);
+                accountStatus.textContent='اطلاعات حساب Demo دریافت شد. زمان دریافت: '+new Date().toLocaleString();
+                safety.textContent='محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال';
+              }catch(error){
+                accountStatus.textContent='ارتباط با پنل حساب برقرار نشد.';
+              }finally{
+                accountButton.disabled=false;
+              }
+            });
+            clearButton.addEventListener('click',function(){
+              tokenInput.value='';
+              accountView.replaceChildren();
+              accountStatus.textContent='توکن و اطلاعات نمایش‌داده‌شده از صفحه پاک شدند.';
             });
           })();
           </script>
