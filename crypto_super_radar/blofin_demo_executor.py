@@ -520,6 +520,14 @@ class BloFinDemoEventStore:
             "drawdown_pct": max(0.0, (peak - equity) / peak),
         }
 
+    def has_any_orders(self) -> bool:
+        """Return whether this one-shot Demo service has ever reserved an order."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM blofin_demo_orders LIMIT 1"
+            ).fetchone()
+        return row is not None
+
     def get_order(self, client_order_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(
@@ -636,6 +644,7 @@ class BloFinDemoExecutor:
         inst_id: str,
         leverage: int = 1,
         allow_demo_orders: bool = False,
+        minimum_size_only: bool = False,
     ) -> dict[str, Any]:
         if not allow_demo_orders or not self.trading_enabled:
             raise BloFinDemoExecutionBlocked("Demo order execution is disabled by the two-key safety gate.")
@@ -643,6 +652,8 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("Only the pinned BloFin Demo host is permitted.")
         if self.store.backend != "TURSO_CLOUD_SQLITE":
             raise BloFinDemoExecutionBlocked("Durable Turso storage is required before Demo trading.")
+        if self.store.has_any_orders():
+            raise BloFinDemoExecutionBlocked("This Demo service is limited to one lifetime order; an order is already reserved.")
         if not all((
             self.client.api_key, self.client.api_secret, self.client.passphrase
         )):
@@ -690,6 +701,28 @@ class BloFinDemoExecutor:
             record, instrument, inst_id=inst_id, equity_usdt=equity,
             leverage=int(leverage), policy=self.policy,
         )
+        if minimum_size_only:
+            lot_size = _decimal(instrument.get("lotSize"), "lotSize")
+            min_size = _decimal(instrument.get("minSize"), "minSize")
+            quantity = (min_size / lot_size).to_integral_value(rounding=ROUND_CEILING) * lot_size
+            max_market_size = instrument.get("maxMarketSize")
+            if max_market_size not in (None, "") and quantity > _decimal(max_market_size, "maxMarketSize"):
+                raise BloFinDemoExecutionBlocked("The contract minimum exceeds its maximum market-order size.")
+            contract_value = _decimal(instrument.get("contractValue"), "contractValue")
+            entry = _decimal(plan["entry_reference_price"], "entry_reference_price")
+            stop = _decimal(plan["stop_loss"], "stop_loss")
+            quantity_risk = abs(entry - stop) * contract_value * quantity
+            quantity_notional = entry * contract_value * quantity
+            quantity_margin = quantity_notional / Decimal(int(leverage))
+            if quantity_risk > _decimal(plan["risk_budget_usdt"], "risk_budget_usdt"):
+                raise BloFinDemoExecutionBlocked("The minimum contract size exceeds the configured per-trade risk budget.")
+            if quantity_margin > equity * Decimal(str(self.policy.max_margin_usage_pct)):
+                raise BloFinDemoExecutionBlocked("The minimum contract size exceeds the permitted isolated-margin budget.")
+            plan["quantity"] = _format_decimal(quantity)
+            plan["risk_per_contract_usdt"] = float(abs(entry - stop) * contract_value)
+            plan["notional_usdt"] = float(quantity_notional)
+            plan["estimated_initial_margin_usdt"] = float(quantity_margin)
+            plan["minimum_size_only"] = True
         if not self.store.reserve_order(plan):
             raise BloFinDemoExecutionBlocked("This signal/order ID was already reserved; duplicate entry blocked.")
 
