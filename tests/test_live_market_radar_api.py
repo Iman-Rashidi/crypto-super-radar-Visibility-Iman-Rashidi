@@ -60,7 +60,7 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         status = response.status
         payload = response.read()
         connection.close()
-        return status, json.loads(payload)
+        return status, payload
 
     def setUp(self):
         with web_app.LIVE_MARKET_RADAR_CACHE_LOCK:
@@ -73,9 +73,10 @@ class LiveMarketRadarApiTests(unittest.TestCase):
              patch("crypto_super_radar.live_market_radar.datetime") as clock:
             clock.now.return_value = datetime(2025, 1, 1, 5, 3, tzinfo=timezone.utc)
             clock.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
-            status, payload = self.request(
+            status, raw_payload = self.request(
                 "/api/live-market-radar?symbol=BTCUSDT&interval=5m&refresh=1"
             )
+        payload = json.loads(raw_payload)
         self.assertEqual(status, 200)
         self.assertEqual(payload["cross_validation"]["status"], "PASS")
         self.assertEqual(payload["signal"]["signal"], "BUY")
@@ -89,28 +90,35 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         frame = candle_frame()
         with patch.object(web_app.ENGINE.data.binance, "candles", return_value=frame), \
              patch.object(web_app.ENGINE.data.bybit, "candles", side_effect=RuntimeError("rate limited")):
-            status, payload = self.request(
+            status, raw_payload = self.request(
                 "/api/live-market-radar?symbol=BTCUSDT&interval=5m&refresh=1"
             )
+        payload = json.loads(raw_payload)
         self.assertEqual(status, 200)
         self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
         self.assertNotIn(payload["signal"]["signal"], {"BUY", "SELL"})
         self.assertEqual(payload["signal"]["status"], "BLOCKED")
 
     def test_symbol_outside_curated_market_universe_is_rejected(self):
-        status, payload = self.request(
+        status, raw_payload = self.request(
             "/api/live-market-radar?symbol=UNKNOWNUSDT&interval=5m"
         )
+        payload = json.loads(raw_payload)
         self.assertEqual(status, 400)
         self.assertEqual(payload["status"], "UNKNOWN")
         self.assertFalse(payload["orders_submitted"])
 
     def test_home_page_includes_live_candle_controls_in_paper_bot(self):
-        status, payload = self.request("/")
+        connection = HTTPConnection(self.host, self.port, timeout=5)
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        status = response.status
+        page = response.read().decode("utf-8")
+        connection.close()
         self.assertEqual(status, 200)
-        page = json.dumps(payload) if isinstance(payload, dict) else str(payload)
-        # The homepage is HTML; request helper JSON-decodes only JSON APIs.
-        self.assertTrue(page == "" or "live-market-radar" in page or status == 200)
+        self.assertIn('id="live-market-radar"', page)
+        self.assertIn('id="live-candle-chart"', page)
+        self.assertIn('/api/live-market-radar', page)
 
 
 if __name__ == "__main__":
