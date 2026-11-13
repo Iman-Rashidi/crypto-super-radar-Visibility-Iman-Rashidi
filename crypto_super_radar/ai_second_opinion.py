@@ -210,7 +210,7 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "\"news_sentiment\":{\"view\":\"BULLISH|BEARISH|NEUTRAL|UNKNOWN\",\"reason_fa\":\"...\"},"
         "\"bull_researcher\":{\"view\":\"SUPPORT|OPPOSE|UNCERTAIN\",\"reason_fa\":\"...\"},"
         "\"bear_researcher\":{\"view\":\"SUPPORT|OPPOSE|UNCERTAIN\",\"reason_fa\":\"...\"},"
-        "\"trader\":{\"proposal\":\"LONG|NO_TRADE\",\"reason_fa\":\"...\"},"
+        "\"trader\":{\"proposal\":\""+trader_choices+"\",\"reason_fa\":\"...\"},"
         "\"risk_manager\":{\"verdict\":\"APPROVE|REJECT|INSUFFICIENT_DATA\",\"reason_fa\":\"...\"},"
         "\"portfolio_manager\":{\"verdict\":\"APPROVE|REJECT|INSUFFICIENT_DATA\",\"reason_fa\":\"...\"}"
         "},"
@@ -219,7 +219,6 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "\"rationale_fa\":\"...\""
         "}. "
         + approval_rule + "Any other value must be rejected or marked insufficient. Keep every reason concise and in Persian."
-        "Any other value must be rejected or marked insufficient. Keep every reason concise and in Persian."
     )
     user = "Review this sanitized public market evidence for a paper-only second opinion:\n" + json.dumps(
         evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False
