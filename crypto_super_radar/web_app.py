@@ -3974,6 +3974,35 @@ class Handler(BaseHTTPRequestHandler):
           })();
           </script>
         </section>
+        <section class="card" id="ai-dry-run-panel">
+          <h2>تست واقعی یکپارچگی Nemotron · بدون معامله</h2>
+          <p class="muted">در این تست، درخواست واقعی و تازه به مدل انتخاب‌شده ارسال می‌شود؛ ورودی فقط یک سناریوی ساختگی BTC با ۱۲ فیلتر نمونه است، نه قیمت یا سیگنال زنده. قالب JSON، جهت LONG، نظر مدیریت ریسک و شناسه مدل بررسی می‌شود. حتی اگر مدل سناریو را تأیید کند، این خروجی اجازه ورود به Paper ندارد و هیچ پوزیشن یا سفارشی ساخته نمی‌شود. این تست از سهمیه API رایگان استفاده می‌کند.</p>
+          <button id="ai-dry-run-run" type="button">اجرای تست واقعی Nemotron (Dry-Run)</button>
+          <pre id="ai-dry-run-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          <script>
+          (function(){
+            const button=document.getElementById('ai-dry-run-run');
+            const output=document.getElementById('ai-dry-run-result');
+            if(!button||!output)return;
+            button.addEventListener('click',async function(){
+              button.disabled=true;
+              output.textContent='در حال ارسال سناریوی ساختگی به Nemotron و اعتبارسنجی پاسخ واقعی...';
+              try{
+                const response=await fetch('/api/ai/dry-run',{
+                  method:'POST',
+                  credentials:'same-origin',
+                  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                  body:'confirm=1'
+                });
+                const result=await response.json();
+                output.textContent=JSON.stringify(result,null,2);
+              }catch(error){
+                output.textContent='خطای ارتباط با مسیر Dry-Run؛ وضعیت سرویس را بررسی کن.';
+              }finally{button.disabled=false;}
+            });
+          })();
+          </script>
+        </section>
         <section class="card" id="global-market-board">
           <h2>پایش بازارهای جهانی · آمریکا، اروپا، ETF و ارز</h2>
           <p class="muted">این فهرست، لایهٔ دادهٔ بازارهای سنتی است و در کنار رادار رمزارز کار می‌کند. آمریکا، اروپا، ETF، جفت‌ارز و فلزات گران‌بها از مسیر مستقل داده دریافت می‌شوند؛ ساعات، ارز پایه و سطح دسترسی هر بازار جدا نگه داشته می‌شود.</p>
