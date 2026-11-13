@@ -66,13 +66,14 @@ def valid_document(rating="Buy", risk_verdict="APPROVE", portfolio_verdict="APPR
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, document=None):
+    def __init__(self, status_code=200, document=None, model=DEFAULT_FREE_MODEL):
         self.status_code = status_code
         self.document = document or {}
+        self.model = model
 
     def json(self):
         return {
-            "model": DEFAULT_FREE_MODEL,
+            "model": self.model,
             "usage": {"total_tokens": 99},
             "choices": [{
                 "message": {"content": json.dumps(self.document, ensure_ascii=False)}
@@ -370,7 +371,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
 
         def fake_post(url, headers, json, timeout, allow_redirects=False):
             models.append(json["model"])
-            return FakeResponse(document=valid_document())
+            return FakeResponse(document=valid_document(), model=json["model"])
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
             first = run_free_ai_second_opinion(
