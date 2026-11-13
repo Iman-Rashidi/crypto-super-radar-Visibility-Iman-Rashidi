@@ -188,7 +188,7 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         )
     else:
         direction_rule = "This is a SPOT LONG paper-entry review only. Short selling is not available. "
-        trader_choices = "LONG|NO_TRADE"
+        "\"trader\":{\"proposal\":\""+trader_choices+"\",\"reason_fa\":\"...\"},"
         approval_rule = (
             "Only final_rating Buy or Overweight, both risk and portfolio manager verdicts APPROVE, "
             "trader proposal LONG, and an empty risk_flags list can be APPROVED. "
@@ -218,7 +218,7 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "\"risk_flags\":[\"...\"],"
         "\"rationale_fa\":\"...\""
         "}. "
-        + approval_rule
+        + approval_rule + "Any other value must be rejected or marked insufficient. Keep every reason concise and in Persian."
         "Any other value must be rejected or marked insufficient. Keep every reason concise and in Persian."
     )
     user = "Review this sanitized public market evidence for a paper-only second opinion:\n" + json.dumps(
