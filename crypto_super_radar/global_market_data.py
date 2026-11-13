@@ -295,7 +295,7 @@ class GlobalMarketBoard:
         *,
         instruments: tuple[GlobalInstrument, ...] = GLOBAL_MARKET_UNIVERSE,
         provider: Optional[TwelveDataProvider] = None,
-        cache_ttl_seconds: int = 900,
+        cache_ttl_seconds: int = 3600,
     ):
         self.instruments = instruments
         self.provider = provider or TwelveDataProvider(http)
@@ -305,6 +305,11 @@ class GlobalMarketBoard:
         self._expires_at = 0.0
         self._refreshing = False
         self._last_error: Optional[str] = None
+        self._daily_date = datetime.now(timezone.utc).date()
+        self._daily_reserved_requests = 0
+        self._daily_request_budget = 700
+        self._minimum_refresh_seconds = 3600
+        self._last_refresh_started = 0.0
 
     def _missing_key_payload(self) -> dict[str, Any]:
         items = [
@@ -404,10 +409,21 @@ class GlobalMarketBoard:
             with self._lock:
                 self._refreshing = False
 
-    def _start_refresh(self) -> None:
+    def _start_refresh(self) -> bool:
         with self._lock:
             if self._refreshing:
-                return
+                return False
+            today = datetime.now(timezone.utc).date()
+            if today != self._daily_date:
+                self._daily_date = today
+                self._daily_reserved_requests = 0
+            now = time.monotonic()
+            if now - self._last_refresh_started < self._minimum_refresh_seconds:
+                return False
+            if self._daily_reserved_requests + len(self.instruments) > self._daily_request_budget:
+                return False
+            self._daily_reserved_requests += len(self.instruments)
+            self._last_refresh_started = now
             self._refreshing = True
         worker = threading.Thread(
             target=self._refresh_sync,
@@ -416,9 +432,11 @@ class GlobalMarketBoard:
         )
         try:
             worker.start()
+            return True
         except Exception:
             with self._lock:
                 self._refreshing = False
+                self._daily_reserved_requests = max(0, self._daily_reserved_requests - len(self.instruments))
             raise
 
     def get_board(self, *, force_refresh: bool = False) -> dict[str, Any]:
@@ -429,13 +447,35 @@ class GlobalMarketBoard:
             expired = self._expires_at <= time.monotonic()
             refreshing = self._refreshing
             last_error = self._last_error
+        refresh_blocked = False
         if force_refresh or cache is None or expired:
+            started = False
             if not refreshing:
-                self._start_refresh()
+                started = self._start_refresh()
+                refresh_blocked = not started
             with self._lock:
                 cache = copy.deepcopy(self._cache)
                 refreshing = self._refreshing
                 last_error = self._last_error
+                daily_reserved = self._daily_reserved_requests
+                daily_budget = self._daily_request_budget
+            if cache is None and refresh_blocked:
+                return {
+                    "status": "DAILY_BUDGET_OR_REFRESH_COOLDOWN",
+                    "provider": "Twelve Data",
+                    "configured": True,
+                    "validation_status": "SINGLE_SOURCE_ONLY",
+                    "trade_eligible": False,
+                    "orders_submitted": False,
+                    "updated_at_utc": None,
+                    "cache_ttl_seconds": self.cache_ttl_seconds,
+                    "refreshing": False,
+                    "items": [],
+                    "counts": {"total": len(self.instruments), "observed": 0, "unknown": len(self.instruments)},
+                    "daily_requests_reserved": daily_reserved,
+                    "daily_request_budget": daily_budget,
+                    "scope_note": "Refresh is throttled to protect provider quota; retry after the cooldown or UTC budget reset.",
+                }
             if cache is None:
                 return {
                     "status": "LOADING",
@@ -454,6 +494,9 @@ class GlobalMarketBoard:
         if cache is None:
             return self._missing_key_payload()
         cache["refreshing"] = refreshing
+        with self._lock:
+            cache["daily_requests_reserved"] = self._daily_reserved_requests
+            cache["daily_request_budget"] = self._daily_request_budget
         if expired and refreshing:
             cache["status"] = "STALE"
             for item in cache.get("items", []):
