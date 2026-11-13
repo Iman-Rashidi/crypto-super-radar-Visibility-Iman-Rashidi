@@ -13,6 +13,7 @@ import os
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from .ai_second_opinion import ai_connection_status, run_free_ai_second_opinion
@@ -24,7 +25,7 @@ from .paper_execution import PaperExecutionEventLedger
 FUTURES_PAPER_ASSETS = frozenset({
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT",
-    "TRXUSDT", "GRAMUSDT",
+    "TRXUSDT",
 })
 
 
@@ -82,8 +83,10 @@ class FuturesPaperLedger:
     def __init__(self, path: Optional[str] = None, initial_equity_usd: float = 10_000.0):
         if not math.isfinite(initial_equity_usd) or initial_equity_usd <= 0:
             raise ValueError("Initial futures paper equity must be positive and finite.")
-        selected_path = path or os.getenv("CSR_FUTURES_DB_PATH") or os.getenv("CSR_DB_PATH")
+        selected_path = path or os.getenv("CSR_FUTURES_DB_PATH") or "data/crypto_super_radar_futures.sqlite3"
         self.path = selected_path
+        if selected_path != ":memory:":
+            Path(selected_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._db = connect_database(selected_path)
         with self._db:
