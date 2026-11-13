@@ -217,7 +217,7 @@ def _geometric_patterns(
         out.append(_item(
             name_fa=name_fa, name_en=name_en, category="GEOMETRIC",
             direction=direction, state=state,
-            evidence_strength="MODERATE" if state == "CONFIRMED" else "WEAK",
+            strength="MODERATE" if state == "CONFIRMED" else "WEAK",
             description=description, timestamp=latest_time, score=score,
             trigger_price=trigger, invalidation_price=invalidation,
             potential_direction=potential_direction,
