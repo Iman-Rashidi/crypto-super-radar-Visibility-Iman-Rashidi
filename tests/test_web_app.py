@@ -93,7 +93,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('action="/futures-paper-bot/tick"', page)
         self.assertIn('value="perp:BTCUSDT"', page)
         self.assertIn("/futures-paper-bot/status", page)
-        self.assertIn("FUTURES_PAPER_ONLY", page)
+        self.assertIn("USDT-M Perpetual", page)
         self.assertIn("python scripts/paper_trading_bot.py", page)
         self.assertIn("ماشین‌حساب حرفه‌ای سناریوی Spot", page)
         self.assertIn('id="calc-amount"', page)
