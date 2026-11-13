@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Mapping
@@ -39,6 +40,24 @@ class BloFinDemoExecutionBlocked(RuntimeError):
 
 class BloFinDemoExecutionUnknown(RuntimeError):
     """An order request may have reached BloFin; reconcile before any retry."""
+
+
+_TRADE_WRITE_LOCK = threading.Lock()
+_TRADE_WRITE_TIMES: deque[float] = deque()
+
+
+def _wait_for_trade_write_slot() -> None:
+    """Keep this process below BloFin's 30 requests/10s trading endpoint cap."""
+    while True:
+        with _TRADE_WRITE_LOCK:
+            now = time.monotonic()
+            while _TRADE_WRITE_TIMES and now - _TRADE_WRITE_TIMES[0] >= 10.0:
+                _TRADE_WRITE_TIMES.popleft()
+            if len(_TRADE_WRITE_TIMES) < 25:
+                _TRADE_WRITE_TIMES.append(now)
+                return
+            delay = max(0.05, 10.0 - (now - _TRADE_WRITE_TIMES[0]) + 0.05)
+        time.sleep(delay)
 
 
 def _finite(value: Any, field: str, *, minimum: float | None = None) -> float:
@@ -273,6 +292,7 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             "ACCESS-PASSPHRASE": self.passphrase,
             "Content-Type": "application/json",
         }
+        _wait_for_trade_write_slot()
         try:
             response = self.session.post(
                 f"{self.base_url}{path}",
