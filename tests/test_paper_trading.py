@@ -213,6 +213,46 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertIn("DAILY_LOSS_LIMIT", result["risk_controls"]["halt_reasons"])
         self.assertIsNone(ledger.position())
 
+    def test_market_snapshot_is_refetched_after_ai_review(self):
+        initial = self.engine.data.snapshots["cex:BTCUSDT"]
+        initial.raw = {
+            "provider_a": {
+                "bid_price": 99.9, "ask_price": 100.1,
+                "quote_timestamp_ms": int(time.time() * 1000),
+                "provider": "TestExchange",
+            }
+        }
+
+        def reviewer(result, asset):
+            # Simulate a newer provider response replacing the cached snapshot
+            # while the external AI review is in flight.
+            self.engine.data.snapshots[asset.raw] = SimpleNamespace(
+                price_usd=100.0,
+                raw={"provider_a": {
+                    "bid_price": 100.2, "ask_price": 100.4,
+                    "quote_timestamp_ms": int(time.time() * 1000) + 1_000,
+                    "provider": "TestExchange",
+                }},
+            )
+            return {"status": "APPROVED", "paper_entry_eligible": True}
+
+        bot = PaperTradingBot(self.engine, ledger=self.ledger, ai_reviewer=reviewer)
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "NO_TRADE")
+        self.assertIn("quote changed", result["reason"])
+        self.assertIsNone(self.ledger.position())
+
+    def test_market_price_change_during_ai_review_blocks_entry_without_quotes(self):
+        def reviewer(result, asset):
+            self.engine.data.snapshots[asset.raw] = SimpleNamespace(price_usd=101.0)
+            return {"status": "APPROVED", "paper_entry_eligible": True}
+
+        bot = PaperTradingBot(self.engine, ledger=self.ledger, ai_reviewer=reviewer)
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "NO_TRADE")
+        self.assertIn("price changed", result["reason"])
+        self.assertIsNone(self.ledger.position())
+
     def test_missing_or_non_approving_ai_blocks_new_paper_entry(self):
         bot = PaperTradingBot(
             self.engine,
