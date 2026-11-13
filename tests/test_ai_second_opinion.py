@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from crypto_super_radar.ai_second_opinion import (
     DEFAULT_FREE_MODEL,
+    MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
     run_free_ai_second_opinion,
 )
@@ -81,6 +82,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         with ai_second_opinion._LOCK:
             ai_second_opinion._CACHE.clear()
             ai_second_opinion._REQUEST_COUNTS.clear()
+            ai_second_opinion._MINUTE_REQUEST_TIMESTAMPS.clear()
 
     def test_missing_api_key_is_unknown_and_not_tradeable(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -205,6 +207,27 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(first["paper_entry_eligible"])
         self.assertTrue(second["paper_entry_eligible"])
         self.assertEqual(models, [DEFAULT_FREE_MODEL, "another/free-model:free"])
+
+    def test_local_per_minute_cap_blocks_request_before_provider_call(self):
+        calls = {"count": 0}
+
+        def rate_limited(url, headers, json, timeout, allow_redirects=False):
+            calls["count"] += 1
+            return FakeResponse(status_code=429)
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            for _ in range(MAX_REQUESTS_PER_MINUTE):
+                result = run_free_ai_second_opinion(
+                    valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=rate_limited
+                )
+                self.assertEqual(result["status"], "RATE_LIMITED")
+            blocked = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=rate_limited
+            )
+
+        self.assertEqual(calls["count"], MAX_REQUESTS_PER_MINUTE)
+        self.assertEqual(blocked["status"], "RATE_LIMITED")
+        self.assertFalse(blocked["paper_entry_eligible"])
 
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
