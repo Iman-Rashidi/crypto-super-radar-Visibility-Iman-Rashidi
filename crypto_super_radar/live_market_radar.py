@@ -297,7 +297,8 @@ def build_live_market_radar_payload(
         raise ValueError("no completed candles are available")
     last_closed_end = _interval_end(closed.index[-1], normalized_interval)
     age_seconds = max(0.0, float((current - last_closed_end).total_seconds()))
-    freshness_status = "FRESH" if age_seconds <= (interval_ms / 1000.0) * 1.5 else "STALE"
+    freshness_grace_seconds = max((interval_ms / 1000.0) * 1.5, 5.0 if normalized_interval == "1s" else 0.0)
+    freshness_status = "FRESH" if age_seconds <= freshness_grace_seconds else "STALE"
 
     provider_discrepancy = None
     cross_validation = "UNKNOWN"
