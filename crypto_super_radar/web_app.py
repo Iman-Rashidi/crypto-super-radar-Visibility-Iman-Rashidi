@@ -37,6 +37,11 @@ from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError
+from .blofin_demo_executor import (
+    BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
+    BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
+)
+from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -55,6 +60,8 @@ SCAN_WORKER_STARTED = False
 
 BLOFIN_STATUS_CACHE = {"expires_at": 0.0, "payload": None}
 BLOFIN_STATUS_LOCK = threading.Lock()
+BLOFIN_EXECUTION_GUARD = threading.Lock()
+BLOFIN_EXECUTION_JOBS: dict[str, dict] = {}
 
 AI_DIAGNOSTIC_LOCK = threading.Lock()
 AI_DIAGNOSTIC_STATE = {"day": "", "count": 0, "last_started": 0.0}
@@ -2422,6 +2429,170 @@ def _ensure_scan_worker():
             return
         threading.Thread(target=_scan_queue_worker, daemon=True, name="crypto-scan-queue").start()
         SCAN_WORKER_STARTED = True
+
+
+
+def _blofin_demo_execution_readiness() -> dict:
+    """Expose non-secret prerequisites for one bounded Demo Futures order."""
+    trade_names = (
+        "BLOFIN_DEMO_TRADE_API_KEY",
+        "BLOFIN_DEMO_TRADE_API_SECRET",
+        "BLOFIN_DEMO_TRADE_PASSPHRASE",
+    )
+    trade_credentials_configured = all(bool(os.getenv(name, "").strip()) for name in trade_names)
+    trading_enabled = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
+    dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
+    try:
+        backend = storage_backend()
+    except Exception:
+        backend = "INVALID"
+    durable_storage = backend == "TURSO_CLOUD_SQLITE"
+    one_order_used = None
+    if backend in {"TURSO_CLOUD_SQLITE", "LOCAL_SQLITE"}:
+        try:
+            store = BloFinDemoEventStore()
+            try:
+                one_order_used = store.has_any_orders()
+            finally:
+                store.close()
+        except Exception:
+            one_order_used = None
+    ready = bool(
+        trade_credentials_configured and trading_enabled and dashboard_auth_configured
+        and durable_storage and one_order_used is False
+    )
+    return {
+        "status": "READY" if ready else "BLOCKED",
+        "environment": "BLOFIN_DEMO",
+        "trade_credentials_configured": trade_credentials_configured,
+        "trading_enabled": trading_enabled,
+        "durable_storage": durable_storage,
+        "dashboard_auth_configured": dashboard_auth_configured,
+        "one_order_available": one_order_used is False,
+        "one_order_used": one_order_used is True,
+        "leverage": 1,
+        "size_policy": "EXCHANGE_MINIMUM_CONTRACT_SIZE",
+        "message_fa": (
+            "پیش‌نیازهای سفارش یک‌باره Demo آماده‌اند؛ تحلیل زنده، ۱۲ گیت و تأیید Nemotron هنوز باید عبور کنند."
+            if ready else
+            "اجرای سفارش مسدود است؛ کلید Trade مستقل، فعال‌سازی کنترل سفارش، توکن پنل، Turso پایدار و سهمیه یک‌بارمصرف لازم است."
+        ),
+    }
+
+
+def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with LOCK:
+        current = BLOFIN_EXECUTION_JOBS.get(job_id, {})
+        current.update({"status": status, **values})
+        event = {
+            "time_utc": now,
+            "status": status,
+            "stage": values.get("stage") or current.get("stage") or status,
+            "message_fa": values.get("message_fa") or status,
+        }
+        events = current.setdefault("events", [])
+        if not events or any(
+            events[-1].get(key) != event.get(key)
+            for key in ("status", "stage", "message_fa")
+        ):
+            events.append(event)
+            current["events"] = events[-100:]
+        current["updated_at_utc"] = now
+        BLOFIN_EXECUTION_JOBS[job_id] = current
+
+
+def _blofin_demo_live_monitor_snapshot() -> dict:
+    """Fetch a fresh read-only Demo snapshot plus fills and closed-position history."""
+    client = BloFinDemoReadOnly(timeout=8.0)
+    store = BloFinDemoEventStore()
+    try:
+        latest = store.latest_order()
+        ticker_rows = client.get_tickers(inst_id="BTC-USDT")
+        balance = client.get_futures_balance(product_type="USDT-FUTURES")
+        positions = client.get_positions(inst_id="BTC-USDT")
+        open_orders = client.get_open_orders(inst_id="BTC-USDT")
+        order_detail = None
+        if latest:
+            detail = client.get_order_detail(
+                "BTC-USDT", client_order_id=str(latest["client_order_id"]),
+            )
+            if isinstance(detail, list):
+                order_detail = next((row for row in detail if isinstance(row, dict)), None)
+            elif isinstance(detail, dict):
+                order_detail = detail
+        fills = client.get_fills_history(inst_id="BTC-USDT", limit=100)
+        completed_orders = client.get_orders_history(inst_id="BTC-USDT", limit=20)
+        closed_positions = client.get_positions_history(
+            inst_id="BTC-USDT", state="closed", limit=20,
+        )
+
+        def rows(value, allowed):
+            if not isinstance(value, list):
+                return []
+            return [
+                {key: row[key] for key in allowed if key in row}
+                for row in value if isinstance(row, dict)
+            ]
+
+        ticker = ticker_rows[0] if isinstance(ticker_rows, list) and ticker_rows and isinstance(ticker_rows[0], dict) else {}
+        position_rows = rows(positions, (
+            "positionId", "instId", "marginMode", "positionSide", "positions",
+            "averagePrice", "markPrice", "unrealizedPnl", "unrealizedPnlRatio",
+            "leverage", "liquidationPrice", "createTime", "updateTime",
+        ))
+        order_rows = rows(open_orders, (
+            "orderId", "clientOrderId", "instId", "side", "positionSide",
+            "orderType", "size", "filledSize", "price", "state", "createTime", "updateTime",
+        ))
+        fill_rows = rows(fills, (
+            "tradeId", "orderId", "instId", "side", "fillPrice", "fillSize",
+            "fillPnl", "fee", "ts",
+        ))
+        completed_rows = rows(completed_orders, (
+            "orderId", "clientOrderId", "instId", "side", "orderType", "size",
+            "filledSize", "averagePrice", "fee", "pnl", "state", "createTime", "updateTime",
+        ))
+        closed_rows = rows(closed_positions, (
+            "historyId", "positionId", "instId", "side", "positionSide",
+            "closePositions", "openAveragePrice", "closeAveragePrice",
+            "createTime", "updateTime", "leverage", "realizedPnl", "realizedPnlRatio", "fee",
+        ))
+        detail_fields = (
+            "orderId", "clientOrderId", "instId", "side", "positionSide",
+            "orderType", "size", "filledSize", "averagePrice", "price", "state",
+            "createTime", "updateTime", "fee", "pnl",
+        )
+        safe_detail = (
+            {key: order_detail[key] for key in detail_fields if key in order_detail}
+            if isinstance(order_detail, dict) else None
+        )
+        return {
+            "status": "CONNECTED_READ_ONLY",
+            "environment": "BLOFIN_DEMO",
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "refresh_interval_seconds": 5,
+            "market": {
+                "instId": "BTC-USDT",
+                "last": ticker.get("last"),
+                "markPrice": ticker.get("markPrice"),
+                "ts": ticker.get("ts"),
+            },
+            "account": {
+                "totalEquity": balance.get("totalEquity") if isinstance(balance, dict) else None,
+                "isolatedEquity": balance.get("isolatedEquity") if isinstance(balance, dict) else None,
+            },
+            "latest_local_order": latest,
+            "order_detail": safe_detail,
+            "positions": position_rows,
+            "open_orders": order_rows,
+            "fills": fill_rows,
+            "completed_orders": completed_rows,
+            "closed_positions": closed_rows,
+            "execution_events": store.recent_events(str(latest["client_order_id"])) if latest else [],
+        }
+    finally:
+        store.close()
 
 
 class Handler(BaseHTTPRequestHandler):
