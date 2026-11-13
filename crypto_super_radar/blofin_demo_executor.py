@@ -269,9 +269,20 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH})
 
     def __init__(self, **kwargs: Any) -> None:
-        kwargs.setdefault("api_key", os.getenv("BLOFIN_DEMO_TRADE_API_KEY", ""))
-        kwargs.setdefault("api_secret", os.getenv("BLOFIN_DEMO_TRADE_API_SECRET", ""))
-        kwargs.setdefault("passphrase", os.getenv("BLOFIN_DEMO_TRADE_PASSPHRASE", ""))
+        # Prefer a dedicated Demo Trade key, but reuse the already-configured
+        # Demo API key when it was explicitly granted TRADE permission as well.
+        kwargs.setdefault(
+            "api_key",
+            os.getenv("BLOFIN_DEMO_TRADE_API_KEY") or os.getenv("BLOFIN_DEMO_API_KEY", ""),
+        )
+        kwargs.setdefault(
+            "api_secret",
+            os.getenv("BLOFIN_DEMO_TRADE_API_SECRET") or os.getenv("BLOFIN_DEMO_API_SECRET", ""),
+        )
+        kwargs.setdefault(
+            "passphrase",
+            os.getenv("BLOFIN_DEMO_TRADE_PASSPHRASE") or os.getenv("BLOFIN_DEMO_PASSPHRASE", ""),
+        )
         super().__init__(**kwargs)
 
     def _post(self, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
