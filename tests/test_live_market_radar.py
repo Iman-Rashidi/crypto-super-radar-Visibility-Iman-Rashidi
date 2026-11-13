@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -12,7 +12,7 @@ def synthetic_frame():
     start = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
     rows = []
     for i in range(61):
-        base = 100.0 + (i % 5) * 0.1
+        base = 100.0
         opened = base
         high = base + 1.0
         low = base - 1.0
