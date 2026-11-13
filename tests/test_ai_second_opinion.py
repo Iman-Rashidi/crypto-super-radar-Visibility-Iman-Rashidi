@@ -11,6 +11,7 @@ from crypto_super_radar.ai_second_opinion import (
     MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
     run_free_ai_second_opinion,
+    run_openrouter_connection_diagnostic,
 )
 from crypto_super_radar.models import AssetSpec, Signal
 
@@ -98,6 +99,76 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             status = ai_connection_status()
         self.assertEqual(status["model"], DEFAULT_FREE_MODEL)
         self.assertTrue(status["model"].endswith(":free"))
+
+    def test_connection_diagnostic_verifies_model_and_never_returns_secret(self):
+        captured = {}
+        marker = "CSR_NEMOTRON_PROBE_OK"
+
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({"probe": marker})
+                        }
+                    }],
+                    "usage": {"total_tokens": 12},
+                }
+
+        def fake_post(url, headers, json: dict, timeout, allow_redirects=False):
+            captured.update({
+                "url": url, "headers": headers, "payload": json,
+                "timeout": timeout, "allow_redirects": allow_redirects,
+            })
+            return DiagnosticResponse()
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(http_post=fake_post)
+
+        self.assertEqual(result["status"], "CONNECTED")
+        self.assertTrue(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertFalse(result["orders_submitted"])
+        self.assertNotIn("diagnostic-secret", json.dumps(result))
+        self.assertEqual(captured["payload"]["model"], DEFAULT_FREE_MODEL)
+        self.assertEqual(captured["payload"]["max_tokens"], 48)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer diagnostic-secret")
+        self.assertFalse(captured["allow_redirects"])
+        prompt = json.dumps(captured["payload"], ensure_ascii=False)
+        self.assertNotIn("wallet", prompt.lower())
+        self.assertNotIn("blofin", prompt.lower())
+
+    def test_connection_diagnostic_never_calls_provider_without_key(self):
+        called = []
+
+        def fake_post(*args, **kwargs):
+            called.append(True)
+            raise AssertionError("Provider must not be called without a key")
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_openrouter_connection_diagnostic(http_post=fake_post)
+
+        self.assertEqual(result["status"], "MISSING_API_KEY")
+        self.assertFalse(called)
+        self.assertFalse(result["paper_entry_eligible"])
+
+    def test_connection_diagnostic_maps_invalid_key_and_rate_limit(self):
+        class ErrorResponse:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        for code, expected in ((401, "INVALID_API_KEY"), (429, "RATE_LIMITED")):
+            with self.subTest(code=code):
+                with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+                    result = run_openrouter_connection_diagnostic(
+                        http_post=lambda *args, _code=code, **kwargs: ErrorResponse(_code)
+                    )
+                self.assertEqual(result["status"], expected)
+                self.assertFalse(result["paper_entry_eligible"])
+                self.assertNotIn("diagnostic-secret", json.dumps(result))
 
     def test_approved_ai_response_is_accepted_and_sends_only_public_data(self):
         captured = {}
