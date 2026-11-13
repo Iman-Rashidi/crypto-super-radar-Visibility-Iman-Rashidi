@@ -35,6 +35,21 @@ def _status(value: Any) -> str:
     return str(getattr(value, "value", value)).upper()
 
 
+def _mandatory_gates_pass(gates: Any) -> bool:
+    """Require one and only one PASS result for each mandatory gate ID 1–12."""
+    if not isinstance(gates, (list, tuple)) or len(gates) != 12:
+        return False
+    seen: set[int] = set()
+    for gate in gates:
+        gate_id = getattr(gate, "gate_id", None)
+        if isinstance(gate_id, bool) or not isinstance(gate_id, int):
+            return False
+        if gate_id in seen or _status(getattr(gate, "status", None)) != "PASS":
+            return False
+        seen.add(gate_id)
+    return seen == set(range(1, 13))
+
+
 def _extract_observed_quote(snapshot: Any, *, max_age_ms: int = 60_000) -> Optional[dict[str, Any]]:
     """Read a fresh, source-attributed CEX bid/ask pair from a market snapshot."""
     raw = getattr(snapshot, "raw", None)
@@ -844,9 +859,9 @@ class PaperTradingBot:
                     "reason": "A fresh cross-validated public spot price is unavailable."}
 
         gates = getattr(result, "gates", [])
-        if not gates or any(_status(gate.status) != "PASS" for gate in gates):
+        if not _mandatory_gates_pass(gates):
             return {"status": "NO_TRADE", "asset": asset.raw,
-                    "reason": "Every mandatory signal gate must PASS before paper entry."}
+                    "reason": "Exactly one PASS result for each mandatory gate ID 1–12 is required before paper entry."}
         signal = _status(getattr(result, "signal", "NO TRADE"))
         if signal != "LONG":
             return {"status": "NO_TRADE", "asset": asset.raw,
@@ -860,34 +875,6 @@ class PaperTradingBot:
                 or stop is None or target is None):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Score, risk or stop/target plan did not pass paper safety limits."}
-        try:
-            ai_review = self.ai_reviewer(result, asset)
-        except Exception as exc:
-            ai_review = {
-                "provider": "OpenRouter",
-                "status": "UNKNOWN",
-                "status_fa": "بررسی هوش مصنوعی ناموفق بود؛ ورود جدید متوقف شد.",
-                "reason": "Free AI reviewer failed.",
-                "error_type": type(exc).__name__,
-                "paper_entry_eligible": False,
-                "cost_usd": 0.0,
-            }
-        if (
-            not isinstance(ai_review, dict)
-            or str(ai_review.get("status", "UNKNOWN")).upper() != "APPROVED"
-            or ai_review.get("paper_entry_eligible") is not True
-        ):
-            return {
-                "status": "AI_BLOCKED",
-                "asset": asset.raw,
-                "reason": "A valid approval from the configured free AI reviewer is mandatory for every new paper entry.",
-                "ai_review": ai_review if isinstance(ai_review, dict) else {
-                    "status": "UNKNOWN", "paper_entry_eligible": False,
-                },
-                "mode": "PAPER_ONLY",
-                "orders_submitted": False,
-            }
-
         entry_quote = _extract_observed_quote(snapshot)
         entry_reference = (
             max(price, float(entry_quote["ask"])) if entry_quote is not None else price
@@ -981,6 +968,36 @@ class PaperTradingBot:
             "entry_spread_cost_usd": entry_spread_cost,
             "entry_quote_source": entry_quote_source,
         }
+        # Do not call the external reviewer until every deterministic, duplicate,
+        # account, sizing, reward/risk and circuit-breaker check has passed.
+        try:
+            ai_review = self.ai_reviewer(result, asset)
+        except Exception as exc:
+            ai_review = {
+                "provider": "OpenRouter",
+                "status": "UNKNOWN",
+                "status_fa": "بررسی هوش مصنوعی ناموفق بود؛ ورود جدید متوقف شد.",
+                "reason": "Free AI reviewer failed.",
+                "error_type": type(exc).__name__,
+                "paper_entry_eligible": False,
+                "cost_usd": 0.0,
+            }
+        if (
+            not isinstance(ai_review, dict)
+            or str(ai_review.get("status", "UNKNOWN")).upper() != "APPROVED"
+            or ai_review.get("paper_entry_eligible") is not True
+        ):
+            return {
+                "status": "AI_BLOCKED",
+                "asset": asset.raw,
+                "reason": "A valid approval from the configured free AI reviewer is mandatory for every new paper entry.",
+                "ai_review": ai_review if isinstance(ai_review, dict) else {
+                    "status": "UNKNOWN", "paper_entry_eligible": False,
+                },
+                "mode": "PAPER_ONLY",
+                "orders_submitted": False,
+            }
+
         if not self.ledger.open_position(record, debit):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Paper ledger rejected duplicate, concurrent or unaffordable entry."}
