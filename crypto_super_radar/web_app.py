@@ -3256,6 +3256,7 @@ class Handler(BaseHTTPRequestHandler):
                   evidence_strength:'ساختاری، نه احتمالاتی',
                   score:0,
                   description:(wave.phase||'مرحله نامشخص')+' · '+(wave.reason||'شواهد کافی وجود ندارد.')+
+                    (w.status==='AMBIGUOUS'&&Array.isArray(w.pivots)&&w.pivots.length?' · پیوت‌های تأییدشدهٔ سقف/کف در نمودار مشخص شده‌اند؛ شمارش شماره‌گذاری‌شدهٔ موج هنوز معتبر نیست.':'')+
                     (wave.invalidation_price!==null&&wave.invalidation_price!==undefined?' · سطح ابطال: '+number(wave.invalidation_price):'')
                 }],'تحلیل موج در دسترس نیست.');
                 fields.reason.textContent=s.reason||'دلیل سیگنال در دسترس نیست.';
