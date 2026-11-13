@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import hashlib
 import copy
+import concurrent.futures
 import json
 import math
 import os
@@ -1726,44 +1727,64 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             and now - float(cached.get("_cached_at", 0.0)) < (2 if normalized_interval == "1s" else LIVE_MARKET_RADAR_CACHE_TTL_SECONDS)
         ):
             return copy.deepcopy({k: v for k, v in cached.items() if k != "_cached_at"})
-    binance_frame = ENGINE.data.binance.candles(
-        normalized_symbol, interval=normalized_interval, limit=300,
-    )
+    # Fetch independent feeds concurrently. A slow secondary endpoint must not
+    # serialize candle, trade-flow, and order-book round trips on the chart path.
+    binance_provider = ENGINE.data.binance
+    bybit_provider = ENGINE.data.bybit
     bybit_frame = None
     bybit_error = None
-    if normalized_interval in BYBIT_INTERVAL:
-        try:
-            bybit_frame = ENGINE.data.bybit.candles(
-                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=300,
-            )
-        except Exception as exc:
-            bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
-    else:
-        bybit_error = "Bybit Spot does not provide 1-second candles; independent candle validation is unavailable on this interval."
-
-    # Bounded public microstructure snapshot: 500 aggregate trades plus 20 depth levels.
     aggregate_trades = None
     order_book = None
     flow_errors = []
-    binance_provider = ENGINE.data.binance
-    try:
-        aggregate_trades = binance_provider.http.get(
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=4, thread_name_prefix="live-radar-feed"
+    ) as executor:
+        binance_future = executor.submit(
+            binance_provider.candles,
+            normalized_symbol, interval=normalized_interval, limit=300,
+        )
+        bybit_future = None
+        if normalized_interval in BYBIT_INTERVAL:
+            bybit_future = executor.submit(
+                bybit_provider.candles,
+                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=300,
+            )
+        else:
+            bybit_error = "Bybit Spot does not provide 1-second candles; independent candle validation is unavailable on this interval."
+
+        trades_future = executor.submit(
+            binance_provider.http.get,
             f"{binance_provider.BASE}/api/v3/aggTrades",
             {"symbol": normalized_symbol, "limit": 500},
         )
-        if not isinstance(aggregate_trades, list):
-            raise ValueError("Binance aggregate-trade response was not a list")
-    except Exception as exc:
-        flow_errors.append(f"aggTrades: {type(exc).__name__}: {str(exc)[:100]}")
-    try:
-        order_book = binance_provider.http.get(
+        depth_future = executor.submit(
+            binance_provider.http.get,
             f"{binance_provider.BASE}/api/v3/depth",
             {"symbol": normalized_symbol, "limit": 20},
         )
-        if not isinstance(order_book, dict) or not isinstance(order_book.get("bids"), list) or not isinstance(order_book.get("asks"), list):
-            raise ValueError("Binance depth response schema was incomplete")
-    except Exception as exc:
-        flow_errors.append(f"depth: {type(exc).__name__}: {str(exc)[:100]}")
+
+        # Binance candles are mandatory for the chart. Other feeds fail independently.
+        binance_frame = binance_future.result()
+        if bybit_future is not None:
+            try:
+                bybit_frame = bybit_future.result()
+            except Exception as exc:
+                bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+
+        try:
+            aggregate_trades = trades_future.result()
+            if not isinstance(aggregate_trades, list):
+                raise ValueError("Binance aggregate-trade response was not a list")
+        except Exception as exc:
+            flow_errors.append(f"aggTrades: {type(exc).__name__}: {str(exc)[:100]}")
+
+        try:
+            order_book = depth_future.result()
+            if not isinstance(order_book, dict) or not isinstance(order_book.get("bids"), list) or not isinstance(order_book.get("asks"), list):
+                raise ValueError("Binance depth response schema was incomplete")
+        except Exception as exc:
+            flow_errors.append(f"depth: {type(exc).__name__}: {str(exc)[:100]}")
 
     payload = build_live_market_radar_payload(
         normalized_symbol,
@@ -3198,10 +3219,10 @@ class Handler(BaseHTTPRequestHandler):
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 renderFlow(data.market_flow||{});
-                const divergence=analysis.direction&&analysis.direction.divergence?analysis.direction.divergence:{};
-                const divergenceType=divergence.type||'NONE';
+                const rsiDivergence=analysis.direction&&analysis.direction.divergence?analysis.direction.divergence:{};
+                const divergenceType=rsiDivergence.type||'NONE';
                 fields.divergence.className='live-radar-divergence '+(divergenceType==='BULLISH'?'bullish':divergenceType==='BEARISH'?'bearish':'neutral');
-                fields.divergence.textContent=divergenceType==='BULLISH'?'واگرایی مثبت (صعودی) شناسایی شد · دو کندل پیوت مرجع با سبز نئونی مشخص شده‌اند · RSI '+number(divergence.rsi_pivot_1)+' ← '+number(divergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':divergenceType==='BEARISH'?'واگرایی منفی (نزولی) شناسایی شد · دو کندل پیوت مرجع با صورتی پررنگ مشخص شده‌اند · RSI '+number(divergence.rsi_pivot_1)+' ← '+number(divergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':'واگرایی RSI در پیوت‌های تأییدشده شناسایی نشد · کندل‌های مرجع فقط هنگام تأیید واگرایی رنگ ویژه می‌گیرند.';
+                fields.divergence.textContent=divergenceType==='BULLISH'?'واگرایی مثبت (صعودی) شناسایی شد · دو کندل پیوت مرجع با سبز نئونی مشخص شده‌اند · RSI '+number(rsiDivergence.rsi_pivot_1)+' ← '+number(rsiDivergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':divergenceType==='BEARISH'?'واگرایی منفی (نزولی) شناسایی شد · دو کندل پیوت مرجع با صورتی پررنگ مشخص شده‌اند · RSI '+number(rsiDivergence.rsi_pivot_1)+' ← '+number(rsiDivergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':'واگرایی RSI در پیوت‌های تأییدشده شناسایی نشد · کندل‌های مرجع فقط هنگام تأیید واگرایی رنگ ویژه می‌گیرند.';
                 const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
                 fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
                 const latestBarForPrice=(data.candles||[]).slice(-1)[0];
