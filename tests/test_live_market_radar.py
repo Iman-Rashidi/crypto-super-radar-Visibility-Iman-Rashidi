@@ -71,7 +71,9 @@ class LiveMarketRadarTests(unittest.TestCase):
 
     def test_provider_disagreement_blocks_signal(self):
         other = self.frame.copy()
-        other.loc[other.index[-10:], "close"] *= 1.02
+        recent = other.index[-10:]
+        other.loc[recent, "close"] *= 1.02
+        other.loc[recent, "high"] = other.loc[recent, ["open", "high", "close"]].max(axis=1)
         payload = build_live_market_radar_payload(
             "BTCUSDT", "5m", self.frame, other, now=self.now,
         )
