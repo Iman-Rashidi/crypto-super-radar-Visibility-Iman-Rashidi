@@ -198,6 +198,12 @@ class FuturesPaperBotTests(unittest.TestCase):
         self.assertEqual(result["status"], "NO_TRADE")
         self.assertIsNone(self.ledger.position())
 
+    def test_spot_ai_prompt_retains_long_only_trader_schema(self):
+        messages = _prompt_messages({"market_type": "spot", "expected_side": "LONG"})
+        prompt = messages[0]["content"]
+        self.assertIn('"proposal":"LONG|NO_TRADE"', prompt)
+        self.assertNotIn("perpetual SHORT review", prompt)
+
     def test_short_ai_prompt_requires_short_and_bearish_rating(self):
         messages = _prompt_messages({
             "market_type": "perpetual", "expected_side": "SHORT",
