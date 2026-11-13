@@ -31,6 +31,99 @@ def _rsi(close: pd.Series, period: int = 14) -> float | None:
     return 100.0 - (100.0 / (1.0 + gain / loss))
 
 
+def _rsi_series(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gains = delta.clip(lower=0.0).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    losses = (-delta.clip(upper=0.0)).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    ratio = gains / losses.replace(0.0, np.nan)
+    result = 100.0 - (100.0 / (1.0 + ratio))
+    result = result.where(losses > 0, 100.0)
+    return result.where(gains > 0, 50.0)
+
+
+def _adx(frame: pd.DataFrame, period: int = 14) -> float | None:
+    if len(frame) < period * 2 + 2:
+        return None
+    high = frame["high"].astype(float)
+    low = frame["low"].astype(float)
+    close = frame["close"].astype(float)
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    previous = close.shift(1)
+    tr = pd.concat([(high - low), (high - previous).abs(), (low - previous).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    plus_di = 100.0 * plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr.replace(0.0, np.nan)
+    minus_di = 100.0 * minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr.replace(0.0, np.nan)
+    denominator = (plus_di + minus_di).replace(0.0, np.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / denominator
+    series = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    value = series.iloc[-1]
+    return float(value) if _finite(value) else None
+
+
+def _divergence(frame: pd.DataFrame, pivots: list[dict[str, Any]]) -> dict[str, Any]:
+    rsi_values = _rsi_series(frame["close"].astype(float))
+    highs = [p for p in pivots if p.get("kind") == "HIGH" and 0 <= int(p.get("index", -1)) < len(frame)]
+    lows = [p for p in pivots if p.get("kind") == "LOW" and 0 <= int(p.get("index", -1)) < len(frame)]
+    for selected, kind in ((highs, "BEARISH"), (lows, "BULLISH")):
+        if len(selected) < 2:
+            continue
+        first, second = selected[-2:]
+        rsi_first, rsi_second = rsi_values.iloc[int(first["index"])], rsi_values.iloc[int(second["index"])]
+        if not (_finite(rsi_first) and _finite(rsi_second)):
+            continue
+        price_condition = (
+            float(second["price"]) > float(first["price"]) and float(rsi_second) < float(rsi_first) - 2.0
+            if kind == "BEARISH" else
+            float(second["price"]) < float(first["price"]) and float(rsi_second) > float(rsi_first) + 2.0
+        )
+        if price_condition:
+            return {
+                "type": kind,
+                "status": "CANDIDATE",
+                "price_pivot_1": float(first["price"]),
+                "price_pivot_2": float(second["price"]),
+                "rsi_pivot_1": round(float(rsi_first), 2),
+                "rsi_pivot_2": round(float(rsi_second), 2),
+                "reason": "Confirmed swing-price and RSI pivots diverge; this is a warning, not a standalone entry.",
+            }
+    return {"type": "NONE", "status": "NOT_DETECTED", "reason": "No confirmed RSI/price divergence on the available swing pivots."}
+
+
+def _fibonacci_setup(pivots: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(pivots) < 3:
+        return {"status": "INSUFFICIENT_PIVOTS", "retracement": None, "entry_zone": None, "invalidation_price": None}
+    first, impulse, correction = pivots[-3:]
+    if [first.get("kind"), impulse.get("kind"), correction.get("kind")] == ["LOW", "HIGH", "LOW"]:
+        start, end, current = map(lambda p: float(p["price"]), (first, impulse, correction))
+        length = end - start
+        retracement = (end - current) / length if length > 0 else None
+        zone = [end - length * 0.618, end - length * 0.5]
+        invalidation = start
+        direction = "BULLISH"
+    elif [first.get("kind"), impulse.get("kind"), correction.get("kind")] == ["HIGH", "LOW", "HIGH"]:
+        start, end, current = map(lambda p: float(p["price"]), (first, impulse, correction))
+        length = start - end
+        retracement = (current - end) / length if length > 0 else None
+        zone = [end + length * 0.5, end + length * 0.618]
+        invalidation = start
+        direction = "BEARISH"
+    else:
+        return {"status": "NO_ALTERNATING_IMPULSE", "retracement": None, "entry_zone": None, "invalidation_price": None}
+    if retracement is None or not math.isfinite(retracement):
+        return {"status": "INVALID_STRUCTURE", "retracement": None, "entry_zone": None, "invalidation_price": invalidation}
+    return {
+        "status": "GOLDEN_ZONE_CANDIDATE" if 0.5 <= retracement <= 0.618 else "OUTSIDE_GOLDEN_ZONE",
+        "direction": direction,
+        "retracement": round(float(retracement), 4),
+        "entry_zone": [round(min(zone), 12), round(max(zone), 12)],
+        "invalidation_price": round(invalidation, 12),
+        "confirmation_required": True,
+    }
+
+
 def _atr(frame: pd.DataFrame, period: int = 14) -> float | None:
     if len(frame) < period + 1:
         return None
@@ -362,10 +455,15 @@ def analyze_market_patterns(
 
     ema20 = close.ewm(span=20, adjust=False, min_periods=20).mean()
     ema50 = close.ewm(span=50, adjust=False, min_periods=50).mean()
+    ema200 = close.ewm(span=200, adjust=False, min_periods=200).mean()
     last_close = float(close.iloc[-1])
     e20 = float(ema20.iloc[-1]) if _finite(ema20.iloc[-1]) else None
     e50 = float(ema50.iloc[-1]) if _finite(ema50.iloc[-1]) else None
+    e200 = float(ema200.iloc[-1]) if _finite(ema200.iloc[-1]) else None
     rsi = _rsi(close)
+    adx14 = _adx(candles)
+    divergence = _divergence(candles, pivots or [])
+    fibonacci = _fibonacci_setup(pivots or [])
     macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
     macd_signal = macd_line.ewm(span=9, adjust=False).mean()
     macd_hist = float((macd_line - macd_signal).iloc[-1])
@@ -376,7 +474,12 @@ def analyze_market_patterns(
     change_10 = float(close.iloc[-1] / close.iloc[-11] - 1.0) * 100.0 if len(close) >= 11 else 0.0
 
     trend = "NEUTRAL"
-    if e20 is not None and e50 is not None:
+    if e50 is not None and e200 is not None:
+        if last_close > e50 > e200:
+            trend = "BULLISH"
+        elif last_close < e50 < e200:
+            trend = "BEARISH"
+    elif e20 is not None and e50 is not None:
         if last_close > e20 and e20 > e50:
             trend = "BULLISH"
         elif last_close < e20 and e20 < e50:
@@ -389,7 +492,12 @@ def analyze_market_patterns(
     wave_state = str(wave.get("status") or "UNKNOWN")
 
     score = 0
-    score += 25 if trend == "BULLISH" else -25 if trend == "BEARISH" else 0
+    trend_weight = 25 if adx14 is None or adx14 >= 20 else 0
+    score += trend_weight if trend == "BULLISH" else -trend_weight if trend == "BEARISH" else 0
+    if divergence.get("type") == "BEARISH":
+        score -= 10
+    elif divergence.get("type") == "BULLISH":
+        score += 10
     score += 12 if macd_hist > 0 else -12 if macd_hist < 0 else 0
     score += 12 if rsi is not None and rsi >= 55 else -12 if rsi is not None and rsi <= 45 else 0
     score += 10 if change_10 > 0.6 else -10 if change_10 < -0.6 else 0
@@ -417,10 +525,12 @@ def analyze_market_patterns(
         bias, label = "NEUTRAL", "خنثی / بدون برتری روشن"
 
     rsi_state = "UNKNOWN" if rsi is None else "OVERSOLD" if rsi <= 30 else "OVERBOUGHT" if rsi >= 70 else "NEUTRAL"
-    if trend == "NEUTRAL":
-        regime = "RANGE_OR_TRANSITION"
-    else:
+    if adx14 is not None and adx14 < 20:
+        regime = "RANGING"
+    elif adx14 is not None and adx14 > 25:
         regime = "TRENDING"
+    else:
+        regime = "TRANSITION"
     wave_structure = {
         "pattern": wave_pattern,
         "status": wave_state,
@@ -439,6 +549,10 @@ def analyze_market_patterns(
         "status": "PASS" if e50 is not None else "PARTIAL",
         "direction": {
             "bias": bias,
+            "adx14": round(adx14, 2) if adx14 is not None else None,
+            "ema200": round(e200, 12) if e200 is not None else None,
+            "divergence": divergence,
+            "fibonacci": fibonacci,
             "label_fa": label,
             "score": score,
             "score_semantics": "امتیاز همگرایی شواهد از ۱۰۰- تا ۱۰۰+ است؛ احتمال آماری موفقیت نیست.",
