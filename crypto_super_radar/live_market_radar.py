@@ -135,6 +135,7 @@ def _signal(
     *,
     quality_status: str,
     freshness_status: str,
+    divergence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     unknown = {
         "signal": "UNKNOWN",
@@ -184,6 +185,16 @@ def _signal(
         and entry < float(previous["low"])
         and entry < float(pivot["price"])
     )
+    divergence_type = str((divergence or {}).get("type") or "NONE")
+    if bullish_reversal and divergence_type == "BEARISH":
+        return {**unknown, "signal": "WAIT", "status": "WAITING",
+                "reason": "Bullish entry blocked by a confirmed bearish RSI/price divergence candidate.",
+                "pivot": pivot, "signal_candle_at": frame.index[-1].isoformat()}
+    if bearish_reversal and divergence_type == "BULLISH":
+        return {**unknown, "signal": "WAIT", "status": "WAITING",
+                "reason": "Bearish entry blocked by a confirmed bullish RSI/price divergence candidate.",
+                "pivot": pivot, "signal_candle_at": frame.index[-1].isoformat()}
+
     if not bullish_reversal and not bearish_reversal:
         return {
             **unknown,
@@ -357,7 +368,8 @@ def build_live_market_radar_payload(
         ),
     }
     signal = _signal(
-        closed, pivots, quality_status=quality_status, freshness_status=freshness_status
+        closed, pivots, quality_status=quality_status, freshness_status=freshness_status,
+        divergence=market_analysis.get("direction", {}).get("divergence"),
     )
     chart = []
     for timestamp, row in display_frame.iterrows():
