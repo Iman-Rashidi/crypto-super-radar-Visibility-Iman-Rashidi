@@ -123,7 +123,7 @@ class BloFinDemoReadOnly:
     def get_futures_instruments(self, *, inst_id: str | None = None) -> Any:
         return self._get(
             "/api/v1/market/instruments",
-            params={"instId": inst_id, "instType": "SWAP"},
+            params={"instId": inst_id},
         )
 
     def get_tickers(self, *, inst_id: str | None = None) -> Any:
