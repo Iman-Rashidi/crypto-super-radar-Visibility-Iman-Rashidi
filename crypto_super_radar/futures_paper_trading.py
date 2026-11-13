@@ -360,12 +360,13 @@ class FuturesPaperLedger:
             if float(row["net_pnl"]) >= 0:
                 break
             consecutive += 1
-        last_loss = self._db.execute(
-            "SELECT net_pnl,closed_at FROM futures_paper_trades WHERE net_pnl<0 ORDER BY closed_at DESC,id DESC LIMIT 1"
+        last_trade = self._db.execute(
+            "SELECT net_pnl,closed_at FROM futures_paper_trades ORDER BY closed_at DESC,id DESC LIMIT 1"
         ).fetchone()
         cooldown = 0.0
-        if last_loss:
-            cooldown = max(0.0, cooldown_hours_after_loss * 3600 - (now - int(last_loss["closed_at"]))) / 3600
+        # Apply a loss cooldown only while the latest closed trade is still a loss.
+        if last_trade and float(last_trade["net_pnl"]) < 0:
+            cooldown = max(0.0, cooldown_hours_after_loss * 3600 - (now - int(last_trade["closed_at"]))) / 3600
         daily_loss = max(0.0, -float(daily) / initial * 100.0) if initial else 0.0
         reasons = []
         if daily_loss >= daily_loss_limit_pct * 100:
@@ -396,6 +397,9 @@ class FuturesPaperLedger:
             funding_count = int(self._db.execute(
                 "SELECT COUNT(*) FROM futures_paper_funding_events"
             ).fetchone()[0])
+            realized_pnl = float(self._db.execute(
+                "SELECT COALESCE(SUM(net_pnl),0.0) FROM futures_paper_trades"
+            ).fetchone()[0])
         balance = float(account["balance"])
         initial = float(account["initial_equity"])
         p = dict(position) if position else None
@@ -421,7 +425,7 @@ class FuturesPaperLedger:
                 "available_margin_usd": max(0.0, equity - used_margin),
                 "used_margin_usd": used_margin,
                 "unrealized_pnl_usd": unrealized,
-                "realized_pnl_usd": equity - unrealized - initial,
+                "realized_pnl_usd": realized_pnl,
                 "total_return_pct": (equity / initial - 1.0) * 100.0,
             },
             "open_position": p,
@@ -697,10 +701,31 @@ class FuturesPaperTradingBot:
             return {"status": "UNKNOWN", "asset": asset.raw,
                     "reason": "Futures paper equity or available margin is invalid."}
 
+        holding_days = _number(getattr(result, "expected_holding_days", None))
+        if holding_days is None or holding_days <= 0:
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Expected holding period is unavailable."}
+        max_holding_hours = min(90 * 24, max(1, int(holding_days * 24)))
+        funding_interval = float(market["funding_interval_hours"])
+        if funding_interval <= 0:
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Funding interval is invalid; entry is blocked."}
+        expected_funding_events = max(1, math.ceil(max_holding_hours / funding_interval))
+        # Funding rates can change. Budget the absolute current rate as an adverse
+        # per-settlement charge rather than assuming the bot will receive funding.
+        estimated_adverse_funding_per_unit = (
+            abs(float(market["funding_rate"])) * entry * expected_funding_events
+        )
         stop_exit = float(stop) * (1.0 - sign * self.slippage_rate)
         target_exit = float(target) * (1.0 - sign * self.slippage_rate)
-        unit_risk = abs(entry - stop_exit) + entry * self.fee_rate + stop_exit * self.fee_rate
-        unit_reward = sign * (target_exit - entry) - entry * self.fee_rate - target_exit * self.fee_rate
+        unit_risk = (
+            abs(entry - stop_exit) + entry * self.fee_rate + stop_exit * self.fee_rate
+            + estimated_adverse_funding_per_unit
+        )
+        unit_reward = (
+            sign * (target_exit - entry) - entry * self.fee_rate - target_exit * self.fee_rate
+            - estimated_adverse_funding_per_unit
+        )
         net_rr = unit_reward / unit_risk if unit_risk > 0 else None
         if unit_risk <= 0 or unit_reward <= 0 or net_rr is None or net_rr < self.min_net_reward_risk:
             return {"status": "NO_TRADE", "asset": asset.raw,
@@ -721,11 +746,6 @@ class FuturesPaperTradingBot:
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Position sizing or isolated margin is outside available paper equity."}
 
-        holding_days = _number(getattr(result, "expected_holding_days", None))
-        if holding_days is None or holding_days <= 0:
-            return {"status": "NO_TRADE", "asset": asset.raw,
-                    "reason": "Expected holding period is unavailable."}
-        max_holding_hours = min(90 * 24, max(1, int(holding_days * 24)))
         funding_history = getattr(data, "funding_frames", {}).get(asset.raw)
         if funding_history is None or getattr(funding_history, "empty", True):
             return {"status": "NO_TRADE", "asset": asset.raw,
@@ -742,6 +762,25 @@ class FuturesPaperTradingBot:
                 "reason": "Direction-aware AI second opinion did not approve this futures paper entry.",
                 "ai_review": ai_review if isinstance(ai_review, dict) else {"status": "UNKNOWN"},
                 "mode": "FUTURES_PAPER_ONLY", "orders_submitted": False,
+            }
+
+        # The AI round-trip can take several seconds. Re-read the independent
+        # exchange quotes and refuse stale entry assumptions after that delay.
+        try:
+            refreshed_market = self._market(asset)
+        except Exception as exc:
+            return {
+                "status": "NO_TRADE", "asset": asset.raw,
+                "reason": f"Perpetual quote refresh failed after AI review ({type(exc).__name__}); entry canceled.",
+                "ai_review": ai_review,
+            }
+        quote_drift = abs(float(refreshed_market["mark_price"]) - float(market["mark_price"])) / float(market["mark_price"])
+        if quote_drift > 0.0005:
+            return {
+                "status": "NO_TRADE", "asset": asset.raw,
+                "reason": "Perpetual mark price moved more than 5 bps during AI review; a new analysis cycle is required.",
+                "quote_drift_bps": round(quote_drift * 10_000, 3),
+                "ai_review": ai_review,
             }
 
         now = int(time.time())
@@ -767,6 +806,9 @@ class FuturesPaperTradingBot:
             "confirmation_score": score, "estimated_risk_score": risk,
             "funding_rate": market["funding_rate"],
             "funding_interval_hours": market["funding_interval_hours"],
+            "expected_funding_events": expected_funding_events,
+            "estimated_adverse_funding_per_unit": estimated_adverse_funding_per_unit,
+            "quote_drift_bps_after_ai_review": round(quote_drift * 10_000, 3),
             "risk_controls": controls, "ai_review": ai_review,
             "mode": "FUTURES_PAPER_ONLY", "orders_submitted": False,
             "liquidation_model_status": "NOT_ESTIMATED_EXCHANGE_RISK_TIER_REQUIRED",
