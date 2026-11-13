@@ -190,6 +190,29 @@ class PaperTradingBotTests(unittest.TestCase):
             self.assertEqual(calls["count"], 0, case)
             self.assertIsNone(self.ledger.position(), case)
 
+    def test_risk_breaker_is_rechecked_after_ai_review(self):
+        ledger = self.ledger
+        def reviewer(result, asset):
+            position = {
+                "asset": "cex:BTCUSDT", "quantity": 1.0, "entry_price": 100.0,
+                "stop_loss": 90.0, "initial_stop_loss": 90.0,
+                "take_profit": 120.0, "entry_fee": 0.0, "opened_at": int(time.time()),
+                "signal_bar": "concurrent-loss-bar", "confirmation_score": 80.0,
+                "risk_budget": 50.0, "max_holding_days": 14,
+            }
+            self.assertTrue(ledger.open_position(position, 100.0))
+            ledger.close_position(90.0, 0.0, "CONCURRENT_LOSS")
+            return {"status": "APPROVED", "paper_entry_eligible": True}
+
+        bot = PaperTradingBot(
+            self.engine, ledger=ledger, daily_loss_limit_pct=0.0001,
+            ai_reviewer=reviewer,
+        )
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "RISK_HALT")
+        self.assertIn("DAILY_LOSS_LIMIT", result["risk_controls"]["halt_reasons"])
+        self.assertIsNone(ledger.position())
+
     def test_missing_or_non_approving_ai_blocks_new_paper_entry(self):
         bot = PaperTradingBot(
             self.engine,
