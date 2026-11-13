@@ -322,6 +322,15 @@ def build_live_market_radar_payload(
                 "label": "مبدأ" if point_index == 0 else f"W{point_index}",
             })
     market_analysis = analyze_market_patterns(closed, pivots, wave)
+    market_analysis["data_quality"] = {
+        "pattern_data_source": "Binance Spot",
+        "freshness_status": freshness_status,
+        "cross_validation_status": cross_validation,
+        "signal_eligible": quality_status == "PASS" and freshness_status == "FRESH",
+        "reason": (
+            "Patterns use completed Binance candles; trade alerts still require fresh, aligned Binance and Bybit candles."
+        ),
+    }
     signal = _signal(
         closed, pivots, quality_status=quality_status, freshness_status=freshness_status
     )
