@@ -3031,8 +3031,8 @@ class Handler(BaseHTTPRequestHandler):
             }
             function renderFlow(flow){
               flow=flow||{};const p=flow.pressure||{},a=flow.aggressor_flow||{},book=flow.order_book||{},whale=flow.whale_flow||{};
-              const buy=Number.isFinite(Number(p.buy_pct))?Math.max(0,Math.min(100,Number(p.buy_pct))):50;
-              const sell=Number.isFinite(Number(p.sell_pct))?Math.max(0,Math.min(100,Number(p.sell_pct))):50;
+              const buy=p.buy_pct===null||p.buy_pct===undefined?50:Math.max(0,Math.min(100,Number(p.buy_pct)||0));
+              const sell=p.sell_pct===null||p.sell_pct===undefined?50:Math.max(0,Math.min(100,Number(p.sell_pct)||0));
               fields.flowBuyBar.style.width=buy+'%';fields.flowSellBar.style.width=sell+'%';
               fields.flowBuyLabel.textContent='خرید تخمینی: '+number(p.buy_pct)+'% · '+number(p.buy_quote)+' USDT';
               fields.flowSellLabel.textContent='فروش تخمینی: '+number(p.sell_pct)+'% · '+number(p.sell_quote)+' USDT';
@@ -3147,10 +3147,12 @@ class Handler(BaseHTTPRequestHandler):
                 fields.score.textContent=d.score===null||d.score===undefined?'—':(d.score>0?'+':'')+d.score+'/100';
                 fields.regime.textContent=({TRENDING:'رونددار',RANGE_OR_TRANSITION:'رنج / گذار'}[d.regime]||'نامشخص');
                 fields.trend.textContent=faDirection(d.trend);
-                fields.indicators.textContent='EMA20: '+number(d.ema20)+' · EMA50: '+number(d.ema50)+
-                  ' · RSI(14): '+number(d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[d.rsi_state]||'')+')'+
+                const divergence=d.divergence||{},fib=d.fibonacci||{};
+                fields.indicators.textContent='EMA20: '+number(d.ema20)+' · EMA50: '+number(d.ema50)+' · EMA200: '+number(d.ema200)+
+                  ' · ADX(14): '+number(d.adx14)+' · RSI(14): '+number(d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[d.rsi_state]||'')+')'+
                   ' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
-                  ' · نسبت حجم به میانه: '+number(d.volume_ratio)+'x · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
+                  ' · RVOL کندلی: '+number(d.volume_ratio)+'x · واگرایی: '+(divergence.type||'NONE')+
+                  ' · فیبوناچی: '+(fib.status||'نامشخص')+' '+number(fib.retracement)+' · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
                 const qualityLabel=({PASS:'تطبیق دو منبع موفق',FAIL:'اختلاف دو منبع؛ سیگنال مسدود',UNKNOWN:'تطبیق دو منبع نامشخص'}[quality.cross_validation_status]||'تطبیق نامشخص');
                 const freshnessLabel=quality.freshness_status==='FRESH'?'داده تازه':quality.freshness_status==='STALE'?'داده کهنه':'تازگی نامشخص';
                 fields.analysisNote.textContent='منبع تحلیل: '+(quality.pattern_data_source||'نامشخص')+' · '+qualityLabel+' · '+freshnessLabel+
