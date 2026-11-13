@@ -330,7 +330,7 @@ class BybitProvider:
             fallback_eligible = (
                 "HTTP 403" in message
                 or "HTTP 451" in message
-                or "Bybit API retCode=" in message
+                or "Bybit API error retCode=" in message
                 or "Bybit has no spot ticker" in message
             )
             if not fallback_eligible:
