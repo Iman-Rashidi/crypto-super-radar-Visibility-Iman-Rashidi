@@ -85,6 +85,8 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("✓ مورد با موفقیت در فهرست زیر نظر همین مرورگر ذخیره شد.", page)
         self.assertIn("افزودن ناموفق؛ جزئیات را بررسی کنید", page)
         self.assertIn("ربات معامله‌گر آزمایشی", page)
+        self.assertIn('id="ai-diagnostic-panel"', page)
+        self.assertIn("آزمایش واقعی اتصال Nemotron", page)
         self.assertIn("سقف زیان روزانه", page)
         self.assertIn("پوشش دادهٔ کارمزد", page)
         self.assertIn("اجزای کارمزد مشاهده‌شده", page)
@@ -150,6 +152,57 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(body), payload)
         state.assert_called_once_with()
         self.assertFalse(json.loads(body)["orders_submitted"])
+
+    def test_ai_status_endpoint_reports_configuration_without_exposing_secret(self):
+        payload = {
+            "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "status": "CONFIGURED",
+            "configured": True,
+            "secret_sent_to_model": False,
+        }
+        with patch.object(web_app, "ai_connection_status", return_value=payload):
+            status, _, body = self.request("GET", "/api/ai/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), payload)
+        self.assertNotIn("api_key", body.decode().lower())
+
+    def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
+        payload = {
+            "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "status": "CONNECTED",
+            "probe": "PASS",
+            "model_verified": True,
+            "paper_entry_eligible": False,
+            "orders_submitted": False,
+        }
+        with patch.object(web_app, "_run_ai_diagnostic_limited", return_value=payload) as probe:
+            status, _, body = self.request(
+                "POST", "/api/ai/diagnostic", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": f"http://{self.host}:{self.port}",
+                },
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), payload)
+        probe.assert_called_once_with()
+        self.assertFalse(json.loads(body)["paper_entry_eligible"])
+        self.assertFalse(json.loads(body)["orders_submitted"])
+
+    def test_ai_diagnostic_endpoint_rejects_cross_origin_requests(self):
+        with patch.object(web_app, "_run_ai_diagnostic_limited") as probe:
+            status, _, body = self.request(
+                "POST", "/api/ai/diagnostic", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://attacker.invalid",
+                },
+            )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["status"], "FORBIDDEN")
+        probe.assert_not_called()
 
     def test_futures_paper_post_rejects_spot_asset(self):
         body = "asset=cex%3ABTCUSDT"
