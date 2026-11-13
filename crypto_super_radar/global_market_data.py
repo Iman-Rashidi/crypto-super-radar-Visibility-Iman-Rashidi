@@ -418,7 +418,7 @@ class GlobalMarketBoard:
                 self._daily_date = today
                 self._daily_reserved_requests = 0
             now = time.monotonic()
-            if now - self._last_refresh_started < self._minimum_refresh_seconds:
+            if self._last_refresh_started > 0 and now - self._last_refresh_started < self._minimum_refresh_seconds:
                 return False
             if self._daily_reserved_requests + len(self.instruments) > self._daily_request_budget:
                 return False
