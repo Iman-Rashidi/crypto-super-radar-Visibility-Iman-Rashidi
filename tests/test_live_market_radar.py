@@ -113,6 +113,18 @@ class LiveMarketRadarTests(unittest.TestCase):
         self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
         self.assertEqual(payload["signal"]["status"], "BLOCKED")
         self.assertIn("market_flow", payload)
+
+    def test_one_second_candle_latency_within_five_seconds_remains_fresh(self):
+        frame = self.frame.copy()
+        frame.index = pd.date_range("2025-01-01T00:00:00Z", periods=len(frame), freq="1s")
+        now = datetime(2025, 1, 1, 0, 1, 3, 500000, tzinfo=timezone.utc)
+        payload = build_live_market_radar_payload(
+            "BTCUSDT", "1s", frame, None, now=now,
+            bybit_error="Bybit does not support one-second candles",
+        )
+        self.assertEqual(payload["freshness_status"], "FRESH")
+        self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
+        self.assertEqual(payload["signal"]["status"], "BLOCKED")
         self.assertIn("pressure", payload["market_flow"])
         self.assertIn("whale_flow", payload["market_flow"])
         self.assertFalse(payload["orders_submitted"])
