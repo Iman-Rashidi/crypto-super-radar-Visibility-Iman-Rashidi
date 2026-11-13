@@ -2794,7 +2794,7 @@ class Handler(BaseHTTPRequestHandler):
             const a=s.account||{};
             box.textContent='حالت: Paper فقط · موجودی نقدی: '+Number(a.cash_balance_usd||0).toFixed(2)+' USD · ارزش کل حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · سود/زیان تحقق‌یافته: '+Number(a.realized_pnl_usd||0).toFixed(2)+' USD · موقعیت باز: '+((s.open_position||{}).asset||'ندارد')+' · ترمز ریسک: '+(s.risk_controls&&s.risk_controls.entry_allowed?'فعال':'متوقف')+' · زیان روز: '+Number((s.risk_controls||{}).daily_realized_loss_pct||0).toFixed(3)+'%';
             const ai=s.ai_connection||{},aiBox=document.getElementById('paper-bot-ai-status');
-            if(aiBox)aiBox.textContent='اتصال AI: '+(ai.status_fa||'وضعیت نامشخص')+' · مدل: '+(ai.model||'ثبت نشده')+' · سقف محافظه‌کارانه: '+(ai.requests_per_day_app_cap||35)+' درخواست در روز';
+            if(aiBox)aiBox.textContent='اتصال AI: '+(ai.status_fa||'وضعیت نامشخص')+' · مدل: '+(ai.model||'ثبت نشده')+' · سقف محافظه‌کارانه: '+(ai.requests_per_day_app_cap||35)+' درخواست در روز / '+(ai.requests_per_minute_app_cap||18)+' در دقیقه (هر فرایند)';
           }catch(e){box.textContent='وضعیت حساب آزمایشی در دسترس نیست.';}
         })();
         </script>
