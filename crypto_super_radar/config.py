@@ -20,6 +20,8 @@ class RateLimitConfig:
         "api.binance.com": 0.25,
         "data-api.binance.vision": 0.25,
         "api.bybit.com": 0.25,
+        # Twelve Data Basic allows up to 8 API credits/minute; stay below the cap.
+        "api.twelvedata.com": 7.6,
         "api.mainnet-beta.solana.com": 1.0,
         "ethereum-rpc.publicnode.com": 1.0,
         "mainnet.base.org": 1.0,

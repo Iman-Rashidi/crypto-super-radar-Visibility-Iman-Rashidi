@@ -20,7 +20,12 @@ from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_
 from .ai_second_opinion import ai_connection_status, run_free_ai_second_opinion
 
 
-PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
+PAPER_ASSETS = frozenset({
+    # CEX instruments with explicit conservative security handling in providers.py.
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT",
+    "TRXUSDT", "GRAMUSDT",
+})
 
 
 def _number(value: Any) -> Optional[float]:

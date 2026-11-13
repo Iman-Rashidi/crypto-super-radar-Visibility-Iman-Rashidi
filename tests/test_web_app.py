@@ -94,6 +94,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('id="calc-amount"', page)
         self.assertIn("calc-break-even", page)
         self.assertIn("بازار رمزارزها", page)
+        self.assertIn('id="global-market-board"', page)
+        self.assertIn("/api/global-markets", page)
+        self.assertIn("TWELVEDATA_API_KEY", page)
+        self.assertIn('value="cex:XRPUSDT"', page)
+        self.assertIn('value="cex:AVAXUSDT"', page)
         self.assertIn("APIهای عمومی و رایگان", page)
         self.assertIn("/api/crypto-markets", page)
         self.assertIn('id="crypto-market-search"', page)
@@ -123,6 +128,25 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('class="app-header"', page)
         self.assertIn("var(--teal)", page)
         self.assertLess(page.index('id="crypto-markets"'), page.index('id="scan-section"'))
+
+    def test_global_market_endpoint_is_read_only_and_passes_refresh_flag(self):
+        payload = {
+            "status": "OBSERVED_SINGLE_SOURCE_NOT_VALIDATED",
+            "provider": "Twelve Data",
+            "configured": True,
+            "validation_status": "SINGLE_SOURCE_ONLY",
+            "trade_eligible": False,
+            "orders_submitted": False,
+            "items": [],
+            "counts": {"total": 24, "observed": 0, "unknown": 24},
+        }
+        with patch.object(web_app.GLOBAL_MARKET_BOARD, "get_board", return_value=payload) as board:
+            status, _, body = self.request("GET", "/api/global-markets?refresh=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), payload)
+        board.assert_called_once_with(force_refresh=True)
+        self.assertFalse(json.loads(body)["trade_eligible"])
+        self.assertFalse(json.loads(body)["orders_submitted"])
 
     def test_crypto_market_endpoint_uses_free_cross_validated_spot_data_and_cache(self):
         web_app.CRYPTO_MARKET_CACHE.update(expires_at=0.0, payload=None)
