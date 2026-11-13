@@ -116,5 +116,28 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(analysis["candlestick_patterns"], [])
 
 
+    def test_adx_ema200_and_divergence_fields_are_reported(self):
+        analysis = analyze_market_patterns(candle_frame("up", count=240), [])
+        direction = analysis["direction"]
+        self.assertIsNotNone(direction["adx14"])
+        self.assertGreater(direction["adx14"], 25)
+        self.assertIsNotNone(direction["ema200"])
+        self.assertIn("divergence", direction)
+        self.assertIn("fibonacci", direction)
+
+    def test_fibonacci_golden_zone_and_invalidation_are_calculated(self):
+        pivots = [
+            {"kind": "LOW", "index": 10, "price": 100.0},
+            {"kind": "HIGH", "index": 30, "price": 120.0},
+            {"kind": "LOW", "index": 50, "price": 109.0},
+        ]
+        analysis = analyze_market_patterns(candle_frame("up"), pivots)
+        fib = analysis["direction"]["fibonacci"]
+        self.assertEqual(fib["status"], "GOLDEN_ZONE_CANDIDATE")
+        self.assertAlmostEqual(fib["retracement"], 0.55)
+        self.assertEqual(fib["invalidation_price"], 100.0)
+        self.assertTrue(fib["confirmation_required"])
+
+
 if __name__ == "__main__":
     unittest.main()
