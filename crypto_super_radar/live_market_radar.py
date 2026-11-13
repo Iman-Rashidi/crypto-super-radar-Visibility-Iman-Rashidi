@@ -304,6 +304,22 @@ def build_live_market_radar_payload(
 
     pivots = _pivots(closed)
     wave = monitor_elliott_waves(closed)
+    wave_pivots = []
+    wave_count = wave.get("wave_count")
+    raw_wave_pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
+    if (
+        wave.get("pattern") in {"BULLISH", "BEARISH"}
+        and isinstance(wave_count, int) and wave_count >= 2
+        and len(raw_wave_pivots) >= wave_count + 1
+    ):
+        selected_wave_points = raw_wave_pivots[-(wave_count + 1):]
+        for point_index, point in enumerate(selected_wave_points):
+            wave_pivots.append({
+                "timestamp": point["timestamp"],
+                "price": float(point["price"]),
+                "kind": point["kind"],
+                "label": "مبدأ" if point_index == 0 else f"W{point_index}",
+            })
     signal = _signal(
         closed, pivots, quality_status=quality_status, freshness_status=freshness_status
     )
@@ -338,6 +354,7 @@ def build_live_market_radar_payload(
         },
         "candles": chart,
         "pivots": pivots,
+        "wave_pivots": wave_pivots,
         "elliott_waves": wave,
         "signal": signal,
         "signal_only": True,
