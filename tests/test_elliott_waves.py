@@ -44,6 +44,25 @@ class ElliottWaveMonitorTests(unittest.TestCase):
         self.assertEqual(result["phase"], "NO_RULE_VALID_IMPULSE")
         self.assertIsNone(result["invalidation_price"])
 
+
+    def test_intraday_threshold_detects_swings_below_daily_three_percent_floor(self):
+        # A liquid intraday series can form several useful swings without a 3% reversal.
+        values = [
+            100.00, 100.10, 100.22, 100.38, 100.55, 100.42, 100.25, 100.08,
+            99.96, 100.08, 100.25, 100.44, 100.63, 100.49, 100.30, 100.13,
+            100.02, 100.15, 100.34, 100.54, 100.74, 100.60, 100.42, 100.22,
+            100.12, 100.25, 100.45, 100.66, 100.87, 100.73, 100.55, 100.35,
+            100.25, 100.39, 100.59, 100.80, 101.02, 100.88, 100.69, 100.50,
+        ]
+        frame = candles_from_close(values)
+        daily_floor = monitor_elliott_waves(frame)
+        intraday = monitor_elliott_waves(
+            frame, min_reversal_pct=0.0015, max_reversal_pct=0.15
+        )
+        self.assertEqual(daily_floor["status"], "UNKNOWN")
+        self.assertGreaterEqual(intraday["confirmed_pivot_count"], 3)
+        self.assertNotEqual(intraday["phase"], "INSUFFICIENT_DATA")
+
     def test_missing_or_short_candle_history_is_unknown(self):
         self.assertEqual(monitor_elliott_waves(None)["status"], "UNKNOWN")
         self.assertEqual(monitor_elliott_waves(candles_from_close([1.0] * 20))["status"], "UNKNOWN")
