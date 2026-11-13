@@ -51,15 +51,17 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
 
     def test_public_market_calls_do_not_send_credentials(self):
         self.client.get_futures_instruments(inst_id="BTC-USDT")
-        url, kwargs = self.session.get.call_args
-        self.assertTrue(url.startswith(DEMO_REST_URL))
+        call_args, kwargs = self.session.get.call_args
+        url = call_args[0]
+        self.assertTrue(url.startswith(DEMO_REST_URL)
         self.assertIn("/api/v1/market/instruments?instId=BTC-USDT", url)
         self.assertEqual(kwargs["headers"], {})
         self.assertNotIn("ACCESS-KEY", kwargs["headers"])
 
     def test_candles_validate_limit_and_use_demo_endpoint(self):
         self.client.get_candles("BTC-USDT", bar="5m", limit=250)
-        url, _ = self.session.get.call_args
+        call_args, _ = self.session.get.call_args
+        url = call_args[0]
         self.assertIn("/api/v1/market/candles?", url)
         self.assertIn("bar=5m", url)
         self.assertIn("limit=250", url)
@@ -84,10 +86,12 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
 
     def test_positions_and_open_orders_use_only_read_endpoints(self):
         self.client.get_positions(inst_id="BTC-USDT")
-        url1, _ = self.session.get.call_args
+        call_args1, _ = self.session.get.call_args
+        url1 = call_args1[0]
         self.assertIn("/api/v1/account/positions?instId=BTC-USDT", url1)
         self.client.get_open_orders(inst_id="BTC-USDT")
-        url2, _ = self.session.get.call_args
+        call_args2, _ = self.session.get.call_args
+        url2 = call_args2[0]
         self.assertIn("/api/v1/trade/orders-pending?instId=BTC-USDT", url2)
         self.assertFalse(hasattr(self.client, "place_order"))
         self.assertFalse(hasattr(self.client, "cancel_order"))
