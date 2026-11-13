@@ -297,6 +297,7 @@ class SolanaWhaleScanner:
                 "wallet_graph_events_loaded_from_history": len(wallet_graph_events),
                 "wallet_graph_coverage": "PARTIAL_RECENT_SAMPLE",
                 "wallet_graph_analysis": wallet_graph,
+                "trade_authorization": "NO_TRADE",
                 "caveat": (
                     "Recent transactions for largest token accounts only; no complete history, "
                     "beneficial-owner clustering, or proof of exchange classification. "
