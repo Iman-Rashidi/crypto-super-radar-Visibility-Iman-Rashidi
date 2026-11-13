@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - feature/blofin-demo-adapter
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
