@@ -479,7 +479,10 @@ class BloFinDemoEventStore:
             return True
 
     def update_order(self, client_order_id: str, status: str, *, exchange_order_id: str | None = None) -> None:
-        allowed = {"LEVERAGE_SET", "ACCEPTED", "REJECTED", "UNKNOWN"}
+        allowed = {
+            "LEVERAGE_SET", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
+            "CANCELED", "REJECTED", "UNKNOWN",
+        }
         if status not in allowed:
             raise ValueError("Unsupported order status update.")
         now = int(time.time())
@@ -516,6 +519,14 @@ class BloFinDemoEventStore:
             "daily_loss_pct": max(0.0, (day_open - equity) / day_open),
             "drawdown_pct": max(0.0, (peak - equity) / peak),
         }
+
+    def get_order(self, client_order_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM blofin_demo_orders WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def close(self) -> None:
         with self._lock:
@@ -576,6 +587,47 @@ class BloFinDemoExecutor:
         self.policy = policy or BloFinDemoRiskPolicy()
         configured = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
         self.trading_enabled = configured if trading_enabled is None else bool(trading_enabled)
+
+    def reconcile_unknown_order(self, *, inst_id: str, client_order_id: str) -> dict[str, Any]:
+        """Read order state by client id. This method never places or retries an order."""
+        order = self.store.get_order(client_order_id)
+        if order is None or order.get("instrument_id") != inst_id:
+            raise BloFinDemoExecutionBlocked("No matching locally reserved order exists.")
+        if order.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
+            return {"status": order["status"], "client_order_id": client_order_id}
+        detail = self.client.get_order_detail(inst_id, client_order_id=client_order_id)
+        if isinstance(detail, list):
+            detail = next((row for row in detail if isinstance(row, Mapping)), None)
+        if not isinstance(detail, Mapping):
+            return {"status": "UNKNOWN", "client_order_id": client_order_id,
+                    "reconciliation": "NO_MATCH; no retry was sent"}
+        echoed_id = str(detail.get("clientOrderId") or "")
+        exchange_order_id = str(detail.get("orderId") or "")
+        state = str(detail.get("state") or "").lower()
+        if echoed_id != client_order_id or not exchange_order_id:
+            return {"status": "UNKNOWN", "client_order_id": client_order_id,
+                    "reconciliation": "INCOMPLETE_RECEIPT; no retry was sent"}
+        state_map = {
+            "live": "ACCEPTED",
+            "partially_filled": "PARTIALLY_FILLED",
+            "filled": "FILLED",
+            "canceled": "CANCELED",
+            "order_failed": "REJECTED",
+        }
+        mapped = state_map.get(state)
+        if mapped is None:
+            return {"status": "UNKNOWN", "client_order_id": client_order_id,
+                    "reconciliation": "UNRECOGNIZED_EXCHANGE_STATE; no retry was sent"}
+        self.store.update_order(
+            client_order_id, mapped, exchange_order_id=exchange_order_id
+        )
+        return {
+            "status": mapped,
+            "environment": "BLOFIN_DEMO",
+            "client_order_id": client_order_id,
+            "exchange_order_id": exchange_order_id,
+            "reconciliation": "READ_ONLY",
+        }
 
     def execute(
         self,
