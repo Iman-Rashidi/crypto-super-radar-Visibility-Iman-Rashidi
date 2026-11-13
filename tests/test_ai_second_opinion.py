@@ -29,6 +29,7 @@ def valid_result():
             "asset_regime": "BULLISH",
             "wallet_address": "must-not-be-sent",
             "private_key": "must-not-be-sent",
+            "market_sentiment_score": ["must-not-send-list-values"],
         },
         gates=[
             SimpleNamespace(
@@ -97,8 +98,9 @@ class FreeAISecondOpinionTests(unittest.TestCase):
     def test_approved_ai_response_is_accepted_and_sends_only_public_data(self):
         captured = {}
 
-        def fake_post(url, headers, json: dict, timeout):
-            captured.update({"url": url, "headers": headers, "payload": json, "timeout": timeout})
+        def fake_post(url, headers, json: dict, timeout, allow_redirects=False):
+            captured.update({"url": url, "headers": headers, "payload": json, "timeout": timeout,
+                             "allow_redirects": allow_redirects})
             return FakeResponse(document=valid_document())
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
@@ -114,9 +116,11 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         prompt = json.dumps(captured["payload"], ensure_ascii=False)
         self.assertNotIn("must-not-be-sent", prompt)
         self.assertNotIn("private_key", prompt)
+        self.assertNotIn("must-not-send-list-values", prompt)
+        self.assertFalse(captured["allow_redirects"])
 
     def test_non_bullish_rating_vetoes_entry(self):
-        def fake_post(url, headers, json, timeout):
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
             return FakeResponse(document=valid_document(rating="Hold", proposal="NO_TRADE"))
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
@@ -150,6 +154,55 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertFalse(result["paper_entry_eligible"])
+
+
+    def test_duplicate_and_non_integer_gate_ids_block_before_provider_call(self):
+        malformed_cases = []
+        duplicate = valid_result()
+        malformed_cases.append(duplicate)
+        duplicate.gates.append(SimpleNamespace(
+            gate_id=1, name_en="Duplicate gate", status="PASS", evidence={}
+        ))
+        fractional = valid_result()
+        fractional.gates[0].gate_id = 1.5
+        malformed_cases.append(fractional)
+
+        for invalid in malformed_cases:
+            calls = {"count": 0}
+
+            def forbidden_post(*args, **kwargs):
+                calls["count"] += 1
+                raise AssertionError("invalid gate identities must block the provider call")
+
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+                review = run_free_ai_second_opinion(
+                    invalid, AssetSpec.parse("cex:BTCUSDT"), http_post=forbidden_post
+                )
+            self.assertFalse(review["paper_entry_eligible"])
+            self.assertEqual(calls["count"], 0)
+
+    def test_model_change_invalidates_cached_ai_approval(self):
+        models = []
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            models.append(json["model"])
+            return FakeResponse(document=valid_document())
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            first = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+        with patch.dict(os.environ, {
+            "OPENROUTER_API_KEY": "test-key",
+            "CSR_AI_MODEL": "another/free-model:free",
+        }, clear=True):
+            second = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+
+        self.assertTrue(first["paper_entry_eligible"])
+        self.assertTrue(second["paper_entry_eligible"])
+        self.assertEqual(models, [DEFAULT_FREE_MODEL, "another/free-model:free"])
 
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
