@@ -293,9 +293,11 @@ class FuturesPaperLedger:
                 p["opened_at"], int(time.time()), p["signal_bar"],
                 p["confirmation_score"], reason,
             ))
+            # Funding cash flows were already posted idempotently by apply_funding().
+            # Subtracting the accumulated funding again here would double-charge the account.
             self._db.execute(
                 "UPDATE futures_paper_account SET balance=balance+?-?,updated_at=? WHERE id=1",
-                (gross, exit_fee + funding, int(time.time())),
+                (gross, exit_fee, int(time.time())),
             )
             self._db.execute("DELETE FROM futures_paper_positions WHERE id=1")
             close_side = "SELL" if p["direction"] == "LONG" else "BUY"
