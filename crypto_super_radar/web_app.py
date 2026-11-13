@@ -3167,7 +3167,22 @@ class Handler(BaseHTTPRequestHandler):
           </div>
           <p class="muted" id="blofin-demo-account-status" aria-live="polite">اطلاعات خصوصی حساب تا زمان تأیید توکن نمایش داده نمی‌شود.</p>
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
-          <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال</p>
+          <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
+          <div class="metric" style="margin-top:16px">
+            <h3>اجرای یک سفارش آزمایشی · BTC-USDT Perpetual</h3>
+            <p class="muted">سهمیه فقط یک سفارش در کل عمر سرویس؛ اهرم ایزوله 1x، حداقل اندازه قرارداد، حد ضرر و حد سود. شرط ورود: ۱۲ گیت PASS، تأیید Nemotron و عبور همه کنترل‌های حساب و قیمت. در صورت رد هر شرط، سفارش ارسال نمی‌شود.</p>
+            <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
+            <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک معامله در BloFin Demo</button>
+            <pre id="blofin-execution-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          </div>
+          <div class="metric" style="margin-top:16px">
+            <h3>مانیتور زنده ورود و خروج ربات</h3>
+            <p class="muted">زمان تصمیم، ارسال سفارش، Fill واقعی، قیمت ورود، Mark Price، سود/زیان شناور، سفارش‌های حد سود/ضرر، زمان خروج و PnL نهایی از داده‌های حساب Demo نمایش داده می‌شود.</p>
+            <button id="blofin-demo-monitor-toggle" type="button">شروع مانیتور زنده هر ۵ ثانیه</button>
+            <p id="blofin-monitor-status" class="muted" aria-live="polite">برای مشاهده اطلاعات خصوصی، توکن پنل را در کادر بالا وارد کن.</p>
+            <div id="blofin-monitor-view" style="overflow-x:auto"></div>
+            <div id="blofin-monitor-events" style="overflow-x:auto"></div>
+          </div>
           <script>
           (function(){
             const checkButton=document.getElementById('blofin-demo-check');
@@ -3178,7 +3193,14 @@ class Handler(BaseHTTPRequestHandler):
             const accountStatus=document.getElementById('blofin-demo-account-status');
             const accountView=document.getElementById('blofin-demo-account-view');
             const safety=document.getElementById('blofin-demo-safety');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety)return;
+            const executeButton=document.getElementById('blofin-demo-execute-once');
+            const executionReadiness=document.getElementById('blofin-execution-readiness');
+            const executionResult=document.getElementById('blofin-execution-result');
+            const monitorToggle=document.getElementById('blofin-demo-monitor-toggle');
+            const monitorStatus=document.getElementById('blofin-monitor-status');
+            const monitorView=document.getElementById('blofin-monitor-view');
+            const monitorEvents=document.getElementById('blofin-monitor-events');
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!executionReadiness||!executionResult||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -3293,6 +3315,145 @@ class Handler(BaseHTTPRequestHandler):
                 accountButton.disabled=false;
               }
             });
+            let monitorTimer=null;
+            let monitorActive=false;
+            let lastJobId=null;
+            function addCell(parent,tag,value){
+              const node=document.createElement(tag);
+              node.textContent=value===null||value===undefined||value===''?'—':String(value);
+              parent.appendChild(node);
+              return node;
+            }
+            function formatTime(raw){
+              if(raw===null||raw===undefined||raw==='')return '—';
+              let date;
+              if(typeof raw==='number'||/^\\d+$/.test(String(raw))){
+                const n=Number(raw);date=new Date(n>100000000000?n:n*1000);
+              }else date=new Date(raw);
+              return Number.isNaN(date.getTime())?String(raw):date.toLocaleString();
+            }
+            function renderEvents(title,items,fields){
+              const section=document.createElement('section');
+              addCell(section,'h4',title);
+              if(!items||!items.length){addCell(section,'p','هنوز رویدادی ثبت نشده است.');return section;}
+              const table=document.createElement('table'),head=document.createElement('tr');
+              fields.forEach(([key,label])=>addCell(head,'th',label));table.appendChild(head);
+              items.forEach(item=>{const row=document.createElement('tr');fields.forEach(([key])=>{
+                let value=item[key];if(/time|ts|createTime|updateTime|occurred_at/i.test(key))value=formatTime(value);
+                addCell(row,'td',value);
+              });table.appendChild(row);});
+              section.appendChild(table);return section;
+            }
+            function renderLiveMonitor(snapshot){
+              monitorView.replaceChildren();monitorEvents.replaceChildren();
+              const m=snapshot.market||{},positions=snapshot.positions||[];
+              const active=positions.filter(p=>Math.abs(Number(p.positions||0))>0);
+              const position=active[0]||{};
+              const fillRows=snapshot.fills||[];
+              const closed=snapshot.closed_positions||[];
+              const order=snapshot.latest_local_order||{};
+              const detail=snapshot.order_detail||{};
+              const summary=document.createElement('div');summary.className='grid';
+              const metrics=[
+                ['آخرین قیمت BTC',m.last],['Mark Price',position.markPrice||m.markPrice],
+                ['وضعیت ربات',active.length?'POSITION_OPEN':(detail.state||order.status||'NO_OPEN_POSITION')],
+                ['جهت پوزیشن',position.positionSide||order.side],
+                ['قیمت ورود واقعی',position.averagePrice||detail.averagePrice||order.entry_price],
+                ['حجم باز',position.positions],['اهرم',position.leverage||order.leverage],
+                ['سود/زیان شناور USDT',position.unrealizedPnl],
+                ['Equity حساب Demo',snapshot.account&&snapshot.account.totalEquity],
+                ['آخرین به‌روزرسانی',formatTime(snapshot.updated_at_utc)]
+              ];
+              metrics.forEach(([label,value])=>{const card=document.createElement('div');card.className='metric';addCell(card,'span',label);addCell(card,'strong',value);summary.appendChild(card);});
+              monitorView.appendChild(summary);
+              monitorEvents.appendChild(renderEvents('زمان‌های واقعی معامله · Fillهای صرافی',fillRows,[
+                ['side','خرید/فروش'],['fillPrice','قیمت Fill'],['fillSize','حجم'],['fillPnl','PnL تحقق‌یافته'],['fee','کارمزد'],['ts','زمان دقیق']
+              ]));
+              monitorEvents.appendChild(renderEvents('معاملات بسته‌شده · زمان خروج و سود/زیان نهایی',closed,[
+                ['side','سمت خروج'],['openAveragePrice','قیمت ورود'],['closeAveragePrice','قیمت خروج'],['closePositions','حجم بسته‌شده'],['realizedPnl','PnL نهایی'],['fee','کارمزد'],['updateTime','زمان خروج']
+              ]));
+              monitorEvents.appendChild(renderEvents('سفارش‌های باز',snapshot.open_orders||[],[
+                ['side','سمت'],['orderType','نوع'],['price','قیمت'],['size','حجم'],['filledSize','پرشده'],['state','وضعیت'],['createTime','زمان']
+              ]));
+              monitorEvents.appendChild(renderEvents('رویدادهای ثبت‌شده در ربات',snapshot.execution_events||[],[
+                ['event_type','رویداد'],['occurred_at','زمان UTC']
+              ]));
+            }
+            async function refreshExecutionReadiness(){
+              executeButton.disabled=true;
+              try{
+                const response=await fetch('/api/blofin/demo/execution-readiness',{cache:'no-store'});
+                const result=await response.json();
+                executionReadiness.textContent=result.message_fa||'وضعیت پیش‌نیازهای Demo مشخص نیست.';
+                if(result.status==='READY'&&result.one_order_available===true){
+                  executeButton.disabled=false;
+                  executionReadiness.textContent+=' آماده اجرای یک سفارش است.';
+                }
+                if(result.one_order_used===true){
+                  executionReadiness.textContent='سهمیه یک سفارش این سرویس قبلاً استفاده شده است؛ سفارش دیگری مجاز نیست.';
+                }
+              }catch(error){executionReadiness.textContent='بررسی پیش‌نیازهای سفارش Demo ممکن نشد.';}
+            }
+            async function fetchLiveMonitor(){
+              const token=tokenInput.value.trim();
+              if(!token){monitorStatus.textContent='ابتدا توکن پنل را در کادر بالا وارد کن.';monitorActive=false;monitorToggle.textContent='شروع مانیتور زنده';return;}
+              try{
+                const response=await fetch('/api/blofin/demo/live-monitor',{
+                  cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                });
+                const snapshot=await response.json();
+                if(!response.ok||snapshot.status!=='CONNECTED_READ_ONLY')throw new Error(snapshot.message_fa||'Monitor unavailable');
+                renderLiveMonitor(snapshot);
+                monitorStatus.textContent='اتصال مانیتور برقرار است · به‌روزرسانی هر ۵ ثانیه · '+formatTime(snapshot.updated_at_utc);
+              }catch(error){monitorStatus.textContent='خواندن زنده حساب Demo ناموفق بود؛ اتصال READ و توکن پنل را بررسی کن.';}
+              if(monitorActive)monitorTimer=setTimeout(fetchLiveMonitor,5000);
+            }
+            monitorToggle.addEventListener('click',function(){
+              monitorActive=!monitorActive;
+              if(monitorActive){monitorToggle.textContent='توقف مانیتور زنده';fetchLiveMonitor();}
+              else{clearTimeout(monitorTimer);monitorStatus.textContent='مانیتور زنده متوقف شد.';monitorToggle.textContent='شروع مانیتور زنده هر ۵ ثانیه';}
+            });
+            async function pollExecutionJob(jobId,token,attempt){
+              try{
+                const response=await fetch('/api/blofin/demo/execution-jobs/'+jobId,{
+                  cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                });
+                const job=await response.json();
+                executionResult.textContent=JSON.stringify(job,null,2);
+                const events=job.events||[];
+                executionReadiness.textContent=events.map(e=>formatTime(e.time_utc)+' · '+(e.message_fa||e.stage)).join('\\n');
+                if(job.status==='completed'||job.status==='failed'){
+                  await refreshExecutionReadiness();
+                  if(!monitorActive){monitorActive=true;monitorToggle.textContent='توقف مانیتور زنده';fetchLiveMonitor();}
+                  return;
+                }
+              }catch(error){executionReadiness.textContent='در حال بازیابی همان شناسه سفارش؛ درخواست جدید ارسال نکن.';}
+              if(attempt<180)setTimeout(()=>pollExecutionJob(jobId,token,attempt+1),5000);
+              else executionReadiness.textContent='مهلت نمایش کار پایان یافت؛ شناسه همان عملیات: '+jobId+' . سفارش جدید ارسال نکن.';
+            }
+            executeButton.addEventListener('click',async function(){
+              const token=tokenInput.value.trim();
+              if(!token){executionReadiness.textContent='ابتدا توکن پنل را در کادر بالا وارد کن.';return;}
+              if(!window.confirm('این اقدام یک سفارش بازار BTC-USDT را فقط در BloFin Demo ارسال می‌کند؛ اهرم ایزوله 1x، حداقل حجم قرارداد و حد ضرر/حد سود. اگر تحلیل اجازه ندهد معامله‌ای انجام نمی‌شود. ادامه؟'))return;
+              executeButton.disabled=true;
+              executionResult.textContent='در حال آغاز اسکن زنده ۱۲ گیت و بررسی Nemotron...';
+              try{
+                const response=await fetch('/api/blofin/demo/execute-once',{
+                  method:'POST',cache:'no-store',
+                  headers:{'Authorization':'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
+                  body:new URLSearchParams({confirm:'1',instrument:'BTC-USDT'})
+                });
+                const started=await response.json();
+                if(!response.ok||!started.job_id){executionResult.textContent=JSON.stringify(started,null,2);await refreshExecutionReadiness();return;}
+                lastJobId=started.job_id;
+                executionResult.textContent=JSON.stringify(started,null,2);
+                pollExecutionJob(started.job_id,token,0);
+              }catch(error){
+                executionResult.textContent='نتیجه درخواست نامشخص است؛ پیش از هر تلاش مجدد وضعیت سفارش‌های BloFin را بررسی کن.';
+                executionReadiness.textContent='از فشردن دوباره دکمه خودداری کن تا وضعیت درخواست روشن شود.';
+              }
+            });
+            refreshExecutionReadiness();
             clearButton.addEventListener('click',function(){
               tokenInput.value='';
               accountView.replaceChildren();
