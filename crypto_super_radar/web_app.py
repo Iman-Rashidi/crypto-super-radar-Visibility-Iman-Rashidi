@@ -2846,6 +2846,160 @@ class Handler(BaseHTTPRequestHandler):
         </script>
         <section class="card" id="paper-bot">
           <h2>ربات معامله‌گر آزمایشی (Paper Trading)</h2>
+          <style>
+            .live-radar-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:12px 0}
+            .live-radar-controls label{display:grid;gap:5px;color:var(--muted);font-size:.85rem}
+            .live-candle-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:#07131f}
+            #live-candle-chart{display:block;width:100%;min-width:680px;height:360px}
+            .live-radar-signal{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}
+            .live-radar-signal .metric strong{font-size:1.05rem}
+            .live-radar-note{color:var(--muted);font-size:.82rem;line-height:1.8}
+          </style>
+          <div id="live-market-radar">
+            <h3>نمودار زندهٔ کندل و رادار موج‌ها</h3>
+            <p class="muted">کندل‌های Spot از Binance و Bybit دریافت می‌شوند. نمودار هر ۱۵ ثانیه تازه‌سازی می‌شود؛ فقط کندل‌های بسته‌شده در تشخیص سقف/کف و سیگنال استفاده می‌شوند.</p>
+            <div class="live-radar-controls">
+              <label>رمزارز<select id="live-radar-symbol"><option value="BTCUSDT">BTC</option><option value="ETHUSDT">ETH</option><option value="SOLUSDT">SOL</option><option value="BNBUSDT">BNB</option><option value="XRPUSDT">XRP</option><option value="DOGEUSDT">DOGE</option><option value="ADAUSDT">ADA</option><option value="AVAXUSDT">AVAX</option><option value="LINKUSDT">LINK</option><option value="DOTUSDT">DOT</option><option value="LTCUSDT">LTC</option><option value="TRXUSDT">TRX</option><option value="GRAMUSDT">GRAM</option><option value="PEPEUSDT">PEPE</option><option value="SHIBUSDT">SHIB</option><option value="BCHUSDT">BCH</option><option value="SUIUSDT">SUI</option><option value="HBARUSDT">HBAR</option><option value="NEARUSDT">NEAR</option><option value="UNIUSDT">UNI</option></select></label>
+              <label>تایم‌فریم
+                <select id="live-radar-interval">
+                  <option value="1m">۱ دقیقه</option><option value="5m" selected>۵ دقیقه</option>
+                  <option value="15m">۱۵ دقیقه</option><option value="1h">۱ ساعت</option>
+                  <option value="4h">۴ ساعت</option><option value="1d">۱ روز</option>
+                </select>
+              </label>
+              <button type="button" id="live-radar-refresh">به‌روزرسانی کندل‌ها</button>
+            </div>
+            <p id="live-radar-status" class="muted" aria-live="polite">در حال دریافت کندل‌های زنده...</p>
+            <div class="live-candle-wrap">
+              <canvas id="live-candle-chart" width="1200" height="420" role="img" aria-label="نمودار کندل زنده با سقف و کف تأییدشده"></canvas>
+            </div>
+            <div class="live-radar-signal">
+              <div class="metric"><span>سیگنال فعلی</span><strong id="live-radar-action">در انتظار داده</strong></div>
+              <div class="metric"><span>قیمت مرجع</span><strong id="live-radar-entry">—</strong></div>
+              <div class="metric"><span>حد ضرر</span><strong id="live-radar-stop">—</strong></div>
+              <div class="metric"><span>حد سود</span><strong id="live-radar-target">—</strong></div>
+              <div class="metric"><span>نسبت ریسک به بازده</span><strong id="live-radar-rr">—</strong></div>
+              <div class="metric"><span>ساختار موج الیوت</span><strong id="live-radar-wave">نامشخص</strong></div>
+            </div>
+            <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
+            <p id="live-radar-provider" class="live-radar-note">اعتبارسنجی چندمنبعی: در انتظار داده</p>
+            <p class="live-radar-note">این بخش فعلاً هشدار تحلیلی است و به Paper Bot سفارش نمی‌دهد. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
+          </div>
+          <script>
+          (function(){
+            const symbol=document.getElementById('live-radar-symbol');
+            const interval=document.getElementById('live-radar-interval');
+            const button=document.getElementById('live-radar-refresh');
+            const status=document.getElementById('live-radar-status');
+            const canvas=document.getElementById('live-candle-chart');
+            const ctx=canvas.getContext('2d');
+            const fields={
+              action:document.getElementById('live-radar-action'),
+              entry:document.getElementById('live-radar-entry'),
+              stop:document.getElementById('live-radar-stop'),
+              target:document.getElementById('live-radar-target'),
+              rr:document.getElementById('live-radar-rr'),
+              wave:document.getElementById('live-radar-wave'),
+              reason:document.getElementById('live-radar-reason'),
+              provider:document.getElementById('live-radar-provider')
+            };
+            const number=v=>v===null||v===undefined?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:8});
+            let busy=false,lastSignalKey=null,timer=null;
+            function draw(data){
+              const bars=data.candles||[];
+              ctx.clearRect(0,0,canvas.width,canvas.height);
+              ctx.fillStyle='#07131f';ctx.fillRect(0,0,canvas.width,canvas.height);
+              if(!bars.length){ctx.fillStyle='#ffc66d';ctx.font='18px sans-serif';ctx.fillText('کندل معتبر برای نمایش در دسترس نیست',24,40);return;}
+              const pad={left:58,right:18,top:26,bottom:28};
+              const min=Math.min.apply(null,bars.map(x=>x.low));
+              const max=Math.max.apply(null,bars.map(x=>x.high));
+              const spread=Math.max(max-min,Math.abs(max)*0.0001,1e-9);
+              const y=v=>canvas.height-pad.bottom-(v-min)/spread*(canvas.height-pad.top-pad.bottom);
+              const slot=(canvas.width-pad.left-pad.right)/bars.length;
+              const x=i=>pad.left+(i+.5)*slot;
+              ctx.strokeStyle='#274156';ctx.lineWidth=1;
+              for(let k=0;k<=4;k++){
+                const yy=pad.top+k*(canvas.height-pad.top-pad.bottom)/4;
+                ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right,yy);ctx.stroke();
+                const value=max-k*spread/4;ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';
+                ctx.fillText(number(value),4,yy+4);
+              }
+              bars.forEach((bar,i)=>{
+                const xx=x(i),up=bar.close>=bar.open,color=up?'#53d6a0':'#ff7b85';
+                ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=Math.max(1,slot*.12);
+                ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
+                const top=y(Math.max(bar.open,bar.close)),bottom=y(Math.min(bar.open,bar.close));
+                const bodyW=Math.max(1,Math.min(12,slot*.66));
+                ctx.fillRect(xx-bodyW/2,top,bodyW,Math.max(1,bottom-top));
+                if(!bar.is_closed){
+                  ctx.save();ctx.strokeStyle='#ffc66d';ctx.setLineDash([3,3]);
+                  ctx.strokeRect(xx-bodyW/2-2,top-2,bodyW+4,Math.max(5,bottom-top+4));ctx.restore();
+                }
+              });
+              const indexByTime=new Map(bars.map((bar,i)=>[bar.time,i]));
+              let prev=null;
+              (data.pivots||[]).forEach(p=>{
+                const i=indexByTime.get(Date.parse(p.timestamp));
+                if(i===undefined)return;
+                const xx=x(i),yy=y(p.price);
+                if(prev){
+                  ctx.save();ctx.strokeStyle='#72a7ff';ctx.lineWidth=2;ctx.setLineDash([5,4]);
+                  ctx.beginPath();ctx.moveTo(prev.x,prev.y);ctx.lineTo(xx,yy);ctx.stroke();ctx.restore();
+                }
+                ctx.fillStyle=p.kind==='LOW'?'#53d6a0':'#ffc66d';
+                ctx.beginPath();ctx.arc(xx,yy,5,0,Math.PI*2);ctx.fill();
+                ctx.fillStyle='#edf4fb';ctx.font='11px sans-serif';
+                ctx.fillText(p.kind==='LOW'?'کف':'سقف',xx+5,yy+(p.kind==='LOW'?16:-8));
+                prev={x:xx,y:yy};
+              });
+              const signal=data.signal||{};
+              if(signal.entry_reference_price){
+                const yy=y(signal.entry_reference_price);
+                ctx.save();ctx.strokeStyle=signal.signal==='BUY'?'#53d6a0':signal.signal==='SELL'?'#ff7b85':'#ffc66d';
+                ctx.setLineDash([8,5]);ctx.beginPath();ctx.moveTo(pad.left,yy);
+                ctx.lineTo(canvas.width-pad.right,yy);ctx.stroke();ctx.restore();
+              }
+              ctx.fillStyle='#d7e8f5';ctx.font='13px sans-serif';
+              ctx.fillText(data.symbol+' · '+data.interval,pad.left,17);
+            }
+            async function refresh(force){
+              if(busy)return;busy=true;button.disabled=true;status.textContent='در حال دریافت و تطبیق کندل‌ها...';
+              try{
+                const url='/api/live-market-radar?symbol='+encodeURIComponent(symbol.value)+'&interval='+encodeURIComponent(interval.value)+(force?'&refresh=1':'');
+                const response=await fetch(url,{cache:'no-store'});const data=await response.json();
+                if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+                draw(data);
+                const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
+                const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
+                fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
+                fields.entry.textContent=number(s.entry_reference_price);
+                fields.stop.textContent=number(s.stop_loss);
+                fields.target.textContent=number(s.take_profit);
+                fields.rr.textContent=s.reward_risk===null||s.reward_risk===undefined?'—':s.reward_risk+'R';
+                fields.wave.textContent=(w.pattern||'نامشخص')+' · '+(w.phase||'داده ناکافی');
+                fields.reason.textContent=s.reason||'دلیل سیگنال در دسترس نیست.';
+                fields.provider.textContent='منابع: '+(cv.providers||[]).join(' و ')+' · تطبیق: '+cv.status+
+                  ' · اختلاف بیشینه: '+number(cv.max_close_discrepancy_pct)+'% · کندل بسته‌شده: '+(data.last_closed_candle_at||'—');
+                const lastClosed=(data.candles||[]).filter(x=>x.is_closed).slice(-1)[0];
+                status.textContent='قیمت آخرین کندل بسته‌شده: '+number(lastClosed&&lastClosed.close)+
+                  ' · سن کندل: '+number(data.candle_age_seconds)+' ثانیه · دریافت: '+new Date(data.updated_at_utc).toLocaleTimeString();
+                if(s.signal_key&&s.signal_key!==lastSignalKey){
+                  lastSignalKey=s.signal_key;status.textContent+=' · هشدار جدید '+(labels[s.signal]||s.signal);
+                }
+              }catch(error){
+                status.textContent='دادهٔ تازه در دسترس نیست؛ سیگنال تازه صادر نمی‌شود: '+String(error.message||error);
+                fields.action.textContent='نامشخص';
+                fields.reason.textContent='آخرین داده تأیید نشد. از سیگنال قبلی برای تصمیم تازه استفاده نکنید.';
+              }finally{busy=false;button.disabled=false;}
+            }
+            button.addEventListener('click',()=>refresh(true));
+            symbol.addEventListener('change',()=>refresh(true));
+            interval.addEventListener('change',()=>refresh(true));
+            refresh(true);
+            timer=setInterval(()=>refresh(false),15000);
+            window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);});
+          })();
+          </script>
           <p class="muted">ربات فقط LONG در بازار Spot را با همان ۱۲ فیلتر ارزیابی می‌کند؛ هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
           <div class="metric" style="margin:12px 0">
             <strong>اتصال الزامی به هوش مصنوعی رایگان · OpenRouter / NVIDIA Nemotron</strong>
