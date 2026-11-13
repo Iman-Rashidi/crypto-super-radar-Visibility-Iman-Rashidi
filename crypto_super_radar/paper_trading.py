@@ -1041,23 +1041,45 @@ class PaperTradingBot:
                 "ai_review": ai_review,
             }
 
-        # Do not open from a quote that expired or changed while the provider
-        # was evaluating the evidence; retry on the next fresh market snapshot.
-        if entry_quote is not None:
-            latest_quote = _extract_observed_quote(snapshot)
-            if (
-                latest_quote is None
-                or latest_quote["timestamp_ms"] != entry_quote["timestamp_ms"]
-                or latest_quote["source"] != entry_quote["source"]
-                or latest_quote["bid"] != entry_quote["bid"]
-                or latest_quote["ask"] != entry_quote["ask"]
-            ):
-                return {
-                    "status": "NO_TRADE",
-                    "asset": asset.raw,
-                    "reason": "Observed bid/ask quote changed or expired during AI review; a fresh market scan is required.",
-                    "ai_review": ai_review,
-                }
+        # Fetch a genuinely new cross-validated snapshot after the external
+        # review. Re-reading the original object cannot detect a newer quote
+        # published while the provider was responding.
+        snapshot_getter = getattr(data, "snapshot", None) or getattr(self.engine, "snapshot", None)
+        try:
+            refreshed_snapshot = snapshot_getter(asset) if callable(snapshot_getter) else None
+        except Exception:
+            refreshed_snapshot = None
+        refreshed_price = _number(getattr(refreshed_snapshot, "price_usd", None))
+        price_tolerance = max(1e-8, abs(price) * 1e-6)
+        if (
+            refreshed_snapshot is None
+            or refreshed_price is None
+            or refreshed_price <= 0
+            or abs(refreshed_price - price) > price_tolerance
+        ):
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Cross-validated market price changed or could not be refreshed during AI review; a new scan is required.",
+                "ai_review": ai_review,
+            }
+
+        latest_quote = _extract_observed_quote(refreshed_snapshot)
+        quote_changed = (entry_quote is None) != (latest_quote is None)
+        if entry_quote is not None and latest_quote is not None:
+            quote_changed = quote_changed or any((
+                latest_quote["timestamp_ms"] != entry_quote["timestamp_ms"],
+                latest_quote["source"] != entry_quote["source"],
+                latest_quote["bid"] != entry_quote["bid"],
+                latest_quote["ask"] != entry_quote["ask"],
+            ))
+        if quote_changed:
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Observed bid/ask quote changed, appeared, disappeared or expired during AI review; a fresh market scan is required.",
+                "ai_review": ai_review,
+            }
 
         if not self.ledger.open_position(record, debit):
             return {"status": "NO_TRADE", "asset": asset.raw,
