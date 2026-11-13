@@ -746,7 +746,7 @@ class BloFinDemoExecutor:
             quantity_margin = quantity_notional / Decimal(int(leverage))
             if quantity_risk > _decimal(plan["risk_budget_usdt"], "risk_budget_usdt"):
                 raise BloFinDemoExecutionBlocked("The minimum contract size exceeds the configured per-trade risk budget.")
-            if quantity_margin > equity * Decimal(str(self.policy.max_margin_usage_pct)):
+            if quantity_margin > Decimal(str(equity)) * Decimal(str(self.policy.max_margin_usage_pct)):
                 raise BloFinDemoExecutionBlocked("The minimum contract size exceeds the permitted isolated-margin budget.")
             plan["quantity"] = _format_decimal(quantity)
             plan["risk_per_contract_usdt"] = float(abs(entry - stop) * contract_value)
