@@ -268,16 +268,104 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": os.getenv("RENDER_EXTERNAL_URL", "https://crypto-super-radar-blofin-demo.onrender.com"),
+        "HTTP-Referer": os.getenv(
+            "RENDER_EXTERNAL_URL",
+            "https://crypto-super-radar-blofin-demo.onrender.com",
+        ),
         "X-Title": "CRYPTO SUPER RADAR Nemotron Connectivity Probe",
     }
     post = http_post or requests.post
     started = time.monotonic()
     try:
         response = post(
-            OPENROUTER_URL, headers=headers, json=payload,
-            timeout=(8, 20), allow_redirects=False,
+            OPENROUTER_URL,
+            headers=headers,
+            json=payload,
+            timeout=(8, 45),
+            allow_redirects=False,
         )
+    except Exception as exc:
+        return {
+            "provider": "OpenRouter", "model": model, "status": "NETWORK_ERROR",
+            "status_fa": "ارتباط شبکه با OpenRouter برقرار نشد.",
+            "error_type": type(exc).__name__, "probe": "FAIL",
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "paper_entry_eligible": False,
+        }
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    http_status = int(getattr(response, "status_code", 0) or 0)
+    if http_status != 200:
+        status_by_code = {
+            401: ("INVALID_API_KEY", "OpenRouter کلید API را نپذیرفت."),
+            402: ("QUOTA_OR_MODEL_UNAVAILABLE", "سهمیه یا دسترسی مدل رایگان در دسترس نیست."),
+            403: ("ACCESS_DENIED", "OpenRouter دسترسی این درخواست را رد کرد."),
+            429: ("RATE_LIMITED", "محدودیت تعداد درخواست OpenRouter اعمال شده است."),
+        }
+        status, message = status_by_code.get(
+            http_status, ("PROVIDER_ERROR", "OpenRouter درخواست آزمایشی را با موفقیت پاسخ نداد.")
+        )
+        return {
+            "provider": "OpenRouter", "model": model, "status": status,
+            "status_fa": message, "http_status": http_status,
+            "probe": "FAIL", "latency_ms": latency_ms,
+            "paper_entry_eligible": False,
+        }
+
+    try:
+        body = response.json()
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ValueError("MISSING_CHOICES")
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise ValueError("MISSING_MESSAGE")
+        content = message.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            ]
+            content = "\\n".join(text_parts)
+        if not isinstance(content, str):
+            raise ValueError("CONTENT_NOT_TEXT")
+        if len(content) > 8_000:
+            raise ValueError("CONTENT_TOO_LARGE")
+        if marker not in content:
+            raise ValueError("MARKER_NOT_RETURNED")
+
+        returned_model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(returned_model, str) or not returned_model.strip():
+            return {
+                "provider": "OpenRouter", "model": model, "status": "MODEL_UNCONFIRMED",
+                "status_fa": "پاسخ مدل دریافت شد، اما شناسه مدل اجراشده در پاسخ ارائه نشد.",
+                "http_status": http_status, "probe": "PASS",
+                "model_verified": False, "latency_ms": latency_ms,
+                "paper_entry_eligible": False,
+            }
+        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+            return {
+                "provider": "OpenRouter", "model": model,
+                "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
+                "status_fa": "پاسخ از مدلی غیر از Nemotron انتخاب‌شده دریافت شد.",
+                "http_status": http_status, "probe": "PASS",
+                "model_verified": False, "latency_ms": latency_ms,
+                "paper_entry_eligible": False,
+            }
+        usage = body.get("usage") if isinstance(body, dict) else None
+        total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
+            total_tokens = None
+        return {
+            "provider": "OpenRouter", "model": model,
+            "returned_model": returned_model[:160], "status": "CONNECTED",
+            "status_fa": "اتصال واقعی موفق است؛ Nemotron پاسخ معتبر داد و شناسه مدل با مدل انتخاب‌شده مطابقت دارد.",
+            "http_status": http_status, "probe": "PASS",
+            "model_verified": True, "latency_ms": latency_ms,
+            "total_tokens": total_tokens,
+            "paper_entry_eligible": False, "orders_submitted": False,
+        }
     except Exception as exc:
         known_error = (
             str(exc) if isinstance(exc, ValueError)
