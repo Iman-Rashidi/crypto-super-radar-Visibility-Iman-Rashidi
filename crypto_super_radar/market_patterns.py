@@ -76,10 +76,11 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if len(frame) < 3:
         return []
     bars = frame.tail(3)
-    previous, middle, last = bars.iloc[-3], bars.iloc[-2], bars.iloc[-1]
+    first, middle, last = bars.iloc[-3], bars.iloc[-2], bars.iloc[-1]
     o, h, low, c = (float(last[k]) for k in ("open", "high", "low", "close"))
-    po, ph, pl, pc = (float(previous[k]) for k in ("open", "high", "low", "close"))
-    mo, mh, ml, mc = (float(middle[k]) for k in ("open", "high", "low", "close"))
+    fo, fh, fl, fc = (float(first[k]) for k in ("open", "high", "low", "close"))
+    po, ph, pl, pc = (float(middle[k]) for k in ("open", "high", "low", "close"))
+    mo, mh, ml, mc = fo, fh, fl, fc
     body = abs(c - o)
     candle_range = max(h - low, 1e-15)
     upper = h - max(o, c)
@@ -111,13 +112,13 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
         ))
 
     # Three-candle reversal families take priority over single-candle shapes.
-    first_body = abs(pc - po)
-    first_mid = (po + pc) / 2.0
-    middle_body = abs(mc - mo)
+    first_body = abs(fc - fo)
+    first_mid = (fo + fc) / 2.0
+    middle_body = abs(float(middle["close"]) - float(middle["open"]))
     last_bull = c > o
     last_bear = c < o
-    first_bear = pc < po
-    first_bull = pc > po
+    first_bear = fc < fo
+    first_bull = fc > fo
 
     if first_bear and first_body >= max((ph - pl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bull and c > first_mid and c > mc:
         add("ستاره صبحگاهی", "Morning Star", "BULLISH",
@@ -126,17 +127,17 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
         add("ستاره شامگاهی", "Evening Star", "BEARISH",
             "سه کندلِ فشار خرید، مکث و پس‌گرفتن بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی زیر کف الگو.", -15)
 
-    if first_bear and last_bull and o <= pc and c >= po and body >= first_body:
+    if pc < po and last_bull and o <= pc and c >= po and body >= abs(pc - po):
         add("پوشای صعودی", "Bullish Engulfing", "BULLISH",
             "بدنهٔ صعودی آخر، بدنهٔ نزولی قبلی را پوشانده است؛ در روند نزولی معنا‌دارتر است.", 13)
-    elif first_bull and last_bear and o >= pc and c <= po and body >= first_body:
+    elif pc > po and last_bear and o >= pc and c <= po and body >= abs(pc - po):
         add("پوشای نزولی", "Bearish Engulfing", "BEARISH",
             "بدنهٔ نزولی آخر، بدنهٔ صعودی قبلی را پوشانده است؛ در روند صعودی معنا‌دارتر است.", -13)
 
-    if first_bear and last_bull and o < pl and c > first_mid and c < po:
+    if pc < po and last_bull and o < pl and c > (po + pc) / 2.0 and c < po:
         add("خط نفوذی صعودی", "Piercing Line", "BULLISH",
             "کندل صعودی بیش از نیمهٔ بدنهٔ نزولی قبلی را بازیابی کرده است.", 10)
-    elif first_bull and last_bear and o > ph and c < first_mid and c > po:
+    elif pc > po and last_bear and o > ph and c < (po + pc) / 2.0 and c > po:
         add("ابر تیره", "Dark Cloud Cover", "BEARISH",
             "کندل نزولی بیش از نیمهٔ بدنهٔ صعودی قبلی را پس گرفته است.", -10)
 
