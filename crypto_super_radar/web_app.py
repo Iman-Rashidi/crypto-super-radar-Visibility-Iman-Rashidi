@@ -30,10 +30,12 @@ from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
+from .global_market_data import GlobalMarketBoard
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
+GLOBAL_MARKET_BOARD = GlobalMarketBoard(ENGINE.data.http)
 JOBS: dict[str, dict] = {}
 ACTIVE_SCAN_KEYS: dict[str, str] = {}
 JOB_FENCE_COUNTER = 0
@@ -1943,6 +1945,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/dex-search":
             query = parse_qs(parsed.query).get("q", [""])[0]
             payload = search_dex_tokens(getattr(ENGINE.data, "http", None), query)
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if parsed.path == "/api/global-markets":
+            refresh = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
+            payload = GLOBAL_MARKET_BOARD.get_board(force_refresh=refresh)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/gem-hunter/report":
