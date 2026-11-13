@@ -191,6 +191,51 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(json.loads(body)["paper_entry_eligible"])
         self.assertFalse(json.loads(body)["orders_submitted"])
 
+    def test_ai_synthetic_dry_run_calls_only_the_ai_review_and_forces_trade_flags_off(self):
+        payload = {
+            "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "status": "APPROVED",
+            "model_verified": True,
+            "response_validated": True,
+            "test_passed": True,
+            "paper_entry_eligible": False,
+            "orders_submitted": False,
+            "trade_executed": False,
+            "test_mode": "SYNTHETIC_DRY_RUN",
+        }
+        with patch.object(web_app, "_run_ai_synthetic_dry_run_limited", return_value=payload) as dry_run, \
+             patch.object(web_app.FUTURES_PAPER_BOT, "run_once") as futures_tick, \
+             patch.object(web_app.PAPER_BOT, "run_once") as spot_tick:
+            status, _, body = self.request(
+                "POST", "/api/ai/dry-run", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": f"http://{self.host}:{self.port}",
+                },
+            )
+        result = json.loads(body)
+        self.assertEqual(status, 200)
+        dry_run.assert_called_once_with()
+        futures_tick.assert_not_called()
+        spot_tick.assert_not_called()
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertFalse(result["orders_submitted"])
+        self.assertFalse(result["trade_executed"])
+
+    def test_ai_synthetic_dry_run_rejects_cross_origin_requests(self):
+        with patch.object(web_app, "_run_ai_synthetic_dry_run_limited") as dry_run:
+            status, _, body = self.request(
+                "POST", "/api/ai/dry-run", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://attacker.invalid",
+                },
+            )
+        self.assertEqual(status, 403)
+        self.assertIn(b"Cross-origin", body)
+        dry_run.assert_not_called()
+
     def test_ai_diagnostic_endpoint_rejects_cross_origin_requests(self):
         with patch.object(web_app, "_run_ai_diagnostic_limited") as probe:
             status, _, body = self.request(
