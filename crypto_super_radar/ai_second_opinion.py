@@ -45,7 +45,7 @@ _PUBLIC_METRIC_KEYS = {
     "walk_forward_status", "sharpe", "profit_factor", "max_drawdown_pct",
     "relative_strength_30d_pct", "funding_rate_pct",
     "open_interest_change_24h_pct", "expected_holding_days",
-    "stop_loss", "take_profit", "risk_reward",
+    "entry_price", "stop_loss", "take_profit", "risk_reward",
 }
 
 
@@ -148,6 +148,7 @@ def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
         "confirmation_score": _safe_float(getattr(result, "confirmation_score", None)),
         "estimated_risk_score": _safe_float(getattr(result, "estimated_risk_score", None)),
         "opportunity_rank": _safe_float(getattr(result, "opportunity_rank", None)),
+        "entry_price": _safe_float(getattr(result, "entry_price", None)),
         "stop_loss": _safe_float(getattr(result, "stop_loss", None)),
         "take_profit": _safe_float(getattr(result, "take_profit", None)),
         "expected_holding_days": getattr(result, "expected_holding_days", None),
