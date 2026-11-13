@@ -21,6 +21,7 @@ from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
 from .models import AssetSpec, GateStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
+from .futures_paper_trading import FUTURES_PAPER_ASSETS, FuturesPaperTradingBot
 from .market_intelligence import search_dex_tokens
 from .gem_hunter_discovery import discover_gem_candidates
 from .gem_hunter_evaluator import evaluate_discovery_candidates
@@ -37,6 +38,7 @@ from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_ra
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
+FUTURES_PAPER_BOT = FuturesPaperTradingBot(ENGINE)
 GLOBAL_MARKET_BOARD = GlobalMarketBoard(ENGINE.data.http)
 JOBS: dict[str, dict] = {}
 ACTIVE_SCAN_KEYS: dict[str, str] = {}
@@ -1954,6 +1956,35 @@ def _crypto_market_board() -> dict:
         cached["refresh_error"] = last_error
     return cached
 
+def _run_futures_paper_tick(job_id: str, asset: AssetSpec) -> None:
+    """Run one futures-only paper cycle and publish its directional risk/account state."""
+    global SCAN_RUNNING
+    try:
+        cycle = FUTURES_PAPER_BOT.run_once(asset)
+        state = FUTURES_PAPER_BOT.state()
+        payload = {
+            "safety": {
+                "read_only": True,
+                "paper_only": True,
+                "private_exchange_credentials_used": False,
+                "orders_submitted": False,
+                "transactions_signed": False,
+                "leverage": 1.0,
+                "liquidation_model_status": state.get("liquidation_model_status"),
+            },
+            "cycle": cycle,
+            "futures_state": state,
+        }
+        with LOCK:
+            JOBS[job_id] = {"status": "completed", "result": payload}
+    except Exception as exc:
+        with LOCK:
+            JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        with LOCK:
+            SCAN_RUNNING = False
+
+
 def _scan_queue_worker():
     """Run stateful scan and paper-bot jobs serially with lease and fencing checks."""
     global SCAN_RUNNING
@@ -1989,6 +2020,8 @@ def _scan_queue_worker():
             if should_run:
                 if task["route"] == "/paper-bot/tick":
                     _run_paper_tick(job_id, task["asset"])
+                elif task["route"] == "/futures-paper-bot/tick":
+                    _run_futures_paper_tick(job_id, task["asset"])
                 else:
                     _run_scan(job_id, task["asset"], task["headline"], task["social_post"])
         except Exception as exc:
@@ -2113,6 +2146,10 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json; charset=utf-8")
         if parsed.path == "/paper-bot/status":
             payload = PAPER_BOT.state()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if parsed.path == "/futures-paper-bot/status":
+            payload = FUTURES_PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/history":
@@ -3329,6 +3366,31 @@ class Handler(BaseHTTPRequestHandler):
           }catch(e){box.textContent='وضعیت حساب آزمایشی در دسترس نیست.';}
         })();
         </script>
+        <section class="card" id="futures-paper-bot">
+          <h2>ربات فیوچرز هوشمند · USDT-M Perpetual</h2>
+          <p class="muted">این موتور به‌صورت مستقل LONG و SHORT را ارزیابی می‌کند. ورود فقط با عبور هر ۱۲ فیلتر، تأیید شورای AI، دادهٔ تازهٔ Binance و Bybit، Funding معتبر، حد ضرر و حد سود ساختاری و نسبت سود به ریسک خالص حداقل ۱٫۸ مجاز است.</p>
+          <p class="muted"><strong>ایمنی:</strong> Paper Trading فقط · اهرم حداکثر ۱× · ریسک هر معامله ۰٫۵٪ سرمایه · ارزش اسمی موقعیت حداکثر ۱۰٪ سرمایه · حداکثر یک موقعیت باز · بدون API Key صرافی، بدون سفارش واقعی. محاسبهٔ لیکوییدیشن وابسته به Tier مارجین هر صرافی هنوز فعال نیست.</p>
+          <form method="post" action="/futures-paper-bot/tick">
+            <label>قرارداد دائمی</label>
+            <select name="asset">
+              <option value="perp:BTCUSDT">BTCUSDT Perpetual</option>
+              <option value="perp:ETHUSDT">ETHUSDT Perpetual</option>
+              <option value="perp:SOLUSDT">SOLUSDT Perpetual</option>
+              <option value="perp:XRPUSDT">XRPUSDT Perpetual</option>
+              <option value="perp:BNBUSDT">BNBUSDT Perpetual</option>
+              <option value="perp:ADAUSDT">ADAUSDT Perpetual</option>
+              <option value="perp:DOGEUSDT">DOGEUSDT Perpetual</option>
+              <option value="perp:AVAXUSDT">AVAXUSDT Perpetual</option>
+              <option value="perp:DOTUSDT">DOTUSDT Perpetual</option>
+              <option value="perp:LTCUSDT">LTCUSDT Perpetual</option>
+              <option value="perp:TRXUSDT">TRXUSDT Perpetual</option>
+              <option value="perp:GRAMUSDT">GRAMUSDT Perpetual</option>
+            </select>
+            <button type="submit">اجرای یک چرخهٔ فیوچرز آزمایشی</button>
+          </form>
+          <div id="futures-paper-status" class="muted" style="margin-top:12px" aria-live="polite">در حال دریافت وضعیت حساب فیوچرز آزمایشی...</div>
+          <script>(async function(){const box=document.getElementById('futures-paper-status');try{const r=await fetch('/futures-paper-bot/status',{cache:'no-store'});const s=await r.json();const a=s.account||{},p=s.open_position||{},risk=s.risk_controls||{};box.textContent='حالت: '+s.mode+' · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · موقعیت: '+(p.direction||'ندارد')+' '+(p.asset||'')+' · حد ضرر: '+(p.stop_loss||'—')+' · حد سود: '+(p.take_profit||'—')+' · ترمز ریسک: '+(risk.entry_allowed?'ورود مجاز':'ورود متوقف')+' · سفارش واقعی: '+(s.orders_submitted?'فعال':'غیرفعال');}catch(e){box.textContent='وضعیت حساب فیوچرز در دسترس نیست.';}})();</script>
+        </section>
         <section class="card" id="global-market-board">
           <h2>پایش بازارهای جهانی · آمریکا، اروپا، ETF و ارز</h2>
           <p class="muted">این فهرست، لایهٔ دادهٔ بازارهای سنتی است و در کنار رادار رمزارز کار می‌کند. آمریکا، اروپا، ETF، جفت‌ارز و فلزات گران‌بها از مسیر مستقل داده دریافت می‌شوند؛ ساعات، ارز پایه و سطح دسترسی هر بازار جدا نگه داشته می‌شود.</p>
@@ -3516,7 +3578,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -3535,6 +3597,10 @@ class Handler(BaseHTTPRequestHandler):
                 asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS
             ):
                 raise ValueError("Paper trading accepts only the configured major CEX spot universe.")
+            if route == "/futures-paper-bot/tick" and (
+                asset.market_type != "perp" or asset.symbol not in FUTURES_PAPER_ASSETS
+            ):
+                raise ValueError("Futures paper trading accepts only the configured major USDT-M perpetual universe.")
             headline = form.get("headline", [""])[0].strip() if route == "/scan" else ""
             social_post = form.get("social_post", [""])[0].strip() if route == "/scan" else ""
             global JOB_FENCE_COUNTER
@@ -3583,6 +3649,20 @@ class Handler(BaseHTTPRequestHandler):
                     + _paper_tick_page_script(job_id)
                 )
                 return self._send(202, _page(body, "Paper Bot Cycle"))
+            if route == "/futures-paper-bot/tick":
+                body = (
+                    "<h2>چرخهٔ فیوچرز آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
+                    "<p id='futures-state' aria-live='polite'>در حال ارزیابی دادهٔ Perpetual و مدیریت موقعیت LONG/SHORT...</p>"
+                    "<pre id='futures-result' style='white-space:pre-wrap;overflow-wrap:anywhere'></pre>"
+                    "<p><a href='/'>بازگشت به داشبورد</a></p>"
+                    "<script>(function(){const id='" + job_id + "',state=document.getElementById('futures-state'),out=document.getElementById('futures-result');"
+                    "async function poll(){try{const r=await fetch('/jobs/'+id,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();"
+                    "state.textContent='وضعیت: '+j.status;if(j.status==='completed'){const p=j.result||{},c=p.cycle||{},a=(p.futures_state||{}).account||{};"
+                    "state.textContent='نتیجه: '+(c.status||'UNKNOWN')+' · جهت: '+(c.direction||'بدون معامله')+' · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD';"
+                    "out.textContent=JSON.stringify(p,null,2);return;}if(j.status==='failed'){out.textContent=j.error||'چرخه ناموفق بود';return;}}catch(e){state.textContent='خطای ارتباط؛ تلاش مجدد برای همان چرخه';}"
+                    "setTimeout(poll,2500);}poll();})();</script>"
+                )
+                return self._send(202, _page(body, "Futures Paper Bot"))
             body = (
                 "<h2>اسکن آغاز شد</h2><p>شناسه کار: <code>" + job_id + "</code></p>"
                 "<p id='state'>در حال جمع‌آوری داده‌های بازار، نهنگ‌ها و احساسات...</p>"
