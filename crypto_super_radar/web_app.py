@@ -3087,9 +3087,9 @@ class Handler(BaseHTTPRequestHandler):
                 if(Number.isInteger(idx)&&idx>=0&&idx<bars.length)divIndexes.add(idx);
               });
               const levels=[
-                {name:'سقف بازار',value:rawMax,color:'#ffb454',dash:[7,5]},
-                {name:'تعادل بازار',value:(rawMax+rawMin)/2,color:'#74b7ff',dash:[4,5]},
-                {name:'کف بازار',value:rawMin,color:'#42d6a0',dash:[7,5]}
+                {name:'سقف بازه',value:rawMax,color:'#ffb454',dash:[7,5]},
+                {name:'خط میانی بازه',value:(rawMax+rawMin)/2,color:'#74b7ff',dash:[4,5]},
+                {name:'کف بازه',value:rawMin,color:'#42d6a0',dash:[7,5]}
               ];
               levels.forEach(level=>{
                 const yy=y(level.value);
@@ -3169,7 +3169,7 @@ class Handler(BaseHTTPRequestHandler):
                 ctx.save();ctx.strokeStyle='#55d7ff';ctx.lineWidth=2.7;ctx.setLineDash([]);
                 ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right+8,yy);ctx.stroke();ctx.restore();
                 ctx.fillStyle='#55d7ff';ctx.font='bold 13px sans-serif';
-                ctx.fillText('قیمت فعلی '+number(currentPrice),canvas.width-pad.right+16,yy-9);
+                ctx.fillText('قیمت آخرین کندل '+number(currentPrice),canvas.width-pad.right+16,yy-9);
               }
               if(signal.entry_reference_price){
                 const yy=y(signal.entry_reference_price);
