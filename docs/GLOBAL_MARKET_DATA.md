@@ -41,7 +41,9 @@ The provider describes its Basic US real-time equity source as using venues that
 
 - `GET /api/global-markets`: returns the cached board or starts an asynchronous refresh.
 - `GET /api/global-markets?refresh=1`: requests a refresh if one is not already running.
-- Cache TTL: 900 seconds.
+- Cache TTL: 3600 seconds.
+- Minimum refresh interval: 3600 seconds, including manual refresh attempts.
+- In-process daily reservation ceiling: 700 symbol requests (below the published Basic 800/day cap); failed attempts are conservatively reserved until UTC reset. Process restarts reset this in-memory counter, so this is not a substitute for a provider-side quota monitor.
 - Requests are paced at 7.6 seconds per Twelve Data host, below the published Basic 8-credits/minute limit. A full 25-symbol pass can take several minutes; the first response is normally `LOADING`.
 
 Each item reports:
@@ -53,6 +55,7 @@ Each item reports:
 
 - `CONFIGURATION_REQUIRED`: API key is absent.
 - `LOADING`: first collection or refresh is still running.
+- `DAILY_BUDGET_OR_REFRESH_COOLDOWN`: the hourly refresh cooldown or conservative daily reservation ceiling prevents another call.
 - `OBSERVED_SINGLE_SOURCE_NOT_VALIDATED`: all requested symbols returned one-provider observations.
 - `PARTIAL_SINGLE_SOURCE`: some symbols returned observations, others did not.
 - `ENTITLEMENT_REQUIRED`: the configured plan does not include that market or instrument.
