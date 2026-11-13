@@ -127,6 +127,56 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
         with self.assertRaises(BloFinDemoResponseError):
             self.client.get_positions()
 
+    def test_position_mode_is_read_only_and_validated(self):
+        self.session.get.return_value = FakeResponse({
+            "code": "0", "data": {"positionMode": "long_short_mode", "multiPosition": "false"}
+        })
+        result = self.client.get_position_mode()
+        self.assertEqual(result["positionMode"], "long_short_mode")
+        args, kwargs = self.session.get.call_args
+        self.assertTrue(args[0].endswith("/api/v1/account/position-mode"))
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+
+    def test_nested_business_code_is_checked(self):
+        from crypto_super_radar.blofin_demo_readonly import BloFinDemoResponseError
+        self.session.get.return_value = FakeResponse({
+            "code": "0", "data": [{"code": "102089", "msg": "position mode mismatch"}]
+        })
+        with self.assertRaises(BloFinDemoResponseError):
+            self.client.get_positions()
+
+    def test_instrument_contract_metadata_requires_full_permission(self):
+        self.session.get.return_value = FakeResponse({
+            "code": "0",
+            "data": [{
+                "instId": "BTC-USDT", "apiPermission": "full", "state": "live",
+                "contractType": "linear", "settleCurrency": "USDT",
+                "contractValue": "0.001", "minSize": "0.1",
+                "lotSize": "0.1", "tickSize": "0.5"
+            }]
+        })
+        result = self.client.get_tradable_instrument("BTC-USDT")
+        self.assertEqual(result["contractValue"], 0.001)
+        self.assertEqual(result["minSize"], 0.1)
+        self.assertEqual(result["lotSize"], 0.1)
+        self.assertEqual(result["apiPermission"], "full")
+        args, _ = self.session.get.call_args
+        self.assertIn("apiPermission=full", args[0])
+
+    def test_instrument_with_reduce_only_permission_is_rejected(self):
+        from crypto_super_radar.blofin_demo_readonly import BloFinDemoResponseError
+        self.session.get.return_value = FakeResponse({
+            "code": "0",
+            "data": [{
+                "instId": "BTC-USDT", "apiPermission": "reduce_only", "state": "live",
+                "contractType": "linear", "settleCurrency": "USDT",
+                "contractValue": "0.001", "minSize": "0.1",
+                "lotSize": "0.1", "tickSize": "0.5"
+            }]
+        })
+        with self.assertRaises(BloFinDemoResponseError):
+            self.client.get_tradable_instrument("BTC-USDT")
+
 
 if __name__ == "__main__":
     unittest.main()
