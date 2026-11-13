@@ -2836,6 +2836,8 @@ class Handler(BaseHTTPRequestHandler):
             API_KEY_MISSING:'کلید داده ثبت نشده',
             OBSERVED_SINGLE_SOURCE:'داده دریافت شد · تک‌منبعی',
             ENTITLEMENT_REQUIRED:'پلن ارائه‌دهنده کافی نیست',
+            RATE_LIMITED:'سقف درخواست ارائه‌دهنده پر شده',
+            DAILY_BUDGET_OR_REFRESH_COOLDOWN:'محدودیت به‌روزرسانی / سهمیه روزانه',
             UNKNOWN:'نامشخص',
             STALE:'قدیمی'
           };
