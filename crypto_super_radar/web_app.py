@@ -3181,7 +3181,7 @@ class Handler(BaseHTTPRequestHandler):
               ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';ctx.textAlign='center';
               tickIndexes.forEach(i=>{
                 const xx=x(i),stamp=new Date(bars[i].time);
-                const label=stamp.toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+                const label=data.interval==='1s'?stamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'}):stamp.toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
                 ctx.fillText(label,xx,canvas.height-22);
               });
               ctx.textAlign='start';
