@@ -47,8 +47,11 @@ def _check_response_codes(payload: Mapping[str, Any]) -> None:
     """Check both the HTTP API envelope and per-item business result codes."""
     top_code = payload.get("code")
     if top_code is not None and str(top_code) != "0":
+        code = str(top_code)[:24]
+        if code == "401":
+            raise BloFinDemoAuthError("BloFin rejected API authentication (code=401).")
         raise BloFinDemoResponseError(
-            f"BloFin rejected the request (code={str(top_code)[:24]})."
+            f"BloFin rejected the request (code={code})."
         )
     data = payload.get("data")
     rows = data if isinstance(data, list) else [data]
@@ -56,6 +59,8 @@ def _check_response_codes(payload: Mapping[str, Any]) -> None:
         if isinstance(row, dict) and row.get("code") is not None:
             item_code = str(row.get("code"))
             if item_code != "0":
+                if item_code == "401":
+                    raise BloFinDemoAuthError("BloFin rejected API authentication (code=401).")
                 raise BloFinDemoResponseError(
                     f"BloFin rejected an item in the response (code={item_code[:24]})."
                 )
@@ -145,6 +150,8 @@ class BloFinDemoReadOnly:
                         server_delay = 0.0
                     time.sleep(max(server_delay, min(0.5 * (2 ** attempt), 4.0)))
                     continue
+                if status == 401:
+                    raise BloFinDemoAuthError("BloFin rejected API authentication (HTTP 401).") from exc
                 if status == 403:
                     # BloFin documents a temporary firewall ban of about five minutes.
                     # Do not hammer the endpoint; let the caller schedule a later retry.
