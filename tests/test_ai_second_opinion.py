@@ -134,12 +134,60 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertFalse(result["orders_submitted"])
         self.assertNotIn("diagnostic-secret", json.dumps(result))
         self.assertEqual(captured["payload"]["model"], DEFAULT_FREE_MODEL)
-        self.assertEqual(captured["payload"]["max_tokens"], 48)
+        self.assertEqual(captured["payload"]["max_tokens"], 128)
         self.assertEqual(captured["headers"]["Authorization"], "Bearer diagnostic-secret")
         self.assertFalse(captured["allow_redirects"])
         prompt = json.dumps(captured["payload"], ensure_ascii=False)
         self.assertNotIn("wallet", prompt.lower())
         self.assertNotIn("blofin", prompt.lower())
+
+    def test_connection_diagnostic_accepts_plain_text_and_content_blocks(self):
+        marker = "CSR_NEMOTRON_PROBE_OK"
+
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "analysis omitted"},
+                                {"type": "text", "text": marker},
+                            ]
+                        }
+                    }],
+                    "usage": {"total_tokens": 22},
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(
+                http_post=lambda *args, **kwargs: DiagnosticResponse()
+            )
+        self.assertEqual(result["status"], "CONNECTED")
+        self.assertTrue(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("diagnostic-secret", json.dumps(result))
+
+    def test_connection_diagnostic_reports_safe_reason_when_marker_is_missing(self):
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{"message": {"content": "No token returned."}}],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(
+                http_post=lambda *args, **kwargs: DiagnosticResponse()
+            )
+        self.assertEqual(result["status"], "INVALID_RESPONSE")
+        self.assertEqual(result["error_type"], "MARKER_NOT_RETURNED")
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("No token returned", json.dumps(result))
 
     def test_connection_diagnostic_never_calls_provider_without_key(self):
         called = []
