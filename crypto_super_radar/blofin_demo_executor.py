@@ -192,11 +192,13 @@ def build_demo_order_plan(
 
     # Round protective trigger prices in the conservative direction.
     if side == "LONG":
-        stop = (stop / tick_size).to_integral_value(rounding=ROUND_FLOOR) * tick_size
+        # Stop is rounded toward entry to avoid increasing planned loss.
+        stop = (stop / tick_size).to_integral_value(rounding=ROUND_CEILING) * tick_size
         target = (target / tick_size).to_integral_value(rounding=ROUND_CEILING) * tick_size
         risk_distance, reward_distance = entry - stop, target - entry
     else:
-        stop = (stop / tick_size).to_integral_value(rounding=ROUND_CEILING) * tick_size
+        # For shorts, a lower stop and lower target are the conservative tick directions.
+        stop = (stop / tick_size).to_integral_value(rounding=ROUND_FLOOR) * tick_size
         target = (target / tick_size).to_integral_value(rounding=ROUND_FLOOR) * tick_size
         risk_distance, reward_distance = stop - entry, entry - target
     if risk_distance <= 0 or reward_distance / risk_distance < Decimal(str(policy.min_reward_risk)):
@@ -604,7 +606,9 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("Maximum account drawdown limit has been reached.")
 
         positions = self.client.get_positions()
-        pending = self.client.get_open_orders(inst_id=inst_id)
+        # Account-wide pending orders can fill on another symbol and consume the
+        # concurrency/margin budget, so the safety check is intentionally global.
+        pending = self.client.get_open_orders()
         if _active_position_count(positions) >= self.policy.max_concurrent_positions:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")
         if _active_order_count(pending) > 0:
