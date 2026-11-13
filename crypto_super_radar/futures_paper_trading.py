@@ -774,12 +774,17 @@ class FuturesPaperTradingBot:
                 "reason": f"Perpetual quote refresh failed after AI review ({type(exc).__name__}); entry canceled.",
                 "ai_review": ai_review,
             }
-        quote_drift = abs(float(refreshed_market["mark_price"]) - float(market["mark_price"])) / float(market["mark_price"])
-        if quote_drift > 0.0005:
+        quote_drift = max(
+            abs(float(refreshed_market[key]) - float(market[key])) / float(market[key])
+            for key in ("mark_price", "best_bid", "best_ask")
+        )
+        funding_drift = abs(float(refreshed_market["funding_rate"]) - float(market["funding_rate"]))
+        if quote_drift > 0.0005 or funding_drift > 0.0002:
             return {
                 "status": "NO_TRADE", "asset": asset.raw,
-                "reason": "Perpetual mark price moved more than 5 bps during AI review; a new analysis cycle is required.",
+                "reason": "Perpetual quote or funding changed materially during AI review; a new analysis cycle is required.",
                 "quote_drift_bps": round(quote_drift * 10_000, 3),
+                "funding_drift_bps": round(funding_drift * 10_000, 3),
                 "ai_review": ai_review,
             }
 
