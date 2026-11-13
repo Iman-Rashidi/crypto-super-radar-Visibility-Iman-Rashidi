@@ -122,10 +122,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     first_bear = fc < fo
     first_bull = fc > fo
 
-    if first_bear and first_body >= max((ph - pl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bull and c > first_mid and c > mc:
+    if first_bear and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bull and c > first_mid and c > mc:
         add("ستاره صبحگاهی", "Morning Star", "BULLISH",
             "سه کندلِ فشار فروش، مکث و بازپس‌گیری بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی بالای سقف الگو.", 15)
-    elif first_bull and first_body >= max((ph - pl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bear and c < first_mid and c < mc:
+    elif first_bull and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bear and c < first_mid and c < mc:
         add("ستاره شامگاهی", "Evening Star", "BEARISH",
             "سه کندلِ فشار خرید، مکث و پس‌گرفتن بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی زیر کف الگو.", -15)
 
@@ -183,7 +183,7 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
 
-    if body_ratio <= 0.10:
+    if body_ratio <= 0.10 and (long_lower == long_upper):
         add("دوجی", "Doji", "NEUTRAL",
             "بدنه بسیار کوچک نسبت به دامنهٔ کندل؛ نشان‌دهندهٔ تردید است، نه سیگنال مستقل خرید یا فروش.", 0, strength="MODERATE")
     elif body_ratio <= 0.30 and upper >= candle_range * 0.20 and lower >= candle_range * 0.20:
