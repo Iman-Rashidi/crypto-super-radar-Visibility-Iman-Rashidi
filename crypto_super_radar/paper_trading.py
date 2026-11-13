@@ -998,6 +998,67 @@ class PaperTradingBot:
                 "orders_submitted": False,
             }
 
+        # Re-check account-level guards after the network round-trip. Another
+        # worker may have closed a losing position or changed available equity
+        # while the AI provider was responding.
+        latest_controls = self.ledger.risk_controls(
+            asset=asset.raw,
+            daily_loss_limit_pct=self.daily_loss_limit_pct,
+            max_drawdown_pct=self.max_drawdown_pct,
+            max_consecutive_losses=self.max_consecutive_losses,
+            cooldown_hours_after_loss=self.cooldown_hours_after_loss,
+        )
+        if not latest_controls["entry_allowed"]:
+            return {
+                "status": "RISK_HALT",
+                "asset": asset.raw,
+                "reason": "Paper risk circuit breaker changed while awaiting AI review.",
+                "risk_controls": latest_controls,
+                "ai_review": ai_review,
+            }
+
+        latest_state = self.ledger.state()
+        latest_equity = _number(latest_state["account"]["equity_usd"])
+        latest_cash = _number(latest_state["account"]["cash_balance_usd"])
+        latest_risk_budget = (
+            latest_equity * self.risk_per_trade_pct if latest_equity is not None else None
+        )
+        latest_notional_cap = (
+            latest_equity * self.max_position_notional_pct
+            if latest_equity is not None else None
+        )
+        if (
+            latest_equity is None or latest_cash is None
+            or latest_equity <= 0 or latest_cash < debit
+            or latest_risk_budget is None or latest_notional_cap is None
+            or quantity * unit_risk > latest_risk_budget + 1e-8
+            or notional > latest_notional_cap + 1e-8
+        ):
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Paper account equity or risk budget changed while awaiting AI review.",
+                "ai_review": ai_review,
+            }
+
+        # Do not open from a quote that expired or changed while the provider
+        # was evaluating the evidence; retry on the next fresh market snapshot.
+        if entry_quote is not None:
+            latest_quote = _extract_observed_quote(snapshot)
+            if (
+                latest_quote is None
+                or latest_quote["timestamp_ms"] != entry_quote["timestamp_ms"]
+                or latest_quote["source"] != entry_quote["source"]
+                or latest_quote["bid"] != entry_quote["bid"]
+                or latest_quote["ask"] != entry_quote["ask"]
+            ):
+                return {
+                    "status": "NO_TRADE",
+                    "asset": asset.raw,
+                    "reason": "Observed bid/ask quote changed or expired during AI review; a fresh market scan is required.",
+                    "ai_review": ai_review,
+                }
+
         if not self.ledger.open_position(record, debit):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Paper ledger rejected duplicate, concurrent or unaffordable entry."}
