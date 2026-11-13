@@ -2595,6 +2595,361 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
         store.close()
 
 
+
+def _run_blofin_demo_execution_job(job_id: str) -> None:
+    """Analyze one live BTC perpetual signal and submit at most one guarded Demo order."""
+    store = None
+    submission_started = False
+    try:
+        _set_blofin_execution_job(
+            job_id, "running", stage="READINESS_CHECK",
+            message_fa="در حال بررسی مجوزهای Demo، کلید Trade و ذخیره‌سازی پایدار.",
+        )
+        readiness = _blofin_demo_execution_readiness()
+        if readiness.get("status") != "READY":
+            _set_blofin_execution_job(
+                job_id, "completed", stage="BLOCKED",
+                message_fa=readiness.get("message_fa"),
+                result={
+                    "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                    "reason_fa": readiness.get("message_fa"),
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
+
+        asset = AssetSpec.parse("perp:BTCUSDT")
+        _set_blofin_execution_job(
+            job_id, "running", stage="LIVE_12_GATE_ANALYSIS",
+            message_fa="دریافت داده زنده BTC Perpetual و اجرای موتور ۱۲ گیت.",
+        )
+        analysis = ENGINE.analyze(asset)
+        record = analysis.to_record()
+        gates = record.get("gates")
+        pass_count = sum(
+            1 for item in gates
+            if isinstance(item, dict) and str(item.get("status", "")).upper() == "PASS"
+        ) if isinstance(gates, list) else 0
+        fail_count = sum(
+            1 for item in gates
+            if isinstance(item, dict) and str(item.get("status", "")).upper() == "FAIL"
+        ) if isinstance(gates, list) else 0
+        unknown_count = sum(
+            1 for item in gates
+            if isinstance(item, dict) and str(item.get("status", "")).upper() == "UNKNOWN"
+        ) if isinstance(gates, list) else 12
+        direction = str(record.get("signal") or "").upper()
+        gate_summary = {
+            "signal": direction or "UNKNOWN",
+            "gate_pass_count": pass_count,
+            "gate_fail_count": fail_count,
+            "gate_unknown_count": unknown_count,
+            "confirmation_score": record.get("confirmation_score"),
+            "estimated_risk_score": record.get("estimated_risk_score"),
+            "entry_reference_price": record.get("entry_price_usd"),
+            "stop_loss": record.get("stop_loss_usd"),
+            "take_profit": record.get("take_profit_usd"),
+        }
+        if (
+            not isinstance(gates, list) or len(gates) != 12
+            or (pass_count, fail_count, unknown_count) != (12, 0, 0)
+            or direction not in {"LONG", "SHORT"}
+        ):
+            _set_blofin_execution_job(
+                job_id, "completed", stage="NO_TRADE",
+                message_fa="شرایط ورود تأیید نشد؛ تمام ۱۲ گیت باید PASS و سیگنال LONG یا SHORT باشد.",
+                analysis=gate_summary,
+                result={
+                    "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                    **gate_summary,
+                    "reason_fa": "سیگنال جهت‌دار با ۱۲ گیت PASS به دست نیامد؛ هیچ سفارشی ارسال نشد.",
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
+
+        frames = getattr(ENGINE.data, "candle_frames", {})
+        frame = frames.get(asset.raw) if isinstance(frames, dict) else None
+        if frame is None or getattr(frame, "empty", True) or not hasattr(frame.index[-1], "isoformat"):
+            _set_blofin_execution_job(
+                job_id, "completed", stage="NO_TRADE",
+                message_fa="کندل کامل و زمان‌دار برای جلوگیری از سفارش تکراری موجود نیست.",
+                result={
+                    "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                    "reason_fa": "کندل کامل و معتبر در دسترس نبود؛ سفارش ارسال نشد.",
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
+        signal_bar = frame.index[-1].isoformat()
+        record["signal_id"] = asset.raw + "|" + signal_bar
+        record["inst_id"] = "BTC-USDT"
+
+        _set_blofin_execution_job(
+            job_id, "running", stage="NEMOTRON_SECOND_OPINION",
+            message_fa="تحلیل زنده به Nemotron فرستاده شد؛ هنوز هیچ سفارشی ارسال نشده است.",
+            analysis=gate_summary,
+        )
+        try:
+            ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
+        except Exception as exc:
+            ai_review = {
+                "status": "UNKNOWN", "paper_entry_eligible": False,
+                "error_type": type(exc).__name__,
+            }
+        ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
+        if (
+            not isinstance(ai_review, dict) or ai_status != "APPROVED"
+            or ai_review.get("paper_entry_eligible") is not True
+        ):
+            _set_blofin_execution_job(
+                job_id, "completed", stage="AI_BLOCKED",
+                message_fa="Nemotron ورود را تأیید نکرد؛ هیچ سفارشی ارسال نشد.",
+                ai_review={
+                    "status": ai_status,
+                    "model": ai_review.get("model") if isinstance(ai_review, dict) else None,
+                    "latency_ms": ai_review.get("latency_ms") if isinstance(ai_review, dict) else None,
+                },
+                result={
+                    "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
+                    **gate_summary, "ai_status": ai_status,
+                    "reason_fa": "Nemotron نظر تأییدکننده و مجوز ورود صادر نکرد؛ هیچ سفارشی ارسال نشد.",
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
+
+        _set_blofin_execution_job(
+            job_id, "running", stage="DEMO_ORDER_GUARDS",
+            message_fa="کنترل حساب Demo، مارجین، قیمت، حجم حداقل قرارداد و حد ضرر/حد سود.",
+            ai_review={
+                "status": ai_status, "model": ai_review.get("model"),
+                "returned_model": ai_review.get("returned_model"),
+                "latency_ms": ai_review.get("latency_ms"),
+            },
+        )
+        client = BloFinDemoTradeClient(timeout=10.0)
+        store = BloFinDemoEventStore()
+        policy = BloFinDemoRiskPolicy(max_leverage=1)
+        trader = BloFinDemoExecutor(
+            client=client, store=store, policy=policy, trading_enabled=True,
+        )
+        submission_started = True
+        execution = trader.execute(
+            record, inst_id="BTC-USDT", leverage=1,
+            allow_demo_orders=True, minimum_size_only=True,
+        )
+        _set_blofin_execution_job(
+            job_id, "running", stage="ORDER_SUBMITTED",
+            message_fa="سفارش به BloFin Demo ارسال شد؛ در حال تأیید Fill، قیمت ورود و پوزیشن.",
+            order={
+                "exchange_order_id": execution.get("exchange_order_id"),
+                "client_order_id": execution.get("client_order_id"),
+                "instrument_id": execution.get("instrument_id"),
+                "side": execution.get("side"),
+                "quantity_contracts": execution.get("quantity_contracts"),
+                "reference_entry_price": execution.get("entry_reference_price"),
+                "leverage": execution.get("leverage"),
+                "stop_loss": execution.get("stop_loss"),
+                "take_profit": execution.get("take_profit"),
+                "risk_budget_usdt": execution.get("risk_budget_usdt"),
+            },
+            submitted_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+
+        order_detail = None
+        fills = []
+        detail_error = None
+        for attempt in range(3):
+            try:
+                raw_detail = client.get_order_detail(
+                    "BTC-USDT", client_order_id=execution["client_order_id"],
+                )
+                if isinstance(raw_detail, list):
+                    order_detail = next((row for row in raw_detail if isinstance(row, dict)), None)
+                elif isinstance(raw_detail, dict):
+                    order_detail = raw_detail
+                raw_fills = client.get_fills_history(inst_id="BTC-USDT", order_id=execution["exchange_order_id"], limit=100)
+                fills = raw_fills if isinstance(raw_fills, list) else []
+                if fills or (
+                    isinstance(order_detail, dict)
+                    and str(order_detail.get("state") or "").lower() in {
+                        "filled", "partially_filled", "canceled", "order_failed",
+                    }
+                ):
+                    break
+            except Exception as exc:
+                detail_error = type(exc).__name__
+            if attempt < 2:
+                time.sleep(1.5)
+
+        detail_state = str((order_detail or {}).get("state") or "").lower()
+        mapped_state = {
+            "live": "ACCEPTED", "partially_filled": "PARTIALLY_FILLED",
+            "filled": "FILLED", "canceled": "CANCELED", "order_failed": "REJECTED",
+        }.get(detail_state)
+        if mapped_state and execution.get("client_order_id"):
+            store.update_order(
+                execution["client_order_id"], mapped_state,
+                exchange_order_id=str((order_detail or {}).get("orderId") or execution.get("exchange_order_id") or "") or None,
+            )
+
+        allowed_order_fields = (
+            "orderId", "clientOrderId", "instId", "side", "positionSide",
+            "orderType", "size", "filledSize", "averagePrice", "price",
+            "state", "createTime", "updateTime", "fee", "pnl",
+        )
+        safe_detail = (
+            {key: order_detail[key] for key in allowed_order_fields if key in order_detail}
+            if isinstance(order_detail, dict) else None
+        )
+        allowed_fill_fields = (
+            "tradeId", "orderId", "instId", "side", "fillPrice",
+            "fillSize", "fillPnl", "fee", "ts",
+        )
+        safe_fills = [
+            {key: row[key] for key in allowed_fill_fields if key in row}
+            for row in fills if isinstance(row, dict)
+        ]
+        filled_size = 0.0
+        for row in safe_fills:
+            try:
+                filled_size += float(row.get("fillSize") or 0)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if not filled_size:
+            try:
+                filled_size = float((order_detail or {}).get("filledSize") or 0)
+            except (TypeError, ValueError, OverflowError):
+                filled_size = 0.0
+        average_fill = (
+            sum(float(row["fillPrice"]) * float(row["fillSize"]) for row in safe_fills
+                if row.get("fillPrice") not in (None, "") and row.get("fillSize") not in (None, ""))
+            / sum(float(row["fillSize"]) for row in safe_fills
+                  if row.get("fillPrice") not in (None, "") and row.get("fillSize") not in (None, ""))
+            if any(row.get("fillPrice") not in (None, "") and row.get("fillSize") not in (None, "") for row in safe_fills)
+            else (safe_detail or {}).get("averagePrice")
+        )
+        trade_executed = filled_size > 0
+        positions = []
+        position_history = []
+        try:
+            rows = client.get_positions(inst_id="BTC-USDT")
+            positions = [
+                {key: row[key] for key in (
+                    "positionId", "instId", "positionSide", "positions",
+                    "averagePrice", "markPrice", "unrealizedPnl",
+                    "leverage", "liquidationPrice", "createTime", "updateTime",
+                ) if key in row}
+                for row in rows if isinstance(row, dict)
+            ] if isinstance(rows, list) else []
+        except Exception:
+            pass
+        try:
+            rows = client.get_positions_history(inst_id="BTC-USDT", state="closed", limit=20)
+            position_history = [
+                {key: row[key] for key in (
+                    "historyId", "positionId", "instId", "side", "positionSide",
+                    "closePositions", "openAveragePrice", "closeAveragePrice",
+                    "createTime", "updateTime", "leverage", "realizedPnl",
+                    "realizedPnlRatio", "fee",
+                ) if key in row}
+                for row in rows if isinstance(row, dict)
+            ] if isinstance(rows, list) else []
+        except Exception:
+            pass
+
+        filled_at = None
+        if safe_fills:
+            latest_fill = max(safe_fills, key=lambda row: int(row.get("ts") or 0))
+            if latest_fill.get("ts"):
+                try:
+                    filled_at = datetime.fromtimestamp(int(latest_fill["ts"]) / 1000, tz=timezone.utc).isoformat()
+                except (TypeError, ValueError, OverflowError, OSError):
+                    filled_at = None
+        _set_blofin_execution_job(
+            job_id, "running", stage="ENTRY_FILL_CONFIRMED" if trade_executed else "ORDER_PENDING",
+            message_fa=(
+                "Fill ورود از تاریخچه معاملات BloFin تأیید شد."
+                if trade_executed else
+                "سفارش ثبت شده، اما پرشدن آن هنوز از تاریخچه Fill تأیید نشده است."
+            ),
+            fill={
+                "filled_size": filled_size,
+                "average_fill_price": average_fill,
+                "filled_at_utc": filled_at,
+                "fills": safe_fills,
+            },
+        )
+        result = {
+            **execution,
+            "status": mapped_state or execution.get("status", "ACCEPTED"),
+            "environment": "BLOFIN_DEMO",
+            "order_detail": safe_detail,
+            "fills": safe_fills,
+            "average_fill_price": average_fill,
+            "filled_size": filled_size,
+            "filled_at_utc": filled_at,
+            "trade_executed": trade_executed,
+            "orders_submitted": True,
+            "ai_review": {
+                "status": ai_status, "model": ai_review.get("model"),
+                "returned_model": ai_review.get("returned_model"),
+                "final_rating": ai_review.get("final_rating"),
+                "latency_ms": ai_review.get("latency_ms"),
+            },
+            "positions": positions,
+            "closed_positions": position_history,
+            "reason_fa": (
+                "ورود آزمایشی در BloFin Demo پر شده است؛ مانیتور زنده قیمت، PnL، حد ضرر/حد سود و زمان خروج را دنبال می‌کند."
+                if trade_executed else
+                "سفارش به BloFin Demo ارسال شد، اما پرشدن آن هنوز تأیید نشده؛ سفارش دوباره ارسال نمی‌شود."
+            ),
+        }
+        _set_blofin_execution_job(
+            job_id, "completed", stage="MONITORING",
+            message_fa=result["reason_fa"], result=result,
+            completed_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+    except BloFinDemoExecutionUnknown as exc:
+        _set_blofin_execution_job(
+            job_id, "completed", stage="ORDER_OUTCOME_UNKNOWN",
+            message_fa="نتیجه ارسال مبهم است؛ برای جلوگیری از سفارش تکراری ارسال مجدد نمی‌شود.",
+            result={
+                "status": "UNKNOWN", "environment": "BLOFIN_DEMO",
+                "reason_fa": "نتیجه ارسال سفارش مبهم است؛ قبل از هر اقدام، order history و positions را بررسی کن.",
+                "error_type": type(exc).__name__,
+                "orders_submitted": "UNKNOWN", "trade_executed": False,
+            },
+        )
+    except BloFinDemoExecutionBlocked as exc:
+        _set_blofin_execution_job(
+            job_id, "completed", stage="BLOCKED",
+            message_fa=str(exc),
+            result={
+                "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                "reason_fa": str(exc), "error_type": type(exc).__name__,
+                "orders_submitted": False, "trade_executed": False,
+            },
+        )
+    except Exception as exc:
+        _set_blofin_execution_job(
+            job_id, "failed", stage="EXECUTION_ERROR",
+            message_fa="اجرای آزمایشی با خطای کنترل‌شده متوقف شد؛ قبل از تلاش مجدد باید وضعیت سفارش در BloFin بررسی شود.",
+            error={
+                "type": type(exc).__name__,
+                "orders_submitted": "UNKNOWN" if submission_started else False,
+                "trade_executed": False,
+            },
+        )
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
