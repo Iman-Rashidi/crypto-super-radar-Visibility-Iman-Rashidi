@@ -119,7 +119,18 @@ def _blofin_demo_connection_status() -> dict:
                     "message_fa": "اتصال Demo و احراز هویت API موفق است. ربات هنوز فقط اطلاعات را می‌خواند و هیچ سفارشی ارسال نمی‌کند.",
                 }
                 cache_seconds = 60
-            except BloFinDemoAuthError:
+            except BloFinDemoAuthError as exc:
+                failed_credential = next(
+                    (name for name in credential_names if name in str(exc)),
+                    None,
+                )
+                if failed_credential:
+                    message_fa = (
+                        f"مقدار {failed_credential} دارای فاصله یا کاراکتر غیرمجاز است؛ "
+                        "همان مقدار را از BloFin دوباره کپی و در Render جایگزین کن."
+                    )
+                else:
+                    message_fa = "BloFin احراز هویت API را رد کرد؛ API Key، Secret، Passphrase و مجوز READ را بررسی کن."
                 payload = {
                     "status": "AUTH_FAILED",
                     "environment": "BLOFIN_DEMO",
@@ -128,7 +139,8 @@ def _blofin_demo_connection_status() -> dict:
                     "private_api": "FAIL" if stage.startswith("PRIVATE_") else "NOT_CHECKED",
                     "orders_enabled": False,
                     "failed_stage": stage,
-                    "message_fa": "BloFin احراز هویت API را رد کرد؛ API Key، Secret، Passphrase و مجوز READ را بررسی کن.",
+                    "failed_credential": failed_credential,
+                    "message_fa": message_fa,
                 }
                 cache_seconds = 20
             except BloFinDemoError as exc:
