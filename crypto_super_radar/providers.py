@@ -806,6 +806,97 @@ class PerpetualMarketProvider:
             raise DataProviderError(f"Bybit Linear returned incomplete ticker for {symbol}")
         return {**values, "raw": item}
 
+    def execution_snapshot(self, symbol: str) -> Dict[str, Any]:
+        """Return independently checked USD-M/Bybit mark, funding and top-of-book data."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            binance_book_future = executor.submit(
+                self.http.get, f"{self.BINANCE}/fapi/v1/ticker/bookTicker", {"symbol": symbol}
+            )
+            binance_mark_future = executor.submit(
+                self.http.get, f"{self.BINANCE}/fapi/v1/premiumIndex", {"symbol": symbol}
+            )
+            bybit_future = executor.submit(
+                self.http.get, f"{self.BYBIT}/v5/market/tickers",
+                {"category": "linear", "symbol": symbol},
+            )
+            book = binance_book_future.result()
+            premium = binance_mark_future.result()
+            bybit_payload = bybit_future.result()
+
+        if not isinstance(book, dict) or not isinstance(premium, dict):
+            raise DataProviderError("Binance perpetual order-book/mark response has an invalid schema")
+        if not isinstance(bybit_payload, dict) or bybit_payload.get("retCode") not in (0, "0"):
+            raise DataProviderError("Bybit perpetual ticker returned an API error")
+        bybit_rows = ((bybit_payload.get("result") or {}).get("list") or [])
+        if not isinstance(bybit_rows, list) or len(bybit_rows) != 1 or not isinstance(bybit_rows[0], dict):
+            raise DataProviderError("Bybit perpetual ticker must return exactly one instrument")
+        bybit = bybit_rows[0]
+
+        values = {
+            "binance_mark": _positive_float(premium.get("markPrice")),
+            "binance_index": _positive_float(premium.get("indexPrice")),
+            "binance_bid": _positive_float(book.get("bidPrice")),
+            "binance_ask": _positive_float(book.get("askPrice")),
+            "binance_funding": _finite_float(premium.get("lastFundingRate")),
+            "binance_time": _positive_float(book.get("time") or premium.get("time")),
+            "bybit_mark": _positive_float(bybit.get("markPrice")),
+            "bybit_index": _positive_float(bybit.get("indexPrice")),
+            "bybit_bid": _positive_float(bybit.get("bid1Price")),
+            "bybit_ask": _positive_float(bybit.get("ask1Price")),
+            "bybit_funding": _finite_float(bybit.get("fundingRate")),
+            "bybit_time": _positive_float(bybit_payload.get("time")),
+            "bybit_open_interest": _positive_float(bybit.get("openInterest")),
+        }
+        if any(value is None for value in values.values()):
+            missing = sorted(key for key, value in values.items() if value is None)
+            raise DataProviderError("Perpetual execution snapshot is incomplete: " + ", ".join(missing))
+        if values["binance_ask"] < values["binance_bid"] or values["bybit_ask"] < values["bybit_bid"]:
+            raise DataProviderError("A perpetual venue returned a crossed order book")
+        if values["binance_time"] <= 0 or values["bybit_time"] <= 0:
+            raise DataProviderError("Perpetual quote timestamps are missing")
+        now_ms = int(time.time() * 1000)
+        timestamp_ms = min(int(values["binance_time"]), int(values["bybit_time"]))
+        if timestamp_ms > now_ms + 5_000 or now_ms - timestamp_ms > 120_000:
+            raise DataProviderError("Perpetual mark or top-of-book quote is stale")
+        mark_discrepancy = relative_difference_pct(values["binance_mark"], values["bybit_mark"])
+        index_discrepancy = relative_difference_pct(values["binance_index"], values["bybit_index"])
+        funding_discrepancy = abs(values["binance_funding"] - values["bybit_funding"])
+        if mark_discrepancy > self.http.config.thresholds.provider_discrepancy_pct:
+            raise DataProviderError("Binance/Bybit mark-price discrepancy is above the configured limit")
+        if index_discrepancy > self.http.config.thresholds.provider_discrepancy_pct:
+            raise DataProviderError("Binance/Bybit index-price discrepancy is above the configured limit")
+        if funding_discrepancy > 0.0002:
+            raise DataProviderError("Binance/Bybit funding-rate discrepancy exceeds 2 bps")
+
+        funding_interval = self.funding_interval_hours(symbol)
+        if not math.isfinite(funding_interval) or funding_interval <= 0:
+            raise DataProviderError("Perpetual funding settlement interval is invalid")
+        best_bid = max(values["binance_bid"], values["bybit_bid"])
+        best_ask = min(values["binance_ask"], values["bybit_ask"])
+        if best_ask < best_bid:
+            raise DataProviderError("Cross-venue best bid/ask is crossed; execution simulation is blocked")
+        return {
+            "status": "PASS",
+            "symbol": symbol,
+            "mark_price": (values["binance_mark"] + values["bybit_mark"]) / 2.0,
+            "index_price": (values["binance_index"] + values["bybit_index"]) / 2.0,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "funding_rate": (values["binance_funding"] + values["bybit_funding"]) / 2.0,
+            "funding_interval_hours": funding_interval,
+            "open_interest_binance": None,
+            "open_interest_bybit": values["bybit_open_interest"],
+            "mark_price_discrepancy_pct": mark_discrepancy,
+            "index_price_discrepancy_pct": index_discrepancy,
+            "funding_rate_discrepancy": funding_discrepancy,
+            "timestamp_ms": timestamp_ms,
+            "sources": ["Binance USD-M", "Bybit Linear"],
+            "next_funding_time_ms": _positive_float(bybit.get("nextFundingTime")),
+            "quote_quality": "OBSERVED_CROSS_VENUE",
+        }
+
     def binance_candles(self, symbol: str, limit: int = 365) -> pd.DataFrame:
         rows = self.http.get(f"{self.BINANCE}/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": min(limit, 1000)})
         return _ohlcv_frame(rows)
