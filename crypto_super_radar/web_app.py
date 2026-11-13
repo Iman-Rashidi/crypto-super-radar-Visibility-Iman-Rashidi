@@ -3384,7 +3384,6 @@ class Handler(BaseHTTPRequestHandler):
               <option value="perp:DOTUSDT">DOTUSDT Perpetual</option>
               <option value="perp:LTCUSDT">LTCUSDT Perpetual</option>
               <option value="perp:TRXUSDT">TRXUSDT Perpetual</option>
-              <option value="perp:GRAMUSDT">GRAMUSDT Perpetual</option>
             </select>
             <button type="submit">اجرای یک چرخهٔ فیوچرز آزمایشی</button>
           </form>
