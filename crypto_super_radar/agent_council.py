@@ -56,14 +56,10 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
 
     for gate in raw_gates:
         raw_id = getattr(gate, "gate_id", None)
-        if isinstance(raw_id, bool):
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int):
             invalid_ids += 1
             continue
-        try:
-            gate_id = int(raw_id)
-        except (TypeError, ValueError, OverflowError):
-            invalid_ids += 1
-            continue
+        gate_id = raw_id
         if gate_id in gates:
             duplicate_ids.append(gate_id)
         else:
