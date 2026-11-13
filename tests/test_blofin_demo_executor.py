@@ -85,7 +85,7 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
         self.assertEqual(plan["quantity"], "1250")
         self.assertEqual(plan["risk_budget_usdt"], 2.5)
         self.assertEqual(plan["leverage"], 3)
-        self.assertEqual(plan["client_order_id"], "d4b8b8a98d3d93c8df4cb6c")  # replaced below
+        self.assertEqual(plan["client_order_id"], "205ccdbb36207dcd1acb9eba0a30ec04")
 
     def test_rejects_failed_or_unknown_confirmation_gate(self):
         for overrides in (
