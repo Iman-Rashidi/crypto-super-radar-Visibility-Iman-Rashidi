@@ -23,7 +23,7 @@ def candle_frame():
     start = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
     rows = []
     for i in range(61):
-        base = 100.0 + (i % 5) * 0.1
+        base = 100.0
         opened, high, low, close = base, base + 1.0, base - 1.0, base + 0.2
         if i == 50:
             opened, high, low, close = 106.0, 110.0, 105.0, 108.0
