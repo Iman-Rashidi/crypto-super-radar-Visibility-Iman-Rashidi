@@ -78,8 +78,15 @@ class FIFOLotAccountingTests(unittest.TestCase):
         self.assertEqual(self.ledger.trial_balance("fifo-usd")["status"], "PASS")
 
     def test_foreign_currency_cost_basis_uses_acquisition_fx_not_sale_fx(self):
+        with self.db:
+            self.ledger.record_capital_contribution(
+                "fifo-usd", idempotency_key="eur-cash", amount=1_000,
+                currency="EUR", fx_rate_to_base=1.1, fx_source="ECB",
+                fx_observed_at=1_800_000_009, fx_quality="OBSERVED",
+                occurred_at=1_800_000_010,
+            )
         self.buy(
-            "buy-eur", 2.0, 100.0, 1_800_000_010,
+            "buy-eur", 2.0, 100.0, 1_800_000_011,
             quote_currency="EUR", fx_rate_to_base=1.1,
             fx_source="ECB", fx_observed_at=1_800_000_009, fx_quality="OBSERVED",
         )
