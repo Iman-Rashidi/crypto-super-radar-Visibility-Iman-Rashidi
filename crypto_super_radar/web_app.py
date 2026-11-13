@@ -2991,6 +2991,41 @@ class Handler(BaseHTTPRequestHandler):
             payload = _blofin_demo_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/blofin/demo/execution-readiness":
+            payload = _blofin_demo_execution_readiness()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if parsed.path == "/api/blofin/demo/live-monitor":
+            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            try:
+                payload = _blofin_demo_live_monitor_snapshot()
+                return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
+            except BloFinDemoError as exc:
+                payload = {"status": "READ_FAILED", "environment": "BLOFIN_DEMO",
+                           "error_type": type(exc).__name__,
+                           "message_fa": "دریافت تازه اطلاعات معاملات دمو از BloFin ممکن نشد."}
+                return self._send(502, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status": "UNKNOWN", "environment": "BLOFIN_DEMO",
+                           "error_type": type(exc).__name__,
+                           "message_fa": "مانیتور زنده با خطای کنترل‌شده متوقف شد."}
+                return self._send(502, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+        if parsed.path.startswith("/api/blofin/demo/execution-jobs/"):
+            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            job_id = parsed.path.rsplit("/", 1)[-1]
+            with LOCK:
+                job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id))
+            if job is None:
+                return self._send(404, b'{"status":"NOT_FOUND"}', "application/json; charset=utf-8")
+            return self._send(200, json.dumps(job, ensure_ascii=False, default=str).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/account":
             expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
             if not expected_token:
@@ -4716,7 +4751,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -4730,6 +4765,53 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/blofin/demo/execute-once":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, b'{"status":"UNAUTHORIZED","message_fa":"توکن پنل معتبر نیست."}', "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1" or form.get("instrument", [""])[0] != "BTC-USDT":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                readiness = _blofin_demo_execution_readiness()
+                if readiness.get("status") != "READY":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
+                        "readiness": readiness,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with BLOFIN_EXECUTION_GUARD:
+                    with LOCK:
+                        active = any(
+                            item.get("status") in {"queued", "running"}
+                            for item in BLOFIN_EXECUTION_JOBS.values()
+                        )
+                    if active:
+                        return self._send(409, b'{"status":"ALREADY_RUNNING","message_fa":"یک آزمایش دمو در حال اجراست."}', "application/json; charset=utf-8")
+                    job_id = uuid.uuid4().hex
+                    _set_blofin_execution_job(
+                        job_id, "queued", stage="QUEUED",
+                        message_fa="درخواست یک‌باره ثبت شد؛ هنوز سفارشی ارسال نشده است.",
+                    )
+                    worker = threading.Thread(
+                        target=_run_blofin_demo_execution_job,
+                        args=(job_id,), daemon=True, name="blofin-demo-one-shot-order",
+                    )
+                    try:
+                        worker.start()
+                    except Exception:
+                        _set_blofin_execution_job(
+                            job_id, "failed", stage="WORKER_START_FAILED",
+                            message_fa="کارگر اجرای سفارش دمو شروع نشد.",
+                        )
+                        return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "QUEUED", "job_id": job_id,
+                    "message_fa": "اسکن زنده ۱۲ گیت، تحلیل Nemotron و کنترل سفارش Demo آغاز شد.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             if route == "/api/ai/dry-run":
                 if (
                     not origin
