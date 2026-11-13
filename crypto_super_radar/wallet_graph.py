@@ -272,13 +272,13 @@ class WalletGraphAnalytics:
                 if event.chain in EVM_CHAINS and event.tx_hash and event.log_index is not None:
                     identity = (
                         "evm_log", event.chain, event.token, event.tx_hash,
-                        event.log_index, event.event_type, event.block_hash,
+                        event.log_index, event.wallet, event.event_type, event.block_hash,
                     )
                 elif event.chain == "solana" and event.tx_hash and event.instruction_index is not None:
                     identity = (
                         "solana_instruction", event.chain, event.token, event.tx_hash,
                         event.instruction_index, event.inner_instruction_index,
-                        event.event_type,
+                        event.wallet, event.event_type,
                     )
                 else:
                     # Legacy fallback is deliberately conservative: only byte-for-byte
