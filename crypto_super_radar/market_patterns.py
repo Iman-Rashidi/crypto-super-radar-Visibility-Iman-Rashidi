@@ -56,12 +56,14 @@ def _item(
     score: int,
     trigger_price: float | None = None,
     invalidation_price: float | None = None,
+    potential_direction: str | None = None,
 ) -> dict[str, Any]:
     return {
         "name_fa": name_fa,
         "name_en": name_en,
         "category": category,
         "direction": direction,
+        "potential_direction": potential_direction,
         "state": state,
         "evidence_strength": strength,
         "description": description,
@@ -181,7 +183,7 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
 
-    if body_ratio <= 0.10 and not (long_lower or long_upper):
+    if body_ratio <= 0.10:
         add("دوجی", "Doji", "NEUTRAL",
             "بدنه بسیار کوچک نسبت به دامنهٔ کندل؛ نشان‌دهندهٔ تردید است، نه سیگنال مستقل خرید یا فروش.", 0, strength="MODERATE")
     elif body_ratio <= 0.30 and upper >= candle_range * 0.20 and lower >= candle_range * 0.20:
@@ -210,13 +212,15 @@ def _geometric_patterns(
     out: list[dict[str, Any]] = []
 
     def add(name_fa: str, name_en: str, direction: str, state: str, description: str,
-            score: int, trigger: float | None = None, invalidation: float | None = None) -> None:
+            score: int, trigger: float | None = None, invalidation: float | None = None,
+            potential_direction: str | None = None) -> None:
         out.append(_item(
             name_fa=name_fa, name_en=name_en, category="GEOMETRIC",
             direction=direction, state=state,
             evidence_strength="MODERATE" if state == "CONFIRMED" else "WEAK",
             description=description, timestamp=latest_time, score=score,
             trigger_price=trigger, invalidation_price=invalidation,
+            potential_direction=potential_direction,
         ))
 
     # Three-point double top / bottom.
@@ -232,7 +236,8 @@ def _geometric_patterns(
                 "CONFIRMED" if confirmed else "FORMING",
                 "دو قله در محدودهٔ قیمتی نزدیک؛ شکست و بسته‌شدن زیر خط گردن شرط تأیید است.",
                 -18 if confirmed else 0, trigger=neckline,
-                invalidation=max(float(first["price"]), float(second["price"])))
+                invalidation=max(float(first["price"]), float(second["price"])),
+                potential_direction=None if confirmed else "BEARISH")
     elif kinds3 == ["LOW", "HIGH", "LOW"]:
         first, neck, second = last3
         bottoms_close = abs(float(first["price"]) - float(second["price"])) <= tolerance
@@ -243,7 +248,8 @@ def _geometric_patterns(
                 "CONFIRMED" if confirmed else "FORMING",
                 "دو کف در محدودهٔ قیمتی نزدیک؛ شکست و بسته‌شدن بالای خط گردن شرط تأیید است.",
                 18 if confirmed else 0, trigger=neckline,
-                invalidation=min(float(first["price"]), float(second["price"])))
+                invalidation=min(float(first["price"]), float(second["price"])),
+                potential_direction=None if confirmed else "BULLISH")
 
     # Head-and-shoulders and inverse head-and-shoulders.
     last5 = pivots[-5:]
@@ -259,7 +265,8 @@ def _geometric_patterns(
                 "CONFIRMED" if confirmed else "FORMING",
                 "شانه‌ها تقریباً هم‌سطح و سر بالاتر است؛ بسته‌شدن زیر خط گردن الگو را تأیید می‌کند.",
                 -22 if confirmed else 0, trigger=neckline,
-                invalidation=float(head["price"]))
+                invalidation=float(head["price"]),
+                potential_direction=None if confirmed else "BEARISH")
     elif kinds5 == ["LOW", "HIGH", "LOW", "HIGH", "LOW"]:
         left, high1, head, high2, right = last5
         shoulders_match = abs(float(left["price"]) - float(right["price"])) <= tolerance
@@ -271,7 +278,8 @@ def _geometric_patterns(
                 "CONFIRMED" if confirmed else "FORMING",
                 "دو شانهٔ کف تقریباً هم‌سطح و سر پایین‌تر است؛ بسته‌شدن بالای خط گردن شرط تأیید است.",
                 22 if confirmed else 0, trigger=neckline,
-                invalidation=float(head["price"]))
+                invalidation=float(head["price"]),
+                potential_direction=None if confirmed else "BULLISH")
 
     # Triangles, wedges and channels are fitted to confirmed alternating swing points.
     recent = pivots[-8:]
