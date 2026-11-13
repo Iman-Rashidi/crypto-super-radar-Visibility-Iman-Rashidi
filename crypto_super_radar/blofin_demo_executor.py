@@ -528,6 +528,36 @@ class BloFinDemoEventStore:
             ).fetchone()
         return row is not None
 
+    def latest_order(self) -> dict[str, Any] | None:
+        """Return the newest reserved order without exposing account credentials."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM blofin_demo_orders ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def recent_events(self, client_order_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return append-only lifecycle events for the selected Demo order."""
+        bounded = max(1, min(int(limit), 100))
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT sequence, event_type, occurred_at, payload_json
+                FROM blofin_demo_execution_events
+                WHERE client_order_id=? ORDER BY sequence DESC LIMIT ?""",
+                (client_order_id, bounded),
+            ).fetchall()
+        events = []
+        for row in reversed(rows):
+            try:
+                payload = json.loads(row["payload_json"])
+            except Exception:
+                payload = {}
+            events.append({
+                "sequence": row["sequence"], "event_type": row["event_type"],
+                "occurred_at": row["occurred_at"], "payload": payload,
+            })
+        return events
+
     def get_order(self, client_order_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(
