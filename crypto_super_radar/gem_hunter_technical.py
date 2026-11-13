@@ -298,7 +298,9 @@ def analyze_multi_timeframe_market(pool_frames: dict[str, Any],
         evidence["reason_fa"].append("کندل‌های بسته‌شدهٔ ۱۵دقیقه، ۴ساعته و روزانه و دادهٔ روزانهٔ BTC/ETH از نظر تازگی و پوشش معتبرند.")
     else:
         evidence["coverage_status"] = "PARTIAL" if pool_close or benchmark_close else "UNKNOWN"
-        evidence["status"] = evidence["coverage_status"]
+        # Partial coverage remains UNKNOWN for the overall decision even when
+        # some individual indicators can still be calculated and displayed.
+        evidence["status"] = "UNKNOWN"
         evidence["reason_codes"].append("MULTI_TIMEFRAME_COVERAGE_INCOMPLETE")
         evidence["reason_fa"].append("بعضی شاخص‌ها با شواهد موجود محاسبه شدند؛ تاریخچهٔ کامل تمام بازه‌ها و دو benchmark هنوز موجود نیست.")
     evidence["source_errors"] = errors

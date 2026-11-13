@@ -14,7 +14,10 @@ class FakeEngine:
     def __init__(self, signal="LONG", gate_status="PASS", price=100.0):
         self.result = SimpleNamespace(
             signal=signal,
-            gates=[SimpleNamespace(status=gate_status) for _ in range(12)],
+            gates=[
+                SimpleNamespace(gate_id=gate_id, status=gate_status)
+                for gate_id in range(1, 13)
+            ],
             confirmation_score=82.0,
             estimated_risk_score=20.0,
             stop_loss=90.0,
@@ -99,7 +102,13 @@ class PaperTradingBotTests(unittest.TestCase):
     def setUp(self):
         self.ledger = PaperLedger(":memory:")
         self.engine = FakeEngine()
-        self.bot = PaperTradingBot(self.engine, ledger=self.ledger)
+        self.bot = PaperTradingBot(
+            self.engine, ledger=self.ledger,
+            ai_reviewer=lambda result, asset: {
+                "status": "APPROVED", "paper_entry_eligible": True,
+                "provider": "test", "final_rating": "Buy", "cost_usd": 0.0,
+            },
+        )
 
     def tearDown(self):
         self.ledger.close()
@@ -158,6 +167,117 @@ class PaperTradingBotTests(unittest.TestCase):
         result = self.bot.run_once("cex:BTCUSDT")
         self.assertEqual(result["status"], "NO_TRADE")
         self.assertIsNone(self.ledger.position())
+
+    def test_missing_duplicate_and_non_integer_gate_ids_block_entry_without_ai(self):
+        cases = ("missing", "duplicate", "fractional")
+        for case in cases:
+            self.engine = FakeEngine()
+            if case == "missing":
+                self.engine.result.gates.pop()
+            elif case == "duplicate":
+                self.engine.result.gates[0].gate_id = 2
+            else:
+                self.engine.result.gates[0].gate_id = 1.5
+            calls = {"count": 0}
+
+            def reviewer(result, asset):
+                calls["count"] += 1
+                return {"status": "APPROVED", "paper_entry_eligible": True}
+
+            bot = PaperTradingBot(self.engine, ledger=self.ledger, ai_reviewer=reviewer)
+            outcome = bot.run_once("cex:BTCUSDT")
+            self.assertEqual(outcome["status"], "NO_TRADE", case)
+            self.assertEqual(calls["count"], 0, case)
+            self.assertIsNone(self.ledger.position(), case)
+
+    def test_risk_breaker_is_rechecked_after_ai_review(self):
+        ledger = self.ledger
+        def reviewer(result, asset):
+            position = {
+                "asset": "cex:BTCUSDT", "quantity": 1.0, "entry_price": 100.0,
+                "stop_loss": 90.0, "initial_stop_loss": 90.0,
+                "take_profit": 120.0, "entry_fee": 0.0, "opened_at": int(time.time()),
+                "signal_bar": "concurrent-loss-bar", "confirmation_score": 80.0,
+                "risk_budget": 50.0, "max_holding_days": 14,
+            }
+            self.assertTrue(ledger.open_position(position, 100.0))
+            ledger.close_position(90.0, 0.0, "CONCURRENT_LOSS")
+            return {"status": "APPROVED", "paper_entry_eligible": True}
+
+        bot = PaperTradingBot(
+            self.engine, ledger=ledger, daily_loss_limit_pct=0.0001,
+            ai_reviewer=reviewer,
+        )
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "RISK_HALT")
+        self.assertIn("DAILY_LOSS_LIMIT", result["risk_controls"]["halt_reasons"])
+        self.assertIsNone(ledger.position())
+
+    def test_market_snapshot_is_refetched_after_ai_review(self):
+        initial = self.engine.data.snapshots["cex:BTCUSDT"]
+        initial.raw = {
+            "provider_a": {
+                "bid_price": 99.9, "ask_price": 100.1,
+                "quote_timestamp_ms": int(time.time() * 1000),
+                "provider": "TestExchange",
+            }
+        }
+
+        def reviewer(result, asset):
+            # Simulate a newer provider response replacing the cached snapshot
+            # while the external AI review is in flight.
+            self.engine.data.snapshots[asset.raw] = SimpleNamespace(
+                price_usd=100.0,
+                raw={"provider_a": {
+                    "bid_price": 100.2, "ask_price": 100.4,
+                    "quote_timestamp_ms": int(time.time() * 1000) + 1_000,
+                    "provider": "TestExchange",
+                }},
+            )
+            return {"status": "APPROVED", "paper_entry_eligible": True}
+
+        bot = PaperTradingBot(self.engine, ledger=self.ledger, ai_reviewer=reviewer)
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "NO_TRADE")
+        self.assertIn("quote changed", result["reason"])
+        self.assertIsNone(self.ledger.position())
+
+    def test_market_price_change_during_ai_review_blocks_entry_without_quotes(self):
+        def reviewer(result, asset):
+            self.engine.data.snapshots[asset.raw] = SimpleNamespace(price_usd=101.0)
+            return {"status": "APPROVED", "paper_entry_eligible": True}
+
+        bot = PaperTradingBot(self.engine, ledger=self.ledger, ai_reviewer=reviewer)
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "NO_TRADE")
+        self.assertIn("price changed", result["reason"])
+        self.assertIsNone(self.ledger.position())
+
+    def test_missing_or_non_approving_ai_blocks_new_paper_entry(self):
+        bot = PaperTradingBot(
+            self.engine,
+            ledger=self.ledger,
+            ai_reviewer=lambda result, asset: {
+                "status": "UNKNOWN",
+                "paper_entry_eligible": False,
+                "status_fa": "کلید AI ثبت نشده است.",
+            },
+        )
+        result = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "AI_BLOCKED")
+        self.assertFalse(result["ai_review"]["paper_entry_eligible"])
+        self.assertIsNone(self.ledger.position())
+
+    def test_existing_position_is_managed_without_requiring_a_new_ai_review(self):
+        opened = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        self.bot.ai_reviewer = lambda result, asset: {
+            "status": "UNKNOWN", "paper_entry_eligible": False,
+        }
+        self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 125.0
+        closed = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(closed["status"], "CLOSED")
+        self.assertEqual(closed["trade"]["exit_reason"], "TAKE_PROFIT")
 
     def test_spot_short_is_never_opened(self):
         self.engine.result.signal = "SHORT"
@@ -232,19 +352,33 @@ class PaperTradingBotTests(unittest.TestCase):
         self.assertEqual(result["status"], "CLOSED")
         self.assertEqual(result["trade"]["exit_reason"], "TIME_EXIT")
 
-    def test_daily_loss_circuit_halts_new_entries(self):
+    def test_daily_loss_circuit_halts_new_entries_before_ai_review(self):
+        calls = {"count": 0}
+
+        def reviewer(result, asset):
+            calls["count"] += 1
+            return {
+                "status": "APPROVED", "paper_entry_eligible": True,
+                "provider": "test", "final_rating": "Buy", "cost_usd": 0.0,
+            }
+
         bot = PaperTradingBot(
-            self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001
+            self.engine, ledger=self.ledger, daily_loss_limit_pct=0.0001,
+            ai_reviewer=reviewer,
         )
-        bot.run_once("cex:BTCUSDT")
+        opened = bot.run_once("cex:BTCUSDT")
+        self.assertEqual(opened["status"], "OPENED")
+        self.assertEqual(calls["count"], 1)
         self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 85.0
         closed = bot.run_once("cex:BTCUSDT")
         self.assertEqual(closed["status"], "CLOSED")
         frame = self.engine.data.candle_frames["cex:BTCUSDT"]
         frame.loc[frame.index[-1] + pd.Timedelta(days=1)] = {"close": 100.0}
         self.engine.data.snapshots["cex:BTCUSDT"].price_usd = 100.0
+        calls["count"] = 0
         blocked = bot.run_once("cex:BTCUSDT")
         self.assertEqual(blocked["status"], "RISK_HALT")
+        self.assertEqual(calls["count"], 0)
         self.assertIn("DAILY_LOSS_LIMIT", blocked["risk_controls"]["halt_reasons"])
 
     def test_bot_limits_portfolio_to_one_open_position(self):

@@ -330,7 +330,7 @@ class BybitProvider:
             fallback_eligible = (
                 "HTTP 403" in message
                 or "HTTP 451" in message
-                or "Bybit API retCode=" in message
+                or "Bybit API error retCode=" in message
                 or "Bybit has no spot ticker" in message
             )
             if not fallback_eligible:
@@ -387,7 +387,7 @@ class BybitProvider:
         if str(ret_code) != "0":
             ret_msg = payload.get("retMsg", "MISSING")
             raise DataProviderError(
-                f"Bybit API retCode={ret_code!r} retMsg={ret_msg!r} for spot ticker {symbol}"
+                f"Bybit API error retCode={ret_code!r} retMsg={ret_msg!r} for spot ticker {symbol}"
             )
         result = payload.get("result")
         if not isinstance(result, dict):

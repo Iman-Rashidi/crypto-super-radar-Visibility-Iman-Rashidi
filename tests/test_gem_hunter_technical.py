@@ -152,7 +152,7 @@ class GemHunterTechnicalTests(unittest.TestCase):
         self.assertTrue(result["filter_coverage"]["trend"])
         self.assertTrue(result["filter_coverage"]["momentum"])
         self.assertFalse(result["filter_coverage"]["relative_strength"])
-        self.assertEqual(result["sources"], ["GECKOTERMINAL"])
+        self.assertEqual(result["sources"], ["GECKOTERMINAL", "BINANCE_SPOT"])
 
 
 

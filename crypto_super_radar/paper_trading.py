@@ -17,6 +17,7 @@ from .database import connect_database, storage_backend
 from .signal_performance import summarize_closed_trades
 from .execution_costs import calculate_fill_costs
 from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
+from .ai_second_opinion import ai_connection_status, run_free_ai_second_opinion
 
 
 PAPER_ASSETS = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
@@ -32,6 +33,21 @@ def _number(value: Any) -> Optional[float]:
 
 def _status(value: Any) -> str:
     return str(getattr(value, "value", value)).upper()
+
+
+def _mandatory_gates_pass(gates: Any) -> bool:
+    """Require one and only one PASS result for each mandatory gate ID 1–12."""
+    if not isinstance(gates, (list, tuple)) or len(gates) != 12:
+        return False
+    seen: set[int] = set()
+    for gate in gates:
+        gate_id = getattr(gate, "gate_id", None)
+        if isinstance(gate_id, bool) or not isinstance(gate_id, int):
+            return False
+        if gate_id in seen or _status(getattr(gate, "status", None)) != "PASS":
+            return False
+        seen.add(gate_id)
+    return seen == set(range(1, 13))
 
 
 def _extract_observed_quote(snapshot: Any, *, max_age_ms: int = 60_000) -> Optional[dict[str, Any]]:
@@ -686,8 +702,10 @@ class PaperTradingBot:
         max_consecutive_losses: int = 3,
         cooldown_hours_after_loss: float = 24.0,
         min_net_reward_risk: float = 1.8,
+        ai_reviewer=None,
     ):
         self.engine = engine
+        self.ai_reviewer = ai_reviewer or run_free_ai_second_opinion
         self.ledger = ledger or PaperLedger()
         values = (risk_per_trade_pct, max_position_notional_pct, max_risk_score,
                   min_confirmation_score, fee_bps_per_side, slippage_bps_per_side,
@@ -721,6 +739,7 @@ class PaperTradingBot:
 
     def state(self) -> dict[str, Any]:
         state = self.ledger.state()
+        state["ai_connection"] = ai_connection_status()
         position = state.get("open_position")
         recent_trades = state.get("recent_trades") or []
         control_asset = (position or {}).get("asset") or (
@@ -840,9 +859,9 @@ class PaperTradingBot:
                     "reason": "A fresh cross-validated public spot price is unavailable."}
 
         gates = getattr(result, "gates", [])
-        if not gates or any(_status(gate.status) != "PASS" for gate in gates):
+        if not _mandatory_gates_pass(gates):
             return {"status": "NO_TRADE", "asset": asset.raw,
-                    "reason": "Every mandatory signal gate must PASS before paper entry."}
+                    "reason": "Exactly one PASS result for each mandatory gate ID 1–12 is required before paper entry."}
         signal = _status(getattr(result, "signal", "NO TRADE"))
         if signal != "LONG":
             return {"status": "NO_TRADE", "asset": asset.raw,
@@ -949,6 +968,119 @@ class PaperTradingBot:
             "entry_spread_cost_usd": entry_spread_cost,
             "entry_quote_source": entry_quote_source,
         }
+        # Do not call the external reviewer until every deterministic, duplicate,
+        # account, sizing, reward/risk and circuit-breaker check has passed.
+        try:
+            ai_review = self.ai_reviewer(result, asset)
+        except Exception as exc:
+            ai_review = {
+                "provider": "OpenRouter",
+                "status": "UNKNOWN",
+                "status_fa": "بررسی هوش مصنوعی ناموفق بود؛ ورود جدید متوقف شد.",
+                "reason": "Free AI reviewer failed.",
+                "error_type": type(exc).__name__,
+                "paper_entry_eligible": False,
+                "cost_usd": 0.0,
+            }
+        if (
+            not isinstance(ai_review, dict)
+            or str(ai_review.get("status", "UNKNOWN")).upper() != "APPROVED"
+            or ai_review.get("paper_entry_eligible") is not True
+        ):
+            return {
+                "status": "AI_BLOCKED",
+                "asset": asset.raw,
+                "reason": "A valid approval from the configured free AI reviewer is mandatory for every new paper entry.",
+                "ai_review": ai_review if isinstance(ai_review, dict) else {
+                    "status": "UNKNOWN", "paper_entry_eligible": False,
+                },
+                "mode": "PAPER_ONLY",
+                "orders_submitted": False,
+            }
+
+        # Re-check account-level guards after the network round-trip. Another
+        # worker may have closed a losing position or changed available equity
+        # while the AI provider was responding.
+        latest_controls = self.ledger.risk_controls(
+            asset=asset.raw,
+            daily_loss_limit_pct=self.daily_loss_limit_pct,
+            max_drawdown_pct=self.max_drawdown_pct,
+            max_consecutive_losses=self.max_consecutive_losses,
+            cooldown_hours_after_loss=self.cooldown_hours_after_loss,
+        )
+        if not latest_controls["entry_allowed"]:
+            return {
+                "status": "RISK_HALT",
+                "asset": asset.raw,
+                "reason": "Paper risk circuit breaker changed while awaiting AI review.",
+                "risk_controls": latest_controls,
+                "ai_review": ai_review,
+            }
+
+        latest_state = self.ledger.state()
+        latest_equity = _number(latest_state["account"]["equity_usd"])
+        latest_cash = _number(latest_state["account"]["cash_balance_usd"])
+        latest_risk_budget = (
+            latest_equity * self.risk_per_trade_pct if latest_equity is not None else None
+        )
+        latest_notional_cap = (
+            latest_equity * self.max_position_notional_pct
+            if latest_equity is not None else None
+        )
+        if (
+            latest_equity is None or latest_cash is None
+            or latest_equity <= 0 or latest_cash < debit
+            or latest_risk_budget is None or latest_notional_cap is None
+            or quantity * unit_risk > latest_risk_budget + 1e-8
+            or notional > latest_notional_cap + 1e-8
+        ):
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Paper account equity or risk budget changed while awaiting AI review.",
+                "ai_review": ai_review,
+            }
+
+        # Fetch a genuinely new cross-validated snapshot after the external
+        # review. Re-reading the original object cannot detect a newer quote
+        # published while the provider was responding.
+        snapshot_getter = getattr(data, "snapshot", None) or getattr(self.engine, "snapshot", None)
+        try:
+            refreshed_snapshot = snapshot_getter(asset) if callable(snapshot_getter) else None
+        except Exception:
+            refreshed_snapshot = None
+        refreshed_price = _number(getattr(refreshed_snapshot, "price_usd", None))
+        price_tolerance = max(1e-8, abs(price) * 1e-6)
+        if (
+            refreshed_snapshot is None
+            or refreshed_price is None
+            or refreshed_price <= 0
+            or abs(refreshed_price - price) > price_tolerance
+        ):
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Cross-validated market price changed or could not be refreshed during AI review; a new scan is required.",
+                "ai_review": ai_review,
+            }
+
+        latest_quote = _extract_observed_quote(refreshed_snapshot)
+        quote_changed = (entry_quote is None) != (latest_quote is None)
+        if entry_quote is not None and latest_quote is not None:
+            quote_changed = quote_changed or any((
+                latest_quote["timestamp_ms"] != entry_quote["timestamp_ms"],
+                latest_quote["source"] != entry_quote["source"],
+                latest_quote["bid"] != entry_quote["bid"],
+                latest_quote["ask"] != entry_quote["ask"],
+            ))
+        if quote_changed:
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Observed bid/ask quote changed, appeared, disappeared or expired during AI review; a fresh market scan is required.",
+                "ai_review": ai_review,
+            }
+
         if not self.ledger.open_position(record, debit):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Paper ledger rejected duplicate, concurrent or unaffordable entry."}
@@ -957,4 +1089,5 @@ class PaperTradingBot:
                 "take_profit": target, "risk_budget_usd": risk_budget,
                 "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
                 "max_holding_days": max_holding_days, "fee_usd": entry_fee,
-                "risk_controls": controls, "mode": "PAPER_ONLY", "orders_submitted": False}
+                "risk_controls": controls, "ai_review": ai_review,
+                "mode": "PAPER_ONLY", "orders_submitted": False}

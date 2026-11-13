@@ -252,7 +252,7 @@ class SolanaWhaleTests(unittest.TestCase):
         scanner = SolanaWhaleScanner(session=rpc, limiter=NoWaitLimiter())
         result = scanner.scan_mint("S" * 32, price_usd=1.0)
         self.assertEqual(result["status"], "PARTIAL")
-        self.assertEqual(result["whale_watchlist"][0]["address"], "walletowner")
+        self.assertEqual(result["whale_watchlist"][0]["address"], "WalletOwner")
         self.assertIn("LARGE_ENTITY_TRANSFER", result["classification_counts"])
 
 

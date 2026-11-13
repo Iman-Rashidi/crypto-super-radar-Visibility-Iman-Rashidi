@@ -575,7 +575,7 @@ class WebAppHttpTests(unittest.TestCase):
                             "reason": "No valid closed paper trades are recorded yet."},
         }
         try:
-            with patch.object(web_app.PAPER_BOT, "run_once", return_value=cycle), \\
+            with patch.object(web_app.PAPER_BOT, "run_once", return_value=cycle), \
                  patch.object(web_app.PAPER_BOT, "state", return_value=paper_state):
                 web_app._run_paper_tick(job_id, "cex:SOLUSDT")
             job = web_app.JOBS[job_id]

@@ -1302,6 +1302,7 @@ _PAPER_CYCLE_STATUS_FA = {
     "SKIPPED": "دارایی از چرخه کنار گذاشته شد",
     "UNKNOWN": "وضعیت نامشخص",
     "RISK_HALT": "ورود به‌دلیل محدودیت ریسک متوقف شد",
+    "AI_BLOCKED": "ورود به‌دلیل نبود تأیید هوش مصنوعی رایگان متوقف شد",
 }
 _PAPER_REASON_FA = {
     "Paper bot currently accepts only BTC, ETH and SOL spot symbols.":
@@ -1330,6 +1331,8 @@ _PAPER_REASON_FA = {
         "سیگنال مربوط به این کندل قبلاً در حساب آزمایشی اجرا شده است.",
     "Paper entries paused by risk circuit breaker.":
         "مدار قطع‌کنندهٔ ریسک، ورودهای جدید حساب آزمایشی را موقتاً متوقف کرده است.",
+    "A valid approval from the configured free AI reviewer is mandatory for every new paper entry.":
+        "برای هر ورود آزمایشی جدید، دریافت تأیید از هوش مصنوعی رایگان الزامی است؛ اتصال یا پاسخ معتبر در دسترس نیست.",
     "Paper account balance is invalid.":
         "موجودی حساب آزمایشی معتبر نیست.",
     "Net reward/risk is invalid after costs.":
@@ -1350,6 +1353,11 @@ _PAPER_ENUM_FA = {
     "COMPLETE": "کامل",
     "NOT_APPLICABLE": "قابل اعمال نیست",
     "UNKNOWN": "نامشخص",
+    "APPROVED": "تأیید",
+    "VETO": "رد",
+    "RATE_LIMITED": "سهمیه یا محدودیت سرویس پر شده است",
+    "CONFIGURED": "کلید ثبت شده",
+    "MISSING_API_KEY": "کلید API ثبت نشده",
     "PASS": "تأیید",
     "FAIL": "رد",
     "PARTIAL": "جزئی",
@@ -1396,6 +1404,30 @@ def _paper_tick_report_fa(cycle: dict, paper_state: dict, safety: dict) -> dict:
     ]
     if reason:
         cycle_rows.append(row("دلیل تصمیم", _paper_reason_fa(reason)))
+    ai_review = cycle.get("ai_review")
+    if isinstance(ai_review, dict):
+        cycle_rows.append(row(
+            "وضعیت بررسی هوش مصنوعی",
+            ai_review.get("status_fa") or _paper_enum_fa(ai_review.get("status")),
+        ))
+        if ai_review.get("model"):
+            cycle_rows.append(row("مدل AI رایگان", ai_review.get("model")))
+        if ai_review.get("final_rating"):
+            cycle_rows.append(row("نظر نهایی AI", ai_review.get("final_rating")))
+        if ai_review.get("rationale_fa"):
+            cycle_rows.append(row("دلیل نظر AI", ai_review.get("rationale_fa")))
+        for role, view in (ai_review.get("specialist_views") or {}).items():
+            if isinstance(view, dict):
+                cycle_rows.append(row(
+                    "تحلیل " + str(role),
+                    str(view.get("view") or "UNKNOWN") + " · " + str(view.get("reason_fa") or ""),
+                ))
+    ai_connection = paper_state.get("ai_connection") or {}
+    if ai_connection:
+        cycle_rows.append(row(
+            "اتصال هوش مصنوعی رایگان",
+            ai_connection.get("status_fa") or _paper_enum_fa(ai_connection.get("status")),
+        ))
     for key, label, unit in (
         ("side", "جهت موقعیت", None),
         ("quantity", "مقدار دارایی", None),
@@ -1535,6 +1567,7 @@ def _paper_tick_report_fa(cycle: dict, paper_state: dict, safety: dict) -> dict:
     notes = [
         "لغزش قیمت ورود و خروج، در صورت وجود مظنهٔ تازه، از بهترین قیمت خرید/فروش مشاهده‌شده محاسبه می‌شود؛ در غیر این صورت قیمت مرجعِ تطبیق‌یافته مبناست. این هزینه در قیمت اجرای شبیه‌سازی‌شده لحاظ شده و دوباره از سود/زیان کسر نمی‌شود.",
         "هزینهٔ اسپرد فقط وقتی ثبت می‌شود که مظنهٔ خرید و فروشِ تازه و زمان‌دار موجود باشد؛ نبود پوشش کامل به‌عنوان دادهٔ ناقص گزارش می‌شود.",
+        "این چرخه فقط PAPER_ONLY است و هیچ سفارش واقعی به صرافی ارسال نمی‌کند.",
         "هزینهٔ تأمین مالی برای این دفترکلِ اسپات کاربرد ندارد؛ در بک‌تست قراردادهای دائمی، تاریخچهٔ کامل Funding لازم است.",
     ]
 
@@ -2736,6 +2769,12 @@ class Handler(BaseHTTPRequestHandler):
         <section class="card" id="paper-bot">
           <h2>ربات معامله‌گر آزمایشی (Paper Trading)</h2>
           <p class="muted">ربات فقط LONG در بازار Spot را با همان ۱۲ فیلتر ارزیابی می‌کند؛ هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
+          <div class="metric" style="margin:12px 0">
+            <strong>اتصال الزامی به هوش مصنوعی رایگان · OpenRouter / NVIDIA Nemotron</strong>
+            <p class="muted">برای هر ورود جدید، مدل زبانی واقعی باید نقش تحلیل‌گر بازار، تحلیل‌گر تکنیکال، تحلیل‌گر احساسات، پژوهشگر صعودی/نزولی، معامله‌گر و مدیر ریسک را بررسی و خروجی معتبر بدهد. مدل رایگان <code>nvidia/nemotron-3-ultra-550b-a55b:free</code> با هزینهٔ مدل صفر استفاده می‌شود. سقف برنامه ۳۵ درخواست در روز و حافظهٔ نتیجه ۴ ساعت است؛ در صورت قطعی یا اتمام سهمیه، ورود جدید متوقف می‌شود اما مدیریت و خروج موقعیت باز ادامه دارد.</p>
+            <p class="muted">برای فعال‌سازی: در <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">OpenRouter</a> یک API Key رایگان بساز و آن را فقط در Render → Environment با نام <code>OPENROUTER_API_KEY</code> ثبت کن. کلید را در GitHub، فرم داشبورد یا مرورگر قرار نده. فقط دادهٔ عمومی و خلاصه‌شدهٔ بازار ارسال می‌شود؛ برای مدل رایگان ارائه‌دهنده ممکن است درخواست‌ها را برای امنیت و بهبود محصول نگه‌داری/استفاده کند.</p>
+            <div id="paper-bot-ai-status" class="muted" aria-live="polite">وضعیت اتصال AI در حال بررسی...</div>
+          </div>
           <form method="post" action="/paper-bot/tick">
             <label>دارایی</label>
             <select name="asset">
@@ -2755,6 +2794,8 @@ class Handler(BaseHTTPRequestHandler):
             const r=await fetch('/paper-bot/status');const s=await r.json();
             const a=s.account||{};
             box.textContent='حالت: Paper فقط · موجودی نقدی: '+Number(a.cash_balance_usd||0).toFixed(2)+' USD · ارزش کل حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · سود/زیان تحقق‌یافته: '+Number(a.realized_pnl_usd||0).toFixed(2)+' USD · موقعیت باز: '+((s.open_position||{}).asset||'ندارد')+' · ترمز ریسک: '+(s.risk_controls&&s.risk_controls.entry_allowed?'فعال':'متوقف')+' · زیان روز: '+Number((s.risk_controls||{}).daily_realized_loss_pct||0).toFixed(3)+'%';
+            const ai=s.ai_connection||{},aiBox=document.getElementById('paper-bot-ai-status');
+            if(aiBox)aiBox.textContent='اتصال AI: '+(ai.status_fa||'وضعیت نامشخص')+' · مدل: '+(ai.model||'ثبت نشده')+' · سقف محافظه‌کارانه: '+(ai.requests_per_day_app_cap||35)+' درخواست در روز / '+(ai.requests_per_minute_app_cap||18)+' در دقیقه (هر فرایند)';
           }catch(e){box.textContent='وضعیت حساب آزمایشی در دسترس نیست.';}
         })();
         </script>

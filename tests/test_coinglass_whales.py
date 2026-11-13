@@ -79,7 +79,7 @@ class CoinGlassWhaleTests(unittest.TestCase):
         self.assertEqual(result["alerts_status"], "UNAVAILABLE")
         self.assertEqual(result["positions_status"], "KNOWN")
         self.assertEqual(result["position_count"], 0)
-        self.assertIsNone(result["long_notional_usd"])
+        self.assertEqual(result["long_notional_usd"], 0.0)
 
     @patch.dict("os.environ", {"COINGLASS_API_KEY": "test-key"})
     def test_symbol_required(self):
