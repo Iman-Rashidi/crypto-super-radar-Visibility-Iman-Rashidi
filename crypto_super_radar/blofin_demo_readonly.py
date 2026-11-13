@@ -34,6 +34,33 @@ class BloFinDemoResponseError(BloFinDemoError):
     """Unexpected or unsuccessful BloFin response."""
 
 
+class BloFinDemoHTTPError(BloFinDemoError):
+    """Sanitized HTTP failure with a safe retry hint."""
+
+    def __init__(self, status_code: int, retry_after_seconds: float | None = None):
+        self.status_code = int(status_code)
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(f"BloFin Demo HTTP request failed (status={self.status_code}).")
+
+
+def _check_response_codes(payload: Mapping[str, Any]) -> None:
+    """Check both the HTTP API envelope and per-item business result codes."""
+    top_code = payload.get("code")
+    if top_code is not None and str(top_code) != "0":
+        raise BloFinDemoResponseError(
+            f"BloFin rejected the request (code={str(top_code)[:24]})."
+        )
+    data = payload.get("data")
+    rows = data if isinstance(data, list) else [data]
+    for row in rows:
+        if isinstance(row, dict) and row.get("code") is not None:
+            item_code = str(row.get("code"))
+            if item_code != "0":
+                raise BloFinDemoResponseError(
+                    f"BloFin rejected an item in the response (code={item_code[:24]})."
+                )
+
+
 def _canonical_query(params: Mapping[str, Any] | None) -> str:
     if not params:
         return ""
@@ -41,8 +68,10 @@ def _canonical_query(params: Mapping[str, Any] | None) -> str:
     return urlencode(clean)
 
 
-def _signature(secret: str, method: str, path: str, timestamp: str, nonce: str) -> str:
-    prehash = f"{path}{method.upper()}{timestamp}{nonce}"
+def _signature(
+    secret: str, method: str, path: str, timestamp: str, nonce: str, body: str = ""
+) -> str:
+    prehash = f"{path}{method.upper()}{timestamp}{nonce}{body}"
     digest_hex = hmac.new(
         secret.encode("utf-8"), prehash.encode("utf-8"), hashlib.sha256
     ).hexdigest()
@@ -100,31 +129,82 @@ class BloFinDemoReadOnly:
         path_with_query = f"{path}?{query}" if query else path
         headers = self._auth_headers(path_with_query) if private else {}
         url = f"{self.base_url}{path_with_query}"
-        try:
-            response = self.session.get(url, headers=headers, timeout=self.timeout)
-            response.raise_for_status()
-            payload = response.json()
-        except requests.RequestException as exc:
-            raise BloFinDemoError("BloFin Demo request failed.") from exc
-        except (TypeError, ValueError) as exc:
-            raise BloFinDemoResponseError("BloFin returned invalid JSON.") from exc
+        for attempt in range(3):
+            try:
+                response = self.session.get(url, headers=headers, timeout=self.timeout)
+                response.raise_for_status()
+                payload = response.json()
+                break
+            except requests.HTTPError as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status == 429 and attempt < 2:
+                    retry_header = getattr(exc.response, "headers", {}).get("Retry-After")
+                    try:
+                        server_delay = max(0.0, float(retry_header))
+                    except (TypeError, ValueError):
+                        server_delay = 0.0
+                    time.sleep(max(server_delay, min(0.5 * (2 ** attempt), 4.0)))
+                    continue
+                if status == 403:
+                    # BloFin documents a temporary firewall ban of about five minutes.
+                    # Do not hammer the endpoint; let the caller schedule a later retry.
+                    raise BloFinDemoHTTPError(403, retry_after_seconds=300.0) from exc
+                if status == 429:
+                    raise BloFinDemoHTTPError(429, retry_after_seconds=4.0) from exc
+                raise BloFinDemoError("BloFin Demo request failed.") from exc
+            except requests.RequestException as exc:
+                raise BloFinDemoError("BloFin Demo request failed.") from exc
+            except (TypeError, ValueError) as exc:
+                raise BloFinDemoResponseError("BloFin returned invalid JSON.") from exc
+        else:
+            raise BloFinDemoHTTPError(429, retry_after_seconds=4.0)
         if not isinstance(payload, dict):
             raise BloFinDemoResponseError("BloFin response must be a JSON object.")
-        if str(payload.get("code", "0")) != "0":
-            # Do not echo response bodies: they may contain account details.
-            raise BloFinDemoResponseError(
-                f"BloFin rejected the read request (code={payload.get('code', 'unknown')})."
-            )
+        _check_response_codes(payload)
         if "data" not in payload:
             raise BloFinDemoResponseError("BloFin response is missing the data field.")
         return payload["data"]
 
     # Public market-data endpoints: no API key is sent.
-    def get_futures_instruments(self, *, inst_id: str | None = None) -> Any:
+    def get_futures_instruments(
+        self, *, inst_id: str | None = None, api_permission: str | None = None
+    ) -> Any:
+        if api_permission not in {None, "full", "reduce_only"}:
+            raise ValueError("api_permission must be 'full' or 'reduce_only'.")
         return self._get(
             "/api/v1/market/instruments",
-            params={"instId": inst_id},
+            params={"instId": inst_id, "apiPermission": api_permission},
         )
+
+    def get_tradable_instrument(self, inst_id: str) -> dict[str, Any]:
+        """Return validated linear USDT contract metadata only when API permission is full."""
+        if not inst_id or not isinstance(inst_id, str):
+            raise ValueError("inst_id is required.")
+        rows = self.get_futures_instruments(inst_id=inst_id, api_permission="full")
+        if not isinstance(rows, list):
+            raise BloFinDemoResponseError("Instrument response is not a list.")
+        match = next(
+            (row for row in rows if isinstance(row, dict) and row.get("instId") == inst_id),
+            None,
+        )
+        if match is None or match.get("apiPermission") != "full":
+            raise BloFinDemoResponseError("Instrument is not fully enabled for API trading.")
+        if match.get("state") != "live" or match.get("contractType") != "linear":
+            raise BloFinDemoResponseError("Only live linear contracts are accepted.")
+        if match.get("settleCurrency") != "USDT":
+            raise BloFinDemoResponseError("Only USDT-settled contracts are accepted in this phase.")
+        try:
+            values = {
+                "contractValue": float(match["contractValue"]),
+                "minSize": float(match["minSize"]),
+                "lotSize": float(match["lotSize"]),
+                "tickSize": float(match["tickSize"]),
+            }
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise BloFinDemoResponseError("Instrument contract metadata is incomplete.") from exc
+        if any(not (value > 0) for value in values.values()):
+            raise BloFinDemoResponseError("Instrument contract metadata is invalid.")
+        return {**match, **values}
 
     def get_tickers(self, *, inst_id: str | None = None) -> Any:
         return self._get("/api/v1/market/tickers", params={"instId": inst_id})
@@ -140,6 +220,15 @@ class BloFinDemoReadOnly:
         )
 
     # Private endpoints: READ permission only.
+    def get_position_mode(self) -> dict[str, Any]:
+        result = self._get("/api/v1/account/position-mode", private=True)
+        if not isinstance(result, dict):
+            raise BloFinDemoResponseError("Position-mode response is invalid.")
+        mode = result.get("positionMode")
+        if mode not in {"net_mode", "long_short_mode"}:
+            raise BloFinDemoResponseError("Position mode is missing or unsupported.")
+        return result
+
     def get_futures_balance(self, *, product_type: str = "USDT-FUTURES") -> Any:
         return self._get(
             "/api/v1/account/balance",
