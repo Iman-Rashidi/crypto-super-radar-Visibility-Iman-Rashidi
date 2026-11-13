@@ -56,7 +56,7 @@ class WalletEventStoreTests(unittest.TestCase):
         )), 1)
 
     def test_counterparty_address_is_persisted_and_retrieved(self):
-        row = event()
+        row = event(counterparty_address="WalletCounterparty111111111111111111111")
         self.store.append_many([row])
         saved = self.store.token_events(chain="solana", token_address=row["token_address"])
         self.assertEqual(saved[0]["counterparty_address"], row["counterparty_address"])
