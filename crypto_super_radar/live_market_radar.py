@@ -42,6 +42,20 @@ MAX_CANDLES = 240
 MAX_CANDLE_DISCREPANCY_PCT = 0.40
 SIGNAL_MAX_PIVOT_AGE_BARS = 10
 
+# Elliott pivot floors are timeframe-aware. A daily 3% threshold on 1m/5m
+# candles suppresses every useful intraday swing and leaves the wave panel empty.
+ELLIOTT_MIN_REVERSAL_PCT = {
+    "1s": 0.0005,
+    "1m": 0.0008,
+    "5m": 0.0015,
+    "15m": 0.0025,
+    "1h": 0.0040,
+    "4h": 0.0080,
+    "1d": 0.0150,
+    "1w": 0.0250,
+    "1M": 0.0300,
+}
+
 
 def _interval_end(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
     if interval == "1M":
@@ -336,7 +350,11 @@ def build_live_market_radar_payload(
     quality_status = cross_validation
 
     pivots = _pivots(closed)
-    wave = monitor_elliott_waves(closed)
+    wave = monitor_elliott_waves(
+        closed,
+        min_reversal_pct=ELLIOTT_MIN_REVERSAL_PCT[normalized_interval],
+        max_reversal_pct=0.15,
+    )
     wave_pivots = []
     wave_count = wave.get("wave_count")
     raw_wave_pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
