@@ -53,7 +53,7 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
         self.client.get_futures_instruments(inst_id="BTC-USDT")
         call_args, kwargs = self.session.get.call_args
         url = call_args[0]
-        self.assertTrue(url.startswith(DEMO_REST_URL)
+        self.assertTrue(url.startswith(DEMO_REST_URL))
         self.assertIn("/api/v1/market/instruments?instId=BTC-USDT", url)
         self.assertEqual(kwargs["headers"], {})
         self.assertNotIn("ACCESS-KEY", kwargs["headers"])
@@ -70,7 +70,8 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
 
     def test_private_balance_is_signed_get_and_uses_demo_host(self):
         self.client.get_futures_balance()
-        url, kwargs = self.session.get.call_args
+        call_args, kwargs = self.session.get.call_args
+        url = call_args[0]
         self.assertTrue(url.startswith(DEMO_REST_URL))
         self.assertIn("/api/v1/account/balance?productType=USDT-FUTURES", url)
         headers = kwargs["headers"]
