@@ -387,7 +387,7 @@ class BybitProvider:
         if str(ret_code) != "0":
             ret_msg = payload.get("retMsg", "MISSING")
             raise DataProviderError(
-                f"Bybit API retCode={ret_code!r} retMsg={ret_msg!r} for spot ticker {symbol}"
+                f"Bybit API error retCode={ret_code!r} retMsg={ret_msg!r} for spot ticker {symbol}"
             )
         result = payload.get("result")
         if not isinstance(result, dict):
