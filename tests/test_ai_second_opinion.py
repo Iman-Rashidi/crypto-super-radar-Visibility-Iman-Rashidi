@@ -22,6 +22,7 @@ def valid_result():
         confirmation_score=82.0,
         estimated_risk_score=20.0,
         opportunity_rank=88.0,
+        entry_price=100.0,
         stop_loss=90.0,
         take_profit=120.0,
         expected_holding_days=3,
