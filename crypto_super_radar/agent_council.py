@@ -124,10 +124,17 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
             add_check("All 12 mandatory gates", "UNKNOWN", "At least one mandatory gate is UNKNOWN.")
 
     signal = _enum_text(getattr(result, "signal", None)).replace("_", " ")
+    asset_name = str(getattr(result, "asset", "") or "")
+    perpetual = asset_name.lower().startswith("perp:")
     if signal == "LONG":
         add_check("Radar trade proposal", "PASS", "Radar proposes LONG.")
+    elif signal == "SHORT" and perpetual:
+        add_check("Radar trade proposal", "PASS", "Perpetual radar proposes SHORT.")
     else:
-        add_check("Radar trade proposal", "FAIL", "Only a LONG spot proposal can be reviewed for paper entry.")
+        add_check(
+            "Radar trade proposal", "FAIL",
+            "Only LONG spot or LONG/SHORT perpetual proposals can be reviewed for paper entry.",
+        )
 
     confirmation = _finite_number(getattr(result, "confirmation_score", None))
     if confirmation is None:
@@ -145,14 +152,20 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
     else:
         add_check("Estimated risk", "FAIL", f"Risk {risk:.2f} is at or above the {MAX_ESTIMATED_RISK_SCORE:.0f} ceiling.")
 
+    entry = _finite_number(getattr(result, "entry_price", None))
     stop = _finite_number(getattr(result, "stop_loss", None))
     target = _finite_number(getattr(result, "take_profit", None))
-    if stop is None or target is None:
-        add_check("Stop-loss and take-profit plan", "UNKNOWN", "Both risk levels must be finite numbers.")
-    elif 0 < stop < target:
-        add_check("Stop-loss and take-profit plan", "PASS", "Positive LONG stop and target are correctly ordered.")
+    if entry is None or stop is None or target is None:
+        add_check(
+            "Stop-loss and take-profit plan", "UNKNOWN",
+            "Finite entry, stop-loss and take-profit levels are all required.",
+        )
+    elif signal == "LONG" and 0 < stop < entry < target:
+        add_check("Stop-loss and take-profit plan", "PASS", "LONG requires stop < entry < take-profit.")
+    elif signal == "SHORT" and perpetual and 0 < target < entry < stop:
+        add_check("Stop-loss and take-profit plan", "PASS", "SHORT requires take-profit < entry < stop.")
     else:
-        add_check("Stop-loss and take-profit plan", "FAIL", "LONG stop/target levels are not safely ordered.")
+        add_check("Stop-loss and take-profit plan", "FAIL", "Entry/stop/target ordering does not match the proposed trade direction.")
 
     check_statuses = [row["status"] for row in checks]
     if "FAIL" in check_statuses:
