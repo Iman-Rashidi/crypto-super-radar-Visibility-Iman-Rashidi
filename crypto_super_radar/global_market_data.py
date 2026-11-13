@@ -497,7 +497,7 @@ class GlobalMarketBoard:
         with self._lock:
             cache["daily_requests_reserved"] = self._daily_reserved_requests
             cache["daily_request_budget"] = self._daily_request_budget
-        if expired and refreshing:
+        if expired and (refreshing or refresh_blocked):
             cache["status"] = "STALE"
             for item in cache.get("items", []):
                 item["status"] = "UNKNOWN"
