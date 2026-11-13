@@ -14,14 +14,18 @@ import pandas as pd
 
 from .elliott_waves import monitor_elliott_waves
 from .market_patterns import analyze_market_patterns
+from .market_flow import analyze_market_flow
 
 INTERVAL_MS = {
+    "1s": 1_000,
     "1m": 60_000,
     "5m": 300_000,
     "15m": 900_000,
     "1h": 3_600_000,
     "4h": 14_400_000,
     "1d": 86_400_000,
+    "1w": 604_800_000,
+    "1M": 2_592_000_000,  # approximate duration for display/cache only; boundaries use calendar months
 }
 BYBIT_INTERVAL = {
     "1m": "1",
@@ -30,11 +34,19 @@ BYBIT_INTERVAL = {
     "1h": "60",
     "4h": "240",
     "1d": "D",
+    "1w": "W",
+    "1M": "M",
 }
 PIVOT_RADIUS = 3
 MAX_CANDLES = 240
 MAX_CANDLE_DISCREPANCY_PCT = 0.40
 SIGNAL_MAX_PIVOT_AGE_BARS = 10
+
+
+def _interval_end(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
+    if interval == "1M":
+        return timestamp + pd.DateOffset(months=1)
+    return timestamp + pd.Timedelta(milliseconds=INTERVAL_MS[interval])
 
 
 def _utc_frame(frame: pd.DataFrame, *, now: pd.Timestamp) -> pd.DataFrame:
@@ -123,6 +135,7 @@ def _signal(
     *,
     quality_status: str,
     freshness_status: str,
+    divergence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     unknown = {
         "signal": "UNKNOWN",
@@ -172,6 +185,16 @@ def _signal(
         and entry < float(previous["low"])
         and entry < float(pivot["price"])
     )
+    divergence_type = str((divergence or {}).get("type") or "NONE")
+    if bullish_reversal and divergence_type == "BEARISH":
+        return {**unknown, "signal": "WAIT", "status": "WAITING",
+                "reason": "Bullish entry blocked by a confirmed bearish RSI/price divergence candidate.",
+                "pivot": pivot, "signal_candle_at": frame.index[-1].isoformat()}
+    if bearish_reversal and divergence_type == "BULLISH":
+        return {**unknown, "signal": "WAIT", "status": "WAITING",
+                "reason": "Bearish entry blocked by a confirmed bullish RSI/price divergence candidate.",
+                "pivot": pivot, "signal_candle_at": frame.index[-1].isoformat()}
+
     if not bullish_reversal and not bearish_reversal:
         return {
             **unknown,
@@ -244,10 +267,14 @@ def build_live_market_radar_payload(
     *,
     now: datetime | None = None,
     bybit_error: str | None = None,
+    aggregate_trades: list[dict[str, Any]] | None = None,
+    order_book: dict[str, Any] | None = None,
+    market_flow_error: str | None = None,
 ) -> dict[str, Any]:
     """Build a chart payload and fail-closed signal from two public OHLCV sources."""
     normalized_symbol = str(symbol or "").strip().upper()
-    normalized_interval = str(interval or "").strip().lower()
+    raw_interval = str(interval or "").strip()
+    normalized_interval = raw_interval if raw_interval == "1M" else raw_interval.lower()
     if normalized_interval not in INTERVAL_MS:
         raise ValueError("unsupported candle interval")
     if not normalized_symbol or not normalized_symbol.isascii() or not normalized_symbol.isalnum():
@@ -258,14 +285,17 @@ def build_live_market_radar_payload(
     else:
         current = current.tz_convert("UTC")
     interval_ms = INTERVAL_MS[normalized_interval]
-    interval_delta = pd.Timedelta(milliseconds=interval_ms)
     binance = _utc_frame(binance_candles, now=current)
+    # Calendar-aware boundaries are required for 1M; seconds and weeks remain exact.
+    bar_ends = pd.Series([_interval_end(ts, normalized_interval) for ts in binance.index], index=binance.index)
     # Current/in-progress candle can be drawn, but it is excluded from all signal math.
     display_frame = binance.tail(MAX_CANDLES)
-    closed = binance.loc[(binance.index + interval_delta) <= current].copy()
+    display_ends = bar_ends.reindex(display_frame.index)
+    closed_mask = bar_ends <= current
+    closed = binance.loc[closed_mask].copy()
     if closed.empty:
         raise ValueError("no completed candles are available")
-    last_closed_end = closed.index[-1] + interval_delta
+    last_closed_end = _interval_end(closed.index[-1], normalized_interval)
     age_seconds = max(0.0, float((current - last_closed_end).total_seconds()))
     freshness_status = "FRESH" if age_seconds <= (interval_ms / 1000.0) * 1.5 else "STALE"
 
@@ -277,7 +307,8 @@ def build_live_market_radar_payload(
     if isinstance(bybit_candles, pd.DataFrame):
         try:
             bybit = _utc_frame(bybit_candles, now=current)
-            bybit_closed = bybit.loc[(bybit.index + interval_delta) <= current]
+            bybit_ends = pd.Series([_interval_end(ts, normalized_interval) for ts in bybit.index], index=bybit.index)
+            bybit_closed = bybit.loc[bybit_ends <= current]
             common = closed[["close"]].join(
                 bybit_closed[["close"]], how="inner", lsuffix="_binance", rsuffix="_bybit"
             )
@@ -322,6 +353,11 @@ def build_live_market_radar_payload(
                 "label": "مبدأ" if point_index == 0 else f"W{point_index}",
             })
     market_analysis = analyze_market_patterns(closed, pivots, wave)
+    market_flow = analyze_market_flow(
+        closed, aggregate_trades=aggregate_trades, order_book=order_book, now=current.to_pydatetime()
+    )
+    if market_flow_error:
+        market_flow["live_flow_error"] = str(market_flow_error)[:180]
     market_analysis["data_quality"] = {
         "pattern_data_source": "Binance Spot",
         "freshness_status": freshness_status,
@@ -332,11 +368,12 @@ def build_live_market_radar_payload(
         ),
     }
     signal = _signal(
-        closed, pivots, quality_status=quality_status, freshness_status=freshness_status
+        closed, pivots, quality_status=quality_status, freshness_status=freshness_status,
+        divergence=market_analysis.get("direction", {}).get("divergence"),
     )
     chart = []
     for timestamp, row in display_frame.iterrows():
-        opened = timestamp + interval_delta
+        opened = _interval_end(timestamp, normalized_interval)
         is_closed = opened <= current
         chart.append({
             "time": int(timestamp.timestamp() * 1000),
@@ -368,6 +405,7 @@ def build_live_market_radar_payload(
         "wave_pivots": wave_pivots,
         "elliott_waves": wave,
         "market_analysis": market_analysis,
+        "market_flow": market_flow,
         "signal": signal,
         "signal_only": True,
         "paper_bot_connected": False,
