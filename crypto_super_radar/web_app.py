@@ -1710,7 +1710,8 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
 def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: bool = False) -> dict:
     """Fetch live spot candles from two independent venues and cache briefly."""
     normalized_symbol = str(symbol or "").strip().upper()
-    normalized_interval = str(interval or "").strip().lower()
+    raw_interval = str(interval or "").strip()
+    normalized_interval = raw_interval if raw_interval == "1M" else raw_interval.lower()
     allowed_symbols = {item[0] for item in CRYPTO_MARKET_UNIVERSE}
     if normalized_symbol not in allowed_symbols:
         raise ValueError("نماد برای رادار زنده در فهرست بازار منتخب نیست.")
@@ -1722,7 +1723,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         cached = LIVE_MARKET_RADAR_CACHE.get(key)
         if (
             not force_refresh and cached is not None
-            and now - float(cached.get("_cached_at", 0.0)) < LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
+            and now - float(cached.get("_cached_at", 0.0)) < (2 if normalized_interval == "1s" else LIVE_MARKET_RADAR_CACHE_TTL_SECONDS)
         ):
             return copy.deepcopy({k: v for k, v in cached.items() if k != "_cached_at"})
     binance_frame = ENGINE.data.binance.candles(
@@ -1730,18 +1731,49 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
     )
     bybit_frame = None
     bybit_error = None
+    if normalized_interval in BYBIT_INTERVAL:
+        try:
+            bybit_frame = ENGINE.data.bybit.candles(
+                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=300,
+            )
+        except Exception as exc:
+            bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+    else:
+        bybit_error = "Bybit Spot does not provide 1-second candles; independent candle validation is unavailable on this interval."
+
+    # Bounded public microstructure snapshot: 500 aggregate trades plus 20 depth levels.
+    aggregate_trades = None
+    order_book = None
+    flow_errors = []
+    binance_provider = ENGINE.data.binance
     try:
-        bybit_frame = ENGINE.data.bybit.candles(
-            normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=300,
+        aggregate_trades = binance_provider.http.get(
+            f"{binance_provider.BASE}/api/v3/aggTrades",
+            {"symbol": normalized_symbol, "limit": 500},
         )
+        if not isinstance(aggregate_trades, list):
+            raise ValueError("Binance aggregate-trade response was not a list")
     except Exception as exc:
-        bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+        flow_errors.append(f"aggTrades: {type(exc).__name__}: {str(exc)[:100]}")
+    try:
+        order_book = binance_provider.http.get(
+            f"{binance_provider.BASE}/api/v3/depth",
+            {"symbol": normalized_symbol, "limit": 20},
+        )
+        if not isinstance(order_book, dict) or not isinstance(order_book.get("bids"), list) or not isinstance(order_book.get("asks"), list):
+            raise ValueError("Binance depth response schema was incomplete")
+    except Exception as exc:
+        flow_errors.append(f"depth: {type(exc).__name__}: {str(exc)[:100]}")
+
     payload = build_live_market_radar_payload(
         normalized_symbol,
         normalized_interval,
         binance_frame,
         bybit_frame,
         bybit_error=bybit_error,
+        aggregate_trades=aggregate_trades,
+        order_book=order_book,
+        market_flow_error="; ".join(flow_errors) if flow_errors else None,
     )
     cached_payload = {**copy.deepcopy(payload), "_cached_at": time.monotonic()}
     with LIVE_MARKET_RADAR_CACHE_LOCK:
@@ -2865,6 +2897,15 @@ class Handler(BaseHTTPRequestHandler):
             .live-pattern-meta{font-size:.74rem;color:var(--muted);margin-bottom:4px}
             .live-pattern-detail{font-size:.8rem;line-height:1.7;color:var(--muted)}
             .live-radar-indicators{color:var(--muted);font-size:.82rem;line-height:1.8}
+            .live-radar-flow{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:10px}
+            .live-flow-track{display:flex;overflow:hidden;height:18px;border-radius:999px;background:var(--surface-raised)}
+            .live-flow-buy{background:#19a974;height:100%;width:50%;transition:width .25s}
+            .live-flow-sell{background:#e05260;height:100%;width:50%;transition:width .25s}
+            .live-flow-legend,.live-flow-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px}
+            .live-flow-legend span,.live-flow-stats span{font-size:.8rem;color:var(--muted)}
+            .live-flow-events{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:7px}
+            .live-flow-event{padding:8px;border-radius:8px;border:1px solid var(--line);font-size:.78rem}
+            .live-flow-event.buy{border-inline-start:3px solid #19a974}.live-flow-event.sell{border-inline-start:3px solid #e05260}
           </style>
           <div id="live-market-radar">
             <h3>نمودار زندهٔ کندل و رادار موج‌ها</h3>
@@ -2873,9 +2914,10 @@ class Handler(BaseHTTPRequestHandler):
               <label>رمزارز<select id="live-radar-symbol"><option value="BTCUSDT">BTC</option><option value="ETHUSDT">ETH</option><option value="SOLUSDT">SOL</option><option value="BNBUSDT">BNB</option><option value="XRPUSDT">XRP</option><option value="DOGEUSDT">DOGE</option><option value="ADAUSDT">ADA</option><option value="AVAXUSDT">AVAX</option><option value="LINKUSDT">LINK</option><option value="DOTUSDT">DOT</option><option value="LTCUSDT">LTC</option><option value="TRXUSDT">TRX</option><option value="GRAMUSDT">GRAM</option><option value="PEPEUSDT">PEPE</option><option value="SHIBUSDT">SHIB</option><option value="BCHUSDT">BCH</option><option value="SUIUSDT">SUI</option><option value="HBARUSDT">HBAR</option><option value="NEARUSDT">NEAR</option><option value="UNIUSDT">UNI</option></select></label>
               <label>تایم‌فریم
                 <select id="live-radar-interval">
-                  <option value="1m">۱ دقیقه</option><option value="5m" selected>۵ دقیقه</option>
+                  <option value="1s">۱ ثانیه</option><option value="1m">۱ دقیقه</option><option value="5m" selected>۵ دقیقه</option>
                   <option value="15m">۱۵ دقیقه</option><option value="1h">۱ ساعت</option>
                   <option value="4h">۴ ساعت</option><option value="1d">۱ روز</option>
+                  <option value="1w">۱ هفته</option><option value="1M">۱ ماه</option>
                 </select>
               </label>
               <button type="button" id="live-radar-refresh">به‌روزرسانی کندل‌ها</button>
@@ -2893,6 +2935,19 @@ class Handler(BaseHTTPRequestHandler):
               <div class="metric"><span>ساختار موج الیوت</span><strong id="live-radar-wave">نامشخص</strong></div>
             </div>
             <section class="live-radar-analysis" aria-label="تحلیل چندگانه بازار">
+              <section class="live-radar-flow" aria-label="فشار حجم و جریان معاملات">
+                <h4>حجم معاملات و فشار خرید / فروش</h4>
+                <div class="live-flow-track" role="img" aria-label="نسبت فشار خرید و فروش">
+                  <span id="live-flow-buy-bar" class="live-flow-buy"></span><span id="live-flow-sell-bar" class="live-flow-sell"></span>
+                </div>
+                <div class="live-flow-legend"><span id="live-flow-buy-label">خرید: —</span><span id="live-flow-sell-label">فروش: —</span></div>
+                <div class="live-flow-stats">
+                  <span id="live-flow-volume">حجم دلاری کندل: —</span><span id="live-flow-rvol">RVOL: —</span>
+                  <span id="live-flow-cvd">دلتا معاملات واقعی: —</span><span id="live-flow-book">عدم‌تعادل دفتر سفارش: —</span>
+                </div>
+                <div><strong id="live-flow-whale-bias">جریان معاملات بزرگ: در انتظار داده</strong><p id="live-flow-whale-evidence" class="live-radar-note">معاملات بزرگ با دادهٔ عمومی و بدون شناسایی مالک تحلیل می‌شوند.</p></div>
+                <div id="live-flow-whale-trades" class="live-flow-events"><span class="live-radar-note">در انتظار معاملات بزرگ...</span></div>
+              </section>
               <div class="live-radar-direction">
                 <div class="metric"><span>جهت غالب بازار</span><strong id="live-radar-bias">در انتظار داده</strong></div>
                 <div class="metric"><span>امتیاز همگرایی شواهد</span><strong id="live-radar-score">—</strong></div>
@@ -2936,7 +2991,18 @@ class Handler(BaseHTTPRequestHandler):
               analysisNote:document.getElementById('live-radar-analysis-note'),
               candlePatterns:document.getElementById('live-radar-candle-patterns'),
               geometricPatterns:document.getElementById('live-radar-geometric-patterns'),
-              waveAnalysis:document.getElementById('live-radar-wave-analysis')
+              waveAnalysis:document.getElementById('live-radar-wave-analysis'),
+              flowBuyBar:document.getElementById('live-flow-buy-bar'),
+              flowSellBar:document.getElementById('live-flow-sell-bar'),
+              flowBuyLabel:document.getElementById('live-flow-buy-label'),
+              flowSellLabel:document.getElementById('live-flow-sell-label'),
+              flowVolume:document.getElementById('live-flow-volume'),
+              flowRvol:document.getElementById('live-flow-rvol'),
+              flowCvd:document.getElementById('live-flow-cvd'),
+              flowBook:document.getElementById('live-flow-book'),
+              whaleBias:document.getElementById('live-flow-whale-bias'),
+              whaleEvidence:document.getElementById('live-flow-whale-evidence'),
+              whaleTrades:document.getElementById('live-flow-whale-trades')
             };
             const number=v=>v===null||v===undefined?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:8});
             const faDirection=v=>({BULLISH:'صعودی',BEARISH:'نزولی',NEUTRAL:'خنثی',UNKNOWN:'نامشخص'}[v]||v||'نامشخص');
@@ -2961,6 +3027,30 @@ class Handler(BaseHTTPRequestHandler):
                   trigger.textContent='سطح ماشه/شکست: '+number(item.trigger_price);card.appendChild(trigger);
                 }
                 target.appendChild(card);
+              });
+            }
+            function renderFlow(flow){
+              flow=flow||{};const p=flow.pressure||{},a=flow.aggressor_flow||{},book=flow.order_book||{},whale=flow.whale_flow||{};
+              const buy=Number.isFinite(Number(p.buy_pct))?Math.max(0,Math.min(100,Number(p.buy_pct))):50;
+              const sell=Number.isFinite(Number(p.sell_pct))?Math.max(0,Math.min(100,Number(p.sell_pct))):50;
+              fields.flowBuyBar.style.width=buy+'%';fields.flowSellBar.style.width=sell+'%';
+              fields.flowBuyLabel.textContent='خرید تخمینی: '+number(p.buy_pct)+'% · '+number(p.buy_quote)+' USDT';
+              fields.flowSellLabel.textContent='فروش تخمینی: '+number(p.sell_pct)+'% · '+number(p.sell_quote)+' USDT';
+              fields.flowVolume.textContent='حجم دلاری کندل: '+number(flow.current_quote_volume)+' USDT';
+              fields.flowRvol.textContent='RVOL: '+number(flow.rvol)+'x · '+({EXTREME:'بسیار غیرعادی',HIGH:'بالا',NORMAL:'عادی',UNKNOWN:'نامشخص'}[flow.volume_state]||'نامشخص');
+              fields.flowCvd.textContent='دلتا معاملات واقعی: '+number(a.net_delta_quote)+' USDT';
+              fields.flowBook.textContent='عدم‌تعادل عمق ۲۰ سطح: '+number(book.imbalance_pct)+'%';
+              fields.whaleBias.textContent=(whale.label||'جریان معاملات بزرگ نامشخص')+' · امتیاز '+number(whale.score);
+              fields.whaleEvidence.textContent=(whale.evidence||[]).join(' · ')+' · '+(flow.disclaimer||'');
+              fields.whaleTrades.replaceChildren();
+              const events=flow.large_trades||[];
+              if(!events.length){const empty=document.createElement('span');empty.className='live-radar-note';empty.textContent='در پنجرهٔ معاملات اخیر، معامله‌ای بالاتر از آستانهٔ تطبیقی شناسایی نشد.';fields.whaleTrades.appendChild(empty);}
+              events.forEach(event=>{
+                const card=document.createElement('article');card.className='live-flow-event '+(event.side==='BUY'?'buy':'sell');
+                const side=event.side==='BUY'?'خرید تهاجمی':'فروش تهاجمی';
+                const time=event.timestamp_ms?new Date(event.timestamp_ms).toLocaleTimeString():'زمان نامشخص';
+                card.textContent=side+' · '+number(event.quote_value)+' USDT · قیمت '+number(event.price)+' · '+time;
+                fields.whaleTrades.appendChild(card);
               });
             }
             let busy=false,lastSignalKey=null,timer=null;
@@ -3045,6 +3135,7 @@ class Handler(BaseHTTPRequestHandler):
                 draw(data);
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
+                renderFlow(data.market_flow||{});
                 const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
                 fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
                 fields.entry.textContent=number(s.entry_reference_price);
@@ -3099,9 +3190,10 @@ class Handler(BaseHTTPRequestHandler):
             }
             button.addEventListener('click',()=>refresh(true));
             symbol.addEventListener('change',()=>refresh(true));
-            interval.addEventListener('change',()=>refresh(true));
+            function scheduleRefresh(){if(timer!==null)clearInterval(timer);timer=setInterval(()=>refresh(false),interval.value==='1s'?5000:15000);}
+            interval.addEventListener('change',()=>{scheduleRefresh();refresh(true);});
             refresh(true);
-            timer=setInterval(()=>refresh(false),15000);
+            scheduleRefresh();
             window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);});
           })();
           </script>
