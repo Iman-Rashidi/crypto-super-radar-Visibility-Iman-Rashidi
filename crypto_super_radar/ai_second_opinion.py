@@ -217,9 +217,13 @@ def _validated_review(document: dict[str, Any], model: str, asset: str) -> dict[
         raise ValueError("Required specialist views are missing")
 
     risk_flags = document.get("risk_flags")
-    if not isinstance(risk_flags, list) or any(not isinstance(x, str) for x in risk_flags):
-        raise ValueError("Risk flags have an invalid format")
-    risk_flags = [x.strip()[:180] for x in risk_flags[:8] if x.strip()]
+    if (
+        not isinstance(risk_flags, list)
+        or len(risk_flags) > 8
+        or any(not isinstance(x, str) for x in risk_flags)
+    ):
+        raise ValueError("Risk flags have an invalid format or exceed the maximum count")
+    risk_flags = [x.strip()[:180] for x in risk_flags if x.strip()]
 
     allowed_views = {
         "market_regime": {"BULLISH", "BEARISH", "NEUTRAL", "UNKNOWN"},
