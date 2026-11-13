@@ -2439,7 +2439,16 @@ def _blofin_demo_execution_readiness() -> dict:
         "BLOFIN_DEMO_TRADE_API_SECRET",
         "BLOFIN_DEMO_TRADE_PASSPHRASE",
     )
-    trade_credentials_configured = all(bool(os.getenv(name, "").strip()) for name in trade_names)
+    dedicated_trade_credentials = all(bool(os.getenv(name, "").strip()) for name in trade_names)
+    existing_demo_credentials = all(bool(os.getenv(name, "").strip()) for name in (
+        "BLOFIN_DEMO_API_KEY", "BLOFIN_DEMO_API_SECRET", "BLOFIN_DEMO_PASSPHRASE",
+    ))
+    trade_credentials_configured = dedicated_trade_credentials or existing_demo_credentials
+    credential_source = (
+        "DEDICATED_TRADE_KEY" if dedicated_trade_credentials else
+        "EXISTING_DEMO_KEY_REQUIRES_TRADE_PERMISSION" if existing_demo_credentials else
+        "MISSING"
+    )
     trading_enabled = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
     dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
     try:
@@ -2465,6 +2474,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "status": "READY" if ready else "BLOCKED",
         "environment": "BLOFIN_DEMO",
         "trade_credentials_configured": trade_credentials_configured,
+        "credential_source": credential_source,
         "trading_enabled": trading_enabled,
         "durable_storage": durable_storage,
         "dashboard_auth_configured": dashboard_auth_configured,
