@@ -97,9 +97,20 @@ class BloFinDemoReadOnly:
         clock_ms: Any = None,
         timeout: float = 10.0,
     ) -> None:
-        self.api_key = api_key if api_key is not None else os.getenv("BLOFIN_DEMO_API_KEY", "")
-        self.api_secret = api_secret if api_secret is not None else os.getenv("BLOFIN_DEMO_API_SECRET", "")
-        self.passphrase = passphrase if passphrase is not None else os.getenv("BLOFIN_DEMO_PASSPHRASE", "")
+        # Render dashboard pastes can accidentally retain leading/trailing whitespace.
+        # Normalize only the outside; never alter characters inside a credential.
+        self.api_key = str(api_key if api_key is not None else os.getenv("BLOFIN_DEMO_API_KEY", "")).strip()
+        self.api_secret = str(api_secret if api_secret is not None else os.getenv("BLOFIN_DEMO_API_SECRET", "")).strip()
+        self.passphrase = str(passphrase if passphrase is not None else os.getenv("BLOFIN_DEMO_PASSPHRASE", "")).strip()
+        for env_name, credential in (
+            ("BLOFIN_DEMO_API_KEY", self.api_key),
+            ("BLOFIN_DEMO_API_SECRET", self.api_secret),
+            ("BLOFIN_DEMO_PASSPHRASE", self.passphrase),
+        ):
+            if any(ord(char) < 33 or ord(char) > 126 for char in credential):
+                raise BloFinDemoAuthError(
+                    f"{env_name} contains whitespace, a control character, or a non-ASCII character."
+                )
         self.session = session or requests.Session()
         self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
         self.timeout = timeout
