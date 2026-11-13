@@ -2882,7 +2882,11 @@ class Handler(BaseHTTPRequestHandler):
             .live-radar-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:12px 0}
             .live-radar-controls label{display:grid;gap:5px;color:var(--muted);font-size:.85rem}
             .live-candle-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:#07131f}
-            #live-candle-chart{display:block;width:100%;min-width:680px;height:360px}
+            #live-candle-chart{display:block;width:100%;min-width:820px;height:390px}
+            .live-radar-divergence{margin:10px 0;padding:12px 14px;border:1px solid #52677b;border-inline-start:5px solid #ffc66d;border-radius:10px;background:#101e2b;color:#dce9f5;font-weight:700;line-height:1.8}
+            .live-radar-divergence.bullish{border-color:#19d18b;background:#092a25;color:#a9f5d5}
+            .live-radar-divergence.bearish{border-color:#ff4d83;background:#351523;color:#ffc0d4}
+            .live-radar-divergence.neutral{border-color:#ffc66d;background:#2a2417;color:#ffe0a1}
             .live-radar-signal{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}
             .live-radar-signal .metric strong{font-size:1.05rem}
             .live-radar-note{color:var(--muted);font-size:.82rem;line-height:1.8}
@@ -2924,11 +2928,13 @@ class Handler(BaseHTTPRequestHandler):
             </div>
             <p id="live-radar-status" class="muted" aria-live="polite">در حال دریافت کندل‌های زنده...</p>
             <div class="live-candle-wrap">
-              <canvas id="live-candle-chart" width="1200" height="420" role="img" aria-label="نمودار کندل زنده با سقف و کف تأییدشده"></canvas>
+              <canvas id="live-candle-chart" width="1440" height="460" role="img" aria-label="نمودار کندل و امواج الیوت با سه سطح کف، تعادل و سقف، قیمت لحظه‌ای و کندل‌های واگرایی"></canvas>
             </div>
+            <div id="live-radar-divergence" class="live-radar-divergence neutral" role="status" aria-live="polite">واگرایی RSI: در انتظار تحلیل پیوت‌های تأییدشده...</div>
             <div class="live-radar-signal">
               <div class="metric"><span>سیگنال فعلی</span><strong id="live-radar-action">در انتظار داده</strong></div>
-              <div class="metric"><span>قیمت مرجع</span><strong id="live-radar-entry">—</strong></div>
+              <div class="metric"><span>قیمت لحظه‌ای</span><strong id="live-radar-current-price">—</strong></div>
+              <div class="metric"><span>قیمت مرجع سیگنال</span><strong id="live-radar-entry">—</strong></div>
               <div class="metric"><span>حد ضرر</span><strong id="live-radar-stop">—</strong></div>
               <div class="metric"><span>حد سود</span><strong id="live-radar-target">—</strong></div>
               <div class="metric"><span>نسبت ریسک به بازده</span><strong id="live-radar-rr">—</strong></div>
@@ -2976,6 +2982,8 @@ class Handler(BaseHTTPRequestHandler):
             const ctx=canvas.getContext('2d');
             const fields={
               action:document.getElementById('live-radar-action'),
+              currentPrice:document.getElementById('live-radar-current-price'),
+              divergence:document.getElementById('live-radar-divergence'),
               entry:document.getElementById('live-radar-entry'),
               stop:document.getElementById('live-radar-stop'),
               target:document.getElementById('live-radar-target'),
@@ -3059,33 +3067,70 @@ class Handler(BaseHTTPRequestHandler):
               ctx.clearRect(0,0,canvas.width,canvas.height);
               ctx.fillStyle='#07131f';ctx.fillRect(0,0,canvas.width,canvas.height);
               if(!bars.length){ctx.fillStyle='#ffc66d';ctx.font='18px sans-serif';ctx.fillText('کندل معتبر برای نمایش در دسترس نیست',24,40);return;}
-              const pad={left:58,right:18,top:26,bottom:28};
-              const min=Math.min.apply(null,bars.map(x=>x.low));
-              const max=Math.max.apply(null,bars.map(x=>x.high));
-              const spread=Math.max(max-min,Math.abs(max)*0.0001,1e-9);
+              const pad={left:82,right:190,top:34,bottom:58};
+              const rawMin=Math.min.apply(null,bars.map(x=>x.low));
+              const rawMax=Math.max.apply(null,bars.map(x=>x.high));
+              const rawSpread=Math.max(rawMax-rawMin,Math.abs(rawMax)*0.0001,1e-9);
+              const min=rawMin-rawSpread*.10,max=rawMax+rawSpread*.10,spread=max-min;
               const y=v=>canvas.height-pad.bottom-(v-min)/spread*(canvas.height-pad.top-pad.bottom);
               const slot=(canvas.width-pad.left-pad.right)/bars.length;
               const x=i=>pad.left+(i+.5)*slot;
+              const indexByTime=new Map(bars.map((bar,i)=>[bar.time,i]));
+              const analysis=data.market_analysis||{},direction=analysis.direction||{},divergence=direction.divergence||{};
+              const divType=divergence.type||'NONE';
+              const divIndexes=new Set();
+              [divergence.price_pivot_1_time,divergence.price_pivot_2_time].forEach(ts=>{
+                const key=ts?Date.parse(ts):NaN;
+                if(Number.isFinite(key)){const idx=indexByTime.get(key);if(idx!==undefined)divIndexes.add(idx);}
+              });
+              [divergence.price_pivot_1_index,divergence.price_pivot_2_index].forEach(idx=>{
+                if(Number.isInteger(idx)&&idx>=0&&idx<bars.length)divIndexes.add(idx);
+              });
+              const levels=[
+                {name:'سقف بازه',value:rawMax,color:'#ffb454',dash:[7,5]},
+                {name:'خط میانی بازه',value:(rawMax+rawMin)/2,color:'#74b7ff',dash:[4,5]},
+                {name:'کف بازه',value:rawMin,color:'#42d6a0',dash:[7,5]}
+              ];
+              levels.forEach(level=>{
+                const yy=y(level.value);
+                ctx.save();ctx.strokeStyle=level.color;ctx.lineWidth=1.8;ctx.setLineDash(level.dash);
+                ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right+8,yy);ctx.stroke();ctx.restore();
+                ctx.fillStyle=level.color;ctx.font='bold 13px sans-serif';
+                ctx.fillText(level.name,canvas.width-pad.right+16,yy-5);
+                ctx.font='12px sans-serif';ctx.fillText(number(level.value),canvas.width-pad.right+16,yy+13);
+              });
               ctx.strokeStyle='#274156';ctx.lineWidth=1;
               for(let k=0;k<=4;k++){
-                const yy=pad.top+k*(canvas.height-pad.top-pad.bottom)/4;
+                const value=max-k*spread/4,yy=y(value);
                 ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right,yy);ctx.stroke();
-                const value=max-k*spread/4;ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';
-                ctx.fillText(number(value),4,yy+4);
+                ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';ctx.fillText(number(value),4,yy+4);
               }
               bars.forEach((bar,i)=>{
-                const xx=x(i),up=bar.close>=bar.open,color=up?'#53d6a0':'#ff7b85';
-                ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=Math.max(1,slot*.12);
+                const xx=x(i),up=bar.close>=bar.open;
+                const baseColor=up?'#53d6a0':'#ff7b85';
+                const special=bar.is_closed&&divIndexes.has(i);
+                const color=special?(divType==='BULLISH'?'#00f0a0':'#ff3d83'):baseColor;
+                if(special){
+                  ctx.save();ctx.fillStyle=divType==='BULLISH'?'rgba(0,240,160,.18)':'rgba(255,61,131,.20)';
+                  ctx.fillRect(xx-slot*.43,pad.top,slot*.86,canvas.height-pad.top-pad.bottom);
+                  ctx.shadowColor=color;ctx.shadowBlur=18;ctx.strokeStyle=color;ctx.lineWidth=3;
+                  ctx.strokeRect(xx-Math.max(4,slot*.42),y(Math.max(bar.open,bar.close))-5,
+                    Math.max(8,slot*.84),Math.max(10,Math.abs(y(bar.open)-y(bar.close))+10));ctx.restore();
+                }
+                ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=special?3:Math.max(1,slot*.12);
                 ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
                 const top=y(Math.max(bar.open,bar.close)),bottom=y(Math.min(bar.open,bar.close));
                 const bodyW=Math.max(1,Math.min(12,slot*.66));
                 ctx.fillRect(xx-bodyW/2,top,bodyW,Math.max(1,bottom-top));
+                if(special){
+                  ctx.fillStyle=color;ctx.font='bold 12px sans-serif';
+                  ctx.fillText(divType==='BULLISH'?'واگرایی +':'واگرایی −',xx+6,Math.max(pad.top+14,top-8));
+                }
                 if(!bar.is_closed){
                   ctx.save();ctx.strokeStyle='#ffc66d';ctx.setLineDash([3,3]);
                   ctx.strokeRect(xx-bodyW/2-2,top-2,bodyW+4,Math.max(5,bottom-top+4));ctx.restore();
                 }
               });
-              const indexByTime=new Map(bars.map((bar,i)=>[bar.time,i]));
               const waveLabels=new Map((data.wave_pivots||[]).map(p=>[Date.parse(p.timestamp),p]));
               let prev=null;
               (data.pivots||[]).forEach(p=>{
@@ -3117,14 +3162,31 @@ class Handler(BaseHTTPRequestHandler):
                 wavePrev=point;
               });
               const signal=data.signal||{};
+              const current=bars[bars.length-1];
+              const currentPrice=current?current.close:null;
+              if(currentPrice!==null&&currentPrice!==undefined){
+                const yy=y(currentPrice);
+                ctx.save();ctx.strokeStyle='#55d7ff';ctx.lineWidth=2.7;ctx.setLineDash([]);
+                ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right+8,yy);ctx.stroke();ctx.restore();
+                ctx.fillStyle='#55d7ff';ctx.font='bold 13px sans-serif';
+                ctx.fillText('قیمت آخرین کندل '+number(currentPrice),canvas.width-pad.right+16,yy-9);
+              }
               if(signal.entry_reference_price){
                 const yy=y(signal.entry_reference_price);
                 ctx.save();ctx.strokeStyle=signal.signal==='BUY'?'#53d6a0':signal.signal==='SELL'?'#ff7b85':'#ffc66d';
                 ctx.setLineDash([8,5]);ctx.beginPath();ctx.moveTo(pad.left,yy);
                 ctx.lineTo(canvas.width-pad.right,yy);ctx.stroke();ctx.restore();
               }
-              ctx.fillStyle='#d7e8f5';ctx.font='13px sans-serif';
-              ctx.fillText(data.symbol+' · '+data.interval,pad.left,17);
+              const tickIndexes=[0,Math.floor((bars.length-1)/3),Math.floor(2*(bars.length-1)/3),bars.length-1];
+              ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';ctx.textAlign='center';
+              tickIndexes.forEach(i=>{
+                const xx=x(i),stamp=new Date(bars[i].time);
+                const label=data.interval==='1s'?stamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'}):stamp.toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+                ctx.fillText(label,xx,canvas.height-22);
+              });
+              ctx.textAlign='start';
+              ctx.fillStyle='#d7e8f5';ctx.font='bold 14px sans-serif';
+              ctx.fillText(data.symbol+' · '+data.interval+' · محور افقی: زمان | محور عمودی: قیمت',pad.left,19);
             }
             async function refresh(force){
               if(busy)return;busy=true;button.disabled=true;status.textContent='در حال دریافت و تطبیق کندل‌ها...';
@@ -3136,8 +3198,14 @@ class Handler(BaseHTTPRequestHandler):
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 renderFlow(data.market_flow||{});
+                const divergence=analysis.direction&&analysis.direction.divergence?analysis.direction.divergence:{};
+                const divergenceType=divergence.type||'NONE';
+                fields.divergence.className='live-radar-divergence '+(divergenceType==='BULLISH'?'bullish':divergenceType==='BEARISH'?'bearish':'neutral');
+                fields.divergence.textContent=divergenceType==='BULLISH'?'واگرایی مثبت (صعودی) شناسایی شد · دو کندل پیوت مرجع با سبز نئونی مشخص شده‌اند · RSI '+number(divergence.rsi_pivot_1)+' ← '+number(divergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':divergenceType==='BEARISH'?'واگرایی منفی (نزولی) شناسایی شد · دو کندل پیوت مرجع با صورتی پررنگ مشخص شده‌اند · RSI '+number(divergence.rsi_pivot_1)+' ← '+number(divergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':'واگرایی RSI در پیوت‌های تأییدشده شناسایی نشد · کندل‌های مرجع فقط هنگام تأیید واگرایی رنگ ویژه می‌گیرند.';
                 const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
                 fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
+                const latestBarForPrice=(data.candles||[]).slice(-1)[0];
+                fields.currentPrice.textContent=number(latestBarForPrice?latestBarForPrice.close:null);
                 fields.entry.textContent=number(s.entry_reference_price);
                 fields.stop.textContent=number(s.stop_loss);
                 fields.target.textContent=number(s.take_profit);

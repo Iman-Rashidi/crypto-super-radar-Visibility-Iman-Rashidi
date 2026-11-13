@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 
-from crypto_super_radar.market_patterns import analyze_market_patterns
+from crypto_super_radar.market_patterns import _divergence, analyze_market_patterns
 
 
 def candle_frame(direction: str = "down", count: int = 70) -> pd.DataFrame:
@@ -124,6 +125,23 @@ class MarketPatternTests(unittest.TestCase):
         self.assertIsNotNone(direction["ema200"])
         self.assertIn("divergence", direction)
         self.assertIn("fibonacci", direction)
+
+    def test_divergence_exposes_exact_pivot_candle_coordinates(self):
+        frame = candle_frame("up", count=50)
+        rsi_values = pd.Series(50.0, index=frame.index)
+        rsi_values.iloc[10] = 62.0
+        rsi_values.iloc[30] = 54.0
+        pivots = [
+            {"kind": "HIGH", "index": 10, "price": 100.0},
+            {"kind": "HIGH", "index": 30, "price": 110.0},
+        ]
+        with patch("crypto_super_radar.market_patterns._rsi_series", return_value=rsi_values):
+            result = _divergence(frame, pivots)
+        self.assertEqual(result["type"], "BEARISH")
+        self.assertEqual(result["price_pivot_1_index"], 10)
+        self.assertEqual(result["price_pivot_2_index"], 30)
+        self.assertEqual(result["price_pivot_1_time"], frame.index[10].isoformat())
+        self.assertEqual(result["price_pivot_2_time"], frame.index[30].isoformat())
 
     def test_fibonacci_golden_zone_and_invalidation_are_calculated(self):
         pivots = [
