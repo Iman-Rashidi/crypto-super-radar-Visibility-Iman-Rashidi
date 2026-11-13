@@ -1,0 +1,130 @@
+name: live-provider-acceptance
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/live_provider_acceptance.py
+      - scripts/live_research_scan.py
+      - scripts/rebuild_source_archive.py
+      - tests/test_live_provider_acceptance.py
+      - tests/test_live_research_scan.py
+      - crypto_super_radar/config.py
+      - crypto_super_radar/providers.py
+      - crypto_super_radar/cex_whales.py
+      - crypto_super_radar/evm_transfers.py
+      - crypto_super_radar/integrated_engine.py
+      - docs/LIVE_PROVIDER_ACCEPTANCE.md
+      - .github/workflows/live-provider-acceptance.yml
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: Public spot/perpetual symbol supported by the configured providers
+        required: false
+        default: BTCUSDT
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  live-provider-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Rebuild and extract complete source package
+        run: |
+          set -euo pipefail
+          python scripts/rebuild_source_archive.py
+          mkdir -p "$RUNNER_TEMP/csr-live"
+          tar -xJf dist/crypto-super-radar-source.tar.xz -C "$RUNNER_TEMP/csr-live"
+          cp -R crypto_super_radar/. "$RUNNER_TEMP/csr-live/crypto-super-radar/crypto_super_radar/"
+          cp -R scripts/. "$RUNNER_TEMP/csr-live/crypto-super-radar/scripts/"
+          cp -R tests/. "$RUNNER_TEMP/csr-live/crypto-super-radar/tests/"
+          cp README.md pyproject.toml requirements.txt "$RUNNER_TEMP/csr-live/crypto-super-radar/"
+          mkdir -p reports
+      - name: Test acceptance and live scan runners
+        working-directory: ${{ runner.temp }}/csr-live/crypto-super-radar
+        run: |
+          python -m unittest discover -s tests -p 'test_live_provider_acceptance.py' -v
+          python -m unittest discover -s tests -p 'test_live_research_scan.py' -v
+      - name: Run public read-only provider checks
+        id: live_checks
+        continue-on-error: true
+        env:
+          ACCEPTANCE_SYMBOL: ${{ github.event.inputs.symbol || 'BTCUSDT' }}
+        working-directory: ${{ runner.temp }}/csr-live/crypto-super-radar
+        run: |
+          python -m scripts.live_provider_acceptance \
+            --symbol "${ACCEPTANCE_SYMBOL}" \
+            --output "$GITHUB_WORKSPACE/reports/live-provider-acceptance.json"
+      - name: Execute integrated 12-gate research scan (read-only)
+        id: live_scan
+        continue-on-error: true
+        env:
+          ACCEPTANCE_SYMBOL: ${{ github.event.inputs.symbol || 'BTCUSDT' }}
+        working-directory: ${{ runner.temp }}/csr-live/crypto-super-radar
+        run: |
+          python -m scripts.live_research_scan \
+            --asset "cex:${ACCEPTANCE_SYMBOL}" \
+            --output "$GITHUB_WORKSPACE/reports/live-research-scan-spot.json"
+          python -m scripts.live_research_scan \
+            --asset "perp:${ACCEPTANCE_SYMBOL}" \
+            --output "$GITHUB_WORKSPACE/reports/live-research-scan-perpetual.json"
+      - name: Upload live provider and integrated scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-provider-and-research-reports
+          path: reports/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Enforce provider acceptance and scan execution gates
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          provider_path = Path("reports/live-provider-acceptance.json")
+          scan_paths = [
+              Path("reports/live-research-scan-spot.json"),
+              Path("reports/live-research-scan-perpetual.json"),
+          ]
+          if not provider_path.exists():
+              raise SystemExit("Live provider acceptance did not produce a report.")
+          if any(not path.exists() for path in scan_paths):
+              raise SystemExit("One or more integrated live research scan reports are missing.")
+
+          provider = json.loads(provider_path.read_text(encoding="utf-8"))
+          scans = [json.loads(path.read_text(encoding="utf-8")) for path in scan_paths]
+          print(
+              "Provider acceptance:",
+              provider.get("overall_status"),
+              f"PASS={provider.get('pass_count')}",
+              f"FAIL={provider.get('fail_count')}",
+              f"INCONCLUSIVE={provider.get('inconclusive_count')}",
+          )
+          for scan in scans:
+              print(
+                  "Integrated research scan:",
+                  scan.get("asset"),
+                  scan.get("execution_status"),
+                  scan.get("gate_status"),
+                  scan.get("decision", {}).get("signal"),
+                  scan.get("gate_summary"),
+              )
+              print("Safety:", scan.get("safety"))
+          if provider.get("overall_status") != "PASS":
+              raise SystemExit("Provider acceptance is not fully PASS; market readiness remains blocked.")
+          if any(scan.get("execution_status") != "COMPLETED" for scan in scans):
+              raise SystemExit("One or more integrated live research scans did not complete.")
+          PY

@@ -1,0 +1,37 @@
+name: render-app-e2e
+on:
+  # This E2E targets the deployed Render service and expects it to run this exact
+  # commit. Keep it manual because Render deploys are intentionally approval-gated.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render-app-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install HTTP test dependency
+        run: python -m pip install requests
+      - name: Run one paper cycle and one live research scan through deployed app forms
+        env:
+          CSR_BASE_URL: https://crypto-super-radar.onrender.com
+          CSR_EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          python scripts/live_app_e2e.py \
+            --deploy-timeout 600 \
+            --job-timeout 360 \
+            --output reports/render-app-e2e.json
+      - name: Upload Render E2E report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-app-e2e-report
+          path: reports/render-app-e2e.json
+          if-no-files-found: warn
+          retention-days: 14

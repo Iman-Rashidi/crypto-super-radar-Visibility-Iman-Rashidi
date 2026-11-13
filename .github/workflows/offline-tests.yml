@@ -1,0 +1,87 @@
+name: offline-tests
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches:
+      - main
+      - feature/multi-stage-confirmation-engine
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install numpy pandas requests
+      - run: python -m compileall -q crypto_super_radar tests
+      - run: python scripts/rebuild_source_archive.py
+      - name: Verify Render overlay build and HTTP startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/csr-render
+          tar -xJf dist/crypto-super-radar-source.tar.xz -C /tmp/csr-render
+          cp -R crypto_super_radar/. /tmp/csr-render/crypto-super-radar/crypto_super_radar/
+          cp README.md pyproject.toml requirements.txt /tmp/csr-render/crypto-super-radar/
+          cd /tmp/csr-render/crypto-super-radar
+          python -m pip install -r requirements.txt
+          python -m compileall -q .
+          PORT=18765 CSR_DB_PATH=/tmp/csr-render/crypto-super-radar/data/csr-test.sqlite3 python -m crypto_super_radar.web_app > /tmp/csr-render/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --connect-timeout 1 -fsS http://127.0.0.1:18765/health > /tmp/csr-render/health.json; then
+              break
+            fi
+            sleep 0.5
+          done
+          grep -q '"status":"ok"' /tmp/csr-render/health.json
+          curl --connect-timeout 2 -fsS http://127.0.0.1:18765/ > /tmp/csr-render/home.html
+          grep -q '۱۲ فیلتر اجباری' /tmp/csr-render/home.html
+          curl --connect-timeout 2 -fsS 'http://127.0.0.1:18765/history?asset=cex%3ABTCUSDT' > /tmp/csr-render/history.json
+          grep -q 'LOCAL_SQLITE' /tmp/csr-render/history.json
+      - name: Verify extracted full source bundle
+        run: |
+          mkdir -p /tmp/csr-bundle
+          tar -xJf dist/crypto-super-radar-source.tar.xz -C /tmp/csr-bundle
+          cd /tmp/csr-bundle/crypto-super-radar
+          python -m compileall -q .
+          python -m unittest discover -s tests -v
+          python -m crypto_super_radar --help
+          python -m crypto_super_radar.order_flow_service --help
+          python scripts/paper_trading_bot.py --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crypto-super-radar-source-bundle
+          path: dist/crypto-super-radar-source.tar.xz
+          if-no-files-found: error
+
+  streamlit-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install numpy pandas requests "streamlit>=1.40"
+      - run: python scripts/rebuild_source_archive.py
+      - name: Smoke-test optional Streamlit dashboard
+        run: |
+          mkdir -p /tmp/csr-streamlit
+          tar -xJf dist/crypto-super-radar-source.tar.xz -C /tmp/csr-streamlit
+          cp -R crypto_super_radar/. /tmp/csr-streamlit/crypto-super-radar/crypto_super_radar/
+          cd /tmp/csr-streamlit/crypto-super-radar
+          python -m compileall -q .
+          python - <<'PY'
+          from streamlit.testing.v1 import AppTest
+          app = AppTest.from_file("crypto_super_radar/streamlit_app.py", default_timeout=20).run()
+          assert not app.exception, app.exception
+          assert any("CRYPTO SUPER RADAR" in item.value for item in app.title)
+          assert any("اجرای اسکن پژوهشی" in item.label for item in app.button)
+          PY

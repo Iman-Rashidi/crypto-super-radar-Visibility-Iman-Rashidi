@@ -1,0 +1,1098 @@
+"""Free, SQLite-backed paper trading bot for validated spot LONG signals.
+
+This module never calls an exchange trading endpoint and has no live-order mode.
+"""
+from __future__ import annotations
+
+import math
+import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+from .models import AssetSpec
+from .database import connect_database, storage_backend
+from .signal_performance import summarize_closed_trades
+from .execution_costs import calculate_fill_costs
+from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
+from .ai_second_opinion import ai_connection_status, run_free_ai_second_opinion
+
+
+PAPER_ASSETS = frozenset({
+    # CEX instruments with explicit conservative security handling in providers.py.
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT",
+    "TRXUSDT", "GRAMUSDT",
+})
+
+
+def _number(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _status(value: Any) -> str:
+    return str(getattr(value, "value", value)).upper()
+
+
+def _mandatory_gates_pass(gates: Any) -> bool:
+    """Require one and only one PASS result for each mandatory gate ID 1–12."""
+    if not isinstance(gates, (list, tuple)) or len(gates) != 12:
+        return False
+    seen: set[int] = set()
+    for gate in gates:
+        gate_id = getattr(gate, "gate_id", None)
+        if isinstance(gate_id, bool) or not isinstance(gate_id, int):
+            return False
+        if gate_id in seen or _status(getattr(gate, "status", None)) != "PASS":
+            return False
+        seen.add(gate_id)
+    return seen == set(range(1, 13))
+
+
+def _extract_observed_quote(snapshot: Any, *, max_age_ms: int = 60_000) -> Optional[dict[str, Any]]:
+    """Read a fresh, source-attributed CEX bid/ask pair from a market snapshot."""
+    raw = getattr(snapshot, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+    now_ms = int(time.time() * 1000)
+    for key in ("provider_a", "provider_b"):
+        provider = raw.get(key)
+        if not isinstance(provider, dict):
+            continue
+        bid = _number(provider.get("bid_price"))
+        ask = _number(provider.get("ask_price"))
+        timestamp = _number(provider.get("quote_timestamp_ms"))
+        if (
+            bid is None or ask is None or timestamp is None
+            or bid <= 0 or ask < bid or timestamp <= 0
+        ):
+            continue
+        age_ms = now_ms - int(timestamp)
+        if age_ms < -5_000 or age_ms > max_age_ms:
+            continue
+        source = provider.get("provider")
+        if not isinstance(source, str) or not source.strip():
+            source = str(getattr(snapshot, "provider_a" if key == "provider_a" else "provider_b", key))
+        return {
+            "bid": bid, "ask": ask, "timestamp_ms": int(timestamp),
+            "age_ms": age_ms, "source": source,
+        }
+    return None
+
+
+class PaperLedger:
+    """Minimal paper account and immutable closed-trade journal in SQLite."""
+
+    def __init__(self, path: Optional[str] = None, initial_equity_usd: float = 10_000.0):
+        if not math.isfinite(initial_equity_usd) or initial_equity_usd <= 0:
+            raise ValueError("Initial paper equity must be a positive finite number.")
+        self.path = path or os.getenv("CSR_DB_PATH", "data/crypto_super_radar.sqlite3")
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._db = connect_database(self.path)
+        with self._db:
+            self.execution_ledger = PaperExecutionEventLedger(self._db, lock=self._lock)
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS paper_account (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    initial_equity REAL NOT NULL,
+                    cash_balance REAL NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS paper_positions (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    asset TEXT NOT NULL,
+                    quantity REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    take_profit REAL NOT NULL,
+                    entry_fee REAL NOT NULL,
+                    opened_at INTEGER NOT NULL,
+                    signal_bar TEXT NOT NULL,
+                    confirmation_score REAL NOT NULL,
+                    risk_budget REAL NOT NULL,
+                    mark_price REAL NOT NULL,
+                    initial_stop_loss REAL NOT NULL DEFAULT 0,
+                    max_holding_days INTEGER NOT NULL DEFAULT 14,
+                    peak_price REAL NOT NULL DEFAULT 0,
+                    entry_reference_price REAL,
+                    entry_slippage_usd REAL,
+                    entry_spread_cost_usd REAL,
+                    entry_quote_source TEXT
+                )
+            """)
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS paper_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    initial_stop_loss REAL NOT NULL DEFAULT 0,
+                    take_profit REAL NOT NULL,
+                    entry_fee REAL NOT NULL,
+                    exit_fee REAL NOT NULL,
+                    gross_pnl REAL NOT NULL,
+                    net_pnl REAL NOT NULL,
+                    opened_at INTEGER NOT NULL,
+                    closed_at INTEGER NOT NULL,
+                    signal_bar TEXT NOT NULL,
+                    confirmation_score REAL NOT NULL,
+                    exit_reason TEXT NOT NULL,
+                    entry_reference_price REAL,
+                    exit_reference_price REAL,
+                    entry_slippage_usd REAL,
+                    exit_slippage_usd REAL,
+                    spread_cost_usd REAL,
+                    entry_spread_cost_usd REAL,
+                    exit_spread_cost_usd REAL,
+                    entry_quote_source TEXT,
+                    exit_quote_source TEXT,
+                    funding_cost_usd REAL NOT NULL DEFAULT 0,
+                    funding_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE',
+                    UNIQUE(asset, signal_bar)
+                )
+            """)
+            trade_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(paper_trades)")
+            }
+            if "initial_stop_loss" not in trade_columns:
+                self._db.execute(
+                    "ALTER TABLE paper_trades ADD COLUMN initial_stop_loss REAL NOT NULL DEFAULT 0"
+                )
+            for name, declaration in (
+                ("entry_reference_price", "REAL"),
+                ("exit_reference_price", "REAL"),
+                ("entry_slippage_usd", "REAL"),
+                ("exit_slippage_usd", "REAL"),
+                ("spread_cost_usd", "REAL"),
+                ("entry_spread_cost_usd", "REAL"),
+                ("exit_spread_cost_usd", "REAL"),
+                ("entry_quote_source", "TEXT"),
+                ("exit_quote_source", "TEXT"),
+                ("funding_cost_usd", "REAL NOT NULL DEFAULT 0"),
+                ("funding_status", "TEXT NOT NULL DEFAULT 'NOT_APPLICABLE'"),
+            ):
+                if name not in trade_columns:
+                    self._db.execute(
+                        f"ALTER TABLE paper_trades ADD COLUMN {name} {declaration}"
+                    )
+            position_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(paper_positions)")
+            }
+            for name, declaration in (
+                ("initial_stop_loss", "REAL NOT NULL DEFAULT 0"),
+                ("max_holding_days", "INTEGER NOT NULL DEFAULT 14"),
+                ("peak_price", "REAL NOT NULL DEFAULT 0"),
+                ("entry_reference_price", "REAL"),
+                ("entry_slippage_usd", "REAL"),
+                ("entry_spread_cost_usd", "REAL"),
+                ("entry_quote_source", "TEXT"),
+            ):
+                if name not in position_columns:
+                    self._db.execute(
+                        f"ALTER TABLE paper_positions ADD COLUMN {name} {declaration}"
+                    )
+            self._db.execute(
+                "UPDATE paper_positions SET initial_stop_loss=stop_loss WHERE initial_stop_loss<=0"
+            )
+            self._db.execute(
+                "UPDATE paper_positions SET peak_price=entry_price WHERE peak_price<=0"
+            )
+            self._db.execute(
+                "INSERT OR IGNORE INTO paper_account(id, initial_equity, cash_balance, updated_at) VALUES (1, ?, ?, ?)",
+                (float(initial_equity_usd), float(initial_equity_usd), int(time.time())),
+            )
+
+    def position(self) -> Optional[dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM paper_positions WHERE id=1").fetchone()
+        return dict(row) if row else None
+
+    def has_traded_signal_bar(self, asset: str, signal_bar: str) -> bool:
+        with self._lock:
+            closed = self._db.execute(
+                "SELECT 1 FROM paper_trades WHERE asset=? AND signal_bar=? LIMIT 1",
+                (asset, signal_bar),
+            ).fetchone()
+            opened = self._db.execute(
+                "SELECT 1 FROM paper_positions WHERE asset=? AND signal_bar=? LIMIT 1",
+                (asset, signal_bar),
+            ).fetchone()
+        return bool(closed or opened)
+
+    def open_position(self, position: dict[str, Any], debit: float) -> bool:
+        with self._lock, self._db:
+            account = self._db.execute(
+                "SELECT cash_balance FROM paper_account WHERE id=1"
+            ).fetchone()
+            active = self._db.execute("SELECT 1 FROM paper_positions LIMIT 1").fetchone()
+            duplicate = self._db.execute(
+                "SELECT 1 FROM paper_trades WHERE asset=? AND signal_bar=? LIMIT 1",
+                (position["asset"], position["signal_bar"]),
+            ).fetchone()
+            if active or duplicate or account is None or debit > float(account["cash_balance"]):
+                return False
+            self._db.execute("""
+                INSERT INTO paper_positions
+                (id, asset, quantity, entry_price, stop_loss, take_profit, entry_fee,
+                 opened_at, signal_bar, confirmation_score, risk_budget, mark_price,
+                 initial_stop_loss, max_holding_days, peak_price,
+                 entry_reference_price, entry_slippage_usd, entry_spread_cost_usd,
+                 entry_quote_source)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position["asset"], position["quantity"], position["entry_price"],
+                position["stop_loss"], position["take_profit"], position["entry_fee"],
+                position["opened_at"], position["signal_bar"],
+                position["confirmation_score"], position["risk_budget"],
+                position["entry_price"], position["initial_stop_loss"],
+                position["max_holding_days"], position["entry_price"],
+                position.get("entry_reference_price"),
+                position.get("entry_slippage_usd"),
+                position.get("entry_spread_cost_usd"),
+                position.get("entry_quote_source"),
+            ))
+            self._db.execute(
+                "UPDATE paper_account SET cash_balance=cash_balance-?, updated_at=? WHERE id=1",
+                (debit, int(time.time())),
+            )
+            self.execution_ledger.record_simulated_fill(
+                client_order_id=make_paper_client_order_id(
+                    position["asset"], position["signal_bar"], "ENTRY"
+                ),
+                asset=position["asset"], side="BUY", quantity=position["quantity"],
+                fill_price=position["entry_price"], fee_paid_usd=position["entry_fee"],
+                source=(
+                    "OBSERVED_QUOTE_PAPER_FILL"
+                    if position.get("entry_quote_source") else "MODELLED_PAPER_FILL"
+                ),
+                reason="PAPER_ENTRY", occurred_at=position["opened_at"],
+            )
+        return True
+
+    def update_management(self, price: float, stop_loss: float) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                """UPDATE paper_positions
+                SET mark_price=?, peak_price=MAX(peak_price, ?),
+                    stop_loss=MAX(stop_loss, ?)
+                WHERE id=1""",
+                (float(price), float(price), float(stop_loss)),
+            )
+
+    def risk_controls(
+        self, *, asset: str, daily_loss_limit_pct: float, max_drawdown_pct: float,
+        max_consecutive_losses: int, cooldown_hours_after_loss: float,
+        now: Optional[int] = None,
+    ) -> dict[str, Any]:
+        now = int(time.time()) if now is None else int(now)
+        day_start = now // 86_400 * 86_400
+        state = self.state()
+        initial = float(state["account"]["initial_equity_usd"])
+        equity = float(state["account"]["equity_usd"])
+        with self._lock:
+            daily_net = float(self._db.execute(
+                "SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE closed_at>=?",
+                (day_start,),
+            ).fetchone()[0])
+            recent = self._db.execute(
+                "SELECT net_pnl FROM paper_trades ORDER BY closed_at DESC, id DESC LIMIT ?",
+                (int(max_consecutive_losses),),
+            ).fetchall()
+            history = self._db.execute(
+                "SELECT net_pnl FROM paper_trades ORDER BY closed_at ASC, id ASC"
+            ).fetchall()
+            last_asset = self._db.execute(
+                "SELECT net_pnl, closed_at FROM paper_trades WHERE asset=? "
+                "ORDER BY closed_at DESC, id DESC LIMIT 1",
+                (asset,),
+            ).fetchone()
+        consecutive = 0
+        for row in recent:
+            if float(row["net_pnl"]) >= 0:
+                break
+            consecutive += 1
+        daily_loss_pct = max(0.0, -daily_net / initial * 100.0) if initial > 0 else 0.0
+        running_equity = initial
+        peak_equity = initial
+        max_historical_drawdown = 0.0
+        for row in history:
+            running_equity += float(row["net_pnl"])
+            peak_equity = max(peak_equity, running_equity)
+            if peak_equity > 0:
+                max_historical_drawdown = max(
+                    max_historical_drawdown,
+                    (peak_equity - running_equity) / peak_equity * 100.0,
+                )
+        peak_equity = max(peak_equity, equity)
+        current_drawdown = (
+            (peak_equity - equity) / peak_equity * 100.0 if peak_equity > 0 else 100.0
+        )
+        drawdown_pct = max(max_historical_drawdown, current_drawdown)
+        cooldown_remaining = 0.0
+        if last_asset and float(last_asset["net_pnl"]) < 0:
+            cooldown_remaining = max(
+                0.0, cooldown_hours_after_loss * 3600.0 - (now - int(last_asset["closed_at"]))
+            ) / 3600.0
+        reasons = []
+        if daily_loss_pct >= daily_loss_limit_pct * 100.0:
+            reasons.append("DAILY_LOSS_LIMIT")
+        if drawdown_pct >= max_drawdown_pct * 100.0:
+            reasons.append("MAX_EQUITY_DRAWDOWN")
+        if consecutive >= max_consecutive_losses:
+            reasons.append("CONSECUTIVE_LOSSES")
+        if cooldown_remaining > 0:
+            reasons.append("POST_LOSS_COOLDOWN")
+        return {
+            "entry_allowed": not reasons,
+            "halt_reasons": reasons,
+            "daily_realized_loss_pct": round(daily_loss_pct, 4),
+            "max_equity_drawdown_pct": round(drawdown_pct, 4),
+            "consecutive_losses": consecutive,
+            "cooldown_hours_remaining": round(cooldown_remaining, 2),
+            "limits": {
+                "daily_loss_pct": daily_loss_limit_pct * 100.0,
+                "max_drawdown_pct": max_drawdown_pct * 100.0,
+                "max_consecutive_losses": max_consecutive_losses,
+                "cooldown_hours_after_loss": cooldown_hours_after_loss,
+            },
+        }
+
+    def close_position(
+        self,
+        exit_price: float,
+        exit_fee_rate: float,
+        reason: str,
+        *,
+        exit_reference_price: Optional[float] = None,
+        exit_bid: Optional[float] = None,
+        exit_ask: Optional[float] = None,
+        exit_quote_source: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        with self._lock, self._db:
+            row = self._db.execute("SELECT * FROM paper_positions WHERE id=1").fetchone()
+            if row is None:
+                return None
+            p = dict(row)
+            closed_at = int(time.time())
+            exit_fee = p["quantity"] * exit_price * exit_fee_rate
+            gross = p["quantity"] * (exit_price - p["entry_price"])
+            net = gross - p["entry_fee"] - exit_fee
+            reference_exit = _number(exit_reference_price)
+            normalized_bid = _number(exit_bid)
+            normalized_ask = _number(exit_ask)
+            if normalized_bid is not None and normalized_ask is not None:
+                exit_costs = calculate_fill_costs(
+                    side="SELL", quantity=p["quantity"], bid=normalized_bid,
+                    ask=normalized_ask, fill_price=exit_price,
+                    fee_paid_usd=exit_fee, funding_applicable=False,
+                    quote_quality="OBSERVED",
+                )
+                exit_slippage = exit_costs["slippage_cost_usd"]
+                exit_spread = exit_costs["spread_cost_usd"]
+                normalized_quote_source = (
+                    exit_quote_source.strip()
+                    if isinstance(exit_quote_source, str) and exit_quote_source.strip()
+                    else None
+                )
+            else:
+                exit_slippage = (
+                    max(0.0, (reference_exit - exit_price) * p["quantity"])
+                    if reference_exit is not None and reference_exit > 0
+                    else None
+                )
+                exit_spread = None
+                normalized_quote_source = None
+            entry_spread = _number(p.get("entry_spread_cost_usd"))
+            total_spread = (
+                entry_spread + exit_spread
+                if entry_spread is not None and exit_spread is not None
+                else None
+            )
+            self._db.execute(
+                "UPDATE paper_account SET cash_balance=cash_balance+?, updated_at=? WHERE id=1",
+                (p["quantity"] * exit_price - exit_fee, int(time.time())),
+            )
+            self._db.execute("""
+                INSERT INTO paper_trades
+                (asset, side, quantity, entry_price, exit_price, stop_loss, initial_stop_loss,
+                 take_profit, entry_fee, exit_fee, gross_pnl, net_pnl, opened_at, closed_at,
+                 signal_bar, confirmation_score, exit_reason, entry_reference_price,
+                 exit_reference_price, entry_slippage_usd, exit_slippage_usd,
+                 spread_cost_usd, entry_spread_cost_usd, exit_spread_cost_usd,
+                 entry_quote_source, exit_quote_source, funding_cost_usd, funding_status)
+                VALUES (?, 'LONG', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                p["asset"], p["quantity"], p["entry_price"], exit_price,
+                p["stop_loss"], p.get("initial_stop_loss") or p["stop_loss"],
+                p["take_profit"], p["entry_fee"], exit_fee,
+                gross, net, p["opened_at"], closed_at, p["signal_bar"],
+                p["confirmation_score"], reason,
+                p.get("entry_reference_price"), reference_exit, p.get("entry_slippage_usd"),
+                exit_slippage, total_spread, entry_spread, exit_spread,
+                p.get("entry_quote_source"), normalized_quote_source,
+                0.0, "NOT_APPLICABLE",
+            ))
+            self._db.execute("DELETE FROM paper_positions WHERE id=1")
+            self.execution_ledger.record_simulated_fill(
+                client_order_id=make_paper_client_order_id(
+                    p["asset"], p["signal_bar"], "EXIT"
+                ),
+                asset=p["asset"], side="SELL", quantity=p["quantity"],
+                fill_price=exit_price, fee_paid_usd=exit_fee,
+                source=(
+                    "OBSERVED_QUOTE_PAPER_FILL"
+                    if normalized_quote_source else "MODELLED_PAPER_FILL"
+                ),
+                reason=f"PAPER_EXIT:{reason}", occurred_at=closed_at,
+            )
+        return {
+            "asset": p["asset"], "gross_pnl_usd": gross, "net_pnl_usd": net,
+            "exit_price": exit_price, "exit_reason": reason,
+            "entry_slippage_usd": p.get("entry_slippage_usd"),
+            "exit_slippage_usd": exit_slippage,
+            "entry_spread_cost_usd": entry_spread,
+            "exit_spread_cost_usd": exit_spread,
+            "spread_cost_usd": total_spread,
+            "entry_quote_source": p.get("entry_quote_source"),
+            "exit_quote_source": normalized_quote_source,
+            "spread_attribution": "COMPLETE" if total_spread is not None else "INCOMPLETE",
+        }
+
+    def reconciliation(self) -> dict[str, Any]:
+        """Compare account projections with immutable execution events.
+
+        Missing events on legacy rows are INCOMPLETE, never reconstructed.
+        Cash consistency uses initial equity + realized PnL - open-position debit.
+        """
+        with self._lock:
+            account = self._db.execute(
+                "SELECT initial_equity, cash_balance FROM paper_account WHERE id=1"
+            ).fetchone()
+            position_row = self._db.execute(
+                "SELECT * FROM paper_positions WHERE id=1"
+            ).fetchone()
+            trade_rows = self._db.execute(
+                "SELECT * FROM paper_trades ORDER BY closed_at ASC, id ASC"
+            ).fetchall()
+
+        replay = self.execution_ledger.replay_order_states()
+        errors: list[str] = []
+        missing_events: list[str] = []
+        missing_projections: list[str] = []
+        matched_fills = 0
+        expected_order_ids: set[str] = set()
+
+        if account is None:
+            return {
+                "status": "FAIL", "errors": ["paper_account row is missing"],
+                "missing_events": [], "missing_projections": [],
+                "event_replay_status": replay["status"],
+            }
+        if replay["status"] == "FAIL":
+            errors.extend(replay["errors"])
+
+        initial = float(account["initial_equity"])
+        cash = float(account["cash_balance"])
+        realized = sum(float(row["net_pnl"]) for row in trade_rows)
+        position = dict(position_row) if position_row else None
+        open_debit = (
+            float(position["quantity"]) * float(position["entry_price"])
+            + float(position["entry_fee"])
+            if position else 0.0
+        )
+        expected_cash = initial + realized - open_debit
+        cash_delta = cash - expected_cash
+        cash_tolerance = max(0.01, abs(expected_cash) * 1e-8)
+        if abs(cash_delta) > cash_tolerance:
+            errors.append(
+                f"cash projection mismatch: actual={cash:.8f}, expected={expected_cash:.8f}"
+            )
+
+        def verify_fill(
+            *, order_id: str, asset: str, side: str, quantity: float,
+            price: float, fee: float, label: str,
+        ) -> None:
+            nonlocal matched_fills
+            expected_order_ids.add(order_id)
+            event = self.execution_ledger.order_state(order_id)
+            if event is None:
+                missing_events.append(f"{label}:{order_id}")
+                return
+            if event["status"] != "FILLED":
+                errors.append(f"{label}:{order_id} has status {event['status']}, expected FILLED")
+                return
+            for field, actual, expected in (
+                ("asset", str(event["asset"]), asset),
+                ("side", str(event["side"]), side),
+            ):
+                if actual != expected:
+                    errors.append(f"{label}:{order_id} {field} mismatch")
+            for field, actual, expected in (
+                ("quantity", float(event["quantity"]), quantity),
+                ("filled_quantity", float(event["filled_quantity"]), quantity),
+                ("fill_price", float(event["fill_price"]), price),
+                ("fee_paid_usd", float(event["fee_paid_usd"]), fee),
+            ):
+                if not math.isclose(actual, expected, rel_tol=1e-8, abs_tol=1e-8):
+                    errors.append(f"{label}:{order_id} {field} mismatch")
+            if not any(message.startswith(f"{label}:{order_id} ") for message in errors):
+                matched_fills += 1
+
+        for row in trade_rows:
+            trade = dict(row)
+            asset = str(trade["asset"])
+            signal_bar = str(trade["signal_bar"])
+            quantity = float(trade["quantity"])
+            verify_fill(
+                order_id=make_paper_client_order_id(asset, signal_bar, "ENTRY"),
+                asset=asset, side="BUY", quantity=quantity,
+                price=float(trade["entry_price"]), fee=float(trade["entry_fee"]),
+                label=f"trade-{trade['id']}-entry",
+            )
+            verify_fill(
+                order_id=make_paper_client_order_id(asset, signal_bar, "EXIT"),
+                asset=asset, side="SELL", quantity=quantity,
+                price=float(trade["exit_price"]), fee=float(trade["exit_fee"]),
+                label=f"trade-{trade['id']}-exit",
+            )
+
+        if position:
+            asset = str(position["asset"])
+            signal_bar = str(position["signal_bar"])
+            quantity = float(position["quantity"])
+            entry_id = make_paper_client_order_id(asset, signal_bar, "ENTRY")
+            exit_id = make_paper_client_order_id(asset, signal_bar, "EXIT")
+            verify_fill(
+                order_id=entry_id, asset=asset, side="BUY", quantity=quantity,
+                price=float(position["entry_price"]), fee=float(position["entry_fee"]),
+                label="open-position-entry",
+            )
+            exit_event = self.execution_ledger.order_state(exit_id)
+            if exit_event is not None and exit_event["status"] == "FILLED":
+                errors.append(f"open position still exists after filled exit order {exit_id}")
+
+        for order in replay["orders"].values():
+            order_id = str(order["client_order_id"])
+            source = str(order.get("source") or "")
+            is_paper_projection_event = (
+                order_id.startswith(("paper-entry-", "paper-exit-"))
+                or source.startswith((
+                    "PAPER_SIMULATOR", "PAPER_FILL_SIMULATOR",
+                    "PAPER_EXECUTION_ADAPTER", "PAPER_ORDER_BOOK_SNAPSHOT",
+                ))
+            )
+            if is_paper_projection_event and order_id not in expected_order_ids:
+                missing_projections.append(order_id)
+
+        if errors:
+            result_status = "FAIL"
+        elif missing_events or missing_projections:
+            result_status = "INCOMPLETE"
+        elif not trade_rows and not position and not expected_order_ids:
+            result_status = "NO_DATA"
+        else:
+            result_status = "PASS"
+
+        return {
+            "status": result_status,
+            "positions_checked": 1 if position else 0,
+            "closed_trades_checked": len(trade_rows),
+            "matched_fills": matched_fills,
+            "event_count": replay["event_count"],
+            "event_replay_status": replay["status"],
+            "cash_balance_usd": round(cash, 8),
+            "expected_cash_balance_usd": round(expected_cash, 8),
+            "cash_delta_usd": round(cash_delta, 8),
+            "missing_events": missing_events,
+            "missing_projections": missing_projections,
+            "errors": errors,
+        }
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            account = self._db.execute("SELECT * FROM paper_account WHERE id=1").fetchone()
+            position = self._db.execute("SELECT * FROM paper_positions WHERE id=1").fetchone()
+            trades = self._db.execute(
+                "SELECT * FROM paper_trades ORDER BY closed_at DESC, id DESC LIMIT 20"
+            ).fetchall()
+            all_trades = self._db.execute(
+                "SELECT * FROM paper_trades ORDER BY closed_at ASC, id ASC LIMIT 10000"
+            ).fetchall()
+            realized_total = self._db.execute(
+                "SELECT COALESCE(SUM(net_pnl), 0.0) AS total FROM paper_trades"
+            ).fetchone()["total"]
+        cash = float(account["cash_balance"])
+        initial = float(account["initial_equity"])
+        performance = summarize_closed_trades(
+            [dict(row) for row in all_trades],
+            initial_equity_usd=initial,
+            min_sample_size=30,
+        )
+        open_position = dict(position) if position else None
+        unrealized = 0.0
+        equity = cash
+        if open_position:
+            mark = float(open_position["mark_price"])
+            qty = float(open_position["quantity"])
+            equity += qty * mark
+            unrealized = (
+                qty * (mark - float(open_position["entry_price"]))
+                - float(open_position["entry_fee"])
+            )
+        realized = float(realized_total)
+        return {
+            "mode": "PAPER_ONLY",
+            "live_orders_enabled": False,
+            "orders_submitted": False,
+            "account": {
+                "initial_equity_usd": initial,
+                "cash_balance_usd": cash,
+                "equity_usd": equity,
+                "realized_pnl_usd": realized,
+                "unrealized_pnl_usd": unrealized,
+                "total_return_pct": (equity / initial - 1.0) * 100.0,
+            },
+            "open_position": open_position,
+            "recent_trades": [dict(row) for row in trades],
+            "execution_ledger": {
+                "event_count": self.execution_ledger.event_count(),
+                "recent_orders": self.execution_ledger.latest_orders(20),
+                "append_only": True,
+                "mode": "PAPER_ONLY",
+            },
+            "reconciliation": self.reconciliation(),
+            "performance": performance,
+            "execution_cost_notes": {
+                "entry_exit_slippage": "Observed against fresh best ask/bid when available; otherwise modelled versus the cross-validated reference price. Already embedded in fills and not deducted twice.",
+                "spread": "Recorded per fill when a fresh timestamped bid/ask quote is available; missing quote coverage remains INCOMPLETE.",
+                "funding": "NOT_APPLICABLE for this Spot-only paper ledger. Perpetual backtests require complete historical funding.",
+            },
+            "storage": storage_backend(),
+        }
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+
+class PaperTradingBot:
+    """One-cycle spot paper trader; requires every existing signal gate to PASS."""
+
+    def __init__(
+        self,
+        engine: Any,
+        *,
+        ledger: Optional[PaperLedger] = None,
+        risk_per_trade_pct: float = 0.005,
+        max_position_notional_pct: float = 0.10,
+        max_risk_score: float = 45.0,
+        min_confirmation_score: float = 75.0,
+        fee_bps_per_side: float = 8.0,
+        slippage_bps_per_side: float = 10.0,
+        daily_loss_limit_pct: float = 0.015,
+        max_drawdown_pct: float = 0.10,
+        max_consecutive_losses: int = 3,
+        cooldown_hours_after_loss: float = 24.0,
+        min_net_reward_risk: float = 1.8,
+        ai_reviewer=None,
+    ):
+        self.engine = engine
+        self.ai_reviewer = ai_reviewer or run_free_ai_second_opinion
+        self.ledger = ledger or PaperLedger()
+        values = (risk_per_trade_pct, max_position_notional_pct, max_risk_score,
+                  min_confirmation_score, fee_bps_per_side, slippage_bps_per_side,
+                  daily_loss_limit_pct, max_drawdown_pct, cooldown_hours_after_loss,
+                  min_net_reward_risk)
+        if not all(math.isfinite(float(x)) for x in values):
+            raise ValueError("Paper trading configuration must be finite.")
+        if not 0 < risk_per_trade_pct <= 0.02:
+            raise ValueError("Per-trade risk must be greater than zero and at most 2%.")
+        if not 0 < max_position_notional_pct <= 0.25:
+            raise ValueError("Position notional cap must be greater than zero and at most 25%.")
+        if fee_bps_per_side < 0 or slippage_bps_per_side < 0:
+            raise ValueError("Fee and slippage assumptions cannot be negative.")
+        if not 0 < daily_loss_limit_pct <= 0.10 or not 0 < max_drawdown_pct <= 0.50:
+            raise ValueError("Daily loss and max drawdown limits must be conservative positive fractions.")
+        if not isinstance(max_consecutive_losses, int) or max_consecutive_losses <= 0:
+            raise ValueError("Maximum consecutive losses must be a positive integer.")
+        if cooldown_hours_after_loss < 0 or min_net_reward_risk < 1.0:
+            raise ValueError("Cooldown cannot be negative and net reward/risk must be at least 1.");
+        self.risk_per_trade_pct = risk_per_trade_pct
+        self.max_position_notional_pct = max_position_notional_pct
+        self.max_risk_score = max_risk_score
+        self.min_confirmation_score = min_confirmation_score
+        self.fee_rate = fee_bps_per_side / 10_000.0
+        self.slippage_rate = slippage_bps_per_side / 10_000.0
+        self.daily_loss_limit_pct = daily_loss_limit_pct
+        self.max_drawdown_pct = max_drawdown_pct
+        self.max_consecutive_losses = max_consecutive_losses
+        self.cooldown_hours_after_loss = cooldown_hours_after_loss
+        self.min_net_reward_risk = min_net_reward_risk
+
+    def state(self) -> dict[str, Any]:
+        state = self.ledger.state()
+        state["ai_connection"] = ai_connection_status()
+        position = state.get("open_position")
+        recent_trades = state.get("recent_trades") or []
+        control_asset = (position or {}).get("asset") or (
+            recent_trades[0].get("asset") if recent_trades else ""
+        )
+        state["risk_controls"] = self.ledger.risk_controls(
+            asset=control_asset,
+            daily_loss_limit_pct=self.daily_loss_limit_pct,
+            max_drawdown_pct=self.max_drawdown_pct,
+            max_consecutive_losses=self.max_consecutive_losses,
+            cooldown_hours_after_loss=self.cooldown_hours_after_loss,
+        )
+        return state
+
+    def run_once(self, asset_input: str | AssetSpec) -> dict[str, Any]:
+        asset = asset_input if isinstance(asset_input, AssetSpec) else AssetSpec.parse(asset_input)
+        if asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS:
+            return {"status": "SKIPPED", "asset": asset.raw,
+                    "reason": "Paper bot currently accepts only BTC, ETH and SOL spot symbols."}
+        position = self.ledger.position()
+        if position and position["asset"] != asset.raw:
+            return {"status": "BLOCKED", "asset": asset.raw,
+                    "reason": "One paper position is already open; manage it before scanning another asset."}
+        data = getattr(self.engine, "data", None)
+        if position:
+            try:
+                snapshot_getter = getattr(data, "snapshot", None) or getattr(self.engine, "snapshot", None)
+                if not callable(snapshot_getter):
+                    raise RuntimeError("snapshot reader unavailable")
+                snapshot = snapshot_getter(asset)
+            except Exception:
+                return {"status": "UNKNOWN", "asset": asset.raw,
+                        "reason": "Fresh price unavailable; open paper position was left unchanged."}
+            price = _number(getattr(snapshot, "price_usd", None))
+            if price is None or price <= 0:
+                return {"status": "UNKNOWN", "asset": asset.raw,
+                        "reason": "Fresh cross-validated price is invalid; position was left unchanged."}
+            entry = float(position["entry_price"])
+            initial_stop = float(position.get("initial_stop_loss") or position["stop_loss"])
+            initial_risk = max(0.0, entry - initial_stop)
+            peak = max(float(position.get("peak_price") or entry), price)
+            managed_stop = float(position["stop_loss"])
+            if initial_risk > 0 and peak >= entry + initial_risk:
+                break_even = entry * (1.0 + 2.0 * self.fee_rate + 2.0 * self.slippage_rate)
+                managed_stop = max(managed_stop, break_even)
+            if initial_risk > 0 and peak >= entry + 1.5 * initial_risk:
+                managed_stop = max(managed_stop, peak - initial_risk)
+            exit_quote = _extract_observed_quote(snapshot)
+            liquidation_mark = (
+                min(price, float(exit_quote["bid"])) if exit_quote is not None else price
+            )
+            self.ledger.update_management(liquidation_mark, managed_stop)
+            managed_position = self.ledger.position() or position
+            active_stop = float(managed_position["stop_loss"])
+            if price <= active_stop:
+                reference_exit = min(price, active_stop)
+                sell_reference = (
+                    min(reference_exit, float(exit_quote["bid"]))
+                    if exit_quote is not None else reference_exit
+                )
+                fill = sell_reference * (1.0 - self.slippage_rate)
+                initial_stop = float(managed_position.get("initial_stop_loss") or active_stop)
+                exit_reason = "TRAILING_STOP" if active_stop > initial_stop else "STOP_LOSS"
+                closed = self.ledger.close_position(
+                    fill, self.fee_rate, exit_reason,
+                    exit_reference_price=reference_exit,
+                    exit_bid=exit_quote["bid"] if exit_quote else None,
+                    exit_ask=exit_quote["ask"] if exit_quote else None,
+                    exit_quote_source=exit_quote["source"] if exit_quote else None,
+                )
+                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
+            if price >= float(position["take_profit"]):
+                reference_exit = float(position["take_profit"])
+                sell_reference = (
+                    min(reference_exit, float(exit_quote["bid"]))
+                    if exit_quote is not None else reference_exit
+                )
+                fill = sell_reference * (1.0 - self.slippage_rate)
+                closed = self.ledger.close_position(
+                    fill, self.fee_rate, "TAKE_PROFIT",
+                    exit_reference_price=reference_exit,
+                    exit_bid=exit_quote["bid"] if exit_quote else None,
+                    exit_ask=exit_quote["ask"] if exit_quote else None,
+                    exit_quote_source=exit_quote["source"] if exit_quote else None,
+                )
+                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
+            max_holding = max(1, int(position.get("max_holding_days") or 14))
+            if int(time.time()) - int(position["opened_at"]) >= max_holding * 86_400:
+                reference_exit = price
+                sell_reference = (
+                    min(reference_exit, float(exit_quote["bid"]))
+                    if exit_quote is not None else reference_exit
+                )
+                fill = sell_reference * (1.0 - self.slippage_rate)
+                closed = self.ledger.close_position(
+                    fill, self.fee_rate, "TIME_EXIT",
+                    exit_reference_price=reference_exit,
+                    exit_bid=exit_quote["bid"] if exit_quote else None,
+                    exit_ask=exit_quote["ask"] if exit_quote else None,
+                    exit_quote_source=exit_quote["source"] if exit_quote else None,
+                )
+                return {"status": "CLOSED", "asset": asset.raw, "trade": closed}
+            return {"status": "HOLDING", "asset": asset.raw, "mark_price": price,
+                    "active_stop_loss": active_stop,
+                    "unrealized_pnl_usd": self.ledger.state()["account"]["unrealized_pnl_usd"]}
+
+        try:
+            result = self.engine.analyze(asset)
+        except Exception as exc:
+            return {"status": "UNKNOWN", "asset": asset.raw,
+                    "reason": f"Market scan failed; paper state was not changed ({type(exc).__name__})."}
+        snapshots = getattr(data, "snapshots", {})
+        snapshot = snapshots.get(asset.raw) if isinstance(snapshots, dict) else None
+        price = _number(getattr(snapshot, "price_usd", None))
+        if price is None or price <= 0:
+            return {"status": "UNKNOWN", "asset": asset.raw,
+                    "reason": "A fresh cross-validated public spot price is unavailable."}
+
+        gates = getattr(result, "gates", [])
+        if not _mandatory_gates_pass(gates):
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Exactly one PASS result for each mandatory gate ID 1–12 is required before paper entry."}
+        signal = _status(getattr(result, "signal", "NO TRADE"))
+        if signal != "LONG":
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Paper spot bot opens LONG signals only; short and neutral outputs are skipped."}
+        score = _number(getattr(result, "confirmation_score", None))
+        risk = _number(getattr(result, "estimated_risk_score", None))
+        stop = _number(getattr(result, "stop_loss", None))
+        target = _number(getattr(result, "take_profit", None))
+        if (score is None or score < self.min_confirmation_score
+                or risk is None or risk >= self.max_risk_score
+                or stop is None or target is None):
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Score, risk or stop/target plan did not pass paper safety limits."}
+        entry_quote = _extract_observed_quote(snapshot)
+        entry_reference = (
+            max(price, float(entry_quote["ask"])) if entry_quote is not None else price
+        )
+        entry = entry_reference * (1.0 + self.slippage_rate)
+        half_spread_per_unit = (
+            (float(entry_quote["ask"]) - float(entry_quote["bid"])) / 2.0
+            if entry_quote is not None else 0.0
+        )
+        exit_at_stop = (
+            (stop - half_spread_per_unit) * (1.0 - self.slippage_rate)
+        )
+        if not (0 < exit_at_stop < entry < target):
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Spot entry, stop-loss and take-profit levels are not ordered safely."}
+        frame = getattr(data, "candle_frames", {}).get(asset.raw)
+        if frame is None or frame.empty or not hasattr(frame.index[-1], "isoformat"):
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "A timestamped completed candle is required to prevent duplicate entries."}
+        signal_bar = frame.index[-1].isoformat()
+        if self.ledger.has_traded_signal_bar(asset.raw, signal_bar):
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "This completed-candle signal was already paper-traded."}
+
+        controls = self.ledger.risk_controls(
+            asset=asset.raw,
+            daily_loss_limit_pct=self.daily_loss_limit_pct,
+            max_drawdown_pct=self.max_drawdown_pct,
+            max_consecutive_losses=self.max_consecutive_losses,
+            cooldown_hours_after_loss=self.cooldown_hours_after_loss,
+        )
+        if not controls["entry_allowed"]:
+            return {"status": "RISK_HALT", "asset": asset.raw,
+                    "reason": "Paper entries paused by risk circuit breaker.",
+                    "risk_controls": controls}
+
+        state = self.ledger.state()
+        equity = _number(state["account"]["equity_usd"])
+        cash = _number(state["account"]["cash_balance_usd"])
+        if equity is None or cash is None or equity <= 0:
+            return {"status": "UNKNOWN", "asset": asset.raw, "reason": "Paper account balance is invalid."}
+        risk_budget = equity * self.risk_per_trade_pct
+        unit_risk = entry - exit_at_stop + entry * self.fee_rate + exit_at_stop * self.fee_rate
+        target_fill = (target - half_spread_per_unit) * (1.0 - self.slippage_rate)
+        unit_reward = target_fill - entry - entry * self.fee_rate - target_fill * self.fee_rate
+        net_reward_risk = unit_reward / unit_risk if unit_risk > 0 else None
+        if unit_risk <= 0 or unit_reward <= 0 or net_reward_risk is None:
+            return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Net reward/risk is invalid after costs."}
+        if net_reward_risk < self.min_net_reward_risk:
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Net reward/risk after fees and slippage is below the minimum.",
+                    "net_reward_risk": round(net_reward_risk, 3)}
+        holding_raw = _number(getattr(result, "expected_holding_days", None))
+        if holding_raw is None or holding_raw < 1:
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "A valid maximum holding period is required for paper entry."}
+        max_holding_days = min(90, max(1, int(holding_raw)))
+        quantity = min(
+            risk_budget / unit_risk,
+            equity * self.max_position_notional_pct / entry,
+            cash / (entry * (1.0 + self.fee_rate)),
+        )
+        notional = quantity * entry
+        entry_fee = notional * self.fee_rate
+        debit = notional + entry_fee
+        if not math.isfinite(quantity) or quantity <= 0 or debit > cash:
+            return {"status": "NO_TRADE", "asset": asset.raw, "reason": "Position sizing returned no safe quantity."}
+        if entry_quote is not None:
+            entry_costs = calculate_fill_costs(
+                side="BUY", quantity=quantity, bid=entry_quote["bid"],
+                ask=entry_quote["ask"], fill_price=entry,
+                fee_paid_usd=entry_fee, funding_applicable=False,
+                quote_quality="OBSERVED",
+            )
+            entry_slippage = entry_costs["slippage_cost_usd"]
+            entry_spread_cost = entry_costs["spread_cost_usd"]
+            entry_quote_source = entry_quote["source"]
+        else:
+            entry_slippage = quantity * max(0.0, entry - price)
+            entry_spread_cost = None
+            entry_quote_source = None
+        record = {
+            "asset": asset.raw, "quantity": quantity, "entry_price": entry,
+            "stop_loss": stop, "initial_stop_loss": stop,
+            "take_profit": target, "entry_fee": entry_fee,
+            "opened_at": int(time.time()), "signal_bar": signal_bar,
+            "confirmation_score": score, "risk_budget": risk_budget,
+            "max_holding_days": max_holding_days,
+            "entry_reference_price": entry_reference,
+            "entry_slippage_usd": entry_slippage,
+            "entry_spread_cost_usd": entry_spread_cost,
+            "entry_quote_source": entry_quote_source,
+        }
+        # Do not call the external reviewer until every deterministic, duplicate,
+        # account, sizing, reward/risk and circuit-breaker check has passed.
+        try:
+            ai_review = self.ai_reviewer(result, asset)
+        except Exception as exc:
+            ai_review = {
+                "provider": "OpenRouter",
+                "status": "UNKNOWN",
+                "status_fa": "بررسی هوش مصنوعی ناموفق بود؛ ورود جدید متوقف شد.",
+                "reason": "Free AI reviewer failed.",
+                "error_type": type(exc).__name__,
+                "paper_entry_eligible": False,
+                "cost_usd": 0.0,
+            }
+        if (
+            not isinstance(ai_review, dict)
+            or str(ai_review.get("status", "UNKNOWN")).upper() != "APPROVED"
+            or ai_review.get("paper_entry_eligible") is not True
+        ):
+            return {
+                "status": "AI_BLOCKED",
+                "asset": asset.raw,
+                "reason": "A valid approval from the configured free AI reviewer is mandatory for every new paper entry.",
+                "ai_review": ai_review if isinstance(ai_review, dict) else {
+                    "status": "UNKNOWN", "paper_entry_eligible": False,
+                },
+                "mode": "PAPER_ONLY",
+                "orders_submitted": False,
+            }
+
+        # Re-check account-level guards after the network round-trip. Another
+        # worker may have closed a losing position or changed available equity
+        # while the AI provider was responding.
+        latest_controls = self.ledger.risk_controls(
+            asset=asset.raw,
+            daily_loss_limit_pct=self.daily_loss_limit_pct,
+            max_drawdown_pct=self.max_drawdown_pct,
+            max_consecutive_losses=self.max_consecutive_losses,
+            cooldown_hours_after_loss=self.cooldown_hours_after_loss,
+        )
+        if not latest_controls["entry_allowed"]:
+            return {
+                "status": "RISK_HALT",
+                "asset": asset.raw,
+                "reason": "Paper risk circuit breaker changed while awaiting AI review.",
+                "risk_controls": latest_controls,
+                "ai_review": ai_review,
+            }
+
+        latest_state = self.ledger.state()
+        latest_equity = _number(latest_state["account"]["equity_usd"])
+        latest_cash = _number(latest_state["account"]["cash_balance_usd"])
+        latest_risk_budget = (
+            latest_equity * self.risk_per_trade_pct if latest_equity is not None else None
+        )
+        latest_notional_cap = (
+            latest_equity * self.max_position_notional_pct
+            if latest_equity is not None else None
+        )
+        if (
+            latest_equity is None or latest_cash is None
+            or latest_equity <= 0 or latest_cash < debit
+            or latest_risk_budget is None or latest_notional_cap is None
+            or quantity * unit_risk > latest_risk_budget + 1e-8
+            or notional > latest_notional_cap + 1e-8
+        ):
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Paper account equity or risk budget changed while awaiting AI review.",
+                "ai_review": ai_review,
+            }
+
+        # Fetch a genuinely new cross-validated snapshot after the external
+        # review. Re-reading the original object cannot detect a newer quote
+        # published while the provider was responding.
+        snapshot_getter = getattr(data, "snapshot", None) or getattr(self.engine, "snapshot", None)
+        try:
+            refreshed_snapshot = snapshot_getter(asset) if callable(snapshot_getter) else None
+        except Exception:
+            refreshed_snapshot = None
+        refreshed_price = _number(getattr(refreshed_snapshot, "price_usd", None))
+        price_tolerance = max(1e-8, abs(price) * 1e-6)
+        if (
+            refreshed_snapshot is None
+            or refreshed_price is None
+            or refreshed_price <= 0
+            or abs(refreshed_price - price) > price_tolerance
+        ):
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Cross-validated market price changed or could not be refreshed during AI review; a new scan is required.",
+                "ai_review": ai_review,
+            }
+
+        latest_quote = _extract_observed_quote(refreshed_snapshot)
+        quote_changed = (entry_quote is None) != (latest_quote is None)
+        if entry_quote is not None and latest_quote is not None:
+            quote_changed = quote_changed or any((
+                latest_quote["timestamp_ms"] != entry_quote["timestamp_ms"],
+                latest_quote["source"] != entry_quote["source"],
+                latest_quote["bid"] != entry_quote["bid"],
+                latest_quote["ask"] != entry_quote["ask"],
+            ))
+        if quote_changed:
+            return {
+                "status": "NO_TRADE",
+                "asset": asset.raw,
+                "reason": "Observed bid/ask quote changed, appeared, disappeared or expired during AI review; a fresh market scan is required.",
+                "ai_review": ai_review,
+            }
+
+        if not self.ledger.open_position(record, debit):
+            return {"status": "NO_TRADE", "asset": asset.raw,
+                    "reason": "Paper ledger rejected duplicate, concurrent or unaffordable entry."}
+        return {"status": "OPENED", "asset": asset.raw, "side": "LONG",
+                "quantity": quantity, "entry_price": entry, "stop_loss": stop,
+                "take_profit": target, "risk_budget_usd": risk_budget,
+                "confirmation_score": score, "net_reward_risk": round(net_reward_risk, 3),
+                "max_holding_days": max_holding_days, "fee_usd": entry_fee,
+                "risk_controls": controls, "ai_review": ai_review,
+                "mode": "PAPER_ONLY", "orders_submitted": False}

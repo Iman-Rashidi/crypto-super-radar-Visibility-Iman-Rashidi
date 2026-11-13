@@ -1,0 +1,5 @@
+numpy>=1.24
+pandas>=2.0
+requests>=2.31
+websockets>=12.0
+turso_serverless

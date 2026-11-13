@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-super-radar"
+version = "0.1.0"
+description = "Zero-cost public-data quantitative crypto research and multi-stage confirmation engine"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pandas>=2.0", "requests>=2.31", "websockets>=12.0", "turso_serverless"]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.40"]
+
+[project.scripts]
+crypto-super-radar = "crypto_super_radar.enhanced_cli:main"
+crypto-super-radar-orderflow = "crypto_super_radar.order_flow_service:main"
+
+[tool.setuptools.packages.find]
+include = ["crypto_super_radar*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
