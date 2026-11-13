@@ -23,6 +23,18 @@ class FakeHttp:
         return self.payload
 
 
+class GlobalUniverseContractTests(unittest.TestCase):
+    def test_curated_watchlist_covers_required_global_asset_classes(self):
+        from crypto_super_radar.global_market_data import GLOBAL_MARKET_UNIVERSE
+
+        classes = {item.asset_class for item in GLOBAL_MARKET_UNIVERSE}
+        regions = {item.region for item in GLOBAL_MARKET_UNIVERSE}
+        self.assertTrue({"US_STOCK", "US_ETF", "EU_STOCK", "FX", "PRECIOUS_METAL"}.issubset(classes))
+        self.assertTrue({"US", "EU", "GLOBAL"}.issubset(regions))
+        self.assertGreaterEqual(len(GLOBAL_MARKET_UNIVERSE), 25)
+        self.assertEqual(len({item.instrument_id for item in GLOBAL_MARKET_UNIVERSE}), len(GLOBAL_MARKET_UNIVERSE))
+
+
 class TwelveDataProviderTests(unittest.TestCase):
     def setUp(self):
         self.instrument = GlobalInstrument(
