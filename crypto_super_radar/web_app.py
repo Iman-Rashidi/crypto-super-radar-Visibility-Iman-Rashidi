@@ -3162,7 +3162,7 @@ class Handler(BaseHTTPRequestHandler):
                 wavePrev=point;
               });
               const signal=data.signal||{};
-              const current=bars.filter(b=>b.is_closed).slice(-1)[0]||bars[bars.length-1];
+              const current=bars[bars.length-1];
               const currentPrice=current?current.close:null;
               if(currentPrice!==null&&currentPrice!==undefined){
                 const yy=y(currentPrice);
@@ -3204,8 +3204,8 @@ class Handler(BaseHTTPRequestHandler):
                 fields.divergence.textContent=divergenceType==='BULLISH'?'واگرایی مثبت (صعودی) شناسایی شد · دو کندل پیوت مرجع با سبز نئونی مشخص شده‌اند · RSI '+number(divergence.rsi_pivot_1)+' ← '+number(divergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':divergenceType==='BEARISH'?'واگرایی منفی (نزولی) شناسایی شد · دو کندل پیوت مرجع با صورتی پررنگ مشخص شده‌اند · RSI '+number(divergence.rsi_pivot_1)+' ← '+number(divergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':'واگرایی RSI در پیوت‌های تأییدشده شناسایی نشد · کندل‌های مرجع فقط هنگام تأیید واگرایی رنگ ویژه می‌گیرند.';
                 const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
                 fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
-                const lastClosedForPrice=(data.candles||[]).filter(x=>x.is_closed).slice(-1)[0];
-                fields.currentPrice.textContent=number(lastClosedForPrice?lastClosedForPrice.close:null);
+                const latestBarForPrice=(data.candles||[]).slice(-1)[0];
+                fields.currentPrice.textContent=number(latestBarForPrice?latestBarForPrice.close:null);
                 fields.entry.textContent=number(s.entry_reference_price);
                 fields.stop.textContent=number(s.stop_loss);
                 fields.target.textContent=number(s.take_profit);
