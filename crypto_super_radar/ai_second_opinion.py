@@ -25,6 +25,8 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
+PROMPT_VERSION = "free-second-opinion-v2"
+MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -88,32 +90,30 @@ def _safe_float(value: Any) -> float | None:
 
 
 def _public_evidence(value: Any, depth: int = 0) -> Any:
-    """Whitelist public numeric/enum evidence; discard wallet IDs and raw blobs."""
-    if depth > 3:
+    """Whitelist scalar public market evidence; reject arrays and free-form text."""
+    if depth > 3 or not isinstance(value, dict):
         return None
-    if isinstance(value, dict):
-        result = {}
-        for key, item in value.items():
-            name = str(key).lower()
-            if name in _PUBLIC_METRIC_KEYS:
-                if isinstance(item, (int, float)) and not isinstance(item, bool):
-                    result[name] = _safe_float(item)
-                elif isinstance(item, (str, bool)):
-                    result[name] = item[:120] if isinstance(item, str) else item
-                elif isinstance(item, dict):
-                    nested = _public_evidence(item, depth + 1)
-                    if nested:
-                        result[name] = nested
-        return result
-    if isinstance(value, (list, tuple)):
-        return [_public_evidence(item, depth + 1) for item in value[:12]]
-    if isinstance(value, str):
-        return value[:160]
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return _safe_float(value)
-    if isinstance(value, bool):
-        return value
-    return None
+    result = {}
+    for key, item in value.items():
+        name = str(key).lower()
+        if name not in _PUBLIC_METRIC_KEYS:
+            continue
+        if isinstance(item, bool):
+            result[name] = item
+        elif isinstance(item, (int, float)):
+            number = _safe_float(item)
+            if number is not None:
+                result[name] = number
+        elif isinstance(item, str):
+            normalized = item.strip()
+            # Metric strings are categorical labels, never prose or instructions.
+            if normalized and re.fullmatch(r"[\\w .:+/%-]{1,120}", normalized):
+                result[name] = normalized
+        elif isinstance(item, dict):
+            nested = _public_evidence(item, depth + 1)
+            if nested:
+                result[name] = nested
+    return result
 
 
 def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
@@ -309,7 +309,14 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
         }
     evidence = _build_review_input(result, asset_name)
     model = _model()
-    digest = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    cache_material = {
+        "prompt_version": PROMPT_VERSION,
+        "model": model,
+        "evidence": evidence,
+    }
+    digest = hashlib.sha256(
+        json.dumps(cache_material, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     cache_key = f"{asset_name}:{digest}"
     now = time.monotonic()
     day = datetime.now(timezone.utc).date().isoformat()
@@ -347,6 +354,7 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
             headers=headers,
             json=payload,
             timeout=(8, 35),
+            allow_redirects=False,
         )
         if response.status_code != 200:
             status = "RATE_LIMITED" if response.status_code == 429 else "UNKNOWN"
@@ -363,6 +371,8 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
         content = body["choices"][0]["message"]["content"]
         if not isinstance(content, str):
             raise ValueError("AI message content is not text")
+        if len(content) > MAX_RESPONSE_CHARS:
+            raise ValueError("AI response exceeded the maximum accepted size")
         parsed = _extract_json(content)
         review = _validated_review(parsed, model, asset_name)
         with _LOCK:
