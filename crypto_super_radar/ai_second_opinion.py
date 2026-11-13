@@ -110,7 +110,7 @@ def _public_evidence(value: Any, depth: int = 0) -> Any:
         elif isinstance(item, str):
             normalized = item.strip()
             # Metric strings are categorical labels, never prose or instructions.
-            if normalized and re.fullmatch(r"[\\w.:+/%-]{1,120}", normalized):
+            if normalized and re.fullmatch(r"[\w.:+/%-]{1,120}", normalized):
                 result[name] = normalized
         elif isinstance(item, dict):
             nested = _public_evidence(item, depth + 1)
