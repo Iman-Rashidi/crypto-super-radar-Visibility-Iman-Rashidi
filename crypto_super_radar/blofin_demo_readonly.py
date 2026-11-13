@@ -250,6 +250,16 @@ class BloFinDemoReadOnly:
             private=True,
         )
 
+    def get_order_detail(self, inst_id: str, *, client_order_id: str) -> Any:
+        """Read one order by its client id so an ambiguous POST is never retried blindly."""
+        if not inst_id or not client_order_id:
+            raise ValueError("inst_id and client_order_id are required.")
+        return self._get(
+            "/api/v1/trade/order-detail",
+            params={"instId": inst_id, "clientOrderId": client_order_id},
+            private=True,
+        )
+
     def check_clock_skew(self, *, inst_id: str = "BTC-USDT") -> dict[str, int]:
         """Estimate exchange clock offset from the exchange timestamp in ticker data."""
         rows = self.get_tickers(inst_id=inst_id)
