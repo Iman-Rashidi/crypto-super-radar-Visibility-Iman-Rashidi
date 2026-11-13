@@ -131,7 +131,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertFalse(result["paper_entry_eligible"])
 
     def test_ai_outage_and_rate_limit_fail_closed(self):
-        def unavailable(url, headers, json, timeout):
+        def unavailable(url, headers, json, timeout, allow_redirects=False):
             return FakeResponse(status_code=429)
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
