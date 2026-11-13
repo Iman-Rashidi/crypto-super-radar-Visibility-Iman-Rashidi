@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -36,7 +37,7 @@ from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError
-from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic
+from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -100,6 +101,108 @@ def _run_ai_diagnostic_limited() -> dict:
     result["paper_entry_eligible"] = False
     result["orders_submitted"] = False
     return result
+
+
+AI_DRY_RUN_LOCK = threading.Lock()
+AI_DRY_RUN_STATE = {"day": "", "count": 0, "last_started": 0.0}
+AI_DRY_RUN_MAX_PER_UTC_DAY = 2
+AI_DRY_RUN_MIN_INTERVAL_SECONDS = 300
+
+
+def _run_ai_synthetic_dry_run_limited() -> dict:
+    """Call the real configured LLM on synthetic evidence, with no bot or ledger access."""
+    configured = ai_connection_status()
+    if not configured.get("configured"):
+        return {
+            "provider": "OpenRouter", "model": configured.get("model"),
+            "status": "MISSING_API_KEY",
+            "status_fa": "کلید OpenRouter در محیط سرویس Demo تنظیم نشده است.",
+            "test_passed": False, "paper_entry_eligible": False,
+            "orders_submitted": False, "trade_executed": False,
+        }
+
+    now = time.monotonic()
+    day = datetime.now(timezone.utc).date().isoformat()
+    with AI_DRY_RUN_LOCK:
+        if AI_DRY_RUN_STATE.get("day") != day:
+            AI_DRY_RUN_STATE.update(day=day, count=0, last_started=0.0)
+        elapsed = now - float(AI_DRY_RUN_STATE.get("last_started") or 0.0)
+        if elapsed < AI_DRY_RUN_MIN_INTERVAL_SECONDS:
+            return {
+                "provider": "OpenRouter", "model": configured.get("model"),
+                "status": "DRY_RUN_COOLDOWN",
+                "status_fa": "برای جلوگیری از مصرف سهمیه، فاصله پنج‌دقیقه‌ای تست رعایت شود.",
+                "retry_after_seconds": max(1, int(AI_DRY_RUN_MIN_INTERVAL_SECONDS - elapsed)),
+                "test_passed": False, "paper_entry_eligible": False,
+                "orders_submitted": False, "trade_executed": False,
+            }
+        if int(AI_DRY_RUN_STATE.get("count") or 0) >= AI_DRY_RUN_MAX_PER_UTC_DAY:
+            return {
+                "provider": "OpenRouter", "model": configured.get("model"),
+                "status": "DAILY_DRY_RUN_LIMIT",
+                "status_fa": "سقف دو تست یکپارچگی امروز تکمیل شده است.",
+                "test_passed": False, "paper_entry_eligible": False,
+                "orders_submitted": False, "trade_executed": False,
+            }
+        AI_DRY_RUN_STATE["last_started"] = now
+        AI_DRY_RUN_STATE["count"] = int(AI_DRY_RUN_STATE.get("count") or 0) + 1
+
+    # Synthetic evidence exercises the real model call and response validator,
+    # but it is not a live-market signal and never enters either paper ledger.
+    asset = AssetSpec.parse("perp:BTCUSDT")
+    result = SimpleNamespace(
+        asset=asset.raw,
+        signal=Signal.LONG,
+        confirmation_score=82.0,
+        estimated_risk_score=20.0,
+        opportunity_rank=80.0,
+        entry_price=100.0,
+        stop_loss=98.0,
+        take_profit=106.0,
+        expected_holding_days=2,
+        metrics={
+            "asset_regime": "BULLISH",
+            "benchmark_regime": "BULLISH",
+            "rsi_14": 58.0,
+            "ema20": 101.0,
+            "ema50": 99.0,
+            "ema200": 95.0,
+            "funding_rate_pct": 0.003,
+            "open_interest_change_24h_pct": 2.0,
+            "market_sentiment_score": 55.0,
+            "fear_greed_value": 55.0,
+            "expected_holding_days": 2,
+        },
+        gates=[
+            SimpleNamespace(
+                gate_id=gate_id,
+                name_en=f"Synthetic validation gate {gate_id}",
+                status=GateStatus.PASS,
+                evidence={"rsi_14": 58.0},
+            )
+            for gate_id in range(1, 13)
+        ],
+    )
+    review = run_free_ai_second_opinion(result, asset, bypass_cache=True)
+    payload = copy.deepcopy(review) if isinstance(review, dict) else {
+        "provider": "OpenRouter", "model": configured.get("model"),
+        "status": "UNKNOWN",
+    }
+    payload.update({
+        "test_mode": "SYNTHETIC_DRY_RUN",
+        "input_data": "SYNTHETIC_NOT_LIVE_MARKET",
+        "synthetic_asset": "perp:BTCUSDT",
+        "synthetic_gate_set": "12 PASS (synthetic fixture only)",
+        "test_passed": bool(
+            payload.get("model_verified") is True
+            and payload.get("response_validated") is True
+        ),
+        "ai_approval_for_synthetic_scenario": payload.get("paper_entry_eligible") is True,
+        "paper_entry_eligible": False,
+        "orders_submitted": False,
+        "trade_executed": False,
+    })
+    return payload
 
 
 def _blofin_demo_connection_status() -> dict:
@@ -4058,7 +4161,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -4072,6 +4175,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/ai/dry-run":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN","message":"Same-origin request required."}',
+                                      "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}',
+                                      "application/json; charset=utf-8")
+                payload = _run_ai_synthetic_dry_run_limited()
+                status_code = 200 if payload.get("test_passed") is True else (
+                    429 if payload.get("status") in {"RATE_LIMITED", "DRY_RUN_COOLDOWN", "DAILY_DRY_RUN_LIMIT"} else
+                    503 if payload.get("status") == "MISSING_API_KEY" else 502
+                )
+                return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+
             if route == "/api/ai/diagnostic":
                 if (
                     not origin
