@@ -201,7 +201,7 @@ class WebAppHttpTests(unittest.TestCase):
                 },
             )
         self.assertEqual(status, 403)
-        self.assertEqual(json.loads(body)["status"], "FORBIDDEN")
+        self.assertIn(b"Cross-origin scan requests are not allowed", body)
         probe.assert_not_called()
 
     def test_futures_paper_post_rejects_spot_asset(self):
