@@ -188,5 +188,30 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
         self.assertIn("clientOrderId=0123456789abcdef0123456789abcdef", args[0])
         self.assertIn("ACCESS-SIGN", kwargs["headers"])
 
+    def test_futures_fill_history_is_signed_read_only(self):
+        self.client.get_fills_history(
+            inst_id="BTC-USDT", order_id="demo-order-1", limit=100
+        )
+        args, kwargs = self.session.get.call_args
+        self.assertIn("/api/v1/trade/fills-history?", args[0])
+        self.assertIn("instId=BTC-USDT", args[0])
+        self.assertIn("orderId=demo-order-1", args[0])
+        self.assertIn("limit=100", args[0])
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+
+    def test_futures_orders_history_is_signed_read_only(self):
+        self.client.get_orders_history(inst_id="BTC-USDT", limit=20)
+        args, kwargs = self.session.get.call_args
+        self.assertIn("/api/v1/trade/orders-history?", args[0])
+        self.assertIn("instId=BTC-USDT", args[0])
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+
+    def test_positions_history_exposes_closed_trade_times_read_only(self):
+        self.client.get_positions_history(inst_id="BTC-USDT", state="closed", limit=20)
+        args, kwargs = self.session.get.call_args
+        self.assertIn("/api/v1/account/positions-history?", args[0])
+        self.assertIn("state=closed", args[0])
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+
 if __name__ == "__main__":
     unittest.main()
