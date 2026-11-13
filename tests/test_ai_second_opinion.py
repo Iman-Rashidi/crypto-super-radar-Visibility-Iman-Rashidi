@@ -123,6 +123,21 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("ignore previous instructions", prompt)
         self.assertFalse(captured["allow_redirects"])
 
+    def test_more_than_eight_risk_flags_cannot_be_ignored(self):
+        document = valid_document()
+        document["risk_flags"] = [f"risk-{index}" for index in range(9)]
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            return FakeResponse(document=document)
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+
+        self.assertFalse(review["paper_entry_eligible"])
+        self.assertEqual(review["status"], "UNKNOWN")
+
     def test_non_bullish_rating_vetoes_entry(self):
         def fake_post(url, headers, json, timeout, allow_redirects=False):
             return FakeResponse(document=valid_document(rating="Hold", proposal="NO_TRADE"))
