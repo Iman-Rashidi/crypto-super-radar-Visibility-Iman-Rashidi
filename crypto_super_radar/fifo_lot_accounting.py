@@ -54,6 +54,13 @@ def _instrument(value: Any) -> str:
     return result
 
 
+def _synchronized(method):
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class FIFOLotAccounting:
     """Append-only FIFO lot book layered over MultiCurrencyPaperLedger.
 
@@ -73,7 +80,7 @@ class FIFOLotAccounting:
     ):
         self._db = connection
         self._ledger = ledger
-        self._lock = lock or threading.RLock()
+        self._lock = lock or getattr(ledger, "_lock", threading.RLock())
         with self._lock:
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS paper_cost_basis_lots (
