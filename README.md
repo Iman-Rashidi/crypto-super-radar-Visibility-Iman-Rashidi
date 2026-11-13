@@ -384,6 +384,22 @@ Use Ctrl+C to stop. State and closed trades are stored in the local SQLite datab
 This bot is explicitly paper-only: it has no exchange order adapter, API-key input or live-order mode. It never submits exchange orders. Paper fills are estimates from cross-validated public spot prices, fee assumptions and slippage; they are not guaranteed executable fills.
 
 
+## BloFin Demo Futures read-only adapter
+
+The isolated branch `feature/blofin-demo-adapter` adds `crypto_super_radar.blofin_demo_readonly`. This adapter is pinned to `https://demo-trading-openapi.blofin.com` and exposes only GET operations for futures instruments, tickers, candles, futures balance, positions, and pending orders. It also builds the documented private-WebSocket login payload and estimates clock skew from the exchange timestamp in public ticker data.
+
+It deliberately has no order placement, amend, cancel, leverage-setting, transfer, or withdrawal methods. It is separate from `binance_execution.py`, which is a Binance **Spot Testnet** adapter, and from the local Futures Paper Trading ledger. Do not treat any of those three environments as interchangeable.
+
+For a read-only Demo key, set these server-side variables only after the account's Demo API key has been created with BloFin's `READ` permission:
+
+- `BLOFIN_DEMO_API_KEY`
+- `BLOFIN_DEMO_API_SECRET`
+- `BLOFIN_DEMO_PASSPHRASE`
+
+Do not set them in GitHub, Notion, browser code, chat, or committed files. Keep `TRADE`, `TRANSFER`, and any withdrawal permission disabled. Public market data methods do not require credentials. Private read methods require all three variables. The module does not accept a configurable API host, so this adapter cannot be redirected to the production REST host.
+
+The new unit tests use mocked HTTP responses and do not contact BloFin. A successful unit test is not a live API acceptance test. Live validation still requires a confirmed eligible account, a Demo-only READ key, server-side secret configuration, verified clock skew, and authenticated WebSocket confirmation. No Demo credentials are currently configured or tested by this code change.
+
 ## Binance Spot order execution (testnet first)
 
 A guarded execution adapter is available in `crypto_super_radar.binance_execution`. It accepts only BTCUSDT, ETHUSDT and SOLUSDT spot orders, sends limit IOC orders, checks the live quote against the signal price, exchange quantity/price/minimum-notional filters, free balance, and a hard 25 USDT per-order ceiling. `ValidatedSignalExecutor` accepts only a LONG result with all 12 gates passing, score at least 75, risk score below 45, a valid stop/target, and net reward/risk at least 1.8. Position sizing risks at most 0.5% of free USDT.
