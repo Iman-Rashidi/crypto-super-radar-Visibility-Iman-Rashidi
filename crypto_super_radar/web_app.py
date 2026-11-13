@@ -2854,6 +2854,17 @@ class Handler(BaseHTTPRequestHandler):
             .live-radar-signal{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}
             .live-radar-signal .metric strong{font-size:1.05rem}
             .live-radar-note{color:var(--muted);font-size:.82rem;line-height:1.8}
+            .live-radar-analysis{display:grid;gap:12px;margin:16px 0}
+            .live-radar-direction{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}
+            .live-radar-pattern-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+            .live-radar-pattern-panel{border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--surface)}
+            .live-radar-pattern-panel h4{margin:0 0 9px}
+            .live-pattern-list{display:grid;gap:8px}
+            .live-pattern-item{border:1px solid var(--line);border-radius:9px;padding:9px;background:var(--surface-raised,transparent)}
+            .live-pattern-item strong{display:block;font-size:.9rem;margin-bottom:4px}
+            .live-pattern-meta{font-size:.74rem;color:var(--muted);margin-bottom:4px}
+            .live-pattern-detail{font-size:.8rem;line-height:1.7;color:var(--muted)}
+            .live-radar-indicators{color:var(--muted);font-size:.82rem;line-height:1.8}
           </style>
           <div id="live-market-radar">
             <h3>نمودار زندهٔ کندل و رادار موج‌ها</h3>
@@ -2881,6 +2892,21 @@ class Handler(BaseHTTPRequestHandler):
               <div class="metric"><span>نسبت ریسک به بازده</span><strong id="live-radar-rr">—</strong></div>
               <div class="metric"><span>ساختار موج الیوت</span><strong id="live-radar-wave">نامشخص</strong></div>
             </div>
+            <section class="live-radar-analysis" aria-label="تحلیل چندگانه بازار">
+              <div class="live-radar-direction">
+                <div class="metric"><span>جهت غالب بازار</span><strong id="live-radar-bias">در انتظار داده</strong></div>
+                <div class="metric"><span>امتیاز همگرایی شواهد</span><strong id="live-radar-score">—</strong></div>
+                <div class="metric"><span>رژیم بازار</span><strong id="live-radar-regime">—</strong></div>
+                <div class="metric"><span>قدرت روند</span><strong id="live-radar-trend">—</strong></div>
+              </div>
+              <p id="live-radar-indicators" class="live-radar-indicators">EMA، RSI، MACD، ATR و نسبت حجم پس از دریافت داده نمایش داده می‌شوند.</p>
+              <p id="live-radar-analysis-note" class="live-radar-note">این امتیاز احتمال آماری موفقیت نیست؛ ترکیبی از شواهد روند، مومنتوم، حجم، الگوهای کندلی، هندسی و موجی است.</p>
+              <div class="live-radar-pattern-grid">
+                <article class="live-radar-pattern-panel"><h4>الگوهای کندلی</h4><div id="live-radar-candle-patterns" class="live-pattern-list"><p class="live-radar-note">در انتظار کندل بسته‌شده...</p></div></article>
+                <article class="live-radar-pattern-panel"><h4>الگوهای هندسی قیمت</h4><div id="live-radar-geometric-patterns" class="live-pattern-list"><p class="live-radar-note">در انتظار پیوت‌های تأییدشده...</p></div></article>
+                <article class="live-radar-pattern-panel"><h4>امواج و ساختار بازار</h4><div id="live-radar-wave-analysis" class="live-pattern-list"><p class="live-radar-note">در انتظار ساختار موج...</p></div></article>
+              </div>
+            </section>
             <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
             <p id="live-radar-provider" class="live-radar-note">اعتبارسنجی چندمنبعی: در انتظار داده</p>
             <p class="live-radar-note">این بخش فعلاً هشدار تحلیلی است و به Paper Bot سفارش نمی‌دهد. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
@@ -2901,9 +2927,42 @@ class Handler(BaseHTTPRequestHandler):
               rr:document.getElementById('live-radar-rr'),
               wave:document.getElementById('live-radar-wave'),
               reason:document.getElementById('live-radar-reason'),
-              provider:document.getElementById('live-radar-provider')
+              provider:document.getElementById('live-radar-provider'),
+              bias:document.getElementById('live-radar-bias'),
+              score:document.getElementById('live-radar-score'),
+              regime:document.getElementById('live-radar-regime'),
+              trend:document.getElementById('live-radar-trend'),
+              indicators:document.getElementById('live-radar-indicators'),
+              analysisNote:document.getElementById('live-radar-analysis-note'),
+              candlePatterns:document.getElementById('live-radar-candle-patterns'),
+              geometricPatterns:document.getElementById('live-radar-geometric-patterns'),
+              waveAnalysis:document.getElementById('live-radar-wave-analysis')
             };
             const number=v=>v===null||v===undefined?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:8});
+            const faDirection=v=>({BULLISH:'صعودی',BEARISH:'نزولی',NEUTRAL:'خنثی',UNKNOWN:'نامشخص'}[v]||v||'نامشخص');
+            const faState=v=>({CONFIRMED:'تأییدشده',FORMING:'در حال شکل‌گیری',NEEDS_CONFIRMATION:'نیازمند تأیید',CANDIDATE:'سناریوی ساختاری',AMBIGUOUS:'مبهم',UNKNOWN:'نامشخص'}[v]||v||'نامشخص');
+            function renderPatternList(target,items,emptyText){
+              if(!target)return;target.replaceChildren();
+              if(!Array.isArray(items)||!items.length){
+                const empty=document.createElement('p');empty.className='live-radar-note';empty.textContent=emptyText;target.appendChild(empty);return;
+              }
+              items.forEach(item=>{
+                const card=document.createElement('article');card.className='live-pattern-item';
+                const title=document.createElement('strong');
+                const displayDirection=item.direction==='NEUTRAL'&&item.potential_direction?'گرایش '+faDirection(item.potential_direction):faDirection(item.direction);
+                title.textContent=(item.name_fa||item.name_en||'الگوی ناشناخته')+' · '+displayDirection;
+                const meta=document.createElement('p');meta.className='live-pattern-meta';
+                meta.textContent=faState(item.state)+' · قدرت شواهد: '+(item.evidence_strength||'نامشخص')+
+                  (item.score?' · امتیاز: '+item.score:'');
+                const detail=document.createElement('p');detail.className='live-pattern-detail';detail.textContent=item.description||'شرح الگو موجود نیست.';
+                card.append(title,meta,detail);
+                if(item.trigger_price!==null&&item.trigger_price!==undefined){
+                  const trigger=document.createElement('p');trigger.className='live-pattern-meta';
+                  trigger.textContent='سطح ماشه/شکست: '+number(item.trigger_price);card.appendChild(trigger);
+                }
+                target.appendChild(card);
+              });
+            }
             let busy=false,lastSignalKey=null,timer=null;
             function draw(data){
               const bars=data.candles||[];
@@ -2985,6 +3044,7 @@ class Handler(BaseHTTPRequestHandler):
                 if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
                 draw(data);
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
+                const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
                 fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
                 fields.entry.textContent=number(s.entry_reference_price);
@@ -2992,6 +3052,30 @@ class Handler(BaseHTTPRequestHandler):
                 fields.target.textContent=number(s.take_profit);
                 fields.rr.textContent=s.reward_risk===null||s.reward_risk===undefined?'—':s.reward_risk+'R';
                 fields.wave.textContent=(w.pattern||'نامشخص')+' · '+(w.phase||'داده ناکافی');
+                fields.bias.textContent=d.label_fa||faDirection(d.bias);
+                fields.score.textContent=d.score===null||d.score===undefined?'—':(d.score>0?'+':'')+d.score+'/100';
+                fields.regime.textContent=({TRENDING:'رونددار',RANGE_OR_TRANSITION:'رنج / گذار'}[d.regime]||'نامشخص');
+                fields.trend.textContent=faDirection(d.trend);
+                fields.indicators.textContent='EMA20: '+number(d.ema20)+' · EMA50: '+number(d.ema50)+
+                  ' · RSI(14): '+number(d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[d.rsi_state]||'')+')'+
+                  ' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
+                  ' · نسبت حجم به میانه: '+number(d.volume_ratio)+'x · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
+                const qualityLabel=({PASS:'تطبیق دو منبع موفق',FAIL:'اختلاف دو منبع؛ سیگنال مسدود',UNKNOWN:'تطبیق دو منبع نامشخص'}[quality.cross_validation_status]||'تطبیق نامشخص');
+                const freshnessLabel=quality.freshness_status==='FRESH'?'داده تازه':quality.freshness_status==='STALE'?'داده کهنه':'تازگی نامشخص';
+                fields.analysisNote.textContent='منبع تحلیل: '+(quality.pattern_data_source||'نامشخص')+' · '+qualityLabel+' · '+freshnessLabel+
+                  ' · '+((analysis.summary||[]).join(' · ')||'امتیاز جهت بازار صرفاً تجمیع شواهد است و احتمال موفقیت نیست.');
+                renderPatternList(fields.candlePatterns,analysis.candlestick_patterns,'در آخرین کندل بسته‌شده الگوی شاخصی تشخیص داده نشد.');
+                renderPatternList(fields.geometricPatterns,analysis.geometric_patterns,'ساختار هندسی معتبر یا پیوت کافی هنوز شناسایی نشده است.');
+                renderPatternList(fields.waveAnalysis,[{
+                  name_fa:'موج الیوت · '+faDirection(wave.pattern),
+                  name_en:'Elliott structure',
+                  direction:wave.pattern,
+                  state:wave.status,
+                  evidence_strength:'ساختاری، نه احتمالاتی',
+                  score:0,
+                  description:(wave.phase||'مرحله نامشخص')+' · '+(wave.reason||'شواهد کافی وجود ندارد.')+
+                    (wave.invalidation_price!==null&&wave.invalidation_price!==undefined?' · سطح ابطال: '+number(wave.invalidation_price):'')
+                }],'تحلیل موج در دسترس نیست.');
                 fields.reason.textContent=s.reason||'دلیل سیگنال در دسترس نیست.';
                 fields.provider.textContent='منابع: '+(cv.providers||[]).join(' و ')+' · تطبیق: '+cv.status+
                   ' · اختلاف بیشینه: '+number(cv.max_close_discrepancy_pct)+'% · کندل بسته‌شده: '+(data.last_closed_candle_at||'—');
@@ -3005,6 +3089,11 @@ class Handler(BaseHTTPRequestHandler):
                 status.textContent='دادهٔ تازه در دسترس نیست؛ سیگنال تازه صادر نمی‌شود: '+String(error.message||error);
                 draw({candles:[]});
                 fields.action.textContent='نامشخص';
+                fields.bias.textContent='نامشخص';
+                fields.score.textContent='—';
+                renderPatternList(fields.candlePatterns,[],'دادهٔ تازه برای تحلیل الگوها در دسترس نیست.');
+                renderPatternList(fields.geometricPatterns,[],'دادهٔ تازه برای تحلیل الگوها در دسترس نیست.');
+                renderPatternList(fields.waveAnalysis,[],'دادهٔ تازه برای تحلیل موج در دسترس نیست.');
                 fields.reason.textContent='آخرین داده تأیید نشد. از سیگنال قبلی برای تصمیم تازه استفاده نکنید.';
               }finally{busy=false;button.disabled=false;}
             }
