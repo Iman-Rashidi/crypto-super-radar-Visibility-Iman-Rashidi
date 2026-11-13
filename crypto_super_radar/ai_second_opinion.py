@@ -25,12 +25,14 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
+MAX_REQUESTS_PER_MINUTE = 18
 PROMPT_VERSION = "free-second-opinion-v2"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _REQUEST_COUNTS: dict[str, int] = {}
+_MINUTE_REQUEST_TIMESTAMPS: list[float] = []
 _LOCK = threading.RLock()
 
 _PUBLIC_METRIC_KEYS = {
@@ -73,6 +75,7 @@ def ai_connection_status() -> dict[str, Any]:
         ),
         "configured": key_present,
         "requests_per_day_app_cap": MAX_REQUESTS_PER_UTC_DAY,
+        "requests_per_minute_app_cap": MAX_REQUESTS_PER_MINUTE,
         "secret_sent_to_model": False,
     }
 
@@ -325,6 +328,16 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
         cached = _CACHE.get(cache_key)
         if cached and cached[0] > now:
             return copy.deepcopy(cached[1])
+        _MINUTE_REQUEST_TIMESTAMPS[:] = [
+            stamp for stamp in _MINUTE_REQUEST_TIMESTAMPS if stamp > now - 60.0
+        ]
+        if len(_MINUTE_REQUEST_TIMESTAMPS) >= MAX_REQUESTS_PER_MINUTE:
+            return {
+                "provider": "OpenRouter", "model": model, "status": "RATE_LIMITED",
+                "status_fa": "سقف محافظه‌کارانهٔ دقیقه‌ای برنامه برای API رایگان پر شده است.",
+                "reason": "Local per-minute free-request safety cap reached.",
+                "paper_entry_eligible": False, "cost_usd": 0.0,
+            }
         if _REQUEST_COUNTS.get(day, 0) >= MAX_REQUESTS_PER_UTC_DAY:
             return {
                 "provider": "OpenRouter", "model": model, "status": "UNKNOWN",
@@ -333,6 +346,7 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
         _REQUEST_COUNTS[day] = _REQUEST_COUNTS.get(day, 0) + 1
+        _MINUTE_REQUEST_TIMESTAMPS.append(now)
 
     payload = {
         "model": model,
