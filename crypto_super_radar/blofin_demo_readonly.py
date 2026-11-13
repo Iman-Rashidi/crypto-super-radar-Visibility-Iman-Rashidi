@@ -278,6 +278,46 @@ class BloFinDemoReadOnly:
             private=True,
         )
 
+    def get_fills_history(
+        self, *, inst_id: str, order_id: str | None = None, limit: int = 100
+    ) -> Any:
+        """Read actual futures fills for an instrument or one specific order."""
+        if not inst_id or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("inst_id is required and limit must be between 1 and 100.")
+        return self._get(
+            "/api/v1/trade/fills-history",
+            params={"instId": inst_id, "orderId": order_id, "limit": str(limit)},
+            private=True,
+        )
+
+    def get_orders_history(
+        self, *, inst_id: str, limit: int = 20
+    ) -> Any:
+        """Read completed futures orders, newest first."""
+        if not inst_id or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("inst_id is required and limit must be between 1 and 100.")
+        return self._get(
+            "/api/v1/trade/orders-history",
+            params={"instId": inst_id, "limit": str(limit)},
+            private=True,
+        )
+
+    def get_positions_history(
+        self, *, inst_id: str, state: str | None = None, limit: int = 20
+    ) -> Any:
+        """Read closed/partially-closed position history with actual close time and PnL."""
+        if not inst_id or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("inst_id is required and limit must be between 1 and 100.")
+        if state is not None and state not in {
+            "partially_closed", "closed", "liquidated", "partially_liquidated", "adl"
+        }:
+            raise ValueError("Unsupported position-history state.")
+        return self._get(
+            "/api/v1/account/positions-history",
+            params={"instId": inst_id, "state": state, "limit": str(limit)},
+            private=True,
+        )
+
     def check_clock_skew(self, *, inst_id: str = "BTC-USDT") -> dict[str, int]:
         """Estimate exchange clock offset from the exchange timestamp in ticker data."""
         rows = self.get_tickers(inst_id=inst_id)
