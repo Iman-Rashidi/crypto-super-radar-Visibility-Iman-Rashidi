@@ -2788,6 +2788,15 @@ class Handler(BaseHTTPRequestHandler):
               <option value="cex:BTCUSDT">BTC / USDT</option>
               <option value="cex:ETHUSDT">ETH / USDT</option>
               <option value="cex:SOLUSDT">SOL / USDT</option>
+              <option value="cex:XRPUSDT">XRP / USDT</option>
+              <option value="cex:BNBUSDT">BNB / USDT</option>
+              <option value="cex:ADAUSDT">ADA / USDT</option>
+              <option value="cex:DOGEUSDT">DOGE / USDT</option>
+              <option value="cex:AVAXUSDT">AVAX / USDT</option>
+              <option value="cex:DOTUSDT">DOT / USDT</option>
+              <option value="cex:LTCUSDT">LTC / USDT</option>
+              <option value="cex:TRXUSDT">TRX / USDT</option>
+              <option value="cex:GRAMUSDT">GRAM / USDT</option>
             </select>
             <button type="submit">اجرای یک چرخهٔ ربات آزمایشی</button>
           </form>
@@ -2804,6 +2813,84 @@ class Handler(BaseHTTPRequestHandler):
             const ai=s.ai_connection||{},aiBox=document.getElementById('paper-bot-ai-status');
             if(aiBox)aiBox.textContent='اتصال AI: '+(ai.status_fa||'وضعیت نامشخص')+' · مدل: '+(ai.model||'ثبت نشده')+' · سقف محافظه‌کارانه: '+(ai.requests_per_day_app_cap||35)+' درخواست در روز / '+(ai.requests_per_minute_app_cap||18)+' در دقیقه (هر فرایند)';
           }catch(e){box.textContent='وضعیت حساب آزمایشی در دسترس نیست.';}
+        })();
+        </script>
+        <section class="card" id="global-market-board">
+          <h2>پایش بازارهای جهانی · آمریکا، اروپا، ETF و ارز</h2>
+          <p class="muted">این فهرست، لایهٔ دادهٔ بازارهای سنتی است و در کنار رادار رمزارز کار می‌کند. آمریکا، اروپا، ETF، جفت‌ارز و فلزات گران‌بها از مسیر مستقل داده دریافت می‌شوند؛ ساعات، ارز پایه و سطح دسترسی هر بازار جدا نگه داشته می‌شود.</p>
+          <p class="muted">اتصال دادهٔ این بخش به <code>TWELVEDATA_API_KEY</code> نیاز دارد. کلید OpenRouter جایگزین آن نیست. پلن رایگان Twelve Data شامل دادهٔ لحظه‌ای سهام آمریکا/ETF و FX است؛ پوشش گستردهٔ اروپا و کالاها به پلن بالاتر وابسته است.</p>
+          <div class="global-market-controls">
+            <button type="button" id="global-market-refresh">به‌روزرسانی بازارهای جهانی</button>
+            <span id="global-market-status" class="muted" aria-live="polite">در حال بررسی تنظیمات منبع جهانی...</span>
+          </div>
+          <div id="global-market-table" style="overflow-x:auto"></div>
+          <p class="muted">محدودیت پذیرش: قیمت‌های این پنل تک‌منبعی‌اند، دادهٔ آمریکا لزوماً فید تجمیعی SIP نیست و دادهٔ اروپا ممکن است EOD باشد. تا زمان cross-validation مستقل، بک‌تست بازارمحور و دفتر Paper چنددارایی، <strong>هیچ سیگنال ورود یا سفارش معاملاتی از این پنل مجاز نیست</strong>.</p>
+        </section>
+        <script>
+        (function(){
+          const status=document.getElementById('global-market-status');
+          const tableHost=document.getElementById('global-market-table');
+          const button=document.getElementById('global-market-refresh');
+          if(!status||!tableHost||!button)return;
+          const labelStatus={
+            API_KEY_MISSING:'کلید داده ثبت نشده',
+            OBSERVED_SINGLE_SOURCE:'داده دریافت شد · تک‌منبعی',
+            ENTITLEMENT_REQUIRED:'پلن ارائه‌دهنده کافی نیست',
+            UNKNOWN:'نامشخص',
+            STALE:'قدیمی'
+          };
+          function cell(row,value,header){
+            const node=document.createElement(header?'th':'td');
+            node.textContent=value===null||value===undefined||value===''?'—':String(value);
+            row.appendChild(node);
+          }
+          function render(data){
+            tableHost.replaceChildren();
+            const items=Array.isArray(data.items)?data.items:[];
+            if(!items.length){
+              tableHost.textContent=data.status==='LOADING'?'در حال دریافت داده‌ها؛ محدودیت نرخ ارائه‌دهنده رعایت می‌شود.':'هنوز داده‌ای برای نمایش وجود ندارد.';
+              return;
+            }
+            const table=document.createElement('table');
+            const head=document.createElement('thead');
+            const headRow=document.createElement('tr');
+            ['بازار','دارایی','نماد / بورس','قیمت','ارز','تازگی','وضعیت'].forEach(v=>cell(headRow,v,true));
+            head.appendChild(headRow);table.appendChild(head);
+            const body=document.createElement('tbody');
+            items.forEach(item=>{
+              const row=document.createElement('tr');
+              cell(row,item.asset_class+' · '+item.region);
+              cell(row,item.display_name);
+              cell(row,item.symbol+(item.mic_code?' · '+item.mic_code:''));
+              cell(row,item.price);
+              cell(row,item.currency||item.currency_hint);
+              cell(row,item.freshness);
+              cell(row,labelStatus[item.status]||item.status||'نامشخص');
+              body.appendChild(row);
+            });
+            table.appendChild(body);tableHost.appendChild(table);
+          }
+          async function refresh(force){
+            button.disabled=true;
+            status.textContent='در حال دریافت وضعیت فید جهانی...';
+            try{
+              const response=await fetch('/api/global-markets'+(force?'?refresh=1':''),{cache:'no-store'});
+              const data=await response.json();
+              if(!response.ok)throw new Error('HTTP '+response.status);
+              render(data);
+              const counts=data.counts||{};
+              status.textContent='وضعیت: '+data.status+' · منبع: '+(data.provider||'—')+
+                ' · دریافت‌شده: '+(counts.observed||0)+' / '+(counts.total||0)+
+                (data.refreshing?' · به‌روزرسانی ادامه دارد':'');
+              if(data.status==='CONFIGURATION_REQUIRED'){
+                status.textContent+=' · متغیر لازم: TWELVEDATA_API_KEY';
+              }
+            }catch(error){
+              status.textContent='فید جهانی در دسترس نیست: '+String(error.message||error);
+            }finally{button.disabled=false;}
+          }
+          button.addEventListener('click',()=>refresh(true));
+          refresh(false);
         })();
         </script>
         <section class="card" id="scan-section">
@@ -2931,7 +3018,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/paper-bot/tick" and (
                 asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS
             ):
-                raise ValueError("Paper trading accepts only BTC, ETH or SOL spot.")
+                raise ValueError("Paper trading accepts only the configured major CEX spot universe.")
             headline = form.get("headline", [""])[0].strip() if route == "/scan" else ""
             social_post = form.get("social_post", [""])[0].strip() if route == "/scan" else ""
             global JOB_FENCE_COUNTER
