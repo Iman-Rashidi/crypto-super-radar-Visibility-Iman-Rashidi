@@ -201,6 +201,7 @@ def evaluate_discovery_candidate(candidate: dict, *, now: datetime | None = None
             and (
                 security_evidence.get("flags") or security_evidence.get("reason_codes")
                 or security_evidence.get("reasons") or security_evidence.get("reason")
+                or security_evidence.get("reason_fa")
             )
         ):
             token_risk_evidence["contract_authority"] = {
