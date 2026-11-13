@@ -160,6 +160,21 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
             clock_ms=lambda: 1_800_000_000_000,
         )
 
+    def test_existing_demo_credentials_are_reused_when_trade_key_is_not_separate(self):
+        from crypto_super_radar.blofin_demo_executor import BloFinDemoTradeClient
+        with patch.dict(os.environ, {
+            "BLOFIN_DEMO_TRADE_API_KEY": "",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "",
+            "BLOFIN_DEMO_API_KEY": "existing-demo-key",
+            "BLOFIN_DEMO_API_SECRET": "existing-demo-secret",
+            "BLOFIN_DEMO_PASSPHRASE": "existing-demo-pass",
+        }, clear=False):
+            client = BloFinDemoTradeClient(session=Mock())
+        self.assertEqual(client.api_key, "existing-demo-key")
+        self.assertEqual(client.api_secret, "existing-demo-secret")
+        self.assertEqual(client.passphrase, "existing-demo-pass")
+
     def test_order_payload_is_compact_signed_and_contains_attached_tp_sl(self):
         response = self.client.place_futures_order(
             inst_id="BTC-USDT", side="buy", position_side="net", size="2.5",
