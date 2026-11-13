@@ -148,8 +148,9 @@ class TwelveDataProvider:
         )
         if not isinstance(payload, dict):
             raise DataProviderError("Twelve Data returned an invalid JSON document")
-        if str(payload.get("status", "")).lower() == "error" or payload.get("code") in {401, 403, 404, 429}:
-            code = payload.get("code")
+        raw_code = payload.get("code")
+        code = int(raw_code) if str(raw_code).isdigit() else raw_code
+        if str(payload.get("status", "")).lower() == "error" or code in {401, 403, 404, 429}:
             message = str(payload.get("message") or payload.get("error") or "provider rejected the request")[:240]
             # Never include request headers or API-key material in diagnostics.
             raise DataProviderError(f"Twelve Data error {code}: {message}")
@@ -348,7 +349,12 @@ class GlobalMarketBoard:
                     except Exception as exc:
                         message = f"{type(exc).__name__}: {str(exc)[:220]}"
                         upper = message.upper()
-                        status = "ENTITLEMENT_REQUIRED" if "403" in upper or "UPGRADE" in upper or "FORBIDDEN" in upper else "UNKNOWN"
+                        if "403" in upper or "UPGRADE" in upper or "FORBIDDEN" in upper:
+                            status = "ENTITLEMENT_REQUIRED"
+                        elif "429" in upper or "QUOTA" in upper or "RATE LIMIT" in upper:
+                            status = "RATE_LIMITED"
+                        else:
+                            status = "UNKNOWN"
                         results[instrument.instrument_id] = {
                             **instrument.to_public_dict(),
                             "status": status,
@@ -422,6 +428,7 @@ class GlobalMarketBoard:
             cache = copy.deepcopy(self._cache)
             expired = self._expires_at <= time.monotonic()
             refreshing = self._refreshing
+            last_error = self._last_error
         if force_refresh or cache is None or expired:
             if not refreshing:
                 self._start_refresh()
@@ -447,6 +454,12 @@ class GlobalMarketBoard:
         if cache is None:
             return self._missing_key_payload()
         cache["refreshing"] = refreshing
+        if expired and refreshing:
+            cache["status"] = "STALE"
+            for item in cache.get("items", []):
+                item["status"] = "UNKNOWN"
+                item["freshness"] = "STALE"
+                item["trade_eligible"] = False
         if last_error:
             cache["refresh_error"] = last_error
         return cache
