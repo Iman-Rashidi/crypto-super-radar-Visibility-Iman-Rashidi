@@ -327,7 +327,7 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
                 for part in content
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             ]
-            content = "\\n".join(text_parts)
+            content = "\n".join(text_parts)
         if not isinstance(content, str):
             raise ValueError("CONTENT_NOT_TEXT")
         if len(content) > 8_000:
