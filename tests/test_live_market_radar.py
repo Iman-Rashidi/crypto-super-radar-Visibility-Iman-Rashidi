@@ -101,6 +101,35 @@ class LiveMarketRadarTests(unittest.TestCase):
                 "BTCUSDT", "2m", self.frame, self.frame.copy(), now=self.now,
             )
 
+    def test_one_second_interval_is_supported_but_signal_requires_independent_validation(self):
+        frame = self.frame.iloc[:].copy()
+        frame.index = pd.date_range("2025-01-01T00:00:00Z", periods=len(frame), freq="1s")
+        now = datetime(2025, 1, 1, 0, 1, 0, 500000, tzinfo=timezone.utc)
+        payload = build_live_market_radar_payload(
+            "BTCUSDT", "1s", frame, None, now=now,
+            bybit_error="Bybit does not support one-second candles",
+        )
+        self.assertEqual(payload["interval"], "1s")
+        self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
+        self.assertEqual(payload["signal"]["status"], "BLOCKED")
+        self.assertIn("market_flow", payload)
+        self.assertFalse(payload["orders_submitted"])
+
+    def test_monthly_interval_uses_calendar_month_boundaries(self):
+        frame = self.frame.iloc[:4].copy()
+        frame.index = pd.to_datetime([
+            "2025-01-01T00:00:00Z", "2025-02-01T00:00:00Z",
+            "2025-03-01T00:00:00Z", "2025-04-01T00:00:00Z",
+        ])
+        now = datetime(2025, 4, 15, tzinfo=timezone.utc)
+        payload = build_live_market_radar_payload(
+            "BTCUSDT", "1M", frame, None, now=now,
+            bybit_error="Not independently validated",
+        )
+        self.assertEqual(payload["interval"], "1M")
+        self.assertEqual(payload["last_closed_candle_at"], "2025-03-01T00:00:00+00:00")
+        self.assertEqual(payload["candles"][-1]["is_closed"], False)
+
     def test_duplicate_or_malformed_candles_are_rejected(self):
         duplicate = self.frame.copy()
         duplicate.index = list(duplicate.index[:-1]) + [duplicate.index[-2]]
