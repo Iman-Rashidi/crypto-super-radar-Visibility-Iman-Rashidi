@@ -113,6 +113,8 @@ class LiveMarketRadarTests(unittest.TestCase):
         self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
         self.assertEqual(payload["signal"]["status"], "BLOCKED")
         self.assertIn("market_flow", payload)
+        self.assertIn("pressure", payload["market_flow"])
+        self.assertIn("whale_flow", payload["market_flow"])
         self.assertFalse(payload["orders_submitted"])
 
     def test_monthly_interval_uses_calendar_month_boundaries(self):
