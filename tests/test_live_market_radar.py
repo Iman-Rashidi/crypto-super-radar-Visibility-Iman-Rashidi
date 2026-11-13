@@ -59,6 +59,11 @@ class LiveMarketRadarTests(unittest.TestCase):
         self.assertTrue(payload["signal_only"])
         self.assertFalse(payload["paper_bot_connected"])
         self.assertFalse(payload["orders_submitted"])
+        self.assertIn("market_analysis", payload)
+        self.assertIn("direction", payload["market_analysis"])
+        self.assertIn("candlestick_patterns", payload["market_analysis"])
+        self.assertIn("geometric_patterns", payload["market_analysis"])
+        self.assertIn("wave_structure", payload["market_analysis"])
 
     def test_single_source_never_emits_buy_or_sell(self):
         payload = build_live_market_radar_payload(
