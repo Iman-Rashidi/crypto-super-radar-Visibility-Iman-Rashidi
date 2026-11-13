@@ -3044,7 +3044,7 @@ class Handler(BaseHTTPRequestHandler):
                 if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
                 draw(data);
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
-                const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{};
+                const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
                 fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
                 fields.entry.textContent=number(s.entry_reference_price);
@@ -3060,7 +3060,10 @@ class Handler(BaseHTTPRequestHandler):
                   ' · RSI(14): '+number(d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[d.rsi_state]||'')+')'+
                   ' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
                   ' · نسبت حجم به میانه: '+number(d.volume_ratio)+'x · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
-                fields.analysisNote.textContent=(analysis.summary||[]).join(' · ')||'امتیاز جهت بازار صرفاً تجمیع شواهد است و احتمال موفقیت نیست.';
+                const qualityLabel=({PASS:'تطبیق دو منبع موفق',FAIL:'اختلاف دو منبع؛ سیگنال مسدود',UNKNOWN:'تطبیق دو منبع نامشخص'}[quality.cross_validation_status]||'تطبیق نامشخص');
+                const freshnessLabel=quality.freshness_status==='FRESH'?'داده تازه':quality.freshness_status==='STALE'?'داده کهنه':'تازگی نامشخص';
+                fields.analysisNote.textContent='منبع تحلیل: '+(quality.pattern_data_source||'نامشخص')+' · '+qualityLabel+' · '+freshnessLabel+
+                  ' · '+((analysis.summary||[]).join(' · ')||'امتیاز جهت بازار صرفاً تجمیع شواهد است و احتمال موفقیت نیست.');
                 renderPatternList(fields.candlePatterns,analysis.candlestick_patterns,'در آخرین کندل بسته‌شده الگوی شاخصی تشخیص داده نشد.');
                 renderPatternList(fields.geometricPatterns,analysis.geometric_patterns,'ساختار هندسی معتبر یا پیوت کافی هنوز شناسایی نشده است.');
                 renderPatternList(fields.waveAnalysis,[{
