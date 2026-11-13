@@ -36,6 +36,7 @@ from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError
+from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -53,6 +54,52 @@ SCAN_WORKER_STARTED = False
 
 BLOFIN_STATUS_CACHE = {"expires_at": 0.0, "payload": None}
 BLOFIN_STATUS_LOCK = threading.Lock()
+
+AI_DIAGNOSTIC_LOCK = threading.Lock()
+AI_DIAGNOSTIC_STATE = {"day": "", "count": 0, "last_started": 0.0}
+AI_DIAGNOSTIC_MAX_PER_UTC_DAY = 3
+AI_DIAGNOSTIC_MIN_INTERVAL_SECONDS = 300
+
+
+def _run_ai_diagnostic_limited() -> dict:
+    """Cap public diagnostic requests; this function never starts a bot cycle."""
+    configured = ai_connection_status()
+    if not configured.get("configured"):
+        return {
+            "provider": "OpenRouter", "model": configured.get("model"),
+            "status": "MISSING_API_KEY",
+            "status_fa": "کلید API در محیط Render پیدا نشد؛ هیچ درخواست خارجی ارسال نشد.",
+            "probe": "NOT_RUN", "paper_entry_eligible": False, "orders_submitted": False,
+        }
+
+    now = time.monotonic()
+    day = datetime.now(timezone.utc).date().isoformat()
+    with AI_DIAGNOSTIC_LOCK:
+        if AI_DIAGNOSTIC_STATE.get("day") != day:
+            AI_DIAGNOSTIC_STATE.update(day=day, count=0, last_started=0.0)
+        elapsed = now - float(AI_DIAGNOSTIC_STATE.get("last_started") or 0.0)
+        if elapsed < AI_DIAGNOSTIC_MIN_INTERVAL_SECONDS:
+            return {
+                "provider": "OpenRouter", "model": configured.get("model"),
+                "status": "DIAGNOSTIC_COOLDOWN",
+                "status_fa": "برای جلوگیری از مصرف سهمیه، کمی بعد دوباره آزمایش کن.",
+                "retry_after_seconds": max(1, int(AI_DIAGNOSTIC_MIN_INTERVAL_SECONDS - elapsed)),
+                "paper_entry_eligible": False, "orders_submitted": False,
+            }
+        if int(AI_DIAGNOSTIC_STATE.get("count") or 0) >= AI_DIAGNOSTIC_MAX_PER_UTC_DAY:
+            return {
+                "provider": "OpenRouter", "model": configured.get("model"),
+                "status": "DAILY_DIAGNOSTIC_LIMIT",
+                "status_fa": "سقف سه آزمایش تشخیصی امروز پر شده است.",
+                "paper_entry_eligible": False, "orders_submitted": False,
+            }
+        AI_DIAGNOSTIC_STATE["last_started"] = now
+        AI_DIAGNOSTIC_STATE["count"] = int(AI_DIAGNOSTIC_STATE.get("count") or 0) + 1
+
+    result = run_openrouter_connection_diagnostic()
+    result["paper_entry_eligible"] = False
+    result["orders_submitted"] = False
+    return result
 
 
 def _blofin_demo_connection_status() -> dict:
@@ -2307,6 +2354,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
+        if parsed.path == "/api/ai/status":
+            payload = ai_connection_status()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/status":
             payload = _blofin_demo_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -3787,6 +3838,39 @@ class Handler(BaseHTTPRequestHandler):
           <div id="futures-paper-status" class="muted" style="margin-top:12px" aria-live="polite">در حال دریافت وضعیت حساب فیوچرز آزمایشی...</div>
           <script>(async function(){const box=document.getElementById('futures-paper-status');try{const r=await fetch('/futures-paper-bot/status',{cache:'no-store'});const s=await r.json();const a=s.account||{},p=s.open_position||{},risk=s.risk_controls||{};box.textContent='حالت: '+s.mode+' · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · موقعیت: '+(p.direction||'ندارد')+' '+(p.asset||'')+' · حد ضرر: '+(p.stop_loss||'—')+' · حد سود: '+(p.take_profit||'—')+' · ترمز ریسک: '+(risk.entry_allowed?'ورود مجاز':'ورود متوقف')+' · سفارش واقعی: '+(s.orders_submitted?'فعال':'غیرفعال');}catch(e){box.textContent='وضعیت حساب فیوچرز در دسترس نیست.';}})();</script>
         </section>
+        <section class="card" id="ai-diagnostic-panel">
+          <h2>آزمایش اتصال هوش مصنوعی · NVIDIA Nemotron</h2>
+          <p class="muted">این آزمون فقط یک پیام ثابت و کوتاه برای بررسی احراز هویت و پاسخ مدل می‌فرستد؛ داده بازار، اطلاعات حساب و کلید API به متن پیام اضافه نمی‌شود. هیچ چرخه معاملاتی یا موقعیت Paper اجرا نمی‌شود. سقف آزمون: ۳ بار در روز و حداقل ۵ دقیقه فاصله.</p>
+          <div id="ai-diagnostic-current" class="muted">در حال بررسی تنظیمات مدل...</div>
+          <button id="ai-diagnostic-run" type="button">آزمایش واقعی اتصال Nemotron</button>
+          <pre id="ai-diagnostic-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          <script>
+          (function(){
+            const button=document.getElementById('ai-diagnostic-run');
+            const current=document.getElementById('ai-diagnostic-current');
+            const output=document.getElementById('ai-diagnostic-result');
+            fetch('/api/ai/status',{cache:'no-store'}).then(r=>r.json()).then(s=>{
+              current.textContent='ارائه‌دهنده: '+s.provider+' · مدل: '+s.model+' · وضعیت کلید: '+s.status;
+            }).catch(()=>{current.textContent='وضعیت تنظیمات هوش مصنوعی دریافت نشد.';});
+            button.addEventListener('click',async function(){
+              button.disabled=true;
+              output.textContent='در حال ارسال درخواست تشخیصی محدود به OpenRouter...';
+              try{
+                const response=await fetch('/api/ai/diagnostic',{
+                  method:'POST',
+                  credentials:'same-origin',
+                  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                  body:'confirm=1'
+                });
+                const result=await response.json();
+                output.textContent=JSON.stringify(result,null,2);
+              }catch(error){
+                output.textContent='خطای ارتباط با مسیر تشخیصی؛ وضعیت سرویس را دوباره بررسی کن.';
+              }finally{button.disabled=false;}
+            });
+          })();
+          </script>
+        </section>
         <section class="card" id="global-market-board">
           <h2>پایش بازارهای جهانی · آمریکا، اروپا، ETF و ارز</h2>
           <p class="muted">این فهرست، لایهٔ دادهٔ بازارهای سنتی است و در کنار رادار رمزارز کار می‌کند. آمریکا، اروپا، ETF، جفت‌ارز و فلزات گران‌بها از مسیر مستقل داده دریافت می‌شوند؛ ساعات، ارز پایه و سطح دسترسی هر بازار جدا نگه داشته می‌شود.</p>
@@ -3974,7 +4058,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -3988,6 +4072,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/ai/diagnostic":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN","message":"Same-origin request required."}',
+                                      "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}',
+                                      "application/json; charset=utf-8")
+                payload = _run_ai_diagnostic_limited()
+                result_status = str(payload.get("status") or "UNKNOWN")
+                status_code = 200 if result_status == "CONNECTED" else (
+                    429 if result_status in {"RATE_LIMITED", "DIAGNOSTIC_COOLDOWN", "DAILY_DIAGNOSTIC_LIMIT"} else
+                    503 if result_status == "MISSING_API_KEY" else 502
+                )
+                return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+
             asset = _parse_scan_asset(form.get("asset", [""])[0].strip())
             if route == "/paper-bot/tick" and (
                 asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS
