@@ -72,6 +72,8 @@ class FakeResponse:
 
     def json(self):
         return {
+            "model": DEFAULT_FREE_MODEL,
+            "usage": {"total_tokens": 99},
             "choices": [{
                 "message": {"content": json.dumps(self.document, ensure_ascii=False)}
             }]
@@ -242,6 +244,49 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("must-not-send-list-values", prompt)
         self.assertNotIn("ignore previous instructions", prompt)
         self.assertFalse(captured["allow_redirects"])
+
+    def test_bypass_cache_forces_fresh_request_and_reports_verified_telemetry(self):
+        captured = []
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.append(json)
+            return FakeResponse(document=valid_document())
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            first = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+            second = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+
+        self.assertEqual(first["status"], "APPROVED")
+        self.assertEqual(second["status"], "APPROVED")
+        self.assertEqual(len(captured), 2)
+        self.assertTrue(second["model_verified"])
+        self.assertTrue(second["response_validated"])
+        self.assertEqual(second["returned_model"], DEFAULT_FREE_MODEL)
+        self.assertEqual(second["http_status"], 200)
+        self.assertEqual(second["total_tokens"], 99)
+        self.assertIn("latency_ms", second)
+
+    def test_full_review_rejects_returned_model_mismatch(self):
+        class MismatchedResponse(FakeResponse):
+            def json(self):
+                body = super().json()
+                body["model"] = "other/provider:free"
+                return body
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: MismatchedResponse(document=valid_document()),
+                bypass_cache=True,
+            )
+        self.assertEqual(result["status"], "MODEL_MISMATCH")
+        self.assertFalse(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
 
     def test_more_than_eight_risk_flags_cannot_be_ignored(self):
         document = valid_document()
