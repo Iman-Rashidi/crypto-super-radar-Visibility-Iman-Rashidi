@@ -82,7 +82,7 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     o, h, low, c = (float(last[k]) for k in ("open", "high", "low", "close"))
     fo, fh, fl, fc = (float(first[k]) for k in ("open", "high", "low", "close"))
     po, ph, pl, pc = (float(middle[k]) for k in ("open", "high", "low", "close"))
-    mo, mh, ml, mc = fo, fh, fl, fc
+    mo, mh, ml, mc = po, ph, pl, pc
     body = abs(c - o)
     candle_range = max(h - low, 1e-15)
     upper = h - max(o, c)
