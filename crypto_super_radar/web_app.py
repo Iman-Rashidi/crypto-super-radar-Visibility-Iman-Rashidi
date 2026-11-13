@@ -31,6 +31,7 @@ from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
+from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -90,6 +91,10 @@ CRYPTO_MARKET_UNIVERSE = (
 CRYPTO_MARKET_CACHE_TTL_SECONDS = 60
 CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None, "refreshing": False, "last_error": None}
 CRYPTO_MARKET_CACHE_LOCK = threading.Lock()
+
+LIVE_MARKET_RADAR_CACHE: dict[tuple[str, str], dict] = {}
+LIVE_MARKET_RADAR_CACHE_TTL_SECONDS = 8
+LIVE_MARKET_RADAR_CACHE_LOCK = threading.RLock()
 GEM_HUNTER_CACHE_TTL_SECONDS = 60
 GEM_HUNTER_CACHE = {"expires_at": 0.0, "payload": None}
 GEM_HUNTER_CACHE_LOCK = threading.Lock()
@@ -1702,6 +1707,51 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
             SCAN_RUNNING = False
 
 
+def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: bool = False) -> dict:
+    """Fetch live spot candles from two independent venues and cache briefly."""
+    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_interval = str(interval or "").strip().lower()
+    allowed_symbols = {item[0] for item in CRYPTO_MARKET_UNIVERSE}
+    if normalized_symbol not in allowed_symbols:
+        raise ValueError("نماد برای رادار زنده در فهرست بازار منتخب نیست.")
+    if normalized_interval not in INTERVAL_MS:
+        raise ValueError("بازهٔ کندل پشتیبانی نمی‌شود.")
+    key = (normalized_symbol, normalized_interval)
+    now = time.monotonic()
+    with LIVE_MARKET_RADAR_CACHE_LOCK:
+        cached = LIVE_MARKET_RADAR_CACHE.get(key)
+        if (
+            not force_refresh and cached is not None
+            and now - float(cached.get("_cached_at", 0.0)) < LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
+        ):
+            return copy.deepcopy({k: v for k, v in cached.items() if k != "_cached_at"})
+    binance_frame = ENGINE.data.binance.candles(
+        normalized_symbol, interval=normalized_interval, limit=300,
+    )
+    bybit_frame = None
+    bybit_error = None
+    try:
+        bybit_frame = ENGINE.data.bybit.candles(
+            normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=300,
+        )
+    except Exception as exc:
+        bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+    payload = build_live_market_radar_payload(
+        normalized_symbol,
+        normalized_interval,
+        binance_frame,
+        bybit_frame,
+        bybit_error=bybit_error,
+    )
+    cached_payload = {**copy.deepcopy(payload), "_cached_at": time.monotonic()}
+    with LIVE_MARKET_RADAR_CACHE_LOCK:
+        LIVE_MARKET_RADAR_CACHE[key] = cached_payload
+        while len(LIVE_MARKET_RADAR_CACHE) > 60:
+            oldest = next(iter(LIVE_MARKET_RADAR_CACHE))
+            LIVE_MARKET_RADAR_CACHE.pop(oldest, None)
+    return payload
+
+
 def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
     total = len(CRYPTO_MARKET_UNIVERSE)
     complete = len(items) >= total
@@ -1979,6 +2029,27 @@ class Handler(BaseHTTPRequestHandler):
             payload = _crypto_market_board()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/live-market-radar":
+            query = parse_qs(parsed.query)
+            symbol = query.get("symbol", ["BTCUSDT"])[0]
+            interval = query.get("interval", ["5m"])[0]
+            force_refresh = query.get("refresh", ["0"])[0] == "1"
+            try:
+                payload = _live_market_radar_payload(symbol, interval, force_refresh=force_refresh)
+                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except ValueError as exc:
+                payload = {"status": "UNKNOWN", "error": str(exc), "signal": {"signal": "UNKNOWN", "status": "BLOCKED"},
+                           "candles": [], "orders_submitted": False}
+                return self._send(400, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status": "UNKNOWN", "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                           "signal": {"signal": "UNKNOWN", "status": "BLOCKED",
+                                      "reason": "دادهٔ کندل بازار در دسترس نیست."},
+                           "candles": [], "orders_submitted": False}
+                return self._send(502, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
         if parsed.path.startswith("/jobs/"):
             job_id = parsed.path.rsplit("/", 1)[-1]
             with LOCK:
