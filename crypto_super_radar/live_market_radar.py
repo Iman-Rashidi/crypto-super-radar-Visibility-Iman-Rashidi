@@ -371,6 +371,16 @@ def build_live_market_radar_payload(
                 "kind": point["kind"],
                 "label": "مبدأ" if point_index == 0 else f"W{point_index}",
             })
+    elif raw_wave_pivots:
+        # Preserve confirmed structural swings on the chart without pretending
+        # that an ambiguous sequence is a valid numbered Elliott impulse.
+        for point in raw_wave_pivots:
+            wave_pivots.append({
+                "timestamp": point["timestamp"],
+                "price": float(point["price"]),
+                "kind": point["kind"],
+                "label": "سقف ساختاری" if point["kind"] == "HIGH" else "کف ساختاری",
+            })
     market_analysis = analyze_market_patterns(closed, pivots, wave)
     market_flow = analyze_market_flow(
         closed, aggregate_trades=aggregate_trades, order_book=order_book, now=current.to_pydatetime()
