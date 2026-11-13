@@ -178,5 +178,15 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
             self.client.get_tradable_instrument("BTC-USDT")
 
 
+    def test_order_detail_lookup_is_signed_read_only(self):
+        self.client.get_order_detail(
+            "BTC-USDT", client_order_id="0123456789abcdef0123456789abcdef"
+        )
+        args, kwargs = self.session.get.call_args
+        self.assertIn("/api/v1/trade/order-detail?", args[0])
+        self.assertIn("instId=BTC-USDT", args[0])
+        self.assertIn("clientOrderId=0123456789abcdef0123456789abcdef", args[0])
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+
 if __name__ == "__main__":
     unittest.main()
