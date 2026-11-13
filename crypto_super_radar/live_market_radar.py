@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from .elliott_waves import monitor_elliott_waves
+from .market_patterns import analyze_market_patterns
 
 INTERVAL_MS = {
     "1m": 60_000,
@@ -320,6 +321,7 @@ def build_live_market_radar_payload(
                 "kind": point["kind"],
                 "label": "مبدأ" if point_index == 0 else f"W{point_index}",
             })
+    market_analysis = analyze_market_patterns(closed, pivots, wave)
     signal = _signal(
         closed, pivots, quality_status=quality_status, freshness_status=freshness_status
     )
@@ -356,6 +358,7 @@ def build_live_market_radar_payload(
         "pivots": pivots,
         "wave_pivots": wave_pivots,
         "elliott_waves": wave,
+        "market_analysis": market_analysis,
         "signal": signal,
         "signal_only": True,
         "paper_bot_connected": False,
