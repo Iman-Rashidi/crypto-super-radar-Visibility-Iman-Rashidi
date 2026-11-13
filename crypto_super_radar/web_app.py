@@ -4935,7 +4935,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
                 expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
                 if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
-                    return self._send(401, b'{"status":"UNAUTHORIZED","message_fa":"توکن پنل معتبر نیست."}', "application/json; charset=utf-8")
+                    return self._send(401, json.dumps({"status":"UNAUTHORIZED","message_fa":"توکن پنل معتبر نیست."}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 if form.get("confirm", [""])[0] != "1" or form.get("instrument", [""])[0] != "BTC-USDT":
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
                 readiness = _blofin_demo_execution_readiness()
@@ -4951,7 +4951,7 @@ class Handler(BaseHTTPRequestHandler):
                             for item in BLOFIN_EXECUTION_JOBS.values()
                         )
                     if active:
-                        return self._send(409, b'{"status":"ALREADY_RUNNING","message_fa":"یک آزمایش دمو در حال اجراست."}', "application/json; charset=utf-8")
+                        return self._send(409, json.dumps({"status":"ALREADY_RUNNING","message_fa":"یک آزمایش دمو در حال اجراست."}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     job_id = uuid.uuid4().hex
                     _set_blofin_execution_job(
                         job_id, "queued", stage="QUEUED",
