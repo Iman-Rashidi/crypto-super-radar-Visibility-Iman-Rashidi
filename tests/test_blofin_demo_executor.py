@@ -370,5 +370,40 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             store.close()
 
 
+    def test_ambiguous_order_is_reconciled_by_client_id_without_resubmission(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        plan = build_demo_order_plan(
+            signal_record(), instrument_record(), inst_id="BTC-USDT",
+            equity_usdt=1000,
+        )
+        store.reserve_order(plan)
+        store.update_order(plan["client_order_id"], "UNKNOWN")
+        client = FakeExecutorClient()
+        client.get_order_detail = lambda inst_id, *, client_order_id: {
+            "clientOrderId": client_order_id,
+            "orderId": "exchange-order-after-reconcile",
+            "state": "live",
+        }
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=False)
+        try:
+            result = executor.reconcile_unknown_order(
+                inst_id="BTC-USDT", client_order_id=plan["client_order_id"]
+            )
+            self.assertEqual(result["status"], "ACCEPTED")
+            self.assertEqual(result["reconciliation"], "READ_ONLY")
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] == "place_order"
+                for call in client.calls
+            ))
+            self.assertEqual(
+                store.get_order(plan["client_order_id"])["status"], "ACCEPTED"
+            )
+        finally:
+            store.close()
+
 if __name__ == "__main__":
     unittest.main()
