@@ -89,6 +89,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("پوشش دادهٔ کارمزد", page)
         self.assertIn("اجزای کارمزد مشاهده‌شده", page)
         self.assertIn('action="/paper-bot/tick"', page)
+        self.assertIn('id="futures-paper-bot"', page)
+        self.assertIn('action="/futures-paper-bot/tick"', page)
+        self.assertIn('value="perp:BTCUSDT"', page)
+        self.assertIn("/futures-paper-bot/status", page)
+        self.assertIn("FUTURES_PAPER_ONLY", page)
         self.assertIn("python scripts/paper_trading_bot.py", page)
         self.assertIn("ماشین‌حساب حرفه‌ای سناریوی Spot", page)
         self.assertIn('id="calc-amount"', page)
@@ -128,6 +133,32 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('class="app-header"', page)
         self.assertIn("var(--teal)", page)
         self.assertLess(page.index('id="crypto-markets"'), page.index('id="scan-section"'))
+
+    def test_futures_paper_status_endpoint_returns_paper_only_state(self):
+        payload = {
+            "mode": "FUTURES_PAPER_ONLY",
+            "market": "USDT-M_PERPETUAL",
+            "leverage": 1.0,
+            "orders_submitted": False,
+            "account": {"balance_usd": 10_000.0, "equity_usd": 10_000.0},
+            "open_position": None,
+            "risk_controls": {"entry_allowed": True},
+        }
+        with patch.object(web_app.FUTURES_PAPER_BOT, "state", return_value=payload) as state:
+            status, _, body = self.request("GET", "/futures-paper-bot/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), payload)
+        state.assert_called_once_with()
+        self.assertFalse(json.loads(body)["orders_submitted"])
+
+    def test_futures_paper_post_rejects_spot_asset(self):
+        body = "asset=cex%3ABTCUSDT"
+        status, _, payload = self.request(
+            "POST", "/futures-paper-bot/tick", body,
+            {"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn(b"Futures paper trading accepts only", payload)
 
     def test_global_market_endpoint_is_read_only_and_passes_refresh_flag(self):
         payload = {
