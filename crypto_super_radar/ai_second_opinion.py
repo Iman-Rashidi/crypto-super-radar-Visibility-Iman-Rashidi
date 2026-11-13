@@ -188,7 +188,7 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         )
     else:
         direction_rule = "This is a SPOT LONG paper-entry review only. Short selling is not available. "
-        "\"trader\":{\"proposal\":\""+trader_choices+"\",\"reason_fa\":\"...\"},"
+        trader_choices = "LONG|NO_TRADE"
         approval_rule = (
             "Only final_rating Buy or Overweight, both risk and portfolio manager verdicts APPROVE, "
             "trader proposal LONG, and an empty risk_flags list can be APPROVED. "
