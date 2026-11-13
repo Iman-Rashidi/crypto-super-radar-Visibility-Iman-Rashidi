@@ -2937,6 +2937,7 @@ class Handler(BaseHTTPRequestHandler):
                 }
               });
               const indexByTime=new Map(bars.map((bar,i)=>[bar.time,i]));
+              const waveLabels=new Map((data.wave_pivots||[]).map(p=>[Date.parse(p.timestamp),p]));
               let prev=null;
               (data.pivots||[]).forEach(p=>{
                 const i=indexByTime.get(Date.parse(p.timestamp));
@@ -2948,9 +2949,23 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 ctx.fillStyle=p.kind==='LOW'?'#53d6a0':'#ffc66d';
                 ctx.beginPath();ctx.arc(xx,yy,5,0,Math.PI*2);ctx.fill();
+                const wavePoint=waveLabels.get(Date.parse(p.timestamp));
                 ctx.fillStyle='#edf4fb';ctx.font='11px sans-serif';
-                ctx.fillText(p.kind==='LOW'?'کف':'سقف',xx+5,yy+(p.kind==='LOW'?16:-8));
+                ctx.fillText(wavePoint?wavePoint.label:(p.kind==='LOW'?'کف':'سقف'),xx+5,yy+(p.kind==='LOW'?16:-8));
                 prev={x:xx,y:yy};
+              });
+              let wavePrev=null;
+              (data.wave_pivots||[]).forEach(p=>{
+                const i=indexByTime.get(Date.parse(p.timestamp));
+                if(i===undefined)return;
+                const point={x:x(i),y:y(p.price)};
+                if(wavePrev){
+                  ctx.save();ctx.strokeStyle='#d7a9ff';ctx.lineWidth=2.5;ctx.setLineDash([]);
+                  ctx.beginPath();ctx.moveTo(wavePrev.x,wavePrev.y);ctx.lineTo(point.x,point.y);ctx.stroke();ctx.restore();
+                }
+                ctx.fillStyle='#d7a9ff';ctx.beginPath();ctx.arc(point.x,point.y,7,0,Math.PI*2);ctx.fill();
+                ctx.fillStyle='#f5eaff';ctx.font='bold 12px sans-serif';ctx.fillText(p.label,point.x+7,point.y-9);
+                wavePrev=point;
               });
               const signal=data.signal||{};
               if(signal.entry_reference_price){
@@ -2988,6 +3003,7 @@ class Handler(BaseHTTPRequestHandler):
                 }
               }catch(error){
                 status.textContent='دادهٔ تازه در دسترس نیست؛ سیگنال تازه صادر نمی‌شود: '+String(error.message||error);
+                draw({candles:[]});
                 fields.action.textContent='نامشخص';
                 fields.reason.textContent='آخرین داده تأیید نشد. از سیگنال قبلی برای تصمیم تازه استفاده نکنید.';
               }finally{busy=false;button.disabled=false;}
