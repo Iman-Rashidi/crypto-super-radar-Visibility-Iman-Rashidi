@@ -2948,7 +2948,9 @@ class Handler(BaseHTTPRequestHandler):
               }
               items.forEach(item=>{
                 const card=document.createElement('article');card.className='live-pattern-item';
-                const title=document.createElement('strong');title.textContent=(item.name_fa||item.name_en||'الگوی ناشناخته')+' · '+faDirection(item.direction);
+                const title=document.createElement('strong');
+                const displayDirection=item.direction==='NEUTRAL'&&item.potential_direction?'گرایش '+faDirection(item.potential_direction):faDirection(item.direction);
+                title.textContent=(item.name_fa||item.name_en||'الگوی ناشناخته')+' · '+displayDirection;
                 const meta=document.createElement('p');meta.className='live-pattern-meta';
                 meta.textContent=faState(item.state)+' · قدرت شواهد: '+(item.evidence_strength||'نامشخص')+
                   (item.score?' · امتیاز: '+item.score:'');
