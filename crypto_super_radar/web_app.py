@@ -1,6 +1,7 @@
 """Dependency-light Persian web dashboard for on-demand research scans."""
 from __future__ import annotations
 
+import atexit
 import html
 import hashlib
 import hmac
@@ -1480,6 +1481,34 @@ def _get_easy_position_manager():
                 slippage_bps_per_side=risk.slippage_bps_per_side,
             )
     return _EASY_POSITION_MANAGER
+
+
+def _close_storage_resources() -> None:
+    """Close process-scoped database handles during a graceful service shutdown."""
+    with _EASY_POSITION_MANAGER_LOCK:
+        manager = _EASY_POSITION_MANAGER
+    handles = (
+        getattr(manager, "db", None),
+        STORE,
+        getattr(PAPER_BOT, "ledger", None),
+        getattr(FUTURES_PAPER_BOT, "ledger", None),
+    )
+    closed: set[int] = set()
+    for handle in handles:
+        if handle is None or id(handle) in closed:
+            continue
+        closed.add(id(handle))
+        close = getattr(handle, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                # Shutdown is best-effort; one failing adapter must not prevent
+                # the remaining process-scoped connections from being released.
+                pass
+
+
+atexit.register(_close_storage_resources)
 
 
 def _build_easy_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:

@@ -957,6 +957,27 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(payload), {"error": "job not found"})
 
+    def test_shutdown_closes_process_scoped_database_handles(self):
+        closed = []
+
+        class Closable:
+            def close(self):
+                closed.append(self)
+
+        easy_db = Closable()
+        whale_store = Closable()
+        spot_ledger = Closable()
+        futures_ledger = Closable()
+        with (
+            patch.object(web_app, "_EASY_POSITION_MANAGER", SimpleNamespace(db=easy_db)),
+            patch.object(web_app, "STORE", whale_store),
+            patch.object(web_app, "PAPER_BOT", SimpleNamespace(ledger=spot_ledger)),
+            patch.object(web_app, "FUTURES_PAPER_BOT", SimpleNamespace(ledger=futures_ledger)),
+        ):
+            web_app._close_storage_resources()
+
+        self.assertCountEqual(closed, [easy_db, whale_store, spot_ledger, futures_ledger])
+
     def test_cross_origin_scan_post_is_rejected_before_engine_execution(self):
         status, _, payload = self.request(
             "POST",
