@@ -268,6 +268,17 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.store.reserve_order(self._plan())
         self.assertTrue(self.store.has_any_orders())
 
+    def test_trade_budget_tracks_daily_count_and_signal_idempotency(self):
+        plan = self._plan()
+        self.assertFalse(self.store.has_signal(plan["signal_id"]))
+        self.store.reserve_order(plan)
+        self.assertTrue(self.store.has_signal(plan["signal_id"]))
+        budget = self.store.trade_budget_status(2)
+        self.assertEqual(budget["orders_today"], 1)
+        self.assertEqual(budget["max_orders_per_utc_day"], 2)
+        self.assertTrue(budget["daily_capacity_available"])
+        self.assertEqual(budget["unresolved_orders"], 1)
+
     def test_event_journal_is_append_only(self):
         plan = self._plan()
         self.store.reserve_order(plan)
@@ -393,7 +404,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_executor_allows_only_one_lifetime_order(self):
+    def test_executor_allows_multiple_orders_within_daily_budget(self):
         with patch.dict(os.environ, {
             "TURSO_DATABASE_URL": "",
             "TURSO_AUTH_TOKEN": "",
@@ -401,17 +412,32 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
         client = FakeExecutorClient()
-        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        policy = BloFinDemoRiskPolicy(
+            max_orders_per_utc_day=2,
+            min_seconds_between_orders=0,
+        )
+        executor = BloFinDemoExecutor(
+            client=client, store=store, policy=policy, trading_enabled=True,
+        )
         try:
-            executor.execute(
+            first = executor.execute(
                 signal_record(), inst_id="BTC-USDT", leverage=1,
                 allow_demo_orders=True,
+            )
+            second = executor.execute(
+                signal_record(signal_id="a-new-completed-candle"),
+                inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
+            )
+            self.assertEqual(first["status"], "ACCEPTED")
+            self.assertEqual(second["status"], "ACCEPTED")
+            self.assertEqual(
+                store._db.execute("SELECT COUNT(*) FROM blofin_demo_orders").fetchone()[0], 2
             )
             calls_before = len(client.calls)
             with self.assertRaises(BloFinDemoExecutionBlocked):
                 executor.execute(
-                    signal_record(signal_id="a-new-candle"), inst_id="BTC-USDT", leverage=1,
-                    allow_demo_orders=True,
+                    signal_record(signal_id="third-completed-candle"),
+                    inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
                 )
             self.assertEqual(len(client.calls), calls_before)
         finally:
