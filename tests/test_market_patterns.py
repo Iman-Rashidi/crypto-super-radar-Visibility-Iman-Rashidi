@@ -289,5 +289,53 @@ class MarketPatternTests(unittest.TestCase):
 
 
 
+    def _set_bearish_marubozu(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-1] = [110.0, 110.1, 104.9, 105.0, 1800.0]
+        return frame
+
+    def test_bearish_marubozu_after_uptrend_is_bearish_and_unconfirmed(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Bearish Marubozu"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["score"], -14)
+        self.assertEqual(pattern["trigger_price"], 104.9)
+        self.assertEqual(pattern["invalidation_price"], 110.1)
+
+    def test_bearish_marubozu_in_downtrend_is_continuation_context(self):
+        frame = self._set_bearish_marubozu(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Bearish Marubozu"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["score"], -11)
+        self.assertIn("ادامهٔ روند نزولی", pattern["description"])
+
+    def test_bearish_marubozu_rejects_long_shadows(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("high")] = 111.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Bearish Marubozu",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_bearish_marubozu_rejects_small_body(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        frame.iloc[-1] = [110.0, 112.0, 104.9, 109.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Bearish Marubozu",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
