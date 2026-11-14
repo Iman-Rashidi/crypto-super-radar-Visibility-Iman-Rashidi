@@ -46,3 +46,20 @@ The Easy Fundamental report now exposes two additional supporting modules:
   - The panel reports coverage and status but does not invent a market forecast.
 
 These are supporting diagnostics, not extra weighted score modules. The original seven-module weights and 70% minimum coverage rule are unchanged until empirical calibration. Their evidence does not alter the 12 mandatory trade gates, the Standard/Strict engines, or execution behavior. No live macro/accounting data provider is implied by this schema; absent observations remain `UNKNOWN`.
+
+
+## Event analysis / event study
+
+The Easy Fundamental report exposes `event_analysis` as a supporting diagnostic, separate from the seven weighted modules. It does not change the seven-module weights or 70% coverage threshold and cannot authorize or block a trade by itself.
+
+- Input events require an event identifier/type, a verified source URL, an event timestamp, event-window metadata, and timestamped asset/benchmark return observations.
+- At least 20 valid estimation-window observations and one event-window observation are required. Missing or malformed evidence remains `UNKNOWN`.
+- A market-model OLS regression estimates normal return: `asset_return = alpha + beta * benchmark_return`.
+- Abnormal return is `actual_return - normal_return`; the event-window abnormal returns are summed into CAR.
+- CAR significance is evaluated with a two-sided Student-t test at the 5% level, using estimation residual degrees of freedom.
+- Limitations are surfaced: window/benchmark sensitivity, possible residual autocorrelation, and confounding simultaneous events. Statistical significance does not prove causality or forecast profit.
+- The default DefiLlama provider does not supply event news or benchmark return series. Until a timestamped event/news provider and historical return feed are connected, live reports correctly show `UNKNOWN` rather than fabricate event data.
+
+The HTTP/Render and Streamlit Persian dashboards expose event status, event type, CAR, t-statistic, p-value, 5% significance and source when present.
+
+Tests cover absent event data, a controlled market-model event study, and missing source/timestamp handling.
