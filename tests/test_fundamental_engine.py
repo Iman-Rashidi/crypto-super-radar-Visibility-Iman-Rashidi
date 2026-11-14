@@ -164,8 +164,8 @@ class FundamentalReportTests(unittest.TestCase):
             "comparables": {"status": "KNOWN", "score": 85},
         }
         result = build_fundamental_report(evidence)
-        expected = sum(MODULE_WEIGHTS[key] * value["score"]
-                       for key, value in result["modules"].items()) / 100
+        expected = sum(MODULE_WEIGHTS[key] * result["modules"][key]["score"]
+                       for key in MODULE_WEIGHTS) / 100
         self.assertEqual(result["status"], "KNOWN")
         self.assertEqual(result["coverage_pct"], 100.0)
         self.assertEqual(result["score"], round(expected, 2))
