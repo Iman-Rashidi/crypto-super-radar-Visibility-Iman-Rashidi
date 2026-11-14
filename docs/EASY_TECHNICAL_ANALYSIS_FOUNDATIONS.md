@@ -203,3 +203,14 @@ Die Implementierung liegt in \`crypto_super_radar/price_action.py\` und wird als
 - Fehlende oder fehlerhafte Daten liefern UNKNOWN statt erfundener Werte.
 - Die Erweiterung wird ausschließlich als Diagnose-Metrik an die integrierte Easy-Analyse angehängt. Sie verändert weder Gate-Status noch Signal, Entry, Stop-Loss, Positionsgröße oder Order-Ausführung.
 - Standard- und Strict-Entscheidungslogik werden durch diese Diagnose nicht verändert.
+
+
+## Volumen, Gaps und Ausbrüche — Easy Diagnostics
+
+- Relative Volume (letzte abgeschlossene Kerze gegenüber dem 20-Kerzen-Durchschnitt) beschreibt Beteiligung, nicht Richtung.
+- Ein Volumen-Climax wird heuristisch ab einem Verhältnis von 2,5 erkannt und nur als möglicher Erschöpfungs-/Kapitulationshinweis ausgegeben.
+- OBV und Preis-OBV-Divergenz dienen als Warnhinweise. Eine enge Handelsspanne mit steigendem OBV wird als mögliche Akkumulation, mit fallendem OBV als mögliche Distribution markiert; dies ist kein Nachweis von Wallet-Flows.
+- Breakout-/Breakdown-Interpretation muss Widerstands-/Unterstützungszonen, relatives Volumen und einen möglichen Retest gemeinsam berücksichtigen. Ein kurzer Durchstich ist kein bestätigter Ausbruch.
+- Crypto-Gaps werden nur bei zeitlich aufeinanderfolgenden Kerzen gesucht. Fehlende Zeitintervalle sind Datenlücken, keine Kurs-Gaps. Gap-Typen (Breakaway, Runaway, Exhaustion, Common) sind heuristische Kandidaten; die häufigen Aktienmarkt-Gap-Muster sind auf 24/7-Kryptomärkten nur eingeschränkt übertragbar.
+- Elliott-Wellen werden bereits über den separaten \`elliott_wave\`-Monitor als strukturelle Hypothese ausgegeben. Sie bleiben mehrdeutigkeitsanfällig und sind weder Wahrscheinlichkeitsprognose noch Pflicht-Gate.
+- Sämtliche neuen Felder sind diagnostisch; sie ändern weder Signalrichtung noch Orderausführung und dürfen Standard/Strict nicht beeinflussen.
