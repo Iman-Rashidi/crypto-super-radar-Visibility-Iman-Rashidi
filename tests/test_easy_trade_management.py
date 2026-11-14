@@ -102,7 +102,7 @@ class EasyTradeManagementTests(unittest.TestCase):
         opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 90, 130)
         first = manager.update_position(opened["position_id"], {"open":100,"high":110,"low":99,"close":108}, atr_value=3)
         self.assertGreater(first["current_stop"], 90)
-        second = manager.update_position(opened["position_id"], {"open":108,"high":109,"low":100,"close":102}, atr_value=10)
+        second = manager.update_position(opened["position_id"], {"open":108,"high":109,"low":103,"close":104}, atr_value=10)
         self.assertGreaterEqual(second["current_stop"], first["current_stop"])
 
     def test_mental_stop_only_alerts_until_manual_close(self):
