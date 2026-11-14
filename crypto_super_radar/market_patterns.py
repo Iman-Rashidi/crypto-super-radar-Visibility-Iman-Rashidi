@@ -150,6 +150,71 @@ def _bullish_abandoned_baby_pattern(frame: pd.DataFrame, volume_ratio: float | N
         )
     return None
 
+def _rising_window_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a strict bullish Rising Window and track whether its gap remains open."""
+    if len(frame) < 6:
+        return None
+
+    first_start = max(1, len(frame) - 12)
+    for start in range(len(frame) - 2, first_start - 1, -1):
+        first, second = frame.iloc[start], frame.iloc[start + 1]
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change < 0.003:
+            continue
+
+        first_high = float(first["high"])
+        second_open = float(second["open"])
+        second_high = float(second["high"])
+        second_low = float(second["low"])
+        if not all(_finite(x) for x in (first_high, second_open, second_high, second_low)):
+            continue
+        if not (second_open > first_high and second_low > first_high and second_high >= second_open):
+            continue
+
+        later = frame.iloc[start + 2:]
+        gap_filled = not later.empty and bool(
+            (pd.to_numeric(later["low"], errors="coerce") <= first_high).any()
+        )
+        if gap_filled:
+            continue
+
+        sustained = not later.empty
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        strength = (
+            "STRONG" if sustained and volume_confirmed
+            else "MODERATE" if sustained or volume_confirmed
+            else "WEAK"
+        )
+        gap_size = second_low - first_high
+        description = (
+            "پس از زمینهٔ صعودی، کندل دوم بالاتر از سقف کندل اول باز شده و کف آن نیز بالاتر از سقف کندل اول مانده است؛ "
+            f"بنابراین شکاف صعودیِ بدون هم‌پوشانی به اندازهٔ {gap_size:.8g} تشکیل شده است. "
+            f"محدودهٔ شکاف از {first_high:.8g} تا {second_low:.8g} است. "
+        )
+        if sustained:
+            description += "کندل‌های بعدی وارد محدودهٔ شکاف نشده‌اند؛ پنجره همچنان باز و الگو پایدار است."
+        else:
+            description += "هنوز کندل بعدی برای بررسی بازماندن شکاف وجود ندارد؛ ورود قیمت به محدودهٔ شکاف این الگو را باطل می‌کند."
+        return _item(
+            name_fa="پنجرهٔ صعودی (گپ رو به بالا)",
+            name_en="Rising Window",
+            category="CANDLE",
+            direction="BULLISH" if sustained else "NEUTRAL",
+            potential_direction=None if sustained else "BULLISH",
+            state="CONFIRMED" if sustained else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 1].isoformat(),
+            score=15 if sustained else 8,
+            trigger_price=second_high,
+            invalidation_price=first_high,
+        )
+    return None
+
+
 def _morning_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect a three-candle Morning Star and confirm it only with a later close."""
     if len(frame) < 6:
@@ -692,6 +757,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     abandoned_baby = _bullish_abandoned_baby_pattern(frame, volume_ratio)
     if abandoned_baby is not None:
         out.append(abandoned_baby)
+
+    rising_window = _rising_window_pattern(frame, volume_ratio)
+    if rising_window is not None:
+        out.append(rising_window)
 
     morning_star = _morning_star_pattern(frame, volume_ratio)
     if morning_star is not None:
