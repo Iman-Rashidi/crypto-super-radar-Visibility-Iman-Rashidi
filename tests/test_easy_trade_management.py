@@ -4,6 +4,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from crypto_super_radar.database import connect_database
 from crypto_super_radar.easy_trade_management import (
     evaluate_breakout_retest, stop_execution_guidance, EasyPositionManager,
 )
@@ -17,7 +18,7 @@ class EasyTradeManagementTests(unittest.TestCase):
         low = np.full(n, 99.0)
         open_ = np.full(n, 100.0)
         volume = np.full(n, 100.0)
-        close[23], high[23], low[23], open_[23], volume[23] = 102.0, 103.0, 100.5, 100.0, 220.0
+        close[23], high[23], low[23], open_[23], volume[23] = 102.0, 103.0, 99.5, 100.0, 220.0
         if scenario == "confirm":
             close[24], high[24], low[24], open_[24] = 101.0, 102.0, 100.4, 102.0
             close[25], high[25], low[25], open_[25] = 103.0, 104.0, 100.8, 101.0
@@ -60,7 +61,7 @@ class EasyTradeManagementTests(unittest.TestCase):
         self.assertEqual(manager.get_position(opened["position_id"])["bars_held"], 0)
 
     def test_hard_stop_closes_and_journals_position(self):
-        manager = EasyPositionManager(db=__import__("sqlite3").connect(":memory:", check_same_thread=False))
+        manager = EasyPositionManager(db=connect_database(":memory:"))
         opened = manager.open_position("cex:BTCUSDT", "LONG", 2, 100, 95, 110)
         result = manager.update_position(opened["position_id"], {"open":100,"high":101,"low":94,"close":96})
         self.assertEqual(result["status"], "CLOSED")
