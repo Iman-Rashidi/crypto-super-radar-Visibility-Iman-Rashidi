@@ -67,6 +67,35 @@ class EasyPriceActionTests(unittest.TestCase):
         self.assertEqual(result["as_of"], frame.index[-1].isoformat())
         self.assertFalse(result["data_policy"]["last_candle_excluded_as_provisional"])
 
+    def test_volume_climax_and_range_obv_diagnostics_are_present(self):
+        frame = self.candles()
+        frame.iloc[-2, frame.columns.get_loc("volume")] = 20000
+        result = analyze_easy_price_action(frame)
+        self.assertTrue(result["volume"]["volume_climax"])
+        self.assertIn(result["volume"]["range_obv_behavior"], {
+            "POSSIBLE_ACCUMULATION", "POSSIBLE_DISTRIBUTION", "NO_CLEAR_RANGE_PHASE"
+        })
+
+    def test_gap_event_has_candidate_type_and_fill_status(self):
+        frame = self.candles()
+        i = 60
+        previous_close = float(frame["close"].iloc[i-1])
+        frame.iloc[i, frame.columns.get_loc("open")] = previous_close * 1.02
+        frame.iloc[i, frame.columns.get_loc("high")] = max(
+            frame.iloc[i]["open"], frame.iloc[i]["close"]
+        ) + 0.8
+        frame.iloc[i, frame.columns.get_loc("low")] = min(
+            frame.iloc[i]["open"], frame.iloc[i]["close"]
+        ) - 0.8
+        result = analyze_easy_price_action(frame, gap_threshold_pct=1.0)
+        self.assertGreaterEqual(result["gaps"]["count"], 1)
+        event = next(x for x in result["gaps"]["events"] if x["timestamp"] == frame.index[i].isoformat())
+        self.assertIn(event["status"], {"FILLED", "UNFILLED"})
+        self.assertIn(event["gap_type"], {
+            "COMMON_OR_FILLED", "UNCLASSIFIED", "BREAKAWAY_CANDIDATE",
+            "EXHAUSTION_CANDIDATE", "RUNAWAY_CANDIDATE"
+        })
+
     def test_timestamp_gap_is_not_misreported_as_price_gap(self):
         frame = self.candles()
         frame.index = frame.index.where(
