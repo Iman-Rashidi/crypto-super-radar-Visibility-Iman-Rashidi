@@ -1661,6 +1661,7 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                 "ranges": range_evidence.get("windows", {}),
                 "candles": candle_records,
                 "chart_pattern": result.metrics.get("chart_pattern"),
+                "easy_price_action": result.metrics.get("easy_price_action"),
                 "asset_regime": (trend_gate.evidence or {}).get("asset_regime") if trend_gate else None,
                 "benchmark_regime": (regime_gate.evidence or {}).get("regime") if regime_gate else None,
             },
@@ -6062,7 +6063,7 @@ async function refreshExecutionReadiness(){
                 "function cell(tag,text){const e=document.createElement(tag);e.textContent=text??'UNKNOWN';return e;}"
                 "function table(container,headers,rows){const t=document.createElement('table'),h=document.createElement('thead'),hr=document.createElement('tr');headers.forEach(v=>hr.appendChild(cell('th',v)));h.appendChild(hr);t.appendChild(h);const b=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach(v=>tr.appendChild(cell('td',v)));b.appendChild(tr);});t.appendChild(b);container.replaceChildren(t);}"
                 "function renderMarket(m){const box=document.getElementById('market-summary');"
-                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status],['الگوی هندسی',(m.chart_pattern||{}).pattern||'نامشخص'],['وضعیت الگو',(m.chart_pattern||{}).status||'UNKNOWN'],['تأیید شکست با حجم',(m.chart_pattern||{}).breakout_confirmation||'UNKNOWN'],['حجم شکست / میانه ۲۰ کندل',(m.chart_pattern||{}).breakout_volume_ratio||'UNKNOWN']];"
+                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status],['الگوی هندسی',(m.chart_pattern||{}).pattern||'نامشخص'],['وضعیت الگو',(m.chart_pattern||{}).status||'UNKNOWN'],['تأیید شکست با حجم',(m.chart_pattern||{}).breakout_confirmation||'UNKNOWN'],['حجم شکست / میانه ۲۰ کندل',(m.chart_pattern||{}).breakout_volume_ratio||'UNKNOWN'],['ناحیه‌های حمایت',JSON.stringify((m.easy_price_action||{}).support_resistance?.support_zones||[])],['ناحیه‌های مقاومت',JSON.stringify((m.easy_price_action||{}).support_resistance?.resistance_zones||[])],['وضعیت خط روند',(m.easy_price_action||{}).trendlines?.classification||'UNKNOWN'],['حجم نسبی ۲۰ کندل',(m.easy_price_action||{}).volume?.relative_volume_20??'UNKNOWN'],['جهت OBV',(m.easy_price_action||{}).volume?.obv_direction||'UNKNOWN'],['تعداد شکاف واقعی قیمت',(m.easy_price_action||{}).gaps?.count??'UNKNOWN']];"
                 "box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));const strong=cell('strong',v);d.appendChild(strong);box.appendChild(d);});"
                 "const labels={'7':'۷ روز','30':'۳۰ روز','90':'۹۰ روز','365':'۳۶۵ روز'};"
                 "const rows=Object.entries(m.ranges||{}).map(([k,v])=>[labels[k]||k,v.status,v.low,v.high,v.candle_count,v.coverage_pct]);"
