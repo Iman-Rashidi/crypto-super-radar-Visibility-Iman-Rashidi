@@ -615,6 +615,30 @@ class BloFinDemoEventStore:
             })
         return events
 
+    def recent_all_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent append-only lifecycle events across every local Demo order."""
+        bounded = max(1, min(int(limit), 200))
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT sequence, client_order_id, event_type, occurred_at, payload_json
+                FROM blofin_demo_execution_events ORDER BY sequence DESC LIMIT ?""",
+                (bounded,),
+            ).fetchall()
+        events = []
+        for row in reversed(rows):
+            try:
+                payload = json.loads(row["payload_json"])
+            except Exception:
+                payload = {}
+            events.append({
+                "sequence": row["sequence"],
+                "client_order_id": row["client_order_id"],
+                "event_type": row["event_type"],
+                "occurred_at": row["occurred_at"],
+                "payload": payload,
+            })
+        return events
+
     def get_order(self, client_order_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(
