@@ -1129,18 +1129,6 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if three_inside_up is not None:
         out.append(three_inside_up)
 
-    evening_star = _evening_star_pattern(frame, volume_ratio)
-    if evening_star is not None:
-        out.append(evening_star)
-
-    three_black_crows = _three_black_crows_pattern(frame, volume_ratio)
-    if three_black_crows is not None:
-        out.append(three_black_crows)
-
-    hanging_man = _hanging_man_pattern(frame, volume_ratio)
-    if hanging_man is not None:
-        out.append(hanging_man)
-
     bullish_engulfing = _bullish_engulfing_pattern(frame, volume_ratio)
     if bullish_engulfing is not None:
         out.append(bullish_engulfing)
@@ -1297,6 +1285,19 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if h < ph and low > pl:
         add("کندل داخلی", "Inside Bar", "NEUTRAL",
             "دامنهٔ کندل آخر داخل دامنهٔ کندل قبلی است؛ شکست هر طرف می‌تواند جهت حرکت بعدی را روشن کند.", 0, strength="WEAK")
+
+    # Prioritize these reversal formations in the five-pattern dashboard summary.
+    evening_star = _evening_star_pattern(frame, volume_ratio)
+    if evening_star is not None:
+        out.append(evening_star)
+
+    three_black_crows = _three_black_crows_pattern(frame, volume_ratio)
+    if three_black_crows is not None:
+        out.append(three_black_crows)
+
+    hanging_man = _hanging_man_pattern(frame, volume_ratio)
+    if hanging_man is not None:
+        out.append(hanging_man)
 
     return out[-5:]
 
