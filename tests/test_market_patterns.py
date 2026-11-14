@@ -681,6 +681,58 @@ class MarketPatternTests(unittest.TestCase):
         self.assertFalse(any(p["name_en"] == "Bullish Marubozu" for p in analysis["candlestick_patterns"]))
 
 
+
+    def _set_bearish_abandoned_baby(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        pattern_start = -4 if with_confirmation else -3
+        frame.iloc[pattern_start] = [100.0, 108.0, 99.0, 107.0, 1500.0]
+        frame.iloc[pattern_start + 1] = [110.0, 111.0, 109.5, 110.0, 900.0]
+        frame.iloc[pattern_start + 2] = [108.5, 109.0, 105.0, 105.5, 1800.0]
+        if with_confirmation:
+            frame.iloc[-1] = [105.0, 106.0, 103.0, 104.0, 1900.0]
+        return frame
+
+    def test_bearish_abandoned_baby_requires_both_full_range_gaps_after_uptrend(self):
+        frame = self._set_bearish_abandoned_baby(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Abandoned Baby")
+        self.assertEqual(pattern["name_fa"], "نوزاد رهاشدهٔ نزولی")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 105.0)
+        self.assertEqual(pattern["invalidation_price"], 108.0)
+
+    def test_bearish_abandoned_baby_confirmed_by_follow_through_close(self):
+        frame = self._set_bearish_abandoned_baby(candle_frame("up"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Abandoned Baby")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_bearish_abandoned_baby_rejected_without_prior_uptrend(self):
+        frame = self._set_bearish_abandoned_baby(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Abandoned Baby" for p in analysis["candlestick_patterns"]))
+
+    def test_bearish_abandoned_baby_rejected_when_doji_overlaps_first_candle(self):
+        frame = self._set_bearish_abandoned_baby(candle_frame("up"))
+        frame.iloc[-2] = [108.0, 111.0, 107.5, 108.2, 900.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Abandoned Baby" for p in analysis["candlestick_patterns"]))
+
+    def test_bearish_abandoned_baby_rejected_when_third_candle_overlaps_doji(self):
+        frame = self._set_bearish_abandoned_baby(candle_frame("up"))
+        frame.iloc[-1] = [109.0, 110.0, 105.0, 105.5, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Abandoned Baby" for p in analysis["candlestick_patterns"]))
+
+    def test_bearish_abandoned_baby_rejected_when_middle_candle_is_not_doji(self):
+        frame = self._set_bearish_abandoned_baby(candle_frame("up"))
+        frame.iloc[-2] = [110.0, 111.0, 109.5, 109.0, 900.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Abandoned Baby" for p in analysis["candlestick_patterns"]))
+
     def _set_bullish_abandoned_baby(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
         start = -4 if with_confirmation else -3
         frame.iloc[start] = [100.0, 101.0, 93.0, 94.0, 1500.0]
