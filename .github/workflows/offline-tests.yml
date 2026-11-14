@@ -4,12 +4,14 @@ on:
     branches:
       - main
       - feature/blofin-demo-adapter
+      - feature/easy-trader-candlestick-engine
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
       - main
       - feature/multi-stage-confirmation-engine
       - feature/blofin-demo-adapter
+      - feature/easy-trader-candlestick-engine
 jobs:
   test:
     runs-on: ubuntu-latest
