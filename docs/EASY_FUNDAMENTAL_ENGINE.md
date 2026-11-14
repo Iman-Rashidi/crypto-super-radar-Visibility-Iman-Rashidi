@@ -152,3 +152,29 @@ The Easy Fundamental equity diagnostics now expose KGV (P/E) and PEG alongside E
 - Crypto/token assets return NOT_APPLICABLE for company EPS/KGV/PEG. Crypto valuation remains on protocol metrics such as market-cap/FDV-to-revenue and TVL multiples.
 - KGV/PEG are supporting diagnostics only. They do not alter the seven weighted modules, 70% coverage threshold, 12 mandatory trade gates, Standard/Strict engines or order execution.
 - Tests cover PEG calculation, missing/zero/negative growth, no substitution of historical growth, negative EPS and ESG diagnostic isolation.
+
+
+## Same-sector company comparison and Debt-to-Equity (D/E)
+
+These are company/equity diagnostics, separate from crypto-token comparables.
+
+### Comparative company analysis
+- Compares the subject company with peers in the same declared sector and subsector.
+- Peer market capitalization must be between 50% and 200% of the subject company.
+- Company and peer records must have valid source URLs and observation timestamps.
+- Fiscal reporting period, reporting currency and accounting basis must match exactly. Non-matching peers are excluded and listed; no silent currency conversion or period mixing occurs.
+- Metrics are compared independently when present: revenue growth, operating margin, net margin, ROE, D/E, interest coverage, P/E, P/B and dividend yield.
+- The dashboard reports peer median, range, peer count and relative difference. It does not create a composite score or buy/sell signal.
+- Management quality, brand strength and market reputation remain sourced qualitative context, never invented numeric scores.
+- Banking, insurance and other regulated financial businesses may need industry-specific leverage metrics and should not be judged using generic D/E thresholds.
+
+### Debt-to-Equity
+- D/E = total liabilities / total shareholders' equity.
+- Requires a company/equity asset class, non-negative liabilities, strictly positive equity, source URL and observation timestamp.
+- Zero or negative equity makes D/E UNKNOWN; missing inputs are null, never zero.
+- Interest coverage (EBIT / interest expense) is displayed as a separate supporting measure when both sourced inputs are available.
+- Peer and industry median comparisons are optional and only shown when supplied with the same source/timestamp.
+- These metrics are diagnostic-only; neither enters the seven weighted Fundamental modules or changes 70% coverage, 12 mandatory trade gates, or authorization.
+
+### Data contract
+Company and each peer record use: `asset_class`, `symbol`/ `name`, `sector`, `subsector`, `market_cap`, `reporting_period`, `currency`, `accounting_basis`, `source`, `observed_at_utc`, plus any available numeric comparison metrics. The company-level D/E input uses `total_liabilities`, `total_equity`, optional `ebit` and `interest_expense`, and optional peer/industry D/E medians.
