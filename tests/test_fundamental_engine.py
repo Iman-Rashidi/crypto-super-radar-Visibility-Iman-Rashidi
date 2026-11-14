@@ -420,6 +420,17 @@ class EPSAnalysisTests(unittest.TestCase):
         self.assertIsNone(result["peg_ratio"])
         self.assertEqual(result["checks"]["peg_ratio"], "UNKNOWN")
 
+    def test_missing_source_withholds_eps_kgv_and_peg_values(self):
+        result = eps_analysis({"asset_class": "equity", "net_income": 100,
+            "weighted_average_shares": 10, "current_price": 20,
+            "expected_eps_growth_pct": 20})
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(result["basic_eps"])
+        self.assertIsNone(result["pe_ratio"])
+        self.assertIsNone(result["peg_ratio"])
+        self.assertEqual(result["checks"]["pe_ratio"], "UNKNOWN")
+        self.assertEqual(result["checks"]["peg_ratio"], "UNKNOWN")
+
     def test_negative_eps_does_not_produce_pe(self):
         result = eps_analysis({"asset_class": "equity", "net_income": -100,
             "weighted_average_shares": 10, "current_price": 5,
