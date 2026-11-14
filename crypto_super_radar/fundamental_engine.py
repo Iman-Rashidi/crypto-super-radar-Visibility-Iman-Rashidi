@@ -62,13 +62,16 @@ def industry_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
             unknown.append(key)
         else:
             scores[key] = value
-    if not scores:
-        return {"status": "UNKNOWN", "score": None, "known_criteria": [],
-                "unknown_criteria": unknown, "reason": "No valid, sourced industry criteria."}
-    # Equal weights avoid pretending unsupported sector-specific weights are calibrated.
-    score = sum(scores.values()) / len(scores)
-    return {"status": "PARTIAL" if unknown else "KNOWN", "score": round(score, 2),
-            "known_criteria": sorted(scores), "unknown_criteria": unknown}
+    result = {"status": "UNKNOWN", "score": None, "known_criteria": [],
+              "unknown_criteria": unknown, "reason": "No valid, sourced industry criteria."}
+    if scores:
+        # Equal weights avoid pretending unsupported sector-specific weights are calibrated.
+        score = sum(scores.values()) / len(scores)
+        result.update({"status": "PARTIAL" if unknown else "KNOWN", "score": round(score, 2),
+                       "known_criteria": sorted(scores)})
+    if isinstance(evidence.get("evidence"), Mapping):
+        result["evidence"] = dict(evidence["evidence"])
+    return result
 
 
 def discounted_protocol_cashflows(
@@ -165,6 +168,8 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
         valid = score is not None and 0 <= score <= 100
         modules[name] = ({"status": "KNOWN", "score": score} if valid else
                          {"status": "UNKNOWN", "score": None, "reason": "Valid sourced score not supplied."})
+        if isinstance(item, Mapping) and isinstance(item.get("evidence"), Mapping):
+            modules[name]["evidence"] = dict(item["evidence"])
     modules["industry"] = industry_analysis(evidence.get("industry", {}))
     for name in ("dcf", "comparables"):
         item = evidence.get(name)
@@ -172,6 +177,8 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
         valid = score is not None and 0 <= score <= 100
         modules[name] = ({"status": "KNOWN", "score": score} if valid else
                          {"status": "UNKNOWN", "score": None, "reason": "Valid valuation score not supplied."})
+        if isinstance(item, Mapping) and isinstance(item.get("evidence"), Mapping):
+            modules[name]["evidence"] = dict(item["evidence"])
     known_weight = sum(MODULE_WEIGHTS[name] for name, item in modules.items() if item["score"] is not None)
     coverage = known_weight / sum(MODULE_WEIGHTS.values()) * 100
     score = None
