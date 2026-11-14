@@ -380,6 +380,14 @@ class EasyModeEngine:
             "portfolio_stress_test": stress,
             "fractional_kelly": kelly,
             "leverage_margin_estimate": leverage_margin,
+            "portfolio_correlation_analysis": {
+                "status": "UNKNOWN",
+                "reason": "No synchronized return histories for at least two portfolio assets were supplied to this Easy scan.",
+            },
+            "beta_hedge_estimate": {
+                "status": "UNKNOWN",
+                "reason": "A validated hedge benchmark return series and price were not supplied.",
+            },
             "strategy_style": strategy_style,
             "strategy_horizon": STRATEGY_STYLE_GUIDE.get(strategy_style, {"holding_horizon": "not_selected"}).get("holding_horizon"),
             "timeframe_conflict": mtf.get("conflict", "UNKNOWN"),
