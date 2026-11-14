@@ -290,6 +290,83 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
                 "golden_zone": {"lower": min(levels["50.0%"], levels["61.8%"]), "upper": max(levels["50.0%"], levels["61.8%"])},
             }
 
+    # Money Flow Index (MFI 14): price-weighted volume pressure.
+    typical_price = (high + low + close) / 3.0
+    raw_money_flow = typical_price * volume
+    typical_delta = typical_price.diff()
+    positive_flow = raw_money_flow.where(typical_delta > 0, 0.0).rolling(14, min_periods=14).sum()
+    negative_flow = raw_money_flow.where(typical_delta < 0, 0.0).rolling(14, min_periods=14).sum()
+    mfi_ratio = positive_flow / negative_flow.replace(0, np.nan)
+    mfi_series = 100.0 - 100.0 / (1.0 + mfi_ratio)
+    mfi_series = mfi_series.where(negative_flow > 0, 100.0).where(positive_flow > 0, 0.0)
+    mfi_value = float(mfi_series.iloc[-1]) if _finite(mfi_series.iloc[-1]) else None
+    mfi_previous = float(mfi_series.iloc[-2]) if len(mfi_series) > 1 and _finite(mfi_series.iloc[-2]) else None
+    mfi_state = "UNKNOWN" if mfi_value is None else "OVERBOUGHT" if mfi_value > 80 else "OVERSOLD" if mfi_value < 20 else "NEUTRAL"
+    mfi_midline = "UNKNOWN" if mfi_value is None or mfi_previous is None else (
+        "BULLISH_CROSS" if mfi_previous <= 50 < mfi_value else
+        "BEARISH_CROSS" if mfi_previous >= 50 > mfi_value else "NONE"
+    )
+    mfi_array = mfi_series.to_numpy(dtype=float)
+    mfi_divergence = "NONE"
+    if len(price_highs) == 2 and all(_finite(mfi_array[i]) for i, _ in price_highs):
+        (i1, p1), (i2, p2) = price_highs
+        if p2 > p1 and mfi_array[i2] < mfi_array[i1] - 2:
+            mfi_divergence = "BEARISH"
+    if mfi_divergence == "NONE" and len(price_lows) == 2 and all(_finite(mfi_array[i]) for i, _ in price_lows):
+        (i1, p1), (i2, p2) = price_lows
+        if p2 < p1 and mfi_array[i2] > mfi_array[i1] + 2:
+            mfi_divergence = "BULLISH"
+    mfi_support_resistance = "UNKNOWN"
+    if len(close) >= 21 and mfi_value is not None:
+        if last <= float(low.iloc[-21:-1].min()) * 1.01 and mfi_value < 20 and mfi_previous is not None and mfi_value > mfi_previous:
+            mfi_support_resistance = "POTENTIAL_BULLISH_SUPPORT_BOUNCE"
+        elif last >= float(high.iloc[-21:-1].max()) * 0.99 and mfi_value > 80 and mfi_previous is not None and mfi_value < mfi_previous:
+            mfi_support_resistance = "POTENTIAL_BEARISH_RESISTANCE_REJECTION"
+
+    # Detrended Price Oscillator (DPO 20), intentionally lagged for cycle analysis.
+    dpo_period = 20
+    dpo_shift = dpo_period // 2 + 1
+    dpo_sma = close.rolling(dpo_period, min_periods=dpo_period).mean()
+    dpo_series = close - dpo_sma.shift(dpo_shift)
+    dpo_value = float(dpo_series.iloc[-1]) if _finite(dpo_series.iloc[-1]) else None
+    dpo_previous = float(dpo_series.iloc[-2]) if len(dpo_series) > 1 and _finite(dpo_series.iloc[-2]) else None
+    dpo_zero = "UNKNOWN" if dpo_value is None or dpo_previous is None else (
+        "BULLISH_ZERO_CROSS" if dpo_previous <= 0 < dpo_value else
+        "BEARISH_ZERO_CROSS" if dpo_previous >= 0 > dpo_value else
+        "ABOVE_ZERO" if dpo_value > 0 else "BELOW_ZERO"
+    )
+    dpo_array = dpo_series.to_numpy(dtype=float)
+    dpo_divergence = "NONE"
+    if len(price_highs) == 2 and all(_finite(dpo_array[i]) for i, _ in price_highs):
+        (i1, p1), (i2, p2) = price_highs
+        if p2 > p1 and dpo_array[i2] < dpo_array[i1]:
+            dpo_divergence = "BEARISH"
+    if dpo_divergence == "NONE" and len(price_lows) == 2 and all(_finite(dpo_array[i]) for i, _ in price_lows):
+        (i1, p1), (i2, p2) = price_lows
+        if p2 < p1 and dpo_array[i2] > dpo_array[i1]:
+            dpo_divergence = "BULLISH"
+
+    # Rate of Change (ROC 10), percentage momentum with no fixed extremes.
+    roc_period = 10
+    roc_series = (close / close.shift(roc_period) - 1.0) * 100.0
+    roc_value = float(roc_series.iloc[-1]) if _finite(roc_series.iloc[-1]) else None
+    roc_previous = float(roc_series.iloc[-2]) if len(roc_series) > 1 and _finite(roc_series.iloc[-2]) else None
+    roc_zero = "UNKNOWN" if roc_value is None or roc_previous is None else (
+        "BULLISH_ZERO_CROSS" if roc_previous <= 0 < roc_value else
+        "BEARISH_ZERO_CROSS" if roc_previous >= 0 > roc_value else
+        "ABOVE_ZERO" if roc_value > 0 else "BELOW_ZERO"
+    )
+    roc_array = roc_series.to_numpy(dtype=float)
+    roc_divergence = "NONE"
+    if len(price_highs) == 2 and all(_finite(roc_array[i]) for i, _ in price_highs):
+        (i1, p1), (i2, p2) = price_highs
+        if p2 > p1 and roc_array[i2] < roc_array[i1]:
+            roc_divergence = "BEARISH"
+    if roc_divergence == "NONE" and len(price_lows) == 2 and all(_finite(roc_array[i]) for i, _ in price_lows):
+        (i1, p1), (i2, p2) = price_lows
+        if p2 < p1 and roc_array[i2] > roc_array[i1]:
+            roc_divergence = "BULLISH"
+
     return {
         "status": "KNOWN",
         "moving_averages": {
@@ -309,6 +386,24 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "histogram": float(macd_hist.iloc[-1]) if _finite(macd_hist.iloc[-1]) else None,
             "crossover": macd_cross, "zero_line": macd_zero, "divergence": macd_divergence,
         },
+        "mfi": {
+            "period": 14, "value": mfi_value, "previous": mfi_previous,
+            "state": mfi_state, "overbought_threshold": 80, "oversold_threshold": 20,
+            "midline_50": mfi_midline, "divergence": mfi_divergence,
+            "support_resistance_context": mfi_support_resistance,
+            "trend_confirmation_above_50": mfi_value is not None and mfi_value > 50,
+        },
+        "dpo": {
+            "period": dpo_period, "shift": dpo_shift, "value": dpo_value,
+            "previous": dpo_previous, "zero_line": dpo_zero,
+            "divergence": dpo_divergence, "trend_identification": "NOT_SUITABLE_CYCLE_ONLY",
+            "overbought_oversold": "HISTORICAL_ASSET_SPECIFIC_LEVELS_ONLY",
+        },
+        "roc": {
+            "period": roc_period, "value_pct": roc_value, "previous_pct": roc_previous,
+            "zero_line": roc_zero, "divergence": roc_divergence,
+            "overbought_oversold": "NO_STANDARD_THRESHOLDS_USE_HISTORICAL_EXTREMES",
+        },
         "fibonacci": fib,
         "parabolic_sar": {
             "value": sar_current, "trend": sar_trend, "price_relation": sar_relation, "last_flip": sar_flip,
@@ -324,5 +419,5 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "state": rsi_state, "midline_50": midline,
             "divergence": rsi_divergence, "trendline_breakout": rsi_trendline,
         },
-        "summary_fa": "MA جهت روند، OBV همراهی حجم، RSI و MACD مومنتوم، فیبوناچی نواحی اصلاح، SAR جهت و حد متحرک، و ATR فقط نوسان را می‌سنجند؛ هیچ‌کدام به‌تنهایی مجوز سفارش نیستند.",
+        "summary_fa": "MA جهت روند، OBV و MFI جریان حجم و پول، RSI و MACD و ROC مومنتوم، DPO چرخه قیمت، فیبوناچی نواحی اصلاح، SAR حد متحرک، و ATR نوسان را می‌سنجند؛ هیچ‌کدام به‌تنهایی مجوز سفارش نیستند.",
     }
