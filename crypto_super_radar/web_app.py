@@ -5489,9 +5489,14 @@ async function refreshExecutionReadiness(){
                   ' · OBV: '+number(obv.value)+' · روند OBV: '+(obv.trend||'نامشخص')+' · واگرایی OBV: '+(divLabel[obv.divergence]||'نامشخص')+' · تأیید شکست: '+(obv.breakout_confirmation||'نامشخص')+
                   ' · RSI(14): '+number(rsiTech.value??d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[rsiTech.state||d.rsi_state]||'')+')'+
                   ' · عبور RSI از ۵۰: '+(rsiTech.midline_50||'نامشخص')+' · واگرایی RSI: '+(divLabel[rsiTech.divergence]||'نامشخص')+' · شکست خط روند RSI: '+(rsiTech.trendline_breakout||'نامشخص')+
-                  ' · ADX(14): '+number(d.adx14)+' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
+                  ' · MACD(12,26,9): '+number((tech.macd||{}).line)+' / Signal: '+number((tech.macd||{}).signal)+' / Histogram: '+number((tech.macd||{}).histogram)+
+                  ' · تقاطع MACD: '+((tech.macd||{}).crossover||'نامشخص')+' · خط صفر MACD: '+((tech.macd||{}).zero_line||'نامشخص')+' · واگرایی MACD: '+((tech.macd||{}).divergence||'نامشخص')+
+                  ' · Parabolic SAR: '+number((tech.parabolic_sar||{}).value)+' · روند SAR: '+((tech.parabolic_sar||{}).trend||'نامشخص')+' · آخرین چرخش SAR: '+((tech.parabolic_sar||{}).last_flip||'NONE')+
+                  ' · ATR(14): '+number((tech.atr||{}).value)+' ('+number((tech.atr||{}).percentage)+'%) · فاصله حدضرر 2×ATR: '+number((((tech.atr||{}).risk_references)||{}).stop_distance_2x)+
                   ' · RVOL کندلی: '+number(d.volume_ratio)+'x · واگرایی پیوت RSI: '+(divergence.type||'NONE')+
-                  ' · فیبوناچی: '+(fib.status||'نامشخص')+' '+number(fib.retracement)+' · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
+                  ' · فیبوناچی: '+((tech.fibonacci||{}).status||fib.status||'نامشخص')+' · جهت موج: '+((tech.fibonacci||{}).direction||'نامشخص')+
+                  ' · نزدیک‌ترین سطح فیبوناچی: '+((((tech.fibonacci||{}).nearest_level)||{}).level||'نامشخص')+' در '+number((((tech.fibonacci||{}).nearest_level)||{}).price)+
+                  ' · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
                 const qualityLabel=({PASS:'تطبیق دو منبع موفق',FAIL:'اختلاف دو منبع؛ سیگنال مسدود',UNKNOWN:'تطبیق دو منبع نامشخص'}[quality.cross_validation_status]||'تطبیق نامشخص');
                 const freshnessLabel=quality.freshness_status==='FRESH'?'داده تازه':quality.freshness_status==='STALE'?'داده کهنه':'تازگی نامشخص';
                 fields.analysisNote.textContent='منبع تحلیل: '+(quality.pattern_data_source||'نامشخص')+' · '+qualityLabel+' · '+freshnessLabel+
