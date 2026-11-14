@@ -101,3 +101,29 @@ The Easy Fundamental report exposes `sector_rotation` as a supporting market dia
 - No automatic portfolio overweight, allocation change or trade authorization is produced.
 
 Both modules are displayed in the Persian Streamlit Fundamental panel and the default HTTP/Render dashboard. They do not change the seven-module weights, 70% coverage threshold, mandatory trade gates, Standard/Strict engines or order execution.
+
+
+## Share buyback analysis
+
+The Easy Fundamental report exposes `share_buybacks` as an evidence-only equity diagnostic, outside the seven weighted modules.
+
+- Only completed repurchases are counted. An authorization or announced maximum is not treated as executed activity.
+- Inputs can include completed shares repurchased, shares outstanding before/after, average repurchase price, current price reference, cash spent and debt-funded amount.
+- Buyback yield is completed shares repurchased divided by pre-buyback shares outstanding. Share-count reduction is calculated from the before/after share counts.
+- The dashboard reports debt funding share, repurchase price premium/discount versus the supplied current-price reference and mechanical EPS accretion assuming unchanged net income.
+- Debt funding and repurchases above the supplied current-price reference are review flags, not automatic sell signals.
+- Mechanical EPS accretion is explicitly not treated as operating earnings growth. Missing source URL or observation time keeps evidence UNKNOWN.
+
+## EPS analysis
+
+The Easy Fundamental report exposes `eps_analysis` as an evidence-only equity diagnostic, outside the seven weighted modules.
+
+- Basic EPS = (net income - preferred dividends) / weighted-average common shares.
+- Diluted EPS uses diluted weighted-average shares when supplied.
+- Adjusted EPS is calculated from adjusted net income when supplied; it is not substituted for reported EPS.
+- P/E = current share price / positive basic EPS. P/E is omitted for zero or negative EPS.
+- Historical EPS CAGR and forecast-vs-actual EPS change are displayed only when the required sourced inputs exist.
+- EPS increases can result from repurchases or accounting effects; the module does not infer better operating performance from EPS alone.
+- Missing source URL or observation timestamp keeps the checks UNKNOWN. Crypto/token assets return NOT_APPLICABLE, not a negative score.
+
+Both diagnostics are shown in Persian Streamlit and HTTP/Render dashboards. They do not change the seven weighted modules, 70% coverage threshold, mandatory trade gates, Standard/Strict engines or order execution.
