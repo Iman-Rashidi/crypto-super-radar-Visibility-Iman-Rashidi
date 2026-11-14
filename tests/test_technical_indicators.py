@@ -40,6 +40,25 @@ class EasyTraderTechnicalIndicatorTests(unittest.TestCase):
         self.assertAlmostEqual(bands["upper"], middle * 1.05)
         self.assertAlmostEqual(bands["lower"], middle * 0.95)
 
+    def test_macd_sar_atr_and_fibonacci_sections_are_returned(self):
+        result = analyze_technical_indicators(self.candles())
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["macd"]["fast_period"], 12)
+        self.assertEqual(result["macd"]["slow_period"], 26)
+        self.assertEqual(result["macd"]["signal_period"], 9)
+        self.assertIsNotNone(result["macd"]["histogram"])
+        self.assertIn(result["macd"]["crossover"], {"BULLISH_CROSS", "BEARISH_CROSS", "NONE", "UNKNOWN"})
+        self.assertIsNotNone(result["parabolic_sar"]["value"])
+        self.assertIn(result["parabolic_sar"]["trend"], {"BULLISH", "BEARISH"})
+        self.assertGreater(result["atr"]["value"], 0)
+        self.assertEqual(result["atr"]["period"], 14)
+        self.assertEqual(result["atr"]["directional_signal"], "NONE_VOLATILITY_ONLY")
+        self.assertIn("risk_references", result["atr"])
+        fib = result["fibonacci"]
+        if fib["status"] == "CALCULATED":
+            self.assertEqual(set(fib["levels"]), {"23.6%", "38.2%", "50.0%", "61.8%", "78.6%"})
+            self.assertIn(fib["direction"], {"BULLISH", "BEARISH"})
+
     def test_invalid_ohlcv_fails_closed(self):
         frame = self.candles()
         frame.loc[frame.index[-1], "volume"] = -1
