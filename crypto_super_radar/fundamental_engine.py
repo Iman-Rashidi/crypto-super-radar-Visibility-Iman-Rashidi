@@ -154,6 +154,108 @@ def comparable_projects(project: Mapping[str, Any], peers: Sequence[Mapping[str,
             "reason": None if relative else "No valid same-sector peer multiple comparison."}
 
 
+def accounting_principles_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Assess financial-reporting quality without misapplying industrial accounting to tokens.
+
+    Revenue recognition checks delivery/performance obligation and collectability.
+    Inventory valuation is N/A for a protocol/token unless the project actually
+    holds or sells inventory. Depreciation is N/A unless material depreciable
+    operating assets are reported. Unknown is never treated as a clean audit.
+    """
+    definitions = {
+        "revenue_recognition": {
+            "label_fa": "شناسایی درآمد",
+            "checks": ("performance_obligation_satisfied", "revenue_basis_disclosed",
+                       "fees_separated_from_tokenholder_revenue", "collectability_supported"),
+            "note": "Protocol fees, gross revenue and revenue accruing to token holders are different measures.",
+        },
+        "inventory_valuation": {
+            "label_fa": "ارزش‌گذاری موجودی",
+            "checks": ("inventory_scope_disclosed", "valuation_method_disclosed",
+                       "impairment_or_obsolescence_disclosed"),
+            "note": "For a software protocol with no material inventory this is NOT_APPLICABLE, not a positive score.",
+        },
+        "depreciation": {
+            "label_fa": "استهلاک دارایی‌ها",
+            "checks": ("material_asset_register_disclosed", "useful_lives_disclosed",
+                       "depreciation_method_disclosed", "impairment_disclosed"),
+            "note": "Assess servers, equipment and capitalized development only where material and disclosed.",
+        },
+    }
+    results = {}
+    for name, definition in definitions.items():
+        supplied = evidence.get(name)
+        supplied = supplied if isinstance(supplied, Mapping) else {}
+        applicability = str(supplied.get("applicability") or "UNKNOWN").upper()
+        if applicability == "NOT_APPLICABLE":
+            results[name] = {"status": "NOT_APPLICABLE", "score": None,
+                             "label_fa": definition["label_fa"], "checks": {},
+                             "reason": "عدم کاربرد باید با شواهد ساختار پروژه تأیید شود."}
+            continue
+        checks = {}
+        for key in definition["checks"]:
+            item = supplied.get(key)
+            checks[key] = (str(item).upper() if str(item).upper() in
+                           ("PASS", "FAIL", "UNKNOWN") else "UNKNOWN")
+        values = list(checks.values())
+        status = ("UNKNOWN" if all(value == "UNKNOWN" for value in values) else
+                  "FAIL" if "FAIL" in values else
+                  "PARTIAL" if "UNKNOWN" in values else "PASS")
+        results[name] = {"status": status, "score": None,
+                         "label_fa": definition["label_fa"], "checks": checks,
+                         "note": definition["note"]}
+    return {
+        "status": "UNKNOWN" if all(x["status"] in ("UNKNOWN", "NOT_APPLICABLE") for x in results.values()) else
+                  "FAIL" if any(x["status"] == "FAIL" for x in results.values()) else "PARTIAL",
+        "score": None, "principles": results,
+        "message_fa": "کیفیت گزارشگری مالی بررسی می‌شود؛ موارد نامرتبط با ماهیت پروژه امتیاز مثبت نمی‌گیرند.",
+    }
+
+
+def market_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Evidence checklist for market context; no forecast is inferred from missing data."""
+    criteria = {
+        "gdp_growth": "رشد تولید ناخالص داخلی",
+        "inflation": "تورم",
+        "interest_rates": "نرخ بهره",
+        "employment": "اشتغال",
+        "industry_trends": "روندهای صنعت",
+        "regulatory_developments": "تحولات مقرراتی",
+        "market_risks": "ریسک‌های بازار",
+        "market_outlook": "چشم‌انداز بازار",
+    }
+    observations = {}
+    known = 0
+    failed = 0
+    for key, label in criteria.items():
+        item = evidence.get(key)
+        item = item if isinstance(item, Mapping) else {}
+        status = str(item.get("status") or "UNKNOWN").upper()
+        if status not in ("KNOWN", "FAIL", "UNKNOWN"):
+            status = "UNKNOWN"
+        value = item.get("value")
+        source = item.get("source")
+        observed_at = item.get("observed_at_utc")
+        if status == "KNOWN" and (value is None or not source or not observed_at):
+            status = "UNKNOWN"
+        known += status == "KNOWN"
+        failed += status == "FAIL"
+        observations[key] = {"label_fa": label, "status": status,
+                              "value": value if status == "KNOWN" else None,
+                              "source": source if status == "KNOWN" else None,
+                              "observed_at_utc": observed_at if status == "KNOWN" else None}
+    coverage = known / len(criteria) * 100
+    return {
+        "status": "FAIL" if failed else "KNOWN" if known == len(criteria) else
+                  "PARTIAL" if known else "UNKNOWN",
+        "score": None, "coverage_pct": round(coverage, 2),
+        "observations": observations,
+        "methodology": ["collect_data", "identify_trends", "assess_market_risks",
+                        "form_scenarios"],
+        "message_fa": "تحلیل بازار باید همراه تحلیل مالی، بنیادی و تکنیکال انجام شود؛ پیش‌بینی بدون داده معتبر تولید نمی‌شود.",
+    }
+
+
 def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Aggregate seven evidence modules with explicit coverage and no fabricated scores.
 
@@ -171,6 +273,11 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(item, Mapping) and isinstance(item.get("evidence"), Mapping):
             modules[name]["evidence"] = dict(item["evidence"])
     modules["industry"] = industry_analysis(evidence.get("industry", {}))
+    # Supporting diagnostics are visible in the Easy Fundamental panel but are
+    # deliberately excluded from the seven-module score until calibrated.
+    modules["accounting_principles"] = accounting_principles_analysis(
+        evidence.get("accounting_principles", {}))
+    modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
     for name in ("dcf", "comparables"):
         item = evidence.get(name)
         score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
@@ -197,5 +304,6 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
-           "industry_analysis", "discounted_protocol_cashflows",
-           "comparable_projects", "build_fundamental_report"]
+           "industry_analysis", "accounting_principles_analysis", "market_analysis",
+           "discounted_protocol_cashflows", "comparable_projects",
+           "build_fundamental_report"]
