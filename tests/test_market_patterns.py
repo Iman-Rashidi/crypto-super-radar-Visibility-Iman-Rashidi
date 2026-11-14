@@ -80,6 +80,31 @@ class MarketPatternTests(unittest.TestCase):
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Morning Star" for p in analysis["candlestick_patterns"]))
 
+    def _set_three_white_soldiers(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-3] = [95.0, 101.0, 94.8, 100.8, 1200.0]
+        frame.iloc[-2] = [98.0, 104.2, 97.8, 104.0, 1300.0]
+        frame.iloc[-1] = [101.0, 110.2, 100.8, 110.0, 1500.0]
+        return frame
+
+    def test_three_white_soldiers_requires_three_strong_green_candles_and_prior_context(self):
+        frame = self._set_three_white_soldiers(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three White Soldiers")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["name_fa"], "سه سرباز سفید")
+
+    def test_three_white_soldiers_rejected_when_opens_are_not_inside_previous_bodies(self):
+        frame = self._set_three_white_soldiers(candle_frame("down"))
+        frame.iloc[-2, frame.columns.get_loc("open")] = 90.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three White Soldiers" for p in analysis["candlestick_patterns"]))
+
+    def test_three_white_soldiers_rejected_after_strong_existing_uptrend(self):
+        frame = self._set_three_white_soldiers(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three White Soldiers" for p in analysis["candlestick_patterns"]))
+
     def test_doji_is_reported_as_neutral_not_as_a_trade_signal(self):
         frame = candle_frame("flat")
         frame.iloc[-1, frame.columns.get_loc("open")] = 100.0
