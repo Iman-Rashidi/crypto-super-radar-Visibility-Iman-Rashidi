@@ -302,5 +302,118 @@ class FreeRegionalFallbackTests(unittest.TestCase):
         self.assertEqual(result["open_interest"], 4321)
 
 
+    def test_execution_snapshot_uses_cross_validated_gate_okx_fallback_after_ip_blocks(self):
+        now_ms = int(time.time() * 1000)
+        now_seconds = now_ms / 1000.0
+
+        class RegionalFallbackHttp:
+            config = AppConfig()
+
+            def get(self, url, params=None):
+                if "fapi.binance.com" in url:
+                    raise DataProviderError("HTTP 451 from fapi.binance.com")
+                if "api.bybit.com" in url:
+                    raise DataProviderError("HTTP 403 from api.bybit.com")
+                if url.endswith("/futures/usdt/tickers"):
+                    return [{
+                        "contract": "BTC_USDT",
+                        "mark_price": "65000",
+                        "index_price": "64980",
+                        "funding_rate": "-0.00010",
+                        "total_size": "1234",
+                    }]
+                if url.endswith("/futures/usdt/order_book"):
+                    return {
+                        "current": now_seconds,
+                        "update": now_seconds,
+                        "asks": [{"p": "65010", "s": "1"}],
+                        "bids": [{"p": "64990", "s": "1"}],
+                    }
+                if url.endswith("/market/ticker"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP",
+                        "bidPx": "64995", "askPx": "65005", "ts": str(now_ms),
+                    }]}
+                if url.endswith("/public/mark-price"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP", "markPx": "65001", "ts": str(now_ms),
+                    }]}
+                if url.endswith("/market/index-tickers"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT", "idxPx": "64985", "ts": str(now_ms),
+                    }]}
+                if url.endswith("/public/funding-rate"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP", "fundingRate": "-0.00011",
+                        "nextFundingTime": str(now_ms + 3_600_000),
+                    }]}
+                if url.endswith("/public/open-interest"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP", "oi": "2345", "ts": str(now_ms),
+                    }]}
+                raise AssertionError(f"Unexpected market-data URL: {url}")
+
+        provider = PerpetualMarketProvider(RegionalFallbackHttp())
+        provider.funding_interval_hours = lambda symbol: 8.0
+
+        result = provider.execution_snapshot("BTCUSDT")
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["sources"], ["Gate.io USDT Perpetual", "OKX USDT Swap"])
+        self.assertEqual(result["quote_quality"], "OBSERVED_CROSS_VENUE_FALLBACK")
+        self.assertAlmostEqual(result["mark_price"], 65000.5)
+        self.assertAlmostEqual(result["index_price"], 64982.5)
+        self.assertAlmostEqual(result["funding_rate"], -0.000105)
+        self.assertEqual(result["funding_interval_hours"], 8.0)
+        self.assertIn("HTTP 451", result["provider_fallback_reason"])
+
+    def test_gate_okx_fallback_still_blocks_cross_venue_mark_disagreement(self):
+        now_ms = int(time.time() * 1000)
+        now_seconds = now_ms / 1000.0
+
+        class DivergentRegionalFallbackHttp:
+            config = AppConfig()
+
+            def get(self, url, params=None):
+                if "fapi.binance.com" in url:
+                    raise DataProviderError("HTTP 451 from fapi.binance.com")
+                if url.endswith("/futures/usdt/tickers"):
+                    return [{
+                        "contract": "BTC_USDT", "mark_price": "65000",
+                        "index_price": "64980", "funding_rate": "-0.00010",
+                        "total_size": "1234",
+                    }]
+                if url.endswith("/futures/usdt/order_book"):
+                    return {"current": now_seconds, "asks": [{"p": "65010"}],
+                            "bids": [{"p": "64990"}]}
+                if url.endswith("/market/ticker"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP", "bidPx": "64995",
+                        "askPx": "65005", "ts": str(now_ms),
+                    }]}
+                if url.endswith("/public/mark-price"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP", "markPx": "90000", "ts": str(now_ms),
+                    }]}
+                if url.endswith("/market/index-tickers"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT", "idxPx": "64985", "ts": str(now_ms),
+                    }]}
+                if url.endswith("/public/funding-rate"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP", "fundingRate": "-0.00011",
+                    }]}
+                if url.endswith("/public/open-interest"):
+                    return {"code": "0", "data": [{
+                        "instId": "BTC-USDT-SWAP", "oi": "2345", "ts": str(now_ms),
+                    }]}
+                raise AssertionError(f"Unexpected market-data URL: {url}")
+
+        provider = PerpetualMarketProvider(DivergentRegionalFallbackHttp())
+        provider.funding_interval_hours = lambda symbol: 8.0
+        with self.assertRaisesRegex(DataProviderError, "mark-price discrepancy"):
+            provider.execution_snapshot("BTCUSDT")
+
+
 if __name__ == "__main__":
     unittest.main()

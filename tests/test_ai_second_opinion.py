@@ -11,6 +11,7 @@ from crypto_super_radar.ai_second_opinion import (
     MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
     run_free_ai_second_opinion,
+    run_openrouter_connection_diagnostic,
 )
 from crypto_super_radar.models import AssetSpec, Signal
 
@@ -65,12 +66,15 @@ def valid_document(rating="Buy", risk_verdict="APPROVE", portfolio_verdict="APPR
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, document=None):
+    def __init__(self, status_code=200, document=None, model=DEFAULT_FREE_MODEL):
         self.status_code = status_code
         self.document = document or {}
+        self.model = model
 
     def json(self):
         return {
+            "model": self.model,
+            "usage": {"total_tokens": 99},
             "choices": [{
                 "message": {"content": json.dumps(self.document, ensure_ascii=False)}
             }]
@@ -99,6 +103,124 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(status["model"], DEFAULT_FREE_MODEL)
         self.assertTrue(status["model"].endswith(":free"))
 
+    def test_connection_diagnostic_verifies_model_and_never_returns_secret(self):
+        captured = {}
+        marker = "CSR_NEMOTRON_PROBE_OK"
+
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({"probe": marker})
+                        }
+                    }],
+                    "usage": {"total_tokens": 12},
+                }
+
+        def fake_post(url, headers, json: dict, timeout, allow_redirects=False):
+            captured.update({
+                "url": url, "headers": headers, "payload": json,
+                "timeout": timeout, "allow_redirects": allow_redirects,
+            })
+            return DiagnosticResponse()
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(http_post=fake_post)
+
+        self.assertEqual(result["status"], "CONNECTED")
+        self.assertTrue(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertFalse(result["orders_submitted"])
+        self.assertNotIn("diagnostic-secret", json.dumps(result))
+        self.assertEqual(captured["payload"]["model"], DEFAULT_FREE_MODEL)
+        self.assertEqual(captured["payload"]["max_tokens"], 128)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer diagnostic-secret")
+        self.assertFalse(captured["allow_redirects"])
+        prompt = json.dumps(captured["payload"], ensure_ascii=False)
+        self.assertNotIn("wallet", prompt.lower())
+        self.assertNotIn("blofin", prompt.lower())
+
+    def test_connection_diagnostic_accepts_plain_text_and_content_blocks(self):
+        marker = "CSR_NEMOTRON_PROBE_OK"
+
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "analysis omitted"},
+                                {"type": "text", "text": marker},
+                            ]
+                        }
+                    }],
+                    "usage": {"total_tokens": 22},
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(
+                http_post=lambda *args, **kwargs: DiagnosticResponse()
+            )
+        self.assertEqual(result["status"], "CONNECTED")
+        self.assertTrue(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("diagnostic-secret", json.dumps(result))
+
+    def test_connection_diagnostic_reports_safe_reason_when_marker_is_missing(self):
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{"message": {"content": "No token returned."}}],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(
+                http_post=lambda *args, **kwargs: DiagnosticResponse()
+            )
+        self.assertEqual(result["status"], "INVALID_RESPONSE")
+        self.assertEqual(result["error_type"], "MARKER_NOT_RETURNED")
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("No token returned", json.dumps(result))
+
+    def test_connection_diagnostic_never_calls_provider_without_key(self):
+        called = []
+
+        def fake_post(*args, **kwargs):
+            called.append(True)
+            raise AssertionError("Provider must not be called without a key")
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_openrouter_connection_diagnostic(http_post=fake_post)
+
+        self.assertEqual(result["status"], "MISSING_API_KEY")
+        self.assertFalse(called)
+        self.assertFalse(result["paper_entry_eligible"])
+
+    def test_connection_diagnostic_maps_invalid_key_and_rate_limit(self):
+        class ErrorResponse:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        for code, expected in ((401, "INVALID_API_KEY"), (429, "RATE_LIMITED")):
+            with self.subTest(code=code):
+                with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+                    result = run_openrouter_connection_diagnostic(
+                        http_post=lambda *args, _code=code, **kwargs: ErrorResponse(_code)
+                    )
+                self.assertEqual(result["status"], expected)
+                self.assertFalse(result["paper_entry_eligible"])
+                self.assertNotIn("diagnostic-secret", json.dumps(result))
+
     def test_approved_ai_response_is_accepted_and_sends_only_public_data(self):
         captured = {}
 
@@ -123,6 +245,49 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("must-not-send-list-values", prompt)
         self.assertNotIn("ignore previous instructions", prompt)
         self.assertFalse(captured["allow_redirects"])
+
+    def test_bypass_cache_forces_fresh_request_and_reports_verified_telemetry(self):
+        captured = []
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.append(json)
+            return FakeResponse(document=valid_document())
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            first = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+            second = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+
+        self.assertEqual(first["status"], "APPROVED")
+        self.assertEqual(second["status"], "APPROVED")
+        self.assertEqual(len(captured), 2)
+        self.assertTrue(second["model_verified"])
+        self.assertTrue(second["response_validated"])
+        self.assertEqual(second["returned_model"], DEFAULT_FREE_MODEL)
+        self.assertEqual(second["http_status"], 200)
+        self.assertEqual(second["total_tokens"], 99)
+        self.assertIn("latency_ms", second)
+
+    def test_full_review_rejects_returned_model_mismatch(self):
+        class MismatchedResponse(FakeResponse):
+            def json(self):
+                body = super().json()
+                body["model"] = "other/provider:free"
+                return body
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: MismatchedResponse(document=valid_document()),
+                bypass_cache=True,
+            )
+        self.assertEqual(result["status"], "MODEL_MISMATCH")
+        self.assertFalse(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
 
     def test_more_than_eight_risk_flags_cannot_be_ignored(self):
         document = valid_document()
@@ -206,7 +371,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
 
         def fake_post(url, headers, json, timeout, allow_redirects=False):
             models.append(json["model"])
-            return FakeResponse(document=valid_document())
+            return FakeResponse(document=valid_document(), model=json["model"])
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
             first = run_free_ai_second_opinion(

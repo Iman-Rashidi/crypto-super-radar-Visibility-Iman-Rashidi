@@ -239,6 +239,150 @@ def _extract_json(content: str) -> dict[str, Any]:
     return parsed
 
 
+
+def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
+    """Make one tiny, fixed-prompt connectivity probe; never evaluates a trade."""
+    key = _api_key()
+    model = _model()
+    if not key:
+        return {
+            "provider": "OpenRouter", "model": model,
+            "status": "MISSING_API_KEY",
+            "status_fa": "کلید OpenRouter در محیط سرور پیدا نشد.",
+            "probe": "NOT_RUN", "paper_entry_eligible": False,
+        }
+
+    marker = "CSR_NEMOTRON_PROBE_OK"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": (
+                "This is a connectivity test, not a trading task. "
+                "Reply with exactly this token and no other text: " + marker
+            )},
+            {"role": "user", "content": "Repeat the exact token requested by the system message."},
+        ],
+        "temperature": 0,
+        "max_tokens": 128,
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.getenv(
+            "RENDER_EXTERNAL_URL",
+            "https://crypto-super-radar-blofin-demo.onrender.com",
+        ),
+        "X-Title": "CRYPTO SUPER RADAR Nemotron Connectivity Probe",
+    }
+    post = http_post or requests.post
+    started = time.monotonic()
+    try:
+        response = post(
+            OPENROUTER_URL,
+            headers=headers,
+            json=payload,
+            timeout=(8, 45),
+            allow_redirects=False,
+        )
+    except Exception as exc:
+        return {
+            "provider": "OpenRouter", "model": model, "status": "NETWORK_ERROR",
+            "status_fa": "ارتباط شبکه با OpenRouter برقرار نشد.",
+            "error_type": type(exc).__name__, "probe": "FAIL",
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "paper_entry_eligible": False,
+        }
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    http_status = int(getattr(response, "status_code", 0) or 0)
+    if http_status != 200:
+        status_by_code = {
+            401: ("INVALID_API_KEY", "OpenRouter کلید API را نپذیرفت."),
+            402: ("QUOTA_OR_MODEL_UNAVAILABLE", "سهمیه یا دسترسی مدل رایگان در دسترس نیست."),
+            403: ("ACCESS_DENIED", "OpenRouter دسترسی این درخواست را رد کرد."),
+            429: ("RATE_LIMITED", "محدودیت تعداد درخواست OpenRouter اعمال شده است."),
+        }
+        status, message = status_by_code.get(
+            http_status, ("PROVIDER_ERROR", "OpenRouter درخواست آزمایشی را با موفقیت پاسخ نداد.")
+        )
+        return {
+            "provider": "OpenRouter", "model": model, "status": status,
+            "status_fa": message, "http_status": http_status,
+            "probe": "FAIL", "latency_ms": latency_ms,
+            "paper_entry_eligible": False,
+        }
+
+    try:
+        body = response.json()
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ValueError("MISSING_CHOICES")
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise ValueError("MISSING_MESSAGE")
+        content = message.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            ]
+            content = "\n".join(text_parts)
+        if not isinstance(content, str):
+            raise ValueError("CONTENT_NOT_TEXT")
+        if len(content) > 8_000:
+            raise ValueError("CONTENT_TOO_LARGE")
+        if marker not in content:
+            raise ValueError("MARKER_NOT_RETURNED")
+
+        returned_model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(returned_model, str) or not returned_model.strip():
+            return {
+                "provider": "OpenRouter", "model": model, "status": "MODEL_UNCONFIRMED",
+                "status_fa": "پاسخ مدل دریافت شد، اما شناسه مدل اجراشده در پاسخ ارائه نشد.",
+                "http_status": http_status, "probe": "PASS",
+                "model_verified": False, "latency_ms": latency_ms,
+                "paper_entry_eligible": False,
+            }
+        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+            return {
+                "provider": "OpenRouter", "model": model,
+                "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
+                "status_fa": "پاسخ از مدلی غیر از Nemotron انتخاب‌شده دریافت شد.",
+                "http_status": http_status, "probe": "PASS",
+                "model_verified": False, "latency_ms": latency_ms,
+                "paper_entry_eligible": False,
+            }
+        usage = body.get("usage") if isinstance(body, dict) else None
+        total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
+            total_tokens = None
+        return {
+            "provider": "OpenRouter", "model": model,
+            "returned_model": returned_model[:160], "status": "CONNECTED",
+            "status_fa": "اتصال واقعی موفق است؛ Nemotron پاسخ معتبر داد و شناسه مدل با مدل انتخاب‌شده مطابقت دارد.",
+            "http_status": http_status, "probe": "PASS",
+            "model_verified": True, "latency_ms": latency_ms,
+            "total_tokens": total_tokens,
+            "paper_entry_eligible": False, "orders_submitted": False,
+        }
+    except Exception as exc:
+        known_error = (
+            str(exc) if isinstance(exc, ValueError)
+            and str(exc) in {
+                "MISSING_CHOICES", "MISSING_MESSAGE", "CONTENT_NOT_TEXT",
+                "CONTENT_TOO_LARGE", "MARKER_NOT_RETURNED",
+            } else type(exc).__name__
+        )
+        return {
+            "provider": "OpenRouter", "model": model, "status": "INVALID_RESPONSE",
+            "status_fa": "OpenRouter پاسخ داد، اما محتوای قابل تأیید از Nemotron دریافت نشد.",
+            "http_status": http_status, "probe": "FAIL",
+            "error_type": known_error, "latency_ms": latency_ms,
+            "paper_entry_eligible": False,
+        }
+
+
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
     rating = str(document.get("final_rating") or "REVIEW").strip()
     if rating.casefold() not in ALLOWED_RATINGS:
@@ -326,7 +470,9 @@ def _validated_review(document: dict[str, Any], model: str, asset: str, *, expec
     }
 
 
-def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -> dict[str, Any]:
+def run_free_ai_second_opinion(
+    result: Any, asset: Any = None, http_post=None, *, bypass_cache: bool = False,
+) -> dict[str, Any]:
     """Call a true free-hosted LLM; block paper entry unless the reply is approved."""
     key = _api_key()
     if not key:
@@ -373,7 +519,7 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
     day = datetime.now(timezone.utc).date().isoformat()
 
     with _LOCK:
-        cached = _CACHE.get(cache_key)
+        cached = None if bypass_cache else _CACHE.get(cache_key)
         if cached and cached[0] > now:
             return copy.deepcopy(cached[1])
         _MINUTE_REQUEST_TIMESTAMPS[:] = [
@@ -410,6 +556,9 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
     }
 
     post = http_post or requests.post
+    started = time.monotonic()
+    latency_ms = 0
+    http_status = None
     try:
         response = post(
             OPENROUTER_URL,
@@ -418,39 +567,89 @@ def run_free_ai_second_opinion(result: Any, asset: Any = None, http_post=None) -
             timeout=(8, 35),
             allow_redirects=False,
         )
-        if response.status_code != 200:
-            status = "RATE_LIMITED" if response.status_code == 429 else "UNKNOWN"
-            detail = "Free AI quota or provider limit reached." if response.status_code == 429 else (
+        latency_ms = int((time.monotonic() - started) * 1000)
+        http_status = int(getattr(response, "status_code", 0) or 0)
+        if http_status != 200:
+            status = "RATE_LIMITED" if http_status == 429 else "UNKNOWN"
+            detail = "Free AI quota or provider limit reached." if http_status == 429 else (
                 "Free AI provider rejected or could not complete the request."
             )
             return {
                 "provider": "OpenRouter", "model": model, "status": status,
                 "status_fa": "سرویس هوش مصنوعی رایگان در دسترس نیست؛ ورود جدید متوقف شد.",
-                "reason": detail, "http_status": int(response.status_code),
+                "reason": detail, "http_status": http_status,
+                "latency_ms": latency_ms, "response_validated": False,
+                "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
         body = response.json()
-        content = body["choices"][0]["message"]["content"]
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ValueError("Missing AI response choices")
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise ValueError("Missing AI response message")
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\\n".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
         if not isinstance(content, str):
             raise ValueError("AI message content is not text")
         if len(content) > MAX_RESPONSE_CHARS:
             raise ValueError("AI response exceeded the maximum accepted size")
         parsed = _extract_json(content)
-        review = _validated_review(parsed, model, asset_name, expected_side=expected_side, market_type=market_type)
-        with _LOCK:
-            _CACHE[cache_key] = (time.monotonic() + CACHE_TTL_SECONDS, copy.deepcopy(review))
-            if len(_CACHE) > 128:
-                expired = [key for key, value in _CACHE.items() if value[0] <= time.monotonic()]
-                for old_key in expired:
-                    _CACHE.pop(old_key, None)
-                while len(_CACHE) > 128:
-                    _CACHE.pop(next(iter(_CACHE)))
+        returned_model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(returned_model, str) or not returned_model.strip():
+            return {
+                "provider": "OpenRouter", "model": model, "status": "MODEL_UNCONFIRMED",
+                "status_fa": "پاسخ تحلیل دریافت شد، اما شناسه مدل اجراشده تأیید نشد.",
+                "http_status": http_status, "latency_ms": latency_ms,
+                "response_validated": False, "model_verified": False,
+                "paper_entry_eligible": False, "cost_usd": 0.0,
+            }
+        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+            return {
+                "provider": "OpenRouter", "model": model,
+                "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
+                "status_fa": "پاسخ تحلیل از مدلی غیر از Nemotron انتخاب‌شده دریافت شد.",
+                "http_status": http_status, "latency_ms": latency_ms,
+                "response_validated": False, "model_verified": False,
+                "paper_entry_eligible": False, "cost_usd": 0.0,
+            }
+        review = _validated_review(
+            parsed, model, asset_name, expected_side=expected_side, market_type=market_type
+        )
+        usage = body.get("usage") if isinstance(body, dict) else None
+        total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
+            total_tokens = None
+        review.update({
+            "http_status": http_status,
+            "returned_model": returned_model[:160],
+            "model_verified": True,
+            "response_validated": True,
+            "latency_ms": latency_ms,
+            "total_tokens": total_tokens,
+        })
+        if not bypass_cache:
+            with _LOCK:
+                _CACHE[cache_key] = (time.monotonic() + CACHE_TTL_SECONDS, copy.deepcopy(review))
+                if len(_CACHE) > 128:
+                    expired = [key for key, value in _CACHE.items() if value[0] <= time.monotonic()]
+                    for old_key in expired:
+                        _CACHE.pop(old_key, None)
+                    while len(_CACHE) > 128:
+                        _CACHE.pop(next(iter(_CACHE)))
         return review
     except Exception as exc:
         return {
             "provider": "OpenRouter", "model": model, "status": "UNKNOWN",
             "status_fa": "پاسخ معتبر از هوش مصنوعی دریافت نشد؛ ورود جدید متوقف شد.",
             "reason": "Free AI request or response validation failed.",
-            "error_type": type(exc).__name__,
+            "error_type": type(exc).__name__, "http_status": http_status,
+            "latency_ms": latency_ms, "response_validated": False,
+            "model_verified": False,
             "paper_entry_eligible": False, "cost_usd": 0.0,
         }

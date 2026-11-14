@@ -157,5 +157,185 @@ class MarketPatternTests(unittest.TestCase):
         self.assertTrue(fib["confirmation_required"])
 
 
+    def _set_three_inside_down_candles(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-3] = [110.0, 112.0, 109.0, 111.8, 1000.0]
+        frame.iloc[-2] = [111.4, 111.6, 110.5, 110.8, 1000.0]
+        frame.iloc[-1] = [110.4, 110.6, 107.5, 108.5, 1500.0]
+        return frame
+
+    def test_three_inside_down_is_confirmed_only_after_close_below_first_low(self):
+        frame = self._set_three_inside_down_candles(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Three Inside Down"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["score"], -16)
+        self.assertEqual(pattern["trigger_price"], 109.0)
+        self.assertEqual(pattern["invalidation_price"], 112.0)
+
+    def test_three_inside_down_requires_prior_uptrend(self):
+        frame = self._set_three_inside_down_candles(candle_frame("flat"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Three Inside Down",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_three_inside_down_requires_third_close_below_first_low(self):
+        frame = self._set_three_inside_down_candles(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("close")] = 109.2
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Three Inside Down",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_three_inside_down_requires_bearish_harami_inside_first_body(self):
+        frame = self._set_three_inside_down_candles(candle_frame("up"))
+        frame.iloc[-2, frame.columns.get_loc("close")] = 109.8
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Three Inside Down",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
+    def _set_gravestone_doji(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-1] = [110.0, 116.0, 109.9, 110.1, 1500.0]
+        return frame
+
+    def test_gravestone_doji_after_uptrend_is_bearish_pending_confirmation(self):
+        frame = self._set_gravestone_doji(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Gravestone Doji"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["score"], -11)
+        self.assertEqual(pattern["trigger_price"], 109.9)
+        self.assertEqual(pattern["invalidation_price"], 116.0)
+
+    def test_gravestone_doji_without_uptrend_is_not_bearish(self):
+        frame = self._set_gravestone_doji(candle_frame("flat"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Gravestone Doji"
+        )
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["score"], 0)
+
+    def test_gravestone_doji_requires_long_upper_and_tiny_lower_wicks(self):
+        frame = self._set_gravestone_doji(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("low")] = 108.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Gravestone Doji",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
+    def _set_dark_cloud_cover(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-2] = [108.0, 112.0, 107.5, 111.5, 1200.0]
+        frame.iloc[-1] = [112.5, 113.0, 108.5, 109.5, 1600.0]
+        return frame
+
+    def test_dark_cloud_cover_requires_uptrend_gap_and_close_below_midpoint(self):
+        frame = self._set_dark_cloud_cover(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Dark Cloud Cover"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["score"], -12)
+        self.assertEqual(pattern["trigger_price"], 108.5)
+        self.assertEqual(pattern["invalidation_price"], 113.0)
+
+    def test_dark_cloud_cover_is_not_bearish_without_prior_uptrend(self):
+        frame = self._set_dark_cloud_cover(candle_frame("flat"))
+        frame.iloc[-9:-2] = [111.5, 111.5, 111.5, 111.5, 1000.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Dark Cloud Cover",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_dark_cloud_cover_requires_open_above_previous_high(self):
+        frame = self._set_dark_cloud_cover(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("open")] = 111.8
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Dark Cloud Cover",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_dark_cloud_cover_requires_close_below_first_body_midpoint(self):
+        frame = self._set_dark_cloud_cover(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("close")] = 110.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Dark Cloud Cover",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
+    def _set_bearish_marubozu(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-1] = [110.0, 110.1, 104.9, 105.0, 1800.0]
+        return frame
+
+    def test_bearish_marubozu_after_uptrend_is_bearish_and_unconfirmed(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Bearish Marubozu"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["score"], -14)
+        self.assertEqual(pattern["trigger_price"], 104.9)
+        self.assertEqual(pattern["invalidation_price"], 110.1)
+
+    def test_bearish_marubozu_in_downtrend_is_continuation_context(self):
+        frame = self._set_bearish_marubozu(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Bearish Marubozu"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["score"], -11)
+        self.assertIn("ادامهٔ روند نزولی", pattern["description"])
+
+    def test_bearish_marubozu_rejects_long_shadows(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("high")] = 111.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Bearish Marubozu",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_bearish_marubozu_rejects_small_body(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        frame.iloc[-1] = [110.0, 112.0, 104.9, 109.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Bearish Marubozu",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()

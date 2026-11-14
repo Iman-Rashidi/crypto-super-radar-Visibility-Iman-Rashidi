@@ -384,6 +384,24 @@ Use Ctrl+C to stop. State and closed trades are stored in the local SQLite datab
 This bot is explicitly paper-only: it has no exchange order adapter, API-key input or live-order mode. It never submits exchange orders. Paper fills are estimates from cross-validated public spot prices, fee assumptions and slippage; they are not guaranteed executable fills.
 
 
+## BloFin Demo Futures autonomous pilot
+
+The isolated branch `feature/blofin-demo-adapter` now combines the GET-only `crypto_super_radar.blofin_demo_readonly` adapter with the guarded `crypto_super_radar.blofin_demo_executor`. Both REST clients are pinned to `https://demo-trading-openapi.blofin.com`; no production exchange host, transfers, withdrawals, or wallet signing are implemented.
+
+The optional process-local scheduler starts only when `BLOFIN_DEMO_AUTOPILOT_ENABLED=true`. It periodically analyzes **BTC-USDT linear perpetual only** with the existing 12-gate engine, requests the configured free Nemotron second opinion only after every gate passes, and may then submit a Demo market order with exchange-attached mark-price TP/SL. A missing/invalid AI answer, stale/missing data, any FAIL/UNKNOWN gate, invalid instrument permission, clock mismatch, price deviation, account read failure, pending order, or risk-limit breach blocks entry. An ambiguous order response is reconciled using READ-only order-detail calls; the runner never blindly resends the order.
+
+Default Demo limits in the web service are: **1x leverage**, at most **0.25% account-equity risk per trade**, one concurrent position, **2 order reservations per UTC day**, a **30-minute minimum cooldown**, **1% daily loss stop**, **5% peak-to-trough drawdown stop**, and at most **10% isolated-margin usage**. The event store persists order reservations and append-only lifecycle events in Turso. Each completed daily candle is idempotent; prior unresolved order outcomes block new entries until read-only reconciliation succeeds. Rejected attempts also consume the conservative daily order budget.
+
+Set these controls only on the isolated Render Demo service:
+- `BLOFIN_DEMO_AUTOPILOT_ENABLED=true`
+- Optional `BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS=900` (clamped to 300–3600 seconds)
+- Existing server-side `BLOFIN_DEMO_API_KEY`, `BLOFIN_DEMO_API_SECRET`, and `BLOFIN_DEMO_PASSPHRASE` must belong to a **Demo-only key with actual TRADE permission**. The exchange instrument response must confirm `apiPermission=full`; a READ-only key is not sufficient. Dedicated `BLOFIN_DEMO_TRADE_*` variables take precedence when configured.
+- `BLOFIN_DEMO_TRADING_ENABLED=true`, `BLOFIN_DASHBOARD_TOKEN`, both Turso variables, and a working free Nemotron/OpenRouter configuration must also exist.
+
+Never paste secrets into GitHub, Notion, browser code, chat, or source files. Keep TRANSFER and withdrawal permissions disabled. Do not enable the scheduler on Production. Readiness at `/api/blofin/demo/execution-readiness` is only a prerequisite summary; the instrument permission, 12 gates, AI, account state, and risk checks are re-evaluated during each cycle. Runtime status is available from `/api/blofin/demo/autopilot/status`.
+
+**Hosting limit:** Render Free web services can sleep after 15 minutes without inbound traffic. This in-process scheduler therefore runs only while the web process is awake; it does not guarantee 24/7 autonomous execution on the Free plan. It is not a managed background worker or a guaranteed always-on trading service. CI tests use mocked exchange responses and do not prove live Demo API permission or successful fills. Binance Spot Testnet and the local Futures Paper Trading ledger remain separate environments.
+
 ## Binance Spot order execution (testnet first)
 
 A guarded execution adapter is available in `crypto_super_radar.binance_execution`. It accepts only BTCUSDT, ETHUSDT and SOLUSDT spot orders, sends limit IOC orders, checks the live quote against the signal price, exchange quantity/price/minimum-notional filters, free balance, and a hard 25 USDT per-order ceiling. `ValidatedSignalExecutor` accepts only a LONG result with all 12 gates passing, score at least 75, risk score below 45, a valid stop/target, and net reward/risk at least 1.8. Position sizing risks at most 0.5% of free USDT.
