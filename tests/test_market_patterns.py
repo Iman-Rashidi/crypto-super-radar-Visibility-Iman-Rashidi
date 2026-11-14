@@ -81,6 +81,51 @@ class MarketPatternTests(unittest.TestCase):
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Morning Star" for p in analysis["candlestick_patterns"]))
 
+    def _set_evening_star(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        pattern_start = -4 if with_confirmation else -3
+        frame.iloc[pattern_start] = [100.0, 110.0, 99.0, 109.0, 1500.0]
+        frame.iloc[pattern_start + 1] = [109.2, 110.0, 108.5, 109.5, 900.0]
+        frame.iloc[pattern_start + 2] = [109.0, 110.0, 102.0, 104.0, 1800.0]
+        if with_confirmation:
+            frame.iloc[-1] = [103.0, 104.0, 100.0, 101.0, 1900.0]
+        return frame
+
+    def test_evening_star_after_uptrend_is_pending_bearish_evidence(self):
+        frame = self._set_evening_star(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Evening Star")
+        self.assertEqual(pattern["name_fa"], "ستاره شامگاهی")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 102.0)
+        self.assertEqual(pattern["invalidation_price"], 110.0)
+
+    def test_evening_star_confirmed_by_next_close_below_third_low(self):
+        frame = self._set_evening_star(candle_frame("up"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Evening Star")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_evening_star_rejected_without_prior_uptrend(self):
+        frame = self._set_evening_star(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Evening Star" for p in analysis["candlestick_patterns"]))
+
+    def test_evening_star_rejected_when_third_close_does_not_reach_first_body_midpoint(self):
+        frame = self._set_evening_star(candle_frame("up"))
+        frame.iloc[-1] = [109.0, 110.0, 105.0, 106.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Evening Star" for p in analysis["candlestick_patterns"]))
+
+    def test_evening_star_rejected_when_middle_body_is_not_small(self):
+        frame = self._set_evening_star(candle_frame("up"))
+        frame.iloc[-2] = [108.0, 112.0, 107.5, 111.0, 900.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Evening Star" for p in analysis["candlestick_patterns"]))
+
     def _set_three_white_soldiers(self, frame: pd.DataFrame) -> pd.DataFrame:
         frame.iloc[-3] = [95.0, 101.0, 94.8, 100.8, 1200.0]
         frame.iloc[-2] = [98.0, 104.2, 97.8, 104.0, 1300.0]
