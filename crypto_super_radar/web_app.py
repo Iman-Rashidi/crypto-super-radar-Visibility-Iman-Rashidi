@@ -2489,7 +2489,6 @@ def _blofin_demo_execution_readiness() -> dict:
     daily_capacity_available = (
         isinstance(orders_today, int)
         and orders_today < max_orders_per_utc_day
-        and unresolved_orders == 0
     )
     ready = bool(
         trade_credentials_configured and trading_enabled and dashboard_auth_configured
@@ -2663,6 +2662,49 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             return
 
         store = BloFinDemoEventStore()
+        prior_budget = store.trade_budget_status(2)
+        if prior_budget.get("unresolved_orders", 0) > 0:
+            latest = store.latest_order()
+            if not isinstance(latest, dict) or latest.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="UNRESOLVED_ORDER_BLOCK",
+                    message_fa="یک سفارش قبلی تعیین‌تکلیف نشده است؛ هیچ سفارش جدیدی ارسال نمی‌شود.",
+                    result={
+                        "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                        "reason_fa": "سفارش قبلی برای تطبیق امن در دسترس نیست.",
+                        "orders_submitted": False, "trade_executed": False,
+                    },
+                )
+                return
+            _set_blofin_execution_job(
+                job_id, "running", stage="READ_ONLY_ORDER_RECONCILIATION",
+                message_fa="نتیجه سفارش قبلی فقط با درخواست READ بررسی می‌شود؛ هیچ ارسال مجددی انجام نمی‌شود.",
+            )
+            reconciler = BloFinDemoExecutor(
+                client=BloFinDemoTradeClient(timeout=10.0),
+                store=store,
+                policy=BloFinDemoRiskPolicy(max_leverage=1),
+                trading_enabled=False,
+            )
+            try:
+                reconciliation = reconciler.reconcile_unknown_order(
+                    inst_id=str(latest.get("instrument_id") or "BTC-USDT"),
+                    client_order_id=str(latest.get("client_order_id") or ""),
+                )
+            except Exception as exc:
+                reconciliation = {"status": "UNKNOWN", "error_type": type(exc).__name__}
+            if reconciliation.get("status") == "UNKNOWN":
+                _set_blofin_demo_execution_job(
+                    job_id, "completed", stage="ORDER_REMAINS_UNKNOWN",
+                    message_fa="نتیجه سفارش قبلی هنوز روشن نیست؛ ربات متوقف می‌ماند و سفارش دیگری نمی‌فرستد.",
+                    result={
+                        "status": "ORDER_OUTCOME_UNKNOWN", "environment": "BLOFIN_DEMO",
+                        "reconciliation": "READ_ONLY",
+                        "orders_submitted": "UNKNOWN", "trade_executed": False,
+                    },
+                )
+                return
+
         asset = AssetSpec.parse("perp:BTCUSDT")
         _set_blofin_execution_job(
             job_id, "running", stage="LIVE_12_GATE_ANALYSIS",
