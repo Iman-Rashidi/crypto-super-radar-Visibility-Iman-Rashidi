@@ -138,3 +138,17 @@ Both diagnostics are shown in Persian Streamlit and HTTP/Render dashboards. They
 - Controversies are surfaced as human-review flags; they are not automatically converted into a fabricated penalty.
 - Missing evidence remains UNKNOWN. ESG is not added to the seven weighted modules and cannot authorize trades.
 - UI added to Streamlit and HTTP dashboard. Tests cover sourced company data, missing source, crypto network metrics, unknown asset class and architectural isolation.
+
+
+## KGV / P/E and PEG equity valuation diagnostics
+
+The Easy Fundamental equity diagnostics now expose KGV (P/E) and PEG alongside EPS. These are company/share metrics and are not applied to crypto tokens.
+
+- KGV = current share price / positive basic EPS. Zero or negative EPS leaves KGV UNKNOWN/unavailable; it is never converted to zero.
+- PEG = KGV / explicitly supplied forward expected EPS growth rate in percentage points (for example, 20 means 20%). Historical EPS CAGR is shown as context and is never silently substituted for forward growth.
+- PEG interpretation is educational only: below 1 may indicate a lower valuation relative to supplied growth; 1 is growth-aligned; above 1 may indicate a higher valuation relative to growth. None is a standalone buy/sell signal.
+- Optional historical-company, industry and market P/E benchmarks are displayed only when supplied with the same source URL and observation timestamp. Relative differences are descriptive, not proof of over/undervaluation.
+- The Streamlit and HTTP dashboards show KGV, PEG, PEG interpretation and available benchmark comparisons.
+- Crypto/token assets return NOT_APPLICABLE for company EPS/KGV/PEG. Crypto valuation remains on protocol metrics such as market-cap/FDV-to-revenue and TVL multiples.
+- KGV/PEG are supporting diagnostics only. They do not alter the seven weighted modules, 70% coverage threshold, 12 mandatory trade gates, Standard/Strict engines or order execution.
+- Tests cover PEG calculation, missing/zero/negative growth, no substitution of historical growth, negative EPS and ESG diagnostic isolation.
