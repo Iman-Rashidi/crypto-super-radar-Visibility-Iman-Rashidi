@@ -497,6 +497,87 @@ def _evening_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> di
 
 
 
+
+def _shooting_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a Shooting Star after an uptrend; confirm on a close below its low."""
+    if len(frame) < 6:
+        return None
+
+    candidates = []
+    if len(frame) >= 2:
+        candidates.append((len(frame) - 2, True))
+    candidates.append((len(frame) - 1, False))
+
+    for index, has_follow_through in candidates:
+        candle = frame.iloc[index]
+        o, h, low, close = (
+            float(candle["open"]), float(candle["high"]),
+            float(candle["low"]), float(candle["close"])
+        )
+        candle_range = h - low
+        body = abs(close - o)
+        upper_shadow = h - max(o, close)
+        lower_shadow = min(o, close) - low
+        if candle_range <= 0 or body <= 1e-12:
+            continue
+
+        body_ratio = body / candle_range
+        close_location = (close - low) / candle_range
+        valid_shape = (
+            body_ratio <= 0.35
+            and upper_shadow >= max(body * 2.0, candle_range * 0.45)
+            and lower_shadow <= max(body * 0.8, candle_range * 0.10)
+            and close_location <= 0.40
+        )
+        if not valid_shape:
+            continue
+
+        prior = pd.to_numeric(
+            frame["close"].iloc[max(0, index - 8):index], errors="coerce"
+        )
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change < 0.003:
+            continue
+
+        follow_through = (
+            has_follow_through
+            and float(frame.iloc[index + 1]["close"]) < low
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        bearish_body = close < o
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از حرکت صعودی، کندلی با بدنهٔ کوچک در بخش پایینی دامنه و سایهٔ بالایی دست‌کم دو برابر بدنه تشکیل شده است؛ "
+            f"بدنهٔ کندل {'نزولی' if bearish_body else 'صعودی'} است. این الگو هشدار رد قیمت‌های بالاتر است، نه دستور فروش. "
+        )
+        if follow_through:
+            description += "کندل بعدی زیر کف ستاره ثاقب بسته شده و برگشت نزولی را تأیید کرده است."
+        else:
+            description += "برای تأیید نزولی، بسته‌شدن یک کندل بعدی زیر کف این الگو لازم است."
+
+        return _item(
+            name_fa="ستاره ثاقب",
+            name_en="Shooting Star",
+            category="CANDLE",
+            direction="BEARISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BEARISH",
+            state="CONFIRMED" if follow_through else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[index].isoformat(),
+            score=(-18 if bearish_body else -16) if follow_through else (-11 if bearish_body else -9),
+            trigger_price=low,
+            invalidation_price=h,
+        )
+    return None
+
+
 def _hanging_man_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect a Hanging Man after an uptrend and confirm on a close below its low."""
     if len(frame) < 6:
@@ -1207,8 +1288,8 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("چکش معکوس", "Inverted Hammer", "BULLISH",
                 "سایهٔ بالایی بلند پس از افت؛ بازگشت فقط با تأیید کندل بعدی معتبرتر می‌شود.", 9)
         elif context == "UP":
-            add("ستاره ثاقب", "Shooting Star", "BEARISH",
-                "سایهٔ بالایی بلند پس از رشد؛ شکست کف الگو برای تأیید لازم است.", -11)
+            # Shooting Star is emitted by the confirmation-aware detector below.
+            pass
         else:
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
@@ -1298,6 +1379,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     hanging_man = _hanging_man_pattern(frame, volume_ratio)
     if hanging_man is not None:
         out.append(hanging_man)
+
+    shooting_star = _shooting_star_pattern(frame, volume_ratio)
+    if shooting_star is not None:
+        out.append(shooting_star)
 
     return out[-5:]
 
