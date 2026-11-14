@@ -1471,7 +1471,14 @@ def _get_easy_position_manager():
         return _EASY_POSITION_MANAGER
     with _EASY_POSITION_MANAGER_LOCK:
         if _EASY_POSITION_MANAGER is None:
-            _EASY_POSITION_MANAGER = EasyPositionManager()
+            risk = EASY_ENGINE.config.risk
+            _EASY_POSITION_MANAGER = EasyPositionManager(
+                paper_equity=risk.paper_equity_usd,
+                risk_per_trade_pct=risk.risk_per_trade_pct,
+                max_position_notional_pct=risk.max_position_notional_pct,
+                fee_bps_per_side=risk.fee_bps_per_side,
+                slippage_bps_per_side=risk.slippage_bps_per_side,
+            )
     return _EASY_POSITION_MANAGER
 
 
@@ -1716,6 +1723,24 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
         )
         candle_frame = getattr(EASY_ENGINE.data, "candle_frames", {}).get(asset.raw)
         range_evidence = observed_price_ranges(candle_frame)
+        # Automatically manage an existing Easy paper position using only the
+        # newest completed daily candle; no exchange order is ever submitted.
+        try:
+            manager = _get_easy_position_manager()
+            for position in manager.open_positions():
+                if position.get("asset") == asset.raw and candle_frame is not None and not candle_frame.empty:
+                    last = candle_frame.iloc[-1]
+                    atr_value = (result.metrics or {}).get("atr14")
+                    manager.update_position(
+                        position["position_id"],
+                        {key: float(last[key]) for key in ("open", "high", "low", "close")},
+                        atr_value=atr_value,
+                        candle_closed=True,
+                    )
+        except Exception as manager_error:
+            result.metrics["easy_position_manager_status"] = {
+                "status": "UNKNOWN", "error_type": type(manager_error).__name__,
+            }
         trend_gate = None
         snapshot = getattr(EASY_ENGINE.data, "snapshots", {}).get(asset.raw)
         timeframe_ranges = _timeframe_ranges(asset, snapshot)
