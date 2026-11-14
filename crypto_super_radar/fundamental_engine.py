@@ -293,7 +293,8 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     if known_weight and coverage >= MIN_COVERAGE_PCT:
         score = round(sum(MODULE_WEIGHTS[name] * item["score"] for name, item in modules.items()
                           if item["score"] is not None) / known_weight, 2)
-        status = "KNOWN" if all(item["score"] is not None for item in modules.values()) else "PARTIAL"
+        # Only the seven weighted modules determine score completeness.
+        status = "KNOWN" if all(modules[name]["score"] is not None for name in MODULE_WEIGHTS) else "PARTIAL"
     elif known_weight:
         status = "INSUFFICIENT_COVERAGE"
     return {"status": status, "score": score, "coverage_pct": round(coverage, 2),
