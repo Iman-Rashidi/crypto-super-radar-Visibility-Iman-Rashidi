@@ -6010,6 +6010,120 @@ async function refreshExecutionReadiness(){
           ids.forEach(id=>el(id).addEventListener('input',update));update();
         })();
         </script>
+        <section class="card" id="easy-position-manager">
+          <h2>مدیریت موقعیت و ژورنال Easy · Paper Only</h2>
+          <p class="muted">این بخش فقط حساب آزمایشی مستقل Easy را مدیریت می‌کند. سقف پیش‌فرض ریسک هر معامله ۰٫۵٪ سرمایه و سقف ارزش موقعیت ۱۰٪ سرمایه است. پوزیشن باز هنگام اسکن بعدی با آخرین کندل روزانه بسته‌شده به‌روزرسانی می‌شود. هیچ سفارش واقعی ارسال نمی‌شود.</p>
+          <div class="grid" style="align-items:start">
+            <div class="metric">
+              <h3>ثبت موقعیت آزمایشی</h3>
+              <label for="easy-open-asset">دارایی</label>
+              <input id="easy-open-asset" value="cex:BTCUSDT">
+              <label for="easy-open-side">جهت</label>
+              <select id="easy-open-side"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select>
+              <label for="easy-open-qty">تعداد / Quantity</label><input id="easy-open-qty" type="number" min="0.00000001" step="any">
+              <label for="easy-open-entry">قیمت ورود</label><input id="easy-open-entry" type="number" min="0.00000001" step="any">
+              <label for="easy-open-stop">حد ضرر اولیه</label><input id="easy-open-stop" type="number" min="0.00000001" step="any">
+              <label for="easy-open-target">حد سود</label><input id="easy-open-target" type="number" min="0.00000001" step="any">
+              <label for="easy-open-stop-mode">نوع توقف</label>
+              <select id="easy-open-stop-mode"><option value="HARD">Hard Stop · توقف خودکار آزمایشی</option><option value="MENTAL">Mental Stop · هشدار دستی</option></select>
+              <label for="easy-open-max-bars">حداکثر کندل نگهداری</label><input id="easy-open-max-bars" type="number" min="1" max="1000" value="100">
+              <button id="easy-open-submit" type="button">ثبت موقعیت آزمایشی</button>
+            </div>
+            <div class="metric">
+              <h3>به‌روزرسانی کندل بسته‌شده</h3>
+              <p class="muted">برای توقف/هدف و Trailing Stop؛ کندل باز رد می‌شود.</p>
+              <label for="easy-manage-id">شناسه موقعیت</label><input id="easy-manage-id" autocomplete="off">
+              <label for="easy-manage-open">Open</label><input id="easy-manage-open" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-high">High</label><input id="easy-manage-high" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-low">Low</label><input id="easy-manage-low" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-close">Close</label><input id="easy-manage-close" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-atr">ATR (اختیاری)</label><input id="easy-manage-atr" type="number" min="0.00000001" step="any">
+              <label><input id="easy-manage-closed" type="checkbox" checked> این کندل بسته شده است</label>
+              <button id="easy-manage-submit" type="button">ثبت کندل و مدیریت موقعیت</button>
+              <hr>
+              <h3>بستن دستی موقعیت</h3>
+              <label for="easy-close-id">شناسه موقعیت</label><input id="easy-close-id" autocomplete="off">
+              <label for="easy-close-price">قیمت خروج</label><input id="easy-close-price" type="number" min="0.00000001" step="any">
+              <label for="easy-close-reason">علت خروج</label><input id="easy-close-reason" value="MANUAL_CLOSE">
+              <button id="easy-close-submit" type="button">بستن در حساب آزمایشی</button>
+            </div>
+          </div>
+          <p id="easy-position-status" class="muted" aria-live="polite">در حال خواندن حساب آزمایشی Easy...</p>
+          <div id="easy-position-open-list"></div>
+          <h3>ژورنال معاملات بسته‌شده</h3>
+          <div id="easy-position-journal" style="overflow-x:auto"></div>
+          <p class="muted">سود/زیان ژورنال موقعیت‌منیجر بر اساس قیمت‌های ثبت‌شده و قبل از هزینه‌ها محاسبه می‌شود. اجرای واقعی، اتصال کلید خصوصی و اهرم در این حساب وجود ندارد.</p>
+        </section>
+        <script>
+        (function(){
+          const byId=id=>document.getElementById(id);
+          const status=byId('easy-position-status');
+          const openList=byId('easy-position-open-list');
+          const journal=byId('easy-position-journal');
+          if(!status||!openList||!journal)return;
+          const val=id=>(byId(id).value||'').trim();
+          const num=id=>Number(val(id));
+          function cell(row,value){const td=document.createElement('td');td.textContent=value===null||value===undefined?'—':String(value);row.appendChild(td);}
+          function table(headers,rows){
+            const t=document.createElement('table'),head=document.createElement('thead'),hr=document.createElement('tr');
+            headers.forEach(x=>cell(hr,x));head.appendChild(hr);t.appendChild(head);
+            const body=document.createElement('tbody');rows.forEach(values=>{const tr=document.createElement('tr');values.forEach(x=>cell(tr,x));body.appendChild(tr);});
+            t.appendChild(body);return t;
+          }
+          async function refresh(){
+            try{
+              const response=await fetch('/api/easy/positions',{cache:'no-store'});
+              const data=await response.json();if(!response.ok||data.status!=='KNOWN')throw new Error(data.error_type||'دریافت حساب ناموفق بود');
+              const active=data.open_positions||[],history=data.recent_journal||[];
+              openList.replaceChildren();
+              if(active.length){
+                openList.appendChild(table(['Asset','Side','Qty','Entry','Stop فعلی','TP','Stop Mode','Position ID'],
+                  active.map(p=>[p.asset,p.side,p.quantity,p.entry_price,p.current_stop,p.take_profit,p.stop_mode,p.position_id])));
+                const p=active[0];byId('easy-manage-id').value=p.position_id;byId('easy-close-id').value=p.position_id;
+              }else{const p=document.createElement('p');p.className='muted';p.textContent='موقعیت بازی در Easy paper manager وجود ندارد.';openList.appendChild(p);}
+              journal.replaceChildren();
+              if(history.length)journal.appendChild(table(['Asset','Side','Entry','Exit','Gross PnL','Exit reason','Closed at'],
+                history.map(t=>[t.asset,t.side,t.entry_price,t.exit_price,t.gross_pnl,t.exit_reason,new Date(Number(t.closed_at)*1000).toISOString()])));
+              else{const p=document.createElement('p');p.className='muted';p.textContent='هنوز معامله بسته‌شده‌ای در ژورنال ثبت نشده است.';journal.appendChild(p);}
+              status.textContent='حساب Easy: '+active.length+' موقعیت باز · '+history.length+' معامله بسته‌شده · '+data.mode;
+            }catch(error){status.textContent='خواندن حساب Easy ناموفق بود: '+String(error.message||error);}
+          }
+          async function post(path,values){
+            status.textContent='در حال ثبت داده در حساب آزمایشی...';
+            try{
+              const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams(values)});
+              const data=await response.json();
+              status.textContent=(data.status||'UNKNOWN')+' · '+(data.reason||data.message||'درخواست پردازش شد')+' · سفارش واقعی: '+(data.orders_submitted?'ارسال شده':'ارسال نشده');
+              if(data.position_id){byId('easy-manage-id').value=data.position_id;byId('easy-close-id').value=data.position_id;}
+              await refresh();
+              return data;
+            }catch(error){status.textContent='خطا در درخواست حساب آزمایشی: '+String(error.message||error);}
+          }
+          byId('easy-open-submit').addEventListener('click',()=>{
+            const fields=['easy-open-qty','easy-open-entry','easy-open-stop','easy-open-target'];
+            if(fields.some(id=>!Number.isFinite(num(id))||num(id)<=0)){status.textContent='Quantity، Entry، Stop و Target باید عدد مثبت باشند.';return;}
+            post('/api/easy/positions/open',{
+              asset:val('easy-open-asset'),side:val('easy-open-side'),quantity:val('easy-open-qty'),
+              entry_price:val('easy-open-entry'),stop_loss:val('easy-open-stop'),take_profit:val('easy-open-target'),
+              stop_mode:val('easy-open-stop-mode'),max_holding_bars:val('easy-open-max-bars')
+            });
+          });
+          byId('easy-manage-submit').addEventListener('click',()=>{
+            const fields=['easy-manage-open','easy-manage-high','easy-manage-low','easy-manage-close'];
+            if(!val('easy-manage-id')||fields.some(id=>!Number.isFinite(num(id))||num(id)<=0)){status.textContent='شناسه و چهار قیمت OHLC معتبر لازم است.';return;}
+            post('/api/easy/positions/update',{
+              position_id:val('easy-manage-id'),open:val('easy-manage-open'),high:val('easy-manage-high'),
+              low:val('easy-manage-low'),close:val('easy-manage-close'),atr_value:val('easy-manage-atr'),
+              closed:byId('easy-manage-closed').checked?'1':'0'
+            });
+          });
+          byId('easy-close-submit').addEventListener('click',()=>{
+            if(!val('easy-close-id')||!Number.isFinite(num('easy-close-price'))||num('easy-close-price')<=0){status.textContent='شناسه موقعیت و قیمت خروج معتبر لازم است.';return;}
+            post('/api/easy/positions/close',{position_id:val('easy-close-id'),exit_price:val('easy-close-price'),reason:val('easy-close-reason')});
+          });
+          refresh();
+        })();
+        </script>
         <section class="card">
           <h3>۱۲ فیلتر اجباری</h3>
           <p>داده بازار · رژیم · روند · مومنتوم · جریان سرمایه · امنیت · احساسات · بک‌تست · ریسک · نهنگ‌ها · پوشش احساسات · Walk-forward</p>
