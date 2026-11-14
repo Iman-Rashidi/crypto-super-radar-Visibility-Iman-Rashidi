@@ -218,8 +218,8 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(pattern["direction"], "BEARISH")
         self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
         self.assertEqual(pattern["score"], -11)
-        self.assertEqual(pattern["trigger_price"], 116.0)
-        self.assertEqual(pattern["invalidation_price"], 109.9)
+        self.assertEqual(pattern["trigger_price"], 109.9)
+        self.assertEqual(pattern["invalidation_price"], 116.0)
 
     def test_gravestone_doji_without_uptrend_is_not_bearish(self):
         frame = self._set_gravestone_doji(candle_frame("flat"))
