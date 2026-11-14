@@ -168,18 +168,24 @@ def accounting_principles_analysis(evidence: Mapping[str, Any]) -> dict[str, Any
             "checks": ("performance_obligation_satisfied", "revenue_basis_disclosed",
                        "fees_separated_from_tokenholder_revenue", "collectability_supported"),
             "note": "Protocol fees, gross revenue and revenue accruing to token holders are different measures.",
+            "accepted_methods": ("POINT_IN_TIME", "OVER_TIME"),
+            "method_field": "recognition_method",
         },
         "inventory_valuation": {
             "label_fa": "ارزش‌گذاری موجودی",
             "checks": ("inventory_scope_disclosed", "valuation_method_disclosed",
                        "impairment_or_obsolescence_disclosed"),
-            "note": "For a software protocol with no material inventory this is NOT_APPLICABLE, not a positive score.",
+            "note": "FIFO records oldest inventory costs first; LIFO records newest costs first; weighted average uses average unit cost. For a software protocol with no material inventory this is NOT_APPLICABLE, not a positive score.",
+            "accepted_methods": ("FIFO", "LIFO", "WEIGHTED_AVERAGE"),
+            "method_field": "valuation_method",
         },
         "depreciation": {
             "label_fa": "استهلاک دارایی‌ها",
             "checks": ("material_asset_register_disclosed", "useful_lives_disclosed",
                        "depreciation_method_disclosed", "impairment_disclosed"),
-            "note": "Assess servers, equipment and capitalized development only where material and disclosed.",
+            "note": "Straight-line spreads cost evenly; declining-balance accelerates early expense; units-of-production follows actual usage. Assess servers, equipment and capitalized development only where material and disclosed.",
+            "accepted_methods": ("STRAIGHT_LINE", "DECLINING_BALANCE", "UNITS_OF_PRODUCTION"),
+            "method_field": "depreciation_method",
         },
     }
     results = {}
@@ -201,8 +207,13 @@ def accounting_principles_analysis(evidence: Mapping[str, Any]) -> dict[str, Any
         status = ("UNKNOWN" if all(value == "UNKNOWN" for value in values) else
                   "FAIL" if "FAIL" in values else
                   "PARTIAL" if "UNKNOWN" in values else "PASS")
+        reported_method = str(supplied.get(definition["method_field"]) or "").upper()
+        if reported_method not in definition["accepted_methods"]:
+            reported_method = None
         results[name] = {"status": status, "score": None,
                          "label_fa": definition["label_fa"], "checks": checks,
+                         "reported_method": reported_method,
+                         "accepted_methods": list(definition["accepted_methods"]),
                          "note": definition["note"]}
     return {
         "status": "UNKNOWN" if all(x["status"] in ("UNKNOWN", "NOT_APPLICABLE") for x in results.values()) else
