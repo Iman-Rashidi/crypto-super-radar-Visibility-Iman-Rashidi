@@ -41,10 +41,12 @@ from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
 )
+from .strategy_engine import MasterStrategyEngine
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
+MASTER_STRATEGY_ENGINE = MasterStrategyEngine()
 STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
 FUTURES_PAPER_BOT = FuturesPaperTradingBot(ENGINE)
@@ -2769,8 +2771,63 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             )
             return
         signal_bar = frame.index[-1].isoformat()
-        record["signal_id"] = asset.raw + "|" + signal_bar
+        signal_id = asset.raw + "|" + signal_bar
+        _set_blofin_execution_job(
+            job_id, "running", stage="MASTER_STRATEGY_ENGINE",
+            message_fa="Turtle 20/55، روند بازار و Pullback در حال ارزیابی مستقل هستند؛ هنوز سفارشی ارسال نشده است.",
+            analysis=gate_summary,
+        )
+        master_strategy = MASTER_STRATEGY_ENGINE.evaluate(
+            frame, base_signal=direction,
+        )
+        _set_blofin_execution_job(
+            job_id, "running", stage="MASTER_STRATEGY_ENGINE",
+            message_fa=(
+                "استراتژی " + str(master_strategy.get("strategy")) + " با داده روزانه تأیید شد؛ "
+                "در انتظار بازبینی ثانویه Nemotron."
+                if master_strategy.get("status") == "APPROVED" else
+                "موتور استراتژی ورود را تأیید نکرد؛ تصمیم NO TRADE و بدون سفارش."
+            ),
+            strategy=master_strategy,
+            analysis=gate_summary,
+        )
+        if master_strategy.get("status") != "APPROVED":
+            _set_blofin_execution_job(
+                job_id, "completed", stage="MASTER_STRATEGY_BLOCKED",
+                message_fa=(
+                    "Master Strategy Engine سیگنال معتبر نداد؛ هیچ سفارشی ارسال نشد. "
+                    + str(master_strategy.get("reason") or "")
+                ),
+                strategy=master_strategy,
+                result={
+                    "status": "MASTER_STRATEGY_BLOCKED",
+                    "environment": "BLOFIN_DEMO",
+                    "strategy": master_strategy,
+                    "reason_fa": "استراتژی Turtle یا Pullback با جهت ۱۲ گیت و وضعیت روز بازار همسو نبود.",
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                },
+            )
+            return
+
+        # Use deterministic strategy levels, not the legacy EMA-based levels.
+        analysis.entry_price = float(master_strategy["entry_price"])
+        analysis.stop_loss = float(master_strategy["stop_loss"])
+        analysis.take_profit = float(master_strategy["take_profit"])
+        analysis.metrics["master_strategy"] = master_strategy
+        analysis.metrics["master_strategy_status"] = master_strategy.get("status")
+        analysis.metrics["master_strategy_name"] = master_strategy.get("strategy")
+        analysis.metrics["master_strategy_direction"] = master_strategy.get("direction")
+        analysis.metrics["master_strategy_regime"] = master_strategy.get("market_regime")
+        record = analysis.to_record()
+        record["signal_id"] = signal_id
         record["inst_id"] = "BTC-USDT"
+        gate_summary.update({
+            "entry_reference_price": record.get("entry_price_usd"),
+            "stop_loss": record.get("stop_loss_usd"),
+            "take_profit": record.get("take_profit_usd"),
+            "selected_strategy": master_strategy.get("strategy"),
+        })
         if store.has_signal(record["signal_id"]):
             _set_blofin_execution_job(
                 job_id, "completed", stage="DUPLICATE_CANDLE_SKIPPED",
