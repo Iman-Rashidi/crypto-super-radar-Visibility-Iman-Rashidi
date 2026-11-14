@@ -3690,7 +3690,9 @@ class Handler(BaseHTTPRequestHandler):
             <p class="muted">سهمیه فقط یک سفارش در کل عمر سرویس؛ اهرم ایزوله 1x، حداقل اندازه قرارداد، حد ضرر و حد سود. شرط ورود: ۱۲ گیت PASS، تأیید Nemotron و عبور همه کنترل‌های حساب و قیمت. در صورت رد هر شرط، سفارش ارسال نمی‌شود.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک معامله در BloFin Demo</button>
-            <pre id="blofin-execution-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+            <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
+              <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
+            </div>
           </div>
           <div class="metric" style="margin-top:16px">
             <h3>مانیتور زنده ورود و خروج ربات</h3>
@@ -3712,12 +3714,12 @@ class Handler(BaseHTTPRequestHandler):
             const safety=document.getElementById('blofin-demo-safety');
             const executeButton=document.getElementById('blofin-demo-execute-once');
             const executionReadiness=document.getElementById('blofin-execution-readiness');
-            const executionResult=document.getElementById('blofin-execution-result');
+            const executionReport=document.getElementById('blofin-execution-report');
             const monitorToggle=document.getElementById('blofin-demo-monitor-toggle');
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!executionReadiness||!executionResult||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -3930,13 +3932,125 @@ class Handler(BaseHTTPRequestHandler):
               if(monitorActive){monitorToggle.textContent='توقف مانیتور زنده';fetchLiveMonitor();}
               else{clearTimeout(monitorTimer);monitorStatus.textContent='مانیتور زنده متوقف شد.';monitorToggle.textContent='شروع مانیتور زنده هر ۵ ثانیه';}
             });
+            function renderExecutionJob(job){
+              const report=job&&job.report_fa?job.report_fa:{};
+              executionReport.replaceChildren();
+              function node(parent,tag,value,className){
+                const el=document.createElement(tag);
+                if(className)el.className=className;
+                el.textContent=value===null||value===undefined||value===''?'—':String(value);
+                parent.appendChild(el);
+                return el;
+              }
+              function section(title,description){
+                const box=document.createElement('section');
+                box.className='metric';
+                box.style.marginTop='12px';
+                node(box,'h4',title);
+                if(description)node(box,'p',description,'muted');
+                executionReport.appendChild(box);
+                return box;
+              }
+              function metricGrid(parent,items){
+                const grid=document.createElement('div');
+                grid.className='grid';
+                items.forEach(([label,value])=>{
+                  const card=document.createElement('div');
+                  card.className='metric';
+                  node(card,'span',label);
+                  node(card,'strong',value);
+                  grid.appendChild(card);
+                });
+                parent.appendChild(grid);
+              }
+              function makeTable(parent,title,rows,columns,emptyText){
+                const box=section(title);
+                if(!Array.isArray(rows)||!rows.length){
+                  node(box,'p',emptyText||'موردی برای نمایش ثبت نشده است.','muted');
+                  return;
+                }
+                const wrapper=document.createElement('div');
+                wrapper.style.overflowX='auto';
+                const table=document.createElement('table');
+                const head=document.createElement('tr');
+                columns.forEach(([,label])=>node(head,'th',label));
+                table.appendChild(head);
+                rows.forEach(item=>{
+                  const tr=document.createElement('tr');
+                  columns.forEach(([key])=>{
+                    let value=item&&item[key];
+                    if(/time|timestamp|confirmed_at/i.test(key))value=formatTime(value);
+                    node(tr,'td',value);
+                  });
+                  table.appendChild(tr);
+                });
+                wrapper.appendChild(table);
+                box.appendChild(wrapper);
+              }
+              if(!report||!Object.keys(report).length){
+                node(executionReport,'p',(job&&job.message_fa)||'گزارش فارسی هنوز از سرور دریافت نشده است.','muted');
+                return;
+              }
+              node(executionReport,'h3',report.title_fa||'گزارش فارسی اجرای معامله');
+              node(executionReport,'p',report.reason_fa||'دلیل نهایی هنوز ثبت نشده است.','muted');
+              const summary=section('خلاصه تصمیم و وضعیت چرخه');
+              metricGrid(summary,[
+                ['وضعیت',report.status_fa],
+                ['مرحله فعلی',report.stage_fa],
+                ['جهت تحلیل',report.signal_fa],
+                ['سفارش ارسال شد؟',report.orders_submitted===true?'بله، در Demo':report.orders_submitted==='UNKNOWN'?'وضعیت نامشخص':'خیر'],
+                ['معامله واقعاً پر شد؟',report.trade_executed===true?'بله':'خیر / هنوز تأیید نشده'],
+                ['وضعیت ۱۲ فیلتر',report.gate_summary_fa]
+              ]);
+              const timing=section('زمان‌بندی دقیق تصمیم و معامله');
+              metricGrid(timing,[
+                ['زمان تحلیل',formatTime(report.analysis_time_utc)],
+                ['زمان آخرین کندل کامل',formatTime(report.last_completed_candle_time_utc)],
+                ['قیمت بسته‌شدن کندل',report.last_candle_close],
+                ['زمان آخرین رویداد',formatTime(report.decision_time_utc)],
+                ['زمان ارسال سفارش',formatTime(report.submitted_at_utc)],
+                ['زمان تأیید Fill',formatTime(report.filled_at_utc)]
+              ]);
+              const wave=report.elliott_wave||{};
+              const waveBox=section('انتخاب ساختار موج الیوت در لحظه تحلیل',
+                'شمارش موج از پیوت‌های تأییدشدهٔ کندل‌های بازار ساخته می‌شود؛ موج بعدی فقط سناریو است، نه پیش‌بینی قطعی.');
+              metricGrid(waveBox,[
+                ['وضعیت شمارش',wave.status_fa],
+                ['ساختار شناسایی‌شده',wave.pattern_fa],
+                ['مرحله موج',wave.phase_fa],
+                ['سناریوی موج منتخب',wave.selected_wave_fa],
+                ['مقایسه با جهت معامله',wave.direction_alignment_fa],
+                ['سطح ابطال شمارش',wave.invalidation_price],
+                ['آستانه تأیید پیوت (%)',wave.pivot_reversal_threshold_pct]
+              ]);
+              node(waveBox,'p',wave.confidence_note_fa||'موج الیوت به‌تنهایی مجوز ورود صادر نمی‌کند.','muted');
+              makeTable(executionReport,'پیوت‌های تأییدشدهٔ موج الیوت',wave.pivots||[],[
+                ['kind_fa','نوع پیوت'],['price','قیمت'],['timestamp_utc','زمان وقوع پیوت'],['confirmed_at_utc','زمان تأیید پیوت']
+              ],'پیوت تأییدشده‌ای برای شماره‌گذاری موج در دسترس نیست.');
+              makeTable(executionReport,'وضعیت تک‌تک ۱۲ فیلتر',report.gates_fa||[],[
+                ['gate_id','شماره'],['name_fa','فیلتر'],['status_fa','وضعیت'],['reason_fa','دلیل']
+              ],'جزئیات فیلترها هنوز ثبت نشده است.');
+              const order=section('جزئیات سفارش و قیمت‌های اجرایی');
+              metricGrid(order,[
+                ['قیمت مرجع ورود',report.entry_reference_price],
+                ['میانگین قیمت Fill واقعی',report.average_fill_price],
+                ['حد ضرر',report.stop_loss],
+                ['حد سود',report.take_profit],
+                ['حجم قرارداد',report.quantity_contracts],
+                ['اهرم',report.leverage],
+                ['شناسه سفارش صرافی',report.exchange_order_id]
+              ]);
+              makeTable(executionReport,'خط زمانی رویدادهای چرخه',report.events_fa||[],[
+                ['time_utc','زمان'],['stage_fa','مرحله'],['status_fa','وضعیت'],['message_fa','شرح رویداد']
+              ],'رویدادی ثبت نشده است.');
+            }
             async function pollExecutionJob(jobId,token,attempt){
               try{
                 const response=await fetch('/api/blofin/demo/execution-jobs/'+jobId,{
                   cache:'no-store',headers:{'Authorization':'Bearer '+token}
                 });
                 const job=await response.json();
-                executionResult.textContent=JSON.stringify(job,null,2);
+                renderExecutionJob(job);
                 const events=job.events||[];
                 executionReadiness.textContent=events.map(e=>formatTime(e.time_utc)+' · '+(e.message_fa||e.stage)).join('\\n');
                 if(job.status==='completed'||job.status==='failed'){
@@ -3953,7 +4067,11 @@ class Handler(BaseHTTPRequestHandler):
               if(!token){executionReadiness.textContent='ابتدا توکن پنل را در کادر بالا وارد کن.';return;}
               if(!window.confirm('این اقدام یک سفارش بازار BTC-USDT را فقط در BloFin Demo ارسال می‌کند؛ اهرم ایزوله 1x، حداقل حجم قرارداد و حد ضرر/حد سود. اگر تحلیل اجازه ندهد معامله‌ای انجام نمی‌شود. ادامه؟'))return;
               executeButton.disabled=true;
-              executionResult.textContent='در حال آغاز اسکن زنده ۱۲ گیت و بررسی Nemotron...';
+              executionReport.replaceChildren();
+              const runningMessage=document.createElement('p');
+              runningMessage.className='muted';
+              runningMessage.textContent='در حال آغاز تحلیل زندهٔ ۱۲ فیلتر و بررسی ساختار موج الیوت؛ هنوز سفارشی ارسال نشده است.';
+              executionReport.appendChild(runningMessage);
               try{
                 const response=await fetch('/api/blofin/demo/execute-once',{
                   method:'POST',cache:'no-store',
@@ -3961,12 +4079,22 @@ class Handler(BaseHTTPRequestHandler):
                   body:new URLSearchParams({confirm:'1',instrument:'BTC-USDT'})
                 });
                 const started=await response.json();
-                if(!response.ok||!started.job_id){executionResult.textContent=JSON.stringify(started,null,2);await refreshExecutionReadiness();return;}
+                if(!response.ok||!started.job_id){
+                  executionReport.replaceChildren();
+                  const failureMessage=document.createElement('p');
+                  failureMessage.textContent=started.message_fa||started.reason_fa||'ثبت درخواست اجرا نشد؛ جزئیات احراز هویت یا پیش‌نیازها را بررسی کن.';
+                  executionReport.appendChild(failureMessage);
+                  await refreshExecutionReadiness();
+                  return;
+                }
                 lastJobId=started.job_id;
-                executionResult.textContent=JSON.stringify(started,null,2);
+                const acceptedMessage=document.createElement('p');
+                acceptedMessage.className='muted';
+                acceptedMessage.textContent='درخواست ثبت شد. شناسه چرخه: '+started.job_id+'؛ گزارش در حال دریافت است.';
+                executionReport.replaceChildren(acceptedMessage);
                 pollExecutionJob(started.job_id,token,0);
               }catch(error){
-                executionResult.textContent='نتیجه درخواست نامشخص است؛ پیش از هر تلاش مجدد وضعیت سفارش‌های BloFin را بررسی کن.';
+                executionReport.textContent='نتیجه درخواست نامشخص است؛ پیش از هر تلاش مجدد وضعیت سفارش‌های BloFin را بررسی کن.';
                 executionReadiness.textContent='از فشردن دوباره دکمه خودداری کن تا وضعیت درخواست روشن شود.';
               }
             });
