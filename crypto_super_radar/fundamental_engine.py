@@ -161,6 +161,9 @@ def debt_to_equity_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
         return {"status": "NOT_APPLICABLE", "score": None, "debt_to_equity": None,
                 "reason": "D/E شرکتی برای توکن کاربرد ندارد."}
+    if asset_class not in {"equity", "stock", "share", "reit", "company"}:
+        return {"status": "UNKNOWN", "score": None, "debt_to_equity": None,
+                "reason": "نوع دارایی باید به‌عنوان سهام یا شرکت مشخص شود."}
     source, observed = evidence.get("source"), evidence.get("observed_at_utc")
     sourced = (isinstance(source, str) and source.startswith(("https://", "http://"))
                and isinstance(observed, str) and bool(observed.strip()))
@@ -213,7 +216,11 @@ def comparative_company_analysis(company: Mapping[str, Any],
         source, observed = row.get("source"), row.get("observed_at_utc")
         return (isinstance(source, str) and source.startswith(("https://", "http://"))
                 and isinstance(observed, str) and bool(observed.strip()))
-    company_valid = bool(sector and subsector and cap is not None and verified(company))
+    reporting_period = company.get("reporting_period")
+    currency = str(company.get("currency") or "").upper()
+    accounting_basis = str(company.get("accounting_basis") or "").upper()
+    company_valid = bool(sector and subsector and cap is not None and verified(company)
+                         and reporting_period and currency and accounting_basis)
     eligible, excluded = [], []
     for peer in peers:
         if not isinstance(peer, Mapping):
@@ -223,7 +230,10 @@ def comparative_company_analysis(company: Mapping[str, Any],
         same_group = (str(peer.get("sector") or "").strip().lower() == sector
                       and str(peer.get("subsector") or "").strip().lower() == subsector)
         similar_size = bool(cap and peer_cap and 0.5 <= peer_cap / cap <= 2.0)
-        if not company_valid or not same_group or not similar_size or not verified(peer):
+        standardized = (peer.get("reporting_period") == reporting_period
+                        and str(peer.get("currency") or "").upper() == currency
+                        and str(peer.get("accounting_basis") or "").upper() == accounting_basis)
+        if not company_valid or not same_group or not similar_size or not standardized or not verified(peer):
             excluded.append(str(peer.get("symbol") or peer.get("name") or "UNKNOWN_PEER"))
             continue
         eligible.append(peer)
@@ -261,11 +271,14 @@ def comparative_company_analysis(company: Mapping[str, Any],
         "excluded_peers": excluded, "comparisons": comparisons,
         "qualitative_context": qualitative,
         "peer_selection": {"same_sector_and_subsector": True,
-                           "market_cap_range": "50%-200% of company market capitalization"},
+                           "market_cap_range": "50%-200% of company market capitalization",
+                           "same_reporting_period": reporting_period,
+                           "same_currency": currency,
+                           "same_accounting_basis": accounting_basis},
         "source": company.get("source") if company_valid else None,
         "observed_at_utc": company.get("observed_at_utc") if company_valid else None,
         "reason": None if comparisons else "داده معتبر شرکت و حداقل یک همتای هم‌صنعت، هم‌زیرصنعت و هم‌اندازه لازم است.",
-        "limitations": ["مقایسه فقط با دوره مالی و مبنای حسابداری همسان معتبر است؛ دوره/واحد داده باید پیش از ارسال استاندارد شود.",
+        "limitations": ["مقایسه فقط با دوره مالی، ارز گزارشگری و مبنای حسابداری یکسان انجام می‌شود؛ داده‌های ناهمسان حذف می‌شوند.",
                         "میانه همتایان شاخص توصیفی است، نه ارزش ذاتی یا سیگنال خرید و فروش.",
                         "کیفیت مدیریت، قدرت برند و شهرت بازار فقط زمینه کیفی منبع‌دار هستند و امتیاز عددی نمی‌گیرند.",
                         "شرکت‌های مالی، بیمه و بانک‌ها ممکن است به معیارهای تخصصی صنعت نیاز داشته باشند."],
