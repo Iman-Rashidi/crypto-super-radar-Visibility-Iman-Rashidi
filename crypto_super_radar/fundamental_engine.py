@@ -469,6 +469,164 @@ def dividend_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def share_buyback_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Assess completed equity repurchases and their funding; not a trade signal.
+
+    Inputs include completed_shares_repur, shares_outstanding_before/after,
+    average_repurchase_price, current_price, cash_spent, debt_funded_amount,
+    net_income, source and observed_at_utc. Authorizations alone are not treated
+    as completed repurchases.
+    """
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "بازخرید سهام شرکت برای توکن کاربرد ندارد؛ این موضوع ضعف بنیادی رمزارز محسوب نمی‌شود."}
+    if asset_class not in {"equity", "stock", "share", "reit"}:
+        return {"status": "UNKNOWN", "score": None,
+                "message_fa": "نوع دارایی مشخص نیست؛ تحلیل بازخرید سهام اجرا نشد."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(observed)
+    repurchased = _positive(evidence.get("completed_shares_repur"))
+    before = _positive(evidence.get("shares_outstanding_before"))
+    after = _positive(evidence.get("shares_outstanding_after"))
+    avg_price = _positive(evidence.get("average_repurchase_price"))
+    current_price = _positive(evidence.get("current_price"))
+    cash_spent = _positive(evidence.get("cash_spent"))
+    debt_funded = _number(evidence.get("debt_funded_amount"))
+    net_income = _number(evidence.get("net_income"))
+    share_reduction_pct = ((before - after) / before * 100
+                           if before is not None and after is not None and after <= before else None)
+    buyback_yield_pct = (repurchased / before * 100
+                         if repurchased is not None and before is not None else None)
+    implied_spend = (repurchased * avg_price
+                     if repurchased is not None and avg_price is not None else None)
+    total_spend = cash_spent if cash_spent is not None else implied_spend
+    debt_funding_pct = (debt_funded / total_spend * 100
+                        if debt_funded is not None and debt_funded >= 0
+                        and total_spend is not None and total_spend > 0 else None)
+    repurchase_premium_pct = ((avg_price / current_price - 1) * 100
+                              if avg_price is not None and current_price is not None else None)
+    eps_before = (net_income / before
+                  if net_income is not None and before is not None else None)
+    eps_after = (net_income / after
+                 if net_income is not None and after is not None else None)
+    eps_mechanical_accretion_pct = ((eps_after / eps_before - 1) * 100
+                                    if eps_before is not None and eps_before > 0
+                                    and eps_after is not None else None)
+    checks = {
+        "completed_repurchase": "KNOWN" if repurchased is not None and sourced else "UNKNOWN",
+        "share_count_change": "KNOWN" if share_reduction_pct is not None and sourced else "UNKNOWN",
+        "buyback_yield": "KNOWN" if buyback_yield_pct is not None and sourced else "UNKNOWN",
+        "repurchase_price": "KNOWN" if repurchase_premium_pct is not None and sourced else "UNKNOWN",
+        "funding_mix": "KNOWN" if total_spend is not None and debt_funded is not None and sourced else "UNKNOWN",
+        "mechanical_eps_effect": "KNOWN" if eps_mechanical_accretion_pct is not None and sourced else "UNKNOWN",
+    }
+    known = sum(value == "KNOWN" for value in checks.values())
+    status = "KNOWN" if known == len(checks) else "PARTIAL" if known else "UNKNOWN"
+    flags = []
+    if debt_funded is not None and debt_funded > 0:
+        flags.append("debt_funded_repurchase")
+    if repurchase_premium_pct is not None and repurchase_premium_pct > 0:
+        flags.append("repurchased_above_current_price_reference")
+    if share_reduction_pct is not None and share_reduction_pct < 0:
+        flags.append("share_count_increased_check_equity_compensation")
+    return {
+        "status": status, "score": None, "applicability": "APPLICABLE",
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "completed_shares_repur": repurchased, "shares_outstanding_before": before,
+        "shares_outstanding_after": after, "share_reduction_pct": share_reduction_pct,
+        "buyback_yield_pct": buyback_yield_pct, "average_repurchase_price": avg_price,
+        "current_price": current_price, "repurchase_premium_pct": repurchase_premium_pct,
+        "cash_spent": total_spend, "debt_funded_amount": debt_funded,
+        "debt_funding_pct": debt_funding_pct, "mechanical_eps_before": eps_before,
+        "mechanical_eps_after": eps_after,
+        "mechanical_eps_accretion_pct": eps_mechanical_accretion_pct,
+        "review_flags": flags, "checks": checks, "known_checks": known,
+        "total_checks": len(checks),
+        "message_fa": "افزایش مکانیکی EPS ناشی از کاهش تعداد سهام، به‌معنای رشد سود عملیاتی نیست؛ منبع تأمین مالی و قیمت بازخرید را جداگانه ارزیابی کنید.",
+        "limitations": [
+            "مجوز یا سقف برنامه بازخرید، معادل خرید انجام‌شده نیست.",
+            "اثر مکانیکی EPS با فرض ثابت ماندن سود خالص محاسبه شده و پیش‌بینی عملکرد آینده نیست.",
+            "بازخرید بدهی‌محور می‌تواند ریسک ترازنامه و هزینه بهره را افزایش دهد.",
+        ],
+    }
+
+
+def eps_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Calculate sourced basic/diluted EPS, P/E, history and forecast context."""
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "EPS شرکتی برای توکن تعریف نشده است؛ این شاخص نباید به‌عنوان ضعف رمزارز ثبت شود."}
+    if asset_class not in {"equity", "stock", "share", "reit"}:
+        return {"status": "UNKNOWN", "score": None,
+                "message_fa": "نوع دارایی مشخص نیست؛ محاسبه EPS انجام نشد."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(observed)
+    net_income = _number(evidence.get("net_income"))
+    preferred = _number(evidence.get("preferred_dividends"))
+    weighted_shares = _positive(evidence.get("weighted_average_shares"))
+    diluted_shares = _positive(evidence.get("diluted_weighted_average_shares"))
+    common_income = net_income - (preferred or 0) if net_income is not None else None
+    basic_eps = (common_income / weighted_shares
+                 if common_income is not None and weighted_shares is not None else None)
+    diluted_eps = (common_income / diluted_shares
+                   if common_income is not None and diluted_shares is not None else None)
+    adjusted_income = _number(evidence.get("adjusted_net_income"))
+    adjusted_eps = (adjusted_income / weighted_shares
+                    if adjusted_income is not None and weighted_shares is not None else None)
+    price = _positive(evidence.get("current_price"))
+    pe_ratio = price / basic_eps if price is not None and basic_eps is not None and basic_eps > 0 else None
+    history = evidence.get("eps_history")
+    history = history if isinstance(history, list) else []
+    valid_history = []
+    for row in history:
+        if not isinstance(row, Mapping):
+            continue
+        year, value = _number(row.get("year")), _number(row.get("eps"))
+        if year is not None and year.is_integer() and value is not None:
+            valid_history.append((int(year), value))
+    valid_history.sort()
+    history_growth_pct = None
+    if len(valid_history) >= 2 and valid_history[0][1] > 0 and valid_history[-1][1] > 0:
+        intervals = valid_history[-1][0] - valid_history[0][0]
+        if intervals > 0:
+            history_growth_pct = ((valid_history[-1][1] / valid_history[0][1]) ** (1 / intervals) - 1) * 100
+    forecast_eps = _number(evidence.get("forecast_eps"))
+    forecast_change_pct = ((forecast_eps / basic_eps - 1) * 100
+                           if forecast_eps is not None and basic_eps is not None and basic_eps != 0 else None)
+    checks = {
+        "basic_eps": "KNOWN" if basic_eps is not None and sourced else "UNKNOWN",
+        "diluted_eps": "KNOWN" if diluted_eps is not None and sourced else "UNKNOWN",
+        "pe_ratio": "KNOWN" if pe_ratio is not None and sourced else "UNKNOWN",
+        "eps_history": "KNOWN" if history_growth_pct is not None and sourced else "UNKNOWN",
+        "forecast_comparison": "KNOWN" if forecast_change_pct is not None and sourced else "UNKNOWN",
+        "adjusted_eps": "KNOWN" if adjusted_eps is not None and sourced else "UNKNOWN",
+    }
+    known = sum(value == "KNOWN" for value in checks.values())
+    status = "KNOWN" if known == len(checks) else "PARTIAL" if known else "UNKNOWN"
+    return {
+        "status": status, "score": None, "applicability": "APPLICABLE",
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "net_income": net_income, "preferred_dividends": preferred,
+        "weighted_average_shares": weighted_shares,
+        "diluted_weighted_average_shares": diluted_shares,
+        "basic_eps": basic_eps, "diluted_eps": diluted_eps,
+        "adjusted_eps": adjusted_eps, "pe_ratio": pe_ratio,
+        "eps_history": [{"year": year, "eps": value} for year, value in valid_history],
+        "eps_history_cagr_pct": history_growth_pct, "forecast_eps": forecast_eps,
+        "forecast_change_pct": forecast_change_pct,
+        "checks": checks, "known_checks": known, "total_checks": len(checks),
+        "message_fa": "EPS باید همراه با جریان نقدی، اقلام غیرتکراری، تعداد سهام و روند سود بررسی شود؛ EPS بالاتر به‌تنهایی نشانه سلامت مالی نیست.",
+        "limitations": [
+            "افزایش EPS ممکن است صرفاً ناشی از بازخرید سهام باشد، نه رشد سود عملیاتی.",
+            "روش‌های حسابداری و اقلام یک‌باره می‌توانند EPS گزارش‌شده را منحرف کنند.",
+            "نسبت P/E برای EPS صفر یا منفی معنادار محاسبه نمی‌شود.",
+        ],
+    }
+
+
 def mergers_acquisitions_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Evidence-only M&A diagnostic for listed companies; never a trade signal."""
     asset_class = str(evidence.get("asset_class") or "").strip().lower()
@@ -619,6 +777,8 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
     modules["event_analysis"] = event_analysis(evidence.get("event_analysis", {}))
     modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
+    modules["share_buybacks"] = share_buyback_analysis(evidence.get("share_buybacks", {}))
+    modules["eps_analysis"] = eps_analysis(evidence.get("eps_analysis", {}))
     modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))
     modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
     for name in ("dcf", "comparables"):
@@ -650,5 +810,6 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
            "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
            "mergers_acquisitions_analysis", "sector_rotation_analysis",
+           "share_buyback_analysis", "eps_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
