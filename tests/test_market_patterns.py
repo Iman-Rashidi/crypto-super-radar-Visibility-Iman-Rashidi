@@ -171,6 +171,72 @@ class MarketPatternTests(unittest.TestCase):
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Three Black Crows" for p in analysis["candlestick_patterns"]))
 
+    def _set_shooting_star(
+        self, frame: pd.DataFrame, *, with_confirmation: bool = False, bearish_body: bool = False
+    ) -> pd.DataFrame:
+        index = -2 if with_confirmation else -1
+        base = float(frame.iloc[index - 1]["close"])
+        if bearish_body:
+            frame.iloc[index] = [base + 1.0, base + 6.1, base - 0.1, base, 1600.0]
+        else:
+            frame.iloc[index] = [base, base + 6.1, base - 0.1, base + 1.0, 1600.0]
+        if with_confirmation:
+            pattern_low = base - 0.1
+            frame.iloc[-1] = [pattern_low + 0.05, pattern_low + 0.08,
+                              pattern_low - 1.0, pattern_low - 0.5, 1900.0]
+        return frame
+
+    def test_shooting_star_after_uptrend_is_pending_bearish_evidence(self):
+        frame = self._set_shooting_star(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Shooting Star")
+        self.assertEqual(pattern["name_fa"], "ستاره ثاقب")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertAlmostEqual(pattern["trigger_price"], frame.iloc[-1]["low"])
+        self.assertAlmostEqual(pattern["invalidation_price"], frame.iloc[-1]["high"])
+
+    def test_shooting_star_confirmed_by_next_close_below_pattern_low(self):
+        frame = self._set_shooting_star(candle_frame("up"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Shooting Star")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_shooting_star_accepts_bearish_body_and_scores_it_more_strongly(self):
+        bullish = self._set_shooting_star(candle_frame("up"))
+        bearish = self._set_shooting_star(candle_frame("up"), bearish_body=True)
+        bullish_pattern = next(
+            p for p in analyze_market_patterns(bullish, [])["candlestick_patterns"]
+            if p["name_en"] == "Shooting Star"
+        )
+        bearish_pattern = next(
+            p for p in analyze_market_patterns(bearish, [])["candlestick_patterns"]
+            if p["name_en"] == "Shooting Star"
+        )
+        self.assertLess(bearish_pattern["score"], bullish_pattern["score"])
+
+    def test_shooting_star_rejected_without_prior_uptrend(self):
+        frame = self._set_shooting_star(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Shooting Star" for p in analysis["candlestick_patterns"]))
+
+    def test_shooting_star_rejected_when_upper_shadow_is_too_short(self):
+        frame = self._set_shooting_star(candle_frame("up"))
+        base = float(frame.iloc[-2]["close"])
+        frame.iloc[-1] = [base, base + 1.2, base - 0.1, base + 1.0, 1600.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Shooting Star" for p in analysis["candlestick_patterns"]))
+
+    def test_shooting_star_rejected_when_lower_shadow_is_too_long(self):
+        frame = self._set_shooting_star(candle_frame("up"))
+        base = float(frame.iloc[-2]["close"])
+        frame.iloc[-1] = [base, base + 6.1, base - 1.5, base + 1.0, 1600.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Shooting Star" for p in analysis["candlestick_patterns"]))
+
     def _set_hanging_man(
         self, frame: pd.DataFrame, *, with_confirmation: bool = False, bearish_body: bool = False
     ) -> pd.DataFrame:
