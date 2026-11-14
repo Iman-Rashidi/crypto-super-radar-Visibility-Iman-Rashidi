@@ -253,6 +253,15 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(pattern["trigger_price"], 96.1)
         self.assertEqual(pattern["invalidation_price"], 92.0)
 
+    def test_dragonfly_doji_confirmed_by_next_close_above_its_high(self):
+        frame = self._set_dragonfly_doji(candle_frame("down"))
+        frame.iloc[-1] = [96.0, 97.0, 95.8, 96.8, 1600.0]
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Dragonfly Doji")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertIsNone(pattern["potential_direction"])
+
     def test_dragonfly_doji_rejected_when_upper_shadow_is_too_long(self):
         frame = self._set_dragonfly_doji(candle_frame("down"))
         frame.iloc[-1] = [95.0, 98.0, 92.0, 95.0, 1500.0]
