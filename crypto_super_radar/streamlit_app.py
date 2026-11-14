@@ -441,6 +441,32 @@ def main() -> None:
                 for limitation in eps.get("limitations") or []:
                     st.caption("• " + limitation)
                 if eps.get("source"): st.caption("منبع: " + eps["source"])
+        debt = (fundamental.get("modules") or {}).get("debt_to_equity") or {}
+        with st.expander("تحلیل ساختار سرمایه و نسبت بدهی به حقوق صاحبان سهام | D/E", expanded=False):
+            st.write(debt.get("reason", "برای محاسبه به بدهی کل، حقوق صاحبان سهام، منبع و زمان معتبر نیاز است."))
+            st.metric("نسبت D/E", "نامشخص" if debt.get("debt_to_equity") is None else f"{debt['debt_to_equity']:.2f}x")
+            st.write("پوشش هزینه بهره:", debt.get("interest_coverage_ratio"))
+            st.write("مقایسه با میانه همتایان (%):", debt.get("relative_to_peer_pct"))
+            st.write("مقایسه با میانه صنعت (%):", debt.get("relative_to_industry_pct"))
+            if debt.get("source"): st.caption("منبع: " + debt["source"])
+            for note in debt.get("limitations") or []: st.caption("• " + note)
+        peer = (fundamental.get("modules") or {}).get("comparative_company_analysis") or {}
+        with st.expander("مقایسه شرکت‌ها در یک صنعت | Peer Comparison", expanded=False):
+            st.write(peer.get("reason") or "مقایسه همتایان بر اساس داده‌های منبع‌دار.")
+            st.write("صنعت / زیرصنعت:", peer.get("sector"), "/", peer.get("subsector"))
+            st.write("تعداد همتایان معتبر:", peer.get("eligible_peer_count", 0))
+            if peer.get("comparisons"):
+                st.dataframe(pd.DataFrame([
+                    {"معیار": key, "مقدار شرکت": value.get("company_value"),
+                     "میانه همتایان": value.get("peer_median"),
+                     "حداقل": value.get("peer_min"), "حداکثر": value.get("peer_max"),
+                     "اختلاف با میانه (%)": value.get("relative_to_peer_median_pct"),
+                     "تعداد داده معتبر": value.get("peer_count")}
+                    for key, value in peer["comparisons"].items()
+                ]), hide_index=True, use_container_width=True)
+            st.write("همتایان حذف‌شده:", peer.get("excluded_peers") or [])
+            st.write("زمینه کیفی مدیریت / برند / شهرت:", peer.get("qualitative_context") or {})
+            for note in peer.get("limitations") or []: st.caption("• " + note)
         esg = (fundamental.get("modules") or {}).get("esg_analysis") or {}
         with st.expander("تحلیل محیط‌زیست، مسئولیت اجتماعی و حاکمیت | ESG", expanded=False):
             st.write(esg.get("message_fa", "برای ارزیابی ESG به داده‌های منبع‌دار نیاز است."))
