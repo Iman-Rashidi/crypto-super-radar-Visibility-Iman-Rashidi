@@ -2669,8 +2669,12 @@ def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
 def _blofin_demo_live_monitor_snapshot() -> dict:
     """Build a complete, read-only Demo monitor snapshot with partial-source disclosure."""
     client = BloFinDemoReadOnly(timeout=8.0)
-    store = BloFinDemoEventStore()
     read_errors: list[dict[str, str]] = []
+    try:
+        store = BloFinDemoEventStore()
+    except Exception as exc:
+        store = None
+        read_errors.append({"endpoint": "local_event_store", "error_type": type(exc).__name__})
 
     def read(endpoint: str, operation, default):
         try:
@@ -2691,7 +2695,7 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
         ]
 
     try:
-        latest = read("local_latest_order", store.latest_order, None)
+        latest = read("local_latest_order", store.latest_order, None) if store is not None else None
         ticker_rows = read(
             "market_ticker", lambda: client.get_tickers(inst_id="BTC-USDT"), []
         )
@@ -2764,6 +2768,12 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
             and isinstance(mark_rows[0], dict) else {}
         )
         balance = balance if isinstance(balance, dict) else {}
+        if not ticker:
+            read_errors.append({"endpoint": "market_ticker", "error_type": "EmptyResponse"})
+        if not mark or mark.get("markPrice") in (None, ""):
+            read_errors.append({"endpoint": "mark_price", "error_type": "EmptyResponse"})
+        if "totalEquity" not in balance or balance.get("totalEquity") is None:
+            read_errors.append({"endpoint": "futures_balance_equity", "error_type": "MissingField"})
 
         position_fields = (
             "positionId", "instId", "instType", "marginMode", "positionSide",
@@ -2833,10 +2843,16 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
             safe_latest = {key: latest[key] for key in allowed_local if key in latest}
 
         execution_events = read(
-            "local_execution_events", lambda: store.recent_all_events(limit=100), []
+            "local_execution_events",
+            lambda: store.recent_all_events(limit=100) if store is not None else [],
+            [],
         )
         return {
-            "status": "CONNECTED_READ_ONLY",
+            "status": (
+                "AUTH_FAILED"
+                if any(item.get("error_type") == "BloFinDemoAuthError" for item in read_errors)
+                else "CONNECTED_READ_ONLY"
+            ),
             "environment": "BLOFIN_DEMO",
             "permission_mode": "READ_ONLY",
             "orders_enabled": False,
