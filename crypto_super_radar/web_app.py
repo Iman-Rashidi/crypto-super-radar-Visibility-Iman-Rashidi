@@ -2405,7 +2405,25 @@ def _futures_paper_cycle_report(cycle: dict) -> dict:
     elif status == "RISK_HALT":
         reason_fa = "یکی از محدودیت‌های زیان روزانه، افت سرمایه، تعداد زیان‌های پیاپی یا دورهٔ توقف فعال است."
     elif status == "NO_TRADE":
-        reason_fa = reason or "شرایط ورود کامل نشد؛ موقعیت جدیدی ساخته نشد."
+        lowered_reason = reason.casefold()
+        if "all 12 unique mandatory gates" in lowered_reason:
+            reason_fa = "هر ۱۲ فیلتر اجباری با شناسهٔ یکتا باید PASS باشند؛ دست‌کم یک فیلتر هنوز تأیید نشده است."
+        elif "radar did not confirm long or short" in lowered_reason:
+            reason_fa = "رادار جهت معتبر خرید یا فروش استقراضی را تأیید نکرد؛ شرایط خنثی یا نامشخص معامله نمی‌شوند."
+        elif "confirmation score, risk score" in lowered_reason:
+            reason_fa = "امتیاز تأیید، امتیاز ریسک یا حد ضرر و حد سود ساختاری از حد مجاز عبور نکرد."
+        elif "timestamped completed perpetual candle" in lowered_reason:
+            reason_fa = "کندل تکمیل‌شده و زمان‌دار قرارداد فیوچرز برای جلوگیری از ثبت معاملهٔ تکراری موجود نیست."
+        elif "already paper-traded" in lowered_reason:
+            reason_fa = "این کندل قبلاً در حساب Paper معامله شده است؛ از ثبت تکراری جلوگیری شد."
+        elif "net reward/risk" in lowered_reason:
+            reason_fa = "نسبت سود به زیان خالص پس از کارمزد و لغزش قیمت به حداقل تعیین‌شده نرسید."
+        elif "historical funding" in lowered_reason or "funding is invalid" in lowered_reason:
+            reason_fa = "دادهٔ معتبر Funding یا فاصلهٔ تسویه تأیید نشد؛ ورود متوقف ماند."
+        elif "expected holding period" in lowered_reason:
+            reason_fa = "مدت نگهداری مورد انتظار معتبر نیست؛ اندازه‌گذاری و ارزیابی معامله انجام نشد."
+        else:
+            reason_fa = "همهٔ شرایط ایمنی و ورود تأیید نشد؛ موقعیت جدیدی ساخته نشد. جزئیات فنی در بخش دادهٔ خام موجود است."
     elif status == "AI_BLOCKED":
         reason_fa = "پاسخ معتبر و تأییدشده از مرحلهٔ هوش مصنوعی دریافت نشد؛ ورود مجاز نشد."
     elif status == "UNKNOWN":
@@ -2460,7 +2478,7 @@ def _run_futures_paper_tick(job_id: str, asset: AssetSpec) -> None:
             ),
             "ai_status": ai.get("status"),
             "ai_status_fa": (
-                "Nemotron در این چرخه فراخوانی نشد؛ چرخه پیش از مرحلهٔ AI متوقف شد."
+                "تنظیمات AI با وضعیت " + str(ai.get("status") or "نامشخص") + " ثبت شده‌اند؛ اما Nemotron در این چرخه فراخوانی نشد، چون چرخه پیش از مرحلهٔ AI متوقف شد."
                 if not ai_was_reviewed else
                 "مرحلهٔ AI در این چرخه اجرا شد؛ نتیجهٔ آن در جزئیات فنی ثبت شده است."
             ),
@@ -4871,7 +4889,7 @@ class Handler(BaseHTTPRequestHandler):
             <button type="submit">اجرای یک چرخهٔ فیوچرز آزمایشی</button>
           </form>
           <div id="futures-paper-status" class="muted" style="margin-top:12px" aria-live="polite">در حال دریافت وضعیت حساب فیوچرز آزمایشی...</div>
-          <script>(async function(){const box=document.getElementById('futures-paper-status');try{const r=await fetch('/futures-paper-bot/status',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const s=await r.json();const a=s.account||{},p=s.open_position||{},risk=s.risk_controls||{};const halted=risk.risk_circuit_breaker_active===true||risk.risk_circuit_breaker_clear===false||risk.entry_allowed===false;const riskText=halted?'فعال یا نامشخص است؛ ورود متوقف بماند':'فعال نیست؛ اما این به‌معنای مجوز نهایی ورود نیست';box.textContent='حالت: حساب فرضی Paper · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · موقعیت: '+(p.direction||'ندارد')+' '+(p.asset||'')+' · ترمز ریسک حساب: '+riskText+' · سفارش واقعی: غیرفعال';}catch(e){box.textContent='وضعیت حساب فیوچرز در دسترس نیست؛ تا دریافت پاسخ معتبر، ورود مجاز نیست.';}})();</script>
+          <script>(async function(){const box=document.getElementById('futures-paper-status');try{const r=await fetch('/futures-paper-bot/status',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const s=await r.json();const a=s.account||{},p=s.open_position||{},risk=s.risk_controls||{};const breakerClear=risk.risk_circuit_breaker_clear===true||(risk.risk_circuit_breaker_clear===undefined&&risk.entry_allowed===true);const riskText=breakerClear?'فعال نیست؛ اما این به‌معنای مجوز نهایی ورود نیست':'فعال یا نامشخص است؛ ورود متوقف بماند';box.textContent='حالت: حساب فرضی Paper · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · موقعیت: '+(p.direction||'ندارد')+' '+(p.asset||'')+' · ترمز ریسک حساب: '+riskText+' · سفارش واقعی: غیرفعال';}catch(e){box.textContent='وضعیت حساب فیوچرز در دسترس نیست؛ تا دریافت پاسخ معتبر، ورود مجاز نیست.';}})();</script>
         </section>
         <section class="card" id="ai-diagnostic-panel">
           <h2>آزمایش اتصال هوش مصنوعی · NVIDIA Nemotron</h2>
