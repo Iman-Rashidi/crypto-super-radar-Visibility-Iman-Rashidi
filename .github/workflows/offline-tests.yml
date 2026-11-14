@@ -4,11 +4,13 @@ on:
     branches:
       - main
       - feature/blofin-demo-adapter
+      - feature/csr-master-strategy-engine
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
       - main
       - feature/multi-stage-confirmation-engine
+      - feature/blofin-demo-adapter
 jobs:
   test:
     runs-on: ubuntu-latest
