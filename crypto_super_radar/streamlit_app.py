@@ -339,6 +339,8 @@ def main() -> None:
             "industry": "تحلیل صنعت و رقبا",
             "dcf": "ارزش‌گذاری DCF",
             "comparables": "مقایسه پروژه‌های هم‌صنعت",
+            "accounting_principles": "اصول حسابداری و کیفیت گزارشگری",
+            "market_analysis": "تحلیل شرایط و ریسک بازار",
         }
         module_rows = []
         for key, label in module_labels.items():
@@ -350,6 +352,31 @@ def main() -> None:
                 "امتیاز": "نامشخص" if value is None else round(float(value), 2),
             })
         st.dataframe(pd.DataFrame(module_rows), hide_index=True, use_container_width=True)
+        accounting = (fundamental.get("modules") or {}).get("accounting_principles") or {}
+        market = (fundamental.get("modules") or {}).get("market_analysis") or {}
+        with st.expander("اصول حسابداری | شناسایی درآمد، موجودی و استهلاک", expanded=False):
+            for key, item in (accounting.get("principles") or {}).items():
+                st.markdown(f"**{item.get('label_fa', key)}** · {item.get('status', 'UNKNOWN')}")
+                checks = item.get("checks") or {}
+                if checks:
+                    st.dataframe(pd.DataFrame(
+                        [{"کنترل": name, "وضعیت": status} for name, status in checks.items()]
+                    ), hide_index=True, use_container_width=True)
+                if item.get("note"):
+                    st.caption(item["note"])
+                if item.get("reason"):
+                    st.caption(item["reason"])
+        with st.expander("تحلیل بازار | اقتصاد، روندها، مقررات و ریسک", expanded=False):
+            observations = market.get("observations") or {}
+            st.dataframe(pd.DataFrame([
+                {"عامل": item.get("label_fa", key),
+                 "وضعیت": item.get("status", "UNKNOWN"),
+                 "مقدار": item.get("value"),
+                 "منبع": item.get("source"),
+                 "زمان مشاهده": item.get("observed_at_utc")}
+                for key, item in observations.items()
+            ]), hide_index=True, use_container_width=True)
+            st.caption("مراحل: گردآوری داده، شناسایی روند، ارزیابی ریسک و ساخت سناریو. پیش‌بینی بدون منبع و زمان مشاهده نمایش داده نمی‌شود.")
         if fundamental.get("status") in {"UNKNOWN", "INSUFFICIENT_COVERAGE"}:
             st.warning("داده بنیادی معتبر و کافی برای امتیاز کلی در دسترس نیست؛ این وضعیت به‌عنوان UNKNOWN ثبت می‌شود.")
         if fundamental.get("status") == "PARTIAL":
