@@ -867,13 +867,14 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
                          {"status": "UNKNOWN", "score": None, "reason": "Valid valuation score not supplied."})
         if isinstance(item, Mapping) and isinstance(item.get("evidence"), Mapping):
             modules[name]["evidence"] = dict(item["evidence"])
-    known_weight = sum(MODULE_WEIGHTS[name] for name, item in modules.items() if item["score"] is not None)
+    known_weight = sum(MODULE_WEIGHTS[name] for name in MODULE_WEIGHTS
+                        if modules[name]["score"] is not None)
     coverage = known_weight / sum(MODULE_WEIGHTS.values()) * 100
     score = None
     status = "UNKNOWN"
     if known_weight and coverage >= MIN_COVERAGE_PCT:
-        score = round(sum(MODULE_WEIGHTS[name] * item["score"] for name, item in modules.items()
-                          if item["score"] is not None) / known_weight, 2)
+        score = round(sum(MODULE_WEIGHTS[name] * modules[name]["score"] for name in MODULE_WEIGHTS
+                          if modules[name]["score"] is not None) / known_weight, 2)
         # Only the seven weighted modules determine score completeness.
         status = "KNOWN" if all(modules[name]["score"] is not None for name in MODULE_WEIGHTS) else "PARTIAL"
     elif known_weight:
