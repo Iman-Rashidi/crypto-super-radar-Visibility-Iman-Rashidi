@@ -343,6 +343,8 @@ def main() -> None:
             "market_analysis": "تحلیل شرایط و ریسک بازار",
             "event_analysis": "تحلیل رویدادها و بازده غیرعادی",
             "dividend_analysis": "تحلیل سود تقسیمی سهام",
+            "mergers_acquisitions": "تحلیل ادغام و تملک شرکت‌ها",
+            "sector_rotation": "تحلیل چرخش سرمایه بین بخش‌ها",
         }
         module_rows = []
         for key, label in module_labels.items():
@@ -396,6 +398,47 @@ def main() -> None:
                 st.warning("احتمال تله سود تقسیمی: بازده بالا هم‌زمان با افت شدید قیمت شناسایی شد.") if dividend.get("dividend_trap_warning") else None
                 st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (dividend.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
                 if dividend.get("source"): st.caption("منبع: " + dividend["source"])
+
+        ma = (fundamental.get("modules") or {}).get("mergers_acquisitions") or {}
+        with st.expander("تحلیل ادغام و تملک | M&A Analysis", expanded=False):
+            st.write(ma.get("message_fa", "برای تحلیل M&A به شواهد معامله نیاز است."))
+            if ma.get("status") == "NOT_APPLICABLE":
+                st.info("این ماژول مربوط به ادغام و تملک شرکت‌هاست و برای توکن به‌صورت خودکار امتیاز منفی ایجاد نمی‌کند.")
+            else:
+                ma_rows = []
+                for deal_id, deal in (ma.get("deals") or {}).items():
+                    ma_rows.append({"معامله": deal_id, "هدف": deal.get("target"),
+                        "خریدار": deal.get("acquirer"), "وضعیت": deal.get("deal_status"),
+                        "صرف پیشنهاد (%)": deal.get("offer_premium_pct"),
+                        "تأمین مالی": deal.get("financing_type"),
+                        "ریسک ادغام": deal.get("integration_risk"),
+                        "وضعیت نهاد ناظر": deal.get("regulatory_status"),
+                        "پرچم‌های بررسی": ", ".join(deal.get("review_flags") or []),
+                        "منبع": deal.get("source_url")})
+                if ma_rows:
+                    st.dataframe(pd.DataFrame(ma_rows), hide_index=True, use_container_width=True)
+                else:
+                    st.info("خبر معامله با منبع و زمان معتبر هنوز ثبت نشده است؛ وضعیت UNKNOWN.")
+                for limitation in ma.get("limitations") or []:
+                    st.caption("• " + limitation)
+        rotation = (fundamental.get("modules") or {}).get("sector_rotation") or {}
+        with st.expander("تحلیل چرخش بخشی | Sector Rotation", expanded=False):
+            st.write(rotation.get("message_fa", "برای تحلیل چرخش بخشی، بازده و جریان سرمایه با منبع معتبر لازم است."))
+            st.write("مرحله چرخه اقتصادی:", rotation.get("economic_phase", "UNKNOWN"))
+            sector_rows = [{"بخش": row.get("sector"), "بازده (%)": row.get("return_pct"),
+                "بازده معیار (%)": row.get("benchmark_return_pct"),
+                "قدرت نسبی (%)": row.get("relative_strength_pct"),
+                "تغییر جریان سرمایه (%)": row.get("flow_change_pct"),
+                "منبع": row.get("source"), "زمان": row.get("observed_at_utc")}
+                for row in rotation.get("sectors") or []]
+            if sector_rows:
+                st.dataframe(pd.DataFrame(sector_rows), hide_index=True, use_container_width=True)
+                st.write("پیشتازها:", ", ".join(rotation.get("leaders") or []))
+                st.write("ضعیف‌ترها:", ", ".join(rotation.get("laggards") or []))
+            else:
+                st.info("داده زمان‌دار و منبع‌دار برای بخش‌ها موجود نیست؛ وضعیت UNKNOWN.")
+            for limitation in rotation.get("limitations") or []:
+                st.caption("• " + limitation)
         event_module = (fundamental.get("modules") or {}).get("event_analysis") or {}
         with st.expander("تحلیل رویدادها | Event Study و بازده غیرعادی", expanded=False):
             st.write(event_module.get("message_fa", "برای تحلیل رویداد، داده زمان‌دار و بازده تاریخی لازم است."))
