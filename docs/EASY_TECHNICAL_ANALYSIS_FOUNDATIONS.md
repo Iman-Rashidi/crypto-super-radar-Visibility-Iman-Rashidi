@@ -172,3 +172,34 @@ Die technische Übersicht soll je Asset mindestens zeigen:
 - Datenquelle, Zeitstempel und Status der letzten Kerze.
 
 Die Multi-Timeframe-Analyse ist ein Kontext- und Bewertungsmerkmal. Sie führt keine neuen obligatorischen Easy-Gates ein.
+
+
+## Easy Price-Action Erweiterung: Levels, Trendlinien, Volumen und Gaps
+
+Die Implementierung liegt in \`crypto_super_radar/price_action.py\` und wird als Diagnose in \`result.metrics["easy_price_action"]\` eingebunden. Das Dashboard zeigt die wichtigsten Felder im Marktüberblick.
+
+### Unterstützung und Widerstand
+- Unterstützungs- und Widerstandszonen werden aus bestätigten Pivot-Tiefs bzw. Pivot-Hochs gebildet.
+- Nahe Pivot-Preise werden anhand einer ATR-relativen Toleranz gruppiert; die Zone enthält Untergrenze, Obergrenze, Mittelpunkt und Anzahl der beobachteten Kontakte.
+- Ein Ausbruch wird nur als Preisstatus beschrieben. Ein False Breakout bleibt möglich und muss mit nachfolgenden geschlossenen Kerzen beurteilt werden.
+
+### Trendlinien
+- Aufwärtstrendlinien verbinden bestätigte Pivot-Tiefs; Abwärtstrendlinien verbinden bestätigte Pivot-Hochs.
+- Mindestens zwei bestätigte Pivot-Punkte sind nötig. Die Steigung ist ein Kandidat/Diagnosewert, keine alleinige Trendbestätigung.
+- Die Pivot-Bestätigung benötigt standardmäßig zwei nachfolgende Kerzen; dadurch entsteht eine offengelegte Verzögerung und kein Look-ahead.
+
+### Volumen
+- Ausgegeben werden das letzte abgeschlossene Volumen, der 20-Kerzen-Durchschnitt, relatives Volumen, OBV-Richtung und eine mögliche Preis/OBV-Divergenz.
+- Geringes Volumen beim Ausbruch und Divergenzen sind Warnungen bzw. Scoring-Kontext, keine Hard-Vetos.
+
+### Krypto-Gaps
+- Eine Preis-Gap-Erkennung vergleicht den Open einer Kerze mit dem Close der vorherigen Kerze nur bei regulär aufeinanderfolgenden Zeitstempeln.
+- Zeitstempel-Unterbrechungen werden als mögliche Datenlücken ausgeschlossen und nicht als Kurs-Gap fehlinterpretiert.
+- Das Ergebnis enthält Richtung, prozentuale Größe, Preise und Volumen. Die automatische Behauptung einer Gap-Füllung ist nicht zulässig.
+
+### Sicherheits- und Datenregeln
+- OHLCV, eindeutige und chronologische Zeitstempel sowie plausible Preisbeziehungen sind Pflicht für eine gültige Diagnose.
+- Die letzte Kerze wird mangels explizitem Candle-Close-Status als vorläufig behandelt und aus bestätigten Pivot-/Volumenmetriken ausgeschlossen.
+- Fehlende oder fehlerhafte Daten liefern UNKNOWN statt erfundener Werte.
+- Die Erweiterung wird ausschließlich als Diagnose-Metrik an die integrierte Easy-Analyse angehängt. Sie verändert weder Gate-Status noch Signal, Entry, Stop-Loss, Positionsgröße oder Order-Ausführung.
+- Standard- und Strict-Entscheidungslogik werden durch diese Diagnose nicht verändert.
