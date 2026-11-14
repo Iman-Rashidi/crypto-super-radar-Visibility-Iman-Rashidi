@@ -160,8 +160,23 @@ def stop_execution_guidance(stop_mode: str) -> dict[str, Any]:
 class EasyPositionManager:
     """SQLite-backed paper position journal and completed-candle stop manager."""
 
-    def __init__(self, db: Any = None):
-        self.db = db or connect_database()
+    def __init__(
+        self, db: Any = None, *, paper_equity: float = 10_000.0,
+        risk_per_trade_pct: float = 0.50, max_position_notional_pct: float = 10.0,
+        fee_bps_per_side: float = 8.0, slippage_bps_per_side: float = 10.0,
+    ):
+        self.db = db if db is not None else connect_database()
+        self.paper_equity = _num(paper_equity)
+        self.risk_per_trade_pct = _num(risk_per_trade_pct)
+        self.max_position_notional_pct = _num(max_position_notional_pct)
+        self.fee_bps_per_side = _num(fee_bps_per_side)
+        self.slippage_bps_per_side = _num(slippage_bps_per_side)
+        if (self.paper_equity is None or self.paper_equity <= 0
+            or self.risk_per_trade_pct is None or not 0 < self.risk_per_trade_pct <= 2
+            or self.max_position_notional_pct is None or not 0 < self.max_position_notional_pct <= 25
+            or self.fee_bps_per_side is None or self.fee_bps_per_side < 0
+            or self.slippage_bps_per_side is None or self.slippage_bps_per_side < 0):
+            raise ValueError("Easy paper account and risk limits are invalid.")
         self.lock = threading.RLock()
         with self.lock, self.db:
             self.db.execute("""
@@ -212,6 +227,24 @@ class EasyPositionManager:
             return {"status": "UNKNOWN", "reason": "LONG requires stop < entry < target."}
         if direction == "SHORT" and not target < entry < stop:
             return {"status": "UNKNOWN", "reason": "SHORT requires target < entry < stop."}
+        loss_per_unit = abs(entry - stop) + entry * (
+            2.0 * (self.fee_bps_per_side + self.slippage_bps_per_side) / 10000.0
+        )
+        modeled_loss = q * loss_per_unit
+        notional = q * entry
+        risk_budget = self.paper_equity * self.risk_per_trade_pct / 100.0
+        notional_cap = self.paper_equity * self.max_position_notional_pct / 100.0
+        if modeled_loss > risk_budget + 1e-9 or notional > notional_cap + 1e-9:
+            max_qty_risk = risk_budget / loss_per_unit
+            max_qty_notional = notional_cap / entry
+            return {
+                "status": "BLOCKED",
+                "reason": "Paper position exceeds the configured stop-risk budget or notional cap.",
+                "modeled_loss": modeled_loss, "risk_budget": risk_budget,
+                "notional": notional, "notional_cap": notional_cap,
+                "maximum_allowed_quantity": min(max_qty_risk, max_qty_notional),
+                "orders_submitted": False,
+            }
         position_id = uuid.uuid4().hex
         now = time.time()
         with self.lock, self.db:
@@ -224,8 +257,19 @@ class EasyPositionManager:
                 VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,'OPEN')
             """, (position_id, asset.strip(), direction, q, entry, stop, stop, target,
                   mode, now, entry, entry, int(max_holding_bars)))
-            self._event(position_id, "OPENED", entry, {"stop_mode": mode, "paper_only": True})
-        return {"status": "OPENED", "position_id": position_id, "stop_guidance": stop_execution_guidance(mode)}
+            self._event(position_id, "OPENED", entry, {
+                "stop_mode": mode, "paper_only": True, "risk_budget": risk_budget,
+                "modeled_loss_including_estimated_costs": modeled_loss,
+                "position_notional": notional,
+            })
+        return {
+            "status": "OPENED", "position_id": position_id,
+            "stop_guidance": stop_execution_guidance(mode),
+            "risk_budget": risk_budget,
+            "modeled_loss_including_estimated_costs": modeled_loss,
+            "position_notional": notional,
+            "orders_submitted": False,
+        }
 
     def get_position(self, position_id: str) -> Optional[dict[str, Any]]:
         with self.lock:
