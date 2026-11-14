@@ -198,7 +198,10 @@ def detect_hammer_candlestick(candles: Optional[pd.DataFrame]) -> dict[str, Any]
         or (frame["low"] > frame[["open", "close", "high"]].min(axis=1)).any()):
         return {**unknown, "reason": "OHLC candle boundaries are inconsistent."}
 
-    candle = frame.iloc[-1]
+    # Prefer the previous completed candle when the latest candle can confirm it.
+    candidate_index = -2 if float(frame["close"].iloc[-1]) > float(frame["high"].iloc[-2]) else -1
+    candle = frame.iloc[candidate_index]
+    prior = frame.iloc[:candidate_index]["close"]
     body = abs(float(candle["close"] - candle["open"]))
     lower = float(min(candle["open"], candle["close"]) - candle["low"])
     upper = float(candle["high"] - max(candle["open"], candle["close"]))
@@ -211,18 +214,17 @@ def detect_hammer_candlestick(candles: Optional[pd.DataFrame]) -> dict[str, Any]
     small_body = body <= candle_range * 0.35
     long_lower = lower >= 2.0 * body_floor
     tiny_upper = upper <= max(body_floor * 0.25, candle_range * 0.05)
-    prior = frame["close"].iloc[:-1]
     downtrend = bool(
         len(prior) >= 5
         and float(prior.iloc[0]) > float(prior.iloc[-1])
         and float(prior.iloc[-1]) <= float(prior.max()) * 0.99
     )
     is_hammer = bool(downtrend and small_body and long_lower and tiny_upper)
-    confirmation = "PENDING"
-    if is_hammer and len(frame) >= 2:
-        # The next candle confirms only if it closes above the hammer high.
-        # For the latest candle there is no next candle yet.
-        confirmation = "PENDING"
+    confirmation = (
+        "CONFIRMED" if is_hammer and candidate_index == -2
+        else "PENDING" if is_hammer
+        else "NOT_APPLICABLE"
+    )
     return {
         "status": "SETUP" if is_hammer else "NOT_DETECTED",
         "pattern": "HAMMER" if is_hammer else "NONE",
@@ -237,10 +239,11 @@ def detect_hammer_candlestick(candles: Optional[pd.DataFrame]) -> dict[str, Any]
         "preceding_downtrend": downtrend,
         "confirmation": confirmation,
         "reason": (
-            "Hammer geometry detected after a preceding downtrend; wait for a later candle to close above the hammer high."
+            "Hammer geometry detected after a preceding downtrend; subsequent close above hammer high confirms the setup." if confirmation == "CONFIRMED" else "Hammer geometry detected after a preceding downtrend; wait for a later candle to close above the hammer high."
             if is_hammer else
             "No valid hammer: downtrend, small body, lower-shadow ratio, and small upper shadow must all qualify."
         ),
+        "hammer_time": str(frame.index[candidate_index]) if is_hammer else None,
         "hammer_high": float(candle["high"]) if is_hammer else None,
         "hammer_low": float(candle["low"]) if is_hammer else None,
         "confidence_semantics": "Pattern setup only; not a probability or trade recommendation.",
