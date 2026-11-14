@@ -74,6 +74,99 @@ def _item(
     }
 
 
+def _morning_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a three-candle Morning Star and confirm it only with a later close."""
+    if len(frame) < 6:
+        return None
+
+    # Prefer a completed follow-through candle; otherwise report the latest forming setup.
+    candidates = []
+    if len(frame) >= 4:
+        candidates.append((len(frame) - 4, True))
+    candidates.append((len(frame) - 3, False))
+
+    for start, has_follow_through in candidates:
+        first, middle, third = (frame.iloc[start + offset] for offset in range(3))
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change > -0.003:
+            continue
+
+        first_open, first_close = float(first["open"]), float(first["close"])
+        first_high, first_low = float(first["high"]), float(first["low"])
+        middle_open, middle_close = float(middle["open"]), float(middle["close"])
+        middle_high, middle_low = float(middle["high"]), float(middle["low"])
+        third_open, third_close = float(third["open"]), float(third["close"])
+        third_high, third_low = float(third["high"]), float(third["low"])
+
+        first_range = first_high - first_low
+        middle_range = middle_high - middle_low
+        third_range = third_high - third_low
+        if min(first_range, middle_range, third_range) <= 0:
+            continue
+
+        first_body = abs(first_close - first_open)
+        middle_body = abs(middle_close - middle_open)
+        third_body = abs(third_close - third_open)
+        first_midpoint = (first_open + first_close) / 2.0
+
+        valid = (
+            first_close < first_open
+            and first_body >= first_range * 0.45
+            and middle_body <= middle_range * 0.30
+            and third_close > third_open
+            and third_body >= third_range * 0.45
+            and third_close >= first_midpoint
+            and third_close > middle_close
+        )
+        if not valid:
+            continue
+
+        follow_through = False
+        if has_follow_through:
+            confirmation = frame.iloc[start + 3]
+            follow_through = float(confirmation["close"]) > third_high
+
+        gap_down = middle_open < first_close
+        gap_up = third_open > middle_close
+        score = 15 + int(gap_down) + int(gap_up)
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        state = "CONFIRMED" if follow_through else "NEEDS_CONFIRMATION"
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از روند نزولی: کندل اول نزولی و بلند، کندل دوم کوچک/دوجی و کندل سوم صعودی و بلند است؛ "
+            "بسته‌شدن کندل سوم دست‌کم تا نیمهٔ بدنهٔ اول بازیابی شده است."
+        )
+        if gap_down or gap_up:
+            description += f" گپ نزولی: {'دارد' if gap_down else 'ندارد'}؛ گپ صعودی: {'دارد' if gap_up else 'ندارد'}."
+        if follow_through:
+            description += " کندل بعدی بالاتر از سقف کندل سوم بسته شده و الگو تأیید شده است."
+        else:
+            description += " برای تأیید، بسته‌شدن یک کندل بعدی بالاتر از سقف کندل سوم لازم است."
+
+        return _item(
+            name_fa="ستاره صبحگاهی",
+            name_en="Morning Star",
+            category="CANDLE",
+            direction="BULLISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BULLISH",
+            state=state,
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 2].isoformat(),
+            score=score if follow_through else int(score * 0.5),
+            trigger_price=third_high,
+            invalidation_price=first_low,
+        )
+    return None
+
+
 def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[dict[str, Any]]:
     if len(frame) < 3:
         return []
@@ -122,10 +215,11 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     first_bear = fc < fo
     first_bull = fc > fo
 
-    if first_bear and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bull and c > first_mid and c > mc:
-        add("ستاره صبحگاهی", "Morning Star", "BULLISH",
-            "سه کندلِ فشار فروش، مکث و بازپس‌گیری بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی بالای سقف الگو.", 15)
-    elif first_bull and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bear and c < first_mid and c < mc:
+    morning_star = _morning_star_pattern(frame, volume_ratio)
+    if morning_star is not None:
+        out.append(morning_star)
+
+    if first_bull and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bear and c < first_mid and c < mc:
         add("ستاره شامگاهی", "Evening Star", "BEARISH",
             "سه کندلِ فشار خرید، مکث و پس‌گرفتن بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی زیر کف الگو.", -15)
 
