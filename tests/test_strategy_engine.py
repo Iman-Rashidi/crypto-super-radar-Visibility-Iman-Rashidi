@@ -51,6 +51,9 @@ class MasterStrategyEngineTests(unittest.TestCase):
 
     def test_strong_downtrend_selects_short_turtle_breakout(self):
         closes = 100.0 * np.power(0.997, np.arange(260, dtype=float))
+        # Create a genuine close below the prior 55-day Donchian low.
+        # A merely downward-trending series with a small daily move is not itself a breakout.
+        closes[-1] = float(np.min(closes[-56:-1]) * 0.98)
         volumes = np.full(260, 100.0)
         volumes[-1] = 150.0
         frame = make_daily_frame(closes, volume=volumes)
