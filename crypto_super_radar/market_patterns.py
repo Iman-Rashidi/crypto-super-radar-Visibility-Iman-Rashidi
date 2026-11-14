@@ -176,7 +176,7 @@ def _rising_window_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> d
 
         later = frame.iloc[start + 2:]
         gap_filled = not later.empty and bool(
-            (pd.to_numeric(later["low"], errors="coerce") <= first_high).any()
+            (pd.to_numeric(later["low"], errors="coerce") <= second_low).any()
         )
         if gap_filled:
             continue
@@ -210,7 +210,7 @@ def _rising_window_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> d
             timestamp=frame.index[start + 1].isoformat(),
             score=15 if sustained else 8,
             trigger_price=second_high,
-            invalidation_price=first_high,
+            invalidation_price=second_low,
         )
     return None
 
