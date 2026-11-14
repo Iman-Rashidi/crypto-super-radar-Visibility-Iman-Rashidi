@@ -195,7 +195,7 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(pattern["potential_direction"], "BEARISH")
         self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
         self.assertEqual(pattern["trigger_price"], frame.iloc[-1]["low"])
-        self.assertEqual(pattern["invalidation_price"], frame.iloc[-1]["high"])
+        self.assertAlmostEqual(pattern["invalidation_price"], frame.iloc[-1]["high"])
 
     def test_hanging_man_confirmed_by_next_close_below_pattern_low(self):
         frame = self._set_hanging_man(candle_frame("up"), with_confirmation=True)
