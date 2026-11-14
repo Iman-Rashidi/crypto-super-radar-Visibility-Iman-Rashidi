@@ -304,9 +304,19 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if pc < po and last_bull and o < pl and c > (po + pc) / 2.0 and c < po:
         add("خط نفوذی صعودی", "Piercing Line", "BULLISH",
             "کندل صعودی بیش از نیمهٔ بدنهٔ نزولی قبلی را بازیابی کرده است.", 10)
-    elif pc > po and last_bear and o > ph and c < (po + pc) / 2.0 and c > po:
+    elif (
+        context == "UP"
+        and pc > po
+        and (ph - pl) > 0
+        and (pc - po) >= (ph - pl) * 0.45
+        and last_bear
+        and o > ph
+        and c < (po + pc) / 2.0
+        and c > po
+    ):
         add("ابر تیره", "Dark Cloud Cover", "BEARISH",
-            "کندل نزولی بیش از نیمهٔ بدنهٔ صعودی قبلی را پس گرفته است.", -10)
+            "پس از روند صعودی، کندل دوم بالاتر از سقف کندل صعودی باز شده اما نزولی بسته شده و بیش از نیمی از بدنهٔ قبلی را پوشانده است؛ برای تصمیم معاملاتی، تأیید نزولی بعدی و سایر شواهد لازم است.",
+            -12, state="NEEDS_CONFIRMATION")
 
     # The classic three-soldiers / three-crows formations.
     three = frame.tail(3)
