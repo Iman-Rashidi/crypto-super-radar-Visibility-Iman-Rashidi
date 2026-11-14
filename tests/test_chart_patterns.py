@@ -86,7 +86,7 @@ class TrianglePatternTests(unittest.TestCase):
         index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
         frame = pd.DataFrame({
             "open":  [110, 108, 106, 104, 102, 100],
-            "high":  [111, 109, 107, 105, 103, 101],
+            "high":  [111, 109, 107, 105, 103, 100.6],
             "low":   [109, 107, 105, 103, 101, 94],
             "close": [109, 107, 105, 103, 101, 100.5],
         }, index=index)
