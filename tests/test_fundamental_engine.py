@@ -107,7 +107,7 @@ class AccountingAndMarketAnalysisTests(unittest.TestCase):
             },
         })
         self.assertEqual(result["principles"]["inventory_valuation"]["reported_method"], "FIFO")
-        self.assertIsNone(result["principles"]["depreciation"]["reported_method"])
+        self.assertEqual(result["principles"]["depreciation"]["reported_method"], "STRAIGHT_LINE")
         self.assertIn("WEIGHTED_AVERAGE", result["principles"]["inventory_valuation"]["accepted_methods"])
 
     def test_missing_accounting_evidence_remains_unknown(self):
