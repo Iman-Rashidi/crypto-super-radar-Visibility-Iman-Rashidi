@@ -49,6 +49,37 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(hammer["state"], "NEEDS_CONFIRMATION")
         self.assertEqual(analysis["status"], "PASS")
 
+    def _set_morning_star(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        pattern_start = -4 if with_confirmation else -3
+        frame.iloc[pattern_start] = [96.0, 96.5, 91.0, 91.5, 1100.0]
+        frame.iloc[pattern_start + 1] = [91.3, 91.8, 91.0, 91.5, 900.0]
+        frame.iloc[pattern_start + 2] = [91.7, 96.5, 91.5, 96.2, 1300.0]
+        if with_confirmation:
+            frame.iloc[-1] = [96.2, 97.2, 96.0, 97.0, 1400.0]
+        return frame
+
+    def test_morning_star_after_downtrend_is_reported_as_pending(self):
+        frame = self._set_morning_star(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Morning Star")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["name_fa"], "ستاره صبحگاهی")
+
+    def test_morning_star_requires_follow_through_close_above_third_high(self):
+        frame = self._set_morning_star(candle_frame("down"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Morning Star")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertGreater(pattern["score"], 0)
+
+    def test_morning_star_is_not_detected_without_prior_downtrend(self):
+        frame = self._set_morning_star(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Morning Star" for p in analysis["candlestick_patterns"]))
+
     def test_doji_is_reported_as_neutral_not_as_a_trade_signal(self):
         frame = candle_frame("flat")
         frame.iloc[-1, frame.columns.get_loc("open")] = 100.0
