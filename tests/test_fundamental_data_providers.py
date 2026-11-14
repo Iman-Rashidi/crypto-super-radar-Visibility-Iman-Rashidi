@@ -91,6 +91,16 @@ class DefiLlamaFundamentalProviderTests(unittest.TestCase):
         with self.assertRaises(FundamentalProviderError):
             provider.fetch("aave")
 
+    def test_future_dated_observation_is_conflicting_and_unknown(self):
+        future = self.now.timestamp() + 3600
+        record = evidence_record(
+            value=42, source="fixture", source_url="https://example.invalid",
+            fetched_at=self.now, observed_at=future, unit="USD",
+        )
+        self.assertEqual(record["freshness"], "CONFLICT")
+        self.assertEqual(record["quality"], "CONFLICT")
+        self.assertEqual(record["status"], "UNKNOWN")
+
     def test_conflicting_quality_is_never_marked_known(self):
         record = evidence_record(
             value=42, source="fixture", source_url="https://example.invalid",
