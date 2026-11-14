@@ -4889,7 +4889,7 @@ async function refreshExecutionReadiness(){
                 const message = String(error && error.message || error);
                 const retryable = error instanceof TypeError ||
                   (error && error.name === 'AbortError') ||
-                  /^HTTP (429|5\d\d)$/.test(message);
+                  /^HTTP (429|5[0-9][0-9])$/.test(message);
                 if (!retryable) throw error;
               }
               if (retry === 3) break;
