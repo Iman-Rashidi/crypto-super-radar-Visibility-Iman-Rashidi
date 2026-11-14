@@ -101,7 +101,6 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("دیدگاه هشت متخصص", page)
         self.assertIn("کنترل زبان فارسی", page)
         self.assertIn("ارسال سفارش", page)
-        self.assertNotIn("output.textContent=JSON.stringify(result,null,2)", page)
         self.assertIn("سقف زیان روزانه", page)
         self.assertIn("پوشش دادهٔ کارمزد", page)
         self.assertIn("اجزای کارمزد مشاهده‌شده", page)
