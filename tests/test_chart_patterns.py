@@ -80,6 +80,34 @@ class TrianglePatternTests(unittest.TestCase):
         result = confirm_breakout_with_volume("UP", frame)
         self.assertEqual(result["status"], "UNCONFIRMED")
 
+
+    def test_detects_hammer_after_downtrend_as_unconfirmed_setup(self):
+        from crypto_super_radar.chart_patterns import detect_hammer_candlestick
+        index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
+        frame = pd.DataFrame({
+            "open":  [110, 108, 106, 104, 102, 100],
+            "high":  [111, 109, 107, 105, 103, 101],
+            "low":   [109, 107, 105, 103, 101, 94],
+            "close": [109, 107, 105, 103, 101, 100.5],
+        }, index=index)
+        result = detect_hammer_candlestick(frame)
+        self.assertEqual(result["pattern"], "HAMMER")
+        self.assertEqual(result["status"], "SETUP")
+        self.assertEqual(result["direction"], "BULLISH")
+        self.assertEqual(result["confirmation"], "PENDING")
+        self.assertGreaterEqual(result["lower_shadow_body_ratio"], 2.0)
+
+    def test_same_shape_without_downtrend_is_not_hammer(self):
+        from crypto_super_radar.chart_patterns import detect_hammer_candlestick
+        index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
+        frame = pd.DataFrame({
+            "open":  [90, 92, 94, 96, 98, 100],
+            "high":  [91, 93, 95, 97, 99, 101],
+            "low":   [89, 91, 93, 95, 97, 94],
+            "close": [91, 93, 95, 97, 99, 100.5],
+        }, index=index)
+        self.assertEqual(detect_hammer_candlestick(frame)["pattern"], "NONE")
+
     def test_rejects_non_finite_price(self):
         result = classify_confirmed_pivots(self.pivots, float("nan"), 21)
         self.assertEqual(result["status"], "UNKNOWN")
