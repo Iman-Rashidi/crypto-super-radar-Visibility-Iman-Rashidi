@@ -384,21 +384,23 @@ Use Ctrl+C to stop. State and closed trades are stored in the local SQLite datab
 This bot is explicitly paper-only: it has no exchange order adapter, API-key input or live-order mode. It never submits exchange orders. Paper fills are estimates from cross-validated public spot prices, fee assumptions and slippage; they are not guaranteed executable fills.
 
 
-## BloFin Demo Futures read-only adapter
+## BloFin Demo Futures autonomous pilot
 
-The isolated branch `feature/blofin-demo-adapter` adds `crypto_super_radar.blofin_demo_readonly`. This adapter is pinned to `https://demo-trading-openapi.blofin.com` and exposes only GET operations for futures instruments, tickers, candles, futures balance, positions, and pending orders. It also builds the documented private-WebSocket login payload and estimates clock skew from the exchange timestamp in public ticker data.
+The isolated branch `feature/blofin-demo-adapter` now combines the GET-only `crypto_super_radar.blofin_demo_readonly` adapter with the guarded `crypto_super_radar.blofin_demo_executor`. Both REST clients are pinned to `https://demo-trading-openapi.blofin.com`; no production exchange host, transfers, withdrawals, or wallet signing are implemented.
 
-It deliberately has no order placement, amend, cancel, leverage-setting, transfer, or withdrawal methods. It is separate from `binance_execution.py`, which is a Binance **Spot Testnet** adapter, and from the local Futures Paper Trading ledger. Do not treat any of those three environments as interchangeable.
+The optional process-local scheduler starts only when `BLOFIN_DEMO_AUTOPILOT_ENABLED=true`. It periodically analyzes **BTC-USDT linear perpetual only** with the existing 12-gate engine, requests the configured free Nemotron second opinion only after every gate passes, and may then submit a Demo market order with exchange-attached mark-price TP/SL. A missing/invalid AI answer, stale/missing data, any FAIL/UNKNOWN gate, invalid instrument permission, clock mismatch, price deviation, account read failure, pending order, or risk-limit breach blocks entry. An ambiguous order response is reconciled using READ-only order-detail calls; the runner never blindly resends the order.
 
-For a read-only Demo key, set these server-side variables only after the account's Demo API key has been created with BloFin's `READ` permission:
+Default Demo limits in the web service are: **1x leverage**, at most **0.25% account-equity risk per trade**, one concurrent position, **2 order reservations per UTC day**, a **30-minute minimum cooldown**, **1% daily loss stop**, **5% peak-to-trough drawdown stop**, and at most **10% isolated-margin usage**. The event store persists order reservations and append-only lifecycle events in Turso. Each completed daily candle is idempotent; prior unresolved order outcomes block new entries until read-only reconciliation succeeds. Rejected attempts also consume the conservative daily order budget.
 
-- `BLOFIN_DEMO_API_KEY`
-- `BLOFIN_DEMO_API_SECRET`
-- `BLOFIN_DEMO_PASSPHRASE`
+Set these controls only on the isolated Render Demo service:
+- `BLOFIN_DEMO_AUTOPILOT_ENABLED=true`
+- Optional `BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS=900` (clamped to 300–3600 seconds)
+- Existing server-side `BLOFIN_DEMO_API_KEY`, `BLOFIN_DEMO_API_SECRET`, and `BLOFIN_DEMO_PASSPHRASE` must belong to a **Demo-only key with actual TRADE permission**. The exchange instrument response must confirm `apiPermission=full`; a READ-only key is not sufficient. Dedicated `BLOFIN_DEMO_TRADE_*` variables take precedence when configured.
+- `BLOFIN_DEMO_TRADING_ENABLED=true`, `BLOFIN_DASHBOARD_TOKEN`, both Turso variables, and a working free Nemotron/OpenRouter configuration must also exist.
 
-Do not set them in GitHub, Notion, browser code, chat, or committed files. Keep `TRADE`, `TRANSFER`, and any withdrawal permission disabled. Public market data methods do not require credentials. Private read methods require all three variables. The module does not accept a configurable API host, so this adapter cannot be redirected to the production REST host.
+Never paste secrets into GitHub, Notion, browser code, chat, or source files. Keep TRANSFER and withdrawal permissions disabled. Do not enable the scheduler on Production. Readiness at `/api/blofin/demo/execution-readiness` is only a prerequisite summary; the instrument permission, 12 gates, AI, account state, and risk checks are re-evaluated during each cycle. Runtime status is available from `/api/blofin/demo/autopilot/status`.
 
-The new unit tests use mocked HTTP responses and do not contact BloFin. A successful unit test is not a live API acceptance test. Live validation still requires a confirmed eligible account, a Demo-only READ key, server-side secret configuration, verified clock skew, and authenticated WebSocket confirmation. No Demo credentials are currently configured or tested by this code change.
+**Hosting limit:** Render Free web services can sleep after 15 minutes without inbound traffic. This in-process scheduler therefore runs only while the web process is awake; it does not guarantee 24/7 autonomous execution on the Free plan. It is not a managed background worker or a guaranteed always-on trading service. CI tests use mocked exchange responses and do not prove live Demo API permission or successful fills. Binance Spot Testnet and the local Futures Paper Trading ledger remain separate environments.
 
 ## Binance Spot order execution (testnet first)
 
