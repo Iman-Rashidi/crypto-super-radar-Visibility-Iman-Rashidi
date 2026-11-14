@@ -1753,7 +1753,7 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             "market_overview": {
                 "status": range_evidence.get("status", "UNKNOWN"),
                 "reason": range_evidence.get("reason"),
-                "current_price": range_evidence.get("current_price"),
+                "current_price": range_evidence.get("current_price") or getattr(snapshot, "price_usd", None),
                 "candle_age_hours": range_evidence.get("candle_age_hours"),
                 "ranges": range_evidence.get("windows", {}),
                 "candles": candle_records,
@@ -3867,6 +3867,33 @@ class Handler(BaseHTTPRequestHandler):
             payload = PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/easy/positions":
+            try:
+                manager = _get_easy_position_manager()
+                payload = {
+                    "status": "KNOWN", "mode": "PAPER_ONLY",
+                    "open_positions": manager.open_positions(),
+                    "recent_journal": manager.journal(50),
+                    "orders_submitted": False,
+                }
+                return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status": "UNKNOWN", "error_type": type(exc).__name__,
+                           "mode": "PAPER_ONLY", "orders_submitted": False}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+        if parsed.path == "/api/easy/positions/events":
+            position_id = parse_qs(parsed.query).get("position_id", [""])[0]
+            if not position_id:
+                return self._send(400, b'{"status":"INVALID_POSITION_ID"}', "application/json; charset=utf-8")
+            try:
+                payload = {"status": "KNOWN", "events": _get_easy_position_manager().events(position_id)}
+                return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(503, json.dumps({"status":"UNKNOWN","error_type":type(exc).__name__}).encode(),
+                                  "application/json; charset=utf-8")
         if parsed.path == "/futures-paper-bot/status":
             payload = FUTURES_PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -5970,7 +5997,7 @@ async function refreshExecutionReadiness(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/easy/positions/open", "/api/easy/positions/update", "/api/easy/positions/close"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -5984,6 +6011,57 @@ async function refreshExecutionReadiness(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route in {"/api/easy/positions/open", "/api/easy/positions/update", "/api/easy/positions/close"}:
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN","mode":"PAPER_ONLY"}',
+                                      "application/json; charset=utf-8")
+                manager = _get_easy_position_manager()
+                value = lambda name, default=None: form.get(name, [default])[0]
+                number = lambda name: float(value(name))
+                if route.endswith("/open"):
+                    try:
+                        asset = AssetSpec.parse(value("asset", ""))
+                        result = manager.open_position(
+                            asset.raw, value("side", ""), number("quantity"),
+                            number("entry_price"), number("stop_loss"), number("take_profit"),
+                            stop_mode=value("stop_mode", "HARD"),
+                            max_holding_bars=int(value("max_holding_bars", "100")),
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        return self._send(400, b'{"status":"INVALID_INPUT","mode":"PAPER_ONLY"}',
+                                          "application/json; charset=utf-8")
+                    code = 201 if result.get("status") == "OPENED" else 409 if result.get("status") == "BLOCKED" else 400
+                elif route.endswith("/update"):
+                    try:
+                        result = manager.update_position(
+                            value("position_id", ""),
+                            {"open": number("open"), "high": number("high"),
+                             "low": number("low"), "close": number("close")},
+                            atr_value=number("atr_value") if value("atr_value") not in (None, "") else None,
+                            trail_atr_multiple=float(value("trail_atr_multiple", "2.0")),
+                            candle_closed=value("closed", "0") == "1",
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        return self._send(400, b'{"status":"INVALID_INPUT","mode":"PAPER_ONLY"}',
+                                          "application/json; charset=utf-8")
+                    code = 200 if result.get("status") in {"OPEN", "PROVISIONAL"} else 404 if result.get("status") == "NOT_FOUND" else 400
+                else:
+                    try:
+                        result = manager.manual_close(
+                            value("position_id", ""), number("exit_price"),
+                            value("reason", "MANUAL_CLOSE"),
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        return self._send(400, b'{"status":"INVALID_INPUT","mode":"PAPER_ONLY"}',
+                                          "application/json; charset=utf-8")
+                    code = 200 if result.get("status") == "CLOSED" else 404 if result.get("status") == "NOT_FOUND" else 400
+                result.update({"mode": "PAPER_ONLY", "orders_submitted": False})
+                return self._send(code, json.dumps(result, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
             if route == "/api/blofin/demo/execute-once":
                 if (
                     not origin
