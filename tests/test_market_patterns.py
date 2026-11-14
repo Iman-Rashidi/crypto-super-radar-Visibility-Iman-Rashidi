@@ -786,6 +786,66 @@ class MarketPatternTests(unittest.TestCase):
 
 
 
+
+
+    def _set_three_inside_down(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        frame.iloc[-3] = [94.0, 101.0, 93.0, 100.0, 1500.0]
+        frame.iloc[-2] = [99.0, 100.0, 95.0, 96.0, 900.0]
+        frame.iloc[-1] = [96.0, 97.0, 92.0, 95.0 if not with_confirmation else 92.0, 1800.0]
+        return frame
+
+    def test_three_inside_down_is_reported_pending_after_uptrend(self):
+        frame = self._set_three_inside_down(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three Inside Down")
+        self.assertEqual(pattern["name_fa"], "سه‌تایی از داخل به پایین")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+
+    def test_three_inside_down_confirmed_by_close_below_first_low(self):
+        frame = self._set_three_inside_down(candle_frame("up"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three Inside Down")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_three_inside_down_rejected_without_prior_uptrend(self):
+        frame = self._set_three_inside_down(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three Inside Down" for p in analysis["candlestick_patterns"]))
+
+    def _set_bearish_marubozu(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        index = -2 if with_confirmation else -1
+        frame.iloc[index] = [100.0, 100.1, 91.9, 92.0, 1800.0]
+        if with_confirmation:
+            frame.iloc[-1] = [92.0, 92.1, 90.0, 91.0, 1900.0]
+        return frame
+
+    def test_bearish_marubozu_is_reported_pending_until_follow_through(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Marubozu")
+        self.assertEqual(pattern["name_fa"], "ماروبوزوی نزولی")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+
+    def test_bearish_marubozu_confirmed_by_close_below_its_low(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Marubozu")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_bearish_marubozu_rejected_when_shadows_are_too_long(self):
+        frame = self._set_bearish_marubozu(candle_frame("up"))
+        frame.iloc[-1] = [100.0, 101.0, 91.0, 92.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Marubozu" for p in analysis["candlestick_patterns"]))
+
     def _set_falling_window(self, frame: pd.DataFrame, *, with_follow_through: bool = False) -> pd.DataFrame:
         first_index = -3 if with_follow_through else -2
         frame.iloc[first_index] = [108.0, 110.0, 105.0, 106.0, 1500.0]
