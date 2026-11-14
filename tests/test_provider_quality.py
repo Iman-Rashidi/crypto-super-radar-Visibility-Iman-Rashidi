@@ -393,7 +393,7 @@ class FreeRegionalFallbackTests(unittest.TestCase):
                     }]}
                 if url.endswith("/public/mark-price"):
                     return {"code": "0", "data": [{
-                        "instId": "BTC-USDT-SWAP", "markPx": "68000", "ts": str(now_ms),
+                        "instId": "BTC-USDT-SWAP", "markPx": "90000", "ts": str(now_ms),
                     }]}
                 if url.endswith("/market/index-tickers"):
                     return {"code": "0", "data": [{
