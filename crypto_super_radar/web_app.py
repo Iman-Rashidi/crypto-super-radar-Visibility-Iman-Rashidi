@@ -2946,6 +2946,8 @@ def _blofin_execution_report_fa(job: dict) -> dict:
             "message_fa": event.get("message_fa") or "رویداد ثبت شد.",
         })
 
+    fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    count_fa = lambda value: str(value if value is not None else "—").translate(fa_digits)
     return {
         "title_fa": "گزارش فارسی اجرای معامله آزمایشی",
         "status_fa": status_labels.get(status, status_labels.get(str(current.get("status") or "").upper(), "وضعیت نامشخص")),
@@ -2956,9 +2958,9 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "gate_fail_count": fail_count,
         "gate_unknown_count": unknown_count,
         "gate_summary_fa": (
-            f"{pass_count if pass_count is not None else '—'} فیلتر تأیید، "
-            f"{fail_count if fail_count is not None else '—'} فیلتر رد و "
-            f"{unknown_count if unknown_count is not None else '—'} فیلتر نامشخص."
+            f"{count_fa(pass_count)} فیلتر تأیید، "
+            f"{count_fa(fail_count)} فیلتر رد و "
+            f"{count_fa(unknown_count)} فیلتر نامشخص."
         ),
         "gates_fa": gates_fa,
         "elliott_wave": wave if isinstance(wave, dict) else {
