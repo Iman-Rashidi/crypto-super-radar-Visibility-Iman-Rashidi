@@ -436,6 +436,28 @@ def main() -> None:
                 for limitation in eps.get("limitations") or []:
                     st.caption("• " + limitation)
                 if eps.get("source"): st.caption("منبع: " + eps["source"])
+        esg = (fundamental.get("modules") or {}).get("esg_analysis") or {}
+        with st.expander("تحلیل محیط‌زیست، مسئولیت اجتماعی و حاکمیت | ESG", expanded=False):
+            st.write(esg.get("message_fa", "برای ارزیابی ESG به داده‌های منبع‌دار نیاز است."))
+            if esg.get("status") == "UNKNOWN":
+                st.info("اطلاعات معتبر ESG کافی نیست؛ امتیاز ساختگی نمایش داده نمی‌شود.")
+            else:
+                ec1, ec2, ec3 = st.columns(3)
+                for col, key, title in zip((ec1, ec2, ec3), ("environmental", "social", "governance"),
+                                           ("محیط‌زیست", "اجتماعی", "حاکمیت")):
+                    pillar = (esg.get("pillars") or {}).get(key) or {}
+                    val = pillar.get("score")
+                    col.metric(title, "نامشخص" if val is None else f"{val:.1f}/100")
+                st.metric("میانگین تشخیصی ESG", "نامشخص" if esg.get("score") is None else f"{esg['score']:.1f}/100")
+                if esg.get("network_metrics"):
+                    st.write("شاخص‌های اختصاصی شبکه رمزارز")
+                    st.json(esg["network_metrics"])
+                if esg.get("controversies"):
+                    st.warning("موارد مناقشه برای بررسی انسانی: " + "؛ ".join(esg["controversies"]))
+                for limitation in esg.get("limitations") or []:
+                    st.caption("• " + limitation)
+                if esg.get("source"):
+                    st.caption("منبع: " + esg["source"])
         ma = (fundamental.get("modules") or {}).get("mergers_acquisitions") or {}
         with st.expander("تحلیل ادغام و تملک | M&A Analysis", expanded=False):
             st.write(ma.get("message_fa", "برای تحلیل M&A به شواهد معامله نیاز است."))
