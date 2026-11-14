@@ -237,5 +237,42 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(analysis["candlestick_patterns"], [])
 
 
+    def _set_dragonfly_doji(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-1] = [96.0, 96.1, 92.0, 96.0, 1500.0]
+        return frame
+
+    def test_dragonfly_doji_after_downtrend_is_pending_bullish_evidence(self):
+        frame = self._set_dragonfly_doji(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Dragonfly Doji")
+        self.assertEqual(pattern["name_fa"], "دوجی سنجاقک")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["timestamp"], frame.index[-1].isoformat())
+        self.assertEqual(pattern["trigger_price"], 96.1)
+        self.assertEqual(pattern["invalidation_price"], 92.0)
+
+    def test_dragonfly_doji_rejected_when_upper_shadow_is_too_long(self):
+        frame = self._set_dragonfly_doji(candle_frame("down"))
+        frame.iloc[-1] = [95.0, 98.0, 92.0, 95.0, 1500.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Dragonfly Doji" for p in analysis["candlestick_patterns"]))
+
+    def test_dragonfly_doji_without_downtrend_has_no_bullish_direction(self):
+        frame = self._set_dragonfly_doji(candle_frame("flat"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Dragonfly Doji")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertIsNone(pattern["potential_direction"])
+        self.assertEqual(pattern["score"], 0)
+
+    def test_dragonfly_doji_not_detected_without_long_lower_shadow(self):
+        frame = self._set_dragonfly_doji(candle_frame("down"))
+        frame.iloc[-1] = [96.0, 96.1, 94.8, 96.0, 1500.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Dragonfly Doji" for p in analysis["candlestick_patterns"]))
+
+
 if __name__ == "__main__":
     unittest.main()
