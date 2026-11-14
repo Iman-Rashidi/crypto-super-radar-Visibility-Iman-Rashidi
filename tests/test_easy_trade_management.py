@@ -52,6 +52,12 @@ class EasyTradeManagementTests(unittest.TestCase):
         self.assertTrue(stop_execution_guidance("HARD")["automatic_trigger_expected"])
         self.assertFalse(stop_execution_guidance("MENTAL")["automatic_trigger_expected"])
 
+    def test_position_manager_enforces_risk_budget_and_notional_cap(self):
+        manager = EasyPositionManager(db=connect_database(":memory:"))
+        blocked = manager.open_position("cex:BTCUSDT", "LONG", 100, 100, 90, 120)
+        self.assertEqual(blocked["status"], "BLOCKED")
+        self.assertLessEqual(blocked["maximum_allowed_quantity"] * 100, 1000.0)
+
     def test_position_manager_ignores_open_candle(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
         opened = manager.open_position("cex:BTCUSDT", "LONG", 2, 100, 95, 110)
