@@ -3060,6 +3060,29 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
         analysis = ENGINE.analyze(asset)
         record = analysis.to_record()
         gates = record.get("gates")
+        analysis_time_utc = datetime.now(timezone.utc).isoformat()
+        wave_report = _blofin_elliott_wave_report_fa(record.get("elliott_wave"), str(record.get("signal") or "NO_TRADE"))
+        frames = getattr(ENGINE.data, "candle_frames", {})
+        frame = frames.get(asset.raw) if isinstance(frames, dict) else None
+        last_candle_close = None
+        last_candle_time = None
+        if frame is not None and not getattr(frame, "empty", True):
+            try:
+                last_candle_close = float(frame["close"].iloc[-1])
+                if not math.isfinite(last_candle_close):
+                    last_candle_close = None
+            except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+                last_candle_close = None
+            try:
+                last_candle_time = frame.index[-1].isoformat()
+            except (IndexError, AttributeError, TypeError):
+                last_candle_time = None
+        trade_context = {
+            "asset": asset.raw,
+            "analysis_time_utc": analysis_time_utc,
+            "last_completed_candle_time_utc": last_candle_time,
+            "last_candle_close": last_candle_close,
+        }
         pass_count = sum(
             1 for item in gates
             if isinstance(item, dict) and str(item.get("status", "")).upper() == "PASS"
@@ -3083,7 +3106,20 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             "entry_reference_price": record.get("entry_price_usd"),
             "stop_loss": record.get("stop_loss_usd"),
             "take_profit": record.get("take_profit_usd"),
+            "signal_fa": {"LONG": "خرید (LONG)", "SHORT": "فروش استقراضی (SHORT)"}.get(direction, "بدون معامله"),
+            "gates_fa": _blofin_gate_rows_fa(gates),
         }
+        wave_message = (
+            f"ساختار موج الیوت: {wave_report.get('selected_wave_fa')} "
+            f"{wave_report.get('direction_alignment_fa')}"
+        )
+        _set_blofin_execution_job(
+            job_id, "running", stage="ELLIOTT_WAVE_ANALYSIS",
+            message_fa=wave_message,
+            analysis=gate_summary,
+            elliott_wave=wave_report,
+            trade_context=trade_context,
+        )
         if (
             not isinstance(gates, list) or len(gates) != 12
             or (pass_count, fail_count, unknown_count) != (12, 0, 0)
@@ -3093,23 +3129,29 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
                 job_id, "completed", stage="NO_TRADE",
                 message_fa="شرایط ورود تأیید نشد؛ تمام ۱۲ گیت باید PASS و سیگنال LONG یا SHORT باشد.",
                 analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
                 result={
                     "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
                     **gate_summary,
+                    "elliott_wave": wave_report,
+                    "trade_context": trade_context,
                     "reason_fa": "سیگنال جهت‌دار با ۱۲ گیت PASS به دست نیامد؛ هیچ سفارشی ارسال نشد.",
                     "orders_submitted": False, "trade_executed": False,
                 },
             )
             return
 
-        frames = getattr(ENGINE.data, "candle_frames", {})
-        frame = frames.get(asset.raw) if isinstance(frames, dict) else None
         if frame is None or getattr(frame, "empty", True) or not hasattr(frame.index[-1], "isoformat"):
             _set_blofin_execution_job(
                 job_id, "completed", stage="NO_TRADE",
                 message_fa="کندل کامل و زمان‌دار برای جلوگیری از سفارش تکراری موجود نیست.",
+                elliott_wave=wave_report,
+                trade_context=trade_context,
                 result={
                     "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                    "elliott_wave": wave_report,
+                    "trade_context": trade_context,
                     "reason_fa": "کندل کامل و معتبر در دسترس نبود؛ سفارش ارسال نشد.",
                     "orders_submitted": False, "trade_executed": False,
                 },
@@ -3122,9 +3164,14 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             _set_blofin_execution_job(
                 job_id, "completed", stage="DUPLICATE_CANDLE_SKIPPED",
                 message_fa="کندل تکمیل‌شده قبلاً بررسی معاملاتی شده است؛ برای جلوگیری از تکرار، سفارش جدید ساخته نشد.",
+                elliott_wave=wave_report,
+                trade_context=trade_context,
                 result={
                     "status": "SKIPPED_DUPLICATE_SIGNAL", "environment": "BLOFIN_DEMO",
                     "signal_id": record["signal_id"],
+                    "elliott_wave": wave_report,
+                    "trade_context": trade_context,
+                    "reason_fa": "کندل تکمیل‌شده قبلاً بررسی معاملاتی شده است؛ هیچ سفارش تکراری ساخته نشد.",
                     "orders_submitted": False, "trade_executed": False,
                 },
             )
@@ -3134,6 +3181,8 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             job_id, "running", stage="NEMOTRON_SECOND_OPINION",
             message_fa="تحلیل زنده به Nemotron فرستاده شد؛ هنوز هیچ سفارشی ارسال نشده است.",
             analysis=gate_summary,
+            elliott_wave=wave_report,
+            trade_context=trade_context,
         )
         try:
             ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
@@ -3158,6 +3207,7 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
                 result={
                     "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
                     **gate_summary, "ai_status": ai_status,
+                    "elliott_wave": wave_report, "trade_context": trade_context,
                     "reason_fa": "Nemotron نظر تأییدکننده و مجوز ورود صادر نکرد؛ هیچ سفارشی ارسال نشد.",
                     "orders_submitted": False, "trade_executed": False,
                 },
@@ -3172,6 +3222,9 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
                 "returned_model": ai_review.get("returned_model"),
                 "latency_ms": ai_review.get("latency_ms"),
             },
+            analysis=gate_summary,
+            elliott_wave=wave_report,
+            trade_context=trade_context,
         )
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
@@ -3202,6 +3255,9 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
                 "risk_budget_usdt": execution.get("risk_budget_usdt"),
             },
             submitted_at_utc=datetime.now(timezone.utc).isoformat(),
+            analysis=gate_summary,
+            elliott_wave=wave_report,
+            trade_context=trade_context,
         )
 
         order_detail = None
@@ -3327,11 +3383,17 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
                 "filled_at_utc": filled_at,
                 "fills": safe_fills,
             },
+            analysis=gate_summary,
+            elliott_wave=wave_report,
+            trade_context=trade_context,
         )
         result = {
             **execution,
             "status": mapped_state or execution.get("status", "ACCEPTED"),
             "environment": "BLOFIN_DEMO",
+            "analysis": gate_summary,
+            "elliott_wave": wave_report,
+            "trade_context": trade_context,
             "order_detail": safe_detail,
             "fills": safe_fills,
             "average_fill_price": average_fill,
@@ -3478,6 +3540,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id))
             if job is None:
                 return self._send(404, b'{"status":"NOT_FOUND"}', "application/json; charset=utf-8")
+            job["report_fa"] = _blofin_execution_report_fa(job)
             return self._send(200, json.dumps(job, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/account":
