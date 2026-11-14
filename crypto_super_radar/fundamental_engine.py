@@ -383,6 +383,91 @@ def event_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
             "methodology": "OLS market model; abnormal return = actual return - expected normal return; CAR significance via two-sided Student-t test.",
             "message_fa": "اثر رویداد با مقایسه بازده واقعی و بازده عادی مورد انتظار سنجیده می‌شود؛ نتیجه توصیفی است و به‌تنهایی سیگنال معامله نیست."}
 
+
+def dividend_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Assess equity dividends from sourced evidence; crypto tokens are N/A.
+
+    Supported inputs: asset_class, current_price, annual_dividend_per_share,
+    dividend_yield_pct, dividends_paid, net_income, free_cash_flow,
+    dividend_history [{year, dividend_per_share}], price_change_12m_pct,
+    source, observed_at_utc. Percentages are expressed as percentage points.
+    """
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "سود تقسیمی شرکتی برای این دارایی تعریف نشده است؛ این مورد ضعف بنیادی توکن محسوب نمی‌شود."}
+    if asset_class not in {"equity", "stock", "share", "reit"}:
+        return {"status": "UNKNOWN", "score": None,
+                "message_fa": "نوع دارایی مشخص نیست؛ برای جلوگیری از اعمال اشتباه تحلیل سود تقسیمی، وضعیت UNKNOWN است."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(observed)
+    price = _positive(evidence.get("current_price"))
+    annual_dividend = _number(evidence.get("annual_dividend_per_share"))
+    yield_pct = _number(evidence.get("dividend_yield_pct"))
+    if yield_pct is None and annual_dividend is not None and price is not None and price > 0:
+        yield_pct = annual_dividend / price * 100
+    net_income = _number(evidence.get("net_income"))
+    dividends_paid = _number(evidence.get("dividends_paid"))
+    payout_ratio = (dividends_paid / net_income * 100
+                    if dividends_paid is not None and net_income is not None and net_income > 0 else None)
+    coverage = (net_income / dividends_paid
+                if net_income is not None and net_income > 0 and dividends_paid is not None and dividends_paid > 0 else None)
+    fcf = _number(evidence.get("free_cash_flow"))
+    fcf_coverage = (fcf / dividends_paid
+                    if fcf is not None and fcf > 0 and dividends_paid is not None and dividends_paid > 0 else None)
+    history = evidence.get("dividend_history")
+    history = history if isinstance(history, list) else []
+    valid_history = []
+    for row in history:
+        if not isinstance(row, Mapping): continue
+        year, amount = _number(row.get("year")), _number(row.get("dividend_per_share"))
+        if year is not None and amount is not None and year.is_integer() and amount >= 0:
+            valid_history.append((int(year), amount))
+    valid_history.sort()
+    years = [row[0] for row in valid_history]
+    amounts = [row[1] for row in valid_history]
+    history_consistent = (len(years) >= 2 and len(set(years)) == len(years)
+                          and all(years[i] == years[i - 1] + 1 for i in range(1, len(years)))
+                          and all(amount > 0 for amount in amounts))
+    dividend_growth_cagr_pct = None
+    if history_consistent and amounts[0] > 0 and amounts[-1] > 0:
+        dividend_growth_cagr_pct = ((amounts[-1] / amounts[0]) ** (1 / (len(amounts) - 1)) - 1) * 100
+    price_change = _number(evidence.get("price_change_12m_pct"))
+    dividend_trap = bool(yield_pct is not None and yield_pct >= 8 and price_change is not None and price_change <= -20)
+    checks = {
+        "dividend_yield": "KNOWN" if yield_pct is not None and sourced else "UNKNOWN",
+        "payout_ratio": "KNOWN" if payout_ratio is not None and sourced else "UNKNOWN",
+        "dividend_history": "KNOWN" if history_consistent and sourced else "UNKNOWN",
+        "dividend_coverage": "KNOWN" if coverage is not None and sourced else "UNKNOWN",
+        "dividend_growth": "KNOWN" if dividend_growth_cagr_pct is not None and sourced else "UNKNOWN",
+        "dividend_sustainability": "KNOWN" if (payout_ratio is not None or fcf_coverage is not None) and sourced else "UNKNOWN",
+        "dividend_trap": "KNOWN" if yield_pct is not None and price_change is not None and sourced else "UNKNOWN",
+    }
+    known = sum(value == "KNOWN" for value in checks.values())
+    status = "KNOWN" if known == len(checks) else "PARTIAL" if known else "UNKNOWN"
+    sustainability = "UNKNOWN"
+    if payout_ratio is not None:
+        sustainability = "RISK" if payout_ratio > 100 else "CAUTION" if payout_ratio > 80 else "HEALTHY"
+    if fcf_coverage is not None and fcf_coverage < 1:
+        sustainability = "RISK"
+    elif fcf_coverage is not None and fcf_coverage < 1.2 and sustainability == "HEALTHY":
+        sustainability = "CAUTION"
+    return {
+        "status": status, "score": None, "applicability": "APPLICABLE",
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "dividend_yield_pct": yield_pct, "payout_ratio_pct": payout_ratio,
+        "dividend_coverage_ratio": coverage, "free_cash_flow_coverage_ratio": fcf_coverage,
+        "dividend_history": [{"year": year, "dividend_per_share": amount} for year, amount in valid_history],
+        "history_consistent": history_consistent, "dividend_growth_cagr_pct": dividend_growth_cagr_pct,
+        "dividend_sustainability": sustainability, "dividend_trap_warning": dividend_trap,
+        "checks": checks, "known_checks": known, "total_checks": len(checks),
+        "message_fa": ("بازده تقسیمی بالا همراه با افت شدید قیمت شناسایی شد؛ احتمال تله سود تقسیمی را بررسی کنید." if dividend_trap else
+                       "نسبت پرداخت و پوشش جریان نقدی باید برای سنجش پایداری سود تقسیمی بررسی شوند."),
+        "limitations": ["بازده بالا به‌تنهایی نشانه ارزندگی نیست.",
+                        "برای شرکت‌های زیان‌ده، نسبت پرداخت بر مبنای سود خالص قابل محاسبه نیست.",
+                        "تاریخچه پرداخت به‌تنهایی تضمین‌کننده پرداخت آینده نیست."],
+    }
+
 def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Aggregate seven evidence modules with explicit coverage and no fabricated scores.
 
@@ -406,6 +491,7 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
         evidence.get("accounting_principles", {}))
     modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
     modules["event_analysis"] = event_analysis(evidence.get("event_analysis", {}))
+    modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
     for name in ("dcf", "comparables"):
         item = evidence.get(name)
         score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
@@ -433,6 +519,6 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
-           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis",
+           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
