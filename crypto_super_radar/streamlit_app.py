@@ -342,6 +342,7 @@ def main() -> None:
             "accounting_principles": "اصول حسابداری و کیفیت گزارشگری",
             "market_analysis": "تحلیل شرایط و ریسک بازار",
             "event_analysis": "تحلیل رویدادها و بازده غیرعادی",
+            "dividend_analysis": "تحلیل سود تقسیمی سهام",
         }
         module_rows = []
         for key, label in module_labels.items():
@@ -380,6 +381,21 @@ def main() -> None:
                 for key, item in observations.items()
             ]), hide_index=True, use_container_width=True)
             st.caption("مراحل: گردآوری داده، شناسایی روند، ارزیابی ریسک و ساخت سناریو. پیش‌بینی بدون منبع و زمان مشاهده نمایش داده نمی‌شود.")
+        dividend = (fundamental.get("modules") or {}).get("dividend_analysis") or {}
+        with st.expander("تحلیل سود تقسیمی | Dividend Analysis", expanded=False):
+            st.write(dividend.get("message_fa", "برای تحلیل سود تقسیمی، داده معتبر شرکت لازم است."))
+            if dividend.get("status") == "NOT_APPLICABLE":
+                st.info("این دارایی رمزارز/توکن است؛ سود تقسیمی شرکتی برای آن کاربرد ندارد.")
+            else:
+                dc1, dc2, dc3 = st.columns(3)
+                dc1.metric("بازده تقسیمی", "نامشخص" if dividend.get("dividend_yield_pct") is None else f"{dividend['dividend_yield_pct']:.2f}%")
+                dc2.metric("نسبت پرداخت", "نامشخص" if dividend.get("payout_ratio_pct") is None else f"{dividend['payout_ratio_pct']:.2f}%")
+                dc3.metric("پوشش سود", "نامشخص" if dividend.get("dividend_coverage_ratio") is None else f"{dividend['dividend_coverage_ratio']:.2f}x")
+                st.write("پایداری پرداخت:", dividend.get("dividend_sustainability", "UNKNOWN"))
+                st.write("رشد سالانه مرکب:", dividend.get("dividend_growth_cagr_pct"))
+                st.warning("احتمال تله سود تقسیمی: بازده بالا هم‌زمان با افت شدید قیمت شناسایی شد.") if dividend.get("dividend_trap_warning") else None
+                st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (dividend.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
+                if dividend.get("source"): st.caption("منبع: " + dividend["source"])
         event_module = (fundamental.get("modules") or {}).get("event_analysis") or {}
         with st.expander("تحلیل رویدادها | Event Study و بازده غیرعادی", expanded=False):
             st.write(event_module.get("message_fa", "برای تحلیل رویداد، داده زمان‌دار و بازده تاریخی لازم است."))
