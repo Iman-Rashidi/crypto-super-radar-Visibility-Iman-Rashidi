@@ -358,6 +358,34 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
 
+    # Bearish Marubozu: dominant bearish body with negligible upper/lower shadows.
+    prior_bodies = (frame["close"].iloc[-11:-1] - frame["open"].iloc[-11:-1]).abs()
+    typical_prior_body = float(prior_bodies.median()) if len(prior_bodies) else 0.0
+    bearish_marubozu = (
+        c < o
+        and body_ratio >= 0.85
+        and upper <= candle_range * 0.08
+        and lower <= candle_range * 0.08
+        and (typical_prior_body <= 0 or body >= typical_prior_body * 1.20)
+    )
+    if bearish_marubozu:
+        if context == "UP":
+            marubozu_score = -14
+            marubozu_description = "ماروبوزوی نزولی پس از روند صعودی؛ فروشندگان از آغاز تا پایان کندل کنترل بازار را در دست داشته‌اند و احتمال برگشت نزولی وجود دارد."
+            marubozu_strength = "STRONG"
+        elif context == "DOWN":
+            marubozu_score = -11
+            marubozu_description = "ماروبوزوی نزولی در ادامهٔ روند نزولی؛ فشار فروش و احتمال تداوم افت را تقویت می‌کند، اما پس از افت طولانی می‌تواند نشانهٔ فرسودگی فروش نیز باشد."
+            marubozu_strength = "MODERATE"
+        else:
+            marubozu_score = -8
+            marubozu_description = "ماروبوزوی نزولی با بدنهٔ بلند و سایه‌های ناچیز؛ فشار فروش شدید را نشان می‌دهد، اما روند زمینه‌ای روشن نیست."
+            marubozu_strength = "MODERATE" if volume_confirmed else "WEAK"
+        add("ماروبوزوی نزولی", "Bearish Marubozu", "BEARISH",
+            marubozu_description, marubozu_score,
+            state="NEEDS_CONFIRMATION",
+            strength="STRONG" if volume_confirmed and marubozu_score <= -11 else marubozu_strength)
+
     # Gravestone Doji: tiny body at/near the low, long upper wick, tiny lower wick.
     gravestone_doji = (
         body_ratio <= 0.10
