@@ -424,5 +424,52 @@ class MarketPatternTests(unittest.TestCase):
         self.assertFalse(any(p["name_en"] == "Bullish Abandoned Baby" for p in analysis["candlestick_patterns"]))
 
 
+    def _set_rising_window(self, frame: pd.DataFrame, *, with_follow_through: bool = False) -> pd.DataFrame:
+        first_index = -3 if with_follow_through else -2
+        frame.iloc[first_index] = [100.0, 102.0, 99.5, 101.0, 1400.0]
+        frame.iloc[first_index + 1] = [103.0, 106.0, 102.5, 105.0, 1800.0]
+        if with_follow_through:
+            frame.iloc[-1] = [105.2, 108.0, 104.0, 107.5, 1900.0]
+        return frame
+
+    def test_rising_window_requires_a_full_non_overlapping_gap_after_uptrend(self):
+        frame = self._set_rising_window(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Rising Window")
+        self.assertEqual(pattern["name_fa"], "پنجرهٔ صعودی (گپ رو به بالا)")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 106.0)
+        self.assertEqual(pattern["invalidation_price"], 102.0)
+
+    def test_rising_window_is_confirmed_while_following_candles_stay_above_gap(self):
+        frame = self._set_rising_window(candle_frame("up"), with_follow_through=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Rising Window")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_rising_window_rejected_when_second_candle_overlaps_first_high(self):
+        frame = self._set_rising_window(candle_frame("up"))
+        frame.iloc[-1] = [103.0, 106.0, 101.8, 105.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Rising Window" for p in analysis["candlestick_patterns"]))
+
+    def test_rising_window_rejected_when_prior_trend_is_not_bullish(self):
+        frame = self._set_rising_window(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Rising Window" for p in analysis["candlestick_patterns"]))
+
+    def test_rising_window_invalidated_when_a_later_candle_enters_gap(self):
+        frame = self._set_rising_window(candle_frame("up"), with_follow_through=True)
+        frame.iloc[-1] = [105.2, 108.0, 101.9, 107.5, 1900.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Rising Window" for p in analysis["candlestick_patterns"]))
+
+
+
+
 if __name__ == "__main__":
     unittest.main()
