@@ -10,6 +10,7 @@ from .config import AppConfig
 from .engine import ConfirmationEngine
 from .evm_security import screen_evm_token
 from .elliott_waves import monitor_elliott_waves
+from .fundamental_engine import build_fundamental_report
 from .chart_patterns import monitor_chart_patterns, contradicts_confirmed_breakout
 from .candle_quality import completed_daily_candles
 from .evm_transfers import EvmTransferScanner
@@ -267,6 +268,21 @@ class WhaleAwareConfirmationEngine:
         result = self.base.analyze(
             asset, supplied + news_items + social_items, open_portfolio_risk_pct,
         )
+        # Fundamental evidence is descriptive and cannot bypass the 12 mandatory gates.
+        # A provider must explicitly supply verified evidence; no synthetic score is created.
+        try:
+            fundamental_reader = getattr(self.data, "fundamental_evidence", None)
+            fundamental_evidence = fundamental_reader(asset) if callable(fundamental_reader) else {}
+            if not isinstance(fundamental_evidence, dict):
+                fundamental_evidence = {}
+            result.metrics["fundamental_analysis"] = build_fundamental_report(fundamental_evidence)
+        except Exception as exc:
+            result.metrics["fundamental_analysis"] = {
+                "status": "UNKNOWN", "score": None, "coverage_pct": 0.0,
+                "trade_authorized": False,
+                "reason": f"Fundamental evidence unavailable: {type(exc).__name__}",
+                "message_fa": "داده بنیادی معتبر در دسترس نیست؛ امتیاز ساختگی تولید نشد.",
+            }
         candle_frames = getattr(self.data, "candle_frames", {})
         wave_candles = candle_frames.get(asset.raw) if isinstance(candle_frames, dict) else None
         # Elliott output is descriptive only; it does not gate or change decisions.
