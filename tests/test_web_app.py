@@ -65,12 +65,15 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
-    def test_home_page_is_persian_and_lists_twelve_gates(self):
+    def test_home_page_is_persian_and_explains_independent_easy_profile(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
         self.assertEqual(status, 200)
         self.assertIn('lang="fa" dir="rtl"', page)
-        self.assertIn("۱۲ فیلتر اجباری", page)
+        self.assertIn('id="easy-position-manager"', page)
+        self.assertIn("مدیریت موقعیت و ژورنال Easy", page)
+        self.assertIn("تفکیک پروفایل‌های موتور", page)
+        self.assertIn("۱۲ گیت Legacy در اسکن Easy اجرا نمی‌شوند", page)
         self.assertIn("فقط BUYهایی نمایش داده می‌شوند", page)
         self.assertIn("کشف‌شده:", page)
         self.assertIn("وضعیت منابع داده", page)
@@ -94,6 +97,10 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('id="ai-dry-run-panel"', page)
         self.assertIn("اجرای تست واقعی Nemotron (Dry-Run)", page)
         self.assertIn("/api/ai/dry-run", page)
+        self.assertIn("renderDryRunResult(result)", page)
+        self.assertIn("دیدگاه هشت متخصص", page)
+        self.assertIn("کنترل زبان فارسی", page)
+        self.assertIn("ارسال سفارش", page)
         self.assertIn("سقف زیان روزانه", page)
         self.assertIn("پوشش دادهٔ کارمزد", page)
         self.assertIn("اجزای کارمزد مشاهده‌شده", page)
@@ -350,6 +357,7 @@ class WebAppHttpTests(unittest.TestCase):
             "status": "APPROVED",
             "model_verified": True,
             "response_validated": True,
+            "explanation_language_verified": True,
             "test_passed": True,
             "paper_entry_eligible": False,
             "orders_submitted": False,
@@ -953,6 +961,27 @@ class WebAppHttpTests(unittest.TestCase):
         status, _, payload = self.request("GET", "/jobs/not-a-real-job")
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(payload), {"error": "job not found"})
+
+    def test_shutdown_closes_process_scoped_database_handles(self):
+        closed = []
+
+        class Closable:
+            def close(self):
+                closed.append(self)
+
+        easy_db = Closable()
+        whale_store = Closable()
+        spot_ledger = Closable()
+        futures_ledger = Closable()
+        with (
+            patch.object(web_app, "_EASY_POSITION_MANAGER", SimpleNamespace(db=easy_db)),
+            patch.object(web_app, "STORE", whale_store),
+            patch.object(web_app, "PAPER_BOT", SimpleNamespace(ledger=spot_ledger)),
+            patch.object(web_app, "FUTURES_PAPER_BOT", SimpleNamespace(ledger=futures_ledger)),
+        ):
+            web_app._close_storage_resources()
+
+        self.assertCountEqual(closed, [easy_db, whale_store, spot_ledger, futures_ledger])
 
     def test_cross_origin_scan_post_is_rejected_before_engine_execution(self):
         status, _, payload = self.request(

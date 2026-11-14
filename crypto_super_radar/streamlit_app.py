@@ -208,6 +208,7 @@ def main() -> None:
         "خطاها و داده‌های نامشخص",
         "معیارهای کوانت",
         "نهنگ‌ها و احساسات",
+        "تحلیل بنیادی",
     ])
     with tabs[0]:
         trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
@@ -320,6 +321,234 @@ def main() -> None:
             "ورود توکن به صرافی به‌تنهایی اثبات فروش و خروج از صرافی اثبات خرید نیست. "
             "Fear & Greed نیز شاخص کلی بازار است، نه مختص این دارایی."
         )
+
+    with tabs[6]:
+        fundamental = result.metrics.get("fundamental_analysis") or {}
+        st.subheader("Fundamental Engine | تحلیل بنیادی")
+        fc1, fc2 = st.columns(2)
+        overall_score = fundamental.get("score")
+        coverage = fundamental.get("coverage_pct")
+        fc1.metric("امتیاز بنیادی", "نامشخص" if overall_score is None else f"{overall_score:.1f} / 100")
+        fc2.metric("پوشش شواهد", "نامشخص" if coverage is None else f"{coverage:.1f}%")
+        st.caption("این امتیاز مستقل از Opportunity Rank و Risk Score است و به‌تنهایی مجوز معامله نیست.")
+        module_labels = {
+            "macro": "اقتصاد کلان",
+            "tokenomics": "توکنومیکس",
+            "onchain": "داده‌های آن‌چین",
+            "project": "سلامت بنیادی پروژه",
+            "industry": "تحلیل صنعت و رقبا",
+            "dcf": "ارزش‌گذاری DCF",
+            "comparables": "مقایسه پروژه‌های هم‌صنعت",
+            "accounting_principles": "اصول حسابداری و کیفیت گزارشگری",
+            "market_analysis": "تحلیل شرایط و ریسک بازار",
+            "event_analysis": "تحلیل رویدادها و بازده غیرعادی",
+            "dividend_analysis": "تحلیل سود تقسیمی سهام",
+            "share_buybacks": "تحلیل بازخرید سهام",
+            "eps_analysis": "تحلیل سود هر سهم (EPS)",
+            "mergers_acquisitions": "تحلیل ادغام و تملک شرکت‌ها",
+            "sector_rotation": "تحلیل چرخش سرمایه بین بخش‌ها",
+        }
+        module_rows = []
+        for key, label in module_labels.items():
+            item = (fundamental.get("modules") or {}).get(key) or {}
+            value = item.get("score")
+            module_rows.append({
+                "ماژول": label,
+                "وضعیت": item.get("status", "UNKNOWN"),
+                "امتیاز": "نامشخص" if value is None else round(float(value), 2),
+            })
+        st.dataframe(pd.DataFrame(module_rows), hide_index=True, use_container_width=True)
+        accounting = (fundamental.get("modules") or {}).get("accounting_principles") or {}
+        market = (fundamental.get("modules") or {}).get("market_analysis") or {}
+        with st.expander("اصول حسابداری | شناسایی درآمد، موجودی و استهلاک", expanded=False):
+            for key, item in (accounting.get("principles") or {}).items():
+                st.markdown(f"**{item.get('label_fa', key)}** · {item.get('status', 'UNKNOWN')}")
+                checks = item.get("checks") or {}
+                if checks:
+                    st.dataframe(pd.DataFrame(
+                        [{"کنترل": name, "وضعیت": status} for name, status in checks.items()]
+                    ), hide_index=True, use_container_width=True)
+                if item.get("reported_method"):
+                    st.caption("روش گزارش‌شده: " + item["reported_method"])
+                if item.get("note"):
+                    st.caption(item["note"])
+                if item.get("reason"):
+                    st.caption(item["reason"])
+        with st.expander("تحلیل بازار | اقتصاد، روندها، مقررات و ریسک", expanded=False):
+            observations = market.get("observations") or {}
+            st.dataframe(pd.DataFrame([
+                {"عامل": item.get("label_fa", key),
+                 "وضعیت": item.get("status", "UNKNOWN"),
+                 "مقدار": item.get("value"),
+                 "منبع": item.get("source"),
+                 "زمان مشاهده": item.get("observed_at_utc")}
+                for key, item in observations.items()
+            ]), hide_index=True, use_container_width=True)
+            st.caption("مراحل: گردآوری داده، شناسایی روند، ارزیابی ریسک و ساخت سناریو. پیش‌بینی بدون منبع و زمان مشاهده نمایش داده نمی‌شود.")
+        dividend = (fundamental.get("modules") or {}).get("dividend_analysis") or {}
+        with st.expander("تحلیل سود تقسیمی | Dividend Analysis", expanded=False):
+            st.write(dividend.get("message_fa", "برای تحلیل سود تقسیمی، داده معتبر شرکت لازم است."))
+            if dividend.get("status") == "NOT_APPLICABLE":
+                st.info("این دارایی رمزارز/توکن است؛ سود تقسیمی شرکتی برای آن کاربرد ندارد.")
+            else:
+                dc1, dc2, dc3 = st.columns(3)
+                dc1.metric("بازده تقسیمی", "نامشخص" if dividend.get("dividend_yield_pct") is None else f"{dividend['dividend_yield_pct']:.2f}%")
+                dc2.metric("نسبت پرداخت", "نامشخص" if dividend.get("payout_ratio_pct") is None else f"{dividend['payout_ratio_pct']:.2f}%")
+                dc3.metric("پوشش سود", "نامشخص" if dividend.get("dividend_coverage_ratio") is None else f"{dividend['dividend_coverage_ratio']:.2f}x")
+                st.write("پایداری پرداخت:", dividend.get("dividend_sustainability", "UNKNOWN"))
+                st.write("رشد سالانه مرکب:", dividend.get("dividend_growth_cagr_pct"))
+                st.warning("احتمال تله سود تقسیمی: بازده بالا هم‌زمان با افت شدید قیمت شناسایی شد.") if dividend.get("dividend_trap_warning") else None
+                st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (dividend.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
+                if dividend.get("source"): st.caption("منبع: " + dividend["source"])
+
+
+        buyback = (fundamental.get("modules") or {}).get("share_buybacks") or {}
+        with st.expander("تحلیل بازخرید سهام | Share Buyback Analysis", expanded=False):
+            st.write(buyback.get("message_fa", "برای تحلیل بازخرید، گزارش خریدهای اجراشده و اطلاعات تعداد سهام لازم است."))
+            if buyback.get("status") == "NOT_APPLICABLE":
+                st.info("بازخرید سهام شرکتی برای توکن کاربرد ندارد.")
+            else:
+                bc1, bc2, bc3 = st.columns(3)
+                bc1.metric("بازده بازخرید", "نامشخص" if buyback.get("buyback_yield_pct") is None else f"{buyback['buyback_yield_pct']:.2f}%")
+                bc2.metric("کاهش تعداد سهام", "نامشخص" if buyback.get("share_reduction_pct") is None else f"{buyback['share_reduction_pct']:.2f}%")
+                bc3.metric("تأمین مالی بدهی", "نامشخص" if buyback.get("debt_funding_pct") is None else f"{buyback['debt_funding_pct']:.2f}%")
+                st.write("صرف/تخفیف قیمت بازخرید نسبت به قیمت مرجع (%):", buyback.get("repurchase_premium_pct"))
+                st.write("افزایش مکانیکی EPS با فرض سود ثابت (%):", buyback.get("mechanical_eps_accretion_pct"))
+                if buyback.get("review_flags"):
+                    st.warning("پرچم‌های بررسی: " + ", ".join(buyback["review_flags"]))
+                st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (buyback.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
+                st.caption("صرفاً بازخرید انجام‌شده محاسبه می‌شود؛ مجوز برنامه بازخرید به‌معنای اجرای آن نیست.")
+                if buyback.get("source"): st.caption("منبع: " + buyback["source"])
+        eps = (fundamental.get("modules") or {}).get("eps_analysis") or {}
+        with st.expander("تحلیل سود هر سهم | EPS Analysis", expanded=False):
+            st.write(eps.get("message_fa", "برای محاسبه EPS به سود خالص و میانگین تعداد سهام نیاز است."))
+            if eps.get("status") == "NOT_APPLICABLE":
+                st.info("EPS شرکتی برای توکن کاربرد ندارد.")
+            else:
+                ec1, ec2, ec3 = st.columns(3)
+                ec1.metric("EPS پایه", "نامشخص" if eps.get("basic_eps") is None else f"{eps['basic_eps']:.4f}")
+                ec2.metric("EPS رقیق‌شده", "نامشخص" if eps.get("diluted_eps") is None else f"{eps['diluted_eps']:.4f}")
+                ec3.metric("P/E", "نامشخص" if eps.get("pe_ratio") is None else f"{eps['pe_ratio']:.2f}x")
+                st.write("EPS تعدیل‌شده:", eps.get("adjusted_eps"))
+                st.write("KGV / P/E:", "نامشخص" if eps.get("pe_ratio") is None else f"{eps['pe_ratio']:.2f}x")
+                st.write("نرخ رشد مورد انتظار EPS (%):", eps.get("expected_eps_growth_pct"))
+                st.write("PEG:", "نامشخص" if eps.get("peg_ratio") is None else f"{eps['peg_ratio']:.2f}")
+                st.write("تفسیر آموزشی PEG:", eps.get("peg_interpretation", "UNKNOWN"))
+                st.write("مقایسه KGV با صنعت / تاریخچه / بازار (%):", eps.get("relative_pe_pct") or "نامشخص")
+                st.write("CAGR تاریخی EPS (%):", eps.get("eps_history_cagr_pct"))
+                st.write("تغییر EPS پیش‌بینی‌شده نسبت به واقعی (%):", eps.get("forecast_change_pct"))
+                st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (eps.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
+                for limitation in eps.get("limitations") or []:
+                    st.caption("• " + limitation)
+                if eps.get("source"): st.caption("منبع: " + eps["source"])
+        debt = (fundamental.get("modules") or {}).get("debt_to_equity") or {}
+        with st.expander("تحلیل ساختار سرمایه و نسبت بدهی به حقوق صاحبان سهام | D/E", expanded=False):
+            st.write(debt.get("reason", "برای محاسبه به بدهی کل، حقوق صاحبان سهام، منبع و زمان معتبر نیاز است."))
+            st.metric("نسبت D/E", "نامشخص" if debt.get("debt_to_equity") is None else f"{debt['debt_to_equity']:.2f}x")
+            st.write("پوشش هزینه بهره:", debt.get("interest_coverage_ratio"))
+            st.write("مقایسه با میانه همتایان (%):", debt.get("relative_to_peer_pct"))
+            st.write("مقایسه با میانه صنعت (%):", debt.get("relative_to_industry_pct"))
+            if debt.get("source"): st.caption("منبع: " + debt["source"])
+            for note in debt.get("limitations") or []: st.caption("• " + note)
+        peer = (fundamental.get("modules") or {}).get("comparative_company_analysis") or {}
+        with st.expander("مقایسه شرکت‌ها در یک صنعت | Peer Comparison", expanded=False):
+            st.write(peer.get("reason") or "مقایسه همتایان بر اساس داده‌های منبع‌دار.")
+            st.write("صنعت / زیرصنعت:", peer.get("sector"), "/", peer.get("subsector"))
+            st.write("تعداد همتایان معتبر:", peer.get("eligible_peer_count", 0))
+            if peer.get("comparisons"):
+                st.dataframe(pd.DataFrame([
+                    {"معیار": key, "مقدار شرکت": value.get("company_value"),
+                     "میانه همتایان": value.get("peer_median"),
+                     "حداقل": value.get("peer_min"), "حداکثر": value.get("peer_max"),
+                     "اختلاف با میانه (%)": value.get("relative_to_peer_median_pct"),
+                     "تعداد داده معتبر": value.get("peer_count")}
+                    for key, value in peer["comparisons"].items()
+                ]), hide_index=True, use_container_width=True)
+            st.write("همتایان حذف‌شده:", peer.get("excluded_peers") or [])
+            st.write("زمینه کیفی مدیریت / برند / شهرت:", peer.get("qualitative_context") or {})
+            for note in peer.get("limitations") or []: st.caption("• " + note)
+        esg = (fundamental.get("modules") or {}).get("esg_analysis") or {}
+        with st.expander("تحلیل محیط‌زیست، مسئولیت اجتماعی و حاکمیت | ESG", expanded=False):
+            st.write(esg.get("message_fa", "برای ارزیابی ESG به داده‌های منبع‌دار نیاز است."))
+            if esg.get("status") == "UNKNOWN":
+                st.info("اطلاعات معتبر ESG کافی نیست؛ امتیاز ساختگی نمایش داده نمی‌شود.")
+            else:
+                ec1, ec2, ec3 = st.columns(3)
+                for col, key, title in zip((ec1, ec2, ec3), ("environmental", "social", "governance"),
+                                           ("محیط‌زیست", "اجتماعی", "حاکمیت")):
+                    pillar = (esg.get("pillars") or {}).get(key) or {}
+                    val = pillar.get("score")
+                    col.metric(title, "نامشخص" if val is None else f"{val:.1f}/100")
+                st.metric("میانگین تشخیصی ESG", "نامشخص" if esg.get("diagnostic_score") is None else f"{esg['diagnostic_score']:.1f}/100")
+                if esg.get("network_metrics"):
+                    st.write("شاخص‌های اختصاصی شبکه رمزارز")
+                    st.json(esg["network_metrics"])
+                if esg.get("controversies"):
+                    st.warning("موارد مناقشه برای بررسی انسانی: " + "؛ ".join(esg["controversies"]))
+                for limitation in esg.get("limitations") or []:
+                    st.caption("• " + limitation)
+                if esg.get("source"):
+                    st.caption("منبع: " + esg["source"])
+        ma = (fundamental.get("modules") or {}).get("mergers_acquisitions") or {}
+        with st.expander("تحلیل ادغام و تملک | M&A Analysis", expanded=False):
+            st.write(ma.get("message_fa", "برای تحلیل M&A به شواهد معامله نیاز است."))
+            if ma.get("status") == "NOT_APPLICABLE":
+                st.info("این ماژول مربوط به ادغام و تملک شرکت‌هاست و برای توکن به‌صورت خودکار امتیاز منفی ایجاد نمی‌کند.")
+            else:
+                ma_rows = []
+                for deal_id, deal in (ma.get("deals") or {}).items():
+                    ma_rows.append({"معامله": deal_id, "هدف": deal.get("target"),
+                        "خریدار": deal.get("acquirer"), "وضعیت": deal.get("deal_status"),
+                        "صرف پیشنهاد (%)": deal.get("offer_premium_pct"),
+                        "تأمین مالی": deal.get("financing_type"),
+                        "ریسک ادغام": deal.get("integration_risk"),
+                        "وضعیت نهاد ناظر": deal.get("regulatory_status"),
+                        "پرچم‌های بررسی": ", ".join(deal.get("review_flags") or []),
+                        "منبع": deal.get("source_url")})
+                if ma_rows:
+                    st.dataframe(pd.DataFrame(ma_rows), hide_index=True, use_container_width=True)
+                else:
+                    st.info("خبر معامله با منبع و زمان معتبر هنوز ثبت نشده است؛ وضعیت UNKNOWN.")
+                for limitation in ma.get("limitations") or []:
+                    st.caption("• " + limitation)
+        rotation = (fundamental.get("modules") or {}).get("sector_rotation") or {}
+        with st.expander("تحلیل چرخش بخشی | Sector Rotation", expanded=False):
+            st.write(rotation.get("message_fa", "برای تحلیل چرخش بخشی، بازده و جریان سرمایه با منبع معتبر لازم است."))
+            st.write("مرحله چرخه اقتصادی:", rotation.get("economic_phase", "UNKNOWN"))
+            sector_rows = [{"بخش": row.get("sector"), "بازده (%)": row.get("return_pct"),
+                "بازده معیار (%)": row.get("benchmark_return_pct"),
+                "قدرت نسبی (%)": row.get("relative_strength_pct"),
+                "تغییر جریان سرمایه (%)": row.get("flow_change_pct"),
+                "منبع": row.get("source"), "زمان": row.get("observed_at_utc")}
+                for row in rotation.get("sectors") or []]
+            if sector_rows:
+                st.dataframe(pd.DataFrame(sector_rows), hide_index=True, use_container_width=True)
+                st.write("پیشتازها:", ", ".join(rotation.get("leaders") or []))
+                st.write("ضعیف‌ترها:", ", ".join(rotation.get("laggards") or []))
+            else:
+                st.info("داده زمان‌دار و منبع‌دار برای بخش‌ها موجود نیست؛ وضعیت UNKNOWN.")
+            for limitation in rotation.get("limitations") or []:
+                st.caption("• " + limitation)
+        event_module = (fundamental.get("modules") or {}).get("event_analysis") or {}
+        with st.expander("تحلیل رویدادها | Event Study و بازده غیرعادی", expanded=False):
+            st.write(event_module.get("message_fa", "برای تحلیل رویداد، داده زمان‌دار و بازده تاریخی لازم است."))
+            event_rows = []
+            for event_id, item in (event_module.get("events") or {}).items():
+                event_rows.append({"رویداد": event_id, "نوع": item.get("event_type", "نامشخص"),
+                    "وضعیت": item.get("status", "UNKNOWN"), "بازده غیرعادی تجمعی": item.get("cumulative_abnormal_return"),
+                    "آماره t": item.get("t_statistic"), "p-value": item.get("p_value_two_sided"),
+                    "معنادار در ۵٪": item.get("statistically_significant_5pct"), "منبع": item.get("source_url")})
+            if event_rows:
+                st.dataframe(pd.DataFrame(event_rows), hide_index=True, use_container_width=True)
+            else:
+                st.info("رویداد زمان‌دار و داده کافی برای پنجره برآورد/رویداد هنوز موجود نیست؛ وضعیت UNKNOWN است.")
+            st.caption("بازده غیرعادی = بازده واقعی − بازده عادی مورد انتظار از مدل بازار. آزمون t دوطرفه برای CAR؛ معناداری آماری اثبات رابطه علّی یا پیش‌بینی سود نیست.")
+        if fundamental.get("status") in {"UNKNOWN", "INSUFFICIENT_COVERAGE"}:
+            st.warning("داده بنیادی معتبر و کافی برای امتیاز کلی در دسترس نیست؛ این وضعیت به‌عنوان UNKNOWN ثبت می‌شود.")
+        if fundamental.get("status") == "PARTIAL":
+            st.info("امتیاز بر اساس ماژول‌های معتبر محاسبه شده و بخشی از شواهد هنوز نامشخص است.")
+        st.info(fundamental.get("message_fa", "این گزارش صرفاً تحلیلی است و معامله را تأیید نمی‌کند."))
+        st.caption("DCF فقط با جریان نقدی منتسب به توکن و نسبت صریح Token Value Capture معتبر است؛ مقایسه ارزش‌گذاری فقط با پروژه‌های هم‌صنعت انجام می‌شود. منابع بنیادی زنده هنوز به این محیط متصل نشده‌اند.")
 
     st.caption(
         "دادهٔ این صفحه مربوط به آخرین اسکن ذخیره‌شده در همین نشست است. "

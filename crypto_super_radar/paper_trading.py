@@ -689,7 +689,7 @@ class PaperLedger:
 
 
 class PaperTradingBot:
-    """One-cycle spot paper trader; requires every existing signal gate to PASS."""
+    """One-cycle spot paper trader with isolated Easy and legacy validation policies."""
 
     def __init__(
         self,
@@ -864,9 +864,20 @@ class PaperTradingBot:
                     "reason": "A fresh cross-validated public spot price is unavailable."}
 
         gates = getattr(result, "gates", [])
-        if not _mandatory_gates_pass(gates):
+        result_metrics = getattr(result, "metrics", {}) or {}
+        easy_profile = result_metrics.get("engine_profile") == "EASY"
+        if easy_profile:
+            policy = result_metrics.get("decision_policy") or {}
+            profile_valid = (
+                policy.get("twelve_gate_engine_used") is False
+                and policy.get("mandatory_legacy_gates") == 0
+                and not gates
+            )
+        else:
+            profile_valid = _mandatory_gates_pass(gates)
+        if not profile_valid:
             return {"status": "NO_TRADE", "asset": asset.raw,
-                    "reason": "Exactly one PASS result for each mandatory gate ID 1–12 is required before paper entry."}
+                    "reason": "The active profile's independent validation policy was not satisfied."}
         signal = _status(getattr(result, "signal", "NO TRADE"))
         if signal != "LONG":
             return {"status": "NO_TRADE", "asset": asset.raw,
@@ -875,9 +886,12 @@ class PaperTradingBot:
         risk = _number(getattr(result, "estimated_risk_score", None))
         stop = _number(getattr(result, "stop_loss", None))
         target = _number(getattr(result, "take_profit", None))
-        if (score is None or score < self.min_confirmation_score
-                or risk is None or risk >= self.max_risk_score
-                or stop is None or target is None):
+        effective_min_score = 55.0 if easy_profile else self.min_confirmation_score
+        # Easy risk score is explicitly heuristic/diagnostic; its independent
+        # hard controls are stop-based sizing, notional caps and account circuit breakers.
+        risk_invalid = risk is None if easy_profile else (risk is None or risk >= self.max_risk_score)
+        if (score is None or score < effective_min_score
+                or risk_invalid or stop is None or target is None):
             return {"status": "NO_TRADE", "asset": asset.raw,
                     "reason": "Score, risk or stop/target plan did not pass paper safety limits."}
         entry_quote = _extract_observed_quote(snapshot)

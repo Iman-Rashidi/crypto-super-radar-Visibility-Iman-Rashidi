@@ -1,0 +1,1064 @@
+"""Evidence-aware crypto fundamental analysis for the Easy trading engine.
+
+This module is deliberately provider-agnostic: it computes only from supplied,
+timestamped evidence and never invents missing fundamentals. It does not place
+orders or authorize a trade.
+"""
+from __future__ import annotations
+
+from math import isfinite, sqrt, log1p
+from statistics import median
+from typing import Any, Mapping, Sequence
+
+MODULE_WEIGHTS = {
+    "macro": 15.0,
+    "tokenomics": 15.0,
+    "onchain": 15.0,
+    "project": 15.0,
+    "industry": 15.0,
+    "dcf": 10.0,
+    "comparables": 15.0,
+}
+MIN_COVERAGE_PCT = 70.0
+VALUATION_METRICS = ("market_cap_to_revenue", "fdv_to_revenue", "market_cap_to_tvl", "fdv_to_tvl")
+
+
+def _number(value: Any) -> float | None:
+    """Return a finite float, otherwise None (never coerce missing data to zero)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if isfinite(result) else None
+
+
+def _positive(value: Any) -> float | None:
+    result = _number(value)
+    return result if result is not None and result > 0 else None
+
+
+def classify_industry(project: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a project's declared sector and expose missing classification."""
+    sector = str(project.get("sector") or "").strip().lower()
+    subsector = str(project.get("subsector") or "").strip().lower()
+    if not sector:
+        return {"status": "UNKNOWN", "sector": None, "subsector": None,
+                "reason": "Project sector is not supplied by a verified source."}
+    return {"status": "KNOWN", "sector": sector, "subsector": subsector or None}
+
+
+def industry_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Score supplied sector evidence; each criterion must explicitly carry a score."""
+    criteria = ("market_growth", "market_share", "competition", "entry_barriers",
+                "technology_trend", "regulatory_environment", "adoption")
+    scores: dict[str, float] = {}
+    unknown: list[str] = []
+    for key in criteria:
+        item = evidence.get(key)
+        value = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
+        if value is None or not 0 <= value <= 100:
+            unknown.append(key)
+        else:
+            scores[key] = value
+    result = {"status": "UNKNOWN", "score": None, "known_criteria": [],
+              "unknown_criteria": unknown, "reason": "No valid, sourced industry criteria."}
+    if scores:
+        # Equal weights avoid pretending unsupported sector-specific weights are calibrated.
+        score = sum(scores.values()) / len(scores)
+        result.update({"status": "PARTIAL" if unknown else "KNOWN", "score": round(score, 2),
+                       "known_criteria": sorted(scores)})
+    if isinstance(evidence.get("evidence"), Mapping):
+        result["evidence"] = dict(evidence["evidence"])
+    return result
+
+
+def discounted_protocol_cashflows(
+    cashflows: Sequence[Any],
+    *,
+    discount_rate: Any,
+    terminal_growth_rate: Any = 0.0,
+    token_value_capture_ratio: Any = None,
+    net_treasury_value: Any = 0.0,
+) -> dict[str, Any]:
+    """Estimate token-attributable value from annual protocol cashflows.
+
+    Cashflows must be forecast net cashflows attributable to the protocol.
+    The token capture ratio must be explicitly supplied; protocol revenue alone
+    is not assumed to accrue to token holders. Rates are decimals (e.g. 0.20).
+    """
+    rate = _number(discount_rate)
+    growth = _number(terminal_growth_rate)
+    capture = _number(token_value_capture_ratio)
+    treasury = _number(net_treasury_value)
+    flows = [_number(x) for x in cashflows]
+    if (not flows or any(x is None for x in flows) or rate is None or growth is None
+            or capture is None or treasury is None):
+        return {"status": "UNKNOWN", "estimated_value": None,
+                "reason": "DCF requires complete cashflows, discount/growth rates, token value-capture ratio and treasury value."}
+    if not (0 <= growth < rate) or rate <= 0 or not 0 <= capture <= 1:
+        return {"status": "UNKNOWN", "estimated_value": None,
+                "reason": "DCF assumptions invalid: require 0 <= growth < discount rate and 0 <= token capture <= 1."}
+    if any(flow < 0 for flow in flows):
+        return {"status": "UNKNOWN", "estimated_value": None,
+                "reason": "Negative forecast cashflows require an explicit turnaround model; this simple DCF rejects them."}
+    captured = [float(flow) * capture for flow in flows]
+    pv_flows = sum(flow / ((1 + rate) ** year) for year, flow in enumerate(captured, start=1))
+    terminal = captured[-1] * (1 + growth) / (rate - growth)
+    pv_terminal = terminal / ((1 + rate) ** len(captured))
+    value = pv_flows + pv_terminal + treasury
+    return {"status": "KNOWN", "estimated_value": round(value, 8),
+            "present_value_cashflows": round(pv_flows, 8),
+            "present_value_terminal": round(pv_terminal, 8),
+            "net_treasury_value": round(treasury, 8),
+            "token_value_capture_ratio": capture,
+            "assumptions": {"discount_rate": rate, "terminal_growth_rate": growth,
+                            "forecast_years": len(flows)},
+            "warning": "Scenario estimate, not a market price or guaranteed fair value."}
+
+
+def comparable_projects(project: Mapping[str, Any], peers: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Compare like-for-like projects using valid positive denominator multiples."""
+    sector = str(project.get("sector") or "").strip().lower()
+    project_values: dict[str, float] = {}
+    peer_values: dict[str, list[float]] = {key: [] for key in VALUATION_METRICS}
+    exclusions = 0
+    for key in VALUATION_METRICS:
+        numerator_key, denominator_key = key.split("_to_")
+        numerator = _positive(project.get(numerator_key))
+        denominator = _positive(project.get(denominator_key))
+        if numerator is not None and denominator is not None:
+            project_values[key] = numerator / denominator
+    for peer in peers:
+        if not sector or str(peer.get("sector") or "").strip().lower() != sector:
+            exclusions += 1
+            continue
+        for key in VALUATION_METRICS:
+            numerator_key, denominator_key = key.split("_to_")
+            numerator = _positive(peer.get(numerator_key))
+            denominator = _positive(peer.get(denominator_key))
+            if numerator is not None and denominator is not None:
+                peer_values[key].append(numerator / denominator)
+    medians = {key: round(median(values), 8) for key, values in peer_values.items() if values}
+    relative = {}
+    for key, value in project_values.items():
+        if key in medians and medians[key] > 0:
+            relative[key] = {"project_multiple": round(value, 8),
+                             "peer_median": medians[key],
+                             "relative_to_peers_pct": round((value / medians[key] - 1) * 100, 2)}
+    status = "KNOWN" if relative else "UNKNOWN"
+    return {"status": status, "sector": sector or None, "peer_count": len(peers) - exclusions,
+            "excluded_non_comparable_peers": exclusions, "project_multiples": project_values,
+            "peer_medians": medians, "relative_valuation": relative,
+            "reason": None if relative else "No valid same-sector peer multiple comparison."}
+
+
+
+def debt_to_equity_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Calculate sourced company leverage; non-positive equity is not a valid D/E denominator."""
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None, "debt_to_equity": None,
+                "reason": "D/E شرکتی برای توکن کاربرد ندارد."}
+    if asset_class not in {"equity", "stock", "share", "reit", "company"}:
+        return {"status": "UNKNOWN", "score": None, "debt_to_equity": None,
+                "reason": "نوع دارایی باید به‌عنوان سهام یا شرکت مشخص شود."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = (isinstance(source, str) and source.startswith(("https://", "http://"))
+               and isinstance(observed, str) and bool(observed.strip()))
+    liabilities = _number(evidence.get("total_liabilities"))
+    equity = _number(evidence.get("total_equity"))
+    debt_to_equity = (liabilities / equity
+                      if sourced and liabilities is not None and liabilities >= 0
+                      and equity is not None and equity > 0 else None)
+    ebit = _number(evidence.get("ebit"))
+    interest_expense = _positive(evidence.get("interest_expense"))
+    interest_coverage = (ebit / interest_expense
+                         if sourced and ebit is not None and interest_expense is not None else None)
+    peer_median = _positive(evidence.get("peer_median_debt_to_equity"))
+    industry_median = _positive(evidence.get("industry_median_debt_to_equity"))
+    return {
+        "status": "KNOWN" if debt_to_equity is not None else "UNKNOWN",
+        "score": None, "debt_to_equity": round(debt_to_equity, 4) if debt_to_equity is not None else None,
+        "total_liabilities": liabilities if sourced else None,
+        "total_equity": equity if sourced else None,
+        "interest_coverage_ratio": round(interest_coverage, 4) if interest_coverage is not None else None,
+        "peer_median_debt_to_equity": peer_median if sourced else None,
+        "industry_median_debt_to_equity": industry_median if sourced else None,
+        "relative_to_peer_pct": round((debt_to_equity / peer_median - 1) * 100, 2)
+            if debt_to_equity is not None and peer_median is not None else None,
+        "relative_to_industry_pct": round((debt_to_equity / industry_median - 1) * 100, 2)
+            if debt_to_equity is not None and industry_median is not None else None,
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "reason": ("D/E محاسبه شد." if debt_to_equity is not None else
+                   "برای D/E به بدهی کل، حقوق صاحبان سهام مثبت، منبع و زمان معتبر نیاز است؛ حقوق صاحبان سهام صفر یا منفی نسبت را نامعتبر می‌کند."),
+        "limitations": ["D/E بین صنایع و استانداردهای گزارشگری متفاوت قابل مقایسه مستقیم نیست.",
+                        "برای بانک‌ها و مؤسسات مالی باید معیارهای اهرمی اختصاصی صنعت به‌کار رود.",
+                        "D/E به‌تنهایی ریسک نکول یا توان پرداخت بهره را نشان نمی‌دهد؛ پوشش بهره مکمل آن است."],
+    }
+
+
+def comparative_company_analysis(company: Mapping[str, Any],
+                                 peers: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Evidence-gated, like-for-like equity peer comparison; no composite score."""
+    asset_class = str(company.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "reason": "مقایسه شرکت‌های بورسی برای توکن کاربرد ندارد؛ از مقایسه پروژه‌های هم‌گروه رمزارزی استفاده شود."}
+    sector = str(company.get("sector") or "").strip().lower()
+    subsector = str(company.get("subsector") or "").strip().lower()
+    cap = _positive(company.get("market_cap"))
+    metrics = ("revenue_growth_pct", "operating_margin_pct", "net_margin_pct",
+               "roe_pct", "debt_to_equity", "interest_coverage_ratio",
+               "pe_ratio", "pb_ratio", "dividend_yield_pct")
+    def verified(row: Mapping[str, Any]) -> bool:
+        source, observed = row.get("source"), row.get("observed_at_utc")
+        return (isinstance(source, str) and source.startswith(("https://", "http://"))
+                and isinstance(observed, str) and bool(observed.strip()))
+    reporting_period = company.get("reporting_period")
+    currency = str(company.get("currency") or "").upper()
+    accounting_basis = str(company.get("accounting_basis") or "").upper()
+    company_valid = bool(sector and subsector and cap is not None and verified(company)
+                         and reporting_period and currency and accounting_basis)
+    eligible, excluded = [], []
+    for peer in peers:
+        if not isinstance(peer, Mapping):
+            excluded.append("INVALID_RECORD")
+            continue
+        peer_cap = _positive(peer.get("market_cap"))
+        same_group = (str(peer.get("sector") or "").strip().lower() == sector
+                      and str(peer.get("subsector") or "").strip().lower() == subsector)
+        similar_size = bool(cap and peer_cap and 0.5 <= peer_cap / cap <= 2.0)
+        standardized = (peer.get("reporting_period") == reporting_period
+                        and str(peer.get("currency") or "").upper() == currency
+                        and str(peer.get("accounting_basis") or "").upper() == accounting_basis)
+        if not company_valid or not same_group or not similar_size or not standardized or not verified(peer):
+            excluded.append(str(peer.get("symbol") or peer.get("name") or "UNKNOWN_PEER"))
+            continue
+        eligible.append(peer)
+    comparisons = {}
+    if company_valid:
+        for metric in metrics:
+            current = _number(company.get(metric))
+            peer_values = [_number(peer.get(metric)) for peer in eligible]
+            peer_values = [value for value in peer_values if value is not None]
+            if current is None or not peer_values:
+                continue
+            peer_median = median(peer_values)
+            comparisons[metric] = {
+                "company_value": current, "peer_median": round(peer_median, 6),
+                "peer_min": min(peer_values), "peer_max": max(peer_values),
+                "peer_count": len(peer_values),
+                "relative_to_peer_median_pct": (round((current / peer_median - 1) * 100, 2)
+                    if peer_median != 0 else None),
+                "status": "KNOWN",
+            }
+    qualitative = {}
+    for key in ("management_quality", "brand_strength", "market_reputation"):
+        item = company.get(key)
+        if isinstance(item, Mapping) and isinstance(item.get("description"), str) and verified(item):
+            qualitative[key] = {"description": item["description"], "source": item["source"],
+                                "observed_at_utc": item["observed_at_utc"], "status": "KNOWN"}
+        else:
+            qualitative[key] = {"description": None, "source": None,
+                                "observed_at_utc": None, "status": "UNKNOWN"}
+    return {
+        "status": "KNOWN" if comparisons else "UNKNOWN", "score": None,
+        "sector": sector or None, "subsector": subsector or None,
+        "company": company.get("symbol") or company.get("name"),
+        "eligible_peer_count": len(eligible), "excluded_peer_count": len(excluded),
+        "excluded_peers": excluded, "comparisons": comparisons,
+        "qualitative_context": qualitative,
+        "peer_selection": {"same_sector_and_subsector": True,
+                           "market_cap_range": "50%-200% of company market capitalization",
+                           "same_reporting_period": reporting_period,
+                           "same_currency": currency,
+                           "same_accounting_basis": accounting_basis},
+        "source": company.get("source") if company_valid else None,
+        "observed_at_utc": company.get("observed_at_utc") if company_valid else None,
+        "reason": None if comparisons else "داده معتبر شرکت و حداقل یک همتای هم‌صنعت، هم‌زیرصنعت و هم‌اندازه لازم است.",
+        "limitations": ["مقایسه فقط با دوره مالی، ارز گزارشگری و مبنای حسابداری یکسان انجام می‌شود؛ داده‌های ناهمسان حذف می‌شوند.",
+                        "میانه همتایان شاخص توصیفی است، نه ارزش ذاتی یا سیگنال خرید و فروش.",
+                        "کیفیت مدیریت، قدرت برند و شهرت بازار فقط زمینه کیفی منبع‌دار هستند و امتیاز عددی نمی‌گیرند.",
+                        "شرکت‌های مالی، بیمه و بانک‌ها ممکن است به معیارهای تخصصی صنعت نیاز داشته باشند."],
+    }
+
+
+def accounting_principles_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Assess financial-reporting quality without misapplying industrial accounting to tokens.
+
+    Revenue recognition checks delivery/performance obligation and collectability.
+    Inventory valuation is N/A for a protocol/token unless the project actually
+    holds or sells inventory. Depreciation is N/A unless material depreciable
+    operating assets are reported. Unknown is never treated as a clean audit.
+    """
+    definitions = {
+        "revenue_recognition": {
+            "label_fa": "شناسایی درآمد",
+            "checks": ("performance_obligation_satisfied", "revenue_basis_disclosed",
+                       "fees_separated_from_tokenholder_revenue", "collectability_supported"),
+            "note": "Protocol fees, gross revenue and revenue accruing to token holders are different measures.",
+            "accepted_methods": ("POINT_IN_TIME", "OVER_TIME"),
+            "method_field": "recognition_method",
+        },
+        "inventory_valuation": {
+            "label_fa": "ارزش‌گذاری موجودی",
+            "checks": ("inventory_scope_disclosed", "valuation_method_disclosed",
+                       "impairment_or_obsolescence_disclosed"),
+            "note": "FIFO records oldest inventory costs first; LIFO records newest costs first; weighted average uses average unit cost. For a software protocol with no material inventory this is NOT_APPLICABLE, not a positive score.",
+            "accepted_methods": ("FIFO", "LIFO", "WEIGHTED_AVERAGE"),
+            "method_field": "valuation_method",
+        },
+        "depreciation": {
+            "label_fa": "استهلاک دارایی‌ها",
+            "checks": ("material_asset_register_disclosed", "useful_lives_disclosed",
+                       "depreciation_method_disclosed", "impairment_disclosed"),
+            "note": "Straight-line spreads cost evenly; declining-balance accelerates early expense; units-of-production follows actual usage. Assess servers, equipment and capitalized development only where material and disclosed.",
+            "accepted_methods": ("STRAIGHT_LINE", "DECLINING_BALANCE", "UNITS_OF_PRODUCTION"),
+            "method_field": "depreciation_method",
+        },
+    }
+    results = {}
+    for name, definition in definitions.items():
+        supplied = evidence.get(name)
+        supplied = supplied if isinstance(supplied, Mapping) else {}
+        applicability = str(supplied.get("applicability") or "UNKNOWN").upper()
+        if applicability == "NOT_APPLICABLE":
+            results[name] = {"status": "NOT_APPLICABLE", "score": None,
+                             "label_fa": definition["label_fa"], "checks": {},
+                             "reason": "عدم کاربرد باید با شواهد ساختار پروژه تأیید شود."}
+            continue
+        checks = {}
+        for key in definition["checks"]:
+            item = supplied.get(key)
+            checks[key] = (str(item).upper() if str(item).upper() in
+                           ("PASS", "FAIL", "UNKNOWN") else "UNKNOWN")
+        values = list(checks.values())
+        status = ("UNKNOWN" if all(value == "UNKNOWN" for value in values) else
+                  "FAIL" if "FAIL" in values else
+                  "PARTIAL" if "UNKNOWN" in values else "PASS")
+        reported_method = str(supplied.get(definition["method_field"]) or "").upper()
+        if reported_method not in definition["accepted_methods"]:
+            reported_method = None
+        results[name] = {"status": status, "score": None,
+                         "label_fa": definition["label_fa"], "checks": checks,
+                         "reported_method": reported_method,
+                         "accepted_methods": list(definition["accepted_methods"]),
+                         "note": definition["note"]}
+    return {
+        "status": "UNKNOWN" if all(x["status"] in ("UNKNOWN", "NOT_APPLICABLE") for x in results.values()) else
+                  "FAIL" if any(x["status"] == "FAIL" for x in results.values()) else "PARTIAL",
+        "score": None, "principles": results,
+        "message_fa": "کیفیت گزارشگری مالی بررسی می‌شود؛ موارد نامرتبط با ماهیت پروژه امتیاز مثبت نمی‌گیرند.",
+    }
+
+
+def market_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Evidence checklist for market context; no forecast is inferred from missing data."""
+    criteria = {
+        "gdp_growth": "رشد تولید ناخالص داخلی",
+        "inflation": "تورم",
+        "interest_rates": "نرخ بهره",
+        "employment": "اشتغال",
+        "industry_trends": "روندهای صنعت",
+        "regulatory_developments": "تحولات مقرراتی",
+        "market_risks": "ریسک‌های بازار",
+        "market_outlook": "چشم‌انداز بازار",
+    }
+    observations = {}
+    known = 0
+    failed = 0
+    for key, label in criteria.items():
+        item = evidence.get(key)
+        item = item if isinstance(item, Mapping) else {}
+        status = str(item.get("status") or "UNKNOWN").upper()
+        if status not in ("KNOWN", "FAIL", "UNKNOWN"):
+            status = "UNKNOWN"
+        value = item.get("value")
+        source = item.get("source")
+        observed_at = item.get("observed_at_utc")
+        if status == "KNOWN" and (value is None or not source or not observed_at):
+            status = "UNKNOWN"
+        known += status == "KNOWN"
+        failed += status == "FAIL"
+        observations[key] = {"label_fa": label, "status": status,
+                              "value": value if status == "KNOWN" else None,
+                              "source": source if status == "KNOWN" else None,
+                              "observed_at_utc": observed_at if status == "KNOWN" else None}
+    coverage = known / len(criteria) * 100
+    return {
+        "status": "FAIL" if failed else "KNOWN" if known == len(criteria) else
+                  "PARTIAL" if known else "UNKNOWN",
+        "score": None, "coverage_pct": round(coverage, 2),
+        "observations": observations,
+        "methodology": ["collect_data", "identify_trends", "assess_market_risks",
+                        "form_scenarios"],
+        "message_fa": "تحلیل بازار باید همراه تحلیل مالی، بنیادی و تکنیکال انجام شود؛ پیش‌بینی بدون داده معتبر تولید نمی‌شود.",
+    }
+
+
+
+def _beta_continued_fraction(a: float, b: float, x: float) -> float:
+    """Continued fraction for the regularized incomplete beta function."""
+    max_iter, epsilon, tiny = 200, 3e-14, 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    if abs(d) < tiny: d = tiny
+    d = 1.0 / d
+    h = d
+    for m in range(1, max_iter + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny: d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny: c = tiny
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny: d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny: c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < epsilon: return h
+    raise ArithmeticError("Incomplete beta continued fraction did not converge")
+
+def _regularized_beta(x: float, a: float, b: float) -> float:
+    """Regularized incomplete beta I_x(a,b), using only the standard library."""
+    if x <= 0: return 0.0
+    if x >= 1: return 1.0
+    from math import exp, lgamma, log
+    front = exp(lgamma(a + b) - lgamma(a) - lgamma(b) + a * log(x) + b * log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _beta_continued_fraction(a, b, x) / a
+    return 1.0 - front * _beta_continued_fraction(b, a, 1.0 - x) / b
+
+def event_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Market-model event study with timestamped sources and Student-t CAR test.
+
+    Each event requires source_url, event_time_utc and observations. Each
+    observation has timestamp, asset_return, benchmark_return and window
+    (ESTIMATION or EVENT). Returns are decimal fractions, not percentages.
+    """
+    raw_events = evidence.get("events") if isinstance(evidence, Mapping) else None
+    if not isinstance(raw_events, list) or not raw_events:
+        return {"status": "UNKNOWN", "score": None, "event_count": 0, "known_events": 0,
+                "events": {}, "reason": "رویداد زمان‌دار و داده بازده دارایی/بازار برای پنجره برآورد و رویداد موجود نیست.",
+                "message_fa": "برای تحلیل رویداد، خبر تأییدشده، زمان انتشار و بازده تاریخی دارایی و شاخص معیار لازم است."}
+    results: dict[str, Any] = {}
+    for index, event in enumerate(raw_events):
+        if not isinstance(event, Mapping): continue
+        event_id = str(event.get("event_id") or f"event_{index + 1}")
+        source_url, event_time = event.get("source_url"), event.get("event_time_utc")
+        observations = event.get("observations")
+        if not isinstance(source_url, str) or not source_url.startswith(("https://", "http://")) or not event_time:
+            results[event_id] = {"status": "UNKNOWN", "reason": "منبع و زمان رویداد باید مشخص باشند."}
+            continue
+        if not isinstance(observations, list):
+            results[event_id] = {"status": "UNKNOWN", "reason": "مشاهدات بازده رویداد موجود نیست."}
+            continue
+        estimation, event_rows, invalid = [], [], False
+        for row in observations:
+            if not isinstance(row, Mapping) or not row.get("timestamp"):
+                invalid = True; break
+            asset_return, benchmark_return = _number(row.get("asset_return")), _number(row.get("benchmark_return"))
+            if asset_return is None or benchmark_return is None:
+                invalid = True; break
+            item = (asset_return, benchmark_return, str(row["timestamp"]))
+            target = str(row.get("window") or "").upper()
+            if target == "ESTIMATION": estimation.append(item)
+            elif target == "EVENT": event_rows.append(item)
+        if invalid or len(estimation) < 20 or not event_rows:
+            results[event_id] = {"status": "UNKNOWN", "reason": "حداقل ۲۰ مشاهده معتبر در پنجره برآورد و یک مشاهده در پنجره رویداد لازم است.",
+                                "estimation_observations": len(estimation), "event_observations": len(event_rows)}
+            continue
+        x_mean = sum(row[1] for row in estimation) / len(estimation)
+        y_mean = sum(row[0] for row in estimation) / len(estimation)
+        variance_x = sum((row[1] - x_mean) ** 2 for row in estimation)
+        if variance_x <= 1e-18:
+            results[event_id] = {"status": "UNKNOWN", "reason": "واریانس بازده شاخص معیار برای برآورد مدل کافی نیست."}; continue
+        beta = sum((row[1] - x_mean) * (row[0] - y_mean) for row in estimation) / variance_x
+        alpha = y_mean - beta * x_mean
+        residuals = [row[0] - (alpha + beta * row[1]) for row in estimation]
+        degrees_freedom = len(estimation) - 2
+        residual_std = sqrt(sum(value * value for value in residuals) / degrees_freedom)
+        if residual_std <= 1e-12:
+            results[event_id] = {"status": "UNKNOWN", "reason": "واریانس خطای مدل برای آزمون معناداری کافی نیست."}; continue
+        abnormal = []
+        for actual, benchmark, stamp in event_rows:
+            abnormal.append({"timestamp": stamp, "actual_return": actual,
+                             "normal_return": alpha + beta * benchmark,
+                             "abnormal_return": actual - (alpha + beta * benchmark)})
+        car = sum(item["abnormal_return"] for item in abnormal)
+        t_stat = car / (residual_std * sqrt(len(abnormal)))
+        p_value = _regularized_beta(degrees_freedom / (degrees_freedom + t_stat * t_stat), degrees_freedom / 2.0, 0.5)
+        results[event_id] = {
+            "status": "KNOWN", "event_type": str(event.get("event_type") or "UNSPECIFIED"),
+            "event_time_utc": str(event_time), "source_url": source_url,
+            "event_window": event.get("event_window") or {},
+            "estimation_observations": len(estimation), "event_observations": len(event_rows),
+            "market_model": {"alpha": alpha, "beta": beta, "residual_std": residual_std, "degrees_freedom": degrees_freedom},
+            "abnormal_returns": abnormal, "cumulative_abnormal_return": car,
+            "t_statistic": t_stat, "p_value_two_sided": p_value,
+            "statistically_significant_5pct": p_value < 0.05,
+            "interpretation_fa": "بازده غیرعادی تجمعی از نظر آماری معنادار است؛ این نتیجه رابطه علّی را اثبات نمی‌کند." if p_value < 0.05 else "شواهد آماری کافی برای معناداری بازده غیرعادی تجمعی در سطح ۵٪ وجود ندارد.",
+            "limitations": ["نتیجه به انتخاب پنجره و شاخص معیار حساس است.", "خطای استاندارد فرض می‌کند خودهمبستگی بازده غیرعادی در پنجره رویداد وجود ندارد.", "هم‌زمانی چند خبر یا رویداد می‌تواند انتساب اثر را مخدوش کند."],
+        }
+    known = sum(item.get("status") == "KNOWN" for item in results.values())
+    return {"status": "KNOWN" if known == len(raw_events) and known else "PARTIAL" if known else "UNKNOWN",
+            "score": None, "event_count": len(raw_events), "known_events": known, "events": results,
+            "methodology": "OLS market model; abnormal return = actual return - expected normal return; CAR significance via two-sided Student-t test.",
+            "message_fa": "اثر رویداد با مقایسه بازده واقعی و بازده عادی مورد انتظار سنجیده می‌شود؛ نتیجه توصیفی است و به‌تنهایی سیگنال معامله نیست."}
+
+
+def dividend_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Assess equity dividends from sourced evidence; crypto tokens are N/A.
+
+    Supported inputs: asset_class, current_price, annual_dividend_per_share,
+    dividend_yield_pct, dividends_paid, net_income, free_cash_flow,
+    dividend_history [{year, dividend_per_share}], price_change_12m_pct,
+    source, observed_at_utc. Percentages are expressed as percentage points.
+    """
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "سود تقسیمی شرکتی برای این دارایی تعریف نشده است؛ این مورد ضعف بنیادی توکن محسوب نمی‌شود."}
+    if asset_class not in {"equity", "stock", "share", "reit"}:
+        return {"status": "UNKNOWN", "score": None,
+                "message_fa": "نوع دارایی مشخص نیست؛ برای جلوگیری از اعمال اشتباه تحلیل سود تقسیمی، وضعیت UNKNOWN است."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(observed)
+    price = _positive(evidence.get("current_price"))
+    annual_dividend = _number(evidence.get("annual_dividend_per_share"))
+    yield_pct = _number(evidence.get("dividend_yield_pct"))
+    if yield_pct is None and annual_dividend is not None and price is not None and price > 0:
+        yield_pct = annual_dividend / price * 100
+    net_income = _number(evidence.get("net_income"))
+    dividends_paid = _number(evidence.get("dividends_paid"))
+    payout_ratio = (dividends_paid / net_income * 100
+                    if dividends_paid is not None and net_income is not None and net_income > 0 else None)
+    coverage = (net_income / dividends_paid
+                if net_income is not None and net_income > 0 and dividends_paid is not None and dividends_paid > 0 else None)
+    fcf = _number(evidence.get("free_cash_flow"))
+    fcf_coverage = (fcf / dividends_paid
+                    if fcf is not None and fcf > 0 and dividends_paid is not None and dividends_paid > 0 else None)
+    history = evidence.get("dividend_history")
+    history = history if isinstance(history, list) else []
+    valid_history = []
+    for row in history:
+        if not isinstance(row, Mapping): continue
+        year, amount = _number(row.get("year")), _number(row.get("dividend_per_share"))
+        if year is not None and amount is not None and year.is_integer() and amount >= 0:
+            valid_history.append((int(year), amount))
+    valid_history.sort()
+    years = [row[0] for row in valid_history]
+    amounts = [row[1] for row in valid_history]
+    history_consistent = (len(years) >= 2 and len(set(years)) == len(years)
+                          and all(years[i] == years[i - 1] + 1 for i in range(1, len(years)))
+                          and all(amount > 0 for amount in amounts))
+    dividend_growth_cagr_pct = None
+    if history_consistent and amounts[0] > 0 and amounts[-1] > 0:
+        dividend_growth_cagr_pct = ((amounts[-1] / amounts[0]) ** (1 / (len(amounts) - 1)) - 1) * 100
+    price_change = _number(evidence.get("price_change_12m_pct"))
+    dividend_trap = bool(yield_pct is not None and yield_pct >= 8 and price_change is not None and price_change <= -20)
+    checks = {
+        "dividend_yield": "KNOWN" if yield_pct is not None and sourced else "UNKNOWN",
+        "payout_ratio": "KNOWN" if payout_ratio is not None and sourced else "UNKNOWN",
+        "dividend_history": "KNOWN" if history_consistent and sourced else "UNKNOWN",
+        "dividend_coverage": "KNOWN" if coverage is not None and sourced else "UNKNOWN",
+        "dividend_growth": "KNOWN" if dividend_growth_cagr_pct is not None and sourced else "UNKNOWN",
+        "dividend_sustainability": "KNOWN" if (payout_ratio is not None or fcf_coverage is not None) and sourced else "UNKNOWN",
+        "dividend_trap": "KNOWN" if yield_pct is not None and price_change is not None and sourced else "UNKNOWN",
+    }
+    known = sum(value == "KNOWN" for value in checks.values())
+    status = "KNOWN" if known == len(checks) else "PARTIAL" if known else "UNKNOWN"
+    sustainability = "UNKNOWN"
+    if payout_ratio is not None:
+        sustainability = "RISK" if payout_ratio > 100 else "CAUTION" if payout_ratio > 80 else "HEALTHY"
+    if fcf_coverage is not None and fcf_coverage < 1:
+        sustainability = "RISK"
+    elif fcf_coverage is not None and fcf_coverage < 1.2 and sustainability == "HEALTHY":
+        sustainability = "CAUTION"
+    return {
+        "status": status, "score": None, "applicability": "APPLICABLE",
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "dividend_yield_pct": yield_pct, "payout_ratio_pct": payout_ratio,
+        "dividend_coverage_ratio": coverage, "free_cash_flow_coverage_ratio": fcf_coverage,
+        "dividend_history": [{"year": year, "dividend_per_share": amount} for year, amount in valid_history],
+        "history_consistent": history_consistent, "dividend_growth_cagr_pct": dividend_growth_cagr_pct,
+        "dividend_sustainability": sustainability, "dividend_trap_warning": dividend_trap,
+        "checks": checks, "known_checks": known, "total_checks": len(checks),
+        "message_fa": ("بازده تقسیمی بالا همراه با افت شدید قیمت شناسایی شد؛ احتمال تله سود تقسیمی را بررسی کنید." if dividend_trap else
+                       "نسبت پرداخت و پوشش جریان نقدی باید برای سنجش پایداری سود تقسیمی بررسی شوند."),
+        "limitations": ["بازده بالا به‌تنهایی نشانه ارزندگی نیست.",
+                        "برای شرکت‌های زیان‌ده، نسبت پرداخت بر مبنای سود خالص قابل محاسبه نیست.",
+                        "تاریخچه پرداخت به‌تنهایی تضمین‌کننده پرداخت آینده نیست."],
+    }
+
+
+
+def share_buyback_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Assess completed equity repurchases and their funding; not a trade signal.
+
+    Inputs include completed_shares_repur, shares_outstanding_before/after,
+    average_repurchase_price, current_price, cash_spent, debt_funded_amount,
+    net_income, source and observed_at_utc. Authorizations alone are not treated
+    as completed repurchases.
+    """
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "بازخرید سهام شرکت برای توکن کاربرد ندارد؛ این موضوع ضعف بنیادی رمزارز محسوب نمی‌شود."}
+    if asset_class not in {"equity", "stock", "share", "reit"}:
+        return {"status": "UNKNOWN", "score": None,
+                "message_fa": "نوع دارایی مشخص نیست؛ تحلیل بازخرید سهام اجرا نشد."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(observed)
+    repurchased = _positive(evidence.get("completed_shares_repur"))
+    before = _positive(evidence.get("shares_outstanding_before"))
+    after = _positive(evidence.get("shares_outstanding_after"))
+    avg_price = _positive(evidence.get("average_repurchase_price"))
+    current_price = _positive(evidence.get("current_price"))
+    cash_spent = _positive(evidence.get("cash_spent"))
+    debt_funded = _number(evidence.get("debt_funded_amount"))
+    net_income = _number(evidence.get("net_income"))
+    share_reduction_pct = ((before - after) / before * 100
+                           if before is not None and after is not None and after <= before else None)
+    buyback_yield_pct = (repurchased / before * 100
+                         if repurchased is not None and before is not None else None)
+    implied_spend = (repurchased * avg_price
+                     if repurchased is not None and avg_price is not None else None)
+    total_spend = cash_spent if cash_spent is not None else implied_spend
+    debt_funding_pct = (debt_funded / total_spend * 100
+                        if debt_funded is not None and debt_funded >= 0
+                        and total_spend is not None and total_spend > 0 else None)
+    repurchase_premium_pct = ((avg_price / current_price - 1) * 100
+                              if avg_price is not None and current_price is not None else None)
+    eps_before = (net_income / before
+                  if net_income is not None and before is not None else None)
+    eps_after = (net_income / after
+                 if net_income is not None and after is not None else None)
+    eps_mechanical_accretion_pct = ((eps_after / eps_before - 1) * 100
+                                    if eps_before is not None and eps_before > 0
+                                    and eps_after is not None else None)
+    checks = {
+        "completed_repurchase": "KNOWN" if repurchased is not None and sourced else "UNKNOWN",
+        "share_count_change": "KNOWN" if share_reduction_pct is not None and sourced else "UNKNOWN",
+        "buyback_yield": "KNOWN" if buyback_yield_pct is not None and sourced else "UNKNOWN",
+        "repurchase_price": "KNOWN" if repurchase_premium_pct is not None and sourced else "UNKNOWN",
+        "funding_mix": "KNOWN" if total_spend is not None and debt_funded is not None and sourced else "UNKNOWN",
+        "mechanical_eps_effect": "KNOWN" if eps_mechanical_accretion_pct is not None and sourced else "UNKNOWN",
+    }
+    known = sum(value == "KNOWN" for value in checks.values())
+    status = "KNOWN" if known == len(checks) else "PARTIAL" if known else "UNKNOWN"
+    flags = []
+    if debt_funded is not None and debt_funded > 0:
+        flags.append("debt_funded_repurchase")
+    if repurchase_premium_pct is not None and repurchase_premium_pct > 0:
+        flags.append("repurchased_above_current_price_reference")
+    if share_reduction_pct is not None and share_reduction_pct < 0:
+        flags.append("share_count_increased_check_equity_compensation")
+    return {
+        "status": status, "score": None, "applicability": "APPLICABLE",
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "completed_shares_repur": repurchased, "shares_outstanding_before": before,
+        "shares_outstanding_after": after, "share_reduction_pct": share_reduction_pct,
+        "buyback_yield_pct": buyback_yield_pct, "average_repurchase_price": avg_price,
+        "current_price": current_price, "repurchase_premium_pct": repurchase_premium_pct,
+        "cash_spent": total_spend, "debt_funded_amount": debt_funded,
+        "debt_funding_pct": debt_funding_pct, "mechanical_eps_before": eps_before,
+        "mechanical_eps_after": eps_after,
+        "mechanical_eps_accretion_pct": eps_mechanical_accretion_pct,
+        "review_flags": flags, "checks": checks, "known_checks": known,
+        "total_checks": len(checks),
+        "message_fa": "افزایش مکانیکی EPS ناشی از کاهش تعداد سهام، به‌معنای رشد سود عملیاتی نیست؛ منبع تأمین مالی و قیمت بازخرید را جداگانه ارزیابی کنید.",
+        "limitations": [
+            "مجوز یا سقف برنامه بازخرید، معادل خرید انجام‌شده نیست.",
+            "اثر مکانیکی EPS با فرض ثابت ماندن سود خالص محاسبه شده و پیش‌بینی عملکرد آینده نیست.",
+            "بازخرید بدهی‌محور می‌تواند ریسک ترازنامه و هزینه بهره را افزایش دهد.",
+        ],
+    }
+
+
+def eps_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Calculate sourced basic/diluted EPS, P/E, history and forecast context."""
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "EPS شرکتی برای توکن تعریف نشده است؛ این شاخص نباید به‌عنوان ضعف رمزارز ثبت شود."}
+    if asset_class not in {"equity", "stock", "share", "reit"}:
+        return {"status": "UNKNOWN", "score": None,
+                "message_fa": "نوع دارایی مشخص نیست؛ محاسبه EPS انجام نشد."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(observed)
+    net_income = _number(evidence.get("net_income"))
+    preferred = _number(evidence.get("preferred_dividends"))
+    weighted_shares = _positive(evidence.get("weighted_average_shares"))
+    diluted_shares = _positive(evidence.get("diluted_weighted_average_shares"))
+    common_income = net_income - (preferred or 0) if net_income is not None else None
+    basic_eps = (common_income / weighted_shares
+                 if common_income is not None and weighted_shares is not None else None)
+    diluted_eps = (common_income / diluted_shares
+                   if common_income is not None and diluted_shares is not None else None)
+    adjusted_income = _number(evidence.get("adjusted_net_income"))
+    adjusted_eps = (adjusted_income / weighted_shares
+                    if adjusted_income is not None and weighted_shares is not None else None)
+    price = _positive(evidence.get("current_price"))
+    pe_ratio = price / basic_eps if price is not None and basic_eps is not None and basic_eps > 0 else None
+    history = evidence.get("eps_history")
+    history = history if isinstance(history, list) else []
+    valid_history = []
+    for row in history:
+        if not isinstance(row, Mapping):
+            continue
+        year, value = _number(row.get("year")), _number(row.get("eps"))
+        if year is not None and year.is_integer() and value is not None:
+            valid_history.append((int(year), value))
+    valid_history.sort()
+    history_growth_pct = None
+    if len(valid_history) >= 2 and valid_history[0][1] > 0 and valid_history[-1][1] > 0:
+        intervals = valid_history[-1][0] - valid_history[0][0]
+        if intervals > 0:
+            history_growth_pct = ((valid_history[-1][1] / valid_history[0][1]) ** (1 / intervals) - 1) * 100
+    forecast_eps = _number(evidence.get("forecast_eps"))
+    forecast_change_pct = ((forecast_eps / basic_eps - 1) * 100
+                           if forecast_eps is not None and basic_eps is not None and basic_eps != 0 else None)
+    # PEG uses an explicitly supplied forward EPS growth rate in percentage points.
+    # Historical CAGR is context only and is never silently substituted for a forecast.
+    expected_growth_pct = _number(evidence.get("expected_eps_growth_pct"))
+    peg_ratio = (pe_ratio / expected_growth_pct
+                 if pe_ratio is not None and expected_growth_pct is not None and expected_growth_pct > 0 else None)
+    peg_interpretation = (
+        "POTENTIALLY_UNDERVALUED" if peg_ratio is not None and peg_ratio < 1 else
+        "GROWTH_ALIGNED" if peg_ratio is not None and peg_ratio == 1 else
+        "POTENTIALLY_OVERVALUED" if peg_ratio is not None and peg_ratio > 1 else "UNKNOWN"
+    )
+    peer_pe = _positive(evidence.get("industry_average_pe"))
+    historical_pe = _positive(evidence.get("historical_average_pe"))
+    market_pe = _positive(evidence.get("market_average_pe"))
+    relative_pe = {
+        key: round((pe_ratio / benchmark - 1) * 100, 2)
+        for key, benchmark in (
+            ("industry", peer_pe), ("historical", historical_pe), ("market", market_pe)
+        ) if pe_ratio is not None and benchmark is not None
+    }
+    checks = {
+        "basic_eps": "KNOWN" if basic_eps is not None and sourced else "UNKNOWN",
+        "diluted_eps": "KNOWN" if diluted_eps is not None and sourced else "UNKNOWN",
+        "pe_ratio": "KNOWN" if pe_ratio is not None and sourced else "UNKNOWN",
+        "peg_ratio": "KNOWN" if peg_ratio is not None and sourced else "UNKNOWN",
+        "eps_history": "KNOWN" if history_growth_pct is not None and sourced else "UNKNOWN",
+        "forecast_comparison": "KNOWN" if forecast_change_pct is not None and sourced else "UNKNOWN",
+        "adjusted_eps": "KNOWN" if adjusted_eps is not None and sourced else "UNKNOWN",
+        "industry_pe_comparison": "KNOWN" if peer_pe is not None and sourced else "UNKNOWN",
+        "historical_pe_comparison": "KNOWN" if historical_pe is not None and sourced else "UNKNOWN",
+        "market_pe_comparison": "KNOWN" if market_pe is not None and sourced else "UNKNOWN",
+    }
+    known = sum(value == "KNOWN" for value in checks.values())
+    status = "KNOWN" if known == len(checks) else "PARTIAL" if known else "UNKNOWN"
+    return {
+        "status": status, "score": None, "applicability": "APPLICABLE",
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "net_income": net_income if sourced else None,
+        "preferred_dividends": preferred if sourced else None,
+        "weighted_average_shares": weighted_shares if sourced else None,
+        "diluted_weighted_average_shares": diluted_shares if sourced else None,
+        "basic_eps": basic_eps if sourced else None,
+        "diluted_eps": diluted_eps if sourced else None,
+        "adjusted_eps": adjusted_eps if sourced else None,
+        "pe_ratio": pe_ratio if sourced else None,
+        "expected_eps_growth_pct": expected_growth_pct if sourced else None,
+        "peg_ratio": peg_ratio if sourced else None,
+        "peg_interpretation": peg_interpretation if sourced else "UNKNOWN",
+        "pe_benchmarks": ({"industry": peer_pe, "historical": historical_pe, "market": market_pe}
+                          if sourced else {"industry": None, "historical": None, "market": None}),
+        "relative_pe_pct": relative_pe if sourced else {},
+        "eps_history": ([{"year": year, "eps": value} for year, value in valid_history] if sourced else []),
+        "eps_history_cagr_pct": history_growth_pct if sourced else None,
+        "forecast_eps": forecast_eps if sourced else None,
+        "forecast_change_pct": forecast_change_pct if sourced else None,
+        "checks": checks, "known_checks": known, "total_checks": len(checks),
+        "message_fa": "EPS باید همراه با جریان نقدی، اقلام غیرتکراری، تعداد سهام و روند سود بررسی شود؛ EPS بالاتر به‌تنهایی نشانه سلامت مالی نیست.",
+        "limitations": [
+            "افزایش EPS ممکن است صرفاً ناشی از بازخرید سهام باشد، نه رشد سود عملیاتی.",
+            "روش‌های حسابداری و اقلام یک‌باره می‌توانند EPS گزارش‌شده را منحرف کنند.",
+            "نسبت P/E برای EPS صفر یا منفی معنادار محاسبه نمی‌شود.",
+            "PEG فقط با نرخ رشد مورد انتظار EPS به‌صورت درصدی و دارای منبع محاسبه می‌شود؛ CAGR تاریخی جایگزین پیش‌بینی نیست.",
+            "PEG کمتر از 1، برابر 1 یا بیشتر از 1 صرفاً تفسیر آموزشی نسبی است و به‌تنهایی نشانه قطعی ارزندگی نیست.",
+            "مقایسه P/E فقط با میانگین‌های هم‌دوره و هم‌صنعت معتبر معنا دارد؛ تفاوت ساختار رشد و ریسک باید بررسی شود.",
+        ],
+    }
+
+
+def mergers_acquisitions_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Evidence-only M&A diagnostic for listed companies; never a trade signal."""
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "این ماژول برای ادغام و تملک شرکت‌هاست؛ برای رویدادهای پروتکلی باید داده رویداد جداگانه ثبت شود."}
+    raw_deals = evidence.get("deals")
+    if not isinstance(raw_deals, list) or not raw_deals:
+        return {"status": "UNKNOWN", "score": None, "deal_count": 0, "known_deals": 0,
+                "deals": {}, "message_fa": "خبر تأییدشده معامله، زمان اعلام و شرایط مالی در دسترس نیست."}
+    results = {}
+    for index, deal in enumerate(raw_deals):
+        if not isinstance(deal, Mapping):
+            continue
+        deal_id = str(deal.get("deal_id") or f"deal_{index + 1}")
+        source = deal.get("source_url")
+        announced = deal.get("announced_at_utc")
+        valid_source = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(announced)
+        offer = _positive(deal.get("offer_price_per_share"))
+        unaffected = _positive(deal.get("unaffected_price_per_share"))
+        premium = ((offer / unaffected - 1) * 100
+                   if offer is not None and unaffected is not None else None)
+        status = str(deal.get("deal_status") or "UNKNOWN").upper()
+        if status not in {"RUMORED", "ANNOUNCED", "PENDING_APPROVAL", "COMPLETED", "TERMINATED", "WITHDRAWN"}:
+            status = "UNKNOWN"
+        regulatory = str(deal.get("regulatory_status") or "UNKNOWN").upper()
+        if regulatory not in {"CLEAR", "REVIEW", "CHALLENGED", "BLOCKED", "UNKNOWN"}:
+            regulatory = "UNKNOWN"
+        financing = str(deal.get("financing_type") or "UNKNOWN").upper()
+        if financing not in {"CASH", "STOCK", "MIXED", "DEBT", "UNKNOWN"}:
+            financing = "UNKNOWN"
+        integration_risk = str(deal.get("integration_risk") or "UNKNOWN").upper()
+        if integration_risk not in {"LOW", "MEDIUM", "HIGH", "UNKNOWN"}:
+            integration_risk = "UNKNOWN"
+        known = valid_source and status != "UNKNOWN"
+        results[deal_id] = {
+            "status": "KNOWN" if known else "UNKNOWN",
+            "deal_status": status if known else "UNKNOWN",
+            "target": deal.get("target") if known else None,
+            "acquirer": deal.get("acquirer") if known else None,
+            "transaction_value": _positive(deal.get("transaction_value")) if known else None,
+            "offer_premium_pct": round(premium, 4) if premium is not None and known else None,
+            "synergies": deal.get("synergies") if known else None,
+            "financing_type": financing if known else "UNKNOWN",
+            "integration_risk": integration_risk if known else "UNKNOWN",
+            "regulatory_status": regulatory if known else "UNKNOWN",
+            "competitor_impact": deal.get("competitor_impact") if known else None,
+            "source_url": source if known else None,
+            "announced_at_utc": announced if known else None,
+            "review_flags": [
+                flag for flag, condition in (
+                    ("regulatory_review_or_challenge", regulatory in {"REVIEW", "CHALLENGED", "BLOCKED"}),
+                    ("high_integration_risk", integration_risk == "HIGH"),
+                    ("debt_financing", financing == "DEBT"),
+                ) if condition
+            ] if known else [],
+        }
+    known_count = sum(item["status"] == "KNOWN" for item in results.values())
+    return {
+        "status": "KNOWN" if known_count == len(results) and known_count else "PARTIAL" if known_count else "UNKNOWN",
+        "score": None, "deal_count": len(results), "known_deals": known_count, "deals": results,
+        "message_fa": "صرف قیمت هدف و خریدار کافی نیست؛ صرف پیشنهاد، تأمین مالی، هم‌افزایی، ریسک ادغام و بررسی نهادهای ناظر باید جداگانه سنجیده شوند.",
+        "limitations": ["صرف پیشنهاد نسبت به قیمت پیش از اعلام، بازده قطعی معامله نیست.",
+                        "معامله اعلام‌شده ممکن است اصلاح، مسدود یا لغو شود.",
+                        "هم‌افزایی اعلامی تا زمان تحقق، صرفاً برآورد شرکت‌هاست.",
+                        "اثر رقبا و تأمین‌کنندگان به داده مستقل نیاز دارد."],
+    }
+
+
+def sector_rotation_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Rank timestamped sector returns/flows relative to a benchmark; no cycle forecast."""
+    phase = evidence.get("economic_phase")
+    phase = phase if isinstance(phase, Mapping) else {}
+    phase_value = str(phase.get("value") or "UNKNOWN").upper()
+    if phase_value not in {"EARLY_EXPANSION", "MID_EXPANSION", "LATE_EXPANSION", "CONTRACTION", "UNKNOWN"}:
+        phase_value = "UNKNOWN"
+    phase_source = phase.get("source")
+    phase_time = phase.get("observed_at_utc")
+    phase_known = bool(isinstance(phase_source, str) and phase_source.startswith(("https://", "http://")) and phase_time and phase_value != "UNKNOWN")
+    raw_sectors = evidence.get("sectors")
+    if not isinstance(raw_sectors, list) or not raw_sectors:
+        return {"status": "UNKNOWN", "score": None, "economic_phase": phase_value if phase_known else "UNKNOWN",
+                "sectors": [], "leaders": [], "laggards": [],
+                "message_fa": "برای سنجش چرخش سرمایه، بازده بخش‌ها، شاخص معیار و داده جریان سرمایه با منبع و زمان لازم است."}
+    rows = []
+    for item in raw_sectors:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("sector") or "").strip()
+        sector_return = _number(item.get("return_pct"))
+        benchmark_return = _number(item.get("benchmark_return_pct"))
+        flow = _number(item.get("flow_change_pct"))
+        source = item.get("source")
+        observed = item.get("observed_at_utc")
+        sourced = bool(name and sector_return is not None and benchmark_return is not None
+                       and isinstance(source, str) and source.startswith(("https://", "http://")) and observed)
+        if not sourced:
+            continue
+        rows.append({
+            "sector": name, "return_pct": sector_return,
+            "benchmark_return_pct": benchmark_return,
+            "relative_strength_pct": round(sector_return - benchmark_return, 4),
+            "flow_change_pct": flow, "source": source, "observed_at_utc": observed,
+            "flow_status": "KNOWN" if flow is not None else "UNKNOWN",
+        })
+    rows.sort(key=lambda row: row["relative_strength_pct"], reverse=True)
+    if not rows:
+        status = "UNKNOWN"
+    elif len(rows) != len(raw_sectors):
+        status = "PARTIAL"
+    else:
+        status = "KNOWN"
+    return {
+        "status": status, "score": None,
+        "economic_phase": phase_value if phase_known else "UNKNOWN",
+        "economic_phase_source": phase_source if phase_known else None,
+        "economic_phase_observed_at_utc": phase_time if phase_known else None,
+        "sectors": rows, "leaders": [row["sector"] for row in rows[:3]],
+        "laggards": [row["sector"] for row in rows[-3:]][::-1],
+        "message_fa": "رتبه‌بندی بر پایه عملکرد نسبیِ داده‌شده است؛ مرحله چرخه اقتصادی به‌تنهایی پیش‌بینی بازده یا توصیه اضافه‌وزن نیست.",
+        "limitations": ["عملکرد گذشته تضمین‌کننده عملکرد آینده نیست.",
+                        "جریان ETF یا سرمایه باید با منبع و بازه زمانی یکسان مقایسه شود.",
+                        "چرخه اقتصادی ممکن است میان کشورها و صنایع متفاوت باشد."],
+    }
+
+
+
+def esg_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Evidence-only ESG diagnostic for companies and crypto networks; not a trade signal."""
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    crypto = asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}
+    equity = asset_class in {"equity", "stock", "share", "reit", "company"}
+    if not (crypto or equity):
+        return {"status": "UNKNOWN", "applicability": "UNKNOWN", "asset_type": None,
+                "score": None, "known_pillars": 0, "controversy_count": 0,
+                "message_fa": "نوع دارایی مشخص نیست؛ ارزیابی ESG انجام نشد."}
+    pillar_descriptions = {
+        "environmental": "مصرف انرژی، انتشار کربن، آب و پسماند؛ در شبکه رمزارزها اثر انرژی و اجماع شبکه.",
+        "social": "شرایط کارکنان، زنجیره تأمین، ایمنی، حریم خصوصی و اثر بر جامعه و کاربران.",
+        "governance": ("شفافیت، کنترل داخلی، حقوق سهام‌داران و پاسخ‌گویی هیئت‌مدیره." if equity else
+                       "تمرکز اعتبارسنج یا ماینر، تمرکز قدرت تصمیم‌گیری، شفافیت و پاسخ‌گویی شبکه."),
+    }
+    pillars: dict[str, Any] = {}
+    scores: list[float] = []
+    for key in ("environmental", "social", "governance"):
+        item = evidence.get(key)
+        item = item if isinstance(item, Mapping) else {}
+        value = _number(item.get("score")) if item.get("status") == "KNOWN" else None
+        source = item.get("source_url")
+        observed = item.get("observed_at_utc")
+        verified = (value is not None and 0 <= value <= 100
+                    and isinstance(source, str) and source.startswith(("https://", "http://"))
+                    and bool(observed))
+        if verified:
+            scores.append(value)
+        pillars[key] = {
+            "status": "KNOWN" if verified else "UNKNOWN",
+            "score": value if verified else None,
+            "source_url": source if verified else None,
+            "observed_at_utc": observed if verified else None,
+            "metrics": dict(item.get("metrics")) if verified and isinstance(item.get("metrics"), Mapping) else {},
+            "description_fa": pillar_descriptions[key],
+        }
+    raw_controversies = evidence.get("controversies")
+    controversies = []
+    if isinstance(raw_controversies, list):
+        for item in raw_controversies:
+            if not isinstance(item, Mapping):
+                continue
+            url, observed = item.get("source_url"), item.get("observed_at_utc")
+            description = item.get("description")
+            if (isinstance(url, str) and url.startswith(("https://", "http://"))
+                    and observed and isinstance(description, str) and description.strip()):
+                controversies.append({
+                    "description": description.strip(),
+                    "severity": str(item.get("severity") or "UNSPECIFIED").upper(),
+                    "pillar": item.get("pillar") if item.get("pillar") in {"environmental", "social", "governance"} else None,
+                    "source_url": url, "observed_at_utc": observed,
+                })
+    known_count = len(scores)
+    score = round(sum(scores) / known_count, 2) if known_count else None
+    status = "KNOWN" if known_count == 3 else "PARTIAL" if known_count else "UNKNOWN"
+    return {
+        "status": status, "applicability": "APPLICABLE",
+        "asset_type": "crypto_network_or_token" if crypto else "company",
+        "score": score, "pillars": pillars, "known_pillars": known_count,
+        "unknown_pillars": [key for key, item in pillars.items() if item["status"] != "KNOWN"],
+        "controversies": controversies, "controversy_count": len(controversies),
+        "message_fa": ("میانگین تشخیصی محورهای ESG بر اساس شواهد مستقل و منبع‌دار محاسبه می‌شود؛ "
+                       "این عدد رتبه‌بندی رسمی یا توصیه سرمایه‌گذاری نیست. محور فاقد مدرک UNKNOWN باقی می‌ماند."),
+        "limitations": [
+            "روش امتیازدهی ارائه‌دهندگان ESG یکسان نیست و میانگین ساده جایگزین رتبه‌بندی مستقل نیست.",
+            "نبود داده به‌معنای عملکرد خوب یا بد نیست؛ محور فاقد مدرک UNKNOWN باقی می‌ماند.",
+            "برای رمزارزها مصرف انرژی، تمرکز اعتبارسنج/ماینر، تنوع کلاینت، پایداری و رخدادهای امنیتی باید با داده شبکه سنجیده شوند.",
+            "مناقشات فقط با منبع و زمان مشاهده معتبر نمایش داده می‌شوند و امتیاز را خودکار تغییر نمی‌دهند."
+        ],
+    }
+
+
+def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Aggregate seven evidence modules with explicit coverage and no fabricated scores.
+
+    Each non-derived module must use {status: KNOWN, score: 0..100}.
+    DCF/comparables can be passed as precomputed module outputs; absent outputs
+    remain UNKNOWN. A score is withheld when evidence coverage is below 70%.
+    """
+    modules: dict[str, dict[str, Any]] = {}
+    for name in ("macro", "tokenomics", "onchain", "project"):
+        item = evidence.get(name)
+        score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
+        valid = score is not None and 0 <= score <= 100
+        modules[name] = ({"status": "KNOWN", "score": score} if valid else
+                         {"status": "UNKNOWN", "score": None, "reason": "Valid sourced score not supplied."})
+        if isinstance(item, Mapping) and isinstance(item.get("evidence"), Mapping):
+            modules[name]["evidence"] = dict(item["evidence"])
+    modules["industry"] = industry_analysis(evidence.get("industry", {}))
+    # Supporting diagnostics are visible in the Easy Fundamental panel but are
+    # deliberately excluded from the seven-module score until calibrated.
+    modules["accounting_principles"] = accounting_principles_analysis(
+        evidence.get("accounting_principles", {}))
+    modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
+    modules["event_analysis"] = event_analysis(evidence.get("event_analysis", {}))
+    modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
+    modules["share_buybacks"] = share_buyback_analysis(evidence.get("share_buybacks", {}))
+    modules["eps_analysis"] = eps_analysis(evidence.get("eps_analysis", {}))
+    modules["debt_to_equity"] = debt_to_equity_analysis(evidence.get("debt_to_equity", {}))
+    modules["comparative_company_analysis"] = comparative_company_analysis(
+        evidence.get("company", {}), evidence.get("company_peers", []))
+    esg_module = esg_analysis(evidence.get("esg_analysis", {}))
+    esg_module["diagnostic_score"] = esg_module.get("score")
+    esg_module["score"] = None  # Supporting ESG diagnostic must never enter the weighted score.
+    modules["esg_analysis"] = esg_module
+    modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))
+    modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
+    for name in ("dcf", "comparables"):
+        item = evidence.get(name)
+        score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
+        valid = score is not None and 0 <= score <= 100
+        modules[name] = ({"status": "KNOWN", "score": score} if valid else
+                         {"status": "UNKNOWN", "score": None, "reason": "Valid valuation score not supplied."})
+        if isinstance(item, Mapping) and isinstance(item.get("evidence"), Mapping):
+            modules[name]["evidence"] = dict(item["evidence"])
+    known_weight = sum(MODULE_WEIGHTS[name] for name in MODULE_WEIGHTS
+                        if modules[name]["score"] is not None)
+    coverage = known_weight / sum(MODULE_WEIGHTS.values()) * 100
+    score = None
+    status = "UNKNOWN"
+    if known_weight and coverage >= MIN_COVERAGE_PCT:
+        score = round(sum(MODULE_WEIGHTS[name] * modules[name]["score"] for name in MODULE_WEIGHTS
+                          if modules[name]["score"] is not None) / known_weight, 2)
+        # Only the seven weighted modules determine score completeness.
+        status = "KNOWN" if all(modules[name]["score"] is not None for name in MODULE_WEIGHTS) else "PARTIAL"
+    elif known_weight:
+        status = "INSUFFICIENT_COVERAGE"
+    return {"status": status, "score": score, "coverage_pct": round(coverage, 2),
+            "minimum_coverage_pct": MIN_COVERAGE_PCT, "modules": modules,
+            "weights": dict(MODULE_WEIGHTS),
+            "trade_authorized": False,
+            "message_fa": ("این گزارش فقط ارزیابی بنیادی است و به‌تنهایی مجوز ورود به معامله نیست.")}
+
+
+__all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
+           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
+           "mergers_acquisitions_analysis", "sector_rotation_analysis",
+           "share_buyback_analysis", "eps_analysis", "debt_to_equity_analysis",
+           "comparative_company_analysis", "esg_analysis",
+           "discounted_protocol_cashflows", "comparable_projects",
+           "build_fundamental_report"]
