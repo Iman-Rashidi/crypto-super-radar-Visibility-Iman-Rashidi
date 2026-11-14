@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+from unittest.mock import patch
 
 from crypto_super_radar.market_patterns import analyze_market_patterns
 
@@ -254,7 +255,8 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(pattern["invalidation_price"], 92.0)
 
     def test_dragonfly_doji_confirmed_by_next_close_above_its_high(self):
-        frame = self._set_dragonfly_doji(candle_frame("down"))
+        frame = candle_frame("down")
+        frame.iloc[-2] = [96.0, 96.1, 92.0, 96.0, 1500.0]
         frame.iloc[-1] = [96.0, 97.0, 95.8, 96.8, 1600.0]
         analysis = analyze_market_patterns(frame, [])
         pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Dragonfly Doji")
@@ -278,7 +280,7 @@ class MarketPatternTests(unittest.TestCase):
 
     def test_dragonfly_doji_not_detected_without_long_lower_shadow(self):
         frame = self._set_dragonfly_doji(candle_frame("down"))
-        frame.iloc[-1] = [96.0, 96.1, 94.8, 96.0, 1500.0]
+        frame.iloc[-1] = [96.0, 96.1, 95.9, 96.0, 1500.0]
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Dragonfly Doji" for p in analysis["candlestick_patterns"]))
 
@@ -361,7 +363,7 @@ class MarketPatternTests(unittest.TestCase):
 
     def test_bullish_marubozu_rejected_when_body_is_not_long_relative_to_prior_candles(self):
         frame = self._set_bullish_marubozu(candle_frame("down"))
-        frame.iloc[-1] = [96.0, 97.0, 96.0, 97.0, 1800.0]
+        frame.iloc[-1] = [96.0, 96.45, 96.0, 96.45, 1800.0]
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Bullish Marubozu" for p in analysis["candlestick_patterns"]))
 
