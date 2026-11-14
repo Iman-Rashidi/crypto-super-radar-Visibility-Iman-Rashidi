@@ -65,7 +65,7 @@ class EasyPriceActionTests(unittest.TestCase):
         frame = self.candles()
         frame.index = frame.index.where(
             np.arange(len(frame)) < 60,
-            frame.index + pd.to_timedelta(np.arange(len(frame)) >= 60, unit="h")
+            frame.index + pd.to_timedelta((np.arange(len(frame)) >= 60).astype(int), unit="h")
         )
         # A timestamp discontinuity is deliberately excluded from price-gap events.
         result = analyze_easy_price_action(frame)
