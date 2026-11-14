@@ -341,6 +341,7 @@ def main() -> None:
             "comparables": "مقایسه پروژه‌های هم‌صنعت",
             "accounting_principles": "اصول حسابداری و کیفیت گزارشگری",
             "market_analysis": "تحلیل شرایط و ریسک بازار",
+            "event_analysis": "تحلیل رویدادها و بازده غیرعادی",
         }
         module_rows = []
         for key, label in module_labels.items():
@@ -379,6 +380,20 @@ def main() -> None:
                 for key, item in observations.items()
             ]), hide_index=True, use_container_width=True)
             st.caption("مراحل: گردآوری داده، شناسایی روند، ارزیابی ریسک و ساخت سناریو. پیش‌بینی بدون منبع و زمان مشاهده نمایش داده نمی‌شود.")
+        event_module = (fundamental.get("modules") or {}).get("event_analysis") or {}
+        with st.expander("تحلیل رویدادها | Event Study و بازده غیرعادی", expanded=False):
+            st.write(event_module.get("message_fa", "برای تحلیل رویداد، داده زمان‌دار و بازده تاریخی لازم است."))
+            event_rows = []
+            for event_id, item in (event_module.get("events") or {}).items():
+                event_rows.append({"رویداد": event_id, "نوع": item.get("event_type", "نامشخص"),
+                    "وضعیت": item.get("status", "UNKNOWN"), "بازده غیرعادی تجمعی": item.get("cumulative_abnormal_return"),
+                    "آماره t": item.get("t_statistic"), "p-value": item.get("p_value_two_sided"),
+                    "معنادار در ۵٪": item.get("statistically_significant_5pct"), "منبع": item.get("source_url")})
+            if event_rows:
+                st.dataframe(pd.DataFrame(event_rows), hide_index=True, use_container_width=True)
+            else:
+                st.info("رویداد زمان‌دار و داده کافی برای پنجره برآورد/رویداد هنوز موجود نیست؛ وضعیت UNKNOWN است.")
+            st.caption("بازده غیرعادی = بازده واقعی − بازده عادی مورد انتظار از مدل بازار. آزمون t دوطرفه برای CAR؛ معناداری آماری اثبات رابطه علّی یا پیش‌بینی سود نیست.")
         if fundamental.get("status") in {"UNKNOWN", "INSUFFICIENT_COVERAGE"}:
             st.warning("داده بنیادی معتبر و کافی برای امتیاز کلی در دسترس نیست؛ این وضعیت به‌عنوان UNKNOWN ثبت می‌شود.")
         if fundamental.get("status") == "PARTIAL":
