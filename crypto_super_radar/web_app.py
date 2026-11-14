@@ -62,6 +62,22 @@ BLOFIN_STATUS_CACHE = {"expires_at": 0.0, "payload": None}
 BLOFIN_STATUS_LOCK = threading.Lock()
 BLOFIN_EXECUTION_GUARD = threading.Lock()
 BLOFIN_EXECUTION_JOBS: dict[str, dict] = {}
+BLOFIN_AUTOPILOT_LOCK = threading.Lock()
+BLOFIN_AUTOPILOT_START_LOCK = threading.Lock()
+BLOFIN_AUTOPILOT_THREAD = None
+BLOFIN_AUTOPILOT_STATE = {
+    "enabled": False,
+    "status": "DISABLED",
+    "environment": "BLOFIN_DEMO",
+    "market": "BTC-USDT",
+    "interval_seconds": 900,
+    "last_cycle_started_at_utc": None,
+    "last_cycle_finished_at_utc": None,
+    "last_stage": None,
+    "last_message_fa": "اتوپایلوت هنوز فعال نشده است.",
+    "last_result_status": None,
+    "cycles_started": 0,
+}
 
 AI_DIAGNOSTIC_LOCK = threading.Lock()
 AI_DIAGNOSTIC_STATE = {"day": "", "count": 0, "last_started": 0.0}
@@ -2433,7 +2449,7 @@ def _ensure_scan_worker():
 
 
 def _blofin_demo_execution_readiness() -> dict:
-    """Expose non-secret prerequisites for one bounded Demo Futures order."""
+    """Expose the recurring Demo order budget and non-secret prerequisites."""
     trade_names = (
         "BLOFIN_DEMO_TRADE_API_KEY",
         "BLOFIN_DEMO_TRADE_API_SECRET",
@@ -2450,45 +2466,63 @@ def _blofin_demo_execution_readiness() -> dict:
         "MISSING"
     )
     trading_enabled = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
+    autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
     dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
+    max_orders_per_utc_day = 2
+    budget = None
     try:
         backend = storage_backend()
     except Exception:
         backend = "INVALID"
     durable_storage = backend == "TURSO_CLOUD_SQLITE"
-    one_order_used = None
     if backend in {"TURSO_CLOUD_SQLITE", "LOCAL_SQLITE"}:
         try:
             store = BloFinDemoEventStore()
             try:
-                one_order_used = store.has_any_orders()
+                budget = store.trade_budget_status(max_orders_per_utc_day)
             finally:
                 store.close()
         except Exception:
-            one_order_used = None
+            budget = None
+    orders_today = budget.get("orders_today") if isinstance(budget, dict) else None
+    unresolved_orders = budget.get("unresolved_orders") if isinstance(budget, dict) else None
+    daily_capacity_available = (
+        isinstance(orders_today, int)
+        and orders_today < max_orders_per_utc_day
+        and unresolved_orders == 0
+    )
     ready = bool(
         trade_credentials_configured and trading_enabled and dashboard_auth_configured
-        and durable_storage and one_order_used is False
+        and durable_storage and daily_capacity_available
     )
     return {
         "status": "READY" if ready else "BLOCKED",
         "environment": "BLOFIN_DEMO",
         "trade_credentials_configured": trade_credentials_configured,
         "credential_source": credential_source,
+        "trade_permission_verified_each_cycle": False,
         "trading_enabled": trading_enabled,
+        "autopilot_enabled": autopilot_enabled,
         "durable_storage": durable_storage,
         "dashboard_auth_configured": dashboard_auth_configured,
-        "one_order_available": one_order_used is False,
-        "one_order_used": one_order_used is True,
+        "orders_today_utc": orders_today,
+        "max_orders_per_utc_day": max_orders_per_utc_day,
+        "daily_capacity_available": daily_capacity_available,
+        "unresolved_orders": unresolved_orders,
+        # Backward-compatible names retained for existing dashboard clients.
+        "one_order_available": daily_capacity_available,
+        "one_order_used": bool(orders_today) if isinstance(orders_today, int) else None,
         "leverage": 1,
-        "size_policy": "EXCHANGE_MINIMUM_CONTRACT_SIZE",
+        "risk_per_trade_pct": 0.25,
+        "daily_loss_limit_pct": 1.0,
+        "max_drawdown_pct": 5.0,
+        "max_concurrent_positions": 1,
         "message_fa": (
-            "پیش‌نیازهای سفارش یک‌باره Demo آماده‌اند؛ تحلیل زنده، ۱۲ گیت و تأیید Nemotron هنوز باید عبور کنند."
+            "پیش‌نیازهای چرخه Demo آماده‌اند؛ مجوز واقعی Trade، قیمت، ۱۲ گیت و Nemotron در هر چرخه دوباره بررسی می‌شوند."
             if ready else
-            "اجرای سفارش مسدود است؛ کلید Trade مستقل، فعال‌سازی کنترل سفارش، توکن پنل، Turso پایدار و سهمیه یک‌بارمصرف لازم است."
+            "چرخه معامله مسدود است؛ کلید Demo دارای مجوز Trade، فعال‌سازی کنترل‌ها، توکن پنل، Turso پایدار و ظرفیت روزانه بدون سفارش مبهم لازم است."
         ),
     }
-
 
 def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
     now = datetime.now(timezone.utc).isoformat()
@@ -2607,7 +2641,7 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
 
 
 def _run_blofin_demo_execution_job(job_id: str) -> None:
-    """Analyze one live BTC perpetual signal and submit at most one guarded Demo order."""
+    """Analyze one BTC perpetual candle and submit one guarded Demo order if approved."""
     store = None
     submission_started = False
     try:
@@ -2628,6 +2662,7 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             )
             return
 
+        store = BloFinDemoEventStore()
         asset = AssetSpec.parse("perp:BTCUSDT")
         _set_blofin_execution_job(
             job_id, "running", stage="LIVE_12_GATE_ANALYSIS",
@@ -2694,6 +2729,17 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
         signal_bar = frame.index[-1].isoformat()
         record["signal_id"] = asset.raw + "|" + signal_bar
         record["inst_id"] = "BTC-USDT"
+        if store.has_signal(record["signal_id"]):
+            _set_blofin_execution_job(
+                job_id, "completed", stage="DUPLICATE_CANDLE_SKIPPED",
+                message_fa="کندل تکمیل‌شده قبلاً بررسی معاملاتی شده است؛ برای جلوگیری از تکرار، سفارش جدید ساخته نشد.",
+                result={
+                    "status": "SKIPPED_DUPLICATE_SIGNAL", "environment": "BLOFIN_DEMO",
+                    "signal_id": record["signal_id"],
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
 
         _set_blofin_execution_job(
             job_id, "running", stage="NEMOTRON_SECOND_OPINION",
@@ -2739,8 +2785,10 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             },
         )
         client = BloFinDemoTradeClient(timeout=10.0)
-        store = BloFinDemoEventStore()
-        policy = BloFinDemoRiskPolicy(max_leverage=1)
+        policy = BloFinDemoRiskPolicy(
+            max_leverage=1, max_orders_per_utc_day=2,
+            min_seconds_between_orders=1800,
+        )
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
         )
@@ -3004,6 +3052,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/blofin/demo/execution-readiness":
             payload = _blofin_demo_execution_readiness()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if parsed.path == "/api/blofin/demo/autopilot/status":
+            with LOCK:
+                payload = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
+            payload["enabled"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+            payload["readiness"] = _blofin_demo_execution_readiness()
+            return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/live-monitor":
             expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
@@ -5140,10 +5195,106 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(fmt, *args)
 
 
+def _blofin_demo_autopilot_worker() -> None:
+    """Run guarded BTC-USDT Demo cycles while the Render web process is awake."""
+    try:
+        configured_interval = int(os.getenv("BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS", "900"))
+    except (TypeError, ValueError):
+        configured_interval = 900
+    interval_seconds = max(300, min(configured_interval, 3600))
+    with LOCK:
+        BLOFIN_AUTOPILOT_STATE.update({
+            "enabled": True,
+            "status": "STARTING",
+            "interval_seconds": interval_seconds,
+            "last_message_fa": "اتوپایلوت Demo فعال شد؛ چرخهٔ اول در حال آماده‌سازی است.",
+        })
+    while True:
+        if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
+            with LOCK:
+                BLOFIN_AUTOPILOT_STATE.update({
+                    "enabled": False, "status": "DISABLED",
+                    "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
+                })
+            time.sleep(30)
+            continue
+        if not BLOFIN_AUTOPILOT_LOCK.acquire(blocking=False):
+            time.sleep(10)
+            continue
+        try:
+            if SCAN_RUNNING:
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE.update({
+                        "status": "WAITING_FOR_SCAN_QUEUE",
+                        "last_message_fa": "اسکن دیگری در حال اجراست؛ برای جلوگیری از تداخل، چرخه Demo به تعویق افتاد.",
+                    })
+                time.sleep(30)
+                continue
+            job_id = uuid.uuid4().hex
+            started = datetime.now(timezone.utc).isoformat()
+            with LOCK:
+                BLOFIN_AUTOPILOT_STATE.update({
+                    "enabled": True,
+                    "status": "RUNNING",
+                    "last_cycle_started_at_utc": started,
+                    "last_stage": "READINESS_CHECK",
+                    "last_message_fa": "چرخه خودکار BTC-USDT Perpetual آغاز شد.",
+                    "cycles_started": int(BLOFIN_AUTOPILOT_STATE.get("cycles_started") or 0) + 1,
+                })
+            _set_blofin_execution_job(
+                job_id, "queued", stage="AUTOPILOT_CYCLE",
+                message_fa="چرخه خودکار توسط زمان‌بند Demo آغاز شد.",
+            )
+            _run_blofin_demo_execution_job(job_id)
+            with LOCK:
+                job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+                result = job.get("result") if isinstance(job.get("result"), dict) else {}
+                BLOFIN_AUTOPILOT_STATE.update({
+                    "status": job.get("status", "UNKNOWN"),
+                    "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "last_stage": job.get("stage"),
+                    "last_message_fa": job.get("message_fa") or "چرخه پایان یافت.",
+                    "last_result_status": result.get("status") or job.get("stage"),
+                    "last_job_id": job_id,
+                })
+        except Exception as exc:
+            with LOCK:
+                BLOFIN_AUTOPILOT_STATE.update({
+                    "status": "ERROR",
+                    "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "last_message_fa": "چرخه خودکار با خطای کنترل‌شده متوقف شد: " + type(exc).__name__,
+                })
+        finally:
+            BLOFIN_AUTOPILOT_LOCK.release()
+        time.sleep(interval_seconds)
+
+
+def _start_blofin_demo_autopilot() -> None:
+    """Start at most one automatic Demo loop per web-service process."""
+    global BLOFIN_AUTOPILOT_THREAD
+    if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": False, "status": "DISABLED",
+                "last_message_fa": "BLOFIN_DEMO_AUTOPILOT_ENABLED فعال نیست.",
+            })
+        return
+    with BLOFIN_AUTOPILOT_START_LOCK:
+        if BLOFIN_AUTOPILOT_THREAD is not None and BLOFIN_AUTOPILOT_THREAD.is_alive():
+            return
+        BLOFIN_AUTOPILOT_THREAD = threading.Thread(
+            target=_blofin_demo_autopilot_worker,
+            daemon=True,
+            name="blofin-demo-autopilot",
+        )
+        BLOFIN_AUTOPILOT_THREAD.start()
+
+
 def main():
     port = int(os.getenv("PORT", "10000"))
     host = os.getenv("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), Handler)
+    _start_blofin_demo_autopilot()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
 
