@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from unittest.mock import patch
 
-from crypto_super_radar.market_patterns import analyze_market_patterns
+from crypto_super_radar.market_patterns import _divergence, analyze_market_patterns
 
 
 def candle_frame(direction: str = "down", count: int = 70) -> pd.DataFrame:
@@ -363,6 +363,13 @@ class MarketPatternTests(unittest.TestCase):
 
     def test_bullish_marubozu_rejected_when_body_is_not_long_relative_to_prior_candles(self):
         frame = self._set_bullish_marubozu(candle_frame("down"))
+        # Make the preceding bodies larger while preserving the prior downtrend.
+        # A 0.45 body must not pass the 1.5x median-body requirement when the
+        # preceding median body is 0.50.
+        prior = frame.iloc[-9:-1]
+        frame.iloc[-9:-1, frame.columns.get_loc("open")] = prior["close"].to_numpy() + 0.50
+        frame.iloc[-9:-1, frame.columns.get_loc("high")] = prior["close"].to_numpy() + 0.55
+        frame.iloc[-9:-1, frame.columns.get_loc("low")] = prior["close"].to_numpy() - 0.05
         frame.iloc[-1] = [96.0, 96.45, 96.0, 96.45, 1800.0]
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Bullish Marubozu" for p in analysis["candlestick_patterns"]))
