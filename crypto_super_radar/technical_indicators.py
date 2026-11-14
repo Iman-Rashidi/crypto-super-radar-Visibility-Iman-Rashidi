@@ -86,7 +86,13 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "BEARISH" if last < ma_values["ema50"] < ma_values["ema200"] else "NEUTRAL"
         )
     true_range = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-    atr = float(true_range.ewm(alpha=1/14, adjust=False, min_periods=14).mean().iloc[-1])
+    true_range_values = true_range.to_numpy(dtype=float)
+    atr_series = np.full(len(true_range_values), np.nan, dtype=float)
+    if len(true_range_values) >= 14:
+        atr_series[13] = float(np.mean(true_range_values[:14]))
+        for i in range(14, len(true_range_values)):
+            atr_series[i] = (atr_series[i - 1] * 13.0 + true_range_values[i]) / 14.0
+    atr = float(atr_series[-1]) if _finite(atr_series[-1]) else float("nan")
     pullback = "NONE"
     if _finite(atr) and atr > 0:
         for period in (20, 50):
