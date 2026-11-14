@@ -6125,9 +6125,10 @@ async function refreshExecutionReadiness(){
         })();
         </script>
         <section class="card">
-          <h3>۱۲ فیلتر اجباری</h3>
-          <p>داده بازار · رژیم · روند · مومنتوم · جریان سرمایه · امنیت · احساسات · بک‌تست · ریسک · نهنگ‌ها · پوشش احساسات · Walk-forward</p>
-          <p class="muted">هر فیلتر FAIL یا UNKNOWN باشد، خروجی NO TRADE است. سولانا در نسخه فعلی فقط نمونه‌برداری محدود از تراکنش‌های اخیر دارد.</p>
+          <h3>تفکیک پروفایل‌های موتور</h3>
+          <p><strong>Easy:</strong> موتور مستقل فرصت‌جو؛ داده پایه قیمت، OHLCV بسته‌شده و ATR برای حدضرر الزامی است. ۱۲ گیت Legacy در اسکن Easy اجرا نمی‌شوند. Whale، احساسات، فاندامنتال، Market Regime و Walk-forward تشخیصی‌اند و به‌تنهایی فرصت را مسدود نمی‌کنند.</p>
+          <p><strong>Standard / Strict:</strong> چارچوب تأیید چندمرحله‌ای و ۱۲ گیت اجباری مربوط به این پروفایل‌ها باقی می‌ماند. مسیر Futures/BloFin همچنان از موتور Legacy استفاده می‌کند.</p>
+          <p class="muted">کامل بودن داده پایه و امکان ساخت Entry/Stop معتبر همچنان شرط صدور خروجی جهت‌دار Easy است. این داشبورد سفارش واقعی ارسال نمی‌کند.</p>
         </section>
         <p class="muted">تاریخچه: <code>/history?asset=cex:BTCUSDT</code></p>
         """
