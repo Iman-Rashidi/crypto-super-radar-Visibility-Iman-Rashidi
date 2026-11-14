@@ -5493,6 +5493,9 @@ async function refreshExecutionReadiness(){
                   ' · تقاطع MACD: '+((tech.macd||{}).crossover||'نامشخص')+' · خط صفر MACD: '+((tech.macd||{}).zero_line||'نامشخص')+' · واگرایی MACD: '+((tech.macd||{}).divergence||'نامشخص')+
                   ' · Parabolic SAR: '+number((tech.parabolic_sar||{}).value)+' · روند SAR: '+((tech.parabolic_sar||{}).trend||'نامشخص')+' · آخرین چرخش SAR: '+((tech.parabolic_sar||{}).last_flip||'NONE')+
                   ' · ATR(14): '+number((tech.atr||{}).value)+' ('+number((tech.atr||{}).percentage)+'%) · فاصله حدضرر 2×ATR: '+number((((tech.atr||{}).risk_references)||{}).stop_distance_2x)+
+                  ' · MFI(14): '+number((tech.mfi||{}).value)+' ('+(({OVERBOUGHT:'اشباع خرید',OVERSOLD:'اشباع فروش',NEUTRAL:'میانه',UNKNOWN:'نامشخص'})[(tech.mfi||{}).state]||'')+') · عبور MFI از ۵۰: '+((tech.mfi||{}).midline_50||'نامشخص')+' · واگرایی MFI: '+((tech.mfi||{}).divergence||'نامشخص')+' · زمینه حمایت/مقاومت MFI: '+((tech.mfi||{}).support_resistance_context||'نامشخص')+
+                  ' · DPO(20): '+number((tech.dpo||{}).value)+' · خط صفر DPO: '+((tech.dpo||{}).zero_line||'نامشخص')+' · واگرایی DPO: '+((tech.dpo||{}).divergence||'نامشخص')+
+                  ' · ROC(10): '+number((tech.roc||{}).value_pct)+'% · خط صفر ROC: '+((tech.roc||{}).zero_line||'نامشخص')+' · واگرایی ROC: '+((tech.roc||{}).divergence||'نامشخص')+
                   ' · RVOL کندلی: '+number(d.volume_ratio)+'x · واگرایی پیوت RSI: '+(divergence.type||'NONE')+
                   ' · فیبوناچی: '+((tech.fibonacci||{}).status||fib.status||'نامشخص')+' · جهت موج: '+((tech.fibonacci||{}).direction||'نامشخص')+
                   ' · نزدیک‌ترین سطح فیبوناچی: '+((((tech.fibonacci||{}).nearest_level)||{}).level||'نامشخص')+' در '+number((((tech.fibonacci||{}).nearest_level)||{}).price)+
