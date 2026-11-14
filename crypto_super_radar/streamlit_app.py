@@ -343,6 +343,8 @@ def main() -> None:
             "market_analysis": "تحلیل شرایط و ریسک بازار",
             "event_analysis": "تحلیل رویدادها و بازده غیرعادی",
             "dividend_analysis": "تحلیل سود تقسیمی سهام",
+            "share_buybacks": "تحلیل بازخرید سهام",
+            "eps_analysis": "تحلیل سود هر سهم (EPS)",
             "mergers_acquisitions": "تحلیل ادغام و تملک شرکت‌ها",
             "sector_rotation": "تحلیل چرخش سرمایه بین بخش‌ها",
         }
@@ -399,6 +401,41 @@ def main() -> None:
                 st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (dividend.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
                 if dividend.get("source"): st.caption("منبع: " + dividend["source"])
 
+
+        buyback = (fundamental.get("modules") or {}).get("share_buybacks") or {}
+        with st.expander("تحلیل بازخرید سهام | Share Buyback Analysis", expanded=False):
+            st.write(buyback.get("message_fa", "برای تحلیل بازخرید، گزارش خریدهای اجراشده و اطلاعات تعداد سهام لازم است."))
+            if buyback.get("status") == "NOT_APPLICABLE":
+                st.info("بازخرید سهام شرکتی برای توکن کاربرد ندارد.")
+            else:
+                bc1, bc2, bc3 = st.columns(3)
+                bc1.metric("بازده بازخرید", "نامشخص" if buyback.get("buyback_yield_pct") is None else f"{buyback['buyback_yield_pct']:.2f}%")
+                bc2.metric("کاهش تعداد سهام", "نامشخص" if buyback.get("share_reduction_pct") is None else f"{buyback['share_reduction_pct']:.2f}%")
+                bc3.metric("تأمین مالی بدهی", "نامشخص" if buyback.get("debt_funding_pct") is None else f"{buyback['debt_funding_pct']:.2f}%")
+                st.write("صرف/تخفیف قیمت بازخرید نسبت به قیمت مرجع (%):", buyback.get("repurchase_premium_pct"))
+                st.write("افزایش مکانیکی EPS با فرض سود ثابت (%):", buyback.get("mechanical_eps_accretion_pct"))
+                if buyback.get("review_flags"):
+                    st.warning("پرچم‌های بررسی: " + ", ".join(buyback["review_flags"]))
+                st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (buyback.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
+                st.caption("صرفاً بازخرید انجام‌شده محاسبه می‌شود؛ مجوز برنامه بازخرید به‌معنای اجرای آن نیست.")
+                if buyback.get("source"): st.caption("منبع: " + buyback["source"])
+        eps = (fundamental.get("modules") or {}).get("eps_analysis") or {}
+        with st.expander("تحلیل سود هر سهم | EPS Analysis", expanded=False):
+            st.write(eps.get("message_fa", "برای محاسبه EPS به سود خالص و میانگین تعداد سهام نیاز است."))
+            if eps.get("status") == "NOT_APPLICABLE":
+                st.info("EPS شرکتی برای توکن کاربرد ندارد.")
+            else:
+                ec1, ec2, ec3 = st.columns(3)
+                ec1.metric("EPS پایه", "نامشخص" if eps.get("basic_eps") is None else f"{eps['basic_eps']:.4f}")
+                ec2.metric("EPS رقیق‌شده", "نامشخص" if eps.get("diluted_eps") is None else f"{eps['diluted_eps']:.4f}")
+                ec3.metric("P/E", "نامشخص" if eps.get("pe_ratio") is None else f"{eps['pe_ratio']:.2f}x")
+                st.write("EPS تعدیل‌شده:", eps.get("adjusted_eps"))
+                st.write("CAGR تاریخی EPS (%):", eps.get("eps_history_cagr_pct"))
+                st.write("تغییر EPS پیش‌بینی‌شده نسبت به واقعی (%):", eps.get("forecast_change_pct"))
+                st.dataframe(pd.DataFrame([{"کنترل": key, "وضعیت": value} for key, value in (eps.get("checks") or {}).items()]), hide_index=True, use_container_width=True)
+                for limitation in eps.get("limitations") or []:
+                    st.caption("• " + limitation)
+                if eps.get("source"): st.caption("منبع: " + eps["source"])
         ma = (fundamental.get("modules") or {}).get("mergers_acquisitions") or {}
         with st.expander("تحلیل ادغام و تملک | M&A Analysis", expanded=False):
             st.write(ma.get("message_fa", "برای تحلیل M&A به شواهد معامله نیاز است."))
