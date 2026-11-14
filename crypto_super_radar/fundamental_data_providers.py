@@ -55,10 +55,15 @@ def evidence_record(
     freshness = "UNKNOWN"
     if observed_at is not None:
         observed_iso = _utc_iso(observed_at)
-        age_seconds = max(0.0, (fetched_at.timestamp() - observed_at))
-        freshness = "FRESH" if age_seconds <= 48 * 3600 else (
-            "STALE" if age_seconds <= 7 * 86400 else "EXPIRED"
-        )
+        raw_age = fetched_at.timestamp() - observed_at
+        if raw_age < -300:
+            quality = "CONFLICT"
+            freshness = "CONFLICT"
+        else:
+            age_seconds = max(0.0, raw_age)
+            freshness = "FRESH" if age_seconds <= 48 * 3600 else (
+                "STALE" if age_seconds <= 7 * 86400 else "EXPIRED"
+            )
     if quality == "CONFLICT":
         freshness = "CONFLICT"
     return {
@@ -112,8 +117,6 @@ class DefiLlamaFundamentalProvider:
         fee_timestamp = _last_chart_timestamp(fee_chart)
         fee_24h = _finite_nonnegative(fees.get("total24h"))
         revenue_24h = _finite_nonnegative(fees.get("totalRevenue24h"))
-        if revenue_24h is None:
-            revenue_24h = _finite_nonnegative(fees.get("totalRevenue24h"))
 
         tvl_record = evidence_record(
             value=tvl_value, source="DefiLlama protocol TVL",
