@@ -77,6 +77,7 @@ Stop behavior:
 - MENTAL: crossing the stop raises an alert but leaves the position open until manually closed.
 - Trailing ATR stops can only tighten toward profit.
 - If one OHLC candle touches both the stop and target, the manager applies STOP_FIRST as the conservative intrabar assumption.
+- If a completed candle opens through a hard stop, the simulated stop-market fill uses the worse opening price, not the stop trigger. Favorable gaps through a take-profit use the opening price as a better limit-style fill. Real fills can still differ.
 - The journal PnL is gross and excludes fees/slippage; it is not an exchange-fill ledger.
 
 ## Dashboard / safety boundaries
