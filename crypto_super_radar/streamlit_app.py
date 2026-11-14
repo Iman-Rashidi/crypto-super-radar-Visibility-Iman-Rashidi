@@ -362,6 +362,8 @@ def main() -> None:
                     st.dataframe(pd.DataFrame(
                         [{"کنترل": name, "وضعیت": status} for name, status in checks.items()]
                     ), hide_index=True, use_container_width=True)
+                if item.get("reported_method"):
+                    st.caption("روش گزارش‌شده: " + item["reported_method"])
                 if item.get("note"):
                     st.caption(item["note"])
                 if item.get("reason"):
