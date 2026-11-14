@@ -290,6 +290,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("checkButton.click();", page)
         self.assertIn("انتخاب ساختار موج الیوت در لحظه تحلیل", page)
         self.assertIn("خط زمانی رویدادهای چرخه", page)
+        self.assertIn("Mark Price واقعی", page)
+        self.assertIn("حد سود و حد ضرر فعال در BloFin", page)
+        self.assertIn("تاریخچه سفارش‌های تکمیل‌شده", page)
+        self.assertIn("تمام رویدادهای ثبت‌شده در ربات (همه سفارش‌ها)", page)
+        self.assertIn("displayMonitorValue", page)
         self.assertNotIn("JSON.stringify(job,null,2)", page)
         self.assertNotIn('id="blofin-execution-result"', page)
 
