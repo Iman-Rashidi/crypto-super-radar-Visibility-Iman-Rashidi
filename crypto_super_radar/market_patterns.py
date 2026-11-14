@@ -404,6 +404,87 @@ def _bullish_three_line_strike_pattern(frame: pd.DataFrame, volume_ratio: float 
     return None
 
 
+def _piercing_line_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a two-candle Piercing Line after a decline; next close confirms it."""
+    if len(frame) < 5:
+        return None
+
+    candidates = []
+    if len(frame) >= 3:
+        candidates.append((len(frame) - 3, True))
+    candidates.append((len(frame) - 2, False))
+
+    for start, has_follow_through in candidates:
+        first, second = frame.iloc[start], frame.iloc[start + 1]
+        prior = pd.to_numeric(
+            frame["close"].iloc[max(0, start - 8):start], errors="coerce"
+        )
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change > -0.003:
+            continue
+
+        first_open, first_close = float(first["open"]), float(first["close"])
+        first_high, first_low = float(first["high"]), float(first["low"])
+        second_open, second_close = float(second["open"]), float(second["close"])
+        second_high, second_low = float(second["high"]), float(second["low"])
+        first_range = first_high - first_low
+        second_range = second_high - second_low
+        first_body = first_open - first_close
+        midpoint = (first_open + first_close) / 2.0
+
+        valid = (
+            first_range > 0
+            and second_range > 0
+            and first_close < first_open
+            and first_body >= first_range * 0.45
+            and second_close > second_open
+            and second_open < first_low
+            and second_close > midpoint
+            and second_close < first_open
+        )
+        if not valid:
+            continue
+
+        confirmed = (
+            has_follow_through
+            and float(frame.iloc[start + 2]["close"]) > second_high
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        state = "CONFIRMED" if confirmed else "NEEDS_CONFIRMATION"
+        strength = (
+            "STRONG" if confirmed and volume_confirmed
+            else "MODERATE" if confirmed or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از روند نزولی، کندل اول نزولی و نسبتاً بلند است. کندل دوم زیر کف کندل اول باز شده، "
+            "اما صعودی بسته شده و بیش از نیمهٔ بدنهٔ کندل اول را پس گرفته است؛ "
+            "بسته‌شدن آن هنوز پایین‌تر از قیمت بازشدن کندل اول است. "
+        )
+        if confirmed:
+            description += "کندل بعدی بالاتر از سقف کندل دوم بسته شده و الگو تأیید شده است."
+        else:
+            description += "الگو هنوز در انتظار تأیید است؛ بسته‌شدن کندل بعدی بالاتر از سقف کندل دوم لازم است."
+
+        return _item(
+            name_fa="خط نفوذی صعودی",
+            name_en="Piercing Line",
+            category="CANDLE",
+            direction="BULLISH" if confirmed else "NEUTRAL",
+            potential_direction=None if confirmed else "BULLISH",
+            state=state,
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 1].isoformat(),
+            score=13 if confirmed else 6,
+            trigger_price=second_high,
+            invalidation_price=second_low,
+        )
+    return None
+
+
 def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[dict[str, Any]]:
     if len(frame) < 3:
         return []
@@ -476,10 +557,11 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
         add("پوشای نزولی", "Bearish Engulfing", "BEARISH",
             "بدنهٔ نزولی آخر، بدنهٔ صعودی قبلی را پوشانده است؛ در روند صعودی معنا‌دارتر است.", -13)
 
-    if pc < po and last_bull and o < pl and c > (po + pc) / 2.0 and c < po:
-        add("خط نفوذی صعودی", "Piercing Line", "BULLISH",
-            "کندل صعودی بیش از نیمهٔ بدنهٔ نزولی قبلی را بازیابی کرده است.", 10)
-    elif pc > po and last_bear and o > ph and c < (po + pc) / 2.0 and c > po:
+    piercing_line = _piercing_line_pattern(frame, volume_ratio)
+    if piercing_line is not None:
+        out.append(piercing_line)
+
+    if pc > po and last_bear and o > ph and c < (po + pc) / 2.0 and c > po:
         add("ابر تیره", "Dark Cloud Cover", "BEARISH",
             "کندل نزولی بیش از نیمهٔ بدنهٔ صعودی قبلی را پس گرفته است.", -10)
 
