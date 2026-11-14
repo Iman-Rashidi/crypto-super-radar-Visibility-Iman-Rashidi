@@ -63,3 +63,17 @@ The Easy Fundamental report exposes `event_analysis` as a supporting diagnostic,
 The HTTP/Render and Streamlit Persian dashboards expose event status, event type, CAR, t-statistic, p-value, 5% significance and source when present.
 
 Tests cover absent event data, a controlled market-model event study, and missing source/timestamp handling.
+
+
+## Dividend analysis / dividend quality
+
+The Easy Fundamental report exposes `dividend_analysis` as a supporting diagnostic, excluded from the seven weighted score modules. It applies only to explicitly classified equities/stocks/shares/REITs. Crypto/token assets return `NOT_APPLICABLE`, not a negative score. Unknown asset classes remain `UNKNOWN`.
+
+- Computes dividend yield from annual dividend per share / current price, or accepts a sourced yield observation.
+- Computes payout ratio (cash dividends / net income), earnings dividend coverage (net income / dividends), and optional free-cash-flow coverage.
+- Evaluates consecutive annual per-share dividend history and CAGR only when at least two consecutive positive years are supplied.
+- Sustainability flags use transparent diagnostics: payout above 100% is a risk, above 80% is caution; free-cash-flow coverage below 1.0 is a risk and below 1.2 is caution.
+- Dividend-trap warning requires sourced yield of at least 8% and a sourced 12-month price decline of at least 20%; it is a warning, not a sell signal.
+- Every metric requires a source URL and observation timestamp before its check is marked known. Missing data remains `UNKNOWN`; no synthetic score is generated.
+- The Persian Streamlit Fundamental panel displays the module, applicability, key ratios, sustainability, growth, trap warning, evidence checks and source.
+- This module does not alter the seven-module weights, 70% coverage rule, twelve mandatory trade gates, or trade authorization.
