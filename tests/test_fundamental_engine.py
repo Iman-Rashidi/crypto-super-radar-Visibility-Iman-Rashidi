@@ -12,6 +12,8 @@ from crypto_super_radar.fundamental_engine import (
     dividend_analysis,
     mergers_acquisitions_analysis,
     sector_rotation_analysis,
+    share_buyback_analysis,
+    eps_analysis,
 )
 
 
@@ -231,6 +233,95 @@ class DividendAnalysisTests(unittest.TestCase):
         result = build_fundamental_report({"dividend_analysis": {"asset_class": "crypto"}})
         self.assertEqual(set(result["weights"]), set(MODULE_WEIGHTS))
         self.assertEqual(result["modules"]["dividend_analysis"]["status"], "NOT_APPLICABLE")
+
+
+class ShareBuybackAnalysisTests(unittest.TestCase):
+    def test_crypto_is_not_applicable(self):
+        result = share_buyback_analysis({"asset_class": "crypto"})
+        self.assertEqual(result["status"], "NOT_APPLICABLE")
+        self.assertIsNone(result["score"])
+
+    def test_buyback_yield_funding_and_mechanical_eps(self):
+        result = share_buyback_analysis({
+            "asset_class": "equity", "completed_shares_repur": 100_000,
+            "shares_outstanding_before": 1_000_000,
+            "shares_outstanding_after": 900_000,
+            "average_repurchase_price": 10, "current_price": 9,
+            "cash_spent": 1_000_000, "debt_funded_amount": 500_000,
+            "net_income": 1_000_000, "source": "https://example.org/filing",
+            "observed_at_utc": "2026-11-01T00:00:00Z",
+        })
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertAlmostEqual(result["buyback_yield_pct"], 10)
+        self.assertAlmostEqual(result["share_reduction_pct"], 10)
+        self.assertAlmostEqual(result["mechanical_eps_before"], 1)
+        self.assertAlmostEqual(result["mechanical_eps_after"], 1_000_000 / 900_000)
+        self.assertAlmostEqual(result["mechanical_eps_accretion_pct"], 11.111111, places=4)
+        self.assertAlmostEqual(result["debt_funding_pct"], 50)
+        self.assertIn("debt_funded_repurchase", result["review_flags"])
+        self.assertIn("repurchased_above_current_price_reference", result["review_flags"])
+
+    def test_authorized_but_unexecuted_program_is_not_completed(self):
+        result = share_buyback_analysis({
+            "asset_class": "equity", "authorized_amount": 5_000_000,
+            "source": "https://example.org/filing",
+            "observed_at_utc": "2026-11-01T00:00:00Z",
+        })
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(result["completed_shares_repur"])
+
+    def test_missing_source_keeps_buyback_unknown(self):
+        result = share_buyback_analysis({"asset_class": "equity",
+            "completed_shares_repur": 100, "shares_outstanding_before": 1000,
+            "shares_outstanding_after": 900})
+        self.assertEqual(result["status"], "UNKNOWN")
+
+
+class EPSAnalysisTests(unittest.TestCase):
+    def test_crypto_is_not_applicable(self):
+        result = eps_analysis({"asset_class": "token"})
+        self.assertEqual(result["status"], "NOT_APPLICABLE")
+        self.assertIsNone(result["score"])
+
+    def test_basic_diluted_adjusted_eps_and_pe(self):
+        result = eps_analysis({
+            "asset_class": "stock", "net_income": 1_000_000,
+            "preferred_dividends": 100_000,
+            "weighted_average_shares": 900_000,
+            "diluted_weighted_average_shares": 1_000_000,
+            "adjusted_net_income": 990_000, "current_price": 20,
+            "eps_history": [{"year": 2023, "eps": 0.8},
+                            {"year": 2024, "eps": 0.9},
+                            {"year": 2025, "eps": 1.0}],
+            "forecast_eps": 1.2, "source": "https://example.org/annual-report",
+            "observed_at_utc": "2026-11-01T00:00:00Z",
+        })
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertAlmostEqual(result["basic_eps"], 1.0)
+        self.assertAlmostEqual(result["diluted_eps"], 0.9)
+        self.assertAlmostEqual(result["adjusted_eps"], 1.1)
+        self.assertAlmostEqual(result["pe_ratio"], 20)
+        self.assertAlmostEqual(result["forecast_change_pct"], 20)
+        self.assertGreater(result["eps_history_cagr_pct"], 0)
+
+    def test_negative_eps_does_not_produce_pe(self):
+        result = eps_analysis({"asset_class": "equity", "net_income": -100,
+            "weighted_average_shares": 10, "current_price": 5,
+            "source": "https://example.org/filing",
+            "observed_at_utc": "2026-11-01T00:00:00Z"})
+        self.assertIsNone(result["pe_ratio"])
+        self.assertEqual(result["status"], "PARTIAL")
+
+    def test_diagnostics_do_not_change_weighted_modules(self):
+        result = build_fundamental_report({
+            "share_buybacks": {"asset_class": "crypto"},
+            "eps_analysis": {"asset_class": "crypto"},
+        })
+        self.assertEqual(set(result["weights"]), set(MODULE_WEIGHTS))
+        self.assertEqual(result["modules"]["share_buybacks"]["status"], "NOT_APPLICABLE")
+        self.assertEqual(result["modules"]["eps_analysis"]["status"], "NOT_APPLICABLE")
+        self.assertFalse(result["trade_authorized"])
+
 
 
 class MergersAcquisitionsTests(unittest.TestCase):
