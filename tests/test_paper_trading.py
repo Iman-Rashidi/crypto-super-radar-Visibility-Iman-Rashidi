@@ -162,6 +162,24 @@ class PaperTradingBotTests(unittest.TestCase):
             "COMPLETE",
         )
 
+    def test_easy_profile_enters_without_legacy_twelve_gates(self):
+        self.engine.result.gates = []
+        self.engine.result.metrics = {
+            "engine_profile": "EASY",
+            "decision_policy": {
+                "mandatory_legacy_gates": 0,
+                "twelve_gate_engine_used": False,
+            },
+        }
+        # Easy's heuristic risk score is advisory; stop-distance account risk,
+        # notional cap, reward/risk and circuit breakers remain mandatory.
+        self.engine.result.estimated_risk_score = 92.0
+        self.engine.result.confirmation_score = 60.0
+        result = self.bot.run_once("cex:BTCUSDT")
+        self.assertEqual(result["status"], "OPENED")
+        self.assertFalse(result["orders_submitted"])
+        self.assertEqual(self.ledger.position()["asset"], "cex:BTCUSDT")
+
     def test_unknown_gate_blocks_entry(self):
         self.engine.result.gates[-1].status = "UNKNOWN"
         result = self.bot.run_once("cex:BTCUSDT")
