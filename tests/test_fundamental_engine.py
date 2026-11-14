@@ -10,6 +10,8 @@ from crypto_super_radar.fundamental_engine import (
     accounting_principles_analysis,
     market_analysis,
     dividend_analysis,
+    mergers_acquisitions_analysis,
+    sector_rotation_analysis,
 )
 
 
@@ -229,6 +231,72 @@ class DividendAnalysisTests(unittest.TestCase):
         result = build_fundamental_report({"dividend_analysis": {"asset_class": "crypto"}})
         self.assertEqual(set(result["weights"]), set(MODULE_WEIGHTS))
         self.assertEqual(result["modules"]["dividend_analysis"]["status"], "NOT_APPLICABLE")
+
+
+class MergersAcquisitionsTests(unittest.TestCase):
+    def test_missing_deal_evidence_is_unknown(self):
+        result = mergers_acquisitions_analysis({"asset_class": "equity"})
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["deal_count"], 0)
+
+    def test_m_and_a_premium_and_risk_flags(self):
+        result = mergers_acquisitions_analysis({"asset_class": "equity", "deals": [{
+            "deal_id": "deal-1", "deal_status": "ANNOUNCED",
+            "target": "Target Co", "acquirer": "Buyer Co",
+            "offer_price_per_share": 120, "unaffected_price_per_share": 100,
+            "financing_type": "DEBT", "integration_risk": "HIGH",
+            "regulatory_status": "REVIEW", "transaction_value": 1_000_000,
+            "source_url": "https://example.org/deal",
+            "announced_at_utc": "2026-11-10T12:00:00Z",
+        }]})
+        deal = result["deals"]["deal-1"]
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(deal["offer_premium_pct"], 20.0)
+        self.assertIn("debt_financing", deal["review_flags"])
+        self.assertIn("high_integration_risk", deal["review_flags"])
+        self.assertIn("regulatory_review_or_challenge", deal["review_flags"])
+
+    def test_crypto_m_and_a_is_not_applicable(self):
+        result = mergers_acquisitions_analysis({"asset_class": "crypto"})
+        self.assertEqual(result["status"], "NOT_APPLICABLE")
+        self.assertIsNone(result["score"])
+
+
+class SectorRotationTests(unittest.TestCase):
+    def test_sector_relative_strength_and_leaders(self):
+        result = sector_rotation_analysis({
+            "economic_phase": {"value": "MID_EXPANSION", "source": "https://example.org/macro",
+                               "observed_at_utc": "2026-11-01T00:00:00Z"},
+            "sectors": [
+                {"sector": "Technology", "return_pct": 12, "benchmark_return_pct": 5,
+                 "flow_change_pct": 4, "source": "https://example.org/tech",
+                 "observed_at_utc": "2026-11-01T00:00:00Z"},
+                {"sector": "Utilities", "return_pct": 2, "benchmark_return_pct": 5,
+                 "flow_change_pct": -1, "source": "https://example.org/util",
+                 "observed_at_utc": "2026-11-01T00:00:00Z"},
+            ]})
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["economic_phase"], "MID_EXPANSION")
+        self.assertEqual(result["leaders"][0], "Technology")
+        self.assertEqual(result["laggards"][0], "Utilities")
+        self.assertEqual(result["sectors"][0]["relative_strength_pct"], 7)
+
+    def test_missing_sector_source_is_not_counted(self):
+        result = sector_rotation_analysis({"sectors": [
+            {"sector": "Technology", "return_pct": 10, "benchmark_return_pct": 5}
+        ]})
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["sectors"], [])
+
+    def test_diagnostics_do_not_change_weighted_score_or_trade_authorization(self):
+        result = build_fundamental_report({
+            "mergers_acquisitions": {"asset_class": "crypto"},
+            "sector_rotation": {},
+        })
+        self.assertEqual(set(result["weights"]), set(MODULE_WEIGHTS))
+        self.assertEqual(result["modules"]["mergers_acquisitions"]["status"], "NOT_APPLICABLE")
+        self.assertEqual(result["modules"]["sector_rotation"]["status"], "UNKNOWN")
+        self.assertFalse(result["trade_authorized"])
 
 class EventAnalysisTests(unittest.TestCase):
     def test_missing_events_remain_unknown(self):
