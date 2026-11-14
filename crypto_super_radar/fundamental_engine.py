@@ -619,7 +619,8 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
     modules["event_analysis"] = event_analysis(evidence.get("event_analysis", {}))
     modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
-    modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))\n    modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
+    modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))
+    modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
     for name in ("dcf", "comparables"):
         item = evidence.get(name)
         score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
