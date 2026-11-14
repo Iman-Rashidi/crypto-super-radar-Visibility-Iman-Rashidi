@@ -348,6 +348,23 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
 
+    # Gravestone Doji: tiny body at/near the low, long upper wick, tiny lower wick.
+    gravestone_doji = (
+        body_ratio <= 0.10
+        and upper >= candle_range * 0.60
+        and lower <= candle_range * 0.10
+        and close_location <= 0.15
+    )
+    if gravestone_doji:
+        if context == "UP":
+            add("دوجی سنگ‌قبر", "Gravestone Doji", "BEARISH",
+                "بدنهٔ بسیار کوچک نزدیک کف، سایهٔ بالایی بلند و سایهٔ پایینی ناچیز پس از روند صعودی؛ نشانهٔ احتمالی برگشت نزولی است و به تأیید کندل بعدی نیاز دارد.",
+                -11, state="NEEDS_CONFIRMATION", strength="STRONG" if volume_confirmed else "MODERATE")
+        else:
+            add("دوجی سنگ‌قبر", "Gravestone Doji", "NEUTRAL",
+                "شکل دوجی سنگ‌قبر دیده شده، اما بدون روند صعودی قبلی جهت نزولی آن قابل اتکا نیست؛ منتظر تأیید بمانید.",
+                0, state="NEEDS_CONFIRMATION", strength="WEAK")
+
     if body_ratio <= 0.10 and (long_lower == long_upper):
         add("دوجی", "Doji", "NEUTRAL",
             "بدنه بسیار کوچک نسبت به دامنهٔ کندل؛ نشان‌دهندهٔ تردید است، نه سیگنال مستقل خرید یا فروش.", 0, strength="MODERATE")
