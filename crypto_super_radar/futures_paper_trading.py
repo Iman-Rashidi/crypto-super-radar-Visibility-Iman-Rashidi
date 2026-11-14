@@ -616,8 +616,8 @@ class FuturesPaperTradingBot:
             # so the dashboard can identify the provider/HTTP/data validation issue.
             detail = " ".join(str(exc).split())
             detail = re.sub(
-                r"(?i)(authorization|api[_-]?key|secret|passphrase)(\\s*[:=]\\s*)[^,;\\s]+",
-                r"\\1\\2[REDACTED]",
+                r"(?i)(authorization|api[_-]?key|secret|passphrase)(\s*[:=]\s*)[^,;\s]+",
+                r"\1\2[REDACTED]",
                 detail,
             )[:240] or None
             return {
