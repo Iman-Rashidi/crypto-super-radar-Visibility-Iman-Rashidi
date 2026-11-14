@@ -9,6 +9,7 @@ on:
     branches:
       - main
       - feature/multi-stage-confirmation-engine
+      - feature/blofin-demo-adapter
 jobs:
   test:
     runs-on: ubuntu-latest
