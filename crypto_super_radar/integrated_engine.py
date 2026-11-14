@@ -1,6 +1,8 @@
 """Connect the new whale/sentiment modules to the legacy nine-gate engine."""
 from __future__ import annotations
 
+import json
+import os
 from typing import Any, Callable, Iterable, Optional
 
 import pandas as pd
@@ -11,6 +13,7 @@ from .engine import ConfirmationEngine
 from .evm_security import screen_evm_token
 from .elliott_waves import monitor_elliott_waves
 from .fundamental_engine import build_fundamental_report
+from .fundamental_data_providers import DefiLlamaFundamentalProvider
 from .chart_patterns import monitor_chart_patterns, contradicts_confirmed_breakout
 from .candle_quality import completed_daily_candles
 from .evm_transfers import EvmTransferScanner
@@ -42,6 +45,26 @@ class WhaleAwareMarketDataService(MarketDataService):
         self.funding_frames: dict[str, pd.Series] = {}
         self.wallet_event_db = connect_database()
         self.wallet_event_store = WalletEventStore(self.wallet_event_db)
+        self.fundamental_provider = DefiLlamaFundamentalProvider(self.http)
+
+    def fundamental_evidence(self, asset: AssetSpec) -> dict[str, Any]:
+        """Fetch public fundamental observations only for explicitly mapped assets.
+
+        CSR_FUNDAMENTAL_PROTOCOL_MAP must be a JSON object keyed by the exact
+        canonical AssetSpec.raw value, with a DefiLlama protocol slug as value.
+        No symbol/name guessing is allowed.
+        """
+        raw_mapping = os.environ.get("CSR_FUNDAMENTAL_PROTOCOL_MAP", "{}")
+        try:
+            mapping = json.loads(raw_mapping)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(mapping, dict):
+            return {}
+        slug = mapping.get(asset.raw)
+        if not isinstance(slug, str) or not slug.strip():
+            return {}
+        return self.fundamental_provider.fetch(slug)
 
     def close(self) -> None:
         """Release the shared durable wallet-event connection."""
