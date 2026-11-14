@@ -514,3 +514,63 @@ class EventAnalysisTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_esg_analysis_equity_pillars_and_source():
+    from crypto_super_radar.fundamental_engine import esg_analysis
+    result = esg_analysis({
+        "asset_class": "equity",
+        "environmental": {"status": "KNOWN", "score": 80},
+        "social": {"status": "KNOWN", "score": 70},
+        "governance": {"status": "KNOWN", "score": 90},
+        "source": "https://example.org/esg-report",
+        "observed_at_utc": "2026-11-14T10:00:00Z",
+        "controversies": ["Pending environmental litigation"],
+    })
+    assert result["status"] == "KNOWN"
+    assert result["score"] == 80
+    assert result["controversy_review_required"] is True
+    assert result["pillars"]["governance"]["score"] == 90
+
+
+def test_esg_analysis_missing_source_is_unknown():
+    from crypto_super_radar.fundamental_engine import esg_analysis
+    result = esg_analysis({
+        "asset_class": "equity",
+        "environmental": {"status": "KNOWN", "score": 80},
+        "social": {"status": "KNOWN", "score": 70},
+        "governance": {"status": "KNOWN", "score": 90},
+    })
+    assert result["status"] == "UNKNOWN"
+    assert result["score"] is None
+    assert result["known_pillars"] == []
+
+
+def test_esg_analysis_crypto_keeps_network_metrics_separate():
+    from crypto_super_radar.fundamental_engine import esg_analysis
+    result = esg_analysis({
+        "asset_class": "crypto",
+        "environmental": {"status": "KNOWN", "score": 65},
+        "social": {"status": "KNOWN", "score": 75},
+        "governance": {"status": "KNOWN", "score": 85},
+        "renewable_energy_pct": 55,
+        "validator_or_miner_concentration_pct": 28,
+        "source": "https://example.org/network-report",
+        "observed_at_utc": "2026-11-14T10:00:00Z",
+    })
+    assert result["status"] == "KNOWN"
+    assert result["network_metrics"]["renewable_energy_pct"] == 55
+    assert result["network_metrics"]["validator_or_miner_concentration_pct"] == 28
+
+
+def test_esg_analysis_unknown_asset_class():
+    from crypto_super_radar.fundamental_engine import esg_analysis
+    assert esg_analysis({})["status"] == "UNKNOWN"
+
+
+def test_esg_is_diagnostic_not_weighted_or_trade_authorizing():
+    from crypto_super_radar.fundamental_engine import build_fundamental_report, MODULE_WEIGHTS
+    report = build_fundamental_report({"esg_analysis": {"asset_class": "equity"}})
+    assert "esg_analysis" in report["modules"]
+    assert "esg_analysis" not in MODULE_WEIGHTS
+    assert report["trade_authorized"] is False
