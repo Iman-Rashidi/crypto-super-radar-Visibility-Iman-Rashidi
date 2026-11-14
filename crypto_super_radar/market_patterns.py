@@ -885,6 +885,81 @@ def _three_black_crows_pattern(frame: pd.DataFrame, volume_ratio: float | None) 
     return None
 
 
+
+def _three_inside_down_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect Three Inside Down: bullish candle, bearish Harami, bearish breakdown."""
+    if len(frame) < 6:
+        return None
+
+    first, second, third = (frame.iloc[-3 + i] for i in range(3))
+    prior = pd.to_numeric(frame["close"].iloc[-11:-3], errors="coerce")
+    if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+        return None
+    prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+    if prior_change < 0.003:
+        return None
+
+    fo, fc = float(first["open"]), float(first["close"])
+    fh, fl = float(first["high"]), float(first["low"])
+    so, sc = float(second["open"]), float(second["close"])
+    sh, sl = float(second["high"]), float(second["low"])
+    to, tc = float(third["open"]), float(third["close"])
+
+    first_body = abs(fo - fc)
+    first_range = fh - fl
+    second_body = abs(sc - so)
+    second_range = sh - sl
+    third_body = abs(tc - to)
+    third_range = float(third["high"]) - float(third["low"])
+    if min(first_range, second_range, third_range) <= 0:
+        return None
+
+    first_is_long_bullish = fc > fo and first_body >= first_range * 0.45
+    bearish_harami = (
+        sc < so
+        and second_body > 0
+        and second_body <= first_body * 0.60
+        and so <= fc
+        and sc >= fo
+        and sh <= fh
+        and sl >= fl
+    )
+    third_is_bearish = tc < to and third_body >= third_range * 0.30
+    if not (first_is_long_bullish and bearish_harami and third_is_bearish):
+        return None
+
+    confirmed = tc < fl
+    volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+    state = "CONFIRMED" if confirmed else "NEEDS_CONFIRMATION"
+    strength = (
+        "STRONG" if confirmed and volume_confirmed
+        else "MODERATE" if confirmed or volume_confirmed
+        else "WEAK"
+    )
+    description = (
+        "پس از روند صعودی، کندل اول سبز و بلند است؛ کندل دوم قرمز و کوچک‌تر، "
+        "کاملاً در محدودهٔ کندل اول قرار دارد و ساختار هارامی نزولی می‌سازد. "
+    )
+    if confirmed:
+        description += "کندل سوم پایین‌تر از کف کندل اول بسته شده و شکست نزولی تأیید شده است."
+    else:
+        description += "کندل سوم نزولی است اما هنوز پایین‌تر از کف کندل اول بسته نشده؛ تأیید کامل لازم است."
+    return _item(
+        name_fa="سه‌تایی از داخل به پایین",
+        name_en="Three Inside Down",
+        category="CANDLE",
+        direction="BEARISH" if confirmed else "NEUTRAL",
+        potential_direction=None if confirmed else "BEARISH",
+        state=state,
+        strength=strength,
+        description=description,
+        timestamp=frame.index[-1].isoformat(),
+        score=-15 if confirmed else -7,
+        trigger_price=fl,
+        invalidation_price=fh,
+    )
+
+
 def _three_inside_up_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect Three Inside Up: bearish candle, bullish Harami, bullish breakout."""
     if len(frame) < 6:
@@ -1361,6 +1436,88 @@ def _bullish_marubozu_pattern(frame: pd.DataFrame, volume_ratio: float | None) -
         )
     return None
 
+
+def _bearish_marubozu_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a long bearish near-shadeless candle; a later close below its low confirms."""
+    if len(frame) < 6:
+        return None
+
+    candidates = []
+    if len(frame) >= 2:
+        candidates.append((len(frame) - 2, True))
+    candidates.append((len(frame) - 1, False))
+
+    for index, has_follow_through in candidates:
+        candle = frame.iloc[index]
+        prior = frame.iloc[max(0, index - 8):index]
+        if len(prior) < 3:
+            continue
+        prior_closes = pd.to_numeric(prior["close"], errors="coerce")
+        prior_bodies = (prior["close"].astype(float) - prior["open"].astype(float)).abs()
+        if prior_closes.isna().any() or prior_bodies.isna().any():
+            continue
+
+        o, h, low, c = (float(candle[k]) for k in ("open", "high", "low", "close"))
+        candle_range = h - low
+        body = o - c
+        upper_shadow = h - o
+        lower_shadow = c - low
+        median_prior_body = float(prior_bodies.median())
+        if candle_range <= 0 or median_prior_body <= 0:
+            continue
+
+        valid = (
+            body > 0
+            and body >= candle_range * 0.85
+            and upper_shadow >= -1e-12
+            and lower_shadow >= -1e-12
+            and upper_shadow <= candle_range * 0.05
+            and lower_shadow <= candle_range * 0.05
+            and body >= median_prior_body * 1.5
+        )
+        if not valid:
+            continue
+
+        prior_change = float(prior_closes.iloc[-1] / prior_closes.iloc[0] - 1.0)
+        context = "UP" if prior_change >= 0.003 else "DOWN" if prior_change <= -0.003 else "SIDEWAYS"
+        confirmed = has_follow_through and float(frame.iloc[index + 1]["close"]) < low
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        strength = (
+            "STRONG" if confirmed and volume_confirmed
+            else "MODERATE" if confirmed or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "کندل نزولی با بدنه‌ای بلند و سایه‌های بسیار کوتاه تشکیل شده است؛ "
+            "قیمت تقریباً از سقف باز شده و نزدیک کف بسته شده، که نشان‌دهندهٔ فشار فروش قوی در این بازه است. "
+        )
+        if context == "UP":
+            description += "این حرکت پس از رشد اخیر می‌تواند نشانهٔ تلاش برای برگشت نزولی باشد."
+        elif context == "DOWN":
+            description += "در روند نزولی، می‌تواند نشانهٔ ادامهٔ فشار فروش باشد؛ پس از افت طولانی خطر خستگی روند نیز باید بررسی شود."
+        else:
+            description += "روند پیشین خنثی است و از این کندل به‌تنهایی نمی‌توان برگشت روند را نتیجه گرفت."
+        if confirmed:
+            description += " کندل بعدی پایین‌تر از کف ماروبوزو بسته شده و حرکت نزولی تأیید شده است."
+        else:
+            description += " برای تأیید، بسته‌شدن کندل بعدی پایین‌تر از کف ماروبوزو لازم است."
+        return _item(
+            name_fa="ماروبوزوی نزولی",
+            name_en="Bearish Marubozu",
+            category="CANDLE",
+            direction="BEARISH" if confirmed else "NEUTRAL",
+            potential_direction=None if confirmed else "BEARISH",
+            state="CONFIRMED" if confirmed else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[index].isoformat(),
+            score=-14 if confirmed else -7,
+            trigger_price=low,
+            invalidation_price=h,
+        )
+    return None
+
+
 def _piercing_line_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect a two-candle Piercing Line after a decline; next close confirms it."""
     if len(frame) < 5:
@@ -1694,7 +1851,15 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if falling_window is not None:
         out.append(falling_window)
 
-    return out[-5:]
+    three_inside_down = _three_inside_down_pattern(frame, volume_ratio)
+    if three_inside_down is not None:
+        out.append(three_inside_down)
+
+    bearish_marubozu = _bearish_marubozu_pattern(frame, volume_ratio)
+    if bearish_marubozu is not None:
+        out.append(bearish_marubozu)
+
+    return out[-7:]
 
 
 def _geometric_patterns(
