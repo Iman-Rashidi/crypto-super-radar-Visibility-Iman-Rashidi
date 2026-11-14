@@ -50,6 +50,62 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(hammer["state"], "NEEDS_CONFIRMATION")
         self.assertEqual(analysis["status"], "PASS")
 
+    def _set_morning_star(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        pattern_start = -4 if with_confirmation else -3
+        frame.iloc[pattern_start] = [96.0, 96.5, 91.0, 91.5, 1100.0]
+        frame.iloc[pattern_start + 1] = [91.3, 91.8, 91.0, 91.5, 900.0]
+        frame.iloc[pattern_start + 2] = [91.7, 96.5, 91.5, 96.2, 1300.0]
+        if with_confirmation:
+            frame.iloc[-1] = [96.2, 97.2, 96.0, 97.0, 1400.0]
+        return frame
+
+    def test_morning_star_after_downtrend_is_reported_as_pending(self):
+        frame = self._set_morning_star(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Morning Star")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["name_fa"], "ستاره صبحگاهی")
+
+    def test_morning_star_requires_follow_through_close_above_third_high(self):
+        frame = self._set_morning_star(candle_frame("down"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Morning Star")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertGreater(pattern["score"], 0)
+
+    def test_morning_star_is_not_detected_without_prior_downtrend(self):
+        frame = self._set_morning_star(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Morning Star" for p in analysis["candlestick_patterns"]))
+
+    def _set_three_white_soldiers(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-3] = [95.0, 101.0, 94.8, 100.8, 1200.0]
+        frame.iloc[-2] = [98.0, 104.2, 97.8, 104.0, 1300.0]
+        frame.iloc[-1] = [101.0, 110.2, 100.8, 110.0, 1500.0]
+        return frame
+
+    def test_three_white_soldiers_requires_three_strong_green_candles_and_prior_context(self):
+        frame = self._set_three_white_soldiers(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three White Soldiers")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["name_fa"], "سه سرباز سفید")
+
+    def test_three_white_soldiers_rejected_when_opens_are_not_inside_previous_bodies(self):
+        frame = self._set_three_white_soldiers(candle_frame("down"))
+        frame.iloc[-2, frame.columns.get_loc("open")] = 90.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three White Soldiers" for p in analysis["candlestick_patterns"]))
+
+    def test_three_white_soldiers_rejected_after_strong_existing_uptrend(self):
+        frame = self._set_three_white_soldiers(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three White Soldiers" for p in analysis["candlestick_patterns"]))
+
     def test_doji_is_reported_as_neutral_not_as_a_trade_signal(self):
         frame = candle_frame("flat")
         frame.iloc[-1, frame.columns.get_loc("open")] = 100.0
@@ -61,17 +117,82 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(doji["direction"], "NEUTRAL")
         self.assertEqual(doji["score"], 0)
 
-    def test_bullish_engulfing_uses_immediately_previous_candle(self):
+    def test_bullish_engulfing_requires_follow_through_confirmation(self):
         frame = candle_frame("down")
         frame.iloc[-2] = [98.0, 98.2, 96.8, 97.0, 1000.0]
         frame.iloc[-1] = [96.7, 99.2, 96.5, 98.5, 1400.0]
         analysis = analyze_market_patterns(frame, [])
-        engulfing = next(
-            p for p in analysis["candlestick_patterns"]
-            if p["name_en"] == "Bullish Engulfing"
-        )
-        self.assertEqual(engulfing["direction"], "BULLISH")
+        engulfing = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bullish Engulfing")
+        self.assertEqual(engulfing["direction"], "NEUTRAL")
+        self.assertEqual(engulfing["potential_direction"], "BULLISH")
         self.assertEqual(engulfing["state"], "NEEDS_CONFIRMATION")
+
+    def _set_three_inside_up(self, frame: pd.DataFrame, *, confirmed: bool = True) -> pd.DataFrame:
+        frame.iloc[-3] = [100.0, 101.0, 93.0, 94.0, 1400.0]
+        frame.iloc[-2] = [95.0, 97.0, 94.5, 96.0, 1100.0]
+        frame.iloc[-1] = [96.2, 103.0 if confirmed else 99.0, 95.8, 102.0 if confirmed else 98.5, 1600.0]
+        return frame
+
+    def test_three_inside_up_confirmed_when_third_closes_above_first_high(self):
+        frame = self._set_three_inside_up(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three Inside Up")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["name_fa"], "سه‌تایی از داخل به بالا")
+
+    def test_three_inside_up_waits_when_third_does_not_close_above_first_high(self):
+        frame = self._set_three_inside_up(candle_frame("down"), confirmed=False)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three Inside Up")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+
+    def test_three_inside_up_rejected_without_prior_downtrend(self):
+        frame = self._set_three_inside_up(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three Inside Up" for p in analysis["candlestick_patterns"]))
+
+    def test_three_inside_up_rejected_when_harami_candle_is_outside_first_candle(self):
+        frame = self._set_three_inside_up(candle_frame("down"))
+        frame.iloc[-2, frame.columns.get_loc("close")] = 102.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three Inside Up" for p in analysis["candlestick_patterns"]))
+
+    def _set_three_line_strike(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        start = -5 if with_confirmation else -4
+        frame.iloc[start] = [95.0, 99.2, 94.8, 99.0, 1100.0]
+        frame.iloc[start + 1] = [98.0, 103.2, 97.8, 103.0, 1200.0]
+        frame.iloc[start + 2] = [102.0, 108.2, 101.8, 108.0, 1300.0]
+        frame.iloc[start + 3] = [109.0, 109.2, 94.0, 94.5, 1800.0]
+        if with_confirmation:
+            frame.iloc[-1] = [94.5, 111.0, 94.2, 110.0, 2000.0]
+        return frame
+
+    def test_bullish_three_line_strike_detected_as_continuation_setup(self):
+        frame = self._set_three_line_strike(candle_frame("up"))
+        # Establish rising context before the four-candle pattern.
+        frame.iloc[-12:-4, frame.columns.get_loc("close")] = np.linspace(85.0, 94.0, 8)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bullish Three Line Strike")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["name_fa"], "ضربهٔ سه‌خطی صعودی")
+
+    def test_bullish_three_line_strike_confirmed_by_close_above_fourth_high(self):
+        frame = self._set_three_line_strike(candle_frame("up"), with_confirmation=True)
+        frame.iloc[-13:-5, frame.columns.get_loc("close")] = np.linspace(85.0, 94.0, 8)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bullish Three Line Strike")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+
+    def test_bullish_three_line_strike_rejected_without_prior_uptrend(self):
+        frame = self._set_three_line_strike(candle_frame("flat"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bullish Three Line Strike" for p in analysis["candlestick_patterns"]))
 
     def test_confirmed_double_bottom_requires_neckline_break(self):
         frame = candle_frame("flat")

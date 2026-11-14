@@ -171,6 +171,336 @@ def _item(
     }
 
 
+def _morning_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a three-candle Morning Star and confirm it only with a later close."""
+    if len(frame) < 6:
+        return None
+
+    # Prefer a completed follow-through candle; otherwise report the latest forming setup.
+    candidates = []
+    if len(frame) >= 4:
+        candidates.append((len(frame) - 4, True))
+    candidates.append((len(frame) - 3, False))
+
+    for start, has_follow_through in candidates:
+        first, middle, third = (frame.iloc[start + offset] for offset in range(3))
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change > -0.003:
+            continue
+
+        first_open, first_close = float(first["open"]), float(first["close"])
+        first_high, first_low = float(first["high"]), float(first["low"])
+        middle_open, middle_close = float(middle["open"]), float(middle["close"])
+        middle_high, middle_low = float(middle["high"]), float(middle["low"])
+        third_open, third_close = float(third["open"]), float(third["close"])
+        third_high, third_low = float(third["high"]), float(third["low"])
+
+        first_range = first_high - first_low
+        middle_range = middle_high - middle_low
+        third_range = third_high - third_low
+        if min(first_range, middle_range, third_range) <= 0:
+            continue
+
+        first_body = abs(first_close - first_open)
+        middle_body = abs(middle_close - middle_open)
+        third_body = abs(third_close - third_open)
+        first_midpoint = (first_open + first_close) / 2.0
+
+        valid = (
+            first_close < first_open
+            and first_body >= first_range * 0.45
+            and middle_body <= middle_range * 0.30
+            and third_close > third_open
+            and third_body >= third_range * 0.45
+            and third_close >= first_midpoint
+            and third_close > middle_close
+        )
+        if not valid:
+            continue
+
+        follow_through = False
+        if has_follow_through:
+            confirmation = frame.iloc[start + 3]
+            follow_through = float(confirmation["close"]) > third_high
+
+        gap_down = middle_open < first_close
+        gap_up = third_open > middle_close
+        score = 15 + int(gap_down) + int(gap_up)
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        state = "CONFIRMED" if follow_through else "NEEDS_CONFIRMATION"
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از روند نزولی: کندل اول نزولی و بلند، کندل دوم کوچک/دوجی و کندل سوم صعودی و بلند است؛ "
+            "بسته‌شدن کندل سوم دست‌کم تا نیمهٔ بدنهٔ اول بازیابی شده است."
+        )
+        if gap_down or gap_up:
+            description += f" گپ نزولی: {'دارد' if gap_down else 'ندارد'}؛ گپ صعودی: {'دارد' if gap_up else 'ندارد'}."
+        if follow_through:
+            description += " کندل بعدی بالاتر از سقف کندل سوم بسته شده و الگو تأیید شده است."
+        else:
+            description += " برای تأیید، بسته‌شدن یک کندل بعدی بالاتر از سقف کندل سوم لازم است."
+
+        return _item(
+            name_fa="ستاره صبحگاهی",
+            name_en="Morning Star",
+            category="CANDLE",
+            direction="BULLISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BULLISH",
+            state=state,
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 2].isoformat(),
+            score=score if follow_through else int(score * 0.5),
+            trigger_price=third_high,
+            invalidation_price=first_low,
+        )
+    return None
+
+
+def _three_inside_up_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect Three Inside Up: bearish candle, bullish Harami, bullish breakout."""
+    if len(frame) < 6:
+        return None
+
+    first, second, third = (frame.iloc[-3 + i] for i in range(3))
+    prior = pd.to_numeric(frame["close"].iloc[-11:-3], errors="coerce")
+    if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+        return None
+    prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+    if prior_change > -0.003:
+        return None
+
+    fo, fc = float(first["open"]), float(first["close"])
+    fh, fl = float(first["high"]), float(first["low"])
+    so, sc = float(second["open"]), float(second["close"])
+    sh, sl = float(second["high"]), float(second["low"])
+    to, tc = float(third["open"]), float(third["close"])
+    th, tl = float(third["high"]), float(third["low"])
+
+    first_body = abs(fo - fc)
+    first_range = fh - fl
+    second_body = abs(sc - so)
+    second_range = sh - sl
+    third_body = abs(tc - to)
+    third_range = th - tl
+    if min(first_range, second_range, third_range) <= 0:
+        return None
+
+    first_is_long_bearish = fc < fo and first_body >= first_range * 0.45
+    bullish_harami = (
+        sc > so
+        and second_body > 0
+        and second_body <= first_body * 0.60
+        and so >= fc
+        and sc <= fo
+        and sh <= fh
+        and sl >= fl
+    )
+    third_is_bullish = tc > to and third_body >= third_range * 0.30
+    if not (first_is_long_bearish and bullish_harami and third_is_bullish):
+        return None
+
+    confirmed = tc > fh
+    volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+    state = "CONFIRMED" if confirmed else "NEEDS_CONFIRMATION"
+    strength = (
+        "STRONG" if confirmed and volume_confirmed
+        else "MODERATE" if confirmed or volume_confirmed
+        else "WEAK"
+    )
+    description = (
+        "پس از روند نزولی، کندل اول قرمز و بلند است؛ کندل دوم سبز و کوچک‌تر، "
+        "در محدودهٔ بدنهٔ کندل اول قرار دارد و ساختار هارامی صعودی می‌سازد. "
+    )
+    if confirmed:
+        description += "کندل سوم بالاتر از سقف کندل اول بسته شده و بازگشت صعودی تأیید شده است."
+    else:
+        description += "کندل سوم صعودی است اما هنوز بالای سقف کندل اول بسته نشده؛ تأیید کامل نشده است."
+    return _item(
+        name_fa="سه‌تایی از داخل به بالا",
+        name_en="Three Inside Up",
+        category="CANDLE",
+        direction="BULLISH" if confirmed else "NEUTRAL",
+        potential_direction=None if confirmed else "BULLISH",
+        state=state,
+        strength=strength,
+        description=description,
+        timestamp=frame.index[-1].isoformat(),
+        score=15 if confirmed else 7,
+        trigger_price=fh,
+        invalidation_price=fl,
+    )
+
+
+def _bullish_engulfing_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect bullish body engulfing after a decline; next close confirms the setup."""
+    if len(frame) < 4:
+        return None
+
+    candidates = []
+    if len(frame) >= 3:
+        candidates.append((len(frame) - 3, True))
+    candidates.append((len(frame) - 2, False))
+
+    for start, has_follow_through in candidates:
+        previous, engulfing = frame.iloc[start], frame.iloc[start + 1]
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change > -0.003:
+            continue
+
+        po, pc = float(previous["open"]), float(previous["close"])
+        eo, ec = float(engulfing["open"]), float(engulfing["close"])
+        eh, el = float(engulfing["high"]), float(engulfing["low"])
+        previous_body = abs(po - pc)
+        engulfing_body = abs(ec - eo)
+        if not (
+            pc < po
+            and ec > eo
+            and previous_body > 0
+            and engulfing_body > previous_body
+            and eo <= pc
+            and ec >= po
+        ):
+            continue
+
+        follow_through = (
+            has_follow_through
+            and float(frame.iloc[start + 2]["close"]) > eh
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        state = "CONFIRMED" if follow_through else "NEEDS_CONFIRMATION"
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        shadow_engulf = (
+            float(engulfing["high"]) >= float(previous["high"])
+            and el <= float(previous["low"])
+        )
+        description = (
+            "پس از افت قیمت، کندل سبز دوم تمام بدنهٔ کندل قرمز قبلی را پوشانده است. "
+            f"پوشش سایه‌ها: {'کامل' if shadow_engulf else 'ناقص یا غیرضروری'}."
+        )
+        if follow_through:
+            description += " کندل بعدی بالاتر از سقف کندل پوشا بسته شده و الگو تأیید شده است."
+        else:
+            description += " برای تأیید، بسته‌شدن کندل بعدی بالاتر از سقف کندل پوشا لازم است."
+        return _item(
+            name_fa="پوشای صعودی",
+            name_en="Bullish Engulfing",
+            category="CANDLE",
+            direction="BULLISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BULLISH",
+            state=state,
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 1].isoformat(),
+            score=14 if follow_through else 7,
+            trigger_price=eh,
+            invalidation_price=el,
+        )
+    return None
+
+
+def _bullish_three_line_strike_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect the four-candle bullish continuation Three Line Strike."""
+    if len(frame) < 7:
+        return None
+
+    candidates = []
+    if len(frame) >= 5:
+        candidates.append((len(frame) - 5, True))
+    candidates.append((len(frame) - 4, False))
+
+    for start, has_follow_through in candidates:
+        first, second, third, strike = (frame.iloc[start + i] for i in range(4))
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change < 0.003:
+            continue
+
+        bullish = (first, second, third)
+        bodies = [float(x["close"]) - float(x["open"]) for x in bullish]
+        ranges = [float(x["high"]) - float(x["low"]) for x in bullish]
+        strong_advances = all(
+            body > 0 and candle_range > 0 and body >= candle_range * 0.40
+            for body, candle_range in zip(bodies, ranges)
+        )
+        rising_closes = (
+            float(second["close"]) > float(first["close"])
+            and float(third["close"]) > float(second["close"])
+        )
+        close_near_highs = all(
+            float(x["high"]) - float(x["close"]) <= max(body * 0.35, 1e-12)
+            for x, body in zip(bullish, bodies)
+        )
+
+        strike_open = float(strike["open"])
+        strike_close = float(strike["close"])
+        strike_high = float(strike["high"])
+        strike_low = float(strike["low"])
+        engulfed_body_top = max(float(x["close"]) for x in bullish)
+        engulfed_body_bottom = min(float(x["open"]) for x in bullish)
+        strike_valid = (
+            strike_close < strike_open
+            and strike_open > float(third["close"])
+            and strike_open >= engulfed_body_top
+            and strike_close < float(first["open"])
+            and strike_close <= engulfed_body_bottom
+        )
+        if not (strong_advances and rising_closes and close_near_highs and strike_valid):
+            continue
+
+        follow_through = (
+            has_follow_through
+            and float(frame.iloc[start + 4]["close"]) > strike_high
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        state = "CONFIRMED" if follow_through else "NEEDS_CONFIRMATION"
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "الگوی ادامه‌دهندهٔ صعودی چهارکندلی: سه کندل سبز با بسته‌شدن‌های بالاتر، "
+            "سپس یک کندل قرمز بلند که بدنهٔ هر سه کندل را پوشانده و زیر بازشدن کندل اول بسته شده است. "
+            "پوشش سایه‌ها شرط نیست."
+        )
+        if follow_through:
+            description += " کندل بعدی بالاتر از سقف کندل چهارم بسته شده و ادامهٔ صعود تأیید شده است."
+        else:
+            description += " تا بسته‌شدن کندل بعدی بالاتر از سقف کندل چهارم، الگو در انتظار تأیید است."
+        return _item(
+            name_fa="ضربهٔ سه‌خطی صعودی",
+            name_en="Bullish Three Line Strike",
+            category="CANDLE",
+            direction="BULLISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BULLISH",
+            state=state,
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 3].isoformat(),
+            score=16 if follow_through else 8,
+            trigger_price=strike_high,
+            invalidation_price=strike_low,
+        )
+    return None
+
+
 def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[dict[str, Any]]:
     if len(frame) < 3:
         return []
@@ -219,17 +549,27 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     first_bear = fc < fo
     first_bull = fc > fo
 
-    if first_bear and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bull and c > first_mid and c > mc:
-        add("ستاره صبحگاهی", "Morning Star", "BULLISH",
-            "سه کندلِ فشار فروش، مکث و بازپس‌گیری بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی بالای سقف الگو.", 15)
-    elif first_bull and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bear and c < first_mid and c < mc:
+    morning_star = _morning_star_pattern(frame, volume_ratio)
+    if morning_star is not None:
+        out.append(morning_star)
+
+    three_inside_up = _three_inside_up_pattern(frame, volume_ratio)
+    if three_inside_up is not None:
+        out.append(three_inside_up)
+
+    if first_bull and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bear and c < first_mid and c < mc:
         add("ستاره شامگاهی", "Evening Star", "BEARISH",
             "سه کندلِ فشار خرید، مکث و پس‌گرفتن بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی زیر کف الگو.", -15)
 
-    if pc < po and last_bull and o <= pc and c >= po and body >= abs(pc - po):
-        add("پوشای صعودی", "Bullish Engulfing", "BULLISH",
-            "بدنهٔ صعودی آخر، بدنهٔ نزولی قبلی را پوشانده است؛ در روند نزولی معنا‌دارتر است.", 13)
-    elif pc > po and last_bear and o >= pc and c <= po and body >= abs(pc - po):
+    bullish_engulfing = _bullish_engulfing_pattern(frame, volume_ratio)
+    if bullish_engulfing is not None:
+        out.append(bullish_engulfing)
+
+    three_line_strike = _bullish_three_line_strike_pattern(frame, volume_ratio)
+    if three_line_strike is not None:
+        out.append(three_line_strike)
+
+    if pc > po and last_bear and o >= pc and c <= po and body >= abs(pc - po):
         add("پوشای نزولی", "Bearish Engulfing", "BEARISH",
             "بدنهٔ نزولی آخر، بدنهٔ صعودی قبلی را پوشانده است؛ در روند صعودی معنا‌دارتر است.", -13)
 
@@ -240,18 +580,44 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
         add("ابر تیره", "Dark Cloud Cover", "BEARISH",
             "کندل نزولی بیش از نیمهٔ بدنهٔ صعودی قبلی را پس گرفته است.", -10)
 
-    # The classic three-soldiers / three-crows formations.
+    # Three White Soldiers: three strong advances with controlled pullbacks.
     three = frame.tail(3)
-    bodies = (three["close"] - three["open"]).to_numpy(dtype=float)
-    ranges = (three["high"] - three["low"]).to_numpy(dtype=float)
-    if np.all(bodies > 0) and np.all(bodies >= np.maximum(ranges * 0.45, 1e-15)):
-        if np.all(np.diff(three["close"].to_numpy(dtype=float)) > 0):
-            add("سه سرباز سفید", "Three White Soldiers", "BULLISH",
-                "سه کندل صعودی با بدنه‌های نسبتاً قوی و بسته‌شدن‌های پیاپی بالاتر.", 14)
-    elif np.all(bodies < 0) and np.all(-bodies >= np.maximum(ranges * 0.45, 1e-15)):
-        if np.all(np.diff(three["close"].to_numpy(dtype=float)) < 0):
-            add("سه کلاغ سیاه", "Three Black Crows", "BEARISH",
-                "سه کندل نزولی با بدنه‌های نسبتاً قوی و بسته‌شدن‌های پیاپی پایین‌تر.", -14)
+    soldiers = three.to_dict("records")
+    soldier_bodies = [float(x["close"]) - float(x["open"]) for x in soldiers]
+    soldier_ranges = [float(x["high"]) - float(x["low"]) for x in soldiers]
+    soldier_lower = [min(float(x["open"]), float(x["close"])) - float(x["low"]) for x in soldiers]
+    soldier_upper = [float(x["high"]) - max(float(x["open"]), float(x["close"])) for x in soldiers]
+    prior_soldier_closes = pd.to_numeric(frame["close"].iloc[-11:-3], errors="coerce")
+    prior_move = (
+        float(prior_soldier_closes.iloc[-1] / prior_soldier_closes.iloc[0] - 1.0)
+        if len(prior_soldier_closes) >= 3 and float(prior_soldier_closes.iloc[0]) > 0
+        else 0.0
+    )
+    prior_not_bullish = prior_move <= 0.003
+    opens_inside_previous_bodies = all(
+        min(float(soldiers[i - 1]["open"]), float(soldiers[i - 1]["close"]))
+        <= float(soldiers[i]["open"])
+        <= max(float(soldiers[i - 1]["open"]), float(soldiers[i - 1]["close"]))
+        for i in (1, 2)
+    )
+    soldiers_valid = (
+        prior_not_bullish
+        and all(r > 0 for r in soldier_ranges)
+        and all(b > 0 and b >= r * 0.50 for b, r in zip(soldier_bodies, soldier_ranges))
+        and all(w <= b * 0.25 for w, b in zip(soldier_lower, soldier_bodies))
+        and all(w <= b * 0.50 for w, b in zip(soldier_upper, soldier_bodies))
+        and all(soldiers[i]["close"] > soldiers[i - 1]["close"] for i in (1, 2))
+        and opens_inside_previous_bodies
+    )
+    if soldiers_valid:
+        add("سه سرباز سفید", "Three White Soldiers", "BULLISH",
+            "سه کندل سبزِ قوی پس از روند نزولی/تثبیت؛ هر کندل داخل بدنه قبلی باز شده، بالاتر بسته شده و سایه پایینی کوتاه دارد. برای ورود، تأیید مستقل روند و ریسک لازم است.",
+            15, strength="STRONG" if volume_confirmed else "MODERATE")
+    elif np.all(np.asarray(soldier_bodies) < 0) and all(
+        -b >= r * 0.45 for b, r in zip(soldier_bodies, soldier_ranges)
+    ) and np.all(np.diff(three["close"].to_numpy(dtype=float)) < 0):
+        add("سه کلاغ سیاه", "Three Black Crows", "BEARISH",
+            "سه کندل نزولی با بدنه‌های نسبتاً قوی و بسته‌شدن‌های پیاپی پایین‌تر.", -14)
 
     # Single-candle reversal shapes; trend context distinguishes hammer from hanging man.
     small_body = body_ratio <= 0.35
