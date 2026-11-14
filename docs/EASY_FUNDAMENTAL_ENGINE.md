@@ -100,4 +100,4 @@ The Easy Fundamental report exposes `sector_rotation` as a supporting market dia
 - The cycle-phase/sector examples are contextual, not hard-coded forecasts. Missing sector evidence remains `UNKNOWN`; partial sector coverage is labeled `PARTIAL`.
 - No automatic portfolio overweight, allocation change or trade authorization is produced.
 
-Both modules are displayed in the Persian Streamlit Fundamental panel. They do not change the seven-module weights, 70% coverage threshold, mandatory trade gates, Standard/Strict engines or order execution.
+Both modules are displayed in the Persian Streamlit Fundamental panel and the default HTTP/Render dashboard. They do not change the seven-module weights, 70% coverage threshold, mandatory trade gates, Standard/Strict engines or order execution.
