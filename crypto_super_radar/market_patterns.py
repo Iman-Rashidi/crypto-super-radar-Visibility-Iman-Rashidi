@@ -167,6 +167,80 @@ def _morning_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> di
     return None
 
 
+def _bullish_engulfing_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect bullish body engulfing after a decline; next close confirms the setup."""
+    if len(frame) < 4:
+        return None
+
+    candidates = []
+    if len(frame) >= 3:
+        candidates.append((len(frame) - 3, True))
+    candidates.append((len(frame) - 2, False))
+
+    for start, has_follow_through in candidates:
+        previous, engulfing = frame.iloc[start], frame.iloc[start + 1]
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change > -0.003:
+            continue
+
+        po, pc = float(previous["open"]), float(previous["close"])
+        eo, ec = float(engulfing["open"]), float(engulfing["close"])
+        eh, el = float(engulfing["high"]), float(engulfing["low"])
+        previous_body = abs(po - pc)
+        engulfing_body = abs(ec - eo)
+        if not (
+            pc < po
+            and ec > eo
+            and previous_body > 0
+            and engulfing_body > previous_body
+            and eo <= pc
+            and ec >= po
+        ):
+            continue
+
+        follow_through = (
+            has_follow_through
+            and float(frame.iloc[start + 2]["close"]) > eh
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        state = "CONFIRMED" if follow_through else "NEEDS_CONFIRMATION"
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        shadow_engulf = (
+            float(engulfing["high"]) >= float(previous["high"])
+            and el <= float(previous["low"])
+        )
+        description = (
+            "پس از افت قیمت، کندل سبز دوم تمام بدنهٔ کندل قرمز قبلی را پوشانده است. "
+            f"پوشش سایه‌ها: {'کامل' if shadow_engulf else 'ناقص یا غیرضروری'}."
+        )
+        if follow_through:
+            description += " کندل بعدی بالاتر از سقف کندل پوشا بسته شده و الگو تأیید شده است."
+        else:
+            description += " برای تأیید، بسته‌شدن کندل بعدی بالاتر از سقف کندل پوشا لازم است."
+        return _item(
+            name_fa="پوشای صعودی",
+            name_en="Bullish Engulfing",
+            category="CANDLE",
+            direction="BULLISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BULLISH",
+            state=state,
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 1].isoformat(),
+            score=14 if follow_through else 7,
+            trigger_price=eh,
+            invalidation_price=el,
+        )
+    return None
+
+
 def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[dict[str, Any]]:
     if len(frame) < 3:
         return []
@@ -223,10 +297,11 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
         add("ستاره شامگاهی", "Evening Star", "BEARISH",
             "سه کندلِ فشار خرید، مکث و پس‌گرفتن بیش از نیمهٔ بدنهٔ کندل اول؛ تأیید با بسته‌شدن بعدی زیر کف الگو.", -15)
 
-    if pc < po and last_bull and o <= pc and c >= po and body >= abs(pc - po):
-        add("پوشای صعودی", "Bullish Engulfing", "BULLISH",
-            "بدنهٔ صعودی آخر، بدنهٔ نزولی قبلی را پوشانده است؛ در روند نزولی معنا‌دارتر است.", 13)
-    elif pc > po and last_bear and o >= pc and c <= po and body >= abs(pc - po):
+    bullish_engulfing = _bullish_engulfing_pattern(frame, volume_ratio)
+    if bullish_engulfing is not None:
+        out.append(bullish_engulfing)
+
+    if pc > po and last_bear and o >= pc and c <= po and body >= abs(pc - po):
         add("پوشای نزولی", "Bearish Engulfing", "BEARISH",
             "بدنهٔ نزولی آخر، بدنهٔ صعودی قبلی را پوشانده است؛ در روند صعودی معنا‌دارتر است.", -13)
 
