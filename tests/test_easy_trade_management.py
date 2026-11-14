@@ -75,7 +75,7 @@ class EasyTradeManagementTests(unittest.TestCase):
         self.assertEqual(manager.journal()[0]["exit_reason"], "STOP_LOSS")
 
     def test_ambiguous_stop_and_target_bar_uses_stop_first(self):
-        manager = EasyPositionManager(db=__import__("sqlite3").connect(":memory:", check_same_thread=False))
+        manager = EasyPositionManager(db=connect_database(":memory:"))
         opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 95, 105)
         result = manager.update_position(opened["position_id"], {"open":100,"high":106,"low":94,"close":101})
         self.assertEqual(result["reason"], "STOP_LOSS")
