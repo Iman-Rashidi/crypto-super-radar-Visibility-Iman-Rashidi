@@ -26,7 +26,7 @@ Weights are initial product defaults, not empirically calibrated predictive coef
 ## Integration status
 The Easy integrated engine now attaches `metrics.fundamental_analysis` to each analysis result. It reads optional `data.fundamental_evidence(asset)` if a provider implements it. No such live fundamentals provider is currently configured, so the production-shaped default is UNKNOWN with no score. This is intentional: the dashboard must not display fabricated positive/negative fundamentals.
 
-Fundamental output is descriptive only and is not a thirteenth gate, a trade authorization, or a modification to the existing twelve-gate decision logic. Live data adapters, UI presentation, and validation of the provisional weights remain follow-up work.
+Fundamental output is descriptive only and is not a thirteenth gate, a trade authorization, or a modification to the existing twelve-gate decision logic. Live data adapters and empirical validation of the provisional weights remain follow-up work. A Persian Fundamental tab is present in the optional Streamlit dashboard, and the default Render HTTP dashboard exposes the same report in its scan result.
 
 ## Test coverage
 Unit tests cover sector classification, partial/missing evidence, DCF assumptions and token capture, same-sector comparable filtering, coverage threshold, weighted score and the no-trade-authorization invariant.
