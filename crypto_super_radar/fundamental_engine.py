@@ -755,162 +755,73 @@ def sector_rotation_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def esg_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
-    """Evidence-led ESG diagnostic for companies and crypto networks.
-
-    Pillars are supplied independently as {score: 0..100, source_url,
-    observed_at_utc, evidence/metrics}. No narrative is converted into a score.
-    The diagnostic is excluded from the seven weighted Fundamental modules.
-    """
-    asset_class = str(evidence.get("asset_class") or "").strip().lower()
-    equity_classes = {"equity", "stock", "share", "reit"}
-    crypto_classes = {"crypto", "cryptocurrency", "token", "digital_asset"}
-    if asset_class not in equity_classes | crypto_classes:
-        return {"status": "UNKNOWN", "score": None, "applicability": "UNKNOWN",
-                "message_fa": "نوع دارایی مشخص نیست؛ چارچوب ESG مناسب انتخاب نشد."}
-    is_crypto = asset_class in crypto_classes
-    pillar_names = ("environmental", "social", "governance")
-    labels = {
-        "environmental": "محیط‌زیست",
-        "social": "اجتماعی",
-        "governance": "حاکمیت",
-    }
-    descriptions = {
-        "environmental": (
-            "برای شرکت: انتشار کربن، مصرف انرژی، آب و مدیریت پسماند؛ "
-            "برای شبکه رمزارزی: انرژی مصرفی، ترکیب انرژی و شدت کربن."
-        ),
-        "social": (
-            "برای شرکت: شرایط نیروی کار، ایمنی محصول، زنجیره تأمین و حریم خصوصی؛ "
-            "برای شبکه رمزارزی: دسترس‌پذیری، اثر بر کاربران، جامعه و ریسک‌های سوءاستفاده."
-        ),
-        "governance": (
-            "برای شرکت: استقلال هیئت‌مدیره، حسابرسی، کنترل داخلی و حقوق سهام‌داران؛ "
-            "برای شبکه رمزارزی: تمرکز اعتبارسنج/ماینر، شفافیت تصمیم‌گیری، امنیت و پاسخ‌گویی."
-        ),
-    }
-    pillars: dict[str, dict[str, Any]] = {}
-    valid_scores: list[float] = []
-    unknown: list[str] = []
-    for name in pillar_names:
-        raw = evidence.get(name)
-        raw = raw if isinstance(raw, Mapping) else {}
-        score = _number(raw.get("score"))
-        source = raw.get("source_url")
-        observed = raw.get("observed_at_utc")
-        valid_source = (isinstance(source, str)
-                        and source.startswith(("https://", "http://"))
-                        and bool(observed))
-        valid = (raw.get("status") == "KNOWN" and score is not None
-                 and 0 <= score <= 100 and valid_source)
-        if valid:
-            valid_scores.append(score)
-            status = "KNOWN"
-        else:
-            unknown.append(name)
-            status = "UNKNOWN"
-        pillars[name] = {
-            "label_fa": labels[name], "status": status,
-            "score": round(score, 2) if valid else None,
-            "source_url": source if valid else None,
-            "observed_at_utc": observed if valid else None,
-            "metrics": dict(raw.get("metrics", {})) if isinstance(raw.get("metrics"), Mapping) else {},
-            "evidence": raw.get("evidence") if isinstance(raw.get("evidence"), (str, list, dict)) else None,
-            "description_fa": descriptions[name],
-        }
-    overall = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else None
-    status = "KNOWN" if len(valid_scores) == 3 else "PARTIAL" if valid_scores else "UNKNOWN"
-    controversy_items = evidence.get("controversies")
-    controversies = []
-    if isinstance(controversy_items, list):
-        for item in controversy_items:
-            if not isinstance(item, Mapping):
-                continue
-            source = item.get("source_url")
-            observed = item.get("observed_at_utc")
-            if (isinstance(source, str) and source.startswith(("https://", "http://"))
-                    and observed and item.get("description")):
-                controversies.append({
-                    "description": str(item["description"])[:500],
-                    "severity": str(item.get("severity") or "UNASSESSED").upper(),
-                    "pillar": item.get("pillar") if item.get("pillar") in pillar_names else None,
-                    "source_url": source, "observed_at_utc": observed,
-                })
-    return {
-        "status": status, "score": overall, "applicability": "APPLICABLE",
-        "asset_type": "crypto_network_or_token" if is_crypto else "company",
-        "framework": "three_pillar_esg",
-        "pillars": pillars, "known_pillars": len(valid_scores),
-        "total_pillars": 3, "unknown_pillars": unknown,
-        "controversies": controversies,
-        "controversy_count": len(controversies),
-        "message_fa": (
-            "امتیاز ESG فقط میان محورهای دارای دادهٔ معتبر محاسبه شده است؛ "
-            "محورهای ناموجود حذف و به‌عنوان UNKNOWN نمایش داده می‌شوند. "
-            "این شاخص تشخیصی است و به‌تنهایی سیگنال معامله نیست."
-        ),
-        "interpretation_fa": (
-            "برای سهام، کیفیت افشا و عملکرد شرکت بررسی می‌شود؛ برای رمزارزها "
-            "مصرف انرژی شبکه، اثر اجتماعی و تمرکز/شفافیت حاکمیتی اهمیت دارد."
-        ),
-        "limitations": [
-            "امتیازدهی ESG میان ارائه‌دهندگان ممکن است به‌دلیل روش‌شناسی متفاوت باشد.",
-            "امتیاز بالا تضمین‌کننده بازده مالی یا نبود ریسک حقوقی و اعتباری نیست.",
-            "نبود داده به‌معنای عملکرد ضعیف نیست و نباید امتیاز صفر تلقی شود.",
-            "محورهای ESG در شرکت و شبکه رمزارزی قابل مقایسه مستقیم نیستند.",
-        ],
-    }
-
-
-
-def esg_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Evidence-only ESG diagnostic for companies and crypto networks; not a trade signal."""
     asset_class = str(evidence.get("asset_class") or "").strip().lower()
     crypto = asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}
     equity = asset_class in {"equity", "stock", "share", "reit", "company"}
     if not (crypto or equity):
-        return {"status": "UNKNOWN", "score": None,
+        return {"status": "UNKNOWN", "applicability": "UNKNOWN", "asset_type": None,
+                "score": None, "known_pillars": 0, "controversy_count": 0,
                 "message_fa": "نوع دارایی مشخص نیست؛ ارزیابی ESG انجام نشد."}
-    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
-    sourced = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(observed)
-    pillars = ("environmental", "social", "governance")
-    scores: dict[str, float] = {}
-    unknown: list[str] = []
-    for pillar in pillars:
-        item = evidence.get(pillar)
-        value = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
-        if value is None or not 0 <= value <= 100:
-            unknown.append(pillar)
-        else:
-            scores[pillar] = value
-    # Network-specific evidence is kept distinct from corporate ESG metrics.
-    network_metrics = {}
-    if crypto:
-        for key in ("energy_per_transaction_kwh", "renewable_energy_pct",
-                    "validator_or_miner_concentration_pct", "client_diversity_pct",
-                    "network_uptime_pct", "security_incidents_12m"):
-            network_metrics[key] = _number(evidence.get(key))
-    controversies = evidence.get("controversies")
-    controversies = [str(x) for x in controversies if isinstance(x, str)] if isinstance(controversies, list) else []
-    score = round(sum(scores.values()) / len(scores), 2) if scores and sourced else None
-    status = ("KNOWN" if len(scores) == 3 else "PARTIAL") if score is not None else "UNKNOWN"
+    pillar_descriptions = {
+        "environmental": "مصرف انرژی، انتشار کربن، آب و پسماند؛ در شبکه رمزارزها اثر انرژی و اجماع شبکه.",
+        "social": "شرایط کارکنان، زنجیره تأمین، ایمنی، حریم خصوصی و اثر بر جامعه و کاربران.",
+        "governance": ("شفافیت، کنترل داخلی، حقوق سهام‌داران و پاسخ‌گویی هیئت‌مدیره." if equity else
+                       "تمرکز اعتبارسنج یا ماینر، تمرکز قدرت تصمیم‌گیری، شفافیت و پاسخ‌گویی شبکه."),
+    }
+    pillars: dict[str, Any] = {}
+    scores: list[float] = []
+    for key in ("environmental", "social", "governance"):
+        item = evidence.get(key)
+        item = item if isinstance(item, Mapping) else {}
+        value = _number(item.get("score")) if item.get("status") == "KNOWN" else None
+        source = item.get("source_url")
+        observed = item.get("observed_at_utc")
+        verified = (value is not None and 0 <= value <= 100
+                    and isinstance(source, str) and source.startswith(("https://", "http://"))
+                    and bool(observed))
+        if verified:
+            scores.append(value)
+        pillars[key] = {
+            "status": "KNOWN" if verified else "UNKNOWN",
+            "score": value if verified else None,
+            "source_url": source if verified else None,
+            "observed_at_utc": observed if verified else None,
+            "metrics": dict(item.get("metrics")) if verified and isinstance(item.get("metrics"), Mapping) else {},
+            "description_fa": pillar_descriptions[key],
+        }
+    raw_controversies = evidence.get("controversies")
+    controversies = []
+    if isinstance(raw_controversies, list):
+        for item in raw_controversies:
+            if not isinstance(item, Mapping):
+                continue
+            url, observed = item.get("source_url"), item.get("observed_at_utc")
+            description = item.get("description")
+            if (isinstance(url, str) and url.startswith(("https://", "http://"))
+                    and observed and isinstance(description, str) and description.strip()):
+                controversies.append({
+                    "description": description.strip(),
+                    "severity": str(item.get("severity") or "UNSPECIFIED").upper(),
+                    "pillar": item.get("pillar") if item.get("pillar") in {"environmental", "social", "governance"} else None,
+                    "source_url": url, "observed_at_utc": observed,
+                })
+    known_count = len(scores)
+    score = round(sum(scores) / known_count, 2) if known_count else None
+    status = "KNOWN" if known_count == 3 else "PARTIAL" if known_count else "UNKNOWN"
     return {
-        "status": status, "score": score, "applicability": "APPLICABLE",
-        "asset_class": "crypto" if crypto else "equity",
-        "pillars": {key: {"status": "KNOWN" if key in scores and sourced else "UNKNOWN",
-                          "score": scores.get(key)} for key in pillars},
-        "known_pillars": [key for key in pillars if key in scores and sourced],
-        "unknown_pillars": [key for key in pillars if key not in scores or not sourced],
-        "network_metrics": network_metrics, "controversies": controversies,
-        "controversy_review_required": bool(controversies),
-        "source": source if sourced else None,
-        "observed_at_utc": observed if sourced else None,
-        "message_fa": ("امتیاز ESG فقط میانگین سادهٔ محورهای دارای امتیاز منبع‌دار است؛ این عدد رتبه‌بندی رسمی یا توصیه سرمایه‌گذاری نیست. "
-                       "برای رمزارزها معیارهای شبکه جایگزین شاخص‌های شرکتی شده‌اند و جداگانه نمایش داده می‌شوند."),
+        "status": status, "applicability": "APPLICABLE",
+        "asset_type": "crypto_network_or_token" if crypto else "company",
+        "score": score, "pillars": pillars, "known_pillars": known_count,
+        "unknown_pillars": [key for key, item in pillars.items() if item["status"] != "KNOWN"],
+        "controversies": controversies, "controversy_count": len(controversies),
+        "message_fa": ("میانگین تشخیصی محورهای ESG بر اساس شواهد مستقل و منبع‌دار محاسبه می‌شود؛ "
+                       "این عدد رتبه‌بندی رسمی یا توصیه سرمایه‌گذاری نیست. محور فاقد مدرک UNKNOWN باقی می‌ماند."),
         "limitations": [
             "روش امتیازدهی ارائه‌دهندگان ESG یکسان نیست و میانگین ساده جایگزین رتبه‌بندی مستقل نیست.",
             "نبود داده به‌معنای عملکرد خوب یا بد نیست؛ محور فاقد مدرک UNKNOWN باقی می‌ماند.",
             "برای رمزارزها مصرف انرژی، تمرکز اعتبارسنج/ماینر، تنوع کلاینت، پایداری و رخدادهای امنیتی باید با داده شبکه سنجیده شوند.",
-            "فهرست مناقشات نیازمند بررسی انسانی و راستی‌آزمایی منبع است."
+            "مناقشات فقط با منبع و زمان مشاهده معتبر نمایش داده می‌شوند و امتیاز را خودکار تغییر نمی‌دهند."
         ],
     }
 
