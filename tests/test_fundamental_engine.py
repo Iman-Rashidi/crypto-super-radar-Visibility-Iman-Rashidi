@@ -251,7 +251,7 @@ class ShareBuybackAnalysisTests(unittest.TestCase):
             "net_income": 1_000_000, "source": "https://example.org/filing",
             "observed_at_utc": "2026-11-01T00:00:00Z",
         })
-        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["status"], "KNOWN")
         self.assertAlmostEqual(result["buyback_yield_pct"], 10)
         self.assertAlmostEqual(result["share_reduction_pct"], 10)
         self.assertAlmostEqual(result["mechanical_eps_before"], 1)
