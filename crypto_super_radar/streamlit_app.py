@@ -208,6 +208,7 @@ def main() -> None:
         "خطاها و داده‌های نامشخص",
         "معیارهای کوانت",
         "نهنگ‌ها و احساسات",
+        "تحلیل بنیادی",
     ])
     with tabs[0]:
         trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
@@ -320,6 +321,41 @@ def main() -> None:
             "ورود توکن به صرافی به‌تنهایی اثبات فروش و خروج از صرافی اثبات خرید نیست. "
             "Fear & Greed نیز شاخص کلی بازار است، نه مختص این دارایی."
         )
+
+    with tabs[6]:
+        fundamental = result.metrics.get("fundamental_analysis") or {}
+        st.subheader("Fundamental Engine | تحلیل بنیادی")
+        fc1, fc2 = st.columns(2)
+        overall_score = fundamental.get("score")
+        coverage = fundamental.get("coverage_pct")
+        fc1.metric("امتیاز بنیادی", "نامشخص" if overall_score is None else f"{overall_score:.1f} / 100")
+        fc2.metric("پوشش شواهد", "نامشخص" if coverage is None else f"{coverage:.1f}%")
+        st.caption("این امتیاز مستقل از Opportunity Rank و Risk Score است و به‌تنهایی مجوز معامله نیست.")
+        module_labels = {
+            "macro": "اقتصاد کلان",
+            "tokenomics": "توکنومیکس",
+            "onchain": "داده‌های آن‌چین",
+            "project": "سلامت بنیادی پروژه",
+            "industry": "تحلیل صنعت و رقبا",
+            "dcf": "ارزش‌گذاری DCF",
+            "comparables": "مقایسه پروژه‌های هم‌صنعت",
+        }
+        module_rows = []
+        for key, label in module_labels.items():
+            item = (fundamental.get("modules") or {}).get(key) or {}
+            value = item.get("score")
+            module_rows.append({
+                "ماژول": label,
+                "وضعیت": item.get("status", "UNKNOWN"),
+                "امتیاز": "نامشخص" if value is None else round(float(value), 2),
+            })
+        st.dataframe(pd.DataFrame(module_rows), hide_index=True, use_container_width=True)
+        if fundamental.get("status") in {"UNKNOWN", "INSUFFICIENT_COVERAGE"}:
+            st.warning("داده بنیادی معتبر و کافی برای امتیاز کلی در دسترس نیست؛ این وضعیت به‌عنوان UNKNOWN ثبت می‌شود.")
+        if fundamental.get("status") == "PARTIAL":
+            st.info("امتیاز بر اساس ماژول‌های معتبر محاسبه شده و بخشی از شواهد هنوز نامشخص است.")
+        st.info(fundamental.get("message_fa", "این گزارش صرفاً تحلیلی است و معامله را تأیید نمی‌کند."))
+        st.caption("DCF فقط با جریان نقدی منتسب به توکن و نسبت صریح Token Value Capture معتبر است؛ مقایسه ارزش‌گذاری فقط با پروژه‌های هم‌صنعت انجام می‌شود. منابع بنیادی زنده هنوز به این محیط متصل نشده‌اند.")
 
     st.caption(
         "دادهٔ این صفحه مربوط به آخرین اسکن ذخیره‌شده در همین نشست است. "
