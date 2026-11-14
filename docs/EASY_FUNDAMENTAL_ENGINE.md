@@ -77,3 +77,27 @@ The Easy Fundamental report exposes `dividend_analysis` as a supporting diagnost
 - Every metric requires a source URL and observation timestamp before its check is marked known. Missing data remains `UNKNOWN`; no synthetic score is generated.
 - The Persian Streamlit Fundamental panel displays the module, applicability, key ratios, sustainability, growth, trap warning, evidence checks and source.
 - This module does not alter the seven-module weights, 70% coverage rule, twelve mandatory trade gates, or trade authorization.
+
+
+## M&A analysis / mergers and acquisitions
+
+The Easy Fundamental report exposes `mergers_acquisitions` as an evidence-only corporate-action diagnostic, excluded from the seven weighted modules. For crypto/token assets this company-level module returns `NOT_APPLICABLE`, not a negative score.
+
+- Each deal requires a source URL and announcement timestamp before it can be marked known.
+- Captures acquirer, target, deal status, transaction value, financing type, expected synergies, integration risk, regulatory status and indirect competitor impact when supplied.
+- Offer premium is calculated as `(offer price per share / unaffected share price - 1) * 100`; it is not a guaranteed target return or completion probability.
+- Debt financing, high integration risk and regulatory review/challenge/block are exposed as review flags.
+- Rumored, announced, pending, completed, terminated and withdrawn statuses are distinguished. Missing evidence remains `UNKNOWN`.
+- The module does not infer deal probability, fair value, causality or a trading signal.
+
+## Sector rotation analysis
+
+The Easy Fundamental report exposes `sector_rotation` as a supporting market diagnostic, excluded from the seven weighted modules.
+
+- Requires timestamped sector returns, benchmark returns and source URLs. Capital-flow change is optional and remains `UNKNOWN` when not supplied.
+- Relative strength is calculated as `sector return - benchmark return`; sectors are ranked by this observed relative performance, with leaders and laggards displayed.
+- Economic phase accepts early expansion, mid expansion, late expansion or contraction only when accompanied by a source and observation timestamp.
+- The cycle-phase/sector examples are contextual, not hard-coded forecasts. Missing sector evidence remains `UNKNOWN`; partial sector coverage is labeled `PARTIAL`.
+- No automatic portfolio overweight, allocation change or trade authorization is produced.
+
+Both modules are displayed in the Persian Streamlit Fundamental panel. They do not change the seven-module weights, 70% coverage threshold, mandatory trade gates, Standard/Strict engines or order execution.
