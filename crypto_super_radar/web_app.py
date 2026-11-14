@@ -3897,6 +3897,7 @@ class Handler(BaseHTTPRequestHandler):
                 manager = _get_easy_position_manager()
                 payload = {
                     "status": "KNOWN", "mode": "PAPER_ONLY",
+                    "storage_backend": storage_backend(),
                     "open_positions": manager.open_positions(),
                     "recent_journal": manager.journal(50),
                     "orders_submitted": False,
