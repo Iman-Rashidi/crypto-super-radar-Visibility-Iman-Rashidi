@@ -448,7 +448,7 @@ def main() -> None:
                     pillar = (esg.get("pillars") or {}).get(key) or {}
                     val = pillar.get("score")
                     col.metric(title, "نامشخص" if val is None else f"{val:.1f}/100")
-                st.metric("میانگین تشخیصی ESG", "نامشخص" if esg.get("score") is None else f"{esg['score']:.1f}/100")
+                st.metric("میانگین تشخیصی ESG", "نامشخص" if esg.get("diagnostic_score") is None else f"{esg['diagnostic_score']:.1f}/100")
                 if esg.get("network_metrics"):
                     st.write("شاخص‌های اختصاصی شبکه رمزارز")
                     st.json(esg["network_metrics"])
