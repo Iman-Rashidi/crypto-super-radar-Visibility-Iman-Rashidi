@@ -20,6 +20,7 @@ from .evm_transfers import EvmTransferScanner
 from .market_sentiment import fetch_market_sentiment
 from .market_intelligence import fetch_market_intelligence
 from .market_behavior import analyze_market_behavior
+from .price_action import analyze_easy_price_action
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
 from .solana_whales import SolanaWhaleScanner
@@ -367,6 +368,8 @@ class WhaleAwareConfirmationEngine:
             result.gates[2].evidence.get("direction", "NO TRADE")
             if len(result.gates) > 2 else "NO TRADE"
         )
+        # Easy price-action diagnostics are informational only; they never veto a trade.
+        result.metrics["easy_price_action"] = analyze_easy_price_action(wave_candles)
         behavior = analyze_market_behavior(
             wave_candles,
             getattr(snapshot, "price_usd", None),
