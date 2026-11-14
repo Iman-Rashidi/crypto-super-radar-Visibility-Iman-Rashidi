@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .technical_indicators import analyze_technical_indicators
+
 
 def _finite(value: Any) -> bool:
     try:
@@ -2103,6 +2105,7 @@ def analyze_market_patterns(
         regime = "TRENDING"
     else:
         regime = "TRANSITION"
+    technical_indicators = analyze_technical_indicators(candles)
     wave_structure = {
         "pattern": wave_pattern,
         "status": wave_state,
@@ -2142,6 +2145,7 @@ def analyze_market_patterns(
             "bearish_pattern_count": bearish_count,
         },
         "candlestick_patterns": candle_patterns,
+        "technical_indicators": technical_indicators,
         "geometric_patterns": geometric_patterns,
         "wave_structure": wave_structure,
         "summary": [
