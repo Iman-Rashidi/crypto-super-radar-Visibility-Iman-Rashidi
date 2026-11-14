@@ -596,13 +596,36 @@ def eps_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     forecast_eps = _number(evidence.get("forecast_eps"))
     forecast_change_pct = ((forecast_eps / basic_eps - 1) * 100
                            if forecast_eps is not None and basic_eps is not None and basic_eps != 0 else None)
+    # PEG uses an explicitly supplied forward EPS growth rate in percentage points.
+    # Historical CAGR is context only and is never silently substituted for a forecast.
+    expected_growth_pct = _number(evidence.get("expected_eps_growth_pct"))
+    peg_ratio = (pe_ratio / expected_growth_pct
+                 if pe_ratio is not None and expected_growth_pct is not None and expected_growth_pct > 0 else None)
+    peg_interpretation = (
+        "POTENTIALLY_UNDERVALUED" if peg_ratio is not None and peg_ratio < 1 else
+        "GROWTH_ALIGNED" if peg_ratio is not None and peg_ratio == 1 else
+        "POTENTIALLY_OVERVALUED" if peg_ratio is not None and peg_ratio > 1 else "UNKNOWN"
+    )
+    peer_pe = _positive(evidence.get("industry_average_pe"))
+    historical_pe = _positive(evidence.get("historical_average_pe"))
+    market_pe = _positive(evidence.get("market_average_pe"))
+    relative_pe = {
+        key: round((pe_ratio / benchmark - 1) * 100, 2)
+        for key, benchmark in (
+            ("industry", peer_pe), ("historical", historical_pe), ("market", market_pe)
+        ) if pe_ratio is not None and benchmark is not None
+    }
     checks = {
         "basic_eps": "KNOWN" if basic_eps is not None and sourced else "UNKNOWN",
         "diluted_eps": "KNOWN" if diluted_eps is not None and sourced else "UNKNOWN",
         "pe_ratio": "KNOWN" if pe_ratio is not None and sourced else "UNKNOWN",
+        "peg_ratio": "KNOWN" if peg_ratio is not None and sourced else "UNKNOWN",
         "eps_history": "KNOWN" if history_growth_pct is not None and sourced else "UNKNOWN",
         "forecast_comparison": "KNOWN" if forecast_change_pct is not None and sourced else "UNKNOWN",
         "adjusted_eps": "KNOWN" if adjusted_eps is not None and sourced else "UNKNOWN",
+        "industry_pe_comparison": "KNOWN" if peer_pe is not None and sourced else "UNKNOWN",
+        "historical_pe_comparison": "KNOWN" if historical_pe is not None and sourced else "UNKNOWN",
+        "market_pe_comparison": "KNOWN" if market_pe is not None and sourced else "UNKNOWN",
     }
     known = sum(value == "KNOWN" for value in checks.values())
     status = "KNOWN" if known == len(checks) else "PARTIAL" if known else "UNKNOWN"
@@ -614,6 +637,10 @@ def eps_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "diluted_weighted_average_shares": diluted_shares,
         "basic_eps": basic_eps, "diluted_eps": diluted_eps,
         "adjusted_eps": adjusted_eps, "pe_ratio": pe_ratio,
+        "expected_eps_growth_pct": expected_growth_pct,
+        "peg_ratio": peg_ratio, "peg_interpretation": peg_interpretation,
+        "pe_benchmarks": {"industry": peer_pe, "historical": historical_pe, "market": market_pe},
+        "relative_pe_pct": relative_pe,
         "eps_history": [{"year": year, "eps": value} for year, value in valid_history],
         "eps_history_cagr_pct": history_growth_pct, "forecast_eps": forecast_eps,
         "forecast_change_pct": forecast_change_pct,
@@ -623,6 +650,9 @@ def eps_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
             "افزایش EPS ممکن است صرفاً ناشی از بازخرید سهام باشد، نه رشد سود عملیاتی.",
             "روش‌های حسابداری و اقلام یک‌باره می‌توانند EPS گزارش‌شده را منحرف کنند.",
             "نسبت P/E برای EPS صفر یا منفی معنادار محاسبه نمی‌شود.",
+            "PEG فقط با نرخ رشد مورد انتظار EPS به‌صورت درصدی و دارای منبع محاسبه می‌شود؛ CAGR تاریخی جایگزین پیش‌بینی نیست.",
+            "PEG کمتر از 1، برابر 1 یا بیشتر از 1 صرفاً تفسیر آموزشی نسبی است و به‌تنهایی نشانه قطعی ارزندگی نیست.",
+            "مقایسه P/E فقط با میانگین‌های هم‌دوره و هم‌صنعت معتبر معنا دارد؛ تفاوت ساختار رشد و ریسک باید بررسی شود.",
         ],
     }
 
@@ -856,7 +886,6 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     esg_module["diagnostic_score"] = esg_module.get("score")
     esg_module["score"] = None  # Supporting ESG diagnostic must never enter the weighted score.
     modules["esg_analysis"] = esg_module
-    modules["esg_analysis"] = esg_analysis(evidence.get("esg_analysis", {}))
     modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))
     modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
     for name in ("dcf", "comparables"):
@@ -890,6 +919,5 @@ __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
            "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
            "mergers_acquisitions_analysis", "sector_rotation_analysis",
            "share_buyback_analysis", "eps_analysis", "esg_analysis",
-           "esg_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
