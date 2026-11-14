@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import os
 import queue
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -247,6 +251,34 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(report["events_fa"][0]["stage_fa"], "تحلیل و انتخاب سناریوی موج الیوت")
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
+
+    def test_blofin_dashboard_inline_javascript_passes_node_syntax_check(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is not available in this test environment")
+        status, _, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        page = body.decode("utf-8")
+        panel_start = page.index('id="blofin-demo-panel"')
+        script_marker = "<script>\\n          (function(){\\n            const checkButton="
+        script_start_marker = page.index(script_marker, panel_start)
+        script_start = page.index("<script>", script_start_marker) + len("<script>\\n")
+        script_end = page.index("</script>", script_start)
+        script = page[script_start:script_end]
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".js", delete=False
+        ) as handle:
+            handle.write(script)
+            script_path = handle.name
+        try:
+            result = subprocess.run(
+                ["node", "--check", script_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            os.unlink(script_path)
 
     def test_blofin_execution_dashboard_renders_persian_report_instead_of_raw_json(self):
         status, _, body = self.request("GET", "/")
