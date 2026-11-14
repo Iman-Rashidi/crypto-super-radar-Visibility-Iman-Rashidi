@@ -85,6 +85,17 @@ class EasyTradeManagementTests(unittest.TestCase):
         self.assertEqual(result["reason"], "STOP_LOSS")
         self.assertEqual(result["conservative_intrabar_rule"], "STOP_FIRST")
 
+    def test_hard_stop_gap_uses_worse_open_not_stop_trigger(self):
+        manager = EasyPositionManager(db=connect_database(":memory:"))
+        self.addCleanup(manager.db.close)
+        opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 95, 110)
+        result = manager.update_position(
+            opened["position_id"], {"open":90,"high":96,"low":89,"close":92}
+        )
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["reason"], "STOP_LOSS")
+        self.assertEqual(result["exit_price"], 90)
+
     def test_trailing_stop_only_ratchets_toward_profit(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
         self.addCleanup(manager.db.close)
