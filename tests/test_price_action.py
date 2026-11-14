@@ -61,6 +61,12 @@ class EasyPriceActionTests(unittest.TestCase):
         self.assertNotEqual(result["as_of"], frame.index[-1].isoformat())
         self.assertTrue(result["data_policy"]["last_candle_excluded_as_provisional"])
 
+    def test_explicitly_closed_last_candle_is_included(self):
+        frame = self.candles()
+        result = analyze_easy_price_action(frame, last_candle_closed=True)
+        self.assertEqual(result["as_of"], frame.index[-1].isoformat())
+        self.assertFalse(result["data_policy"]["last_candle_excluded_as_provisional"])
+
     def test_timestamp_gap_is_not_misreported_as_price_gap(self):
         frame = self.candles()
         frame.index = frame.index.where(
