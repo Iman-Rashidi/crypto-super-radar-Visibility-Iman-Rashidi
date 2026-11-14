@@ -15,6 +15,8 @@ from crypto_super_radar.fundamental_engine import (
     share_buyback_analysis,
     eps_analysis,
     esg_analysis,
+    debt_to_equity_analysis,
+    comparative_company_analysis,
 )
 
 
@@ -366,6 +368,72 @@ class ShareBuybackAnalysisTests(unittest.TestCase):
             "completed_shares_repur": 100, "shares_outstanding_before": 1000,
             "shares_outstanding_after": 900})
         self.assertEqual(result["status"], "UNKNOWN")
+
+
+class DebtToEquityTests(unittest.TestCase):
+    def test_sourced_company_debt_to_equity_and_interest_coverage(self):
+        result = debt_to_equity_analysis({
+            "asset_class": "equity", "total_liabilities": 600, "total_equity": 400,
+            "ebit": 120, "interest_expense": 20,
+            "source": "https://example.org/annual-report",
+            "observed_at_utc": "2026-11-14T00:00:00Z"})
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["debt_to_equity"], 1.5)
+        self.assertEqual(result["interest_coverage_ratio"], 6)
+
+    def test_missing_source_or_nonpositive_equity_is_unknown(self):
+        missing = debt_to_equity_analysis({"asset_class": "equity",
+            "total_liabilities": 100, "total_equity": 50})
+        negative = debt_to_equity_analysis({"asset_class": "equity",
+            "total_liabilities": 100, "total_equity": -50,
+            "source": "https://example.org/report", "observed_at_utc": "2026-11-14T00:00:00Z"})
+        self.assertIsNone(missing["debt_to_equity"])
+        self.assertEqual(missing["status"], "UNKNOWN")
+        self.assertIsNone(negative["debt_to_equity"])
+        self.assertEqual(negative["status"], "UNKNOWN")
+
+    def test_crypto_debt_to_equity_is_not_applicable(self):
+        self.assertEqual(debt_to_equity_analysis({"asset_class": "crypto"})["status"], "NOT_APPLICABLE")
+
+
+class ComparativeCompanyAnalysisTests(unittest.TestCase):
+    def _company(self, **overrides):
+        row = {"asset_class": "equity", "symbol": "AAA", "sector": "technology",
+            "subsector": "software", "market_cap": 1000,
+            "revenue_growth_pct": 20, "operating_margin_pct": 25,
+            "net_margin_pct": 15, "roe_pct": 18, "debt_to_equity": 0.5,
+            "interest_coverage_ratio": 8, "pe_ratio": 25, "pb_ratio": 4,
+            "dividend_yield_pct": 1,
+            "source": "https://example.org/filing",
+            "observed_at_utc": "2026-11-14T00:00:00Z"}
+        row.update(overrides)
+        return row
+
+    def test_compares_only_same_subsector_and_similar_market_cap(self):
+        company = self._company()
+        peers = [
+            self._company(symbol="BBB", market_cap=1200, pe_ratio=20),
+            self._company(symbol="CCC", market_cap=4000),
+            self._company(symbol="DDD", subsector="hardware"),
+            self._company(symbol="EEE", source=None),
+        ]
+        result = comparative_company_analysis(company, peers)
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["eligible_peer_count"], 1)
+        self.assertEqual(result["excluded_peer_count"], 3)
+        self.assertEqual(result["comparisons"]["pe_ratio"]["peer_median"], 20)
+        self.assertEqual(result["comparisons"]["pe_ratio"]["relative_to_peer_median_pct"], 25)
+
+    def test_no_source_or_no_eligible_peers_stays_unknown(self):
+        result = comparative_company_analysis(self._company(source=None), [self._company(symbol="BBB")])
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["comparisons"], {})
+
+    def test_crypto_comparative_company_analysis_not_applicable(self):
+        result = comparative_company_analysis({"asset_class": "crypto"}, [])
+        self.assertEqual(result["status"], "NOT_APPLICABLE")
+        self.assertIsNone(result["score"])
+
 
 
 class EPSAnalysisTests(unittest.TestCase):
