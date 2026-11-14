@@ -42,6 +42,19 @@ class BloFinDemoExecutionUnknown(RuntimeError):
     """An order request may have reached BloFin; reconcile before any retry."""
 
 
+def demo_direction_allowed(signal_direction: Any, required_direction: str | None = None) -> bool:
+    """Allow both futures sides by default; optionally constrain a one-shot test."""
+    actual = str(signal_direction or "").strip().upper()
+    if actual not in {"LONG", "SHORT"}:
+        return False
+    if required_direction is None:
+        return True
+    expected = str(required_direction).strip().upper()
+    if expected not in {"LONG", "SHORT"}:
+        return False
+    return actual == expected
+
+
 _TRADE_WRITE_LOCK = threading.Lock()
 _TRADE_WRITE_TIMES: deque[float] = deque()
 

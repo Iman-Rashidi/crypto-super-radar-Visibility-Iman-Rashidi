@@ -215,6 +215,37 @@ mandatory gate and cannot alter the 12-gate decision.
 - Spot and DEX markets cannot issue a short-sale signal. `SHORT` is considered only for a verified perpetual market with funding and open-interest evidence.
 - The scanner never submits exchange orders, connects to wallets, signs transactions, or stores private keys.
 
+## 7a. CSR Master Strategy Engine v1 (BloFin Demo branch)
+
+The isolated BloFin Demo branch adds a deterministic strategy selector in
+`crypto_super_radar/strategy_engine.py`. It runs **after all 12 mandatory gates
+PASS and before the Nemotron second opinion or any order request**.
+
+| Strategy component | Rule in v1 | Fail-closed behavior |
+|---|---|---|
+| Market regime | Bullish/bearish alignment of close, EMA50, EMA200 and 30-day return | Neutral or conflicting regime means NO TRADE |
+| Turtle breakout | Completed daily close beyond the prior 20- or 55-day Donchian high/low | Prior channel excludes the current candle; volume must be at least the prior 20-day median |
+| Raschke-style pullback | ADX(14) >= 30; price recaptures/falls back through EMA20 with a confirming candle | Disabled outside a strong aligned trend |
+| Initial protection | ATR(20)-based 2N stop and 4N target (2:1 initial reward/risk) | Invalid levels or insufficient history mean NO TRADE |
+| Direction agreement | Strategy direction must match the existing 12-gate engine | A disagreement is a hard veto |
+| Position sizing | Existing Demo executor calculates contract quantity from stop distance and a fixed 0.25% equity-risk budget | Strategy module itself cannot size or submit an order |
+
+The strategy selector requires at least 220 validated, completed daily candles,
+checks timestamp cadence/freshness, duplicate timestamps, OHLC validity and a
+real prior-volume baseline. It only returns an approved candidate or
+`NO_TRADE`/`UNKNOWN`; it does not connect to the exchange.
+
+**Important research boundary:** v1 is a rules-based adaptation inspired by
+published Turtle/Donchian, trend-following and EMA20 pullback ideas. It is not
+a replica of every rule used by Dennis, Eckhardt, Seykota or Raschke. The
+specific strategy module has not yet completed its own cost-aware, walk-forward
+out-of-sample study. The existing 12th gate's EMA-based walk-forward test does
+not validate this new Turtle/Pullback selector. Dynamic Donchian trailing
+exits, trade-by-trade attribution, regime-specific parameter stability and
+a dedicated strategy backtest remain future work. Until those checks pass,
+keep this as a Demo research feature and do not treat a successful CI run as
+evidence of profitability.
+
 ## 8. Important limitations before real capital
 
 1. **EVM contract security is a minimum screen, not an audit.** GoPlus risk fields and exact Sourcify source matching are required; missing fields remain `UNKNOWN`. Proxy contracts, privileged controls, honeypot flags, high taxes or holder concentration can fail the screen. Liquidity locks, upgrade governance and every possible attack path are not certified.

@@ -40,11 +40,14 @@ from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDe
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
+    demo_direction_allowed,
 )
+from .strategy_engine import MasterStrategyEngine
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
+MASTER_STRATEGY_ENGINE = MasterStrategyEngine()
 STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
 FUTURES_PAPER_BOT = FuturesPaperTradingBot(ENGINE)
@@ -2639,8 +2642,14 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
 
 
 
-def _run_blofin_demo_execution_job(job_id: str) -> None:
-    """Analyze one BTC perpetual candle and submit one guarded Demo order if approved."""
+def _run_blofin_demo_execution_job(
+    job_id: str, *, required_direction: str | None = None,
+) -> None:
+    """Analyze one BTC perpetual candle and submit a guarded Demo order if approved.
+
+    The engine remains two-sided for futures. A manual one-shot test may impose
+    a direction constraint; the autonomous cycle leaves it unset.
+    """
     store = None
     submission_started = False
     try:
@@ -2769,8 +2778,92 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             )
             return
         signal_bar = frame.index[-1].isoformat()
-        record["signal_id"] = asset.raw + "|" + signal_bar
+        signal_id = asset.raw + "|" + signal_bar
+        _set_blofin_execution_job(
+            job_id, "running", stage="MASTER_STRATEGY_ENGINE",
+            message_fa="Turtle 20/55، روند بازار و Pullback در حال ارزیابی مستقل هستند؛ هنوز سفارشی ارسال نشده است.",
+            analysis=gate_summary,
+        )
+        master_strategy = MASTER_STRATEGY_ENGINE.evaluate(
+            frame, base_signal=direction,
+        )
+        _set_blofin_execution_job(
+            job_id, "running", stage="MASTER_STRATEGY_ENGINE",
+            message_fa=(
+                "استراتژی " + str(master_strategy.get("strategy")) + " با داده روزانه تأیید شد؛ "
+                "در انتظار بازبینی ثانویه Nemotron."
+                if master_strategy.get("status") == "APPROVED" else
+                "موتور استراتژی ورود را تأیید نکرد؛ تصمیم NO TRADE و بدون سفارش."
+            ),
+            strategy=master_strategy,
+            analysis=gate_summary,
+        )
+        if master_strategy.get("status") != "APPROVED":
+            _set_blofin_execution_job(
+                job_id, "completed", stage="MASTER_STRATEGY_BLOCKED",
+                message_fa=(
+                    "Master Strategy Engine سیگنال معتبر نداد؛ هیچ سفارشی ارسال نشد. "
+                    + str(master_strategy.get("reason") or "")
+                ),
+                strategy=master_strategy,
+                result={
+                    "status": "MASTER_STRATEGY_BLOCKED",
+                    "environment": "BLOFIN_DEMO",
+                    "strategy": master_strategy,
+                    "reason_fa": "استراتژی Turtle یا Pullback با جهت ۱۲ گیت و وضعیت روز بازار همسو نبود.",
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                },
+            )
+            return
+
+        if not demo_direction_allowed(master_strategy.get("direction"), required_direction):
+            actual_direction = str(master_strategy.get("direction") or "UNKNOWN").upper()
+            expected_label = "خرید (LONG)" if required_direction == "LONG" else "فروش استقراضی (SHORT)"
+            actual_label = (
+                "خرید (LONG)" if actual_direction == "LONG"
+                else "فروش استقراضی (SHORT)" if actual_direction == "SHORT"
+                else actual_direction
+            )
+            _set_blofin_execution_job(
+                job_id, "completed", stage="TEST_DIRECTION_BLOCKED",
+                message_fa=(
+                    f"این آزمایش مخصوص {expected_label} است، اما موتور جهت {actual_label} را تشخیص داد؛ "
+                    "برای جلوگیری از سفارش در جهت اشتباه، NO TRADE ثبت شد."
+                ),
+                strategy=master_strategy,
+                analysis=gate_summary,
+                result={
+                    "status": "NO_TRADE_DIRECTION_MISMATCH",
+                    "environment": "BLOFIN_DEMO",
+                    "required_direction": required_direction,
+                    "detected_direction": actual_direction,
+                    "strategy": master_strategy,
+                    "reason_fa": "جهت سیگنال با جهت مجاز این آزمایش یکسان نبود؛ هیچ سفارشی ارسال نشد.",
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                },
+            )
+            return
+
+        # Use deterministic strategy levels, not the legacy EMA-based levels.
+        analysis.entry_price = float(master_strategy["entry_price"])
+        analysis.stop_loss = float(master_strategy["stop_loss"])
+        analysis.take_profit = float(master_strategy["take_profit"])
+        analysis.metrics["master_strategy"] = master_strategy
+        analysis.metrics["master_strategy_status"] = master_strategy.get("status")
+        analysis.metrics["master_strategy_name"] = master_strategy.get("strategy")
+        analysis.metrics["master_strategy_direction"] = master_strategy.get("direction")
+        analysis.metrics["master_strategy_regime"] = master_strategy.get("market_regime")
+        record = analysis.to_record()
+        record["signal_id"] = signal_id
         record["inst_id"] = "BTC-USDT"
+        gate_summary.update({
+            "entry_reference_price": record.get("entry_price_usd"),
+            "stop_loss": record.get("stop_loss_usd"),
+            "take_profit": record.get("take_profit_usd"),
+            "selected_strategy": master_strategy.get("strategy"),
+        })
         if store.has_signal(record["signal_id"]):
             _set_blofin_execution_job(
                 job_id, "completed", stage="DUPLICATE_CANDLE_SKIPPED",
@@ -3276,10 +3369,10 @@ class Handler(BaseHTTPRequestHandler):
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
-            <h3>اجرای یک سفارش آزمایشی · BTC-USDT Perpetual</h3>
-            <p class="muted">سهمیه فقط یک سفارش در کل عمر سرویس؛ اهرم ایزوله 1x، حداقل اندازه قرارداد، حد ضرر و حد سود. شرط ورود: ۱۲ گیت PASS، تأیید Nemotron و عبور همه کنترل‌های حساب و قیمت. در صورت رد هر شرط، سفارش ارسال نمی‌شود.</p>
+            <h3>تست خرید دمو (LONG) · BTC-USDT Perpetual</h3>
+            <p class="muted">این دکمه فقط برای آزمایش خرید LONG است. موتور فیوچرز همچنان هر دو جهت LONG و SHORT را تشخیص می‌دهد؛ اگر سیگنال نهایی SHORT باشد، این تست با NO TRADE متوقف می‌شود و فروش استقراضی ارسال نمی‌کند. ورود فقط با ۱۲ گیت PASS، تأیید Master Strategy و Nemotron و عبور کنترل‌های حساب و قیمت مجاز است. اهرم ایزوله 1x و حد ضرر/حد سود اجباری است.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
-            <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک معامله در BloFin Demo</button>
+            <button id="blofin-demo-execute-once" type="button" disabled>اجرای تست خرید LONG در BloFin Demo</button>
             <pre id="blofin-execution-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
           </div>
           <div class="metric" style="margin-top:16px">
@@ -3541,7 +3634,7 @@ class Handler(BaseHTTPRequestHandler):
             executeButton.addEventListener('click',async function(){
               const token=tokenInput.value.trim();
               if(!token){executionReadiness.textContent='ابتدا توکن پنل را در کادر بالا وارد کن.';return;}
-              if(!window.confirm('این اقدام یک سفارش بازار BTC-USDT را فقط در BloFin Demo ارسال می‌کند؛ اهرم ایزوله 1x، حداقل حجم قرارداد و حد ضرر/حد سود. اگر تحلیل اجازه ندهد معامله‌ای انجام نمی‌شود. ادامه؟'))return;
+              if(!window.confirm('این اقدام فقط یک خرید LONG بازار BTC-USDT را در BloFin Demo آزمایش می‌کند. اگر سیگنال SHORT یا NO_TRADE باشد، هیچ سفارشی ارسال نمی‌شود. اهرم ایزوله 1x و حد ضرر/حد سود اجباری است. ادامه؟'))return;
               executeButton.disabled=true;
               executionResult.textContent='در حال آغاز اسکن زنده ۱۲ گیت و بررسی Nemotron...';
               try{
@@ -5062,11 +5155,12 @@ class Handler(BaseHTTPRequestHandler):
                     job_id = uuid.uuid4().hex
                     _set_blofin_execution_job(
                         job_id, "queued", stage="QUEUED",
-                        message_fa="درخواست یک‌باره ثبت شد؛ هنوز سفارشی ارسال نشده است.",
+                        message_fa="درخواست تست خرید LONG ثبت شد؛ هنوز سفارشی ارسال نشده است.",
                     )
                     worker = threading.Thread(
                         target=_run_blofin_demo_execution_job,
-                        args=(job_id,), daemon=True, name="blofin-demo-one-shot-order",
+                        args=(job_id,), kwargs={"required_direction": "LONG"},
+                        daemon=True, name="blofin-demo-one-shot-order",
                     )
                     try:
                         worker.start()
@@ -5078,7 +5172,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
                 return self._send(202, json.dumps({
                     "status": "QUEUED", "job_id": job_id,
-                    "message_fa": "اسکن زنده ۱۲ گیت، تحلیل Nemotron و کنترل سفارش Demo آغاز شد.",
+                    "message_fa": "تست خرید LONG آغاز شد؛ اگر جهت معتبر SHORT باشد، سفارش ارسال نخواهد شد.",
                 }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             if route == "/api/ai/dry-run":
                 if (
