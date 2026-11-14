@@ -6,7 +6,7 @@ orders or authorize a trade.
 """
 from __future__ import annotations
 
-from math import isfinite
+from math import isfinite, sqrt, log1p
 from statistics import median
 from typing import Any, Mapping, Sequence
 
@@ -267,6 +267,122 @@ def market_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _beta_continued_fraction(a: float, b: float, x: float) -> float:
+    """Continued fraction for the regularized incomplete beta function."""
+    max_iter, epsilon, tiny = 200, 3e-14, 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    if abs(d) < tiny: d = tiny
+    d = 1.0 / d
+    h = d
+    for m in range(1, max_iter + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny: d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny: c = tiny
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny: d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny: c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < epsilon: return h
+    raise ArithmeticError("Incomplete beta continued fraction did not converge")
+
+def _regularized_beta(x: float, a: float, b: float) -> float:
+    """Regularized incomplete beta I_x(a,b), using only the standard library."""
+    if x <= 0: return 0.0
+    if x >= 1: return 1.0
+    from math import exp, lgamma, log
+    front = exp(lgamma(a + b) - lgamma(a) - lgamma(b) + a * log(x) + b * log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _beta_continued_fraction(a, b, x) / a
+    return 1.0 - front * _beta_continued_fraction(b, a, 1.0 - x) / b
+
+def event_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Market-model event study with timestamped sources and Student-t CAR test.
+
+    Each event requires source_url, event_time_utc and observations. Each
+    observation has timestamp, asset_return, benchmark_return and window
+    (ESTIMATION or EVENT). Returns are decimal fractions, not percentages.
+    """
+    raw_events = evidence.get("events") if isinstance(evidence, Mapping) else None
+    if not isinstance(raw_events, list) or not raw_events:
+        return {"status": "UNKNOWN", "score": None, "event_count": 0, "known_events": 0,
+                "events": {}, "reason": "رویداد زمان‌دار و داده بازده دارایی/بازار برای پنجره برآورد و رویداد موجود نیست.",
+                "message_fa": "برای تحلیل رویداد، خبر تأییدشده، زمان انتشار و بازده تاریخی دارایی و شاخص معیار لازم است."}
+    results: dict[str, Any] = {}
+    for index, event in enumerate(raw_events):
+        if not isinstance(event, Mapping): continue
+        event_id = str(event.get("event_id") or f"event_{index + 1}")
+        source_url, event_time = event.get("source_url"), event.get("event_time_utc")
+        observations = event.get("observations")
+        if not isinstance(source_url, str) or not source_url.startswith(("https://", "http://")) or not event_time:
+            results[event_id] = {"status": "UNKNOWN", "reason": "منبع و زمان رویداد باید مشخص باشند."}
+            continue
+        if not isinstance(observations, list):
+            results[event_id] = {"status": "UNKNOWN", "reason": "مشاهدات بازده رویداد موجود نیست."}
+            continue
+        estimation, event_rows, invalid = [], [], False
+        for row in observations:
+            if not isinstance(row, Mapping) or not row.get("timestamp"):
+                invalid = True; break
+            asset_return, benchmark_return = _number(row.get("asset_return")), _number(row.get("benchmark_return"))
+            if asset_return is None or benchmark_return is None:
+                invalid = True; break
+            item = (asset_return, benchmark_return, str(row["timestamp"]))
+            target = str(row.get("window") or "").upper()
+            if target == "ESTIMATION": estimation.append(item)
+            elif target == "EVENT": event_rows.append(item)
+        if invalid or len(estimation) < 20 or not event_rows:
+            results[event_id] = {"status": "UNKNOWN", "reason": "حداقل ۲۰ مشاهده معتبر در پنجره برآورد و یک مشاهده در پنجره رویداد لازم است.",
+                                "estimation_observations": len(estimation), "event_observations": len(event_rows)}
+            continue
+        x_mean = sum(row[1] for row in estimation) / len(estimation)
+        y_mean = sum(row[0] for row in estimation) / len(estimation)
+        variance_x = sum((row[1] - x_mean) ** 2 for row in estimation)
+        if variance_x <= 1e-18:
+            results[event_id] = {"status": "UNKNOWN", "reason": "واریانس بازده شاخص معیار برای برآورد مدل کافی نیست."}; continue
+        beta = sum((row[1] - x_mean) * (row[0] - y_mean) for row in estimation) / variance_x
+        alpha = y_mean - beta * x_mean
+        residuals = [row[0] - (alpha + beta * row[1]) for row in estimation]
+        degrees_freedom = len(estimation) - 2
+        residual_std = sqrt(sum(value * value for value in residuals) / degrees_freedom)
+        if residual_std <= 1e-12:
+            results[event_id] = {"status": "UNKNOWN", "reason": "واریانس خطای مدل برای آزمون معناداری کافی نیست."}; continue
+        abnormal = []
+        for actual, benchmark, stamp in event_rows:
+            abnormal.append({"timestamp": stamp, "actual_return": actual,
+                             "normal_return": alpha + beta * benchmark,
+                             "abnormal_return": actual - (alpha + beta * benchmark)})
+        car = sum(item["abnormal_return"] for item in abnormal)
+        t_stat = car / (residual_std * sqrt(len(abnormal)))
+        p_value = _regularized_beta(degrees_freedom / (degrees_freedom + t_stat * t_stat), degrees_freedom / 2.0, 0.5)
+        results[event_id] = {
+            "status": "KNOWN", "event_type": str(event.get("event_type") or "UNSPECIFIED"),
+            "event_time_utc": str(event_time), "source_url": source_url,
+            "event_window": event.get("event_window") or {},
+            "estimation_observations": len(estimation), "event_observations": len(event_rows),
+            "market_model": {"alpha": alpha, "beta": beta, "residual_std": residual_std, "degrees_freedom": degrees_freedom},
+            "abnormal_returns": abnormal, "cumulative_abnormal_return": car,
+            "t_statistic": t_stat, "p_value_two_sided": p_value,
+            "statistically_significant_5pct": p_value < 0.05,
+            "interpretation_fa": "بازده غیرعادی تجمعی از نظر آماری معنادار است؛ این نتیجه رابطه علّی را اثبات نمی‌کند." if p_value < 0.05 else "شواهد آماری کافی برای معناداری بازده غیرعادی تجمعی در سطح ۵٪ وجود ندارد.",
+            "limitations": ["نتیجه به انتخاب پنجره و شاخص معیار حساس است.", "خطای استاندارد فرض می‌کند خودهمبستگی بازده غیرعادی در پنجره رویداد وجود ندارد.", "هم‌زمانی چند خبر یا رویداد می‌تواند انتساب اثر را مخدوش کند."],
+        }
+    known = sum(item.get("status") == "KNOWN" for item in results.values())
+    return {"status": "KNOWN" if known == len(raw_events) and known else "PARTIAL" if known else "UNKNOWN",
+            "score": None, "event_count": len(raw_events), "known_events": known, "events": results,
+            "methodology": "OLS market model; abnormal return = actual return - expected normal return; CAR significance via two-sided Student-t test.",
+            "message_fa": "اثر رویداد با مقایسه بازده واقعی و بازده عادی مورد انتظار سنجیده می‌شود؛ نتیجه توصیفی است و به‌تنهایی سیگنال معامله نیست."}
+
 def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Aggregate seven evidence modules with explicit coverage and no fabricated scores.
 
@@ -289,6 +405,7 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     modules["accounting_principles"] = accounting_principles_analysis(
         evidence.get("accounting_principles", {}))
     modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
+    modules["event_analysis"] = event_analysis(evidence.get("event_analysis", {}))
     for name in ("dcf", "comparables"):
         item = evidence.get(name)
         score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
@@ -316,6 +433,6 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
-           "industry_analysis", "accounting_principles_analysis", "market_analysis",
+           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
