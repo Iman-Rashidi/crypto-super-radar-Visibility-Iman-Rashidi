@@ -227,6 +227,12 @@ class BloFinDemoReadOnly:
     def get_tickers(self, *, inst_id: str | None = None) -> Any:
         return self._get("/api/v1/market/tickers", params={"instId": inst_id})
 
+    def get_mark_price(self, *, inst_id: str) -> Any:
+        """Read the dedicated exchange mark-price feed, not the last-trade ticker."""
+        if not inst_id or not isinstance(inst_id, str):
+            raise ValueError("inst_id is required.")
+        return self._get("/api/v1/market/mark-price", params={"instId": inst_id})
+
     def get_candles(
         self, inst_id: str, *, bar: str = "1m", limit: int = 100
     ) -> Any:
@@ -265,6 +271,26 @@ class BloFinDemoReadOnly:
         return self._get(
             "/api/v1/trade/orders-pending",
             params={"instId": inst_id},
+            private=True,
+        )
+
+    def get_open_tpsl_orders(self, *, inst_id: str | None = None, limit: int = 100) -> Any:
+        """Read untriggered exchange-managed take-profit / stop-loss orders."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100.")
+        return self._get(
+            "/api/v1/trade/orders-tpsl-pending",
+            params={"instId": inst_id, "limit": str(limit)},
+            private=True,
+        )
+
+    def get_tpsl_orders_history(self, *, inst_id: str | None = None, limit: int = 100) -> Any:
+        """Read completed, canceled or triggered TP/SL order history."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100.")
+        return self._get(
+            "/api/v1/trade/orders-tpsl-history",
+            params={"instId": inst_id, "limit": str(limit)},
             private=True,
         )
 
