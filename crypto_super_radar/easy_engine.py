@@ -13,7 +13,10 @@ import numpy as np
 import pandas as pd
 
 from .config import AppConfig
-from .easy_risk_management import calculate_position_size, classify_market_cycle
+from .easy_risk_management import (
+    calculate_position_size, classify_market_cycle, calculate_fractional_kelly,
+    historical_var_expected_shortfall, stress_test_positions, portfolio_risk_summary,
+)
 from .easy_trade_management import evaluate_breakout_retest
 from .models import AnalysisResult, AssetSpec, SafetyStatus, Signal
 from .technical_indicators import analyze_technical_indicators
@@ -115,7 +118,14 @@ def _multi_timeframe_structure(
             reports[tf] = {"status":"UNKNOWN","trend":"UNKNOWN","reason":type(exc).__name__}
     known = [v["trend"] for v in reports.values() if v.get("status") == "KNOWN"
              and v.get("trend") in {"UPTREND","DOWNTREND"}]
-    conflict = "ALIGNED" if len(set(known)) <= 1 and known else "CONFLICT" if len(set(known)) > 1 else "UNKNOWN"
+    if len(set(known)) > 1:
+        conflict = "CONFLICT"
+    elif known and len(known) == len(reports):
+        conflict = "ALIGNED"
+    elif known:
+        conflict = "PARTIAL_ALIGNMENT"
+    else:
+        conflict = "UNKNOWN"
     return {
         "status": "KNOWN" if reports["1D"].get("status") == "KNOWN" else "PARTIAL",
         "timeframes": reports, "directional_timeframe_count": len(known),
@@ -304,6 +314,28 @@ class EasyModeEngine:
         except Exception as exc:
             market_intelligence = {"status": "UNKNOWN", "reason": type(exc).__name__}
 
+        close_returns = close.pct_change().dropna().tail(250).to_numpy(dtype=float)
+        var_es = historical_var_expected_shortfall(close_returns, confidence=0.95, minimum_observations=60)
+        proposed_positions = []
+        if direction != "NONE" and sizing.get("status") == "KNOWN":
+            proposed_positions.append({
+                "quantity": sizing.get("quantity"), "entry": entry, "stop": stop, "side": direction,
+            })
+        portfolio_risk = portfolio_risk_summary(
+            proposed_positions, equity=self.config.risk.paper_equity_usd,
+        )
+        stress = stress_test_positions(
+            [{"notional": sizing.get("position_notional"), "side": direction}]
+            if direction != "NONE" and sizing.get("status") == "KNOWN" else []
+        )
+        trade_history = getattr(self.data, "closed_trade_history", {}).get(asset.raw, [])
+        kelly_sample = len(trade_history) if isinstance(trade_history, (list, tuple)) else 0
+        kelly = calculate_fractional_kelly(
+            win_probability=0.5, average_win_loss_ratio=1.0,
+            sample_size=kelly_sample,
+        )
+        if kelly_sample < 30:
+            kelly["reason"] = "At least 30 verified closed paper trades are required; no position size is inferred."
         confidence_fields = [tech.get("status") == "KNOWN", price_action.get("status") == "KNOWN",
                              cycle.get("status") == "KNOWN", bool(snapshot.provider_a), bool(snapshot.provider_b)]
         confidence = round(sum(confidence_fields) / len(confidence_fields) * 100.0, 2)
@@ -332,6 +364,10 @@ class EasyModeEngine:
             "chart_pattern": pattern, "elliott_wave": monitor_elliott_waves(candles),
             "market_cycle": cycle, "breakout_retest": breakout,
             "multi_timeframe_structure": mtf,
+            "historical_var_expected_shortfall": var_es,
+            "portfolio_risk_summary": portfolio_risk,
+            "portfolio_stress_test": stress,
+            "fractional_kelly": kelly,
             "timeframe_conflict": mtf.get("conflict", "UNKNOWN"),
             "market_sentiment": sentiment, "sentiment_status": sentiment.get("status", "UNKNOWN"),
             "whale_intelligence": whale, "whale_status": whale.get("status", security.get("status", "UNKNOWN")),
