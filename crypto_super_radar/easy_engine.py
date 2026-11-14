@@ -16,6 +16,7 @@ from .config import AppConfig
 from .easy_risk_management import (
     calculate_position_size, classify_market_cycle, calculate_fractional_kelly,
     historical_var_expected_shortfall, stress_test_positions, portfolio_risk_summary,
+    assess_leverage_margin, STRATEGY_STYLE_GUIDE,
 )
 from .easy_trade_management import evaluate_breakout_retest
 from .models import AnalysisResult, AssetSpec, SafetyStatus, Signal
@@ -324,6 +325,16 @@ class EasyModeEngine:
         portfolio_risk = portfolio_risk_summary(
             proposed_positions, equity=self.config.risk.paper_equity_usd,
         )
+        leverage_margin = (
+            assess_leverage_margin(
+                sizing.get("position_notional"), self.config.risk.paper_equity_usd, 1.0,
+            )
+            if asset.market_type == "perp" and direction != "NONE" and sizing.get("status") == "KNOWN"
+            else {"status": "NOT_APPLICABLE", "reason": "Spot cash positions do not use borrowed leverage or derivative margin."}
+            if asset.market_type == "spot"
+            else {"status": "UNKNOWN", "reason": "No directional perpetual setup or notional is available."}
+        )
+        strategy_style = "SWING" if direction != "NONE" else "UNSELECTED"
         stress = stress_test_positions(
             [{"notional": sizing.get("position_notional"), "side": direction}]
             if direction != "NONE" and sizing.get("status") == "KNOWN" else []
@@ -368,6 +379,9 @@ class EasyModeEngine:
             "portfolio_risk_summary": portfolio_risk,
             "portfolio_stress_test": stress,
             "fractional_kelly": kelly,
+            "leverage_margin_estimate": leverage_margin,
+            "strategy_style": strategy_style,
+            "strategy_horizon": STRATEGY_STYLE_GUIDE.get(strategy_style, {"holding_horizon": "not_selected"}).get("holding_horizon"),
             "timeframe_conflict": mtf.get("conflict", "UNKNOWN"),
             "market_sentiment": sentiment, "sentiment_status": sentiment.get("status", "UNKNOWN"),
             "whale_intelligence": whale, "whale_status": whale.get("status", security.get("status", "UNKNOWN")),
