@@ -331,7 +331,7 @@ class EasyModeEngine:
             )
             if asset.market_type == "perp" and direction != "NONE" and sizing.get("status") == "KNOWN"
             else {"status": "NOT_APPLICABLE", "reason": "Spot cash positions do not use borrowed leverage or derivative margin."}
-            if asset.market_type == "spot"
+            if asset.market_type in {"cex", "dex"}
             else {"status": "UNKNOWN", "reason": "No directional perpetual setup or notional is available."}
         )
         strategy_style = "SWING" if direction != "NONE" else "UNSELECTED"
