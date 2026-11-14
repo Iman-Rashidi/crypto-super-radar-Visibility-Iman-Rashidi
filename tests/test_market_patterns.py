@@ -157,5 +157,52 @@ class MarketPatternTests(unittest.TestCase):
         self.assertTrue(fib["confirmation_required"])
 
 
+    def _set_three_inside_down_candles(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-3] = [110.0, 112.0, 109.0, 111.8, 1000.0]
+        frame.iloc[-2] = [111.4, 111.6, 110.5, 110.8, 1000.0]
+        frame.iloc[-1] = [110.4, 110.6, 107.5, 108.5, 1500.0]
+        return frame
+
+    def test_three_inside_down_is_confirmed_only_after_close_below_first_low(self):
+        frame = self._set_three_inside_down_candles(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Three Inside Down"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["score"], -16)
+        self.assertEqual(pattern["trigger_price"], 109.0)
+        self.assertEqual(pattern["invalidation_price"], 112.0)
+
+    def test_three_inside_down_requires_prior_uptrend(self):
+        frame = self._set_three_inside_down_candles(candle_frame("flat"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Three Inside Down",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_three_inside_down_requires_third_close_below_first_low(self):
+        frame = self._set_three_inside_down_candles(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("close")] = 109.2
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Three Inside Down",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_three_inside_down_requires_bearish_harami_inside_first_body(self):
+        frame = self._set_three_inside_down_candles(candle_frame("up"))
+        frame.iloc[-2, frame.columns.get_loc("close")] = 109.8
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Three Inside Down",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
