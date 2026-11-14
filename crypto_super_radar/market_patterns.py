@@ -549,6 +549,37 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
 
+    # Dragonfly Doji: tiny body near the high, long lower shadow, almost no upper shadow.
+    dragonfly_doji = (
+        body_ratio <= 0.10
+        and lower >= candle_range * 0.60
+        and lower >= max(body * 2.0, candle_range * 0.60)
+        and upper <= max(body * 0.8, candle_range * 0.08)
+        and close_location >= 0.85
+    )
+    if dragonfly_doji:
+        contextual = context == "DOWN"
+        out.append(_item(
+            name_fa="دوجی سنجاقک",
+            name_en="Dragonfly Doji",
+            category="CANDLE",
+            direction="NEUTRAL",
+            potential_direction="BULLISH" if contextual else None,
+            state="NEEDS_CONFIRMATION",
+            strength="MODERATE" if volume_confirmed else "WEAK",
+            description=(
+                "دوجی سنجاقک با بدنهٔ بسیار کوچک در نزدیکی سقف و سایهٔ پایینی بلند شناسایی شد. "
+                + ("این الگو پس از روند نزولی می‌تواند نشانهٔ بازگشت احتمالی صعودی باشد؛ "
+                   "برای تأیید، بسته‌شدن کندل بعدی بالاتر از سقف این کندل لازم است."
+                   if contextual else
+                   "بدون روند نزولی قبلی، جهت بازگشت قابل اتکا نیست؛ این الگو به‌تنهایی سیگنال معامله نیست.")
+            ),
+            timestamp=timestamp,
+            score=7 if contextual else 0,
+            trigger_price=h,
+            invalidation_price=low,
+        ))
+
     if body_ratio <= 0.10 and (long_lower == long_upper):
         add("دوجی", "Doji", "NEUTRAL",
             "بدنه بسیار کوچک نسبت به دامنهٔ کندل؛ نشان‌دهندهٔ تردید است، نه سیگنال مستقل خرید یا فروش.", 0, strength="MODERATE")
