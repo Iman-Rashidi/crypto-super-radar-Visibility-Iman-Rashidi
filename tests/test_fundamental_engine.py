@@ -320,6 +320,8 @@ class ESGAnalysisTests(unittest.TestCase):
         })
         self.assertEqual(set(report["weights"]), set(MODULE_WEIGHTS))
         self.assertEqual(report["modules"]["esg_analysis"]["status"], "PARTIAL")
+        self.assertIsNone(report["modules"]["esg_analysis"]["score"])
+        self.assertEqual(report["modules"]["esg_analysis"]["diagnostic_score"], 50)
         self.assertFalse(report["trade_authorized"])
 
 
@@ -382,7 +384,9 @@ class EPSAnalysisTests(unittest.TestCase):
             "eps_history": [{"year": 2023, "eps": 0.8},
                             {"year": 2024, "eps": 0.9},
                             {"year": 2025, "eps": 1.0}],
-            "forecast_eps": 1.2, "source": "https://example.org/annual-report",
+            "forecast_eps": 1.2, "expected_eps_growth_pct": 20,
+            "industry_average_pe": 15, "historical_average_pe": 18, "market_average_pe": 22,
+            "source": "https://example.org/annual-report",
             "observed_at_utc": "2026-11-01T00:00:00Z",
         })
         self.assertEqual(result["status"], "KNOWN")
@@ -390,8 +394,31 @@ class EPSAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(result["diluted_eps"], 0.9)
         self.assertAlmostEqual(result["adjusted_eps"], 1.1)
         self.assertAlmostEqual(result["pe_ratio"], 20)
+        self.assertAlmostEqual(result["peg_ratio"], 1.0)
+        self.assertEqual(result["peg_interpretation"], "GROWTH_ALIGNED")
+        self.assertEqual(result["relative_pe_pct"]["industry"], round((20 / 15 - 1) * 100, 2))
         self.assertAlmostEqual(result["forecast_change_pct"], 20)
         self.assertGreater(result["eps_history_cagr_pct"], 0)
+
+    def test_peg_requires_positive_explicit_forward_growth(self):
+        base = {"asset_class": "equity", "net_income": 100, "weighted_average_shares": 10,
+                "current_price": 20, "expected_eps_growth_pct": 0,
+                "source": "https://example.org/filing", "observed_at_utc": "2026-11-01T00:00:00Z"}
+        zero_growth = eps_analysis(base)
+        negative_growth = eps_analysis({**base, "expected_eps_growth_pct": -5})
+        self.assertIsNone(zero_growth["peg_ratio"])
+        self.assertEqual(zero_growth["checks"]["peg_ratio"], "UNKNOWN")
+        self.assertIsNone(negative_growth["peg_ratio"])
+        self.assertEqual(negative_growth["peg_interpretation"], "UNKNOWN")
+
+    def test_peg_does_not_substitute_historical_growth_for_forward_growth(self):
+        result = eps_analysis({"asset_class": "equity", "net_income": 100,
+            "weighted_average_shares": 10, "current_price": 20,
+            "eps_history": [{"year": 2023, "eps": 1}, {"year": 2024, "eps": 2}],
+            "source": "https://example.org/filing", "observed_at_utc": "2026-11-01T00:00:00Z"})
+        self.assertIsNotNone(result["eps_history_cagr_pct"])
+        self.assertIsNone(result["peg_ratio"])
+        self.assertEqual(result["checks"]["peg_ratio"], "UNKNOWN")
 
     def test_negative_eps_does_not_produce_pe(self):
         result = eps_analysis({"asset_class": "equity", "net_income": -100,
