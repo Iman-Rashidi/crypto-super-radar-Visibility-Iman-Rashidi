@@ -618,7 +618,8 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
         evidence.get("accounting_principles", {}))
     modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
     modules["event_analysis"] = event_analysis(evidence.get("event_analysis", {}))
-    modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))\n    modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))\n    modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
+    modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
+    modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))\n    modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
     for name in ("dcf", "comparables"):
         item = evidence.get(name)
         score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
@@ -646,6 +647,7 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
-           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",\n           "mergers_acquisitions_analysis", "sector_rotation_analysis",
+           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
+           "mergers_acquisitions_analysis", "sector_rotation_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
