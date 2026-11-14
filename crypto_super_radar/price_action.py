@@ -139,12 +139,26 @@ def analyze_easy_price_action(
     obv_direction="RISING" if len(obv)>=5 and obv[-1]>obv[-5] else "FALLING" if len(obv)>=5 and obv[-1]<obv[-5] else "FLAT"
     price_up=close[-1]>close[-5] if len(close)>=5 else False
     price_down=close[-1]<close[-5] if len(close)>=5 else False
+    # Volume evidence: participation, possible climax, and an OBV-based
+    # accumulation/distribution proxy. These remain descriptive, not proof.
+    volume_climax = bool(ratio is not None and ratio >= 2.5)
+    recent_range = (float(np.max(high[-20:])) - float(np.min(low[-20:]))) / max(current, 1e-12)
+    obv_change = float(obv[-1] - obv[-min(20, len(obv))])
+    accumulation_distribution = (
+        "POSSIBLE_ACCUMULATION" if recent_range <= 0.08 and obv_change > 0 else
+        "POSSIBLE_DISTRIBUTION" if recent_range <= 0.08 and obv_change < 0 else
+        "NO_CLEAR_RANGE_PHASE"
+    )
     volume_data={"status":"KNOWN","latest_closed_volume":latest_volume,
                  "average_20":avg_volume,"relative_volume_20":ratio,
                  "obv":float(obv[-1]),"obv_direction":obv_direction,
                  "price_obv_divergence":("BEARISH_WARNING" if price_up and obv_direction=="FALLING" else
                                          "BULLISH_WARNING" if price_down and obv_direction=="RISING" else "NONE"),
-                 "breakout_volume_warning":bool(ratio is not None and ratio<0.8)}
+                 "breakout_volume_warning":bool(ratio is not None and ratio<0.8),
+                 "volume_climax":volume_climax,
+                 "climax_interpretation":"POSSIBLE_EXHAUSTION_OR_CAPITULATION" if volume_climax else "NONE",
+                 "range_obv_behavior":accumulation_distribution,
+                 "evidence_note":"Volume is exchange/feed-specific and may be fragmented across crypto venues."}
 
     # A crypto price gap is reported only when timestamps are consecutive at
     # the inferred cadence. Missing intervals are data gaps, not price gaps.
@@ -158,12 +172,27 @@ def analyze_easy_price_action(
         prev=float(frame["close"].iloc[i-1]); op=float(frame["open"].iloc[i])
         gap_pct=(op/prev-1.0)*100.0
         if abs(gap_pct)>=float(gap_threshold_pct):
-            gaps.append({"timestamp":frame.index[i].isoformat(),"direction":"UP" if gap_pct>0 else "DOWN",
+            direction = "UP" if gap_pct > 0 else "DOWN"
+            subsequent = frame["low"].iloc[i:] if direction == "UP" else frame["high"].iloc[i:]
+            filled = bool((subsequent <= prev).any()) if direction == "UP" else bool((subsequent >= prev).any())
+            prior_move = (prev / float(frame["close"].iloc[max(0, i-10)]) - 1.0) if i >= 10 else 0.0
+            if filled:
+                gap_type = "COMMON_OR_FILLED"
+            elif i < 20:
+                gap_type = "UNCLASSIFIED"
+            elif abs(prior_move) < 0.03:
+                gap_type = "BREAKAWAY_CANDIDATE"
+            elif (direction == "UP" and prior_move > 0.08) or (direction == "DOWN" and prior_move < -0.08):
+                gap_type = "EXHAUSTION_CANDIDATE"
+            else:
+                gap_type = "RUNAWAY_CANDIDATE"
+            gaps.append({"timestamp":frame.index[i].isoformat(),"direction":direction,
                          "previous_close":prev,"next_open":op,"gap_pct":gap_pct,
-                         "status":"UNFILLED_OR_UNKNOWN","volume":float(frame["volume"].iloc[i])})
+                         "status":"FILLED" if filled else "UNFILLED",
+                         "gap_type":gap_type,"volume":float(frame["volume"].iloc[i])})
     gap_data={"status":"KNOWN","count":len(gaps),"events":gaps[-10:],
               "threshold_pct":float(gap_threshold_pct),
-              "note":"Crypto trades 24/7; timestamp discontinuities are excluded as data gaps, not price gaps."}
+              "note":"Crypto trades 24/7; timestamp discontinuities are excluded as data gaps, not price gaps. Gap labels are heuristic candidates."}
     return {"status":"KNOWN","as_of":confirmed.index[-1].isoformat(),
             "support_resistance":sr,"trendlines":trendlines,"volume":volume_data,"gaps":gap_data,
             "data_policy":{"confirmed_candles_only":True,"last_candle_excluded_as_provisional":not last_candle_closed,
