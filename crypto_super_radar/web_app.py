@@ -2760,6 +2760,232 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
 
 
 
+def _blofin_elliott_wave_report_fa(wave: dict | None, direction: str = "NO_TRADE") -> dict:
+    """Translate confirmed Elliott structure into a timestamped, non-probabilistic trade context."""
+    source = wave if isinstance(wave, dict) else {}
+    status = str(source.get("status") or "UNKNOWN").upper()
+    pattern = str(source.get("pattern") or "AMBIGUOUS").upper()
+    phase = str(source.get("phase") or "INSUFFICIENT_DATA").upper()
+    direction = str(direction or "NO_TRADE").upper()
+    digit = lambda value: str(value).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+    status_fa = {
+        "CONFIRMED": "ساختار موج پنج‌گانه تأیید شده",
+        "CANDIDATE": "شمارش ساختاری موج نامزد است",
+        "AMBIGUOUS": "شمارش موج مبهم است",
+        "UNKNOWN": "دادهٔ کافی برای شمارش موج موجود نیست",
+    }.get(status, "وضعیت شمارش موج مشخص نیست")
+    pattern_fa = {
+        "BULLISH": "صعودی",
+        "BEARISH": "نزولی",
+        "AMBIGUOUS": "نامشخص",
+    }.get(pattern, "نامشخص")
+    phase_fa = {
+        "INSUFFICIENT_DATA": "دادهٔ کافی برای تشخیص موج‌های تأییدشده وجود ندارد.",
+        "NO_RULE_VALID_IMPULSE": "پیوت‌های تأییدشده با قواعد ساختار ایمپالس الیوت منطبق نیستند.",
+        "WAVES_1_AND_2_CONFIRMED": "موج‌های ۱ و ۲ از نظر ساختاری تأیید شده‌اند؛ موج ۳ فقط سناریوی بعدی است.",
+        "WAVE_3_CONFIRMED": "موج ۳ از نظر ساختاری تأیید شده است؛ موج ۴ سناریوی بعدی است.",
+        "WAVE_4_CONFIRMED": "موج ۴ از نظر ساختاری تأیید شده است؛ موج ۵ سناریوی بعدی است.",
+        "FIVE_WAVE_IMPULSE_CONFIRMED": "ساختار پنج‌موجی کامل تأیید شده است؛ جهت موج اصلاحی از این شمارش پیش‌بینی نمی‌شود.",
+    }.get(phase, "مرحلهٔ موج به‌صورت قطعی قابل طبقه‌بندی نیست.")
+
+    next_wave = source.get("next_wave")
+    try:
+        next_wave = int(next_wave) if next_wave is not None else None
+    except (TypeError, ValueError, OverflowError):
+        next_wave = None
+    if next_wave not in {3, 4, 5}:
+        next_wave = None
+
+    selected_wave_fa = "موج بعدی انتخاب نشد؛ ساختار معتبر یا دادهٔ کافی در دسترس نیست."
+    if status == "CANDIDATE" and next_wave is not None and pattern in {"BULLISH", "BEARISH"}:
+        selected_wave_fa = f"سناریوی ساختاری منتخب: موج {digit(next_wave)} {pattern_fa}؛ این سناریو پیش‌بینی قطعی یا احتمال موفقیت نیست."
+    elif status == "CONFIRMED" and phase == "FIVE_WAVE_IMPULSE_CONFIRMED":
+        selected_wave_fa = "موج‌های ۱ تا ۵ تکمیل شده‌اند؛ موج اصلاحی بعدی بدون شواهد تازه انتخاب نمی‌شود."
+
+    if direction in {"LONG", "SHORT"}:
+        expected_pattern = "BULLISH" if direction == "LONG" else "BEARISH"
+        if status in {"CANDIDATE", "CONFIRMED"} and pattern in {"BULLISH", "BEARISH"}:
+            alignment = "ALIGNED" if pattern == expected_pattern else "CONFLICT"
+        else:
+            alignment = "UNKNOWN"
+    else:
+        alignment = "NO_DIRECTION"
+
+    alignment_fa = {
+        "ALIGNED": "ساختار موج با جهت سیگنال هم‌جهت است؛ این مورد به‌تنهایی مجوز ورود نیست.",
+        "CONFLICT": "ساختار موج با جهت سیگنال هم‌جهت نیست؛ این تعارض باید در گزارش تصمیم دیده شود.",
+        "UNKNOWN": "هم‌جهتی موج با سیگنال قابل تأیید نیست؛ شمارش موج مبهم یا داده ناقص است.",
+        "NO_DIRECTION": "هنوز سیگنال LONG یا SHORT وجود ندارد تا با ساختار موج مقایسه شود.",
+    }[alignment]
+
+    pivots = []
+    for item in source.get("pivots", [])[-6:] if isinstance(source.get("pivots"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        pivots.append({
+            "kind_fa": "سقف تأییدشده" if str(item.get("kind", "")).upper() == "HIGH" else "کف تأییدشده",
+            "price": item.get("price"),
+            "timestamp_utc": item.get("timestamp"),
+            "confirmed_at_utc": item.get("confirmed_at"),
+        })
+
+    return {
+        "status": status,
+        "status_fa": status_fa,
+        "pattern": pattern,
+        "pattern_fa": pattern_fa,
+        "phase": phase,
+        "phase_fa": phase_fa,
+        "wave_count": source.get("wave_count"),
+        "next_wave": next_wave,
+        "selected_wave_fa": selected_wave_fa,
+        "trade_direction": direction,
+        "direction_alignment": alignment,
+        "direction_alignment_fa": alignment_fa,
+        "invalidation_price": source.get("invalidation_price"),
+        "pivot_reversal_threshold_pct": source.get("pivot_reversal_threshold_pct"),
+        "pivots": pivots,
+        "reason_fa": phase_fa,
+        "confidence_note_fa": "شماره‌گذاری موج فقط شواهد ساختاری است، نه احتمال موفقیت، سیگنال مستقل یا تضمین حرکت بعدی.",
+    }
+
+
+def _blofin_gate_rows_fa(gates: list) -> list:
+    """Build safe Persian labels for each of the 12 mandatory execution gates."""
+    rows = []
+    labels = {"PASS": "تأیید شد", "FAIL": "رد شد", "UNKNOWN": "نامشخص"}
+    for item in gates if isinstance(gates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "UNKNOWN").upper()
+        rows.append({
+            "gate_id": item.get("gate_id"),
+            "name_fa": item.get("name_fa") or f"فیلتر {item.get('gate_id', '—')}",
+            "status": status,
+            "status_fa": labels.get(status, "نامشخص"),
+            "reason_fa": item.get("reason_fa") or "دلیل فارسی برای این فیلتر ثبت نشده است.",
+        })
+    return rows
+
+
+def _blofin_execution_report_fa(job: dict) -> dict:
+    """Return a display-safe Persian execution report while retaining source evidence."""
+    current = job if isinstance(job, dict) else {}
+    result = current.get("result") if isinstance(current.get("result"), dict) else {}
+    analysis = current.get("analysis") if isinstance(current.get("analysis"), dict) else {}
+    order = current.get("order") if isinstance(current.get("order"), dict) else {}
+    fill = current.get("fill") if isinstance(current.get("fill"), dict) else {}
+    context = current.get("trade_context") if isinstance(current.get("trade_context"), dict) else {}
+    wave = current.get("elliott_wave") if isinstance(current.get("elliott_wave"), dict) else result.get("elliott_wave")
+    status = str(result.get("status") or current.get("status") or "UNKNOWN").upper()
+    stage = str(current.get("stage") or status).upper()
+    direction = str(analysis.get("signal") or result.get("signal") or order.get("side") or "NO_TRADE").upper()
+
+    status_labels = {
+        "QUEUED": "در صف اجرا",
+        "RUNNING": "در حال اجرا",
+        "COMPLETED": "پایان یافت",
+        "FAILED": "با خطای کنترل‌شده متوقف شد",
+        "OPENED": "موقعیت آزمایشی باز شد",
+        "FILLED": "سفارش پر شد",
+        "PARTIALLY_FILLED": "سفارش بخشی پر شد",
+        "NO_TRADE": "معامله‌ای انجام نشد",
+        "AI_BLOCKED": "ورود از سوی هوش مصنوعی تأیید نشد",
+        "BLOCKED": "ورود به‌دلیل کنترل ایمنی مسدود شد",
+        "UNKNOWN": "نتیجه نامشخص؛ اقدام ایمن متوقف شد",
+        "ORDER_OUTCOME_UNKNOWN": "نتیجه سفارش نامشخص است",
+        "SKIPPED_DUPLICATE_SIGNAL": "به‌دلیل تکراری بودن کندل، سفارش ساخته نشد",
+        "ACCEPTED": "سفارش پذیرفته شد؛ وضعیت پرشدن در حال بررسی است",
+        "MONITORING": "معامله در حال پایش است",
+    }
+    stage_labels = {
+        "QUEUED": "ثبت درخواست",
+        "READINESS_CHECK": "بررسی پیش‌نیازهای حساب Demo",
+        "UNRESOLVED_ORDER_BLOCK": "توقف به‌دلیل سفارش قبلی تعیین‌تکلیف‌نشده",
+        "READ_ONLY_ORDER_RECONCILIATION": "تطبیق فقط‌خواندنی سفارش قبلی",
+        "ORDER_REMAINS_UNKNOWN": "نتیجه سفارش قبلی هنوز مشخص نیست",
+        "LIVE_12_GATE_ANALYSIS": "تحلیل زندهٔ ۱۲ فیلتر",
+        "ELLIOTT_WAVE_ANALYSIS": "تحلیل و انتخاب سناریوی موج الیوت",
+        "NO_TRADE": "عدم ورود؛ شرایط کامل نیست",
+        "DUPLICATE_CANDLE_SKIPPED": "جلوگیری از معامله تکراری",
+        "NEMOTRON_SECOND_OPINION": "دریافت نظر دوم از Nemotron",
+        "AI_BLOCKED": "توقف به‌دلیل تأیید نشدن Nemotron",
+        "DEMO_ORDER_GUARDS": "کنترل نهایی اندازه، مارجین و حد ضرر/سود",
+        "ORDER_SUBMITTED": "ارسال سفارش به حساب آزمایشی",
+        "ENTRY_FILL_CONFIRMED": "تأیید پرشدن سفارش",
+        "ORDER_PENDING": "سفارش ثبت شده؛ پرشدن هنوز تأیید نشده",
+        "MONITORING": "پایش معامله و موقعیت",
+        "ORDER_OUTCOME_UNKNOWN": "نتیجه ارسال نامشخص",
+        "BLOCKED": "توقف ایمنی",
+        "EXECUTION_ERROR": "خطای اجرای کنترل‌شده",
+    }
+    signal_fa = {"LONG": "خرید (LONG)", "SHORT": "فروش استقراضی (SHORT)",
+                 "NO_TRADE": "بدون معامله", "UNKNOWN": "جهت نامشخص"}.get(direction, "بدون معامله")
+    reason_fa = (
+        result.get("reason_fa")
+        or current.get("message_fa")
+        or "هنوز نتیجهٔ نهایی چرخه ثبت نشده است."
+    )
+    pass_count = analysis.get("gate_pass_count", result.get("gate_pass_count"))
+    fail_count = analysis.get("gate_fail_count", result.get("gate_fail_count"))
+    unknown_count = analysis.get("gate_unknown_count", result.get("gate_unknown_count"))
+    gates_fa = analysis.get("gates_fa")
+    if not isinstance(gates_fa, list):
+        gates_fa = _blofin_gate_rows_fa(analysis.get("gates", []))
+
+    events_fa = []
+    for event in current.get("events", []) if isinstance(current.get("events"), list) else []:
+        if not isinstance(event, dict):
+            continue
+        event_stage = str(event.get("stage") or "").upper()
+        events_fa.append({
+            "time_utc": event.get("time_utc"),
+            "status_fa": status_labels.get(str(event.get("status") or "").upper(), str(event.get("status") or "ثبت شد")),
+            "stage_fa": stage_labels.get(event_stage, "مرحلهٔ پردازش"),
+            "message_fa": event.get("message_fa") or "رویداد ثبت شد.",
+        })
+
+    return {
+        "title_fa": "گزارش فارسی اجرای معامله آزمایشی",
+        "status_fa": status_labels.get(status, status_labels.get(str(current.get("status") or "").upper(), "وضعیت نامشخص")),
+        "stage_fa": stage_labels.get(stage, "مرحلهٔ پردازش"),
+        "signal_fa": signal_fa,
+        "reason_fa": reason_fa,
+        "gate_pass_count": pass_count,
+        "gate_fail_count": fail_count,
+        "gate_unknown_count": unknown_count,
+        "gate_summary_fa": (
+            f"{pass_count if pass_count is not None else '—'} فیلتر تأیید، "
+            f"{fail_count if fail_count is not None else '—'} فیلتر رد و "
+            f"{unknown_count if unknown_count is not None else '—'} فیلتر نامشخص."
+        ),
+        "gates_fa": gates_fa,
+        "elliott_wave": wave if isinstance(wave, dict) else {
+            "status_fa": "تحلیل موج در این مرحله هنوز ثبت نشده است.",
+            "selected_wave_fa": "هنوز سناریوی موجی انتخاب نشده است.",
+            "direction_alignment_fa": "مقایسه با جهت معامله هنوز انجام نشده است.",
+            "pivots": [],
+        },
+        "analysis_time_utc": context.get("analysis_time_utc"),
+        "last_completed_candle_time_utc": context.get("last_completed_candle_time_utc"),
+        "last_candle_close": context.get("last_candle_close"),
+        "decision_time_utc": current.get("updated_at_utc"),
+        "submitted_at_utc": current.get("submitted_at_utc"),
+        "filled_at_utc": fill.get("filled_at_utc") or result.get("filled_at_utc"),
+        "entry_reference_price": analysis.get("entry_reference_price", result.get("entry_reference_price")),
+        "average_fill_price": fill.get("average_fill_price", result.get("average_fill_price")),
+        "stop_loss": order.get("stop_loss", result.get("stop_loss")),
+        "take_profit": order.get("take_profit", result.get("take_profit")),
+        "quantity_contracts": order.get("quantity_contracts", result.get("quantity_contracts")),
+        "leverage": order.get("leverage", result.get("leverage", 1)),
+        "exchange_order_id": order.get("exchange_order_id", result.get("exchange_order_id")),
+        "events_fa": events_fa,
+        "orders_submitted": result.get("orders_submitted", False),
+        "trade_executed": result.get("trade_executed", False),
+    }
+
+
 def _run_blofin_demo_execution_job(job_id: str) -> None:
     """Analyze one BTC perpetual candle and submit one guarded Demo order if approved."""
     store = None
