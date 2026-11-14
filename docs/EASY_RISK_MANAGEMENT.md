@@ -87,3 +87,7 @@ Stop behavior:
 - The Futures paper bot and BloFin Demo execution path remain on the existing Legacy engine.
 - No live exchange order route was added by this work. The position-manager endpoints update only the paper journal. They use same-origin checks; no wallet credentials or private keys are used.
 - Paper-position persistence depends on the configured database backend. Without a persistent Render disk or configured Turso backend, local SQLite state can be lost on service replacement.
+
+
+- Strategy horizon is currently labelled SWING for directional Easy setups; this is a descriptive holding-style label, not a promise or automatic expiry. The paper manager separately applies its configured maximum holding bars.
+- Cash CEX/DEX assets are marked NOT_APPLICABLE for borrowed leverage and derivative margin. A perpetual Easy analysis reports a 1x initial-margin estimate only; no higher leverage is assumed, no liquidation price is fabricated, and the Easy engine does not send leveraged orders.
