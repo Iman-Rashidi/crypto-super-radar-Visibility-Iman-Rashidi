@@ -21,6 +21,7 @@ from .market_sentiment import fetch_market_sentiment
 from .market_intelligence import fetch_market_intelligence
 from .market_behavior import analyze_market_behavior
 from .price_action import analyze_easy_price_action
+from .easy_risk_management import calculate_position_size, classify_market_cycle, STRATEGY_STYLE_GUIDE
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
 from .solana_whales import SolanaWhaleScanner
@@ -387,6 +388,34 @@ class WhaleAwareConfirmationEngine:
         }
         result.metrics["market_behavior"] = behavior
         result.metrics["risk_before_entry"] = behavior.get("risk_before_entry")
+        # Independent Easy risk diagnostics; these are informational and do not
+        # add gates, alter the signal, or assume a leverage/liquidation model.
+        cycle = classify_market_cycle(wave_candles)
+        result.metrics["market_cycle"] = cycle
+        result.metrics["strategy_style_guide"] = STRATEGY_STYLE_GUIDE
+        if result.entry_price is not None and result.stop_loss is not None:
+            result.metrics["easy_position_sizing"] = calculate_position_size(
+                equity=self.config.risk.paper_equity_usd,
+                entry=result.entry_price,
+                stop=result.stop_loss,
+                risk_pct=self.config.risk.risk_per_trade_pct,
+                atr_value=result.metrics.get("atr14"),
+                atr_multiple=self.config.risk.atr_stop_multiple,
+                max_notional_pct=self.config.risk.max_position_notional_pct,
+                fee_bps_per_side=self.config.risk.fee_bps_per_side,
+                slippage_bps_per_side=self.config.risk.slippage_bps_per_side,
+            )
+        else:
+            result.metrics["easy_position_sizing"] = {
+                "status": "UNKNOWN",
+                "reason": "A validated entry and stop are required for position sizing.",
+            }
+        result.metrics["risk_management_policy"] = {
+            "used_as_hard_gate": False,
+            "leverage_assumed": False,
+            "liquidation_price_inferred": False,
+            "orders_submitted": False,
+        }
         # Existing walk-forward folds and market-history checks are one mandatory gate.
         if walk.get("status") == "FAIL" or behavior.get("status") == "FAIL":
             walk_status = GateStatus.FAIL
