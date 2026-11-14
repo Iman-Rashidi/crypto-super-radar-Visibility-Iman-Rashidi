@@ -296,6 +296,23 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "trend_confirmation": obv_trend == price_trend,
             "divergence": obv_divergence, "breakout_confirmation": obv_breakout,
         },
+        "macd": {
+            "fast_period": 12, "slow_period": 26, "signal_period": 9,
+            "line": float(macd_line.iloc[-1]) if _finite(macd_line.iloc[-1]) else None,
+            "signal": float(macd_signal.iloc[-1]) if _finite(macd_signal.iloc[-1]) else None,
+            "histogram": float(macd_hist.iloc[-1]) if _finite(macd_hist.iloc[-1]) else None,
+            "crossover": macd_cross, "zero_line": macd_zero, "divergence": macd_divergence,
+        },
+        "fibonacci": fib,
+        "parabolic_sar": {
+            "value": sar_current, "trend": sar_trend, "price_relation": sar_relation, "last_flip": sar_flip,
+            "acceleration_start": 0.02, "acceleration_step": 0.02, "acceleration_max": 0.20,
+            "trailing_stop_reference": sar_current,
+        },
+        "atr": {
+            "period": 14, "value": atr_value, "percentage": atr_pct_value,
+            "risk_references": atr_risk, "directional_signal": "NONE_VOLATILITY_ONLY",
+        },
         "rsi": {
             "period": 14, "value": rsi_value, "previous": rsi_previous,
             "state": rsi_state, "midline_50": midline,
