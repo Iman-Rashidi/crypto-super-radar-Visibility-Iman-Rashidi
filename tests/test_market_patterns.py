@@ -204,5 +204,43 @@ class MarketPatternTests(unittest.TestCase):
 
 
 
+    def _set_gravestone_doji(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-1] = [110.0, 116.0, 109.9, 110.1, 1500.0]
+        return frame
+
+    def test_gravestone_doji_after_uptrend_is_bearish_pending_confirmation(self):
+        frame = self._set_gravestone_doji(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Gravestone Doji"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["score"], -11)
+        self.assertEqual(pattern["trigger_price"], 116.0)
+        self.assertEqual(pattern["invalidation_price"], 109.9)
+
+    def test_gravestone_doji_without_uptrend_is_not_bearish(self):
+        frame = self._set_gravestone_doji(candle_frame("flat"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Gravestone Doji"
+        )
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["score"], 0)
+
+    def test_gravestone_doji_requires_long_upper_and_tiny_lower_wicks(self):
+        frame = self._set_gravestone_doji(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("low")] = 108.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Gravestone Doji",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
