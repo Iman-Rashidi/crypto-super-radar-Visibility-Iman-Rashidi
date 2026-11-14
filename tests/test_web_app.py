@@ -171,6 +171,94 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertIn("دادهٔ لحظه‌ای قرارداد دائمی", report["reason_fa"])
 
+    def test_blofin_elliott_wave_report_selects_directional_scenario_and_discloses_alignment(self):
+        wave = {
+            "status": "CANDIDATE",
+            "pattern": "BULLISH",
+            "phase": "WAVES_1_AND_2_CONFIRMED",
+            "wave_count": 2,
+            "next_wave": 3,
+            "invalidation_price": 64200.0,
+            "pivot_reversal_threshold_pct": 3.25,
+            "pivots": [{
+                "kind": "LOW", "price": 64000.0,
+                "timestamp": "2026-11-14T10:00:00+00:00",
+                "confirmed_at": "2026-11-14T12:00:00+00:00",
+            }],
+        }
+        long_report = web_app._blofin_elliott_wave_report_fa(wave, "LONG")
+        short_report = web_app._blofin_elliott_wave_report_fa(wave, "SHORT")
+
+        self.assertEqual(long_report["pattern_fa"], "صعودی")
+        self.assertEqual(long_report["direction_alignment"], "ALIGNED")
+        self.assertIn("موج ۳ صعودی", long_report["selected_wave_fa"])
+        self.assertEqual(long_report["invalidation_price"], 64200.0)
+        self.assertEqual(long_report["pivots"][0]["kind_fa"], "کف تأییدشده")
+        self.assertEqual(short_report["direction_alignment"], "CONFLICT")
+        self.assertIn("هم‌جهت نیست", short_report["direction_alignment_fa"])
+        self.assertIn("احتمال موفقیت", long_report["confidence_note_fa"])
+
+    def test_blofin_execution_report_is_persian_and_contains_live_timing_and_gate_details(self):
+        wave = web_app._blofin_elliott_wave_report_fa({
+            "status": "CANDIDATE", "pattern": "BEARISH",
+            "phase": "WAVE_3_CONFIRMED", "wave_count": 3, "next_wave": 4,
+            "invalidation_price": 67250.0, "pivots": [],
+        }, "NO_TRADE")
+        job = {
+            "status": "completed",
+            "stage": "NO_TRADE",
+            "message_fa": "شرایط ورود تأیید نشد.",
+            "updated_at_utc": "2026-11-14T15:36:46.503528+00:00",
+            "analysis": {
+                "signal": "NO_TRADE", "gate_pass_count": 0,
+                "gate_fail_count": 0, "gate_unknown_count": 12,
+                "gates_fa": [{
+                    "gate_id": 1, "name_fa": "کیفیت داده بازار",
+                    "status_fa": "نامشخص", "reason_fa": "دادهٔ معتبر دریافت نشد.",
+                }],
+            },
+            "elliott_wave": wave,
+            "trade_context": {
+                "analysis_time_utc": "2026-11-14T15:36:43+00:00",
+                "last_completed_candle_time_utc": "2026-11-14T00:00:00+00:00",
+                "last_candle_close": 66100.0,
+            },
+            "events": [{
+                "time_utc": "2026-11-14T15:36:43+00:00",
+                "status": "running", "stage": "ELLIOTT_WAVE_ANALYSIS",
+                "message_fa": "ساختار موج الیوت بررسی شد.",
+            }],
+            "result": {
+                "status": "NO_TRADE",
+                "reason_fa": "۱۲ فیلتر تأیید نشد؛ هیچ سفارشی ارسال نشد.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+
+        report = web_app._blofin_execution_report_fa(job)
+
+        self.assertEqual(report["status_fa"], "معامله‌ای انجام نشد")
+        self.assertEqual(report["signal_fa"], "بدون معامله")
+        self.assertIn("۰ فیلتر تأیید", report["gate_summary_fa"])
+        self.assertIn("۱۲ فیلتر نامشخص", report["gate_summary_fa"])
+        self.assertEqual(report["analysis_time_utc"], "2026-11-14T15:36:43+00:00")
+        self.assertIn("موج ۴ نزولی", report["elliott_wave"]["selected_wave_fa"])
+        self.assertEqual(report["events_fa"][0]["stage_fa"], "تحلیل و انتخاب سناریوی موج الیوت")
+        self.assertFalse(report["orders_submitted"])
+        self.assertFalse(report["trade_executed"])
+
+    def test_blofin_execution_dashboard_renders_persian_report_instead_of_raw_json(self):
+        status, _, body = self.request("GET", "/")
+        page = body.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn('id="blofin-execution-report"', page)
+        self.assertIn("function renderExecutionJob(job)", page)
+        self.assertIn("انتخاب ساختار موج الیوت در لحظه تحلیل", page)
+        self.assertIn("خط زمانی رویدادهای چرخه", page)
+        self.assertNotIn("JSON.stringify(job,null,2)", page)
+        self.assertNotIn('id="blofin-execution-result"', page)
+
     def test_dashboard_does_not_label_risk_circuit_breaker_as_trade_permission(self):
         status, _, body = self.request("GET", "/")
         page = body.decode("utf-8")
