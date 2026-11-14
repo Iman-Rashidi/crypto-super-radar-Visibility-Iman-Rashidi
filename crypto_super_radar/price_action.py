@@ -166,5 +166,6 @@ def analyze_easy_price_action(
               "note":"Crypto trades 24/7; timestamp discontinuities are excluded as data gaps, not price gaps."}
     return {"status":"KNOWN","as_of":confirmed.index[-1].isoformat(),
             "support_resistance":sr,"trendlines":trendlines,"volume":volume_data,"gaps":gap_data,
-            "data_policy":{"confirmed_candles_only":True,"last_candle_excluded_as_provisional":True,
+            "data_policy":{"confirmed_candles_only":True,"last_candle_excluded_as_provisional":not last_candle_closed,
+                           "last_candle_closed_confirmed_by_caller":bool(last_candle_closed),
                            "used_as_hard_gate":False,"used_for_order_execution":False}}
