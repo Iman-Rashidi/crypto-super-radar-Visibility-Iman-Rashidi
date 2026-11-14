@@ -3934,17 +3934,17 @@ class Handler(BaseHTTPRequestHandler):
               if(monitorActive){monitorToggle.textContent='توقف مانیتور زنده';fetchLiveMonitor();}
               else{clearTimeout(monitorTimer);monitorStatus.textContent='مانیتور زنده متوقف شد.';monitorToggle.textContent='شروع مانیتور زنده هر ۵ ثانیه';}
             });
-            function renderExecutionJob(job){{
-              const report=job&&job.report_fa?job.report_fa:{{}};
+            function renderExecutionJob(job){
+              const report=job&&job.report_fa?job.report_fa:{};
               executionReport.replaceChildren();
-              function node(parent,tag,value,className){{
+              function node(parent,tag,value,className){
                 const el=document.createElement(tag);
                 if(className)el.className=className;
                 el.textContent=value===null||value===undefined||value===''?'—':String(value);
                 parent.appendChild(el);
                 return el;
-              }}
-              function section(title,description){{
+              }
+              function section(title,description){
                 const box=document.createElement('section');
                 box.className='metric';
                 box.style.marginTop='12px';
@@ -3952,47 +3952,47 @@ class Handler(BaseHTTPRequestHandler):
                 if(description)node(box,'p',description,'muted');
                 executionReport.appendChild(box);
                 return box;
-              }}
-              function metricGrid(parent,items){{
+              }
+              function metricGrid(parent,items){
                 const grid=document.createElement('div');
                 grid.className='grid';
-                items.forEach(([label,value])=>{{
+                items.forEach(([label,value])=>{
                   const card=document.createElement('div');
                   card.className='metric';
                   node(card,'span',label);
                   node(card,'strong',value);
                   grid.appendChild(card);
-                }});
+                });
                 parent.appendChild(grid);
-              }}
-              function makeTable(parent,title,rows,columns,emptyText){{
+              }
+              function makeTable(parent,title,rows,columns,emptyText){
                 const box=section(title);
-                if(!Array.isArray(rows)||!rows.length){{
+                if(!Array.isArray(rows)||!rows.length){
                   node(box,'p',emptyText||'موردی برای نمایش ثبت نشده است.','muted');
                   return;
-                }}
+                }
                 const wrapper=document.createElement('div');
                 wrapper.style.overflowX='auto';
                 const table=document.createElement('table');
                 const head=document.createElement('tr');
                 columns.forEach(([,label])=>node(head,'th',label));
                 table.appendChild(head);
-                rows.forEach(item=>{{
+                rows.forEach(item=>{
                   const tr=document.createElement('tr');
-                  columns.forEach(([key])=>{{
+                  columns.forEach(([key])=>{
                     let value=item&&item[key];
                     if(/time|timestamp|confirmed_at/i.test(key))value=formatTime(value);
                     node(tr,'td',value);
-                  }});
+                  });
                   table.appendChild(tr);
-                }});
+                });
                 wrapper.appendChild(table);
                 box.appendChild(wrapper);
-              }}
-              if(!report||!Object.keys(report).length){{
+              }
+              if(!report||!Object.keys(report).length){
                 node(executionReport,'p',(job&&job.message_fa)||'گزارش فارسی هنوز از سرور دریافت نشده است.','muted');
                 return;
-              }}
+              }
               node(executionReport,'h3',report.title_fa||'گزارش فارسی اجرای معامله');
               node(executionReport,'p',report.reason_fa||'دلیل نهایی هنوز ثبت نشده است.','muted');
               const summary=section('خلاصه تصمیم و وضعیت چرخه');
@@ -4013,7 +4013,7 @@ class Handler(BaseHTTPRequestHandler):
                 ['زمان ارسال سفارش',formatTime(report.submitted_at_utc)],
                 ['زمان تأیید Fill',formatTime(report.filled_at_utc)]
               ]);
-              const wave=report.elliott_wave||{{}};
+              const wave=report.elliott_wave||{};
               const waveBox=section('انتخاب ساختار موج الیوت در لحظه تحلیل',
                 'شمارش موج از پیوت‌های تأییدشدهٔ کندل‌های بازار ساخته می‌شود؛ موج بعدی فقط سناریو است، نه پیش‌بینی قطعی.');
               metricGrid(waveBox,[
@@ -4045,7 +4045,7 @@ class Handler(BaseHTTPRequestHandler):
               makeTable(executionReport,'خط زمانی رویدادهای چرخه',report.events_fa||[],[
                 ['time_utc','زمان'],['stage_fa','مرحله'],['status_fa','وضعیت'],['message_fa','شرح رویداد']
               ],'رویدادی ثبت نشده است.');
-            }}
+            }
             async function pollExecutionJob(jobId,token,attempt){
               try{
                 const response=await fetch('/api/blofin/demo/execution-jobs/'+jobId,{
@@ -4106,6 +4106,8 @@ class Handler(BaseHTTPRequestHandler):
               accountView.replaceChildren();
               accountStatus.textContent='توکن و اطلاعات نمایش‌داده‌شده از صفحه پاک شدند.';
             });
+            // Safely verify the read-only BloFin connection as soon as the dashboard loads.
+            checkButton.click();
           })();
           </script>
         </section>
