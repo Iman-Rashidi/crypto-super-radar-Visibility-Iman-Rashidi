@@ -237,18 +237,44 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
         add("ابر تیره", "Dark Cloud Cover", "BEARISH",
             "کندل نزولی بیش از نیمهٔ بدنهٔ صعودی قبلی را پس گرفته است.", -10)
 
-    # The classic three-soldiers / three-crows formations.
+    # Three White Soldiers: three strong advances with controlled pullbacks.
     three = frame.tail(3)
-    bodies = (three["close"] - three["open"]).to_numpy(dtype=float)
-    ranges = (three["high"] - three["low"]).to_numpy(dtype=float)
-    if np.all(bodies > 0) and np.all(bodies >= np.maximum(ranges * 0.45, 1e-15)):
-        if np.all(np.diff(three["close"].to_numpy(dtype=float)) > 0):
-            add("سه سرباز سفید", "Three White Soldiers", "BULLISH",
-                "سه کندل صعودی با بدنه‌های نسبتاً قوی و بسته‌شدن‌های پیاپی بالاتر.", 14)
-    elif np.all(bodies < 0) and np.all(-bodies >= np.maximum(ranges * 0.45, 1e-15)):
-        if np.all(np.diff(three["close"].to_numpy(dtype=float)) < 0):
-            add("سه کلاغ سیاه", "Three Black Crows", "BEARISH",
-                "سه کندل نزولی با بدنه‌های نسبتاً قوی و بسته‌شدن‌های پیاپی پایین‌تر.", -14)
+    soldiers = three.to_dict("records")
+    soldier_bodies = [float(x["close"]) - float(x["open"]) for x in soldiers]
+    soldier_ranges = [float(x["high"]) - float(x["low"]) for x in soldiers]
+    soldier_lower = [min(float(x["open"]), float(x["close"])) - float(x["low"]) for x in soldiers]
+    soldier_upper = [float(x["high"]) - max(float(x["open"]), float(x["close"])) for x in soldiers]
+    prior_soldier_closes = pd.to_numeric(frame["close"].iloc[-11:-3], errors="coerce")
+    prior_move = (
+        float(prior_soldier_closes.iloc[-1] / prior_soldier_closes.iloc[0] - 1.0)
+        if len(prior_soldier_closes) >= 3 and float(prior_soldier_closes.iloc[0]) > 0
+        else 0.0
+    )
+    prior_not_bullish = prior_move <= 0.003
+    opens_inside_previous_bodies = all(
+        min(float(soldiers[i - 1]["open"]), float(soldiers[i - 1]["close"]))
+        <= float(soldiers[i]["open"])
+        <= max(float(soldiers[i - 1]["open"]), float(soldiers[i - 1]["close"]))
+        for i in (1, 2)
+    )
+    soldiers_valid = (
+        prior_not_bullish
+        and all(r > 0 for r in soldier_ranges)
+        and all(b > 0 and b >= r * 0.50 for b, r in zip(soldier_bodies, soldier_ranges))
+        and all(w <= b * 0.25 for w, b in zip(soldier_lower, soldier_bodies))
+        and all(w <= b * 0.50 for w, b in zip(soldier_upper, soldier_bodies))
+        and all(soldiers[i]["close"] > soldiers[i - 1]["close"] for i in (1, 2))
+        and opens_inside_previous_bodies
+    )
+    if soldiers_valid:
+        add("سه سرباز سفید", "Three White Soldiers", "BULLISH",
+            "سه کندل سبزِ قوی پس از روند نزولی/تثبیت؛ هر کندل داخل بدنه قبلی باز شده، بالاتر بسته شده و سایه پایینی کوتاه دارد. برای ورود، تأیید مستقل روند و ریسک لازم است.",
+            15, strength="STRONG" if volume_confirmed else "MODERATE")
+    elif np.all(np.asarray(soldier_bodies) < 0) and all(
+        -b >= r * 0.45 for b, r in zip(soldier_bodies, soldier_ranges)
+    ) and np.all(np.diff(three["close"].to_numpy(dtype=float)) < 0):
+        add("سه کلاغ سیاه", "Three Black Crows", "BEARISH",
+            "سه کندل نزولی با بدنه‌های نسبتاً قوی و بسته‌شدن‌های پیاپی پایین‌تر.", -14)
 
     # Single-candle reversal shapes; trend context distinguishes hammer from hanging man.
     small_body = body_ratio <= 0.35
