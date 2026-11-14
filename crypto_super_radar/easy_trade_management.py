@@ -309,11 +309,21 @@ class EasyPositionManager:
             reason = None
             exit_price = None
             if stop_hit and pos["stop_mode"] == "HARD":
-                reason, exit_price = "STOP_LOSS", old_stop
+                reason = "STOP_LOSS"
+                # A stop-market order can gap through its trigger. Never assume
+                # a fill at the trigger when the completed candle opened worse.
+                exit_price = min(old_stop, o) if side == "LONG" else max(old_stop, o)
             elif stop_hit and pos["stop_mode"] == "MENTAL":
-                self._event(position_id, "MENTAL_STOP_ALERT", old_stop, {"bar_high": h, "bar_low": l, "manual_action_required": True})
+                self._event(position_id, "MENTAL_STOP_ALERT", old_stop, {
+                    "bar_open": o, "bar_high": h, "bar_low": l,
+                    "gap_through_stop": (o < old_stop if side == "LONG" else o > old_stop),
+                    "manual_action_required": True,
+                })
             elif target_hit:
-                reason, exit_price = "TAKE_PROFIT", target
+                reason = "TAKE_PROFIT"
+                # Limit-style target simulation receives the open when it gaps
+                # favorably beyond the target, otherwise the target price.
+                exit_price = max(target, o) if side == "LONG" else min(target, o)
             elif bars >= int(pos["max_holding_bars"]):
                 reason, exit_price = "TIME_EXIT", c
 
