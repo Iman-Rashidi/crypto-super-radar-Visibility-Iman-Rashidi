@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .integrated_engine import WhaleAwareConfirmationEngine
+from .easy_engine import EasyModeEngine
+from .easy_trade_management import EasyPositionManager
 from .indicators import observed_price_ranges
 from .models import AssetSpec, GateStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
@@ -45,8 +47,11 @@ from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
+EASY_ENGINE = EasyModeEngine(config=ENGINE.config, data_service=ENGINE.data)
+_EASY_POSITION_MANAGER = None
+_EASY_POSITION_MANAGER_LOCK = threading.Lock()
 STORE = ENGINE.whale_store
-PAPER_BOT = PaperTradingBot(ENGINE)
+PAPER_BOT = PaperTradingBot(EASY_ENGINE)
 FUTURES_PAPER_BOT = FuturesPaperTradingBot(ENGINE)
 GLOBAL_MARKET_BOARD = GlobalMarketBoard(ENGINE.data.http)
 JOBS: dict[str, dict] = {}
@@ -1458,8 +1463,100 @@ def _enforce_volume_cross_validation(result) -> None:
     result.summary_fa = "معامله مسدود شد: اعتبارسنجی مستقل حجم کامل نیست."
 
 
+
+def _get_easy_position_manager():
+    """Initialize the durable Easy paper position journal lazily."""
+    global _EASY_POSITION_MANAGER
+    if _EASY_POSITION_MANAGER is not None:
+        return _EASY_POSITION_MANAGER
+    with _EASY_POSITION_MANAGER_LOCK:
+        if _EASY_POSITION_MANAGER is None:
+            _EASY_POSITION_MANAGER = EasyPositionManager()
+    return _EASY_POSITION_MANAGER
+
+
+def _build_easy_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
+    """Easy profile diagnosis: essential data is validated, optional evidence stays advisory."""
+    signal = getattr(result.signal, "value", str(result.signal))
+    direction = "BUY" if signal == "LONG" else "SELL" if signal == "SHORT" else "NEUTRAL"
+    metrics = result.metrics or {}
+    policy = metrics.get("decision_policy") or {}
+    tech = metrics.get("technical_indicators") or {}
+    complete = (
+        policy.get("twelve_gate_engine_used") is False
+        and tech.get("status") == "KNOWN"
+        and market_overview.get("current_price") is not None
+        and metrics.get("atr14") is not None
+    )
+    if not complete:
+        direction = "ANALYSIS_INCOMPLETE"
+    score = result.confirmation_score
+    risk = result.estimated_risk_score
+    sizing = metrics.get("easy_position_sizing") or {}
+    if direction == "BUY":
+        short_action = "فرصت خرید در پروفایل Easy شناسایی شده است؛ ورود آزمایشی فقط با اندازه موقعیت محاسبه‌شده و حدضرر ATR بررسی شود."
+        long_action = "جهت کوتاه‌مدت صعودی است؛ این تحلیل به‌تنهایی ارزش بنیادی یا بازده بلندمدت را ثابت نمی‌کند."
+        title = "فرصت خرید Easy شناسایی شد"
+    elif direction == "SELL":
+        short_action = "فشار نزولی در بازار مشتقه شناسایی شده است؛ در Spot فروش استقراضی انجام نمی‌شود."
+        long_action = "برای خرید تازه عجله نکن؛ جهت فعلی بازار نزولی است."
+        title = "سناریوی فروش مشتقه شناسایی شد"
+    elif direction == "ANALYSIS_INCOMPLETE":
+        short_action = "قیمت، کندل بسته‌شده یا ATR لازم برای حدضرر معتبر نیست؛ خروجی جهت‌دار صادر نمی‌شود."
+        long_action = "تاریخچه یا ورودی پایه کافی نیست؛ تحلیل بلندمدت نیز باید منتظر داده معتبر بماند."
+        title = "تحلیل پایه ناقص است"
+    else:
+        short_action = "روند و مومنتوم هم‌جهت نیستند؛ موتور Easy فعلاً سیگنال جهت‌دار ندارد."
+        long_action = "وضعیت خنثی یا متناقض است؛ به‌جای اجبار به معامله، منتظر ساختار روشن‌تر بمان."
+        title = "فعلاً جهت معاملاتی مشخص نیست"
+
+    optional_warnings = []
+    for key, label in (
+        ("market_sentiment", "احساسات بازار"),
+        ("whale_intelligence", "اطلاعات نهنگ‌ها"),
+        ("fundamental_analysis", "تحلیل بنیادی"),
+        ("market_intelligence", "هوش بازار"),
+    ):
+        value = metrics.get(key)
+        if not isinstance(value, dict) or str(value.get("status", "UNKNOWN")).upper() in {"UNKNOWN", "UNAVAILABLE"}:
+            optional_warnings.append(f"{label}: داده کامل یا قابل‌تأیید در دسترس نیست؛ این مورد در Easy گیت اجباری نیست.")
+    blockers = []
+    if not complete:
+        blockers.append({"id": None, "name": "ورودی‌های پایه Easy", "status": "UNKNOWN",
+                         "reason": result.summary_fa})
+    elif direction == "NEUTRAL":
+        blockers.append({"id": None, "name": "هم‌جهتی روند و مومنتوم", "status": "NO_SETUP",
+                         "reason": result.summary_fa})
+    return {
+        "coin_name": asset.raw, "coin_name_en": asset.raw, "symbol": asset.symbol or "",
+        "overall_signal": direction,
+        "analysis_status": "COMPLETE" if complete else "INCOMPLETE",
+        "overall_signal_fa": {"BUY": "خرید", "SELL": "فروش مشتقه", "NEUTRAL": "خنثی",
+                              "ANALYSIS_INCOMPLETE": "تحلیل ناقص"}[direction],
+        "short_term": {"action_fa": short_action, "reasons": [result.summary_fa]},
+        "long_term": {"action_fa": long_action, "reasons": [
+            "پروفایل Easy برای افق فرصت‌جویانه طراحی شده است؛ خروجی آن جایگزین ارزیابی بنیادی بلندمدت نیست."
+        ]},
+        "final_recommendation": title,
+        "buy_recommended": direction == "BUY" and complete,
+        "score_status": "AVAILABLE" if score is not None else "UNKNOWN",
+        "risk_status": "DIAGNOSTIC_ONLY" if risk is not None else "UNKNOWN",
+        "risk_score": risk, "opportunity_score": score,
+        "position_sizing_status": sizing.get("status", "UNKNOWN"),
+        "final_reasons": [result.summary_fa] + optional_warnings,
+        "blockers": blockers,
+        "candle_age_text": f"سن آخرین کندل روزانه: {metrics.get('candle_age_hours')} ساعت؛ وضعیت تازگی باید کنار داده بازار خوانده شود.",
+        "explanation": "این خروجی از موتور مستقل Easy می‌آید. دوازده گیت Legacy در این پروفایل اجرا نمی‌شوند؛ داده پایه قیمت، OHLCV بسته‌شده و ATR همچنان الزامی است. هیچ سفارش واقعی ارسال نمی‌شود.",
+        "engine_profile": "EASY",
+        "mandatory_legacy_gate_count": 0,
+        "optional_diagnostics_are_hard_gates": False,
+    }
+
+
 def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
-    """Turn engine output into a plain-language, gate-backed decision summary."""
+    """Turn engine output into a plain-language decision summary."""
+    if (result.metrics or {}).get("engine_profile") == "EASY":
+        return _build_easy_user_diagnosis(result, asset, timeframe_ranges, market_overview)
     mi = result.metrics.get("market_intelligence") or {}
     coin = _coin_display(asset, mi)
     gates = list(result.gates or [])
@@ -1612,21 +1709,21 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
 def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) -> None:
     global SCAN_RUNNING
     try:
-        result = ENGINE.analyze(
+        result = EASY_ENGINE.analyze(
             asset,
             headlines=[headline] if headline else [],
             social_posts=[social_post] if social_post else [],
         )
-        candle_frame = getattr(ENGINE.data, "candle_frames", {}).get(asset.raw)
+        candle_frame = getattr(EASY_ENGINE.data, "candle_frames", {}).get(asset.raw)
         range_evidence = observed_price_ranges(candle_frame)
-        trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
-        snapshot = getattr(ENGINE.data, "snapshots", {}).get(asset.raw)
+        trend_gate = None
+        snapshot = getattr(EASY_ENGINE.data, "snapshots", {}).get(asset.raw)
         timeframe_ranges = _timeframe_ranges(asset, snapshot)
-        _enforce_daily_candle_freshness(result, range_evidence, timeframe_ranges)
-        _enforce_volume_cross_validation(result)
+        # Easy validates essential price/closed-candle/ATR data in its own engine.
+        # Missing volume cross-validation and optional sources remain diagnostics.
         market_intelligence = result.metrics.get("market_intelligence", {}) or {}
         coin_display = _coin_display(asset, market_intelligence)
-        regime_gate = next((gate for gate in result.gates if gate.gate_id == 2), None)
+        regime_gate = None
         candle_records = []
         if candle_frame is not None and not candle_frame.empty:
             required_ohlc = {"open", "high", "low", "close"}
@@ -1666,8 +1763,8 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                 "easy_position_sizing": result.metrics.get("easy_position_sizing"),
                 "strategy_style_guide": result.metrics.get("strategy_style_guide"),
                 "risk_management_policy": result.metrics.get("risk_management_policy"),
-                "asset_regime": (trend_gate.evidence or {}).get("asset_regime") if trend_gate else None,
-                "benchmark_regime": (regime_gate.evidence or {}).get("regime") if regime_gate else None,
+                "asset_regime": result.metrics.get("easy_trend"),
+                "benchmark_regime": result.metrics.get("market_regime", "UNKNOWN"),
             },
             "signal": result.signal.value,
             "confirmation_score": result.confirmation_score,
@@ -1695,7 +1792,9 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                     "walk_forward_status", "walk_forward_fold_count", "risk_score",
                     "opportunity_rank", "confidence_level_pct", "evidence_confidence_pct",
                     "elliott_wave", "market_cycle", "easy_position_sizing",
-                    "strategy_style_guide", "risk_management_policy",
+                    "strategy_style_guide", "risk_management_policy", "engine_profile",
+                    "decision_policy", "easy_trend", "breakout_retest", "market_sentiment",
+                    "whale_intelligence", "risk_score_semantics",
                 )
             },
             "fundamental_analysis": result.metrics.get("fundamental_analysis", {}),
