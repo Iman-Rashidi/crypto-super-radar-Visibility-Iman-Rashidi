@@ -5,6 +5,7 @@ on:
       - main
       - feature/blofin-demo-adapter
       - feature/easy-trader-candlestick-engine
+      - feature/easy-fundamental-engine
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
@@ -44,9 +45,13 @@ jobs:
             fi
             sleep 0.5
           done
-          grep -q '"status":"ok"' /tmp/csr-render/health.json
+          if ! grep -q '"status":"ok"' /tmp/csr-render/health.json; then
+            echo "Render overlay server failed to start. Server log follows:"
+            cat /tmp/csr-render/server.log || true
+            exit 1
+          fi
           curl --connect-timeout 2 -fsS http://127.0.0.1:18765/ > /tmp/csr-render/home.html
-          grep -q '۱۲ فیلتر اجباری' /tmp/csr-render/home.html
+          grep -q 'مدیریت موقعیت و ژورنال Easy' /tmp/csr-render/home.html
           curl --connect-timeout 2 -fsS 'http://127.0.0.1:18765/history?asset=cex%3ABTCUSDT' > /tmp/csr-render/history.json
           grep -q 'LOCAL_SQLITE' /tmp/csr-render/history.json
       - name: Verify extracted full source bundle

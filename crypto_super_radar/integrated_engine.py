@@ -1,6 +1,8 @@
 """Connect the new whale/sentiment modules to the legacy nine-gate engine."""
 from __future__ import annotations
 
+import json
+import os
 from typing import Any, Callable, Iterable, Optional
 
 import pandas as pd
@@ -10,12 +12,16 @@ from .config import AppConfig
 from .engine import ConfirmationEngine
 from .evm_security import screen_evm_token
 from .elliott_waves import monitor_elliott_waves
+from .fundamental_engine import build_fundamental_report
+from .fundamental_data_providers import DefiLlamaFundamentalProvider
 from .chart_patterns import monitor_chart_patterns, contradicts_confirmed_breakout
 from .candle_quality import completed_daily_candles
 from .evm_transfers import EvmTransferScanner
 from .market_sentiment import fetch_market_sentiment
 from .market_intelligence import fetch_market_intelligence
 from .market_behavior import analyze_market_behavior
+from .price_action import analyze_easy_price_action
+from .easy_risk_management import calculate_position_size, classify_market_cycle, STRATEGY_STYLE_GUIDE
 from .models import AssetSpec, GateResult, GateStatus, SafetyStatus, Signal
 from .providers import MarketDataService, PublicHttpClient
 from .solana_whales import SolanaWhaleScanner
@@ -41,6 +47,26 @@ class WhaleAwareMarketDataService(MarketDataService):
         self.funding_frames: dict[str, pd.Series] = {}
         self.wallet_event_db = connect_database()
         self.wallet_event_store = WalletEventStore(self.wallet_event_db)
+        self.fundamental_provider = DefiLlamaFundamentalProvider(self.http)
+
+    def fundamental_evidence(self, asset: AssetSpec) -> dict[str, Any]:
+        """Fetch public fundamental observations only for explicitly mapped assets.
+
+        CSR_FUNDAMENTAL_PROTOCOL_MAP must be a JSON object keyed by the exact
+        canonical AssetSpec.raw value, with a DefiLlama protocol slug as value.
+        No symbol/name guessing is allowed.
+        """
+        raw_mapping = os.environ.get("CSR_FUNDAMENTAL_PROTOCOL_MAP", "{}")
+        try:
+            mapping = json.loads(raw_mapping)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(mapping, dict):
+            return {}
+        slug = mapping.get(asset.raw)
+        if not isinstance(slug, str) or not slug.strip():
+            return {}
+        return self.fundamental_provider.fetch(slug)
 
     def close(self) -> None:
         """Release the shared durable wallet-event connection."""
@@ -267,6 +293,21 @@ class WhaleAwareConfirmationEngine:
         result = self.base.analyze(
             asset, supplied + news_items + social_items, open_portfolio_risk_pct,
         )
+        # Fundamental evidence is descriptive and cannot bypass the 12 mandatory gates.
+        # A provider must explicitly supply verified evidence; no synthetic score is created.
+        try:
+            fundamental_reader = getattr(self.data, "fundamental_evidence", None)
+            fundamental_evidence = fundamental_reader(asset) if callable(fundamental_reader) else {}
+            if not isinstance(fundamental_evidence, dict):
+                fundamental_evidence = {}
+            result.metrics["fundamental_analysis"] = build_fundamental_report(fundamental_evidence)
+        except Exception as exc:
+            result.metrics["fundamental_analysis"] = {
+                "status": "UNKNOWN", "score": None, "coverage_pct": 0.0,
+                "trade_authorized": False,
+                "reason": f"Fundamental evidence unavailable: {type(exc).__name__}",
+                "message_fa": "داده بنیادی معتبر در دسترس نیست؛ امتیاز ساختگی تولید نشد.",
+            }
         candle_frames = getattr(self.data, "candle_frames", {})
         wave_candles = candle_frames.get(asset.raw) if isinstance(candle_frames, dict) else None
         # Elliott output is descriptive only; it does not gate or change decisions.
@@ -328,6 +369,10 @@ class WhaleAwareConfirmationEngine:
             result.gates[2].evidence.get("direction", "NO TRADE")
             if len(result.gates) > 2 else "NO TRADE"
         )
+        # Easy price-action diagnostics are informational only; they never veto a trade.
+        result.metrics["easy_price_action"] = analyze_easy_price_action(
+            wave_candles, last_candle_closed=True,
+        )
         behavior = analyze_market_behavior(
             wave_candles,
             getattr(snapshot, "price_usd", None),
@@ -343,6 +388,34 @@ class WhaleAwareConfirmationEngine:
         }
         result.metrics["market_behavior"] = behavior
         result.metrics["risk_before_entry"] = behavior.get("risk_before_entry")
+        # Independent Easy risk diagnostics; these are informational and do not
+        # add gates, alter the signal, or assume a leverage/liquidation model.
+        cycle = classify_market_cycle(wave_candles)
+        result.metrics["market_cycle"] = cycle
+        result.metrics["strategy_style_guide"] = STRATEGY_STYLE_GUIDE
+        if result.entry_price is not None and result.stop_loss is not None:
+            result.metrics["easy_position_sizing"] = calculate_position_size(
+                equity=self.config.risk.paper_equity_usd,
+                entry=result.entry_price,
+                stop=result.stop_loss,
+                risk_pct=self.config.risk.risk_per_trade_pct,
+                atr_value=result.metrics.get("atr14"),
+                atr_multiple=self.config.risk.atr_stop_multiple,
+                max_notional_pct=self.config.risk.max_position_notional_pct,
+                fee_bps_per_side=self.config.risk.fee_bps_per_side,
+                slippage_bps_per_side=self.config.risk.slippage_bps_per_side,
+            )
+        else:
+            result.metrics["easy_position_sizing"] = {
+                "status": "UNKNOWN",
+                "reason": "A validated entry and stop are required for position sizing.",
+            }
+        result.metrics["risk_management_policy"] = {
+            "used_as_hard_gate": False,
+            "leverage_assumed": False,
+            "liquidation_price_inferred": False,
+            "orders_submitted": False,
+        }
         # Existing walk-forward folds and market-history checks are one mandatory gate.
         if walk.get("status") == "FAIL" or behavior.get("status") == "FAIL":
             walk_status = GateStatus.FAIL

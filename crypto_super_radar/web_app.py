@@ -1,6 +1,7 @@
 """Dependency-light Persian web dashboard for on-demand research scans."""
 from __future__ import annotations
 
+import atexit
 import html
 import hashlib
 import hmac
@@ -20,6 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .integrated_engine import WhaleAwareConfirmationEngine
+from .easy_engine import EasyModeEngine
+from .easy_trade_management import EasyPositionManager
 from .indicators import observed_price_ranges
 from .models import AssetSpec, GateStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
@@ -45,8 +48,11 @@ from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
+EASY_ENGINE = EasyModeEngine(config=ENGINE.config, data_service=ENGINE.data)
+_EASY_POSITION_MANAGER = None
+_EASY_POSITION_MANAGER_LOCK = threading.Lock()
 STORE = ENGINE.whale_store
-PAPER_BOT = PaperTradingBot(ENGINE)
+PAPER_BOT = PaperTradingBot(EASY_ENGINE)
 FUTURES_PAPER_BOT = FuturesPaperTradingBot(ENGINE)
 GLOBAL_MARKET_BOARD = GlobalMarketBoard(ENGINE.data.http)
 JOBS: dict[str, dict] = {}
@@ -1458,8 +1464,135 @@ def _enforce_volume_cross_validation(result) -> None:
     result.summary_fa = "معامله مسدود شد: اعتبارسنجی مستقل حجم کامل نیست."
 
 
+
+def _get_easy_position_manager():
+    """Initialize the durable Easy paper position journal lazily."""
+    global _EASY_POSITION_MANAGER
+    if _EASY_POSITION_MANAGER is not None:
+        return _EASY_POSITION_MANAGER
+    with _EASY_POSITION_MANAGER_LOCK:
+        if _EASY_POSITION_MANAGER is None:
+            risk = EASY_ENGINE.config.risk
+            _EASY_POSITION_MANAGER = EasyPositionManager(
+                paper_equity=risk.paper_equity_usd,
+                risk_per_trade_pct=risk.risk_per_trade_pct,
+                max_position_notional_pct=risk.max_position_notional_pct,
+                fee_bps_per_side=risk.fee_bps_per_side,
+                slippage_bps_per_side=risk.slippage_bps_per_side,
+            )
+    return _EASY_POSITION_MANAGER
+
+
+def _close_storage_resources() -> None:
+    """Close process-scoped database handles during a graceful service shutdown."""
+    with _EASY_POSITION_MANAGER_LOCK:
+        manager = _EASY_POSITION_MANAGER
+    handles = (
+        getattr(manager, "db", None),
+        STORE,
+        getattr(PAPER_BOT, "ledger", None),
+        getattr(FUTURES_PAPER_BOT, "ledger", None),
+    )
+    closed: set[int] = set()
+    for handle in handles:
+        if handle is None or id(handle) in closed:
+            continue
+        closed.add(id(handle))
+        close = getattr(handle, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                # Shutdown is best-effort; one failing adapter must not prevent
+                # the remaining process-scoped connections from being released.
+                pass
+
+
+atexit.register(_close_storage_resources)
+
+
+def _build_easy_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
+    """Easy profile diagnosis: essential data is validated, optional evidence stays advisory."""
+    signal = getattr(result.signal, "value", str(result.signal))
+    direction = "BUY" if signal == "LONG" else "SELL" if signal == "SHORT" else "NEUTRAL"
+    metrics = result.metrics or {}
+    policy = metrics.get("decision_policy") or {}
+    tech = metrics.get("technical_indicators") or {}
+    complete = (
+        policy.get("twelve_gate_engine_used") is False
+        and tech.get("status") == "KNOWN"
+        and market_overview.get("current_price") is not None
+        and metrics.get("atr14") is not None
+    )
+    if not complete:
+        direction = "ANALYSIS_INCOMPLETE"
+    score = result.confirmation_score
+    risk = result.estimated_risk_score
+    sizing = metrics.get("easy_position_sizing") or {}
+    if direction == "BUY":
+        short_action = "فرصت خرید در پروفایل Easy شناسایی شده است؛ ورود آزمایشی فقط با اندازه موقعیت محاسبه‌شده و حدضرر ATR بررسی شود."
+        long_action = "جهت کوتاه‌مدت صعودی است؛ این تحلیل به‌تنهایی ارزش بنیادی یا بازده بلندمدت را ثابت نمی‌کند."
+        title = "فرصت خرید Easy شناسایی شد"
+    elif direction == "SELL":
+        short_action = "فشار نزولی در بازار مشتقه شناسایی شده است؛ در Spot فروش استقراضی انجام نمی‌شود."
+        long_action = "برای خرید تازه عجله نکن؛ جهت فعلی بازار نزولی است."
+        title = "سناریوی فروش مشتقه شناسایی شد"
+    elif direction == "ANALYSIS_INCOMPLETE":
+        short_action = "قیمت، کندل بسته‌شده یا ATR لازم برای حدضرر معتبر نیست؛ خروجی جهت‌دار صادر نمی‌شود."
+        long_action = "تاریخچه یا ورودی پایه کافی نیست؛ تحلیل بلندمدت نیز باید منتظر داده معتبر بماند."
+        title = "تحلیل پایه ناقص است"
+    else:
+        short_action = "روند و مومنتوم هم‌جهت نیستند؛ موتور Easy فعلاً سیگنال جهت‌دار ندارد."
+        long_action = "وضعیت خنثی یا متناقض است؛ به‌جای اجبار به معامله، منتظر ساختار روشن‌تر بمان."
+        title = "فعلاً جهت معاملاتی مشخص نیست"
+
+    optional_warnings = []
+    for key, label in (
+        ("market_sentiment", "احساسات بازار"),
+        ("whale_intelligence", "اطلاعات نهنگ‌ها"),
+        ("fundamental_analysis", "تحلیل بنیادی"),
+        ("market_intelligence", "هوش بازار"),
+    ):
+        value = metrics.get(key)
+        if not isinstance(value, dict) or str(value.get("status", "UNKNOWN")).upper() in {"UNKNOWN", "UNAVAILABLE"}:
+            optional_warnings.append(f"{label}: داده کامل یا قابل‌تأیید در دسترس نیست؛ این مورد در Easy گیت اجباری نیست.")
+    blockers = []
+    if not complete:
+        blockers.append({"id": None, "name": "ورودی‌های پایه Easy", "status": "UNKNOWN",
+                         "reason": result.summary_fa})
+    elif direction == "NEUTRAL":
+        blockers.append({"id": None, "name": "هم‌جهتی روند و مومنتوم", "status": "NO_SETUP",
+                         "reason": result.summary_fa})
+    return {
+        "coin_name": asset.raw, "coin_name_en": asset.raw, "symbol": asset.symbol or "",
+        "overall_signal": direction,
+        "analysis_status": "COMPLETE" if complete else "INCOMPLETE",
+        "overall_signal_fa": {"BUY": "خرید", "SELL": "فروش مشتقه", "NEUTRAL": "خنثی",
+                              "ANALYSIS_INCOMPLETE": "تحلیل ناقص"}[direction],
+        "short_term": {"action_fa": short_action, "reasons": [result.summary_fa]},
+        "long_term": {"action_fa": long_action, "reasons": [
+            "پروفایل Easy برای افق فرصت‌جویانه طراحی شده است؛ خروجی آن جایگزین ارزیابی بنیادی بلندمدت نیست."
+        ]},
+        "final_recommendation": title,
+        "buy_recommended": direction == "BUY" and complete,
+        "score_status": "AVAILABLE" if score is not None else "UNKNOWN",
+        "risk_status": "DIAGNOSTIC_ONLY" if risk is not None else "UNKNOWN",
+        "risk_score": risk, "opportunity_score": score,
+        "position_sizing_status": sizing.get("status", "UNKNOWN"),
+        "final_reasons": [result.summary_fa] + optional_warnings,
+        "blockers": blockers,
+        "candle_age_text": f"سن آخرین کندل روزانه: {metrics.get('candle_age_hours')} ساعت؛ وضعیت تازگی باید کنار داده بازار خوانده شود.",
+        "explanation": "این خروجی از موتور مستقل Easy می‌آید. دوازده گیت Legacy در این پروفایل اجرا نمی‌شوند؛ داده پایه قیمت، OHLCV بسته‌شده و ATR همچنان الزامی است. هیچ سفارش واقعی ارسال نمی‌شود.",
+        "engine_profile": "EASY",
+        "mandatory_legacy_gate_count": 0,
+        "optional_diagnostics_are_hard_gates": False,
+    }
+
+
 def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, market_overview: dict) -> dict:
-    """Turn engine output into a plain-language, gate-backed decision summary."""
+    """Turn engine output into a plain-language decision summary."""
+    if (result.metrics or {}).get("engine_profile") == "EASY":
+        return _build_easy_user_diagnosis(result, asset, timeframe_ranges, market_overview)
     mi = result.metrics.get("market_intelligence") or {}
     coin = _coin_display(asset, mi)
     gates = list(result.gates or [])
@@ -1612,21 +1745,39 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
 def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) -> None:
     global SCAN_RUNNING
     try:
-        result = ENGINE.analyze(
+        result = EASY_ENGINE.analyze(
             asset,
             headlines=[headline] if headline else [],
             social_posts=[social_post] if social_post else [],
         )
-        candle_frame = getattr(ENGINE.data, "candle_frames", {}).get(asset.raw)
+        candle_frame = getattr(EASY_ENGINE.data, "candle_frames", {}).get(asset.raw)
         range_evidence = observed_price_ranges(candle_frame)
-        trend_gate = next((gate for gate in result.gates if gate.gate_id == 3), None)
-        snapshot = getattr(ENGINE.data, "snapshots", {}).get(asset.raw)
+        # Automatically manage an existing Easy paper position using only the
+        # newest completed daily candle; no exchange order is ever submitted.
+        try:
+            manager = _get_easy_position_manager()
+            for position in manager.open_positions():
+                if position.get("asset") == asset.raw and candle_frame is not None and not candle_frame.empty:
+                    last = candle_frame.iloc[-1]
+                    atr_value = (result.metrics or {}).get("atr14")
+                    manager.update_position(
+                        position["position_id"],
+                        {key: float(last[key]) for key in ("open", "high", "low", "close")},
+                        atr_value=atr_value,
+                        candle_closed=True,
+                    )
+        except Exception as manager_error:
+            result.metrics["easy_position_manager_status"] = {
+                "status": "UNKNOWN", "error_type": type(manager_error).__name__,
+            }
+        trend_gate = None
+        snapshot = getattr(EASY_ENGINE.data, "snapshots", {}).get(asset.raw)
         timeframe_ranges = _timeframe_ranges(asset, snapshot)
-        _enforce_daily_candle_freshness(result, range_evidence, timeframe_ranges)
-        _enforce_volume_cross_validation(result)
+        # Easy validates essential price/closed-candle/ATR data in its own engine.
+        # Missing volume cross-validation and optional sources remain diagnostics.
         market_intelligence = result.metrics.get("market_intelligence", {}) or {}
         coin_display = _coin_display(asset, market_intelligence)
-        regime_gate = next((gate for gate in result.gates if gate.gate_id == 2), None)
+        regime_gate = None
         candle_records = []
         if candle_frame is not None and not candle_frame.empty:
             required_ohlc = {"open", "high", "low", "close"}
@@ -1656,13 +1807,20 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             "market_overview": {
                 "status": range_evidence.get("status", "UNKNOWN"),
                 "reason": range_evidence.get("reason"),
-                "current_price": range_evidence.get("current_price"),
+                "current_price": range_evidence.get("current_price") or getattr(snapshot, "price_usd", None),
                 "candle_age_hours": range_evidence.get("candle_age_hours"),
                 "ranges": range_evidence.get("windows", {}),
                 "candles": candle_records,
                 "chart_pattern": result.metrics.get("chart_pattern"),
-                "asset_regime": (trend_gate.evidence or {}).get("asset_regime") if trend_gate else None,
-                "benchmark_regime": (regime_gate.evidence or {}).get("regime") if regime_gate else None,
+                "easy_price_action": result.metrics.get("easy_price_action"),
+                "market_cycle": result.metrics.get("market_cycle"),
+                "easy_position_sizing": result.metrics.get("easy_position_sizing"),
+                "strategy_style": result.metrics.get("strategy_style"),
+                "strategy_horizon": result.metrics.get("strategy_horizon"),
+                "leverage_margin_estimate": result.metrics.get("leverage_margin_estimate"),
+                "risk_management_policy": result.metrics.get("risk_management_policy"),
+                "asset_regime": result.metrics.get("easy_trend"),
+                "benchmark_regime": result.metrics.get("market_regime", "UNKNOWN"),
             },
             "signal": result.signal.value,
             "confirmation_score": result.confirmation_score,
@@ -1689,9 +1847,18 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
                     "market_sentiment_score", "fear_greed_value", "fear_greed_attribution",
                     "walk_forward_status", "walk_forward_fold_count", "risk_score",
                     "opportunity_rank", "confidence_level_pct", "evidence_confidence_pct",
-                    "elliott_wave",
+                    "elliott_wave", "market_cycle", "easy_position_sizing",
+                    "strategy_style_guide", "strategy_style", "strategy_horizon",
+                    "leverage_margin_estimate", "portfolio_correlation_analysis",
+                    "beta_hedge_estimate", "risk_management_policy", "engine_profile",
+                    "decision_policy", "easy_trend", "breakout_retest", "market_sentiment",
+                    "whale_intelligence", "risk_score_semantics", "multi_timeframe_structure",
+                    "historical_var_expected_shortfall", "portfolio_risk_summary",
+                    "portfolio_stress_test", "fractional_kelly", "atr14", "rsi14",
+                    "relative_volume_20", "timeframe_conflict",
                 )
             },
+            "fundamental_analysis": result.metrics.get("fundamental_analysis", {}),
         }
         with LOCK:
             JOBS[job_id] = {"status": "completed", "result": payload}
@@ -3761,6 +3928,34 @@ class Handler(BaseHTTPRequestHandler):
             payload = PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/easy/positions":
+            try:
+                manager = _get_easy_position_manager()
+                payload = {
+                    "status": "KNOWN", "mode": "PAPER_ONLY",
+                    "storage_backend": storage_backend(),
+                    "open_positions": manager.open_positions(),
+                    "recent_journal": manager.journal(50),
+                    "orders_submitted": False,
+                }
+                return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status": "UNKNOWN", "error_type": type(exc).__name__,
+                           "mode": "PAPER_ONLY", "orders_submitted": False}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+        if parsed.path == "/api/easy/positions/events":
+            position_id = parse_qs(parsed.query).get("position_id", [""])[0]
+            if not position_id:
+                return self._send(400, b'{"status":"INVALID_POSITION_ID"}', "application/json; charset=utf-8")
+            try:
+                payload = {"status": "KNOWN", "events": _get_easy_position_manager().events(position_id)}
+                return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(503, json.dumps({"status":"UNKNOWN","error_type":type(exc).__name__}).encode(),
+                                  "application/json; charset=utf-8")
         if parsed.path == "/futures-paper-bot/status":
             payload = FUTURES_PAPER_BOT.state()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -4723,7 +4918,7 @@ async function refreshExecutionReadiness(){
                 const message = String(error && error.message || error);
                 const retryable = error instanceof TypeError ||
                   (error && error.name === 'AbortError') ||
-                  /^HTTP (429|5\d\d)$/.test(message);
+                  /^HTTP (429|5[0-9][0-9])$/.test(message);
                 if (!retryable) throw error;
               }
               if (retry === 3) break;
@@ -5852,10 +6047,125 @@ async function refreshExecutionReadiness(){
           ids.forEach(id=>el(id).addEventListener('input',update));update();
         })();
         </script>
+        <section class="card" id="easy-position-manager">
+          <h2>مدیریت موقعیت و ژورنال Easy · Paper Only</h2>
+          <p class="muted">این بخش فقط حساب آزمایشی مستقل Easy را مدیریت می‌کند. سقف پیش‌فرض ریسک هر معامله ۰٫۵٪ سرمایه و سقف ارزش موقعیت ۱۰٪ سرمایه است. پوزیشن باز هنگام اسکن بعدی با آخرین کندل روزانه بسته‌شده به‌روزرسانی می‌شود. هیچ سفارش واقعی ارسال نمی‌شود.</p>
+          <div class="grid" style="align-items:start">
+            <div class="metric">
+              <h3>ثبت موقعیت آزمایشی</h3>
+              <label for="easy-open-asset">دارایی</label>
+              <input id="easy-open-asset" value="cex:BTCUSDT">
+              <label for="easy-open-side">جهت</label>
+              <select id="easy-open-side"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select>
+              <label for="easy-open-qty">تعداد / Quantity</label><input id="easy-open-qty" type="number" min="0.00000001" step="any">
+              <label for="easy-open-entry">قیمت ورود</label><input id="easy-open-entry" type="number" min="0.00000001" step="any">
+              <label for="easy-open-stop">حد ضرر اولیه</label><input id="easy-open-stop" type="number" min="0.00000001" step="any">
+              <label for="easy-open-target">حد سود</label><input id="easy-open-target" type="number" min="0.00000001" step="any">
+              <label for="easy-open-stop-mode">نوع توقف</label>
+              <select id="easy-open-stop-mode"><option value="HARD">Hard Stop · توقف خودکار آزمایشی</option><option value="MENTAL">Mental Stop · هشدار دستی</option></select>
+              <label for="easy-open-max-bars">حداکثر کندل نگهداری</label><input id="easy-open-max-bars" type="number" min="1" max="1000" value="100">
+              <button id="easy-open-submit" type="button">ثبت موقعیت آزمایشی</button>
+            </div>
+            <div class="metric">
+              <h3>به‌روزرسانی کندل بسته‌شده</h3>
+              <p class="muted">برای توقف/هدف و Trailing Stop؛ کندل باز رد می‌شود.</p>
+              <label for="easy-manage-id">شناسه موقعیت</label><input id="easy-manage-id" autocomplete="off">
+              <label for="easy-manage-open">Open</label><input id="easy-manage-open" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-high">High</label><input id="easy-manage-high" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-low">Low</label><input id="easy-manage-low" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-close">Close</label><input id="easy-manage-close" type="number" min="0.00000001" step="any">
+              <label for="easy-manage-atr">ATR (اختیاری)</label><input id="easy-manage-atr" type="number" min="0.00000001" step="any">
+              <label><input id="easy-manage-closed" type="checkbox" checked> این کندل بسته شده است</label>
+              <button id="easy-manage-submit" type="button">ثبت کندل و مدیریت موقعیت</button>
+              <hr>
+              <h3>بستن دستی موقعیت</h3>
+              <label for="easy-close-id">شناسه موقعیت</label><input id="easy-close-id" autocomplete="off">
+              <label for="easy-close-price">قیمت خروج</label><input id="easy-close-price" type="number" min="0.00000001" step="any">
+              <label for="easy-close-reason">علت خروج</label><input id="easy-close-reason" value="MANUAL_CLOSE">
+              <button id="easy-close-submit" type="button">بستن در حساب آزمایشی</button>
+            </div>
+          </div>
+          <p id="easy-position-status" class="muted" aria-live="polite">در حال خواندن حساب آزمایشی Easy...</p>
+          <div id="easy-position-open-list"></div>
+          <h3>ژورنال معاملات بسته‌شده</h3>
+          <div id="easy-position-journal" style="overflow-x:auto"></div>
+          <p class="muted">سود/زیان ژورنال موقعیت‌منیجر بر اساس قیمت‌های ثبت‌شده و قبل از هزینه‌ها محاسبه می‌شود. اجرای واقعی، اتصال کلید خصوصی و اهرم در این حساب وجود ندارد.</p>
+        </section>
+        <script>
+        (function(){
+          const byId=id=>document.getElementById(id);
+          const status=byId('easy-position-status');
+          const openList=byId('easy-position-open-list');
+          const journal=byId('easy-position-journal');
+          if(!status||!openList||!journal)return;
+          const val=id=>(byId(id).value||'').trim();
+          const num=id=>Number(val(id));
+          function cell(row,value){const td=document.createElement('td');td.textContent=value===null||value===undefined?'—':String(value);row.appendChild(td);}
+          function table(headers,rows){
+            const t=document.createElement('table'),head=document.createElement('thead'),hr=document.createElement('tr');
+            headers.forEach(x=>cell(hr,x));head.appendChild(hr);t.appendChild(head);
+            const body=document.createElement('tbody');rows.forEach(values=>{const tr=document.createElement('tr');values.forEach(x=>cell(tr,x));body.appendChild(tr);});
+            t.appendChild(body);return t;
+          }
+          async function refresh(){
+            try{
+              const response=await fetch('/api/easy/positions',{cache:'no-store'});
+              const data=await response.json();if(!response.ok||data.status!=='KNOWN')throw new Error(data.error_type||'دریافت حساب ناموفق بود');
+              const active=data.open_positions||[],history=data.recent_journal||[];
+              openList.replaceChildren();
+              if(active.length){
+                openList.appendChild(table(['Asset','Side','Qty','Entry','Stop فعلی','TP','Stop Mode','Position ID'],
+                  active.map(p=>[p.asset,p.side,p.quantity,p.entry_price,p.current_stop,p.take_profit,p.stop_mode,p.position_id])));
+                const p=active[0];byId('easy-manage-id').value=p.position_id;byId('easy-close-id').value=p.position_id;
+              }else{const p=document.createElement('p');p.className='muted';p.textContent='موقعیت بازی در Easy paper manager وجود ندارد.';openList.appendChild(p);}
+              journal.replaceChildren();
+              if(history.length)journal.appendChild(table(['Asset','Side','Entry','Exit','Gross PnL','Exit reason','Closed at'],
+                history.map(t=>[t.asset,t.side,t.entry_price,t.exit_price,t.gross_pnl,t.exit_reason,new Date(Number(t.closed_at)*1000).toISOString()])));
+              else{const p=document.createElement('p');p.className='muted';p.textContent='هنوز معامله بسته‌شده‌ای در ژورنال ثبت نشده است.';journal.appendChild(p);}
+              status.textContent='حساب Easy: '+active.length+' موقعیت باز · '+history.length+' معامله بسته‌شده · '+data.mode;
+            }catch(error){status.textContent='خواندن حساب Easy ناموفق بود: '+String(error.message||error);}
+          }
+          async function post(path,values){
+            status.textContent='در حال ثبت داده در حساب آزمایشی...';
+            try{
+              const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams(values)});
+              const data=await response.json();
+              status.textContent=(data.status||'UNKNOWN')+' · '+(data.reason||data.message||'درخواست پردازش شد')+' · سفارش واقعی: '+(data.orders_submitted?'ارسال شده':'ارسال نشده');
+              if(data.position_id){byId('easy-manage-id').value=data.position_id;byId('easy-close-id').value=data.position_id;}
+              await refresh();
+              return data;
+            }catch(error){status.textContent='خطا در درخواست حساب آزمایشی: '+String(error.message||error);}
+          }
+          byId('easy-open-submit').addEventListener('click',()=>{
+            const fields=['easy-open-qty','easy-open-entry','easy-open-stop','easy-open-target'];
+            if(fields.some(id=>!Number.isFinite(num(id))||num(id)<=0)){status.textContent='Quantity، Entry، Stop و Target باید عدد مثبت باشند.';return;}
+            post('/api/easy/positions/open',{
+              asset:val('easy-open-asset'),side:val('easy-open-side'),quantity:val('easy-open-qty'),
+              entry_price:val('easy-open-entry'),stop_loss:val('easy-open-stop'),take_profit:val('easy-open-target'),
+              stop_mode:val('easy-open-stop-mode'),max_holding_bars:val('easy-open-max-bars')
+            });
+          });
+          byId('easy-manage-submit').addEventListener('click',()=>{
+            const fields=['easy-manage-open','easy-manage-high','easy-manage-low','easy-manage-close'];
+            if(!val('easy-manage-id')||fields.some(id=>!Number.isFinite(num(id))||num(id)<=0)){status.textContent='شناسه و چهار قیمت OHLC معتبر لازم است.';return;}
+            post('/api/easy/positions/update',{
+              position_id:val('easy-manage-id'),open:val('easy-manage-open'),high:val('easy-manage-high'),
+              low:val('easy-manage-low'),close:val('easy-manage-close'),atr_value:val('easy-manage-atr'),
+              closed:byId('easy-manage-closed').checked?'1':'0'
+            });
+          });
+          byId('easy-close-submit').addEventListener('click',()=>{
+            if(!val('easy-close-id')||!Number.isFinite(num('easy-close-price'))||num('easy-close-price')<=0){status.textContent='شناسه موقعیت و قیمت خروج معتبر لازم است.';return;}
+            post('/api/easy/positions/close',{position_id:val('easy-close-id'),exit_price:val('easy-close-price'),reason:val('easy-close-reason')});
+          });
+          refresh();
+        })();
+        </script>
         <section class="card">
-          <h3>۱۲ فیلتر اجباری</h3>
-          <p>داده بازار · رژیم · روند · مومنتوم · جریان سرمایه · امنیت · احساسات · بک‌تست · ریسک · نهنگ‌ها · پوشش احساسات · Walk-forward</p>
-          <p class="muted">هر فیلتر FAIL یا UNKNOWN باشد، خروجی NO TRADE است. سولانا در نسخه فعلی فقط نمونه‌برداری محدود از تراکنش‌های اخیر دارد.</p>
+          <h3>تفکیک پروفایل‌های موتور</h3>
+          <p><strong>Easy:</strong> موتور مستقل فرصت‌جو؛ داده پایه قیمت، OHLCV بسته‌شده و ATR برای حدضرر الزامی است. ۱۲ گیت Legacy در اسکن Easy اجرا نمی‌شوند. Whale، احساسات، فاندامنتال، Market Regime و Walk-forward تشخیصی‌اند و به‌تنهایی فرصت را مسدود نمی‌کنند.</p>
+          <p><strong>Standard / Strict:</strong> چارچوب تأیید چندمرحله‌ای و ۱۲ گیت اجباری مربوط به این پروفایل‌ها باقی می‌ماند. مسیر Futures/BloFin همچنان از موتور Legacy استفاده می‌کند.</p>
+          <p class="muted">کامل بودن داده پایه و امکان ساخت Entry/Stop معتبر همچنان شرط صدور خروجی جهت‌دار Easy است. این داشبورد سفارش واقعی ارسال نمی‌کند.</p>
         </section>
         <p class="muted">تاریخچه: <code>/history?asset=cex:BTCUSDT</code></p>
         """
@@ -5864,7 +6174,7 @@ async function refreshExecutionReadiness(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/easy/positions/open", "/api/easy/positions/update", "/api/easy/positions/close"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -5878,6 +6188,57 @@ async function refreshExecutionReadiness(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route in {"/api/easy/positions/open", "/api/easy/positions/update", "/api/easy/positions/close"}:
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN","mode":"PAPER_ONLY"}',
+                                      "application/json; charset=utf-8")
+                manager = _get_easy_position_manager()
+                value = lambda name, default=None: form.get(name, [default])[0]
+                number = lambda name: float(value(name))
+                if route.endswith("/open"):
+                    try:
+                        asset = AssetSpec.parse(value("asset", ""))
+                        result = manager.open_position(
+                            asset.raw, value("side", ""), number("quantity"),
+                            number("entry_price"), number("stop_loss"), number("take_profit"),
+                            stop_mode=value("stop_mode", "HARD"),
+                            max_holding_bars=int(value("max_holding_bars", "100")),
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        return self._send(400, b'{"status":"INVALID_INPUT","mode":"PAPER_ONLY"}',
+                                          "application/json; charset=utf-8")
+                    code = 201 if result.get("status") == "OPENED" else 409 if result.get("status") == "BLOCKED" else 400
+                elif route.endswith("/update"):
+                    try:
+                        result = manager.update_position(
+                            value("position_id", ""),
+                            {"open": number("open"), "high": number("high"),
+                             "low": number("low"), "close": number("close")},
+                            atr_value=number("atr_value") if value("atr_value") not in (None, "") else None,
+                            trail_atr_multiple=float(value("trail_atr_multiple", "2.0")),
+                            candle_closed=value("closed", "0") == "1",
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        return self._send(400, b'{"status":"INVALID_INPUT","mode":"PAPER_ONLY"}',
+                                          "application/json; charset=utf-8")
+                    code = 200 if result.get("status") in {"OPEN", "PROVISIONAL"} else 404 if result.get("status") == "NOT_FOUND" else 400
+                else:
+                    try:
+                        result = manager.manual_close(
+                            value("position_id", ""), number("exit_price"),
+                            value("reason", "MANUAL_CLOSE"),
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        return self._send(400, b'{"status":"INVALID_INPUT","mode":"PAPER_ONLY"}',
+                                          "application/json; charset=utf-8")
+                    code = 200 if result.get("status") == "CLOSED" else 404 if result.get("status") == "NOT_FOUND" else 400
+                result.update({"mode": "PAPER_ONLY", "orders_submitted": False})
+                return self._send(code, json.dumps(result, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
             if route == "/api/blofin/demo/execute-once":
                 if (
                     not origin
@@ -6054,13 +6415,17 @@ async function refreshExecutionReadiness(){
                 "<section class='card'><h3>نمای کلی بازار و نمودار</h3><div id='market-summary' class='grid'></div>"
                 "<div id='range-table'></div><canvas id='candles' width='1000' height='320'></canvas></section>"
                 "<section class='card'><h3>Market Intelligence · DEX و مشتقات</h3><div id='mi-summary' class='grid'></div><div id='mi-notes' class='muted'></div></section>"
-                "<section class='card'><h3>۱۲ فیلتر</h3><div id='gate-table'></div></section>"
+                "<section class='card'><h3>تحلیل بنیادی · Fundamental Engine</h3><div id='fundamental-summary' class='grid'></div><p id='fundamental-note' class='muted'></p></section>"
+                "<section class='card'><h3>گیت‌های Legacy</h3><p class='muted'>در پروفایل Easy هیچ‌یک از ۱۲ گیت Legacy اجرا نمی‌شود؛ ورودی‌های پایه قیمت، OHLCV بسته‌شده و ATR جداگانه کنترل می‌شوند.</p><div id='gate-table'></div></section>"
+                "<section class='card'><h3>ساختار روند چندتایم‌فریمی</h3><p class='muted'>تایم‌فریم بدون OHLCV مستقل UNKNOWN نمایش داده می‌شود؛ تعارض تایم‌فریم‌ها فقط تشخیصی است.</p><div id='easy-mtf-table'></div></section>"
+                "<section class='card'><h3>مدیریت ریسک و سناریوهای افت</h3><div id='easy-risk-table'></div></section>"
+                "<section class='card'><h3>شکست، بازآزمایی و شکست کاذب</h3><div id='easy-breakout-table'></div></section>"
                 "<section class='card'><h3>خلاصه نتیجه اسکن</h3><div id='scan-summary' class='grid'></div></section><p><a href='/'>بازگشت</a></p>"
                 "<script>const job='" + job_id + "';"
                 "function cell(tag,text){const e=document.createElement(tag);e.textContent=text??'UNKNOWN';return e;}"
                 "function table(container,headers,rows){const t=document.createElement('table'),h=document.createElement('thead'),hr=document.createElement('tr');headers.forEach(v=>hr.appendChild(cell('th',v)));h.appendChild(hr);t.appendChild(h);const b=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach(v=>tr.appendChild(cell('td',v)));b.appendChild(tr);});t.appendChild(b);container.replaceChildren(t);}"
                 "function renderMarket(m){const box=document.getElementById('market-summary');"
-                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status],['الگوی هندسی',(m.chart_pattern||{}).pattern||'نامشخص'],['وضعیت الگو',(m.chart_pattern||{}).status||'UNKNOWN'],['تأیید شکست با حجم',(m.chart_pattern||{}).breakout_confirmation||'UNKNOWN'],['حجم شکست / میانه ۲۰ کندل',(m.chart_pattern||{}).breakout_volume_ratio||'UNKNOWN']];"
+                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status],['الگوی هندسی',(m.chart_pattern||{}).pattern||'نامشخص'],['وضعیت الگو',(m.chart_pattern||{}).status||'UNKNOWN'],['تأیید شکست با حجم',(m.chart_pattern||{}).breakout_confirmation||'UNKNOWN'],['حجم شکست / میانه ۲۰ کندل',(m.chart_pattern||{}).breakout_volume_ratio||'UNKNOWN'],['ناحیه‌های حمایت',JSON.stringify((m.easy_price_action||{}).support_resistance?.support_zones||[])],['ناحیه‌های مقاومت',JSON.stringify((m.easy_price_action||{}).support_resistance?.resistance_zones||[])],['وضعیت خط روند',(m.easy_price_action||{}).trendlines?.classification||'UNKNOWN'],['حجم نسبی ۲۰ کندل',(m.easy_price_action||{}).volume?.relative_volume_20??'UNKNOWN'],['جهت OBV',(m.easy_price_action||{}).volume?.obv_direction||'UNKNOWN'],['تعداد شکاف واقعی قیمت',(m.easy_price_action||{}).gaps?.count??'UNKNOWN'],['اوج حجم',(m.easy_price_action||{}).volume?.climax_interpretation||'UNKNOWN'],['تجمیع/توزیع احتمالی',(m.easy_price_action||{}).volume?.range_obv_behavior||'UNKNOWN'],['مرحله موج الیوت',(m.elliott_wave||{}).phase||'UNKNOWN'],['وضعیت موج الیوت',(m.elliott_wave||{}).status||'UNKNOWN'],['نوع آخرین Gap',((m.easy_price_action||{}).gaps?.events||[]).slice(-1)[0]?.gap_type||'NONE']];"
                 "box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));const strong=cell('strong',v);d.appendChild(strong);box.appendChild(d);});"
                 "const labels={'7':'۷ روز','30':'۳۰ روز','90':'۹۰ روز','365':'۳۶۵ روز'};"
                 "const rows=Object.entries(m.ranges||{}).map(([k,v])=>[labels[k]||k,v.status,v.low,v.high,v.candle_count,v.coverage_pct]);"
@@ -6074,8 +6439,10 @@ async function refreshExecutionReadiness(){
                 "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};"
                 "const w=c.whale_intelligence||{};const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['وضعیت Whale API',w.status],['پوزیشن‌های نهنگ Hyperliquid',w.position_count],['کیف‌پول‌های نهنگ',w.wallet_count],['ارزش پوزیشن لانگ (USD)',w.long_notional_usd],['ارزش پوزیشن شورت (USD)',w.short_notional_usd],['خالص مواجهه جهت‌دار (USD)',w.net_directional_notional_usd],['هشدارهای ورود',w.open_alert_count],['هشدارهای خروج',w.close_alert_count],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const whaleWallets=(w.positions||[]).slice(0,5).map(x=>'نهنگ '+(x.wallet||'آدرس نامشخص')+' · '+x.direction+' · '+(x.position_value_usd??'—')+' USD · اهرم '+(x.leverage??'—')+'x · PnL '+(x.unrealized_pnl_usd??'—'));const whaleAlerts=(w.alerts||[]).slice(0,5).map(x=>'هشدار '+x.action+' '+x.direction+' · '+(x.wallet||'آدرس نامشخص')+' · '+(x.position_value_usd??'—')+' USD');const notes=[...(s.notes||[]),d.reason,c.reason,w.reason,w.coverage,...whaleWallets,...whaleAlerts,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
                 "window.CryptoRadar.scanning('radar-asset-scan', 'در حال جمع‌آوری داده و اجرای فیلترهای تحلیلی...');"
+                "function renderFundamental(f){const modules=f.modules||{},labels={macro:'اقتصاد کلان',tokenomics:'توکنومیکس',onchain:'آن‌چین',project:'سلامت پروژه',industry:'تحلیل صنعت',dcf:'ارزش‌گذاری DCF',comparables:'مقایسه پروژه‌های هم‌صنعت',accounting_principles:'اصول حسابداری',market_analysis:'تحلیل بازار',event_analysis:'تحلیل رویدادها',dividend_analysis:'سود تقسیمی',share_buybacks:'بازخرید سهام',eps_analysis:'سود هر سهم EPS',mergers_acquisitions:'ادغام و تملک',sector_rotation:'چرخش بخشی'};const box=document.getElementById('fundamental-summary');const rows=[['وضعیت کلی',f.status||'UNKNOWN'],['امتیاز بنیادی',f.score===null||f.score===undefined?'نامشخص':f.score+'/100'],['پوشش شواهد',f.coverage_pct===undefined?'نامشخص':f.coverage_pct+'%']];Object.keys(labels).forEach(k=>{const m=modules[k]||{};rows.push([labels[k],(m.status||'UNKNOWN')+' · '+(m.score===null||m.score===undefined?'نامشخص':m.score+'/100')]);});const addGroup=(title,items)=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',title));const list=document.createElement('div');Object.entries(items||{}).forEach(([k,v])=>{const line=document.createElement('div');line.textContent=(v.label_fa||k)+' · '+(v.status||'UNKNOWN');if(v.checks)line.textContent+=' · '+Object.entries(v.checks).map(([a,b])=>a+': '+b).join(' | ');if(v.reported_method)line.textContent+=' · روش: '+v.reported_method;if(v.value!==undefined&&v.value!==null)line.textContent+=' · '+v.value;if(v.cumulative_abnormal_return!==undefined)line.textContent+=' · CAR: '+v.cumulative_abnormal_return;if(v.t_statistic!==undefined)line.textContent+=' · t: '+v.t_statistic;if(v.p_value_two_sided!==undefined)line.textContent+=' · p: '+v.p_value_two_sided;if(v.statistically_significant_5pct!==undefined)line.textContent+=' · معناداری ۵٪: '+v.statistically_significant_5pct;if(v.source)line.textContent+=' · '+v.source;if(v.observed_at_utc)line.textContent+=' · '+v.observed_at_utc;list.appendChild(line);});d.appendChild(list);box.appendChild(d);};box.replaceChildren();rows.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});const accounting=modules.accounting_principles||{};addGroup('کنترل‌های گزارشگری مالی',accounting.principles||{});addGroup('شاخص‌ها و ریسک‌های بازار',modules.market_analysis?.observations||{});addGroup('بازده غیرعادی رویدادها',modules.event_analysis?.events||{});const buyback=modules.share_buybacks||{};addGroup('تحلیل بازخرید سهام',{بازده_بازخرید:{status:buyback.checks?.buyback_yield||'UNKNOWN',value:buyback.buyback_yield_pct},کاهش_تعداد_سهام:{status:buyback.checks?.share_count_change||'UNKNOWN',value:buyback.share_reduction_pct},تأمین_مالی_بدهی:{status:buyback.checks?.funding_mix||'UNKNOWN',value:buyback.debt_funding_pct},افزایش_مکانیکی_EPS:{status:buyback.checks?.mechanical_eps_effect||'UNKNOWN',value:buyback.mechanical_eps_accretion_pct}});const esg=modules.esg_analysis||{};addGroup('تحلیل ESG | محیط‌زیست، اجتماعی و حاکمیت',{امتیاز_کل:{status:esg.status||'UNKNOWN',value:esg.diagnostic_score},محیط‌زیست:{status:esg.pillars?.environmental?.status||'UNKNOWN',value:esg.pillars?.environmental?.score},مسئولیت_اجتماعی:{status:esg.pillars?.social?.status||'UNKNOWN',value:esg.pillars?.social?.score},حاکمیت:{status:esg.pillars?.governance?.status||'UNKNOWN',value:esg.pillars?.governance?.score},مصرف_انرژی_شبکه:{status:esg.network_metrics?.energy_per_transaction_kwh==null?'UNKNOWN':'KNOWN',value:esg.network_metrics?.energy_per_transaction_kwh},انرژی_تجدیدپذیر:{status:esg.network_metrics?.renewable_energy_pct==null?'UNKNOWN':'KNOWN',value:esg.network_metrics?.renewable_energy_pct},تمرکز_اعتبارسنج_یا_ماینر:{status:esg.network_metrics?.validator_or_miner_concentration_pct==null?'UNKNOWN':'KNOWN',value:esg.network_metrics?.validator_or_miner_concentration_pct}});const debt=modules.debt_to_equity||{};addGroup('ساختار سرمایه و نسبت بدهی به حقوق صاحبان سهام D/E',{D_E:{status:debt.status||'UNKNOWN',value:debt.debt_to_equity},پوشش_هزینه_بهره:{status:debt.interest_coverage_ratio==null?'UNKNOWN':'KNOWN',value:debt.interest_coverage_ratio},اختلاف_با_میانه_همتایان:{status:debt.relative_to_peer_pct==null?'UNKNOWN':'KNOWN',value:debt.relative_to_peer_pct},اختلاف_با_میانه_صنعت:{status:debt.relative_to_industry_pct==null?'UNKNOWN':'KNOWN',value:debt.relative_to_industry_pct}});const peer=modules.comparative_company_analysis||{};addGroup('مقایسه شرکت‌های هم‌صنعت',{...Object.fromEntries(Object.entries(peer.comparisons||{}).map(([k,v])=>[k,{status:v.status||'UNKNOWN',value:{company:v.company_value,peer_median:v.peer_median,relative_pct:v.relative_to_peer_median_pct,peer_count:v.peer_count}}])),تعداد_همتایان_معتبر:{status:peer.status||'UNKNOWN',value:peer.eligible_peer_count},تعداد_همتایان_حذف‌شده:{status:peer.status||'UNKNOWN',value:peer.excluded_peer_count}});const eps=modules.eps_analysis||{};addGroup('تحلیل EPS، KGV و PEG',{EPS_پایه:{status:eps.checks?.basic_eps||'UNKNOWN',value:eps.basic_eps},EPS_رقیق‌شده:{status:eps.checks?.diluted_eps||'UNKNOWN',value:eps.diluted_eps},KGV_P_E:{status:eps.checks?.pe_ratio||'UNKNOWN',value:eps.pe_ratio},PEG:{status:eps.checks?.peg_ratio||'UNKNOWN',value:eps.peg_ratio},تفسیر_PEG:{status:eps.checks?.peg_ratio||'UNKNOWN',value:eps.peg_interpretation},مقایسه_KGV_با_صنعت:{status:eps.checks?.industry_pe_comparison||'UNKNOWN',value:eps.relative_pe_pct?.industry},مقایسه_KGV_با_تاریخچه:{status:eps.checks?.historical_pe_comparison||'UNKNOWN',value:eps.relative_pe_pct?.historical},مقایسه_KGV_با_بازار:{status:eps.checks?.market_pe_comparison||'UNKNOWN',value:eps.relative_pe_pct?.market},EPS_تعدیل‌شده:{status:eps.checks?.adjusted_eps||'UNKNOWN',value:eps.adjusted_eps},رشد_تاریخی_EPS:{status:eps.checks?.eps_history||'UNKNOWN',value:eps.eps_history_cagr_pct},مقایسه_پیش‌بینی:{status:eps.checks?.forecast_comparison||'UNKNOWN',value:eps.forecast_change_pct}});addGroup('معاملات ادغام و تملک',modules.mergers_acquisitions?.deals||{});addGroup('چرخش بخشی و قدرت نسبی',Object.fromEntries((modules.sector_rotation?.sectors||[]).map((v,i)=>[v.sector||('sector_'+i),{...v,status:'KNOWN'}])));document.getElementById('fundamental-note').textContent=f.message_fa||'داده بنیادی معتبر در دسترس نیست؛ امتیاز ساختگی تولید نشد. این گزارش به‌تنهایی مجوز معامله نیست.';}"
+                "function renderEasyDiagnostics(m){const mtf=(m.multi_timeframe_structure||{}).timeframes||{};const tfRows=Object.entries(mtf).map(([k,v])=>[k,v.status||'UNKNOWN',v.trend||'UNKNOWN',v.source||'—',v.reason||'—']);table(document.getElementById('easy-mtf-table'),['تایم‌فریم','وضعیت','ساختار','منبع','دلیل / محدودیت'],tfRows);const p=m.portfolio_risk_summary||{},v=m.historical_var_expected_shortfall||{},k=m.fractional_kelly||{},stress=m.portfolio_stress_test||{},size=m.easy_position_sizing||{},margin=m.leverage_margin_estimate||{},corr=m.portfolio_correlation_analysis||{},hedge=m.beta_hedge_estimate||{};const riskRows=[['سبک معاملاتی',m.strategy_style],['افق معاملاتی',m.strategy_horizon],['روش Position Sizing',size.method],['تعداد موقعیت پیشنهادی',size.quantity],['بودجه ریسک',size.risk_budget],['زیان مدل‌شده با هزینه',size.modeled_loss_including_estimated_costs],['ارزش موقعیت',size.position_notional],['وضعیت Leverage/Margin',margin.status],['اهرم فرض‌شده',margin.leverage],['Initial Margin تخمینی',margin.initial_margin_estimate],['ATR14',m.atr14],['RSI14',m.rsi14],['حجم نسبی ۲۰ کندل',m.relative_volume_20],['ارزش ناخالص موقعیت',p.gross_notional],['ریسک تا حدضرر',p.stop_risk],['ریسک باز به درصد سرمایه',p.open_stop_risk_pct_equity],['Historical VaR 95% زیان %',v.var_loss_pct],['Expected Shortfall 95% زیان %',v.expected_shortfall_loss_pct],['Kelly وضعیت',k.status],['Kelly توضیح',k.reason],['وضعیت Stress Test',stress.status],['همبستگی پرتفوی',corr.status],['توضیح همبستگی',corr.reason],['تخمین Hedge Beta',hedge.status],['توضیح Hedge',hedge.reason]];Object.entries(stress.scenarios||{}).forEach(([name,value])=>riskRows.push(['Stress '+name,value.pnl_estimate]));table(document.getElementById('easy-risk-table'),['شاخص','مقدار / وضعیت'],riskRows);const b=m.breakout_retest||{};table(document.getElementById('easy-breakout-table'),['شاخص','مقدار'],[['وضعیت',b.status],['حالت',b.state],['جهت',b.side],['سطح مرجع',b.reference_level],['نسبت حجم شکست',b.breakout_volume_ratio],['تأیید حجم',b.volume_confirmed],['زمان شکست',b.breakout_time],['زمان Retest',b.retest_time],['تأیید نهایی',b.confirmation_time],['زمان شکست کاذب',b.false_breakout_time],['توضیح',b.reason]]);}"
                 "let pollAttempts=0;const pollStarted=Date.now();async function poll(){try{const r=await fetch('/jobs/'+job,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();pollAttempts=0;document.getElementById('state').textContent=j.status;"
-                "if(j.status==='completed'){const s=j.result||{};window.CryptoRadar.update('radar-asset-scan',[{symbol:s.symbol||s.asset,name:s.coin_name,signal:s.signal}],{state:'complete',caption:'نتیجهٔ واقعی موتور تحلیل: '+String(s.signal||'UNKNOWN')+' · امتیاز تأیید به‌تنهایی مجوز ورود نیست.'});renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز خام تأیید (مجوز ورود نیست)',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
+                "if(j.status==='completed'){const s=j.result||{};window.CryptoRadar.update('radar-asset-scan',[{symbol:s.symbol||s.asset,name:s.coin_name,signal:s.signal}],{state:'complete',caption:'نتیجهٔ واقعی موتور تحلیل: '+String(s.signal||'UNKNOWN')+' · امتیاز تأیید به‌تنهایی مجوز ورود نیست.'});renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderFundamental(j.result.fundamental_analysis||{});renderGates(j.result.gates);renderEasyDiagnostics(j.result.metrics||{});const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز خام تأیید (مجوز ورود نیست)',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
                 "if(j.status==='failed'){document.getElementById('state').textContent='اسکن ناموفق بود: '+j.error;window.CryptoRadar.error('radar-asset-scan','اسکن کامل نشد؛ هیچ سیگنال خرید یا فروشی ثبت نشده است.');return;}"
                 "if(Date.now()-pollStarted>=1800000){document.getElementById('state').textContent='مهلت پیگیری تمام شد؛ برای ادامه وضعیت همین شناسه را بررسی کنید: /jobs/'+job;return;}"
                 "}catch(e){pollAttempts+=1;const elapsed=Date.now()-pollStarted;if(elapsed>=1800000){document.getElementById('state').textContent='مهلت بازیابی ارتباط تمام شد؛ شناسهٔ همان اسکن: '+job;return;}const delay=Math.min(30000,2500*Math.pow(2,Math.min(pollAttempts,4)));document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ تلاش مجدد خودکار برای همان شناسه در '+Math.ceil(delay/1000)+' ثانیه...';setTimeout(poll,delay);return;}"
