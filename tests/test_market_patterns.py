@@ -282,6 +282,50 @@ class MarketPatternTests(unittest.TestCase):
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Dragonfly Doji" for p in analysis["candlestick_patterns"]))
 
+    def _set_piercing_line(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        start = -3 if with_confirmation else -2
+        frame.iloc[start] = [100.0, 100.5, 90.0, 91.0, 1500.0]
+        frame.iloc[start + 1] = [89.5, 97.0, 89.0, 96.5, 1800.0]
+        if with_confirmation:
+            frame.iloc[-1] = [96.5, 99.0, 96.2, 98.0, 1900.0]
+        return frame
+
+    def test_piercing_line_after_downtrend_is_pending_bullish_evidence(self):
+        frame = self._set_piercing_line(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Piercing Line")
+        self.assertEqual(pattern["name_fa"], "خط نفوذی صعودی")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 97.0)
+        self.assertEqual(pattern["invalidation_price"], 89.0)
+
+    def test_piercing_line_confirmed_by_next_close_above_second_high(self):
+        frame = self._set_piercing_line(candle_frame("down"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Piercing Line")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_piercing_line_rejected_without_prior_downtrend(self):
+        frame = self._set_piercing_line(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Piercing Line" for p in analysis["candlestick_patterns"]))
+
+    def test_piercing_line_rejected_when_second_close_does_not_cross_first_body_midpoint(self):
+        frame = self._set_piercing_line(candle_frame("down"))
+        frame.iloc[-1, frame.columns.get_loc("close")] = 94.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Piercing Line" for p in analysis["candlestick_patterns"]))
+
+    def test_piercing_line_rejected_when_second_candle_does_not_open_below_first_low(self):
+        frame = self._set_piercing_line(candle_frame("down"))
+        frame.iloc[-1, frame.columns.get_loc("open")] = 90.5
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Piercing Line" for p in analysis["candlestick_patterns"]))
+
 
 if __name__ == "__main__":
     unittest.main()
