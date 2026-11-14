@@ -468,6 +468,133 @@ def dividend_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
                         "تاریخچه پرداخت به‌تنهایی تضمین‌کننده پرداخت آینده نیست."],
     }
 
+
+def mergers_acquisitions_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Evidence-only M&A diagnostic for listed companies; never a trade signal."""
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "message_fa": "این ماژول برای ادغام و تملک شرکت‌هاست؛ برای رویدادهای پروتکلی باید داده رویداد جداگانه ثبت شود."}
+    raw_deals = evidence.get("deals")
+    if not isinstance(raw_deals, list) or not raw_deals:
+        return {"status": "UNKNOWN", "score": None, "deal_count": 0, "known_deals": 0,
+                "deals": {}, "message_fa": "خبر تأییدشده معامله، زمان اعلام و شرایط مالی در دسترس نیست."}
+    results = {}
+    for index, deal in enumerate(raw_deals):
+        if not isinstance(deal, Mapping):
+            continue
+        deal_id = str(deal.get("deal_id") or f"deal_{index + 1}")
+        source = deal.get("source_url")
+        announced = deal.get("announced_at_utc")
+        valid_source = isinstance(source, str) and source.startswith(("https://", "http://")) and bool(announced)
+        offer = _positive(deal.get("offer_price_per_share"))
+        unaffected = _positive(deal.get("unaffected_price_per_share"))
+        premium = ((offer / unaffected - 1) * 100
+                   if offer is not None and unaffected is not None else None)
+        status = str(deal.get("deal_status") or "UNKNOWN").upper()
+        if status not in {"RUMORED", "ANNOUNCED", "PENDING_APPROVAL", "COMPLETED", "TERMINATED", "WITHDRAWN"}:
+            status = "UNKNOWN"
+        regulatory = str(deal.get("regulatory_status") or "UNKNOWN").upper()
+        if regulatory not in {"CLEAR", "REVIEW", "CHALLENGED", "BLOCKED", "UNKNOWN"}:
+            regulatory = "UNKNOWN"
+        financing = str(deal.get("financing_type") or "UNKNOWN").upper()
+        if financing not in {"CASH", "STOCK", "MIXED", "DEBT", "UNKNOWN"}:
+            financing = "UNKNOWN"
+        integration_risk = str(deal.get("integration_risk") or "UNKNOWN").upper()
+        if integration_risk not in {"LOW", "MEDIUM", "HIGH", "UNKNOWN"}:
+            integration_risk = "UNKNOWN"
+        known = valid_source and status != "UNKNOWN"
+        results[deal_id] = {
+            "status": "KNOWN" if known else "UNKNOWN",
+            "deal_status": status if known else "UNKNOWN",
+            "target": deal.get("target") if known else None,
+            "acquirer": deal.get("acquirer") if known else None,
+            "transaction_value": _positive(deal.get("transaction_value")) if known else None,
+            "offer_premium_pct": round(premium, 4) if premium is not None and known else None,
+            "synergies": deal.get("synergies") if known else None,
+            "financing_type": financing if known else "UNKNOWN",
+            "integration_risk": integration_risk if known else "UNKNOWN",
+            "regulatory_status": regulatory if known else "UNKNOWN",
+            "competitor_impact": deal.get("competitor_impact") if known else None,
+            "source_url": source if known else None,
+            "announced_at_utc": announced if known else None,
+            "review_flags": [
+                flag for flag, condition in (
+                    ("regulatory_review_or_challenge", regulatory in {"REVIEW", "CHALLENGED", "BLOCKED"}),
+                    ("high_integration_risk", integration_risk == "HIGH"),
+                    ("debt_financing", financing == "DEBT"),
+                ) if condition
+            ] if known else [],
+        }
+    known_count = sum(item["status"] == "KNOWN" for item in results.values())
+    return {
+        "status": "KNOWN" if known_count == len(results) and known_count else "PARTIAL" if known_count else "UNKNOWN",
+        "score": None, "deal_count": len(results), "known_deals": known_count, "deals": results,
+        "message_fa": "صرف قیمت هدف و خریدار کافی نیست؛ صرف پیشنهاد، تأمین مالی، هم‌افزایی، ریسک ادغام و بررسی نهادهای ناظر باید جداگانه سنجیده شوند.",
+        "limitations": ["صرف پیشنهاد نسبت به قیمت پیش از اعلام، بازده قطعی معامله نیست.",
+                        "معامله اعلام‌شده ممکن است اصلاح، مسدود یا لغو شود.",
+                        "هم‌افزایی اعلامی تا زمان تحقق، صرفاً برآورد شرکت‌هاست.",
+                        "اثر رقبا و تأمین‌کنندگان به داده مستقل نیاز دارد."],
+    }
+
+
+def sector_rotation_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Rank timestamped sector returns/flows relative to a benchmark; no cycle forecast."""
+    phase = evidence.get("economic_phase")
+    phase = phase if isinstance(phase, Mapping) else {}
+    phase_value = str(phase.get("value") or "UNKNOWN").upper()
+    if phase_value not in {"EARLY_EXPANSION", "MID_EXPANSION", "LATE_EXPANSION", "CONTRACTION", "UNKNOWN"}:
+        phase_value = "UNKNOWN"
+    phase_source = phase.get("source")
+    phase_time = phase.get("observed_at_utc")
+    phase_known = bool(isinstance(phase_source, str) and phase_source.startswith(("https://", "http://")) and phase_time and phase_value != "UNKNOWN")
+    raw_sectors = evidence.get("sectors")
+    if not isinstance(raw_sectors, list) or not raw_sectors:
+        return {"status": "UNKNOWN", "score": None, "economic_phase": phase_value if phase_known else "UNKNOWN",
+                "sectors": [], "leaders": [], "laggards": [],
+                "message_fa": "برای سنجش چرخش سرمایه، بازده بخش‌ها، شاخص معیار و داده جریان سرمایه با منبع و زمان لازم است."}
+    rows = []
+    for item in raw_sectors:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("sector") or "").strip()
+        sector_return = _number(item.get("return_pct"))
+        benchmark_return = _number(item.get("benchmark_return_pct"))
+        flow = _number(item.get("flow_change_pct"))
+        source = item.get("source")
+        observed = item.get("observed_at_utc")
+        sourced = bool(name and sector_return is not None and benchmark_return is not None
+                       and isinstance(source, str) and source.startswith(("https://", "http://")) and observed)
+        if not sourced:
+            continue
+        rows.append({
+            "sector": name, "return_pct": sector_return,
+            "benchmark_return_pct": benchmark_return,
+            "relative_strength_pct": round(sector_return - benchmark_return, 4),
+            "flow_change_pct": flow, "source": source, "observed_at_utc": observed,
+            "flow_status": "KNOWN" if flow is not None else "UNKNOWN",
+        })
+    rows.sort(key=lambda row: row["relative_strength_pct"], reverse=True)
+    if not rows:
+        status = "UNKNOWN"
+    elif len(rows) != len(raw_sectors):
+        status = "PARTIAL"
+    else:
+        status = "KNOWN"
+    return {
+        "status": status, "score": None,
+        "economic_phase": phase_value if phase_known else "UNKNOWN",
+        "economic_phase_source": phase_source if phase_known else None,
+        "economic_phase_observed_at_utc": phase_time if phase_known else None,
+        "sectors": rows, "leaders": [row["sector"] for row in rows[:3]],
+        "laggards": [row["sector"] for row in rows[-3:]][::-1],
+        "message_fa": "رتبه‌بندی بر پایه عملکرد نسبیِ داده‌شده است؛ مرحله چرخه اقتصادی به‌تنهایی پیش‌بینی بازده یا توصیه اضافه‌وزن نیست.",
+        "limitations": ["عملکرد گذشته تضمین‌کننده عملکرد آینده نیست.",
+                        "جریان ETF یا سرمایه باید با منبع و بازه زمانی یکسان مقایسه شود.",
+                        "چرخه اقتصادی ممکن است میان کشورها و صنایع متفاوت باشد."],
+    }
+
+
 def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Aggregate seven evidence modules with explicit coverage and no fabricated scores.
 
@@ -491,7 +618,7 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
         evidence.get("accounting_principles", {}))
     modules["market_analysis"] = market_analysis(evidence.get("market_analysis", {}))
     modules["event_analysis"] = event_analysis(evidence.get("event_analysis", {}))
-    modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
+    modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))\n    modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))\n    modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
     for name in ("dcf", "comparables"):
         item = evidence.get(name)
         score = _number(item.get("score")) if isinstance(item, Mapping) and item.get("status") == "KNOWN" else None
@@ -519,6 +646,6 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
-           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
+           "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",\n           "mergers_acquisitions_analysis", "sector_rotation_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
