@@ -86,19 +86,145 @@ The decision system should optimize for the account owner's net result, not for 
 
 The system may work around its own *strategy* weaknesses by choosing another validated method or market. It must not evade exchange controls, authentication, rate limits, legal restrictions or account protection.
 
+## 4A. Native quantitative intelligence and machine-learning core
+
+The bot must have its own quantitative decision engine. Nemotron is an independent adviser and reviewer, not the primary signal generator. This applies to both Aggressive and Strict engines.
+
+### Unified market and feature pipeline
+
+Before a candidate is scored, construct a timestamp-aligned, auditable feature set from validated data:
+
+1. Candlestick structure and patterns: OHLCV geometry, candle bodies and wicks, bullish/bearish reversal and continuation patterns, pattern strength and invalidation. Include registered project patterns such as Shooting Star and Bearish Marubozu where the detection rules and required context are available. A candle pattern alone is never an automatic trade instruction.
+2. Technical methods and indicators: trend, momentum, volatility, volume, support/resistance, market structure, breakouts, pullbacks, and leading/lagging indicators. Compute these from market data; educational lesson text is not a numerical signal.
+3. Multiple timeframes: separate regime, setup and trigger timeframes; measure alignment and conflict. Use completed candles for final pattern confirmation unless a strategy explicitly models in-progress candles and their repaint risk.
+4. Crypto-native fundamentals: supply/emissions, vesting/unlocks, token utility, network activity, fees/revenue where meaningful, active users, TVL where relevant, developer activity, security incidents, governance, concentration and credible capital flows.
+5. Asset-aware broader fundamentals: industry/sector analysis, accounting principles, financial statements, earnings, ESG, KGV and PEG are usable only for assets/entities where those measures are relevant and comparable. Never force equity ratios onto tokens or invent missing fundamentals. Mark unavailable/inapplicable values N/A with a reason, not zero or a neutral score.
+6. Market microstructure and derivatives: liquidity, spread, order-book depth, volume quality, open interest, funding, basis, liquidation data, whale/on-chain flows and sentiment where the instrument and trusted provider support them.
+7. Data quality: every feature records source, observation time, instrument, timeframe, freshness and validity. Stale, misaligned, contradictory or critically missing data reduces eligibility or blocks the candidate.
+
+Patterns, indicators and fundamental metrics must become tested, machine-readable feature definitions with inputs, formula/rules, timeframe, validity conditions and tests. A lesson description alone is not an operational signal.
+
+### Native ML tasks
+
+The internal ML layer may use an evaluated ensemble to perform distinct tasks:
+
+- Market-regime classification: trend, range, volatility and liquidity conditions supported by evidence.
+- Setup-quality estimation: estimate whether a combination of candle structure, technical features, fundamentals and context historically produced favourable outcomes.
+- Outcome/risk estimation: calibrated estimates such as target-before-stop, expected return, expected adverse/favourable excursion and holding horizon.
+- Candidate ranking: compare symbols and engines using expected net outcome, confidence, liquidity and portfolio correlation.
+
+Each candidate must expose its symbol, market, side, signal/confirmation timeframes, feature snapshot, detected patterns, technical/fundamental scores, regime, model/version IDs, calibrated estimates, expected gross/net return, estimated fees/slippage/funding, risk/reward, stop/target rationale and uncertainty.
+
+Rank by expected net expectancy after execution costs, not a bullish/bearish label or raw predicted price. A model probability is an estimate, never a profit promise.
+
+### Training and validation
+
+- Use chronological splits and walk-forward evaluation; prevent look-ahead, label leakage and survivorship bias.
+- Use only information available at the historical decision time.
+- Include fees, spread, slippage, funding, partial fills and instrument constraints in evaluation.
+- Compare with simple baselines and retain out-of-sample results by regime, symbol, timeframe and strategy.
+- Calibrate probabilities and monitor precision/recall, expected value, drawdown, turnover and model drift.
+- Version datasets, features, models, thresholds and evaluation reports; make every order traceable to exact versions.
+- A model cannot rewrite risk limits or promote itself. New models and parameters must pass offline and Demo validation.
+- Demo outcomes enter training only after data-quality checks and controlled retraining/evaluation, not after blind reaction to one win or loss.
+
+### Engine profiles
+
+Both engines may share validated data, feature definitions, pattern detection and model infrastructure while retaining separate strategies, thresholds, state and risk budgets.
+
+- Aggressive can evaluate earlier setups, shorter timeframes and alternative feature combinations; it may skip the 12-gate strategy screen but never universal data, account, risk, execution, protective-exit or STOP controls.
+- Strict requires all 12 unique mandatory gates to PASS and consumes structured technical, candle, timeframe, fundamental, regime and model evidence relevant to its strategy. Missing, UNKNOWN or stale required evidence fails closed.
+- Neither engine is forced to trade. NO_TRADE is a valid outcome.
+
+### Nemotron advisory role
+
+Nemotron receives the bot's structured evidence, feature/model versions, rationale, costs and risk summary. It independently challenges the thesis, identifies contradictions, missing context, event/news risks and reasoning errors, and returns a schema-validated result such as SUPPORT, CHALLENGE, VETO or INSUFFICIENT_EVIDENCE with reasons and timestamp.
+
+- Nemotron does not originate the primary signal, fabricate data or select a trade unsupported by the internal engine.
+- A valid veto blocks a candidate. Support cannot override a failed gate, stale data, risk cap, account restriction, exchange rejection or STOP BOT.
+- Preserve the current Demo execution requirement for a fresh valid Nemotron review. The review is an independent check, not proof of profitability.
+- Log disagreements and later evaluate whether the adviser improves or harms decisions; do not tune the system merely to force agreement.
+
+## 4B. AI supervision, teaching, Notion memory and defect correction
+
+The bot is experimental. It must be expected to encounter uncertainty, incomplete data, incorrect classifications and software defects. A separate supervisory AI workflow reviews those cases and turns verified findings into durable knowledge and tested improvements.
+
+### Supervision triggers
+
+Create a review case when the bot cannot analyse a symbol, timeframe, pattern, fundamental metric or regime; when data is unavailable/stale/contradictory; when the internal model and Nemotron materially disagree; when a forecast or classification materially differs from the observed path; when order/fill/protection/reconciliation differs from the expected lifecycle; or when a runtime exception, failed test, provider regression or model drift appears.
+
+### Supervisory AI responsibilities
+
+1. Reconstruct what the bot knew at decision time using immutable market snapshots, feature values, source timestamps, model versions, strategy profile and account/exchange state.
+2. Classify the issue: data/provider problem, missing capability, faulty feature/pattern definition, model weakness, strategy/risk-policy issue, exchange behaviour or code defect.
+3. Explain the lesson in machine-readable form: condition, evidence, root cause, corrected interpretation, applicable assets/timeframes/regimes, confidence, limitations and reproducible example.
+4. Recommend provider repair, feature/pattern correction, model evaluation/retraining, strategy change, code fix or no change because the outcome was an ordinary probabilistic loss.
+5. Create regression tests or labelled training examples where appropriate. A defect is not fixed until a test reproduces the old failure and passes with the correction.
+6. Link the original decision, supervisory review, Notion learning record, GitHub issue/PR/commit, CI result and Demo validation evidence.
+
+A losing trade alone is not proof of a programming error. Separate expected statistical losses from faulty logic, bad data, model drift and execution defects.
+
+### Notion learning and defect log
+
+Maintain a Crypto Super Radar learning/defect record in Notion. Each case includes case ID and time, engine/strategy/symbol/market/timeframe, original decision and evidence, model/feature versions, what the bot could not analyse or got wrong, Nemotron and supervisory diagnosis, root-cause category, corrected lesson, affected modules, reproduction steps, regression-test results, GitHub links, CI/Demo evidence, status and training approval/version.
+
+Notion is the human-readable knowledge and audit layer, not the live trading database. Keep execution-critical state in the application database; queue and idempotently retry Notion sync if Notion is unavailable. Notion downtime must never block STOP BOT, protection management or emergency controls.
+
+### Code and model correction
+
+- Reproduce confirmed software defects with a failing test before patching.
+- Apply the smallest targeted fix on a non-production development branch.
+- Run unit, integration, regression, static/security checks and historical replay against the original and neighbouring cases.
+- For model/strategy changes, run walk-forward and out-of-sample evaluation; for exchange changes, run Binance Demo integration tests.
+- Attach evidence to GitHub and update the linked Notion case with commit, CI and Demo outcome.
+- Promote only after required checks pass. Supervisory AI may analyse, document, propose code changes and prepare branches/PRs, but may not directly modify the running service, change credentials/hosts, weaken safety controls, alter hard risk limits or silently deploy.
+- Keep unresolved features/strategies blocked or limited; never invent a lesson or force a trade.
+
+### Continuous improvement loop
+
+Observe -> preserve evidence -> diagnose -> teach -> record in Notion -> create test -> patch on a development branch -> CI and replay -> Demo validation -> controlled promotion -> monitor recurrence.
+
+## 4C. Mandatory two-track training test for every learning case
+
+Every learning scenario must be evaluated in two separate runs. The first measures the bot's unaided ability; the second measures the bot after receiving supervisory AI coaching. This is the required test protocol during the experimental phase.
+
+### Test 1 — BOT_ONLY baseline
+
+- Replay the immutable market/data snapshot at the original decision time with the same starting capital, instrument rules, fee/slippage/funding assumptions and engine configuration.
+- The bot independently analyses candles, patterns, technical indicators, timeframes, applicable fundamentals, market regime and risk, then records BUY/LONG, SELL/SHORT or NO_TRADE with rationale, confidence and uncertainty.
+- No supervisory AI hints, corrections or learned labels from the same case may enter this run. Freeze and timestamp the bot's complete decision before Test 2 begins.
+- This is a diagnostic/shadow/paper test. It must not create an unprotected or unsupervised exchange order. The actual Binance Demo execution path retains its fresh AI review and all universal safety checks.
+
+### Test 2 — BOT_WITH_AI_MENTOR
+
+- Replay the exact same immutable snapshot, decision timestamp, starting capital, market assumptions and engine profile.
+- The supervisory AI acts like an experienced trading mentor: it questions the bot's reading of candle patterns, trend, momentum, timeframe alignment, fundamental context, costs, risk/reward and missing evidence.
+- The AI explains what is wrong or unknown, provides a corrected interpretation and teaches the bot why, with references to testable features/rules rather than vague instructions.
+- The bot must independently re-evaluate the candidate after the coaching and record its revised decision, what changed, what it rejected and why. The mentor must not silently replace the bot's decision.
+- Record where AI advice improved the decision, made it worse, was unsupported or was correctly rejected by the bot.
+
+### Comparison and learning outcome
+
+Compare Test 1 and Test 2 on pattern recognition, technical/fundamental correctness, timeframe consistency, calibrated confidence, false positives, missed opportunities, NO_TRADE quality, expected net outcome, drawdown, costs and explanation quality. Report bot-only capability, AI-added value, remaining weaknesses and unresolved unknowns separately for each engine and market regime.
+
+Keep Test 1 immutable so Test 2 cannot contaminate the baseline. Store both outputs and the mentor lesson in Notion under one linked case ID. Only verified lessons may enter a later training dataset. Do not feed Test 2 answers into Test 1 or declare improvement from one isolated result; use repeated cases and out-of-sample evaluation.
+
+After a lesson is approved, add it to the training curriculum and convert confirmed software defects into regression tests and GitHub code changes. A strategy lesson may change model/feature training; a programming defect requires a reproducible test and code fix. Neither is silently applied to the running bot.
+
 ## 5. Autonomous execution flow
 
 For each engine independently:
 
-1. Scan exchange-supported Demo instruments and retrieve fresh market/account evidence.
-2. Apply that engine's strategy. Strict requires all 12 gates; Aggressive uses its separately documented signal rules and visibly marks the 12-gate framework skipped.
-3. Build a decision with symbol, market, side, timeframe, entry, order type, size, estimated costs, stop, target, holding horizon and risk.
-4. Request Nemotron review for that exact decision; require a fresh valid approval.
-5. Re-check shared portfolio risk, available balances/margin, symbol filters, price drift, protective-order capacity and global STOP state.
-6. Submit automatically to Binance Demo. No human order-approval click or queue.
-7. Reconcile the exchange order state and partial/full fills.
-8. Install and verify exchange-native protective exits.
-9. Update the human supervision dashboard and continue managing all open lots independently.
+1. Scan exchange-supported Demo instruments and retrieve fresh market, account, fundamental and microstructure evidence.
+2. Validate timestamps and data quality; build a feature snapshot from candle patterns, technical methods, multiple timeframes, asset-appropriate fundamentals and supported derivatives/liquidity data.
+3. Run internal regime, setup-quality and outcome/risk models; rank candidate signals by expected net outcome after execution costs.
+4. Apply that engine's strategy profile. Strict requires all 12 gates; Aggressive uses its documented alternative signal rules and marks the 12-gate screen skipped.
+5. Build a traceable decision with feature/model versions, evidence, symbol, market, side, timeframe, entry, order type, size, costs, stop, target, horizon, uncertainty and risk.
+6. Request Nemotron's independent review for the exact candidate; require a fresh schema-valid response. A veto or insufficient evidence blocks the candidate.
+7. Re-check shared portfolio risk, balances/margin, symbol filters, price drift, protective-order capacity and global STOP state.
+8. Submit automatically to Binance Demo without a human per-order approval click.
+9. Reconcile order state and partial/full fills; install and verify exchange-native protective exits.
+10. Update the dashboard and preserve the decision/outcome evidence for later supervised review, Notion learning records and controlled model evaluation.
 
 A failed condition returns a structured no-trade/block status and submits no order. A score or AI response cannot override a failed universal check.
 
@@ -191,6 +317,16 @@ Persist the lifecycle, for example:
 
 ## 12. Acceptance tests
 
+- Registered candle patterns such as Shooting Star and Bearish Marubozu have tests for detection, context, invalidation and completed-candle behaviour.
+- Technical indicators, leading/lagging methods and multi-timeframe features are tested against fixtures and cannot read future candles.
+- Asset-aware fundamental mapping uses crypto-native metrics for tokens and applies KGV/PEG/accounting/ESG only when relevant and comparable; missing data is never fabricated.
+- ML training/evaluation uses chronological and walk-forward splits, leakage checks, cost-aware labels, calibrated outputs and versioned models.
+- Every candidate exposes its feature snapshot, model version, calibrated estimates and expected net outcome; weak candidates can return NO_TRADE.
+- Every learning case runs a frozen BOT_ONLY baseline first and a BOT_WITH_AI_MENTOR replay second against the same immutable snapshot.
+- Test 1 receives no AI coaching; Test 2 records the mentor's teaching, the bot's own re-evaluation and any accepted/rejected advice.
+- Supervisory AI diagnosis, Notion records, regression tests and GitHub changes are linked; a losing trade alone is not classified as a code defect.
+- Supervisory AI cannot directly modify or deploy the running service or weaken safety/risk controls.
+- Notion outage cannot block STOP BOT or protective-exit management; learning records sync idempotently later.
 - Both engines scan and operate concurrently with isolated strategy state.
 - Aggressive may trade a candidate that does not pass the full 12-gate strategy framework, but cannot bypass any universal safety check.
 - Strict submits zero orders unless all 12 unique mandatory gates PASS.
@@ -209,4 +345,8 @@ Persist the lifecycle, for example:
 
 This document is a requirements specification only. At capture time the repository includes internal simulated paper ledgers, a Binance Spot adapter that defaults to Spot Testnet, single-position Spot/Futures state, and no complete autonomous dual-engine Binance Demo execution flow with verified exchange-side protective exits.
 
-No claim of implementation, live Demo order placement, test pass or Render deployment may be made until code, automated tests and Binance Demo integration tests have actually completed.
+The requirements above do not prove that existing candle-pattern, technical-analysis, fundamental-analysis or educational material is connected to a tested feature pipeline, ML inference, AI-supervision workflow or order decision.
+They also do not prove that the BOT_ONLY versus BOT_WITH_AI_MENTOR protocol, Notion learning capture, regression-test generation or controlled code-correction loop is implemented.
+Those modules must be audited and wired into the system rather than assumed operational because lesson descriptions or dashboard cards exist.
+
+No claim of implementation, live Demo order placement, test pass or Render deployment may be made until code, automated tests, model-validation tests, two-track learning tests, supervisory workflow tests and Binance Demo integration tests have actually completed.
