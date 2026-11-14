@@ -495,6 +495,96 @@ def _evening_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> di
     return None
 
 
+
+def _three_black_crows_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect Three Black Crows after a bullish phase and require follow-through to confirm."""
+    if len(frame) < 6:
+        return None
+
+    candidates = []
+    if len(frame) >= 4:
+        candidates.append((len(frame) - 4, True))
+    candidates.append((len(frame) - 3, False))
+
+    for start, has_follow_through in candidates:
+        candles = [frame.iloc[start + offset] for offset in range(3)]
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        # The pattern is a reversal warning, so require a preceding bullish phase.
+        if prior_change < 0.003:
+            continue
+
+        values = []
+        for candle in candles:
+            o, h, low, close = (
+                float(candle["open"]), float(candle["high"]),
+                float(candle["low"]), float(candle["close"])
+            )
+            candle_range = h - low
+            body = o - close
+            upper_shadow = h - o
+            if candle_range <= 0:
+                values = []
+                break
+            values.append((o, h, low, close, candle_range, body, upper_shadow))
+        if len(values) != 3:
+            continue
+
+        first, second, third = values
+        bearish_long = all(body > 0 and body >= candle_range * 0.50
+                           for _, _, _, _, candle_range, body, _ in values)
+        upper_wicks_short = all(
+            upper_shadow <= min(body * 0.25, candle_range * 0.10) + 1e-12
+            for _, _, _, _, candle_range, body, upper_shadow in values
+        )
+        opens_within_previous_body = (
+            first[3] <= second[0] <= first[0]
+            and second[3] <= third[0] <= second[0]
+        )
+        descending_closes = first[3] > second[3] > third[3]
+        if not (bearish_long and upper_wicks_short and opens_within_previous_body and descending_closes):
+            continue
+
+        first_open, first_high = first[0], first[1]
+        third_low = third[2]
+        follow_through = (
+            has_follow_through
+            and float(frame.iloc[start + 3]["close"]) < third_low
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از فاز صعودی، سه کندل نزولیِ بلند با بسته‌شدن‌های پیاپی پایین‌تر تشکیل شده‌اند؛ "
+            "بازشدن کندل دوم و سوم داخل بدنهٔ کندل قبلی بوده و سایه‌های بالایی کوتاه‌اند. "
+        )
+        if follow_through:
+            description += "کندل بعدی زیر کف کندل سوم بسته شده و ادامهٔ فشار فروش را تأیید کرده است."
+        else:
+            description += "الگو فعلاً هشدار برگشت نزولی است؛ برای تأیید، بسته‌شدن کندل بعدی زیر کف کندل سوم لازم است."
+
+        return _item(
+            name_fa="سه کلاغ سیاه",
+            name_en="Three Black Crows",
+            category="CANDLE",
+            direction="BEARISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BEARISH",
+            state="CONFIRMED" if follow_through else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 2].isoformat(),
+            score=-17 if follow_through else -8,
+            trigger_price=third_low,
+            invalidation_price=first_high,
+        )
+    return None
+
+
 def _three_inside_up_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect Three Inside Up: bearish candle, bullish Harami, bullish breakout."""
     if len(frame) < 6:
@@ -961,6 +1051,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if evening_star is not None:
         out.append(evening_star)
 
+    three_black_crows = _three_black_crows_pattern(frame, volume_ratio)
+    if three_black_crows is not None:
+        out.append(three_black_crows)
+
     bullish_engulfing = _bullish_engulfing_pattern(frame, volume_ratio)
     if bullish_engulfing is not None:
         out.append(bullish_engulfing)
@@ -1018,12 +1112,6 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
         add("سه سرباز سفید", "Three White Soldiers", "BULLISH",
             "سه کندل سبزِ قوی پس از روند نزولی/تثبیت؛ هر کندل داخل بدنه قبلی باز شده، بالاتر بسته شده و سایه پایینی کوتاه دارد. برای ورود، تأیید مستقل روند و ریسک لازم است.",
             15, strength="STRONG" if volume_confirmed else "MODERATE")
-    elif np.all(np.asarray(soldier_bodies) < 0) and all(
-        -b >= r * 0.45 for b, r in zip(soldier_bodies, soldier_ranges)
-    ) and np.all(np.diff(three["close"].to_numpy(dtype=float)) < 0):
-        add("سه کلاغ سیاه", "Three Black Crows", "BEARISH",
-            "سه کندل نزولی با بدنه‌های نسبتاً قوی و بسته‌شدن‌های پیاپی پایین‌تر.", -14)
-
     # Single-candle reversal shapes; trend context distinguishes hammer from hanging man.
     small_body = body_ratio <= 0.35
     long_lower = lower >= max(body * 2.0, candle_range * 0.45)
