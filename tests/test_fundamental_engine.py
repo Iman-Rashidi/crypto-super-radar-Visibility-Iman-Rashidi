@@ -92,6 +92,24 @@ class AccountingAndMarketAnalysisTests(unittest.TestCase):
         self.assertEqual(result["principles"]["depreciation"]["status"], "NOT_APPLICABLE")
         self.assertIsNone(result["principles"]["inventory_valuation"]["score"])
 
+    def test_accounting_methods_are_only_accepted_from_known_disclosures(self):
+        result = accounting_principles_analysis({
+            "inventory_valuation": {
+                "applicability": "APPLICABLE",
+                "valuation_method": "FIFO",
+                "inventory_scope_disclosed": "PASS",
+                "valuation_method_disclosed": "PASS",
+                "impairment_or_obsolescence_disclosed": "PASS",
+            },
+            "depreciation": {
+                "applicability": "APPLICABLE",
+                "depreciation_method": "STRAIGHT_LINE",
+            },
+        })
+        self.assertEqual(result["principles"]["inventory_valuation"]["reported_method"], "FIFO")
+        self.assertIsNone(result["principles"]["depreciation"]["reported_method"])
+        self.assertIn("WEIGHTED_AVERAGE", result["principles"]["inventory_valuation"]["accepted_methods"])
+
     def test_missing_accounting_evidence_remains_unknown(self):
         result = accounting_principles_analysis({})
         self.assertEqual(result["status"], "UNKNOWN")
