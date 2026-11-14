@@ -1432,9 +1432,6 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     first_bull = fc > fo
 
 
-    bearish_abandoned_baby = _bearish_abandoned_baby_pattern(frame, volume_ratio)
-    if bearish_abandoned_baby is not None:
-        out.append(bearish_abandoned_baby)
 
     abandoned_baby = _bullish_abandoned_baby_pattern(frame, volume_ratio)
     if abandoned_baby is not None:
@@ -1629,6 +1626,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     shooting_star = _shooting_star_pattern(frame, volume_ratio)
     if shooting_star is not None:
         out.append(shooting_star)
+
+    bearish_abandoned_baby = _bearish_abandoned_baby_pattern(frame, volume_ratio)
+    if bearish_abandoned_baby is not None:
+        out.append(bearish_abandoned_baby)
 
     return out[-5:]
 
