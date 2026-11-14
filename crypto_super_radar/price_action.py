@@ -23,6 +23,7 @@ def analyze_easy_price_action(
     pivot_radius: int = 2,
     zone_atr_fraction: float = 0.35,
     gap_threshold_pct: float = 0.75,
+    last_candle_closed: bool = False,
 ) -> dict[str, Any]:
     """Return support/resistance, trendline, volume and crypto-gap diagnostics.
 
@@ -63,8 +64,9 @@ def analyze_easy_price_action(
         return {**unknown, "reason": reason, "support_resistance": _unknown(reason),
                 "trendlines": _unknown(reason), "volume": _unknown(reason), "gaps": _unknown(reason)}
 
-    # The last row may be a live candle; use only preceding rows for confirmed metrics.
-    confirmed = frame.iloc[:-1].copy()
+    # Callers must explicitly confirm closure; the integrated engine does so after
+    # completed_daily_candles() has removed an unfinished daily interval.
+    confirmed = frame.copy() if last_candle_closed else frame.iloc[:-1].copy()
     high = confirmed["high"].to_numpy(float)
     low = confirmed["low"].to_numpy(float)
     close = confirmed["close"].to_numpy(float)
