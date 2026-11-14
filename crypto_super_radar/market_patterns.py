@@ -404,6 +404,86 @@ def _bullish_three_line_strike_pattern(frame: pd.DataFrame, volume_ratio: float 
     return None
 
 
+def _bullish_marubozu_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a long bullish near-shadeless candle; a later close above its high confirms."""
+    if len(frame) < 6:
+        return None
+
+    candidates = []
+    if len(frame) >= 2:
+        candidates.append((len(frame) - 2, True))
+    candidates.append((len(frame) - 1, False))
+
+    for index, has_follow_through in candidates:
+        candle = frame.iloc[index]
+        prior = frame.iloc[max(0, index - 8):index]
+        if len(prior) < 3:
+            continue
+        prior_closes = pd.to_numeric(prior["close"], errors="coerce")
+        prior_bodies = (prior["close"].astype(float) - prior["open"].astype(float)).abs()
+        if prior_closes.isna().any() or prior_bodies.isna().any():
+            continue
+
+        o, h, low, c = (float(candle[k]) for k in ("open", "high", "low", "close"))
+        candle_range = h - low
+        body = c - o
+        upper_shadow = h - c
+        lower_shadow = o - low
+        median_prior_body = float(prior_bodies.median())
+        if candle_range <= 0 or median_prior_body <= 0:
+            continue
+
+        valid = (
+            body > 0
+            and body >= candle_range * 0.85
+            and upper_shadow >= -1e-12
+            and lower_shadow >= -1e-12
+            and upper_shadow <= candle_range * 0.05
+            and lower_shadow <= candle_range * 0.05
+            and body >= median_prior_body * 1.5
+        )
+        if not valid:
+            continue
+
+        prior_change = float(prior_closes.iloc[-1] / prior_closes.iloc[0] - 1.0)
+        context = "DOWN" if prior_change <= -0.003 else "UP" if prior_change >= 0.003 else "SIDEWAYS"
+        confirmed = has_follow_through and float(frame.iloc[index + 1]["close"]) > h
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        strength = (
+            "STRONG" if confirmed and volume_confirmed
+            else "MODERATE" if confirmed or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "کندل صعودی با بدنه‌ای بلند و سایه‌های بسیار کوتاه تشکیل شده است؛ "
+            "قیمت تقریباً از کف باز شده و نزدیک سقف بسته شده، که نشان‌دهندهٔ فشار خرید قوی در این بازه است. "
+        )
+        if context == "DOWN":
+            description += "این حرکت پس از افت اخیر می‌تواند نشانهٔ تلاش برای برگشت باشد."
+        elif context == "UP":
+            description += "در روند صعودی، می‌تواند نشانهٔ ادامهٔ فشار خرید باشد؛ پس از رشد طولانی خطر خستگی روند نیز باید بررسی شود."
+        else:
+            description += "روند پیشین خنثی است و از این کندل به‌تنهایی نمی‌توان برگشت روند را نتیجه گرفت."
+        if confirmed:
+            description += " کندل بعدی بالاتر از سقف ماروبوزو بسته شده و حرکت صعودی تأیید شده است."
+        else:
+            description += " برای تأیید، بسته‌شدن کندل بعدی بالاتر از سقف ماروبوزو لازم است."
+        return _item(
+            name_fa="ماروبوزوی صعودی",
+            name_en="Bullish Marubozu",
+            category="CANDLE",
+            direction="BULLISH" if confirmed else "NEUTRAL",
+            potential_direction=None if confirmed else "BULLISH",
+            state="CONFIRMED" if confirmed else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[index].isoformat(),
+            score=14 if confirmed else 7,
+            trigger_price=h,
+            invalidation_price=low,
+        )
+    return None
+
 def _piercing_line_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect a two-candle Piercing Line after a decline; next close confirms it."""
     if len(frame) < 5:
@@ -556,6 +636,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if pc > po and last_bear and o >= pc and c <= po and body >= abs(pc - po):
         add("پوشای نزولی", "Bearish Engulfing", "BEARISH",
             "بدنهٔ نزولی آخر، بدنهٔ صعودی قبلی را پوشانده است؛ در روند صعودی معنا‌دارتر است.", -13)
+
+    bullish_marubozu = _bullish_marubozu_pattern(frame, volume_ratio)
+    if bullish_marubozu is not None:
+        out.append(bullish_marubozu)
 
     piercing_line = _piercing_line_pattern(frame, volume_ratio)
     if piercing_line is not None:
