@@ -171,6 +171,74 @@ def _item(
     }
 
 
+def _three_inside_down_pattern(
+    frame: pd.DataFrame,
+    volume_ratio: float | None,
+) -> dict[str, Any] | None:
+    """Detect a confirmed Three Inside Down reversal on three completed candles."""
+    if len(frame) < 11:
+        return None
+
+    first, middle, last = (frame.iloc[-3], frame.iloc[-2], frame.iloc[-1])
+    fo, fh, fl, fc = (float(first[k]) for k in ("open", "high", "low", "close"))
+    mo, mh, ml, mc = (float(middle[k]) for k in ("open", "high", "low", "close"))
+    lo, lh, ll, lc = (float(last[k]) for k in ("open", "high", "low", "close"))
+
+    # The pattern must follow an established upswing before candle one.
+    prior = frame["close"].iloc[-11:-3].astype(float)
+    if len(prior) < 6 or float(prior.iloc[0]) <= 0:
+        return None
+    prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+    if prior_change < 0.003:
+        return None
+
+    first_range = max(fh - fl, 1e-15)
+    first_body = fc - fo
+    middle_body = mo - mc
+    last_body = lo - lc
+
+    # Candle one: a meaningful bullish body.
+    first_is_long_bull = (
+        first_body > 0
+        and first_body >= first_range * 0.45
+    )
+    # Candle two: bearish real body contained inside candle one's real body
+    # (the bearish Harami component). Wicks may extend beyond the body.
+    middle_is_bearish_harami = (
+        middle_body > 0
+        and mo <= fc
+        and mc >= fo
+        and mh <= fh
+        and ml >= fl
+    )
+    # Candle three: bearish close below candle one's low confirms reversal.
+    last_confirms = (
+        last_body > 0
+        and lc < fl
+    )
+    if not (first_is_long_bull and middle_is_bearish_harami and last_confirms):
+        return None
+
+    volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+    return _item(
+        name_fa="سه‌تایی داخلی نزولی",
+        name_en="Three Inside Down",
+        category="CANDLE",
+        direction="BEARISH",
+        state="CONFIRMED",
+        strength="STRONG" if volume_confirmed else "MODERATE",
+        description=(
+            "پس از روند صعودی، کندل اول صعودی و بلند است؛ بدنهٔ کندل دوم نزولی "
+            "داخل بدنهٔ کندل اول (هارامی نزولی) قرار دارد؛ کندل سوم با بسته‌شدن "
+            "زیر کف کندل اول، برگشت نزولی را تأیید می‌کند."
+        ),
+        timestamp=frame.index[-1].isoformat(),
+        score=-16,
+        trigger_price=fl,
+        invalidation_price=fh,
+    )
+
+
 def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[dict[str, Any]]:
     if len(frame) < 3:
         return []
@@ -290,6 +358,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if h < ph and low > pl:
         add("کندل داخلی", "Inside Bar", "NEUTRAL",
             "دامنهٔ کندل آخر داخل دامنهٔ کندل قبلی است؛ شکست هر طرف می‌تواند جهت حرکت بعدی را روشن کند.", 0, strength="WEAK")
+
+    three_inside_down = _three_inside_down_pattern(frame, volume_ratio)
+    if three_inside_down is not None:
+        out.append(three_inside_down)
 
     return out[-5:]
 
