@@ -852,7 +852,10 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
     modules["share_buybacks"] = share_buyback_analysis(evidence.get("share_buybacks", {}))
     modules["eps_analysis"] = eps_analysis(evidence.get("eps_analysis", {}))
-    modules["esg_analysis"] = esg_analysis(evidence.get("esg_analysis", {}))
+    esg_module = esg_analysis(evidence.get("esg_analysis", {}))
+    esg_module["diagnostic_score"] = esg_module.get("score")
+    esg_module["score"] = None  # Supporting ESG diagnostic must never enter the weighted score.
+    modules["esg_analysis"] = esg_module
     modules["esg_analysis"] = esg_analysis(evidence.get("esg_analysis", {}))
     modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))
     modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
