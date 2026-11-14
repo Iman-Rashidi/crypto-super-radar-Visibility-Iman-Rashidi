@@ -167,6 +167,81 @@ def _morning_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> di
     return None
 
 
+def _three_inside_up_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect Three Inside Up: bearish candle, bullish Harami, bullish breakout."""
+    if len(frame) < 6:
+        return None
+
+    first, second, third = (frame.iloc[-3 + i] for i in range(3))
+    prior = pd.to_numeric(frame["close"].iloc[-11:-3], errors="coerce")
+    if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+        return None
+    prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+    if prior_change > -0.003:
+        return None
+
+    fo, fc = float(first["open"]), float(first["close"])
+    fh, fl = float(first["high"]), float(first["low"])
+    so, sc = float(second["open"]), float(second["close"])
+    sh, sl = float(second["high"]), float(second["low"])
+    to, tc = float(third["open"]), float(third["close"])
+    th, tl = float(third["high"]), float(third["low"])
+
+    first_body = abs(fo - fc)
+    first_range = fh - fl
+    second_body = abs(sc - so)
+    second_range = sh - sl
+    third_body = abs(tc - to)
+    third_range = th - tl
+    if min(first_range, second_range, third_range) <= 0:
+        return None
+
+    first_is_long_bearish = fc < fo and first_body >= first_range * 0.45
+    bullish_harami = (
+        sc > so
+        and second_body > 0
+        and second_body <= first_body * 0.60
+        and so >= fc
+        and sc <= fo
+        and sh <= fh
+        and sl >= fl
+    )
+    third_is_bullish = tc > to and third_body >= third_range * 0.30
+    if not (first_is_long_bearish and bullish_harami and third_is_bullish):
+        return None
+
+    confirmed = tc > fh
+    volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+    state = "CONFIRMED" if confirmed else "NEEDS_CONFIRMATION"
+    strength = (
+        "STRONG" if confirmed and volume_confirmed
+        else "MODERATE" if confirmed or volume_confirmed
+        else "WEAK"
+    )
+    description = (
+        "پس از روند نزولی، کندل اول قرمز و بلند است؛ کندل دوم سبز و کوچک‌تر، "
+        "در محدودهٔ بدنهٔ کندل اول قرار دارد و ساختار هارامی صعودی می‌سازد. "
+    )
+    if confirmed:
+        description += "کندل سوم بالاتر از سقف کندل اول بسته شده و بازگشت صعودی تأیید شده است."
+    else:
+        description += "کندل سوم صعودی است اما هنوز بالای سقف کندل اول بسته نشده؛ تأیید کامل نشده است."
+    return _item(
+        name_fa="سه‌تایی از داخل به بالا",
+        name_en="Three Inside Up",
+        category="CANDLE",
+        direction="BULLISH" if confirmed else "NEUTRAL",
+        potential_direction=None if confirmed else "BULLISH",
+        state=state,
+        strength=strength,
+        description=description,
+        timestamp=frame.index[-1].isoformat(),
+        score=15 if confirmed else 7,
+        trigger_price=fh,
+        invalidation_price=fl,
+    )
+
+
 def _bullish_engulfing_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect bullish body engulfing after a decline; next close confirms the setup."""
     if len(frame) < 4:
@@ -380,6 +455,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     morning_star = _morning_star_pattern(frame, volume_ratio)
     if morning_star is not None:
         out.append(morning_star)
+
+    three_inside_up = _three_inside_up_pattern(frame, volume_ratio)
+    if three_inside_up is not None:
+        out.append(three_inside_up)
 
     if first_bull and first_body >= max((fh - fl) * 0.45, 1e-15) and middle_body <= max((mh - ml) * 0.30, 1e-15) and last_bear and c < first_mid and c < mc:
         add("ستاره شامگاهی", "Evening Star", "BEARISH",
