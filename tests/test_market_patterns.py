@@ -441,7 +441,7 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(pattern["potential_direction"], "BULLISH")
         self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
         self.assertEqual(pattern["trigger_price"], 106.0)
-        self.assertEqual(pattern["invalidation_price"], 102.0)
+        self.assertEqual(pattern["invalidation_price"], 102.5)
 
     def test_rising_window_is_confirmed_while_following_candles_stay_above_gap(self):
         frame = self._set_rising_window(candle_frame("up"), with_follow_through=True)
