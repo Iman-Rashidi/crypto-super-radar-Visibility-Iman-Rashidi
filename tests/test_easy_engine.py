@@ -85,10 +85,21 @@ class EasyEngineTests(unittest.TestCase):
         self.assertEqual(result.gates, [])
 
     @patch("crypto_super_radar.easy_engine.fetch_market_intelligence", return_value={"status":"UNKNOWN"})
-    def test_easy_perpetual_can_assess_short(self, _market_intel):
+    @patch("crypto_super_radar.easy_engine.analyze_technical_indicators")
+    def test_easy_perpetual_can_assess_short(self, indicators, _market_intel):
         engine, asset = self.engine(rising=False, market_type="perp")
+        indicators.return_value = {
+            "status": "KNOWN",
+            "moving_averages": {"ema20": 38.0, "ema50": 42.0},
+            "rsi": {"value": 25.0},
+            "macd": {"histogram": -1.0},
+            "obv": {"trend": "BEARISH"},
+            "volume": {"relative_volume_20": 1.4},
+            "atr": {"value": 1.0},
+        }
         result = engine.analyze(asset)
         self.assertEqual(result.signal, Signal.SHORT)
+        self.assertEqual(result.metrics["mandatory_gate_count"], 0)
 
     def test_missing_snapshot_price_fails_closed(self):
         frame = self.candles()
