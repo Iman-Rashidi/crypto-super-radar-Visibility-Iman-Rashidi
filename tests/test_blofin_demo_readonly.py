@@ -99,6 +99,27 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
         self.assertFalse(hasattr(self.client, "transfer"))
         self.assertFalse(hasattr(self.client, "withdraw"))
 
+    def test_mark_price_uses_dedicated_public_endpoint_without_credentials(self):
+        self.client.get_mark_price(inst_id="BTC-USDT")
+        args, kwargs = self.session.get.call_args
+        self.assertIn("/api/v1/market/mark-price?instId=BTC-USDT", args[0])
+        self.assertEqual(kwargs["headers"], {})
+
+    def test_open_tpsl_orders_use_signed_read_only_endpoint(self):
+        self.client.get_open_tpsl_orders(inst_id="BTC-USDT", limit=100)
+        args, kwargs = self.session.get.call_args
+        self.assertIn("/api/v1/trade/orders-tpsl-pending?", args[0])
+        self.assertIn("instId=BTC-USDT", args[0])
+        self.assertIn("limit=100", args[0])
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+
+    def test_tpsl_history_uses_signed_read_only_endpoint(self):
+        self.client.get_tpsl_orders_history(inst_id="BTC-USDT", limit=100)
+        args, kwargs = self.session.get.call_args
+        self.assertIn("/api/v1/trade/orders-tpsl-history?", args[0])
+        self.assertIn("instId=BTC-USDT", args[0])
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+
     def test_private_call_requires_credentials(self):
         client = BloFinDemoReadOnly(session=self.session)
         with self.assertRaises(BloFinDemoAuthError):
