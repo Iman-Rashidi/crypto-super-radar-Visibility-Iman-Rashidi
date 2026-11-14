@@ -82,7 +82,7 @@ class EasyTradeManagementTests(unittest.TestCase):
         self.assertEqual(result["conservative_intrabar_rule"], "STOP_FIRST")
 
     def test_trailing_stop_only_ratchets_toward_profit(self):
-        manager = EasyPositionManager(db=__import__("sqlite3").connect(":memory:", check_same_thread=False))
+        manager = EasyPositionManager(db=connect_database(":memory:"))
         opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 90, 130)
         first = manager.update_position(opened["position_id"], {"open":100,"high":110,"low":99,"close":108}, atr_value=3)
         self.assertGreater(first["current_stop"], 90)
@@ -90,7 +90,7 @@ class EasyTradeManagementTests(unittest.TestCase):
         self.assertGreaterEqual(second["current_stop"], first["current_stop"])
 
     def test_mental_stop_only_alerts_until_manual_close(self):
-        manager = EasyPositionManager(db=__import__("sqlite3").connect(":memory:", check_same_thread=False))
+        manager = EasyPositionManager(db=connect_database(":memory:"))
         opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 95, 110, stop_mode="MENTAL")
         result = manager.update_position(opened["position_id"], {"open":100,"high":101,"low":94,"close":96})
         self.assertEqual(result["status"], "OPEN")
