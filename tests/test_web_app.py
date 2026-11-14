@@ -65,12 +65,15 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
-    def test_home_page_is_persian_and_lists_twelve_gates(self):
+    def test_home_page_is_persian_and_explains_independent_easy_profile(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
         self.assertEqual(status, 200)
         self.assertIn('lang="fa" dir="rtl"', page)
-        self.assertIn("۱۲ فیلتر اجباری", page)
+        self.assertIn('id="easy-position-manager"', page)
+        self.assertIn("مدیریت موقعیت و ژورنال Easy", page)
+        self.assertIn("تفکیک پروفایل‌های موتور", page)
+        self.assertIn("۱۲ گیت Legacy در اسکن Easy اجرا نمی‌شوند", page)
         self.assertIn("فقط BUYهایی نمایش داده می‌شوند", page)
         self.assertIn("کشف‌شده:", page)
         self.assertIn("وضعیت منابع داده", page)
