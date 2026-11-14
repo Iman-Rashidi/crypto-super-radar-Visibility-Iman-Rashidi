@@ -7,6 +7,8 @@ from crypto_super_radar.fundamental_engine import (
     comparable_projects,
     discounted_protocol_cashflows,
     industry_analysis,
+    accounting_principles_analysis,
+    market_analysis,
 )
 
 
@@ -78,6 +80,58 @@ class ValuationTests(unittest.TestCase):
         self.assertEqual(result["excluded_non_comparable_peers"], 1)
         self.assertEqual(result["peer_medians"]["market_cap_to_revenue"], 5.0)
         self.assertEqual(result["relative_valuation"]["market_cap_to_revenue"]["relative_to_peers_pct"], 100.0)
+
+
+class AccountingAndMarketAnalysisTests(unittest.TestCase):
+    def test_inventory_and_depreciation_can_be_not_applicable_without_positive_score(self):
+        result = accounting_principles_analysis({
+            "inventory_valuation": {"applicability": "NOT_APPLICABLE"},
+            "depreciation": {"applicability": "NOT_APPLICABLE"},
+        })
+        self.assertEqual(result["principles"]["inventory_valuation"]["status"], "NOT_APPLICABLE")
+        self.assertEqual(result["principles"]["depreciation"]["status"], "NOT_APPLICABLE")
+        self.assertIsNone(result["principles"]["inventory_valuation"]["score"])
+
+    def test_missing_accounting_evidence_remains_unknown(self):
+        result = accounting_principles_analysis({})
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["principles"]["revenue_recognition"]["status"], "UNKNOWN")
+
+    def test_revenue_recognition_failure_is_flagged(self):
+        result = accounting_principles_analysis({
+            "revenue_recognition": {
+                "performance_obligation_satisfied": "PASS",
+                "revenue_basis_disclosed": "FAIL",
+                "fees_separated_from_tokenholder_revenue": "UNKNOWN",
+                "collectability_supported": "PASS",
+            }
+        })
+        self.assertEqual(result["principles"]["revenue_recognition"]["status"], "FAIL")
+
+    def test_market_analysis_requires_timestamped_source(self):
+        result = market_analysis({
+            "gdp_growth": {"status": "KNOWN", "value": 2.1, "source": "official"},
+            "inflation": {"status": "KNOWN", "value": 2.5, "source": "official",
+                          "observed_at_utc": "2026-11-01T00:00:00+00:00"},
+        })
+        self.assertEqual(result["observations"]["gdp_growth"]["status"], "UNKNOWN")
+        self.assertEqual(result["observations"]["inflation"]["status"], "KNOWN")
+        self.assertEqual(result["status"], "PARTIAL")
+
+    def test_supporting_modules_do_not_change_seven_module_score_weights(self):
+        result = build_fundamental_report({
+            "accounting_principles": {
+                "inventory_valuation": {"applicability": "NOT_APPLICABLE"},
+            },
+            "market_analysis": {},
+        })
+        self.assertEqual(set(result["weights"]), {
+            "macro", "tokenomics", "onchain", "project", "industry", "dcf", "comparables"
+        })
+        self.assertIn("accounting_principles", result["modules"])
+        self.assertIn("market_analysis", result["modules"])
+        self.assertEqual(result["modules"]["market_analysis"]["status"], "UNKNOWN")
+        self.assertIsNone(result["score"])
 
 
 class FundamentalReportTests(unittest.TestCase):
