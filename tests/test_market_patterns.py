@@ -262,6 +262,7 @@ class MarketPatternTests(unittest.TestCase):
 
     def test_dark_cloud_cover_is_not_bearish_without_prior_uptrend(self):
         frame = self._set_dark_cloud_cover(candle_frame("flat"))
+        frame.iloc[-9:-2] = [111.5, 111.5, 111.5, 111.5, 1000.0]
         analysis = analyze_market_patterns(frame, [])
         self.assertNotIn(
             "Dark Cloud Cover",
