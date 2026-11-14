@@ -52,7 +52,7 @@ class EasyTradeManagementTests(unittest.TestCase):
         self.assertFalse(stop_execution_guidance("MENTAL")["automatic_trigger_expected"])
 
     def test_position_manager_ignores_open_candle(self):
-        manager = EasyPositionManager(db=__import__("sqlite3").connect(":memory:", check_same_thread=False))
+        manager = EasyPositionManager(db=connect_database(":memory:"))
         opened = manager.open_position("cex:BTCUSDT", "LONG", 2, 100, 95, 110)
         result = manager.update_position(opened["position_id"], {"open":100,"high":101,"low":90,"close":99},
                                          candle_closed=False)
