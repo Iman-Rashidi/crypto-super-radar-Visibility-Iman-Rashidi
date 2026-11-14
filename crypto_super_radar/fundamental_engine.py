@@ -753,6 +753,114 @@ def sector_rotation_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def esg_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Evidence-led ESG diagnostic for companies and crypto networks.
+
+    Pillars are supplied independently as {score: 0..100, source_url,
+    observed_at_utc, evidence/metrics}. No narrative is converted into a score.
+    The diagnostic is excluded from the seven weighted Fundamental modules.
+    """
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    equity_classes = {"equity", "stock", "share", "reit"}
+    crypto_classes = {"crypto", "cryptocurrency", "token", "digital_asset"}
+    if asset_class not in equity_classes | crypto_classes:
+        return {"status": "UNKNOWN", "score": None, "applicability": "UNKNOWN",
+                "message_fa": "نوع دارایی مشخص نیست؛ چارچوب ESG مناسب انتخاب نشد."}
+    is_crypto = asset_class in crypto_classes
+    pillar_names = ("environmental", "social", "governance")
+    labels = {
+        "environmental": "محیط‌زیست",
+        "social": "اجتماعی",
+        "governance": "حاکمیت",
+    }
+    descriptions = {
+        "environmental": (
+            "برای شرکت: انتشار کربن، مصرف انرژی، آب و مدیریت پسماند؛ "
+            "برای شبکه رمزارزی: انرژی مصرفی، ترکیب انرژی و شدت کربن."
+        ),
+        "social": (
+            "برای شرکت: شرایط نیروی کار، ایمنی محصول، زنجیره تأمین و حریم خصوصی؛ "
+            "برای شبکه رمزارزی: دسترس‌پذیری، اثر بر کاربران، جامعه و ریسک‌های سوءاستفاده."
+        ),
+        "governance": (
+            "برای شرکت: استقلال هیئت‌مدیره، حسابرسی، کنترل داخلی و حقوق سهام‌داران؛ "
+            "برای شبکه رمزارزی: تمرکز اعتبارسنج/ماینر، شفافیت تصمیم‌گیری، امنیت و پاسخ‌گویی."
+        ),
+    }
+    pillars: dict[str, dict[str, Any]] = {}
+    valid_scores: list[float] = []
+    unknown: list[str] = []
+    for name in pillar_names:
+        raw = evidence.get(name)
+        raw = raw if isinstance(raw, Mapping) else {}
+        score = _number(raw.get("score"))
+        source = raw.get("source_url")
+        observed = raw.get("observed_at_utc")
+        valid_source = (isinstance(source, str)
+                        and source.startswith(("https://", "http://"))
+                        and bool(observed))
+        valid = (raw.get("status") == "KNOWN" and score is not None
+                 and 0 <= score <= 100 and valid_source)
+        if valid:
+            valid_scores.append(score)
+            status = "KNOWN"
+        else:
+            unknown.append(name)
+            status = "UNKNOWN"
+        pillars[name] = {
+            "label_fa": labels[name], "status": status,
+            "score": round(score, 2) if valid else None,
+            "source_url": source if valid else None,
+            "observed_at_utc": observed if valid else None,
+            "metrics": dict(raw.get("metrics", {})) if isinstance(raw.get("metrics"), Mapping) else {},
+            "evidence": raw.get("evidence") if isinstance(raw.get("evidence"), (str, list, dict)) else None,
+            "description_fa": descriptions[name],
+        }
+    overall = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else None
+    status = "KNOWN" if len(valid_scores) == 3 else "PARTIAL" if valid_scores else "UNKNOWN"
+    controversy_items = evidence.get("controversies")
+    controversies = []
+    if isinstance(controversy_items, list):
+        for item in controversy_items:
+            if not isinstance(item, Mapping):
+                continue
+            source = item.get("source_url")
+            observed = item.get("observed_at_utc")
+            if (isinstance(source, str) and source.startswith(("https://", "http://"))
+                    and observed and item.get("description")):
+                controversies.append({
+                    "description": str(item["description"])[:500],
+                    "severity": str(item.get("severity") or "UNASSESSED").upper(),
+                    "pillar": item.get("pillar") if item.get("pillar") in pillar_names else None,
+                    "source_url": source, "observed_at_utc": observed,
+                })
+    return {
+        "status": status, "score": overall, "applicability": "APPLICABLE",
+        "asset_type": "crypto_network_or_token" if is_crypto else "company",
+        "framework": "three_pillar_esg",
+        "pillars": pillars, "known_pillars": len(valid_scores),
+        "total_pillars": 3, "unknown_pillars": unknown,
+        "controversies": controversies,
+        "controversy_count": len(controversies),
+        "message_fa": (
+            "امتیاز ESG فقط میان محورهای دارای دادهٔ معتبر محاسبه شده است؛ "
+            "محورهای ناموجود حذف و به‌عنوان UNKNOWN نمایش داده می‌شوند. "
+            "این شاخص تشخیصی است و به‌تنهایی سیگنال معامله نیست."
+        ),
+        "interpretation_fa": (
+            "برای سهام، کیفیت افشا و عملکرد شرکت بررسی می‌شود؛ برای رمزارزها "
+            "مصرف انرژی شبکه، اثر اجتماعی و تمرکز/شفافیت حاکمیتی اهمیت دارد."
+        ),
+        "limitations": [
+            "امتیازدهی ESG میان ارائه‌دهندگان ممکن است به‌دلیل روش‌شناسی متفاوت باشد.",
+            "امتیاز بالا تضمین‌کننده بازده مالی یا نبود ریسک حقوقی و اعتباری نیست.",
+            "نبود داده به‌معنای عملکرد ضعیف نیست و نباید امتیاز صفر تلقی شود.",
+            "محورهای ESG در شرکت و شبکه رمزارزی قابل مقایسه مستقیم نیستند.",
+        ],
+    }
+
+
 def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Aggregate seven evidence modules with explicit coverage and no fabricated scores.
 
@@ -779,6 +887,7 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
     modules["share_buybacks"] = share_buyback_analysis(evidence.get("share_buybacks", {}))
     modules["eps_analysis"] = eps_analysis(evidence.get("eps_analysis", {}))
+    modules["esg_analysis"] = esg_analysis(evidence.get("esg_analysis", {}))
     modules["mergers_acquisitions"] = mergers_acquisitions_analysis(evidence.get("mergers_acquisitions", {}))
     modules["sector_rotation"] = sector_rotation_analysis(evidence.get("sector_rotation", {}))
     for name in ("dcf", "comparables"):
@@ -811,5 +920,6 @@ __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
            "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
            "mergers_acquisitions_analysis", "sector_rotation_analysis",
            "share_buyback_analysis", "eps_analysis",
+           "esg_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
