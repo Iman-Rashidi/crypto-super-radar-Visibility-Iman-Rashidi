@@ -189,6 +189,39 @@ class FundamentalReportTests(unittest.TestCase):
         self.assertEqual(result["score"], round(expected, 2))
         self.assertFalse(result["trade_authorized"])
 
+class EventAnalysisTests(unittest.TestCase):
+    def test_missing_events_remain_unknown(self):
+        from crypto_super_radar.fundamental_engine import event_analysis
+        result = event_analysis({})
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(result["score"])
+
+    def test_market_model_computes_abnormal_returns_and_t_test(self):
+        from crypto_super_radar.fundamental_engine import event_analysis
+        observations = []
+        for i in range(30):
+            benchmark = (i - 14) * 0.0007
+            residual = ((i % 5) - 2) * 0.0004
+            actual = 0.0005 + 1.15 * benchmark + residual
+            observations.append({"timestamp": f"2026-10-{(i % 28) + 1:02d}T00:00:00Z",
+                "asset_return": actual, "benchmark_return": benchmark,
+                "window": "ESTIMATION" if i < 25 else "EVENT"})
+        for row in observations[25:]: row["asset_return"] += 0.04
+        result = event_analysis({"events": [{"event_id": "test_release", "event_type": "protocol_upgrade",
+            "event_time_utc": "2026-11-01T12:00:00Z", "source_url": "https://example.org/announcement",
+            "event_window": {"before_days": 1, "after_days": 2}, "observations": observations}]})
+        event = result["events"]["test_release"]
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(event["status"], "KNOWN")
+        self.assertEqual(len(event["abnormal_returns"]), 5)
+        self.assertGreater(event["cumulative_abnormal_return"], 0)
+        self.assertLess(event["p_value_two_sided"], 0.05)
+        self.assertTrue(event["statistically_significant_5pct"])
+
+    def test_event_without_timestamped_source_is_unknown(self):
+        from crypto_super_radar.fundamental_engine import event_analysis
+        result = event_analysis({"events": [{"event_id": "missing_source", "observations": []}]})
+        self.assertEqual(result["events"]["missing_source"]["status"], "UNKNOWN")
 
 if __name__ == "__main__":
     unittest.main()
