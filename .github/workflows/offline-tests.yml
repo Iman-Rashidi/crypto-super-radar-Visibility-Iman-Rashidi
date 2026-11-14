@@ -5,6 +5,7 @@ on:
       - main
       - feature/blofin-demo-adapter
       - feature/easy-trader-candlestick-engine
+      - feature/easy-fundamental-engine
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
