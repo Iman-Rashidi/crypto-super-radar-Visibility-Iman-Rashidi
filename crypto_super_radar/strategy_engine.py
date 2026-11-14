@@ -163,7 +163,7 @@ class MasterStrategyEngine:
         for column in required:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
         numeric = frame[list(required)]
-        if numeric.isna().any().any() or not numeric.map(lambda value: math.isfinite(float(value))).all().all():
+        if numeric.isna().any().any() or not all(math.isfinite(float(value)) for value in numeric.to_numpy().ravel()):
             return self._unknown("Missing or non-finite OHLCV observations block strategy evaluation.")
         if (frame[["open", "high", "low", "close"]] <= 0).any().any() or (frame["volume"] < 0).any():
             return self._unknown("Prices must be positive and volume cannot be negative.")
@@ -208,8 +208,6 @@ class MasterStrategyEngine:
         ema20 = close.ewm(span=cfg.ema_pullback_period, adjust=False).mean()
         ema50 = close.ewm(span=cfg.ema_regime_fast_period, adjust=False).mean()
         ema200 = close.ewm(span=cfg.ema_regime_slow_period, adjust=False).mean()
-        atr_series = self._adx(frame, cfg.atr_period)  # computed separately below for ADX
-        del atr_series
         previous_close = close.shift(1)
         tr = pd.concat(
             [
