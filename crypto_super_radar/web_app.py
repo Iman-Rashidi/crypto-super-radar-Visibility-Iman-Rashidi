@@ -5113,12 +5113,53 @@ async function refreshExecutionReadiness(){
             .live-flow-events{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:7px}
             .live-flow-event{padding:8px;border-radius:8px;border:1px solid var(--line);font-size:.78rem}
             .live-flow-event.buy{border-inline-start:3px solid #19a974}.live-flow-event.sell{border-inline-start:3px solid #e05260}
+            .easy-trader-robot{margin:14px 0;border:1px solid var(--line);border-radius:18px;padding:12px;background:linear-gradient(135deg,#0b1d2c,#102b3b 60%,#142338);overflow:hidden}
+            .easy-robot-stage{position:relative;min-height:240px;display:flex;align-items:flex-end;justify-content:center}
+            .easy-robot-bubble{position:relative;z-index:2;width:min(560px,94%);margin:0 auto 96px;padding:12px;border:1px solid #3a7189;border-radius:15px;background:#081825;color:#e7f5ff;text-align:center}
+            .easy-robot-bubble:after{content:"";position:absolute;left:calc(50% - 8px);bottom:-8px;width:15px;height:15px;background:#081825;border-right:1px solid #3a7189;border-bottom:1px solid #3a7189;transform:rotate(45deg)}
+            .easy-robot-pattern{display:block;font-size:1rem;font-weight:900;line-height:1.6;color:#85dfff}
+            .easy-robot-chips{display:flex;flex-wrap:wrap;justify-content:center;gap:7px;margin-top:8px}
+            .easy-robot-chip{padding:4px 9px;border:1px solid #426176;border-radius:999px;background:#102b3d;color:#d7edfa;font-size:.72rem;font-weight:700}
+            .easy-robot-chip[data-tone="bullish"]{border-color:#1dbb86;color:#aaf2d3}.easy-robot-chip[data-tone="bearish"]{border-color:#e45b82;color:#ffc4d5}.easy-robot-chip[data-tone="neutral"]{border-color:#a78343;color:#ffe0a1}
+            .easy-robot-figure{position:absolute;left:50%;bottom:0;width:168px;height:154px;transform:translateX(-50%);animation:easy-robot-float 2.8s ease-in-out infinite}
+            .easy-robot-arm-left{transform-origin:55px 104px;animation:easy-robot-wave 2.1s ease-in-out infinite}.easy-robot-arm-right{transform-origin:145px 104px;animation:easy-robot-wave 2.1s ease-in-out infinite reverse}
+            .easy-robot-eyes{transform-origin:center;animation:easy-robot-blink 4.8s infinite}.easy-robot-antenna-light{transform-origin:center;animation:easy-robot-pulse 1.5s ease-in-out infinite}
+            .easy-robot-caption{text-align:center;margin:0;color:var(--muted);font-size:.76rem}
+            @keyframes easy-robot-float{0%,100%{transform:translate(-50%,0)}50%{transform:translate(-50%,-7px)}}
+            @keyframes easy-robot-wave{0%,100%{transform:rotate(0)}50%{transform:rotate(-9deg)}}
+            @keyframes easy-robot-blink{0%,44%,48%,100%{transform:scaleY(1)}46%{transform:scaleY(.12)}}
+            @keyframes easy-robot-pulse{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.18)}}
+            @media(prefers-reduced-motion:reduce){.easy-robot-figure,.easy-robot-arm-left,.easy-robot-arm-right,.easy-robot-eyes,.easy-robot-antenna-light{animation:none}}
           </style>
           <div id="live-market-radar">
             <h3>نمودار زندهٔ کندل و رادار موج‌ها</h3>
             <p class="muted">کندل‌های Spot از Binance و Bybit دریافت می‌شوند. نمودار هر ۱۵ ثانیه تازه‌سازی می‌شود؛ فقط کندل‌های بسته‌شده در تشخیص سقف/کف و سیگنال استفاده می‌شوند.</p>
             <div class="live-radar-controls">
-              <label>رمزارز<select id="live-radar-symbol"><option value="BTCUSDT">BTC</option><option value="ETHUSDT">ETH</option><option value="SOLUSDT">SOL</option><option value="BNBUSDT">BNB</option><option value="XRPUSDT">XRP</option><option value="DOGEUSDT">DOGE</option><option value="ADAUSDT">ADA</option><option value="AVAXUSDT">AVAX</option><option value="LINKUSDT">LINK</option><option value="DOTUSDT">DOT</option><option value="LTCUSDT">LTC</option><option value="TRXUSDT">TRX</option><option value="GRAMUSDT">GRAM</option><option value="PEPEUSDT">PEPE</option><option value="SHIBUSDT">SHIB</option><option value="BCHUSDT">BCH</option><option value="SUIUSDT">SUI</option><option value="HBARUSDT">HBAR</option><option value="NEARUSDT">NEAR</option><option value="UNIUSDT">UNI</option></select></label>
+              <label>رمزارز<select id="live-radar-symbol"><option value="BTCUSDT">BTC</option><option value="ETHUSDT">ETH</option><option value="SOLUSDT">SOL</            <section class="easy-trader-robot" id="easy-trader-robot" aria-label="ربات متحرک تحلیل‌گر حالت آسان">
+              <div class="easy-robot-stage">
+                <div class="easy-robot-bubble" role="status" aria-live="polite">
+                  <span class="easy-robot-bubble-title">گزارش زنده تحلیل · EASY TRADER</span>
+                  <strong class="easy-robot-pattern" id="easy-robot-pattern">در انتظار الگوی کندلی معتبر...</strong>
+                  <div class="easy-robot-chips">
+                    <span class="easy-robot-chip" id="easy-robot-direction">جهت الگو: نامشخص</span>
+                    <span class="easy-robot-chip" id="easy-robot-signal">سیگنال موتور: در انتظار داده</span>
+                    <span class="easy-robot-chip" id="easy-robot-confirmation">وضعیت تأیید: نامشخص</span>
+                  </div>
+                </div>
+                <svg class="easy-robot-figure" viewBox="0 0 200 184" aria-hidden="true">
+                  <path d="M100 14V28" stroke="#7edfff" stroke-width="5" stroke-linecap="round"/><circle class="easy-robot-antenna-light" cx="100" cy="11" r="8" fill="#6ee7ff" stroke="#c8f7ff" stroke-width="2"/>
+                  <g class="easy-robot-arm-left"><path d="M60 105L37 121L28 108" fill="none" stroke="#5bc8e8" stroke-width="13" stroke-linecap="round"/><circle cx="27" cy="105" r="10" fill="#d6f6ff"/></g>
+                  <g class="easy-robot-arm-right"><path d="M140 105L163 121L172 108" fill="none" stroke="#5bc8e8" stroke-width="13" stroke-linecap="round"/><circle cx="173" cy="105" r="10" fill="#d6f6ff"/></g>
+                  <rect x="49" y="29" width="102" height="91" rx="25" fill="#1b526c" stroke="#83e4ff" stroke-width="4"/><rect x="59" y="40" width="82" height="68" rx="18" fill="#0a1a29"/>
+                  <g class="easy-robot-eyes"><ellipse cx="83" cy="70" rx="7" ry="10" fill="#67e5ff"/><ellipse cx="117" cy="70" rx="7" ry="10" fill="#67e5ff"/></g><path d="M84 91Q100 101 116 91" fill="none" stroke="#80eec4" stroke-width="4" stroke-linecap="round"/>
+                  <rect x="69" y="119" width="62" height="48" rx="17" fill="#24718d" stroke="#83e4ff" stroke-width="3"/><rect x="83" y="130" width="34" height="18" rx="6" fill="#0b2435"/>
+                  <circle cx="91" cy="139" r="3" fill="#62e9c0"/><circle cx="100" cy="139" r="3" fill="#ffc66d"/><circle cx="109" cy="139" r="3" fill="#ff7798"/>
+                  <path d="M82 168L77 177M118 168L123 177" stroke="#5bc8e8" stroke-width="9" stroke-linecap="round"/><path d="M72 176H84M116 176H128" stroke="#d6f6ff" stroke-width="5" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <p class="easy-robot-caption"><strong id="easy-robot-market">بازار: در انتظار داده</strong> · ربات فقط تحلیل را نمایش می‌دهد و مستقلاً سفارش نمی‌فرستد.</p>
+            </section>
+option><option value="BNBUSDT">BNB</option><option value="XRPUSDT">XRP</option><option value="DOGEUSDT">DOGE</option><option value="ADAUSDT">ADA</option><option value="AVAXUSDT">AVAX</option><option value="LINKUSDT">LINK</option><option value="DOTUSDT">DOT</option><option value="LTCUSDT">LTC</option><option value="TRXUSDT">TRX</option><option value="GRAMUSDT">GRAM</option><option value="PEPEUSDT">PEPE</option><option value="SHIBUSDT">SHIB</option><option value="BCHUSDT">BCH</option><option value="SUIUSDT">SUI</option><option value="HBARUSDT">HBAR</option><option value="NEARUSDT">NEAR</option><option value="UNIUSDT">UNI</option></select></label>
               <label>تایم‌فریم
                 <select id="live-radar-interval">
                   <option value="1s">۱ ثانیه</option><option value="1m">۱ دقیقه</option><option value="5m" selected>۵ دقیقه</option>
@@ -5168,7 +5209,25 @@ async function refreshExecutionReadiness(){
               <div class="live-radar-pattern-grid">
                 <article class="live-radar-pattern-panel"><h4>الگوهای کندلی</h4><div id="live-radar-candle-patterns" class="live-pattern-list"><p class="live-radar-note">در انتظار کندل بسته‌شده...</p></div></article>
                 <article class="live-radar-pattern-panel"><h4>الگوهای هندسی قیمت</h4><div id="live-radar-geometric-patterns" class="live-pattern-list"><p class="live-radar-note">در انتظار پیوت‌های تأییدشده...</p></div></article>
-                <article class="live-radar-pattern-panel"><h4>امواج و ساختار بازار</h4><div id="live-radar-wave-analysis" class="live-pattern-list"><p class="live-radar-note">در انتظار ساختار موج...</p></div></article>
+                   const easyRobot={root:document.getElementById('easy-trader-robot'),pattern:document.getElementById('easy-robot-pattern'),direction:document.getElementById('easy-robot-direction'),signal:document.getElementById('easy-robot-signal'),confirmation:document.getElementById('easy-robot-confirmation'),market:document.getElementById('easy-robot-market')};
+             function updateEasyTraderRobot(analysis,signal,symbol,interval){
+               if(!easyRobot.root)return;
+               const items=Array.isArray(analysis&&analysis.candlestick_patterns)?analysis.candlestick_patterns:[];
+               const rank=x=>x.state==='CONFIRMED'?2:(x.state==='NEEDS_CONFIRMATION'||x.state==='FORMING'?1:0);
+               const pattern=items.slice().sort((a,b)=>rank(b)-rank(a)||Math.abs(Number(b.score)||0)-Math.abs(Number(a.score)||0))[0];
+               const dir=pattern?(pattern.direction==='NEUTRAL'&&pattern.potential_direction?pattern.potential_direction:pattern.direction):'UNKNOWN';
+               const faDir={BULLISH:'صعودی',BEARISH:'نزولی',NEUTRAL:'خنثی',UNKNOWN:'نامشخص'}[dir]||'نامشخص';
+               const state=pattern?({CONFIRMED:'تأییدشده',NEEDS_CONFIRMATION:'در انتظار تأیید کندل بعدی',FORMING:'در حال شکل‌گیری'}[pattern.state]||'نامشخص'):'الگوی معتبر شناسایی نشد';
+               const sig=String(signal&&signal.signal||'UNKNOWN').toUpperCase();
+               const faSig={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'سیگنال نامشخص'}[sig]||'سیگنال نامشخص';
+               const tone=sig==='BUY'?'bullish':sig==='SELL'?'bearish':sig==='WAIT'?'neutral':'unknown';
+               easyRobot.pattern.textContent=pattern?((pattern.name_fa||pattern.name_en||'الگوی کندلی')+' · '+(pattern.name_en||'')):'در کندل بسته‌شده الگوی شاخصی شناسایی نشد';
+               easyRobot.direction.textContent='جهت الگو: '+faDir;easyRobot.direction.dataset.tone=dir==='BULLISH'?'bullish':dir==='BEARISH'?'bearish':'neutral';
+               easyRobot.signal.textContent='سیگنال موتور: '+faSig;easyRobot.signal.dataset.tone=tone;
+               easyRobot.confirmation.textContent='وضعیت الگو: '+state;easyRobot.confirmation.dataset.tone=pattern&&pattern.state==='CONFIRMED'?'bullish':pattern?'neutral':'unknown';
+               easyRobot.market.textContent='بازار: '+(symbol||'—')+' · '+(interval||'—');
+             }
+         <article class="live-radar-pattern-panel"><h4>امواج و ساختار بازار</h4><div id="live-radar-wave-analysis" class="live-pattern-list"><p class="live-radar-note">در انتظار ساختار موج...</p></div></article>
               </div>
             </section>
             <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
@@ -5401,6 +5460,7 @@ async function refreshExecutionReadiness(){
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 renderFlow(data.market_flow||{});
+                 updateEasyTraderRobot(analysis,s,symbol.value,interval.value);
                 const rsiDivergence=analysis.direction&&analysis.direction.divergence?analysis.direction.divergence:{};
                 const divergenceType=rsiDivergence.type||'NONE';
                 fields.divergence.className='live-radar-divergence '+(divergenceType==='BULLISH'?'bullish':divergenceType==='BEARISH'?'bearish':'neutral');
@@ -5454,6 +5514,7 @@ async function refreshExecutionReadiness(){
                 status.textContent='دادهٔ تازه در دسترس نیست؛ سیگنال تازه صادر نمی‌شود: '+String(error.message||error);
                 draw({candles:[]});
                 fields.action.textContent='نامشخص';
+                 updateEasyTraderRobot({candlestick_patterns:[]},{signal:'UNKNOWN'},symbol.value,interval.value);
                 fields.bias.textContent='نامشخص';
                 fields.score.textContent='—';
                 renderPatternList(fields.candlePatterns,[],'دادهٔ تازه برای تحلیل الگوها در دسترس نیست.');
