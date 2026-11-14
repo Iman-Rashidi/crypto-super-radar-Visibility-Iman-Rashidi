@@ -74,6 +74,82 @@ def _item(
     }
 
 
+def _bullish_abandoned_baby_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect strict bullish Abandoned Baby with full-range gaps around the Doji."""
+    if len(frame) < 7:
+        return None
+
+    candidates = []
+    if len(frame) >= 4:
+        candidates.append((len(frame) - 4, True))
+    candidates.append((len(frame) - 3, False))
+
+    for start, has_follow_through in candidates:
+        first, middle, third = (frame.iloc[start + offset] for offset in range(3))
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change > -0.003:
+            continue
+
+        fo, fc = float(first["open"]), float(first["close"])
+        fh, fl = float(first["high"]), float(first["low"])
+        mo, mc = float(middle["open"]), float(middle["close"])
+        mh, ml = float(middle["high"]), float(middle["low"])
+        to, tc = float(third["open"]), float(third["close"])
+        th, tl = float(third["high"]), float(third["low"])
+        first_range, middle_range, third_range = fh - fl, mh - ml, th - tl
+        if min(first_range, middle_range, third_range) <= 0:
+            continue
+
+        first_body = fo - fc
+        middle_body = abs(mc - mo)
+        third_body = tc - to
+        valid = (
+            fc < fo
+            and first_body >= first_range * 0.45
+            and middle_body <= middle_range * 0.10
+            and mh < fl
+            and tc > to
+            and third_body >= third_range * 0.45
+            and tl > mh
+            and tc >= (fo + fc) / 2.0
+        )
+        if not valid:
+            continue
+
+        follow_through = has_follow_through and float(frame.iloc[start + 3]["close"]) > th
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از روند نزولی، سه کندل تشکیل شده‌اند: کندل اول نزولی و بلند، دوجی دوم با کل دامنه پایین‌تر از کف کندل اول، "
+            "و کندل سوم صعودی و بلند با کل دامنه بالاتر از سقف دوجی. این دو گپِ بدون هم‌پوشانی شرط اصلی Abandoned Baby هستند. "
+        )
+        if follow_through:
+            description += "کندل بعدی بالاتر از سقف کندل سوم بسته شده و حرکت صعودی را تأیید کرده است."
+        else:
+            description += "برای تأیید بیشتر، بسته‌شدن کندل بعدی بالاتر از سقف کندل سوم لازم است."
+        return _item(
+            name_fa="نوزاد رهاشدهٔ صعودی",
+            name_en="Bullish Abandoned Baby",
+            category="CANDLE",
+            direction="BULLISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BULLISH",
+            state="CONFIRMED" if follow_through else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 2].isoformat(),
+            score=17 if follow_through else 8,
+            trigger_price=th,
+            invalidation_price=fl,
+        )
+    return None
+
 def _morning_star_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect a three-candle Morning Star and confirm it only with a later close."""
     if len(frame) < 6:
@@ -612,6 +688,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     last_bear = c < o
     first_bear = fc < fo
     first_bull = fc > fo
+
+    abandoned_baby = _bullish_abandoned_baby_pattern(frame, volume_ratio)
+    if abandoned_baby is not None:
+        out.append(abandoned_baby)
 
     morning_star = _morning_star_pattern(frame, volume_ratio)
     if morning_star is not None:
