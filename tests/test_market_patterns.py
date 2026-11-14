@@ -349,6 +349,44 @@ class MarketPatternTests(unittest.TestCase):
         self.assertEqual(engulfing["potential_direction"], "BULLISH")
         self.assertEqual(engulfing["state"], "NEEDS_CONFIRMATION")
 
+    def _set_bearish_engulfing(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        start = -3 if with_confirmation else -2
+        frame.iloc[start] = [100.0, 101.0, 99.5, 100.8, 1200.0]
+        frame.iloc[start + 1] = [101.0, 101.5, 98.8, 99.0, 1800.0]
+        if with_confirmation:
+            frame.iloc[-1] = [98.9, 99.0, 97.5, 98.0, 1900.0]
+        return frame
+
+    def test_bearish_engulfing_after_uptrend_is_pending_bearish_evidence(self):
+        frame = self._set_bearish_engulfing(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Engulfing")
+        self.assertEqual(pattern["name_fa"], "پوشای نزولی")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 98.8)
+        self.assertEqual(pattern["invalidation_price"], 101.5)
+
+    def test_bearish_engulfing_confirmed_by_next_close_below_engulfing_low(self):
+        frame = self._set_bearish_engulfing(candle_frame("up"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Engulfing")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_bearish_engulfing_rejected_without_prior_uptrend(self):
+        frame = self._set_bearish_engulfing(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Engulfing" for p in analysis["candlestick_patterns"]))
+
+    def test_bearish_engulfing_rejected_when_second_body_does_not_engulf_first(self):
+        frame = self._set_bearish_engulfing(candle_frame("up"))
+        frame.iloc[-1] = [100.7, 101.0, 99.0, 100.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Engulfing" for p in analysis["candlestick_patterns"]))
+
     def _set_three_inside_up(self, frame: pd.DataFrame, *, confirmed: bool = True) -> pd.DataFrame:
         frame.iloc[-3] = [100.0, 101.0, 93.0, 94.0, 1400.0]
         frame.iloc[-2] = [95.0, 97.0, 94.5, 96.0, 1100.0]
