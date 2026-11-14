@@ -259,9 +259,8 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         page = body.decode("utf-8")
         panel_start = page.index('id="blofin-demo-panel"')
-        script_marker = "<script>\\n          (function(){\\n            const checkButton="
-        script_start_marker = page.index(script_marker, panel_start)
-        script_start = page.index("<script>", script_start_marker) + len("<script>\\n")
+        script_tag = page.index("<script>", panel_start)
+        script_start = page.index("\\n", script_tag) + 1
         script_end = page.index("</script>", script_start)
         script = page[script_start:script_end]
         with tempfile.NamedTemporaryFile(
