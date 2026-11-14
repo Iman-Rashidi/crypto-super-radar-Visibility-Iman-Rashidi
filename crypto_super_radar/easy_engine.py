@@ -34,6 +34,96 @@ def _num(value: Any) -> Optional[float]:
     return x if math.isfinite(x) else None
 
 
+
+def _trend_structure(frame: pd.DataFrame, *, radius: int = 2) -> dict[str, Any]:
+    """Non-repainting HH/HL or LH/LL structure using pivots confirmed after right bars."""
+    required = {"high", "low", "close"}
+    if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns) or len(frame) < 2 * radius + 8:
+        return {"status": "UNKNOWN", "trend": "UNKNOWN", "reason": "Insufficient timeframe OHLC history."}
+    high = pd.to_numeric(frame.high, errors="coerce").to_numpy(float)
+    low = pd.to_numeric(frame.low, errors="coerce").to_numpy(float)
+    close = pd.to_numeric(frame.close, errors="coerce").to_numpy(float)
+    if not np.isfinite(high).all() or not np.isfinite(low).all() or not np.isfinite(close).all():
+        return {"status": "UNKNOWN", "trend": "UNKNOWN", "reason": "Non-finite timeframe data."}
+    highs, lows = [], []
+    for i in range(radius, len(frame) - radius):
+        # A pivot only becomes visible after the full right-hand radius has closed.
+        if high[i] >= np.max(high[i-radius:i+radius+1]) and high[i] > np.max(high[i-radius:i]):
+            highs.append({"index": i, "price": float(high[i])})
+        if low[i] <= np.min(low[i-radius:i+radius+1]) and low[i] < np.min(low[i-radius:i]):
+            lows.append({"index": i, "price": float(low[i])})
+    if len(highs) < 2 or len(lows) < 2:
+        return {"status": "UNKNOWN", "trend": "UNKNOWN",
+                "confirmed_highs": len(highs), "confirmed_lows": len(lows),
+                "reason": "Two confirmed swing highs and lows are not yet available."}
+    hh = highs[-1]["price"] > highs[-2]["price"]
+    hl = lows[-1]["price"] > lows[-2]["price"]
+    lh = highs[-1]["price"] < highs[-2]["price"]
+    ll = lows[-1]["price"] < lows[-2]["price"]
+    trend = "UPTREND" if hh and hl else "DOWNTREND" if lh and ll else "SIDEWAYS_OR_TRANSITION"
+    return {
+        "status": "KNOWN", "trend": trend, "higher_high": hh, "higher_low": hl,
+        "lower_high": lh, "lower_low": ll,
+        "last_high": highs[-1], "prior_high": highs[-2],
+        "last_low": lows[-1], "prior_low": lows[-2],
+        "confirmed_highs": len(highs), "confirmed_lows": len(lows),
+        "pivot_radius": radius, "confirmation_delay_bars": radius,
+        "lookahead_bias": False,
+    }
+
+
+def _multi_timeframe_structure(
+    daily: pd.DataFrame, supplied: Any = None,
+) -> dict[str, Any]:
+    """Use separate supplied OHLCV frames when present; derive only completed higher frames."""
+    required = {"open", "high", "low", "close", "volume"}
+    reports: dict[str, Any] = {}
+    supplied = supplied if isinstance(supplied, dict) else {}
+    aliases = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","1D":"1D","1W":"1W","1M":"1M"}
+    for tf in ("1m","5m","15m","30m","1h","4h"):
+        frame = supplied.get(tf)
+        if isinstance(frame, pd.DataFrame) and required.issubset(frame.columns):
+            reports[tf] = _trend_structure(frame)
+            reports[tf]["source"] = "INDEPENDENT_OHLCV"
+        else:
+            reports[tf] = {"status":"UNKNOWN","trend":"UNKNOWN",
+                           "reason":"No independent OHLCV series is configured for this timeframe."}
+    if not isinstance(daily.index, pd.DatetimeIndex) or not required.issubset(daily.columns):
+        reports["1D"] = {"status":"UNKNOWN","trend":"UNKNOWN","reason":"Daily OHLCV unavailable."}
+        reports["1W"] = {"status":"UNKNOWN","trend":"UNKNOWN","reason":"Daily OHLCV unavailable."}
+        reports["1M"] = {"status":"UNKNOWN","trend":"UNKNOWN","reason":"Daily OHLCV unavailable."}
+        return {"status":"PARTIAL","timeframes":reports,"conflict":"UNKNOWN"}
+    reports["1D"] = _trend_structure(daily)
+    reports["1D"]["source"] = "VALIDATED_DAILY_OHLCV"
+    frame = daily.copy()
+    if frame.index.tz is None:
+        frame.index = frame.index.tz_localize("UTC")
+    else:
+        frame.index = frame.index.tz_convert("UTC")
+    for tf, rule in (("1W","W-SUN"),("1M","ME")):
+        try:
+            agg = frame.resample(rule, label="right", closed="right").agg({
+                "open":"first","high":"max","low":"min","close":"last","volume":"sum"
+            }).dropna()
+            # Keep only fully elapsed calendar periods, never the currently-forming week/month.
+            now = pd.Timestamp.now(tz="UTC")
+            completed = agg.index < now.normalize() if tf == "1W" else agg.index <= now.normalize() - pd.offsets.MonthEnd(1)
+            agg = agg.loc[completed]
+            reports[tf] = _trend_structure(agg)
+            reports[tf]["source"] = "AGGREGATED_COMPLETED_DAILY_BARS"
+        except Exception as exc:
+            reports[tf] = {"status":"UNKNOWN","trend":"UNKNOWN","reason":type(exc).__name__}
+    known = [v["trend"] for v in reports.values() if v.get("status") == "KNOWN"
+             and v.get("trend") in {"UPTREND","DOWNTREND"}]
+    conflict = "ALIGNED" if len(set(known)) <= 1 and known else "CONFLICT" if len(set(known)) > 1 else "UNKNOWN"
+    return {
+        "status": "KNOWN" if reports["1D"].get("status") == "KNOWN" else "PARTIAL",
+        "timeframes": reports, "directional_timeframe_count": len(known),
+        "conflict": conflict, "used_as_hard_gate": False,
+        "policy": "Higher timeframe conflict is a diagnostic only; Easy entry is not blocked by it.",
+    }
+
+
 def _failure(asset: AssetSpec, reason: str, metrics: Optional[dict[str, Any]] = None) -> AnalysisResult:
     return AnalysisResult(
         asset=asset.raw, signal=Signal.NO_TRADE, safety_status=SafetyStatus.UNKNOWN,
@@ -98,7 +188,13 @@ class EasyModeEngine:
         rsi = _num((tech.get("rsi") or {}).get("value"))
         macd_hist = _num((tech.get("macd") or {}).get("histogram"))
         obv_trend = str((tech.get("obv") or {}).get("trend", "UNKNOWN")).upper()
-        relative_volume = _num((tech.get("volume") or {}).get("relative_volume_20"))
+        volume_series = pd.to_numeric(candles["volume"], errors="coerce")
+        prior_volume_mean = float(volume_series.iloc[-21:-1].mean()) if len(volume_series) >= 21 else None
+        relative_volume = (
+            float(volume_series.iloc[-1]) / prior_volume_mean
+            if prior_volume_mean is not None and math.isfinite(prior_volume_mean) and prior_volume_mean > 0
+            else None
+        )
         atr_value = _num((tech.get("atr") or {}).get("value"))
         if ema20 is None or ema50 is None or rsi is None or atr_value is None or atr_value <= 0:
             return _failure(asset, "EMA20/EMA50، RSI و ATR برای تحلیل پایه باید قابل محاسبه باشند.",
@@ -112,8 +208,8 @@ class EasyModeEngine:
         if macd_hist is not None:
             if macd_hist > 0: bull += 15
             elif macd_hist < 0: bear += 15
-        if obv_trend == "BULLISH": bull += 10
-        elif obv_trend == "BEARISH": bear += 10
+        if obv_trend in {"BULLISH", "RISING"}: bull += 10
+        elif obv_trend in {"BEARISH", "FALLING"}: bear += 10
         if relative_volume is not None and relative_volume >= 1.0:
             if trend == "BULLISH": bull += 5
             elif trend == "BEARISH": bear += 5
@@ -126,6 +222,10 @@ class EasyModeEngine:
         price_action = analyze_easy_price_action(candles, last_candle_closed=True)
         pattern = monitor_chart_patterns(candles.tail(120))
         cycle = classify_market_cycle(candles)
+        mtf = _multi_timeframe_structure(
+            candles, getattr(self.data, "timeframe_candles", {}).get(asset.raw)
+            if isinstance(getattr(self.data, "timeframe_candles", {}), dict) else None,
+        )
         candidate_side = "LONG" if trend == "BULLISH" else "SHORT" if trend == "BEARISH" and asset.market_type == "perp" else None
         breakout = {"status": "UNKNOWN", "state": "UNKNOWN", "reason": "No directional support/resistance test was selected."}
         sr = (price_action.get("support_resistance") or {}) if isinstance(price_action, dict) else {}
@@ -231,6 +331,8 @@ class EasyModeEngine:
             "technical_indicators": tech, "easy_price_action": price_action,
             "chart_pattern": pattern, "elliott_wave": monitor_elliott_waves(candles),
             "market_cycle": cycle, "breakout_retest": breakout,
+            "multi_timeframe_structure": mtf,
+            "timeframe_conflict": mtf.get("conflict", "UNKNOWN"),
             "market_sentiment": sentiment, "sentiment_status": sentiment.get("status", "UNKNOWN"),
             "whale_intelligence": whale, "whale_status": whale.get("status", security.get("status", "UNKNOWN")),
             "security_diagnostics": security,
