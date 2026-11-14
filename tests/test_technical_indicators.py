@@ -74,5 +74,25 @@ class EasyTraderTechnicalIndicatorTests(unittest.TestCase):
         self.assertEqual(result["status"], "UNKNOWN")
 
 
+    def test_mfi_dpo_and_roc_sections_are_returned(self):
+        result = analyze_technical_indicators(self.candles())
+        self.assertEqual(result["status"], "KNOWN")
+        mfi = result["mfi"]
+        self.assertEqual(mfi["period"], 14)
+        self.assertIn(mfi["state"], {"OVERBOUGHT", "OVERSOLD", "NEUTRAL", "UNKNOWN"})
+        self.assertIn(mfi["divergence"], {"BULLISH", "BEARISH", "NONE"})
+        self.assertEqual(mfi["overbought_threshold"], 80)
+        self.assertEqual(mfi["oversold_threshold"], 20)
+        dpo = result["dpo"]
+        self.assertEqual(dpo["period"], 20)
+        self.assertEqual(dpo["shift"], 11)
+        self.assertIn(dpo["zero_line"], {"BULLISH_ZERO_CROSS", "BEARISH_ZERO_CROSS", "ABOVE_ZERO", "BELOW_ZERO", "UNKNOWN"})
+        self.assertEqual(dpo["trend_identification"], "NOT_SUITABLE_CYCLE_ONLY")
+        roc = result["roc"]
+        self.assertEqual(roc["period"], 10)
+        self.assertIsNotNone(roc["value_pct"])
+        self.assertIn(roc["zero_line"], {"BULLISH_ZERO_CROSS", "BEARISH_ZERO_CROSS", "ABOVE_ZERO", "BELOW_ZERO", "UNKNOWN"})
+        self.assertEqual(roc["overbought_oversold"], "NO_STANDARD_THRESHOLDS_USE_HISTORICAL_EXTREMES")
+
 if __name__ == "__main__":
     unittest.main()
