@@ -9,6 +9,7 @@ from crypto_super_radar.fundamental_engine import (
     industry_analysis,
     accounting_principles_analysis,
     market_analysis,
+    dividend_analysis,
 )
 
 
@@ -188,6 +189,46 @@ class FundamentalReportTests(unittest.TestCase):
         self.assertEqual(result["coverage_pct"], 100.0)
         self.assertEqual(result["score"], round(expected, 2))
         self.assertFalse(result["trade_authorized"])
+
+class DividendAnalysisTests(unittest.TestCase):
+    def test_crypto_is_not_applicable_not_a_negative_score(self):
+        result = dividend_analysis({"asset_class": "crypto"})
+        self.assertEqual(result["status"], "NOT_APPLICABLE")
+        self.assertIsNone(result["score"])
+
+    def test_equity_dividend_metrics_and_growth(self):
+        result = dividend_analysis({"asset_class": "equity", "current_price": 100,
+            "annual_dividend_per_share": 5, "net_income": 10_000_000,
+            "dividends_paid": 4_000_000, "free_cash_flow": 6_000_000,
+            "dividend_history": [{"year": 2022, "dividend_per_share": 4.0},
+                                 {"year": 2023, "dividend_per_share": 4.2},
+                                 {"year": 2024, "dividend_per_share": 4.5}],
+            "price_change_12m_pct": 2, "source": "https://example.org/filing",
+            "observed_at_utc": "2026-11-01T00:00:00Z"})
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertAlmostEqual(result["dividend_yield_pct"], 5.0)
+        self.assertAlmostEqual(result["payout_ratio_pct"], 40.0)
+        self.assertAlmostEqual(result["dividend_coverage_ratio"], 2.5)
+        self.assertTrue(result["history_consistent"])
+        self.assertGreater(result["dividend_growth_cagr_pct"], 0)
+        self.assertEqual(result["dividend_sustainability"], "HEALTHY")
+
+    def test_high_yield_after_price_crash_flags_dividend_trap(self):
+        result = dividend_analysis({"asset_class": "stock", "dividend_yield_pct": 10,
+            "price_change_12m_pct": -50, "source": "https://example.org",
+            "observed_at_utc": "2026-11-01T00:00:00Z"})
+        self.assertTrue(result["dividend_trap_warning"])
+
+    def test_missing_source_does_not_validate_metrics(self):
+        result = dividend_analysis({"asset_class": "equity", "current_price": 100,
+            "annual_dividend_per_share": 5, "net_income": 100, "dividends_paid": 20})
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["checks"]["dividend_yield"], "UNKNOWN")
+
+    def test_dividend_diagnostic_does_not_change_seven_module_weights(self):
+        result = build_fundamental_report({"dividend_analysis": {"asset_class": "crypto"}})
+        self.assertEqual(set(result["weights"]), set(MODULE_WEIGHTS))
+        self.assertEqual(result["modules"]["dividend_analysis"]["status"], "NOT_APPLICABLE")
 
 class EventAnalysisTests(unittest.TestCase):
     def test_missing_events_remain_unknown(self):
