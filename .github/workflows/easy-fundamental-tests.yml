@@ -1,0 +1,35 @@
+name: Easy Fundamental Engine Tests
+
+on:
+  push:
+    branches:
+      - feature/easy-fundamental-engine
+  pull_request:
+    branches:
+      - feature/easy-trader-candlestick-engine
+    paths:
+      - "crypto_super_radar/fundamental_engine.py"
+      - "crypto_super_radar/integrated_engine.py"
+      - "tests/test_fundamental_engine.py"
+      - ".github/workflows/easy-fundamental-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fundamental-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile changed Python modules
+        run: |
+          python -m py_compile crypto_super_radar/fundamental_engine.py
+          python -m py_compile crypto_super_radar/integrated_engine.py
+          python -m py_compile tests/test_fundamental_engine.py
+      - name: Run Fundamental Engine unit tests
+        run: python -m unittest discover -s tests -p "test_fundamental_engine.py" -v
