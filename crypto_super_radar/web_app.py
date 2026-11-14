@@ -3953,68 +3953,161 @@ class Handler(BaseHTTPRequestHandler):
             let monitorTimer=null;
             let monitorActive=false;
             let lastJobId=null;
+            function displayMonitorValue(value){
+              if(value===null||value===undefined||value==='')return 'داده موجود نیست';
+              if(typeof value==='object')return JSON.stringify(value);
+              return String(value);
+            }
             function addCell(parent,tag,value){
               const node=document.createElement(tag);
-              node.textContent=value===null||value===undefined||value===''?'—':String(value);
+              node.textContent=displayMonitorValue(value);
               parent.appendChild(node);
               return node;
             }
             function formatTime(raw){
-              if(raw===null||raw===undefined||raw==='')return '—';
+              if(raw===null||raw===undefined||raw==='')return 'زمان ثبت نشده';
               let date;
               if(typeof raw==='number'||/^\\d+$/.test(String(raw))){
                 const n=Number(raw);date=new Date(n>100000000000?n:n*1000);
               }else date=new Date(raw);
               return Number.isNaN(date.getTime())?String(raw):date.toLocaleString();
             }
-            function renderEvents(title,items,fields){
+            function renderEvents(title,items,fields,emptyText){
               const section=document.createElement('section');
               addCell(section,'h4',title);
-              if(!items||!items.length){addCell(section,'p','هنوز رویدادی ثبت نشده است.');return section;}
+              if(!Array.isArray(items)||!items.length){
+                addCell(section,'p',emptyText||'در بازهٔ دریافت‌شده رویدادی از صرافی گزارش نشده است.');
+                return section;
+              }
+              const wrapper=document.createElement('div');wrapper.style.overflowX='auto';
               const table=document.createElement('table'),head=document.createElement('tr');
-              fields.forEach(([key,label])=>addCell(head,'th',label));table.appendChild(head);
-              items.forEach(item=>{const row=document.createElement('tr');fields.forEach(([key])=>{
-                let value=item[key];if(/time|ts|createTime|updateTime|occurred_at/i.test(key))value=formatTime(value);
-                addCell(row,'td',value);
-              });table.appendChild(row);});
-              section.appendChild(table);return section;
+              fields.forEach(([,label])=>addCell(head,'th',label));table.appendChild(head);
+              items.forEach(item=>{
+                const row=document.createElement('tr');
+                fields.forEach(([key])=>{
+                  let value=item&&item[key];
+                  if(/time|timestamp|ts|occurred_at|createTime|updateTime/i.test(key))value=formatTime(value);
+                  addCell(row,'td',value);
+                });
+                table.appendChild(row);
+              });
+              wrapper.appendChild(table);section.appendChild(wrapper);return section;
             }
             function renderLiveMonitor(snapshot){
               monitorView.replaceChildren();monitorEvents.replaceChildren();
-              const m=snapshot.market||{},positions=snapshot.positions||[];
-              const active=positions.filter(p=>Math.abs(Number(p.positions||0))>0);
-              const position=active[0]||{};
-              const fillRows=snapshot.fills||[];
-              const closed=snapshot.closed_positions||[];
-              const order=snapshot.latest_local_order||{};
-              const detail=snapshot.order_detail||{};
+              const m=snapshot.market||{},account=snapshot.account||{};
+              const positions=Array.isArray(snapshot.positions)?snapshot.positions:[];
+              const active=positions.filter(p=>{
+                const quantity=Number(p&&p.positions);
+                return Number.isFinite(quantity)&&Math.abs(quantity)>0;
+              });
+              const position=active[0]||{},detail=snapshot.order_detail||{};
+              const localOrder=snapshot.latest_local_order||{};
+              const fills=Array.isArray(snapshot.fills)?snapshot.fills:[];
+              const closed=Array.isArray(snapshot.closed_positions)?snapshot.closed_positions:[];
+              const events=Array.isArray(snapshot.execution_events)?snapshot.execution_events:[];
+              const usdt=(Array.isArray(account.details)?account.details:[]).find(x=>String(x.currency||'').toUpperCase()==='USDT')||{};
+              const lastEvent=type=>events.filter(x=>String(x.event_type||'').toUpperCase()===type).slice(-1)[0]||{};
+              const reserved=lastEvent('RESERVED'),accepted=lastEvent('ACCEPTED'),filledEvent=lastEvent('FILLED');
+              const latestFill=fills[0]||{},latestClosed=closed[0]||{};
               const summary=document.createElement('div');summary.className='grid';
               const metrics=[
-                ['آخرین قیمت BTC',m.last],['Mark Price',position.markPrice||m.markPrice],
-                ['وضعیت ربات',active.length?'POSITION_OPEN':(detail.state||order.status||'NO_OPEN_POSITION')],
-                ['جهت پوزیشن',position.positionSide||order.side],
-                ['قیمت ورود واقعی',position.averagePrice||detail.averagePrice||order.entry_price],
-                ['حجم باز',position.positions],['اهرم',position.leverage||order.leverage],
+                ['آخرین قیمت BTC',m.last],['Mark Price واقعی',m.markPrice??position.markPrice],
+                ['Index Price',m.indexPrice],['وضعیت موقعیت',active.length?'پوزیشن باز':(detail.state||localOrder.status||'بدون پوزیشن باز')],
+                ['جهت پوزیشن',position.positionSide||localOrder.side],
+                ['میانگین قیمت ورود',position.averagePrice??detail.averagePrice??localOrder.entry_price],
+                ['حجم باز',position.positions],['حجم قابل‌بستن',position.availablePositions],
+                ['اهرم',position.leverage??detail.leverage??localOrder.leverage],
                 ['سود/زیان شناور USDT',position.unrealizedPnl],
-                ['Equity حساب Demo',snapshot.account&&snapshot.account.totalEquity],
+                ['Equity کل حساب (USD)',account.totalEquity],['Equity ایزوله (USD)',account.isolatedEquity],
+                ['موجودی USDT',usdt.balance],['Equity موجودی USDT',usdt.equity],
+                ['Available USDT',usdt.available],['Available Equity USDT',usdt.availableEquity],
+                ['Frozen USDT',usdt.frozen],['تعداد پوزیشن‌های باز',active.length],
+                ['سفارش‌های فعال',Array.isArray(snapshot.open_orders)?snapshot.open_orders.length:0],
+                ['TP/SL فعال',Array.isArray(snapshot.open_tpsl_orders)?snapshot.open_tpsl_orders.length:0],
                 ['آخرین به‌روزرسانی',formatTime(snapshot.updated_at_utc)]
               ];
-              metrics.forEach(([label,value])=>{const card=document.createElement('div');card.className='metric';addCell(card,'span',label);addCell(card,'strong',value);summary.appendChild(card);});
+              metrics.forEach(([label,value])=>{
+                const card=document.createElement('div');card.className='metric';
+                addCell(card,'span',label);addCell(card,'strong',value);summary.appendChild(card);
+              });
               monitorView.appendChild(summary);
-              monitorEvents.appendChild(renderEvents('زمان‌های واقعی معامله · Fillهای صرافی',fillRows,[
-                ['side','خرید/فروش'],['fillPrice','قیمت Fill'],['fillSize','حجم'],['fillPnl','PnL تحقق‌یافته'],['fee','کارمزد'],['ts','زمان دقیق']
-              ]));
-              monitorEvents.appendChild(renderEvents('معاملات بسته‌شده · زمان خروج و سود/زیان نهایی',closed,[
-                ['side','سمت خروج'],['openAveragePrice','قیمت ورود'],['closeAveragePrice','قیمت خروج'],['closePositions','حجم بسته‌شده'],['realizedPnl','PnL نهایی'],['fee','کارمزد'],['updateTime','زمان خروج']
-              ]));
-              monitorEvents.appendChild(renderEvents('سفارش‌های باز',snapshot.open_orders||[],[
-                ['side','سمت'],['orderType','نوع'],['price','قیمت'],['size','حجم'],['filledSize','پرشده'],['state','وضعیت'],['createTime','زمان']
-              ]));
-              monitorEvents.appendChild(renderEvents('رویدادهای ثبت‌شده در ربات',snapshot.execution_events||[],[
-                ['event_type','رویداد'],['occurred_at','زمان UTC']
-              ]));
+              const timing=document.createElement('section');timing.className='metric';timing.style.marginTop='12px';
+              addCell(timing,'h4','زمان‌بندی واقعی چرخه و معامله');
+              const timingGrid=document.createElement('div');timingGrid.className='grid';
+              [
+                ['زمان رزرو/تصمیم اجرایی ربات',reserved.occurred_at],
+                ['زمان پذیرش سفارش در صرافی',detail.createTime??accepted.occurred_at],
+                ['زمان آخرین Fill واقعی',latestFill.ts??(filledEvent.occurred_at?Number(filledEvent.occurred_at)*1000:null)],
+                ['زمان خروج آخرین پوزیشن بسته',latestClosed.updateTime],
+                ['زمان آخرین تغییر سفارش محلی',localOrder.updated_at?Number(localOrder.updated_at)*1000:null],
+                ['وضعیت سفارش محلی',localOrder.status],
+                ['شناسه سفارش صرافی',detail.orderId||localOrder.exchange_order_id],
+                ['شناسه سفارش ربات',localOrder.client_order_id]
+              ].forEach(([label,value])=>{
+                const card=document.createElement('div');card.className='metric';
+                addCell(card,'span',label);
+                addCell(card,'strong',/زمان/.test(label)?formatTime(value):value);
+                timingGrid.appendChild(card);
+              });
+              timing.appendChild(timingGrid);monitorView.appendChild(timing);
+              if(snapshot.data_completeness==='PARTIAL'){
+                const warning=document.createElement('section');warning.className='metric';warning.style.marginTop='12px';
+                addCell(warning,'strong','هشدار: بخشی از داده‌های مانیتور دریافت نشد');
+                addCell(warning,'p','مقادیر ناموجود با صفر جایگزین نشده‌اند؛ منابع ناموفق در جدول زیر مشخص شده‌اند.');
+                monitorEvents.appendChild(warning);
+                monitorEvents.appendChild(renderEvents('منابعی که در این نوبت خطا داشتند',snapshot.read_errors||[],[
+                  ['endpoint','منبع داده'],['error_type','نوع خطا']
+                ]));
+              }else{
+                const ok=document.createElement('p');ok.className='muted';
+                ok.textContent='پوشش منابع مانیتور: همهٔ endpointهای درخواستی پاسخ داده‌اند.';
+                monitorEvents.appendChild(ok);
+              }
+              monitorEvents.appendChild(renderEvents('Fillهای واقعی صرافی · قیمت، حجم، کارمزد و زمان',fills,[
+                ['tradeId','شناسه Fill'],['orderId','شناسه سفارش'],['side','خرید/فروش'],
+                ['positionSide','جهت پوزیشن'],['fillPrice','قیمت Fill'],['fillSize','حجم'],
+                ['fillPnl','PnL تحقق‌یافته'],['fee','کارمزد'],['ts','زمان Fill']
+              ],'BloFin در سوابق دریافتی Fill ثبت‌شده‌ای برنگرداند.'));
+              monitorEvents.appendChild(renderEvents('پوزیشن‌های بسته‌شده · ورود، خروج و PnL نهایی',closed,[
+                ['historyId','شناسه سابقه'],['side','سمت'],['positionSide','جهت پوزیشن'],
+                ['openAveragePrice','میانگین ورود'],['closeAveragePrice','میانگین خروج'],
+                ['closePositions','حجم بسته‌شده'],['realizedPnl','PnL نهایی'],
+                ['realizedPnlRatio','درصد PnL'],['fee','کارمزد'],
+                ['createTime','زمان بازشدن'],['updateTime','زمان بسته‌شدن/آخرین تغییر']
+              ],'در تاریخچهٔ دریافتی، پوزیشن بسته‌شده‌ای برای BTC-USDT گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('سفارش‌های تکمیل‌شده و تاریخچه سفارش',snapshot.completed_orders||[],[
+                ['orderId','شناسه سفارش'],['orderCategory','دسته سفارش'],['side','سمت'],
+                ['orderType','نوع سفارش'],['state','وضعیت'],['price','قیمت درخواستی'],
+                ['averagePrice','میانگین اجرای واقعی'],['size','حجم درخواست‌شده'],
+                ['filledSize','حجم اجراشده'],['pnl','PnL'],['fee','کارمزد'],
+                ['createTime','زمان ثبت'],['updateTime','زمان تکمیل/تغییر']
+              ],'در تاریخچهٔ دریافت‌شده سفارش تکمیل‌شده‌ای گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('سفارش‌های باز عادی',snapshot.open_orders||[],[
+                ['orderId','شناسه سفارش'],['side','سمت'],['orderType','نوع'],
+                ['orderCategory','دسته'],['price','قیمت'],['size','حجم'],
+                ['filledSize','پرشده'],['state','وضعیت'],['createTime','زمان ثبت'],
+                ['attachAlgoOrders','حد سود/ضرر متصل']
+              ],'در حال حاضر سفارش عادی بازی برای BTC-USDT گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('حد سود و حد ضرر فعال در BloFin',snapshot.open_tpsl_orders||[],[
+                ['tpslId','شناسه TP/SL'],['side','سمت'],['positionSide','جهت پوزیشن'],
+                ['tpTriggerPrice','قیمت فعال‌سازی TP'],['tpOrderPrice','قیمت اجرای TP'],
+                ['tpTriggerPriceType','مبنای TP'],['slTriggerPrice','قیمت فعال‌سازی SL'],
+                ['slOrderPrice','قیمت اجرای SL'],['slTriggerPriceType','مبنای SL'],
+                ['size','حجم'],['actualSize','حجم مؤثر'],['state','وضعیت'],['createTime','زمان ثبت']
+              ],'سفارشی از نوع TP/SL فعال در حساب Demo گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('تاریخچه سفارش‌های حد سود و حد ضرر',snapshot.tpsl_orders_history||[],[
+                ['tpslId','شناسه TP/SL'],['side','سمت'],['tpTriggerPrice','TP'],
+                ['tpOrderPrice','قیمت اجرای TP'],['slTriggerPrice','SL'],
+                ['slOrderPrice','قیمت اجرای SL'],['state','وضعیت'],
+                ['createTime','زمان ثبت'],['updateTime','آخرین تغییر']
+              ],'در تاریخچهٔ دریافتی، سفارش TP/SL ثبت‌شده‌ای گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('تمام رویدادهای ثبت‌شده در ربات (همه سفارش‌ها)',events,[
+                ['sequence','ترتیب'],['client_order_id','شناسه سفارش ربات'],
+                ['event_type','رویداد'],['occurred_at','زمان ثبت'],['payload','جزئیات']
+              ],'هنوز رویدادی در دفتر ثبت داخلی ربات ذخیره نشده است.'));
             }
-            async function refreshExecutionReadiness(){
+async function refreshExecutionReadiness(){
               executeButton.disabled=true;
               try{
                 const response=await fetch('/api/blofin/demo/execution-readiness',{cache:'no-store'});
