@@ -260,7 +260,7 @@ class WebAppHttpTests(unittest.TestCase):
         page = body.decode("utf-8")
         panel_start = page.index('id="blofin-demo-panel"')
         script_tag = page.index("<script>", panel_start)
-        script_start = page.index("\\n", script_tag) + 1
+        script_start = page.index("\n", script_tag) + 1
         script_end = page.index("</script>", script_start)
         script = page[script_start:script_end]
         with tempfile.NamedTemporaryFile(
