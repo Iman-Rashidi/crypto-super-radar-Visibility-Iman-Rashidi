@@ -67,6 +67,23 @@ class MasterStrategyEngineTests(unittest.TestCase):
         self.assertGreater(result["stop_loss"], result["entry_price"])
         self.assertLess(result["take_profit"], result["entry_price"])
 
+    def test_strong_trend_ema20_pullback_is_selected_without_breakout(self):
+        closes = 100.0 * np.power(1.006, np.arange(260, dtype=float))
+        # A multi-day retracement followed by a bullish EMA20 reclaim.
+        # The reclaim remains below the prior 20-day high, so this is not a Turtle breakout.
+        closes[-6:] = closes[-6:] * np.array([0.92, 0.90, 0.88, 0.89, 0.90, 0.96])
+        frame = make_daily_frame(closes)
+        now = frame.index[-1] + pd.Timedelta(hours=24)
+
+        result = self.engine.evaluate(frame, base_signal="LONG", now=now)
+
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["strategy"], "RASCHKE_EMA20_PULLBACK")
+        self.assertEqual(result["direction"], "LONG")
+        self.assertGreaterEqual(result["adx14"], 30.0)
+        self.assertGreater(result["entry_price"], result["ema20"])
+        self.assertLess(result["entry_price"], result["donchian_20_high"])
+
     def test_strategy_never_overrides_conflicting_twelve_gate_direction(self):
         frame = make_daily_frame(self.closes_up)
         now = frame.index[-1] + pd.Timedelta(hours=24)
