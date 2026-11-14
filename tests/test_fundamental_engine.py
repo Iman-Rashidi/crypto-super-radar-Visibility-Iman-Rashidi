@@ -405,7 +405,8 @@ class ComparativeCompanyAnalysisTests(unittest.TestCase):
             "interest_coverage_ratio": 8, "pe_ratio": 25, "pb_ratio": 4,
             "dividend_yield_pct": 1,
             "source": "https://example.org/filing",
-            "observed_at_utc": "2026-11-14T00:00:00Z"}
+            "observed_at_utc": "2026-11-14T00:00:00Z",
+            "reporting_period": "FY2025", "currency": "USD", "accounting_basis": "US_GAAP"}
         row.update(overrides)
         return row
 
@@ -416,13 +417,15 @@ class ComparativeCompanyAnalysisTests(unittest.TestCase):
             self._company(symbol="CCC", market_cap=4000),
             self._company(symbol="DDD", subsector="hardware"),
             self._company(symbol="EEE", source=None),
+            self._company(symbol="FFF", reporting_period="FY2024"),
         ]
         result = comparative_company_analysis(company, peers)
         self.assertEqual(result["status"], "KNOWN")
         self.assertEqual(result["eligible_peer_count"], 1)
-        self.assertEqual(result["excluded_peer_count"], 3)
+        self.assertEqual(result["excluded_peer_count"], 4)
         self.assertEqual(result["comparisons"]["pe_ratio"]["peer_median"], 20)
         self.assertEqual(result["comparisons"]["pe_ratio"]["relative_to_peer_median_pct"], 25)
+        self.assertEqual(result["peer_selection"]["same_currency"], "USD")
 
     def test_no_source_or_no_eligible_peers_stays_unknown(self):
         result = comparative_company_analysis(self._company(source=None), [self._company(symbol="BBB")])
