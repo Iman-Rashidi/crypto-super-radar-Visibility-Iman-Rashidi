@@ -369,7 +369,9 @@ class WhaleAwareConfirmationEngine:
             if len(result.gates) > 2 else "NO TRADE"
         )
         # Easy price-action diagnostics are informational only; they never veto a trade.
-        result.metrics["easy_price_action"] = analyze_easy_price_action(wave_candles)
+        result.metrics["easy_price_action"] = analyze_easy_price_action(
+            wave_candles, last_candle_closed=True,
+        )
         behavior = analyze_market_behavior(
             wave_candles,
             getattr(snapshot, "price_usd", None),
