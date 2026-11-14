@@ -54,12 +54,14 @@ class EasyTradeManagementTests(unittest.TestCase):
 
     def test_position_manager_enforces_risk_budget_and_notional_cap(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
+        self.addCleanup(manager.db.close)
         blocked = manager.open_position("cex:BTCUSDT", "LONG", 100, 100, 90, 120)
         self.assertEqual(blocked["status"], "BLOCKED")
         self.assertLessEqual(blocked["maximum_allowed_quantity"] * 100, 1000.0)
 
     def test_position_manager_ignores_open_candle(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
+        self.addCleanup(manager.db.close)
         opened = manager.open_position("cex:BTCUSDT", "LONG", 2, 100, 95, 110)
         result = manager.update_position(opened["position_id"], {"open":100,"high":101,"low":90,"close":99},
                                          candle_closed=False)
@@ -68,6 +70,7 @@ class EasyTradeManagementTests(unittest.TestCase):
 
     def test_hard_stop_closes_and_journals_position(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
+        self.addCleanup(manager.db.close)
         opened = manager.open_position("cex:BTCUSDT", "LONG", 2, 100, 95, 110)
         result = manager.update_position(opened["position_id"], {"open":100,"high":101,"low":94,"close":96})
         self.assertEqual(result["status"], "CLOSED")
@@ -76,6 +79,7 @@ class EasyTradeManagementTests(unittest.TestCase):
 
     def test_ambiguous_stop_and_target_bar_uses_stop_first(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
+        self.addCleanup(manager.db.close)
         opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 95, 105)
         result = manager.update_position(opened["position_id"], {"open":100,"high":106,"low":94,"close":101})
         self.assertEqual(result["reason"], "STOP_LOSS")
@@ -83,6 +87,7 @@ class EasyTradeManagementTests(unittest.TestCase):
 
     def test_trailing_stop_only_ratchets_toward_profit(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
+        self.addCleanup(manager.db.close)
         opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 90, 130)
         first = manager.update_position(opened["position_id"], {"open":100,"high":110,"low":99,"close":108}, atr_value=3)
         self.assertGreater(first["current_stop"], 90)
@@ -91,6 +96,7 @@ class EasyTradeManagementTests(unittest.TestCase):
 
     def test_mental_stop_only_alerts_until_manual_close(self):
         manager = EasyPositionManager(db=connect_database(":memory:"))
+        self.addCleanup(manager.db.close)
         opened = manager.open_position("cex:BTCUSDT", "LONG", 1, 100, 95, 110, stop_mode="MENTAL")
         result = manager.update_position(opened["position_id"], {"open":100,"high":101,"low":94,"close":96})
         self.assertEqual(result["status"], "OPEN")
