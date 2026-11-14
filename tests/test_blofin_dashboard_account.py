@@ -135,8 +135,7 @@ class FakeBloFinMonitorStore:
 
 class BloFinLiveMonitorSnapshotTests(unittest.TestCase):
     def test_live_snapshot_includes_mark_equity_fills_completed_orders_and_tpsl(self):
-        with patch.object(web_app, "BloFinDemoReadOnly", FakeBloFinMonitorClient), \\
-             patch.object(web_app, "BloFinDemoEventStore", FakeBloFinMonitorStore):
+        with patch.object(web_app, "BloFinDemoReadOnly", FakeBloFinMonitorClient), patch.object(web_app, "BloFinDemoEventStore", FakeBloFinMonitorStore):
             result = web_app._blofin_demo_live_monitor_snapshot()
         self.assertEqual(result["status"], "CONNECTED_READ_ONLY")
         self.assertEqual(result["data_completeness"], "COMPLETE")
