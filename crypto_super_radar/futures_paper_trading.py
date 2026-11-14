@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -502,12 +503,30 @@ class FuturesPaperTradingBot:
     def state(self) -> dict[str, Any]:
         state = self.ledger.state()
         state["ai_connection"] = ai_connection_status()
-        state["risk_controls"] = self.ledger.risk_controls(
+        risk = self.ledger.risk_controls(
             daily_loss_limit_pct=self.daily_loss_limit_pct,
             max_drawdown_pct=self.max_drawdown_pct,
             max_consecutive_losses=self.max_consecutive_losses,
             cooldown_hours_after_loss=self.cooldown_hours_after_loss,
         )
+        # Backward compatibility: entry_allowed has always represented only the
+        # PnL/drawdown circuit breaker, not final trade eligibility.
+        circuit_breaker_clear = risk.get("entry_allowed") is True
+        risk.update({
+            "risk_circuit_breaker_clear": circuit_breaker_clear,
+            "risk_circuit_breaker_active": not circuit_breaker_clear,
+            "entry_allowed_scope": "RISK_CIRCUIT_BREAKER_ONLY",
+            "entry_allowed_scope_fa": (
+                "این فیلد فقط وضعیت ترمز زیان و افت سرمایه را نشان می‌دهد؛ "
+                "مجوز نهایی ورود نیست و جایگزین اعتبارسنجی بازار، ۱۲ فیلتر و AI نمی‌شود."
+            ),
+            "risk_circuit_breaker_status_fa": (
+                "ترمز ریسک حساب فعال نیست؛ بااین‌حال ورود فقط پس از عبور همه کنترل‌های معامله ممکن است."
+                if circuit_breaker_clear else
+                "ترمز ریسک حساب فعال یا نامشخص است؛ ورود جدید باید متوقف بماند."
+            ),
+        })
+        state["risk_controls"] = risk
         return state
 
     def _market(self, asset: AssetSpec) -> dict[str, Any]:
@@ -593,8 +612,24 @@ class FuturesPaperTradingBot:
         try:
             market = self._market(asset)
         except Exception as exc:
-            return {"status": "UNKNOWN", "asset": asset.raw,
-                    "reason": f"Validated perpetual market data unavailable; no account mutation ({type(exc).__name__})."}
+            # Keep the failure closed, but preserve a short sanitized diagnostic
+            # so the dashboard can identify the provider/HTTP/data validation issue.
+            detail = " ".join(str(exc).split())
+            detail = re.sub(
+                r"(?i)(authorization|api[_-]?key|secret|passphrase)(\s*[:=]\s*)[^,;\s]+",
+                r"\1\2[REDACTED]",
+                detail,
+            )[:240] or None
+            return {
+                "status": "UNKNOWN",
+                "asset": asset.raw,
+                "reason": f"Validated perpetual market data unavailable; no account mutation ({type(exc).__name__}).",
+                "reason_code": "PERPETUAL_MARKET_DATA_UNAVAILABLE",
+                "technical_error_type": type(exc).__name__,
+                "technical_detail": detail,
+                "entry_blocked": True,
+                "entry_block_reason_code": "PERPETUAL_MARKET_DATA_UNAVAILABLE",
+            }
         mark = float(market["mark_price"])
         now_ms = int(time.time() * 1000)
 

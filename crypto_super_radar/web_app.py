@@ -2358,12 +2358,132 @@ def _crypto_market_board() -> dict:
         cached["refresh_error"] = last_error
     return cached
 
+def _futures_paper_cycle_report(cycle: dict) -> dict:
+    """Attach Persian decision text without changing the underlying trading decision."""
+    result = dict(cycle) if isinstance(cycle, dict) else {}
+    status = str(result.get("status") or "UNKNOWN").upper()
+    direction = str(result.get("direction") or "NO_TRADE").upper()
+    reason_code = str(result.get("reason_code") or "")
+    reason = str(result.get("reason") or "").strip()
+
+    status_labels = {
+        "OPENED": "موقعیت آزمایشی باز شد",
+        "CLOSED": "موقعیت آزمایشی بسته شد",
+        "HOLDING": "موقعیت آزمایشی باز نگه داشته شد",
+        "HOLDING_FUNDING_INCOMPLETE": "موقعیت باز است؛ دادهٔ تسویهٔ Funding ناقص است",
+        "NO_TRADE": "معامله‌ای انجام نشد",
+        "RISK_HALT": "ورود به‌دلیل محدودیت ریسک متوقف شد",
+        "AI_BLOCKED": "تأیید هوش مصنوعی دریافت نشد؛ ورود متوقف شد",
+        "BLOCKED": "چرخه مسدود شد",
+        "SKIPPED": "چرخه اجرا نشد",
+        "UNKNOWN": "نتیجه نامشخص؛ چرخه به‌صورت ایمن متوقف شد",
+    }
+    direction_labels = {
+        "LONG": "خرید (LONG)",
+        "SHORT": "فروش استقراضی (SHORT)",
+        "NO_TRADE": "بدون معامله",
+        "NONE": "بدون معامله",
+    }
+    decision_labels = {
+        "OPENED": "ثبت موقعیت آزمایشی",
+        "CLOSED": "بستن موقعیت آزمایشی",
+        "HOLDING": "مدیریت موقعیت باز",
+        "HOLDING_FUNDING_INCOMPLETE": "مدیریت موقعیت باز با هشدار Funding",
+        "NO_TRADE": "عدم ورود",
+        "RISK_HALT": "توقف به‌علت ترمز ریسک",
+        "AI_BLOCKED": "توقف به‌علت عدم تأیید AI",
+        "BLOCKED": "توقف ایمنی",
+        "SKIPPED": "عدم اجرا",
+        "UNKNOWN": "توقف ایمن؛ داده یا وضعیت لازم تأیید نشد",
+    }
+
+    if reason_code == "PERPETUAL_MARKET_DATA_UNAVAILABLE":
+        reason_fa = (
+            "دادهٔ لحظه‌ای قرارداد دائمی از منابع مستقل دریافت یا اعتبارسنجی نشد. "
+            "برای حفظ ایمنی، ورود به معامله مسدود ماند و هیچ تغییری در حساب آزمایشی ایجاد نشد."
+        )
+    elif status == "RISK_HALT":
+        reason_fa = "یکی از محدودیت‌های زیان روزانه، افت سرمایه، تعداد زیان‌های پیاپی یا دورهٔ توقف فعال است."
+    elif status == "NO_TRADE":
+        lowered_reason = reason.casefold()
+        if "all 12 unique mandatory gates" in lowered_reason:
+            reason_fa = "هر ۱۲ فیلتر اجباری با شناسهٔ یکتا باید PASS باشند؛ دست‌کم یک فیلتر هنوز تأیید نشده است."
+        elif "radar did not confirm long or short" in lowered_reason:
+            reason_fa = "رادار جهت معتبر خرید یا فروش استقراضی را تأیید نکرد؛ شرایط خنثی یا نامشخص معامله نمی‌شوند."
+        elif "confirmation score, risk score" in lowered_reason:
+            reason_fa = "امتیاز تأیید، امتیاز ریسک یا حد ضرر و حد سود ساختاری از حد مجاز عبور نکرد."
+        elif "timestamped completed perpetual candle" in lowered_reason:
+            reason_fa = "کندل تکمیل‌شده و زمان‌دار قرارداد فیوچرز برای جلوگیری از ثبت معاملهٔ تکراری موجود نیست."
+        elif "already paper-traded" in lowered_reason:
+            reason_fa = "این کندل قبلاً در حساب Paper معامله شده است؛ از ثبت تکراری جلوگیری شد."
+        elif "net reward/risk" in lowered_reason:
+            reason_fa = "نسبت سود به زیان خالص پس از کارمزد و لغزش قیمت به حداقل تعیین‌شده نرسید."
+        elif "historical funding" in lowered_reason or "funding is invalid" in lowered_reason:
+            reason_fa = "دادهٔ معتبر Funding یا فاصلهٔ تسویه تأیید نشد؛ ورود متوقف ماند."
+        elif "expected holding period" in lowered_reason:
+            reason_fa = "مدت نگهداری مورد انتظار معتبر نیست؛ اندازه‌گذاری و ارزیابی معامله انجام نشد."
+        else:
+            reason_fa = "همهٔ شرایط ایمنی و ورود تأیید نشد؛ موقعیت جدیدی ساخته نشد. جزئیات فنی در بخش دادهٔ خام موجود است."
+    elif status == "AI_BLOCKED":
+        reason_fa = "پاسخ معتبر و تأییدشده از مرحلهٔ هوش مصنوعی دریافت نشد؛ ورود مجاز نشد."
+    elif status == "UNKNOWN":
+        reason_fa = "یکی از داده‌ها یا مراحل ضروری قابل تأیید نبود؛ سیستم معامله را متوقف کرد."
+    else:
+        reason_fa = reason or status_labels.get(status, "وضعیت چرخه ثبت شد.")
+
+    result.update({
+        "status_fa": status_labels.get(status, "وضعیت نامشخص"),
+        "decision_fa": decision_labels.get(status, "نیازمند بررسی"),
+        "direction_fa": direction_labels.get(direction, "بدون معامله"),
+        "reason_fa": reason_fa,
+        "entry_blocked": status in {"UNKNOWN", "NO_TRADE", "RISK_HALT", "AI_BLOCKED", "BLOCKED", "SKIPPED"},
+        "paper_only": True,
+        "orders_submitted": False,
+    })
+    return result
+
+
 def _run_futures_paper_tick(job_id: str, asset: AssetSpec) -> None:
-    """Run one futures-only paper cycle and publish its directional risk/account state."""
+    """Run one futures-only paper cycle and publish Persian reporting plus raw evidence."""
     global SCAN_RUNNING
     try:
-        cycle = FUTURES_PAPER_BOT.run_once(asset)
+        cycle = _futures_paper_cycle_report(FUTURES_PAPER_BOT.run_once(asset))
         state = FUTURES_PAPER_BOT.state()
+        account = state.get("account") or {}
+        risk = state.get("risk_controls") or {}
+        ai = state.get("ai_connection") or {}
+        ai_was_reviewed = isinstance(cycle.get("ai_review"), dict)
+        report_fa = {
+            "title": "گزارش چرخهٔ فیوچرز آزمایشی",
+            "asset": cycle.get("asset") or asset.raw,
+            "status": cycle.get("status_fa"),
+            "decision": cycle.get("decision_fa"),
+            "direction": cycle.get("direction_fa"),
+            "reason": cycle.get("reason_fa"),
+            "technical_detail": cycle.get("technical_detail"),
+            "technical_error_type": cycle.get("technical_error_type"),
+            "balance_usd": account.get("balance_usd"),
+            "equity_usd": account.get("equity_usd"),
+            "open_position": state.get("open_position"),
+            "recent_trade_count": len(state.get("recent_trades") or []),
+            "orders_submitted": False,
+            "account_type_fa": "موجودی نمایشی حساب Paper است و پول واقعی نیست.",
+            "risk_circuit_breaker_fa": risk.get(
+                "risk_circuit_breaker_status_fa",
+                "وضعیت ترمز ریسک حساب در دسترس نیست؛ مجوز نهایی ورود تأیید نشده است.",
+            ),
+            "risk_entry_flag_scope_fa": risk.get(
+                "entry_allowed_scope_fa",
+                "فیلد entry_allowed فقط وضعیت ترمز ریسک حساب را نشان می‌دهد، نه مجوز نهایی ورود.",
+            ),
+            "ai_status": ai.get("status"),
+            "ai_status_fa": (
+                "تنظیمات AI با وضعیت " + str(ai.get("status") or "نامشخص") + " ثبت شده‌اند؛ اما Nemotron در این چرخه فراخوانی نشد، چون چرخه پیش از مرحلهٔ AI متوقف شد."
+                if not ai_was_reviewed else
+                "مرحلهٔ AI در این چرخه اجرا شد؛ نتیجهٔ آن در جزئیات فنی ثبت شده است."
+            ),
+            "liquidation_model_status": state.get("liquidation_model_status"),
+        }
         payload = {
             "safety": {
                 "read_only": True,
@@ -2375,6 +2495,7 @@ def _run_futures_paper_tick(job_id: str, asset: AssetSpec) -> None:
                 "liquidation_model_status": state.get("liquidation_model_status"),
             },
             "cycle": cycle,
+            "report_fa": report_fa,
             "futures_state": state,
         }
         with LOCK:
@@ -4768,7 +4889,7 @@ class Handler(BaseHTTPRequestHandler):
             <button type="submit">اجرای یک چرخهٔ فیوچرز آزمایشی</button>
           </form>
           <div id="futures-paper-status" class="muted" style="margin-top:12px" aria-live="polite">در حال دریافت وضعیت حساب فیوچرز آزمایشی...</div>
-          <script>(async function(){const box=document.getElementById('futures-paper-status');try{const r=await fetch('/futures-paper-bot/status',{cache:'no-store'});const s=await r.json();const a=s.account||{},p=s.open_position||{},risk=s.risk_controls||{};box.textContent='حالت: '+s.mode+' · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · موقعیت: '+(p.direction||'ندارد')+' '+(p.asset||'')+' · حد ضرر: '+(p.stop_loss||'—')+' · حد سود: '+(p.take_profit||'—')+' · ترمز ریسک: '+(risk.entry_allowed?'ورود مجاز':'ورود متوقف')+' · سفارش واقعی: '+(s.orders_submitted?'فعال':'غیرفعال');}catch(e){box.textContent='وضعیت حساب فیوچرز در دسترس نیست.';}})();</script>
+          <script>(async function(){const box=document.getElementById('futures-paper-status');try{const r=await fetch('/futures-paper-bot/status',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const s=await r.json();const a=s.account||{},p=s.open_position||{},risk=s.risk_controls||{};const breakerClear=risk.risk_circuit_breaker_clear===true||(risk.risk_circuit_breaker_clear===undefined&&risk.entry_allowed===true);const riskText=breakerClear?'فعال نیست؛ اما این به‌معنای مجوز نهایی ورود نیست':'فعال یا نامشخص است؛ ورود متوقف بماند';box.textContent='حالت: حساب فرضی Paper · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · موقعیت: '+(p.direction||'ندارد')+' '+(p.asset||'')+' · ترمز ریسک حساب: '+riskText+' · سفارش واقعی: غیرفعال';}catch(e){box.textContent='وضعیت حساب فیوچرز در دسترس نیست؛ تا دریافت پاسخ معتبر، ورود مجاز نیست.';}})();</script>
         </section>
         <section class="card" id="ai-diagnostic-panel">
           <h2>آزمایش اتصال هوش مصنوعی · NVIDIA Nemotron</h2>
@@ -5179,14 +5300,24 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/futures-paper-bot/tick":
                 body = (
                     "<h2>چرخهٔ فیوچرز آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
-                    "<p id='futures-state' aria-live='polite'>در حال ارزیابی دادهٔ Perpetual و مدیریت موقعیت LONG/SHORT...</p>"
-                    "<pre id='futures-result' style='white-space:pre-wrap;overflow-wrap:anywhere'></pre>"
+                    "<p id='futures-state' aria-live='polite'>در حال بررسی داده‌های بازار و شرایط ورود...</p>"
+                    "<section class='card' id='futures-report' aria-live='polite'><p>گزارش فارسی پس از تکمیل چرخه اینجا نمایش داده می‌شود.</p></section>"
+                    "<details class='card'><summary>جزئیات فنی و دادهٔ خام</summary><pre id='futures-result' style='white-space:pre-wrap;overflow-wrap:anywhere'></pre></details>"
                     "<p><a href='/'>بازگشت به داشبورد</a></p>"
-                    "<script>(function(){const id='" + job_id + "',state=document.getElementById('futures-state'),out=document.getElementById('futures-result');"
+                    "<script>(function(){const id='" + job_id + "',state=document.getElementById('futures-state'),report=document.getElementById('futures-report'),out=document.getElementById('futures-result');"
+                    "function addLine(label,value){const row=document.createElement('p'),strong=document.createElement('strong'),span=document.createElement('span');strong.textContent=label+'： ';span.textContent=value===null||value===undefined||value===''?'—':String(value);row.appendChild(strong);row.appendChild(span);report.appendChild(row);}"
                     "async function poll(){try{const r=await fetch('/jobs/'+id,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();"
-                    "state.textContent='وضعیت: '+j.status;if(j.status==='completed'){const p=j.result||{},c=p.cycle||{},a=(p.futures_state||{}).account||{};"
-                    "state.textContent='نتیجه: '+(c.status||'UNKNOWN')+' · جهت: '+(c.direction||'بدون معامله')+' · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD';"
-                    "out.textContent=JSON.stringify(p,null,2);return;}if(j.status==='failed'){out.textContent=j.error||'چرخه ناموفق بود';return;}}catch(e){state.textContent='خطای ارتباط؛ تلاش مجدد برای همان چرخه';}"
+                    "if(j.status==='completed'){const p=j.result||{},c=p.cycle||{},f=p.report_fa||{},s=p.futures_state||{},a=s.account||{},risk=s.risk_controls||{};"
+                    "state.textContent='چرخه تکمیل شد؛ نتیجه در گزارش فارسی آمده است.';report.replaceChildren();"
+                    "addLine('نتیجه',f.status||c.status_fa||'نامشخص');addLine('تصمیم',f.decision||c.decision_fa||'نامشخص');addLine('جهت',f.direction||c.direction_fa||'بدون معامله');"
+                    "addLine('دلیل',f.reason||c.reason_fa||'دلیل ثبت نشده است.');if(f.technical_error_type||f.technical_detail)addLine('جزئیات فنی',String(f.technical_error_type||'')+(f.technical_detail?': '+f.technical_detail:''));"
+                    "addLine('موجودی فرضی Paper',Number(a.balance_usd||0).toFixed(2)+' USD');addLine('ارزش فرضی حساب',Number(a.equity_usd||0).toFixed(2)+' USD');"
+                    "addLine('موقعیت باز',s.open_position?'وجود دارد':'وجود ندارد');addLine('ترمز ریسک حساب',f.risk_circuit_breaker_fa||risk.risk_circuit_breaker_status_fa||'نامشخص');"
+                    "addLine('وضعیت هوش مصنوعی',f.ai_status_fa||'در این چرخه تأیید نشده است.');addLine('محاسبه لیکوییدیشن',f.liquidation_model_status||'نامشخص');"
+                    "addLine('سفارش واقعی','هیچ سفارشی ارسال نشد');addLine('حالت اجرا','فقط Paper و فقط‌خواندنی');out.textContent=JSON.stringify(p,null,2);return;}"
+                    "if(j.status==='failed'){state.textContent='چرخه با خطا متوقف شد.';report.textContent='خطای چرخه: '+(j.error||'جزئیات در دسترس نیست');out.textContent=JSON.stringify(j,null,2);return;}"
+                    "state.textContent=j.status==='queued'?'چرخه در صف اجراست.':j.status==='running'?'در حال اجرای چرخه؛ هنوز تصمیم نهایی صادر نشده است.':'وضعیت چرخه: '+j.status;"
+                    "}catch(e){state.textContent='ارتباط موقتاً قطع شد؛ فقط همان شناسهٔ چرخه دوباره بررسی می‌شود.';}"
                     "setTimeout(poll,2500);}poll();})();</script>"
                 )
                 return self._send(202, _page(body, "Futures Paper Bot"))

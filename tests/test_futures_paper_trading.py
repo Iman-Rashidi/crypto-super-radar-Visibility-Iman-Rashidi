@@ -10,6 +10,7 @@ from crypto_super_radar.futures_paper_trading import (
     FuturesPaperLedger,
     FuturesPaperTradingBot,
 )
+from crypto_super_radar.providers import DataProviderError
 from crypto_super_radar.ai_second_opinion import _prompt_messages, _validated_review
 
 
@@ -197,6 +198,39 @@ class FuturesPaperBotTests(unittest.TestCase):
         result = bot.run_once("perp:BTCUSDT")
         self.assertEqual(result["status"], "NO_TRADE")
         self.assertIsNone(self.ledger.position())
+
+    def test_unavailable_perpetual_data_is_reported_and_never_mutates_paper_account(self):
+        class FailedPerpetualProvider:
+            def execution_snapshot(self, symbol):
+                raise DataProviderError("HTTP 451 from fapi.binance.com")
+
+        engine = FakeFuturesEngine("LONG")
+        engine.data.perpetual = FailedPerpetualProvider()
+        bot = FuturesPaperTradingBot(engine, ledger=self.ledger, ai_reviewer=self.ai)
+        before = self.ledger.state()["account"].copy()
+
+        result = bot.run_once("perp:BTCUSDT")
+
+        after = self.ledger.state()["account"]
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["reason_code"], "PERPETUAL_MARKET_DATA_UNAVAILABLE")
+        self.assertEqual(result["technical_error_type"], "DataProviderError")
+        self.assertIn("HTTP 451", result["technical_detail"])
+        self.assertTrue(result["entry_blocked"])
+        self.assertIsNone(self.ledger.position())
+        self.assertEqual(after["balance_usd"], before["balance_usd"])
+        self.assertEqual(after["equity_usd"], before["equity_usd"])
+
+    def test_risk_entry_flag_is_scoped_to_circuit_breaker_only(self):
+        bot = FuturesPaperTradingBot(
+            FakeFuturesEngine("NO TRADE"), ledger=self.ledger, ai_reviewer=self.ai
+        )
+        risk = bot.state()["risk_controls"]
+        self.assertTrue(risk["entry_allowed"])
+        self.assertTrue(risk["risk_circuit_breaker_clear"])
+        self.assertFalse(risk["risk_circuit_breaker_active"])
+        self.assertEqual(risk["entry_allowed_scope"], "RISK_CIRCUIT_BREAKER_ONLY")
+        self.assertIn("مجوز نهایی ورود نیست", risk["entry_allowed_scope_fa"])
 
     def test_spot_ai_prompt_retains_long_only_trader_schema(self):
         messages = _prompt_messages({"market_type": "spot", "expected_side": "LONG"})

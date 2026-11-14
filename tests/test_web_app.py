@@ -156,6 +156,28 @@ class WebAppHttpTests(unittest.TestCase):
         state.assert_called_once_with()
         self.assertFalse(json.loads(body)["orders_submitted"])
 
+    def test_futures_cycle_report_translates_unknown_market_data_failure(self):
+        report = web_app._futures_paper_cycle_report({
+            "status": "UNKNOWN",
+            "asset": "perp:ETHUSDT",
+            "reason_code": "PERPETUAL_MARKET_DATA_UNAVAILABLE",
+            "technical_error_type": "DataProviderError",
+            "technical_detail": "HTTP 451 from fapi.binance.com",
+        })
+        self.assertEqual(report["status_fa"], "نتیجه نامشخص؛ چرخه به‌صورت ایمن متوقف شد")
+        self.assertEqual(report["decision_fa"], "توقف ایمن؛ داده یا وضعیت لازم تأیید نشد")
+        self.assertEqual(report["direction_fa"], "بدون معامله")
+        self.assertTrue(report["entry_blocked"])
+        self.assertFalse(report["orders_submitted"])
+        self.assertIn("دادهٔ لحظه‌ای قرارداد دائمی", report["reason_fa"])
+
+    def test_dashboard_does_not_label_risk_circuit_breaker_as_trade_permission(self):
+        status, _, body = self.request("GET", "/")
+        page = body.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("به‌معنای مجوز نهایی ورود نیست", page)
+        self.assertNotIn("risk.entry_allowed?'ورود مجاز'", page)
+
     def test_ai_status_endpoint_reports_configuration_without_exposing_secret(self):
         payload = {
             "provider": "OpenRouter",
