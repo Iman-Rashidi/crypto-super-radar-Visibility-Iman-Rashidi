@@ -242,5 +242,51 @@ class MarketPatternTests(unittest.TestCase):
 
 
 
+    def _set_dark_cloud_cover(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame.iloc[-2] = [108.0, 112.0, 107.5, 111.5, 1200.0]
+        frame.iloc[-1] = [112.5, 113.0, 108.5, 109.5, 1600.0]
+        return frame
+
+    def test_dark_cloud_cover_requires_uptrend_gap_and_close_below_midpoint(self):
+        frame = self._set_dark_cloud_cover(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(
+            p for p in analysis["candlestick_patterns"]
+            if p["name_en"] == "Dark Cloud Cover"
+        )
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["score"], -12)
+        self.assertEqual(pattern["trigger_price"], 108.5)
+        self.assertEqual(pattern["invalidation_price"], 113.0)
+
+    def test_dark_cloud_cover_is_not_bearish_without_prior_uptrend(self):
+        frame = self._set_dark_cloud_cover(candle_frame("flat"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Dark Cloud Cover",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_dark_cloud_cover_requires_open_above_previous_high(self):
+        frame = self._set_dark_cloud_cover(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("open")] = 111.8
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Dark Cloud Cover",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+    def test_dark_cloud_cover_requires_close_below_first_body_midpoint(self):
+        frame = self._set_dark_cloud_cover(candle_frame("up"))
+        frame.iloc[-1, frame.columns.get_loc("close")] = 110.0
+        analysis = analyze_market_patterns(frame, [])
+        self.assertNotIn(
+            "Dark Cloud Cover",
+            [p["name_en"] for p in analysis["candlestick_patterns"]],
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
