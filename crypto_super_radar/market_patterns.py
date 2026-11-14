@@ -926,7 +926,7 @@ def _three_inside_down_pattern(frame: pd.DataFrame, volume_ratio: float | None) 
         and sh <= fh
         and sl >= fl
     )
-    third_is_bearish = tc < to and third_body >= third_range * 0.30
+    third_is_bearish = tc < to and third_body >= third_range * 0.15
     if not (first_is_long_bullish and bearish_harami and third_is_bearish):
         return None
 
