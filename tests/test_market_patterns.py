@@ -785,6 +785,51 @@ class MarketPatternTests(unittest.TestCase):
         self.assertFalse(any(p["name_en"] == "Bullish Abandoned Baby" for p in analysis["candlestick_patterns"]))
 
 
+
+    def _set_falling_window(self, frame: pd.DataFrame, *, with_follow_through: bool = False) -> pd.DataFrame:
+        first_index = -3 if with_follow_through else -2
+        frame.iloc[first_index] = [108.0, 110.0, 105.0, 106.0, 1500.0]
+        frame.iloc[first_index + 1] = [103.0, 104.0, 101.0, 102.0, 1800.0]
+        if with_follow_through:
+            frame.iloc[-1] = [102.0, 103.5, 100.0, 101.0, 1700.0]
+        return frame
+
+    def test_falling_window_requires_a_full_non_overlapping_gap(self):
+        frame = self._set_falling_window(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Falling Window")
+        self.assertEqual(pattern["name_fa"], "پنجرهٔ نزولی (گپ رو به پایین)")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 101.0)
+        self.assertEqual(pattern["invalidation_price"], 105.0)
+
+    def test_falling_window_is_confirmed_while_following_candles_stay_below_gap(self):
+        frame = self._set_falling_window(candle_frame("down"), with_follow_through=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Falling Window")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_falling_window_does_not_require_a_prior_downtrend(self):
+        frame = self._set_falling_window(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertTrue(any(p["name_en"] == "Falling Window" for p in analysis["candlestick_patterns"]))
+
+    def test_falling_window_rejected_when_second_candle_overlaps_first_low(self):
+        frame = self._set_falling_window(candle_frame("down"))
+        frame.iloc[-1] = [103.0, 105.2, 100.0, 102.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Falling Window" for p in analysis["candlestick_patterns"]))
+
+    def test_falling_window_invalidated_when_a_later_candle_enters_gap(self):
+        frame = self._set_falling_window(candle_frame("down"), with_follow_through=True)
+        frame.iloc[-1] = [102.0, 104.2, 100.0, 101.0, 1700.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Falling Window" for p in analysis["candlestick_patterns"]))
+
     def _set_rising_window(self, frame: pd.DataFrame, *, with_follow_through: bool = False) -> pd.DataFrame:
         first_index = -3 if with_follow_through else -2
         frame.iloc[first_index] = [100.0, 102.0, 99.5, 101.0, 1400.0]
