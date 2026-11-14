@@ -171,6 +171,84 @@ def _item(
     }
 
 
+
+def _bearish_abandoned_baby_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect strict bearish Abandoned Baby after an uptrend, with two full-range gaps."""
+    if len(frame) < 7:
+        return None
+
+    candidates = []
+    if len(frame) >= 4:
+        candidates.append((len(frame) - 4, True))
+    candidates.append((len(frame) - 3, False))
+
+    for start, has_follow_through in candidates:
+        first, middle, third = (frame.iloc[start + offset] for offset in range(3))
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change < 0.003:
+            continue
+
+        fo, fc = float(first["open"]), float(first["close"])
+        fh, fl = float(first["high"]), float(first["low"])
+        mo, mc = float(middle["open"]), float(middle["close"])
+        mh, ml = float(middle["high"]), float(middle["low"])
+        to, tc = float(third["open"]), float(third["close"])
+        th, tl = float(third["high"]), float(third["low"])
+        first_range, middle_range, third_range = fh - fl, mh - ml, th - tl
+        if min(first_range, middle_range, third_range) <= 0:
+            continue
+
+        first_body = fc - fo
+        middle_body = abs(mc - mo)
+        third_body = to - tc
+        valid = (
+            fc > fo
+            and first_body >= first_range * 0.45
+            and middle_body <= middle_range * 0.10
+            and ml > fh
+            and tc < to
+            and third_body >= third_range * 0.45
+            and th < ml
+        )
+        if not valid:
+            continue
+
+        follow_through = has_follow_through and float(frame.iloc[start + 3]["close"]) < tl
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از روند صعودی، کندل اول صعودی و بلند است؛ دوجی دوم با کل دامنه بالاتر از سقف کندل اول قرار دارد؛ "
+            "کندل سوم نزولی و بلند نیز با کل دامنه پایین‌تر از کف دوجی تشکیل شده است. "
+            "دو گپِ کامل و بدون هم‌پوشانی، ویژگی کلیدی Bearish Abandoned Baby هستند. "
+        )
+        if follow_through:
+            description += "کندل بعدی پایین‌تر از کف کندل سوم بسته شده و فشار نزولی را تأیید کرده است."
+        else:
+            description += "برای تأیید بیشتر، بسته‌شدن کندل بعدی پایین‌تر از کف کندل سوم لازم است."
+        return _item(
+            name_fa="نوزاد رهاشدهٔ نزولی",
+            name_en="Bearish Abandoned Baby",
+            category="CANDLE",
+            direction="BEARISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BEARISH",
+            state="CONFIRMED" if follow_through else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 2].isoformat(),
+            score=-18 if follow_through else -9,
+            trigger_price=tl,
+            invalidation_price=fh,
+        )
+    return None
+
+
 def _bullish_abandoned_baby_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect strict bullish Abandoned Baby with full-range gaps around the Doji."""
     if len(frame) < 7:
@@ -1352,6 +1430,11 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     last_bear = c < o
     first_bear = fc < fo
     first_bull = fc > fo
+
+
+    bearish_abandoned_baby = _bearish_abandoned_baby_pattern(frame, volume_ratio)
+    if bearish_abandoned_baby is not None:
+        out.append(bearish_abandoned_baby)
 
     abandoned_baby = _bullish_abandoned_baby_pattern(frame, volume_ratio)
     if abandoned_baby is not None:
