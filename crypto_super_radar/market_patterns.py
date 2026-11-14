@@ -549,36 +549,67 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
 
-    # Dragonfly Doji: tiny body near the high, long lower shadow, almost no upper shadow.
-    dragonfly_doji = (
-        body_ratio <= 0.10
-        and lower >= candle_range * 0.60
-        and lower >= max(body * 2.0, candle_range * 0.60)
-        and upper <= max(body * 0.8, candle_range * 0.08)
-        and close_location >= 0.85
-    )
-    if dragonfly_doji:
-        contextual = context == "DOWN"
+    # Dragonfly Doji: detect the latest shape, or confirm the prior completed shape
+    # when the following candle closes above its high.
+    dragonfly_candidates = [(len(frame) - 1, False)]
+    if len(frame) >= 2:
+        dragonfly_candidates.append((len(frame) - 2, True))
+    for dragonfly_index, has_follow_through in dragonfly_candidates:
+        dragonfly = frame.iloc[dragonfly_index]
+        d_open, d_high = float(dragonfly["open"]), float(dragonfly["high"])
+        d_low, d_close = float(dragonfly["low"]), float(dragonfly["close"])
+        d_body = abs(d_close - d_open)
+        d_range = d_high - d_low
+        d_upper = d_high - max(d_open, d_close)
+        d_lower = min(d_open, d_close) - d_low
+        d_close_location = (d_close - d_low) / max(d_range, 1e-15)
+        d_body_ratio = d_body / max(d_range, 1e-15)
+        is_dragonfly = (
+            d_range > 0
+            and d_body_ratio <= 0.10
+            and d_lower >= d_range * 0.60
+            and d_lower >= max(d_body * 2.0, d_range * 0.60)
+            and d_upper <= max(d_body * 0.8, d_range * 0.08)
+            and d_close_location >= 0.85
+        )
+        if not is_dragonfly:
+            continue
+        prior_closes = pd.to_numeric(
+            frame["close"].iloc[max(0, dragonfly_index - 8):dragonfly_index], errors="coerce"
+        )
+        prior_change = (
+            float(prior_closes.iloc[-1] / prior_closes.iloc[0] - 1.0)
+            if len(prior_closes) >= 3 and not prior_closes.isna().any()
+            and float(prior_closes.iloc[0]) > 0 else 0.0
+        )
+        contextual = prior_change <= -0.003
+        confirmed = (
+            has_follow_through
+            and float(frame.iloc[dragonfly_index + 1]["close"]) > d_high
+        )
         out.append(_item(
             name_fa="دوجی سنجاقک",
             name_en="Dragonfly Doji",
             category="CANDLE",
-            direction="NEUTRAL",
-            potential_direction="BULLISH" if contextual else None,
-            state="NEEDS_CONFIRMATION",
-            strength="MODERATE" if volume_confirmed else "WEAK",
+            direction="BULLISH" if confirmed else "NEUTRAL",
+            potential_direction="BULLISH" if contextual and not confirmed else None,
+            state="CONFIRMED" if confirmed else "NEEDS_CONFIRMATION",
+            strength="STRONG" if confirmed and volume_confirmed else "MODERATE" if confirmed or volume_confirmed else "WEAK",
             description=(
-                "دوجی سنجاقک با بدنهٔ بسیار کوچک در نزدیکی سقف و سایهٔ پایینی بلند شناسایی شد. "
-                + ("این الگو پس از روند نزولی می‌تواند نشانهٔ بازگشت احتمالی صعودی باشد؛ "
-                   "برای تأیید، بسته‌شدن کندل بعدی بالاتر از سقف این کندل لازم است."
+                "دوجی سنجاقک با بدنهٔ بسیار کوچک نزدیک سقف و سایهٔ پایینی بلند شناسایی شد. "
+                + ("کندل بعدی بالاتر از سقف دوجی بسته شده و بازگشت صعودی تأیید شده است."
+                   if confirmed else
+                   "پس از روند نزولی می‌تواند نشانهٔ بازگشت احتمالی صعودی باشد؛ "
+                   "تا بسته‌شدن کندل بعدی بالاتر از سقف دوجی، تأیید نشده است."
                    if contextual else
-                   "بدون روند نزولی قبلی، جهت بازگشت قابل اتکا نیست؛ این الگو به‌تنهایی سیگنال معامله نیست.")
+                   "روند نزولی قبلی وجود ندارد؛ جهت برگشت روشن نیست و این الگو به‌تنهایی سیگنال معامله نیست.")
             ),
-            timestamp=timestamp,
-            score=7 if contextual else 0,
-            trigger_price=h,
-            invalidation_price=low,
+            timestamp=frame.index[dragonfly_index].isoformat(),
+            score=12 if confirmed else 6 if contextual else 0,
+            trigger_price=d_high,
+            invalidation_price=d_low,
         ))
+        break
 
     if body_ratio <= 0.10 and (long_lower == long_upper):
         add("دوجی", "Doji", "NEUTRAL",
