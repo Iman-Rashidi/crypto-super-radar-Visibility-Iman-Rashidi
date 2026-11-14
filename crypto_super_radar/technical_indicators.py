@@ -367,6 +367,74 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
         if p2 < p1 and roc_array[i2] > roc_array[i1]:
             roc_divergence = "BULLISH"
 
+    # Williams %R (14): bounded momentum oscillator in [-100, 0].
+    williams_period = 14
+    williams_high = high.rolling(williams_period, min_periods=williams_period).max()
+    williams_low = low.rolling(williams_period, min_periods=williams_period).min()
+    williams_range = williams_high - williams_low
+    williams_series = -100.0 * (williams_high - close) / williams_range.replace(0, np.nan)
+    williams_value = float(williams_series.iloc[-1]) if _finite(williams_series.iloc[-1]) else None
+    williams_previous = float(williams_series.iloc[-2]) if len(williams_series) > 1 and _finite(williams_series.iloc[-2]) else None
+    williams_state = "UNKNOWN" if williams_value is None else "OVERBOUGHT" if williams_value > -20 else "OVERSOLD" if williams_value < -80 else "NEUTRAL"
+    williams_cross = "UNKNOWN" if williams_value is None or williams_previous is None else (
+        "BULLISH_EXIT_OVERSOLD" if williams_previous <= -80 < williams_value else
+        "BEARISH_EXIT_OVERBOUGHT" if williams_previous >= -20 > williams_value else "NONE"
+    )
+    williams_array = williams_series.to_numpy(dtype=float)
+    williams_divergence = "NONE"
+    if len(price_highs) == 2 and all(_finite(williams_array[i]) for i, _ in price_highs):
+        (i1, p1), (i2, p2) = price_highs
+        if p2 > p1 and williams_array[i2] < williams_array[i1] - 2:
+            williams_divergence = "BEARISH"
+    if williams_divergence == "NONE" and len(price_lows) == 2 and all(_finite(williams_array[i]) for i, _ in price_lows):
+        (i1, p1), (i2, p2) = price_lows
+        if p2 < p1 and williams_array[i2] > williams_array[i1] + 2:
+            williams_divergence = "BULLISH"
+
+    # Supertrend (ATR 10, multiplier 3): volatility-adjusted trend and trailing reference.
+    st_period, st_multiplier = 10, 3.0
+    st_atr = np.full(len(frame), np.nan, dtype=float)
+    if len(true_range_values) >= st_period:
+        st_atr[st_period - 1] = float(np.mean(true_range_values[:st_period]))
+        for i in range(st_period, len(true_range_values)):
+            st_atr[i] = (st_atr[i - 1] * (st_period - 1) + true_range_values[i]) / st_period
+    hl2 = ((high + low) / 2.0).to_numpy(dtype=float)
+    highs_np, lows_np, closes_np = high.to_numpy(dtype=float), low.to_numpy(dtype=float), close.to_numpy(dtype=float)
+    st_upper = np.full(len(frame), np.nan, dtype=float)
+    st_lower = np.full(len(frame), np.nan, dtype=float)
+    st_line = np.full(len(frame), np.nan, dtype=float)
+    st_direction = np.zeros(len(frame), dtype=int)  # +1 bullish, -1 bearish
+    for i in range(st_period - 1, len(frame)):
+        basic_upper = hl2[i] + st_multiplier * st_atr[i]
+        basic_lower = hl2[i] - st_multiplier * st_atr[i]
+        if i == st_period - 1 or not _finite(st_upper[i - 1]):
+            st_upper[i], st_lower[i] = basic_upper, basic_lower
+            st_direction[i] = 1 if closes_np[i] >= hl2[i] else -1
+        else:
+            st_upper[i] = basic_upper if basic_upper < st_upper[i - 1] or closes_np[i - 1] > st_upper[i - 1] else st_upper[i - 1]
+            st_lower[i] = basic_lower if basic_lower > st_lower[i - 1] or closes_np[i - 1] < st_lower[i - 1] else st_lower[i - 1]
+            if st_direction[i - 1] == 1:
+                st_direction[i] = -1 if closes_np[i] < st_lower[i] else 1
+            else:
+                st_direction[i] = 1 if closes_np[i] > st_upper[i] else -1
+        st_line[i] = st_lower[i] if st_direction[i] == 1 else st_upper[i]
+    st_value = float(st_line[-1]) if _finite(st_line[-1]) else None
+    st_trend = "UNKNOWN" if st_value is None else "BULLISH" if st_direction[-1] == 1 else "BEARISH"
+    st_previous_trend = "UNKNOWN" if len(st_direction) < 2 or st_direction[-2] == 0 else "BULLISH" if st_direction[-2] == 1 else "BEARISH"
+    st_flip = "UNKNOWN" if st_trend == "UNKNOWN" or st_previous_trend == "UNKNOWN" else (
+        "BULLISH_FLIP" if st_previous_trend == "BEARISH" and st_trend == "BULLISH" else
+        "BEARISH_FLIP" if st_previous_trend == "BULLISH" and st_trend == "BEARISH" else "NONE"
+    )
+    st_relation = "UNKNOWN" if st_value is None else "PRICE_ABOVE_LINE" if last > st_value else "PRICE_BELOW_LINE"
+
+    indicator_roles = {
+        "leading_or_early_warning": ["RSI", "Stochastic", "Fibonacci", "MFI", "Williams %R", "DPO", "ROC"],
+        "lagging_or_confirmation": ["SMA", "EMA", "MACD", "Supertrend", "Bollinger Bands", "Parabolic SAR"],
+        "context_dependent": ["OBV", "ATR"],
+        "note_fa": "این دسته‌بندی تقریبی است؛ نقش هر اندیکاتور به تایم‌فریم، تنظیمات و رژیم بازار وابسته است. سیگنال پیشرو خطاپذیرتر است و سیگنال پسرو ممکن است دیرتر برسد.",
+        "order_authority": "NONE_INDICATORS_ARE_EVIDENCE_ONLY",
+    }
+
     return {
         "status": "KNOWN",
         "moving_averages": {
@@ -404,6 +472,17 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "zero_line": roc_zero, "divergence": roc_divergence,
             "overbought_oversold": "NO_STANDARD_THRESHOLDS_USE_HISTORICAL_EXTREMES",
         },
+        "williams_r": {
+            "period": williams_period, "value": williams_value, "previous": williams_previous,
+            "state": williams_state, "overbought_threshold": -20, "oversold_threshold": -80,
+            "threshold_cross": williams_cross, "divergence": williams_divergence,
+        },
+        "supertrend": {
+            "atr_period": st_period, "atr_multiplier": st_multiplier, "value": st_value,
+            "trend": st_trend, "previous_trend": st_previous_trend, "flip": st_flip,
+            "price_relation": st_relation, "trailing_stop_reference": st_value,
+        },
+        "indicator_roles": indicator_roles,
         "fibonacci": fib,
         "parabolic_sar": {
             "value": sar_current, "trend": sar_trend, "price_relation": sar_relation, "last_flip": sar_flip,
@@ -419,5 +498,5 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "state": rsi_state, "midline_50": midline,
             "divergence": rsi_divergence, "trendline_breakout": rsi_trendline,
         },
-        "summary_fa": "MA جهت روند، OBV و MFI جریان حجم و پول، RSI و MACD و ROC مومنتوم، DPO چرخه قیمت، فیبوناچی نواحی اصلاح، SAR حد متحرک، و ATR نوسان را می‌سنجند؛ هیچ‌کدام به‌تنهایی مجوز سفارش نیستند.",
+        "summary_fa": "MA و Supertrend جهت روند، OBV و MFI جریان حجم و پول، RSI و Williams %R و MACD و ROC مومنتوم، DPO چرخه قیمت، فیبوناچی نواحی اصلاح، SAR و Supertrend حد متحرک، و ATR نوسان را می‌سنجند؛ هیچ‌کدام به‌تنهایی مجوز سفارش نیستند.",
     }
