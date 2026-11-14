@@ -30,3 +30,19 @@ Fundamental output is descriptive only and is not a thirteenth gate, a trade aut
 
 ## Test coverage
 Unit tests cover sector classification, partial/missing evidence, DCF assumptions and token capture, same-sector comparable filtering, coverage threshold, weighted score and the no-trade-authorization invariant.
+
+
+## Supporting accounting and market-analysis diagnostics
+
+The Easy Fundamental report now exposes two additional supporting modules:
+
+- `accounting_principles`: revenue recognition, inventory valuation and depreciation.
+  - Revenue checks distinguish protocol fees, reported revenue and value actually accruing to token holders.
+  - Inventory valuation is `NOT_APPLICABLE` only when the project's disclosed operating model supports that conclusion. It is never awarded a positive score.
+  - Depreciation checks apply only to material depreciable assets disclosed by the project, such as equipment or capitalized infrastructure/development where relevant.
+  - Missing accounting disclosures remain `UNKNOWN`; explicit failed checks remain `FAIL`.
+- `market_analysis`: GDP growth, inflation, interest rates, employment, industry trends, regulatory developments, market risks and market outlook.
+  - Each known observation must include a value, source and observation timestamp.
+  - The panel reports coverage and status but does not invent a market forecast.
+
+These are supporting diagnostics, not extra weighted score modules. The original seven-module weights and 70% minimum coverage rule are unchanged until empirical calibration. Their evidence does not alter the 12 mandatory trade gates, the Standard/Strict engines, or execution behavior. No live macro/accounting data provider is implied by this schema; absent observations remain `UNKNOWN`.
