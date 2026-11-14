@@ -823,6 +823,77 @@ def _three_inside_up_pattern(frame: pd.DataFrame, volume_ratio: float | None) ->
     )
 
 
+def _bearish_engulfing_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect bearish body engulfing after an advance; next close confirms it."""
+    if len(frame) < 4:
+        return None
+
+    candidates = []
+    if len(frame) >= 3:
+        candidates.append((len(frame) - 3, True))
+    candidates.append((len(frame) - 2, False))
+
+    for start, has_follow_through in candidates:
+        previous, engulfing = frame.iloc[start], frame.iloc[start + 1]
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change < 0.003:
+            continue
+
+        po, pc = float(previous["open"]), float(previous["close"])
+        eo, ec = float(engulfing["open"]), float(engulfing["close"])
+        eh, el = float(engulfing["high"]), float(engulfing["low"])
+        previous_body = abs(pc - po)
+        engulfing_body = abs(eo - ec)
+        if not (
+            pc > po
+            and ec < eo
+            and previous_body > 0
+            and engulfing_body > previous_body
+            and eo >= pc
+            and ec <= po
+        ):
+            continue
+
+        follow_through = (
+            has_follow_through
+            and float(frame.iloc[start + 2]["close"]) < el
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        shadow_engulf = eh >= float(previous["high"]) and el <= float(previous["low"])
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "پس از فاز صعودی، کندل دوم نزولی و بزرگ‌تر است و تمام بدنهٔ کندل صعودی قبلی را می‌پوشاند. "
+            f"پوشش کامل سایه‌ها: {'بله' if shadow_engulf else 'خیر؛ پوشش سایه‌ها شرط اصلی نیست'}. "
+        )
+        if follow_through:
+            description += "کندل بعدی زیر کف کندل پوشا بسته شده و برگشت نزولی را تأیید کرده است."
+        else:
+            description += "برای تأیید، بسته‌شدن کندل بعدی زیر کف کندل پوشا لازم است."
+
+        return _item(
+            name_fa="پوشای نزولی",
+            name_en="Bearish Engulfing",
+            category="CANDLE",
+            direction="BEARISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BEARISH",
+            state="CONFIRMED" if follow_through else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 1].isoformat(),
+            score=-15 if follow_through else -7,
+            trigger_price=el,
+            invalidation_price=eh,
+        )
+    return None
+
+
 def _bullish_engulfing_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect bullish body engulfing after a decline; next close confirms the setup."""
     if len(frame) < 4:
@@ -1218,9 +1289,9 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if three_line_strike is not None:
         out.append(three_line_strike)
 
-    if pc > po and last_bear and o >= pc and c <= po and body >= abs(pc - po):
-        add("پوشای نزولی", "Bearish Engulfing", "BEARISH",
-            "بدنهٔ نزولی آخر، بدنهٔ صعودی قبلی را پوشانده است؛ در روند صعودی معنا‌دارتر است.", -13)
+    bearish_engulfing = _bearish_engulfing_pattern(frame, volume_ratio)
+    if bearish_engulfing is not None:
+        out.append(bearish_engulfing)
 
     bullish_marubozu = _bullish_marubozu_pattern(frame, volume_ratio)
     if bullish_marubozu is not None:
