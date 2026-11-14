@@ -127,3 +127,14 @@ The Easy Fundamental report exposes `eps_analysis` as an evidence-only equity di
 - Missing source URL or observation timestamp keeps the checks UNKNOWN. Crypto/token assets return NOT_APPLICABLE, not a negative score.
 
 Both diagnostics are shown in Persian Streamlit and HTTP/Render dashboards. They do not change the seven weighted modules, 70% coverage threshold, mandatory trade gates, Standard/Strict engines or order execution.
+
+
+## ESG Analysis (Easy Fundamental diagnostic)
+
+- Added `esg_analysis(evidence)` with three separate pillars: environmental, social and governance (0–100).
+- Requires a source URL and observation timestamp before pillar evidence is considered known.
+- The displayed ESG score is an unweighted arithmetic diagnostic average of sourced pillar scores, not a provider rating or calibrated investment score.
+- Crypto assets can use the same three pillar framework, while network-specific metrics remain separate: energy per transaction, renewable-energy share, validator/miner concentration, client diversity, uptime and security incidents.
+- Controversies are surfaced as human-review flags; they are not automatically converted into a fabricated penalty.
+- Missing evidence remains UNKNOWN. ESG is not added to the seven weighted modules and cannot authorize trades.
+- UI added to Streamlit and HTTP dashboard. Tests cover sourced company data, missing source, crypto network metrics, unknown asset class and architectural isolation.
