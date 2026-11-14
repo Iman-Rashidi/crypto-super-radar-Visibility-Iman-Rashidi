@@ -325,6 +325,65 @@ def _bullish_abandoned_baby_pattern(frame: pd.DataFrame, volume_ratio: float | N
         )
     return None
 
+
+def _falling_window_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect a bearish Falling Window and invalidate it as soon as price enters the gap."""
+    if len(frame) < 3:
+        return None
+
+    first_start = max(0, len(frame) - 12)
+    for start in range(len(frame) - 2, first_start - 1, -1):
+        first, second = frame.iloc[start], frame.iloc[start + 1]
+        first_low = float(first["low"])
+        second_high = float(second["high"])
+        second_low = float(second["low"])
+        second_open = float(second["open"])
+        if not all(_finite(x) for x in (first_low, second_high, second_low, second_open)):
+            continue
+        if not (second_high < first_low and second_low <= second_high and second_open < first_low):
+            continue
+
+        later = frame.iloc[start + 2:]
+        gap_filled = not later.empty and bool(
+            (pd.to_numeric(later["high"], errors="coerce") >= second_high).any()
+        )
+        if gap_filled:
+            continue
+
+        sustained = not later.empty
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        strength = (
+            "STRONG" if sustained and volume_confirmed
+            else "MODERATE" if sustained or volume_confirmed
+            else "WEAK"
+        )
+        gap_size = first_low - second_high
+        description = (
+            "کندل دوم پایین‌تر از کف کندل اول باز شده و سقف آن نیز پایین‌تر از کف کندل اول باقی مانده است؛ "
+            f"بنابراین پنجرهٔ نزولیِ بدون هم‌پوشانی به اندازهٔ {gap_size:.8g} تشکیل شده است. "
+            f"محدودهٔ شکاف از {second_high:.8g} تا {first_low:.8g} است. "
+        )
+        if sustained:
+            description += "کندل‌های بعدی وارد محدودهٔ شکاف نشده‌اند؛ پنجره همچنان باز و فشار نزولی پابرجاست."
+        else:
+            description += "برای تأیید پایداری، کندل‌های بعدی نباید وارد محدودهٔ شکاف شوند؛ ورود قیمت به شکاف این الگو را باطل می‌کند."
+        return _item(
+            name_fa="پنجرهٔ نزولی (گپ رو به پایین)",
+            name_en="Falling Window",
+            category="CANDLE",
+            direction="BEARISH" if sustained else "NEUTRAL",
+            potential_direction=None if sustained else "BEARISH",
+            state="CONFIRMED" if sustained else "NEEDS_CONFIRMATION",
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 1].isoformat(),
+            score=-15 if sustained else -8,
+            trigger_price=second_low,
+            invalidation_price=first_low,
+        )
+    return None
+
+
 def _rising_window_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect a strict bullish Rising Window and track whether its gap remains open."""
     if len(frame) < 6:
@@ -1630,6 +1689,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     bearish_abandoned_baby = _bearish_abandoned_baby_pattern(frame, volume_ratio)
     if bearish_abandoned_baby is not None:
         out.append(bearish_abandoned_baby)
+
+    falling_window = _falling_window_pattern(frame, volume_ratio)
+    if falling_window is not None:
+        out.append(falling_window)
 
     return out[-5:]
 
