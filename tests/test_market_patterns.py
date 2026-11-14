@@ -420,6 +420,46 @@ class MarketPatternTests(unittest.TestCase):
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Three Inside Up" for p in analysis["candlestick_patterns"]))
 
+    def _set_bearish_three_line_strike(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        start = -5 if with_confirmation else -4
+        frame.iloc[start] = [100.0, 100.5, 96.0, 96.5, 1200.0]
+        frame.iloc[start + 1] = [97.0, 97.2, 93.2, 93.5, 1250.0]
+        frame.iloc[start + 2] = [94.0, 94.2, 90.2, 90.5, 1300.0]
+        frame.iloc[start + 3] = [90.0, 102.0, 89.5, 101.5, 2200.0]
+        if with_confirmation:
+            frame.iloc[-1] = [101.0, 101.2, 88.5, 89.0, 2300.0]
+        return frame
+
+    def test_bearish_three_line_strike_after_downtrend_is_pending_continuation(self):
+        frame = self._set_bearish_three_line_strike(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Three Line Strike")
+        self.assertEqual(pattern["name_fa"], "ضربهٔ سه‌خطی نزولی")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 89.5)
+        self.assertEqual(pattern["invalidation_price"], 102.0)
+
+    def test_bearish_three_line_strike_confirmed_by_next_close_below_fourth_low(self):
+        frame = self._set_bearish_three_line_strike(candle_frame("down"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bearish Three Line Strike")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_bearish_three_line_strike_rejected_without_prior_downtrend(self):
+        frame = self._set_bearish_three_line_strike(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Three Line Strike" for p in analysis["candlestick_patterns"]))
+
+    def test_bearish_three_line_strike_rejected_when_fourth_body_does_not_engulf_all_three(self):
+        frame = self._set_bearish_three_line_strike(candle_frame("down"))
+        frame.iloc[-1] = [90.0, 99.0, 89.5, 98.0, 2200.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bearish Three Line Strike" for p in analysis["candlestick_patterns"]))
+
     def _set_three_line_strike(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
         start = -5 if with_confirmation else -4
         frame.iloc[start] = [95.0, 99.2, 94.8, 99.0, 1100.0]
