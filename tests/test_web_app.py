@@ -292,7 +292,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("خط زمانی رویدادهای چرخه", page)
         self.assertIn("Mark Price واقعی", page)
         self.assertIn("حد سود و حد ضرر فعال در BloFin", page)
-        self.assertIn("تاریخچه سفارش‌های تکمیل‌شده", page)
+        self.assertIn("سفارش‌های تکمیل‌شده و تاریخچه سفارش", page)
         self.assertIn("تمام رویدادهای ثبت‌شده در ربات (همه سفارش‌ها)", page)
         self.assertIn("displayMonitorValue", page)
         self.assertNotIn("JSON.stringify(job,null,2)", page)
