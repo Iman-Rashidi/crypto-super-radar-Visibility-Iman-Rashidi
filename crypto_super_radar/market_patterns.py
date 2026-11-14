@@ -968,6 +968,94 @@ def _bullish_engulfing_pattern(frame: pd.DataFrame, volume_ratio: float | None) 
     return None
 
 
+def _bearish_three_line_strike_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
+    """Detect the four-candle bearish continuation Three Line Strike."""
+    if len(frame) < 7:
+        return None
+
+    candidates = []
+    if len(frame) >= 5:
+        candidates.append((len(frame) - 5, True))
+    candidates.append((len(frame) - 4, False))
+
+    for start, has_follow_through in candidates:
+        first, second, third, strike = (frame.iloc[start + i] for i in range(4))
+        prior = pd.to_numeric(frame["close"].iloc[max(0, start - 8):start], errors="coerce")
+        if len(prior) < 3 or prior.isna().any() or float(prior.iloc[0]) <= 0:
+            continue
+        prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+        if prior_change > -0.003:
+            continue
+
+        candles = (first, second, third)
+        bodies = [float(x["open"]) - float(x["close"]) for x in candles]
+        ranges = [float(x["high"]) - float(x["low"]) for x in candles]
+        strong_declines = all(
+            body > 0 and candle_range > 0 and body >= candle_range * 0.40
+            for body, candle_range in zip(bodies, ranges)
+        )
+        descending_closes = (
+            float(second["close"]) < float(first["close"])
+            and float(third["close"]) < float(second["close"])
+        )
+        close_near_lows = all(
+            float(x["close"]) - float(x["low"]) <= max(body * 0.35, 1e-12)
+            for x, body in zip(candles, bodies)
+        )
+
+        strike_open = float(strike["open"])
+        strike_close = float(strike["close"])
+        strike_high = float(strike["high"])
+        strike_low = float(strike["low"])
+        engulfed_body_top = max(float(x["open"]) for x in candles)
+        engulfed_body_bottom = min(float(x["close"]) for x in candles)
+        strike_valid = (
+            strike_close > strike_open
+            and strike_open < float(third["close"])
+            and strike_open <= engulfed_body_bottom
+            and strike_close > float(first["open"])
+            and strike_close >= engulfed_body_top
+        )
+        if not (strong_declines and descending_closes and close_near_lows and strike_valid):
+            continue
+
+        follow_through = (
+            has_follow_through
+            and float(frame.iloc[start + 4]["close"]) < strike_low
+        )
+        volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+        state = "CONFIRMED" if follow_through else "NEEDS_CONFIRMATION"
+        strength = (
+            "STRONG" if follow_through and volume_confirmed
+            else "MODERATE" if follow_through or volume_confirmed
+            else "WEAK"
+        )
+        description = (
+            "الگوی ادامه‌دهندهٔ نزولی چهارکندلی: سه کندل قرمز با بسته‌شدن‌های پیاپی پایین‌تر و نزدیک کف، "
+            "سپس یک کندل سبز بلند که کل بدنهٔ سه کندل قبلی را می‌پوشاند و بالاتر از بازشدن کندل اول بسته می‌شود. "
+            "پوشش سایه‌ها شرط نیست."
+        )
+        if follow_through:
+            description += " کندل بعدی زیر کف کندل چهارم بسته شده و ادامهٔ نزول را تأیید کرده است."
+        else:
+            description += " برای تأیید ادامهٔ نزول، بسته‌شدن کندل بعدی زیر کف کندل چهارم لازم است."
+        return _item(
+            name_fa="ضربهٔ سه‌خطی نزولی",
+            name_en="Bearish Three Line Strike",
+            category="CANDLE",
+            direction="BEARISH" if follow_through else "NEUTRAL",
+            potential_direction=None if follow_through else "BEARISH",
+            state=state,
+            strength=strength,
+            description=description,
+            timestamp=frame.index[start + 3].isoformat(),
+            score=-16 if follow_through else -8,
+            trigger_price=strike_low,
+            invalidation_price=strike_high,
+        )
+    return None
+
+
 def _bullish_three_line_strike_pattern(frame: pd.DataFrame, volume_ratio: float | None) -> dict[str, Any] | None:
     """Detect the four-candle bullish continuation Three Line Strike."""
     if len(frame) < 7:
@@ -1288,6 +1376,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     three_line_strike = _bullish_three_line_strike_pattern(frame, volume_ratio)
     if three_line_strike is not None:
         out.append(three_line_strike)
+
+    bearish_three_line_strike = _bearish_three_line_strike_pattern(frame, volume_ratio)
+    if bearish_three_line_strike is not None:
+        out.append(bearish_three_line_strike)
 
     bearish_engulfing = _bearish_engulfing_pattern(frame, volume_ratio)
     if bearish_engulfing is not None:
