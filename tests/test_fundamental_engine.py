@@ -14,6 +14,7 @@ from crypto_super_radar.fundamental_engine import (
     sector_rotation_analysis,
     share_buyback_analysis,
     eps_analysis,
+    esg_analysis,
 )
 
 
@@ -233,6 +234,94 @@ class DividendAnalysisTests(unittest.TestCase):
         result = build_fundamental_report({"dividend_analysis": {"asset_class": "crypto"}})
         self.assertEqual(set(result["weights"]), set(MODULE_WEIGHTS))
         self.assertEqual(result["modules"]["dividend_analysis"]["status"], "NOT_APPLICABLE")
+
+
+class ESGAnalysisTests(unittest.TestCase):
+    def _pillar(self, score, source):
+        return {"status": "KNOWN", "score": score, "source_url": source,
+                "observed_at_utc": "2026-11-14T10:00:00Z",
+                "metrics": {"sample_metric": 1}}
+
+    def test_company_three_pillars_are_scored_separately(self):
+        result = esg_analysis({
+            "asset_class": "equity",
+            "environmental": self._pillar(80, "https://example.org/environment"),
+            "social": self._pillar(70, "https://example.org/social"),
+            "governance": self._pillar(90, "https://example.org/governance"),
+        })
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["score"], 80)
+        self.assertEqual(result["known_pillars"], 3)
+        self.assertEqual(result["asset_type"], "company")
+
+    def test_crypto_network_uses_same_pillars_but_crypto_context(self):
+        result = esg_analysis({
+            "asset_class": "crypto",
+            "environmental": self._pillar(40, "https://example.org/energy"),
+            "social": self._pillar(75, "https://example.org/community"),
+            "governance": self._pillar(55, "https://example.org/validators"),
+        })
+        self.assertEqual(result["status"], "KNOWN")
+        self.assertEqual(result["asset_type"], "crypto_network_or_token")
+        self.assertEqual(result["score"], round((40 + 75 + 55) / 3, 2))
+        self.assertIn("تمرکز اعتبارسنج", result["pillars"]["governance"]["description_fa"])
+
+    def test_missing_pillar_is_partial_not_zero(self):
+        result = esg_analysis({
+            "asset_class": "stock",
+            "environmental": self._pillar(80, "https://example.org/environment"),
+        })
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["score"], 80)
+        self.assertEqual(result["pillars"]["social"]["status"], "UNKNOWN")
+        self.assertIsNone(result["pillars"]["social"]["score"])
+
+    def test_pillar_without_source_or_timestamp_is_unknown(self):
+        result = esg_analysis({
+            "asset_class": "equity",
+            "environmental": {"status": "KNOWN", "score": 100},
+        })
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(result["score"])
+
+    def test_invalid_scores_and_unverified_controversies_are_ignored(self):
+        result = esg_analysis({
+            "asset_class": "equity",
+            "environmental": self._pillar(120, "https://example.org/environment"),
+            "controversies": [{"description": "unverified claim"}],
+        })
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["controversy_count"], 0)
+
+    def test_sourced_controversy_is_retained_as_context_not_score(self):
+        result = esg_analysis({
+            "asset_class": "equity",
+            "controversies": [{
+                "description": "Regulatory investigation disclosed",
+                "severity": "HIGH", "pillar": "governance",
+                "source_url": "https://example.org/investigation",
+                "observed_at_utc": "2026-11-14T10:00:00Z",
+            }],
+        })
+        self.assertEqual(result["controversy_count"], 1)
+        self.assertEqual(result["controversies"][0]["severity"], "HIGH")
+        self.assertIsNone(result["score"])
+
+    def test_unknown_asset_class_is_not_applicable_or_negative(self):
+        result = esg_analysis({})
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["applicability"], "UNKNOWN")
+        self.assertIsNone(result["score"])
+
+    def test_esg_does_not_change_weighted_modules_or_trade_authorization(self):
+        report = build_fundamental_report({
+            "esg_analysis": {"asset_class": "crypto",
+                "environmental": self._pillar(50, "https://example.org/energy")}
+        })
+        self.assertEqual(set(report["weights"]), set(MODULE_WEIGHTS))
+        self.assertEqual(report["modules"]["esg_analysis"]["status"], "PARTIAL")
+        self.assertFalse(report["trade_authorized"])
+
 
 
 class ShareBuybackAnalysisTests(unittest.TestCase):
