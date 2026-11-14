@@ -298,11 +298,15 @@ def portfolio_correlation_analysis(
     w = np.asarray([float(weights[k]) / weight_sum for k in frame.columns])
     cov = common.cov().to_numpy(dtype=float)
     variance = float(w @ cov @ w)
+    matrix = corr.to_numpy(dtype=float)
+    upper = matrix[np.triu_indices_from(matrix, k=1)]
+    finite_pairs = upper[np.isfinite(upper)]
+    highest = float(np.max(finite_pairs)) if finite_pairs.size else None
     return {
         "status": "KNOWN", "common_observations": int(len(common)),
         "correlation_matrix": {str(k): {str(c): float(corr.loc[k, c]) for c in corr.columns} for k in corr.index},
         "weighted_daily_volatility_pct": math.sqrt(max(0.0, variance)) * 100.0,
-        "highest_pairwise_correlation": float(corr.where(~(corr == 1.0)).max().max()),
+        "highest_pairwise_correlation": highest,
         "note": "Historical correlations are unstable and do not guarantee diversification during market stress.",
     }
 
