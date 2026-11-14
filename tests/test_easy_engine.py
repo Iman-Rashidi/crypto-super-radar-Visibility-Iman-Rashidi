@@ -75,6 +75,8 @@ class EasyEngineTests(unittest.TestCase):
         self.assertEqual(result.metrics["decision_policy"]["mandatory_legacy_gates"], 0)
         self.assertFalse(result.metrics["decision_policy"]["twelve_gate_engine_used"])
         self.assertEqual(result.metrics["easy_position_sizing"]["status"], "KNOWN")
+        self.assertEqual(result.metrics["leverage_margin_estimate"]["status"], "NOT_APPLICABLE")
+        self.assertEqual(result.metrics["strategy_style"], "SWING")
         self.assertEqual(result.metrics["whale_status"], "UNKNOWN")
 
     @patch("crypto_super_radar.easy_engine.fetch_market_intelligence", return_value={"status":"UNKNOWN"})
@@ -100,6 +102,8 @@ class EasyEngineTests(unittest.TestCase):
         result = engine.analyze(asset)
         self.assertEqual(result.signal, Signal.SHORT)
         self.assertEqual(result.metrics["mandatory_gate_count"], 0)
+        self.assertEqual(result.metrics["leverage_margin_estimate"]["status"], "KNOWN")
+        self.assertEqual(result.metrics["leverage_margin_estimate"]["leverage"], 1.0)
 
     def test_missing_snapshot_price_fails_closed(self):
         frame = self.candles()
