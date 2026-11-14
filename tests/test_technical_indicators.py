@@ -94,5 +94,27 @@ class EasyTraderTechnicalIndicatorTests(unittest.TestCase):
         self.assertIn(roc["zero_line"], {"BULLISH_ZERO_CROSS", "BEARISH_ZERO_CROSS", "ABOVE_ZERO", "BELOW_ZERO", "UNKNOWN"})
         self.assertEqual(roc["overbought_oversold"], "NO_STANDARD_THRESHOLDS_USE_HISTORICAL_EXTREMES")
 
+    def test_supertrend_williams_r_and_indicator_roles(self):
+        result = analyze_technical_indicators(self.candles())
+        self.assertEqual(result["status"], "KNOWN")
+        st = result["supertrend"]
+        self.assertEqual(st["atr_period"], 10)
+        self.assertEqual(st["atr_multiplier"], 3.0)
+        self.assertIsNotNone(st["value"])
+        self.assertIn(st["trend"], {"BULLISH", "BEARISH"})
+        self.assertIn(st["flip"], {"BULLISH_FLIP", "BEARISH_FLIP", "NONE"})
+        self.assertEqual(st["trailing_stop_reference"], st["value"])
+        wr = result["williams_r"]
+        self.assertEqual(wr["period"], 14)
+        self.assertIsNotNone(wr["value"])
+        self.assertGreaterEqual(wr["value"], -100)
+        self.assertLessEqual(wr["value"], 0)
+        self.assertEqual(wr["overbought_threshold"], -20)
+        self.assertEqual(wr["oversold_threshold"], -80)
+        roles = result["indicator_roles"]
+        self.assertIn("RSI", roles["leading_or_early_warning"])
+        self.assertIn("Supertrend", roles["lagging_or_confirmation"])
+        self.assertEqual(roles["order_authority"], "NONE_INDICATORS_ARE_EVIDENCE_ONLY")
+
 if __name__ == "__main__":
     unittest.main()
