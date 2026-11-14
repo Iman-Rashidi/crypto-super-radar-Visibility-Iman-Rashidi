@@ -126,6 +126,51 @@ class MarketPatternTests(unittest.TestCase):
         analysis = analyze_market_patterns(frame, [])
         self.assertFalse(any(p["name_en"] == "Evening Star" for p in analysis["candlestick_patterns"]))
 
+    def _set_three_black_crows(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        pattern_start = -4 if with_confirmation else -3
+        frame.iloc[pattern_start] = [110.0, 110.2, 103.8, 104.5, 1500.0]
+        frame.iloc[pattern_start + 1] = [109.0, 109.2, 102.8, 103.0, 1600.0]
+        frame.iloc[pattern_start + 2] = [108.0, 108.2, 101.8, 102.0, 1700.0]
+        if with_confirmation:
+            frame.iloc[-1] = [102.0, 102.1, 100.8, 101.0, 1900.0]
+        return frame
+
+    def test_three_black_crows_after_uptrend_is_pending_bearish_evidence(self):
+        frame = self._set_three_black_crows(candle_frame("up"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three Black Crows")
+        self.assertEqual(pattern["name_fa"], "سه کلاغ سیاه")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BEARISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 101.8)
+        self.assertEqual(pattern["invalidation_price"], 110.2)
+
+    def test_three_black_crows_confirmed_by_next_close_below_third_low(self):
+        frame = self._set_three_black_crows(candle_frame("up"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Three Black Crows")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BEARISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_three_black_crows_rejected_without_prior_uptrend(self):
+        frame = self._set_three_black_crows(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three Black Crows" for p in analysis["candlestick_patterns"]))
+
+    def test_three_black_crows_rejected_when_second_candle_opens_outside_first_body(self):
+        frame = self._set_three_black_crows(candle_frame("up"))
+        frame.iloc[-2] = [112.0, 112.2, 102.8, 103.0, 1600.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three Black Crows" for p in analysis["candlestick_patterns"]))
+
+    def test_three_black_crows_rejected_when_upper_shadow_is_too_long(self):
+        frame = self._set_three_black_crows(candle_frame("up"))
+        frame.iloc[-1] = [108.0, 110.0, 101.8, 102.0, 1700.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Three Black Crows" for p in analysis["candlestick_patterns"]))
+
     def _set_three_white_soldiers(self, frame: pd.DataFrame) -> pd.DataFrame:
         frame.iloc[-3] = [95.0, 101.0, 94.8, 100.8, 1200.0]
         frame.iloc[-2] = [98.0, 104.2, 97.8, 104.0, 1300.0]
