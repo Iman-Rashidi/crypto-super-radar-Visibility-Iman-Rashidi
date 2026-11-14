@@ -97,6 +97,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('id="ai-dry-run-panel"', page)
         self.assertIn("اجرای تست واقعی Nemotron (Dry-Run)", page)
         self.assertIn("/api/ai/dry-run", page)
+        self.assertIn("renderDryRunResult(result)", page)
+        self.assertIn("دیدگاه هشت متخصص", page)
+        self.assertIn("کنترل زبان فارسی", page)
+        self.assertIn("ارسال سفارش", page)
+        self.assertNotIn("output.textContent=JSON.stringify(result,null,2)", page)
         self.assertIn("سقف زیان روزانه", page)
         self.assertIn("پوشش دادهٔ کارمزد", page)
         self.assertIn("اجزای کارمزد مشاهده‌شده", page)
@@ -353,6 +358,7 @@ class WebAppHttpTests(unittest.TestCase):
             "status": "APPROVED",
             "model_verified": True,
             "response_validated": True,
+            "explanation_language_verified": True,
             "test_passed": True,
             "paper_entry_eligible": False,
             "orders_submitted": False,

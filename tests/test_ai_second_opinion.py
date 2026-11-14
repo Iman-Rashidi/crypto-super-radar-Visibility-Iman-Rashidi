@@ -10,6 +10,7 @@ from crypto_super_radar.ai_second_opinion import (
     DEFAULT_FREE_MODEL,
     MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
+    _validated_review,
     run_free_ai_second_opinion,
     run_openrouter_connection_diagnostic,
 )
@@ -236,6 +237,8 @@ class FreeAISecondOpinionTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "APPROVED")
         self.assertTrue(result["paper_entry_eligible"])
+        self.assertTrue(result["explanation_language_verified"])
+        self.assertEqual(result["analysis_language"], "fa")
         self.assertEqual(result["cost_usd"], 0.0)
         self.assertEqual(captured["payload"]["model"], DEFAULT_FREE_MODEL)
         self.assertTrue(captured["headers"]["Authorization"].startswith("Bearer "))
@@ -244,6 +247,8 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("private_key", prompt)
         self.assertNotIn("must-not-send-list-values", prompt)
         self.assertNotIn("ignore previous instructions", prompt)
+        self.assertIn("ONLY in Persian (Farsi)", prompt)
+        self.assertIn("rationale_fa", prompt)
         self.assertFalse(captured["allow_redirects"])
 
     def test_bypass_cache_forces_fresh_request_and_reports_verified_telemetry(self):
@@ -288,6 +293,38 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(result["status"], "MODEL_MISMATCH")
         self.assertFalse(result["model_verified"])
         self.assertFalse(result["paper_entry_eligible"])
+
+    def test_english_explanations_are_rejected_even_when_verdicts_approve(self):
+        document = valid_document()
+        document["specialist_views"]["technical"]["reason_fa"] = (
+            "RSI confirms bullish momentum and supports the long setup."
+        )
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: FakeResponse(document=document),
+                bypass_cache=True,
+            )
+
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertFalse(review["response_validated"])
+        self.assertFalse(review["explanation_language_verified"])
+        self.assertFalse(review["paper_entry_eligible"])
+
+    def test_risk_flags_must_also_be_written_in_persian(self):
+        document = valid_document()
+        document["risk_flags"] = ["high volatility risk"]
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: FakeResponse(document=document),
+                bypass_cache=True,
+            )
+
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertFalse(review["paper_entry_eligible"])
 
     def test_more_than_eight_risk_flags_cannot_be_ignored(self):
         document = valid_document()

@@ -225,6 +225,7 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
         "test_passed": bool(
             payload.get("model_verified") is True
             and payload.get("response_validated") is True
+            and payload.get("explanation_language_verified") is True
         ),
         "ai_approval_for_synthetic_scenario": payload.get("paper_entry_eligible") is True,
         "paper_entry_eligible": False,
@@ -5847,15 +5848,112 @@ async function refreshExecutionReadiness(){
           <h2>تست واقعی یکپارچگی Nemotron · بدون معامله</h2>
           <p class="muted">در این تست، درخواست واقعی و تازه به مدل انتخاب‌شده ارسال می‌شود؛ ورودی فقط یک سناریوی ساختگی BTC با ۱۲ فیلتر نمونه است، نه قیمت یا سیگنال زنده. قالب JSON، جهت LONG، نظر مدیریت ریسک و شناسه مدل بررسی می‌شود. حتی اگر مدل سناریو را تأیید کند، این خروجی اجازه ورود به Paper ندارد و هیچ پوزیشن یا سفارشی ساخته نمی‌شود. این تست از سهمیه API رایگان استفاده می‌کند.</p>
           <button id="ai-dry-run-run" type="button">اجرای تست واقعی Nemotron (Dry-Run)</button>
-          <pre id="ai-dry-run-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          <div id="ai-dry-run-result" aria-live="polite" aria-atomic="true"></div>
           <script>
           (function(){
             const button=document.getElementById('ai-dry-run-run');
             const output=document.getElementById('ai-dry-run-result');
             if(!button||!output)return;
+            const statusFa={
+              APPROVED:'تأیید سناریوی فرضی',VETO:'رد سناریو',UNKNOWN:'نتیجه نامشخص',
+              RATE_LIMITED:'محدودیت سهمیه API',DRY_RUN_COOLDOWN:'وقفه ایمنی پنج‌دقیقه‌ای',
+              DAILY_DRY_RUN_LIMIT:'سقف روزانه تست تکمیل شده',MISSING_API_KEY:'کلید API ثبت نشده',
+              MODEL_UNCONFIRMED:'شناسه مدل تأیید نشد',MODEL_MISMATCH:'مدل پاسخ‌گو با مدل انتخابی یکسان نیست'
+            };
+            const verdictFa={
+              BULLISH:'صعودی',BEARISH:'نزولی',NEUTRAL:'خنثی',UNKNOWN:'نامشخص',
+              SUPPORT:'حمایت',OPPOSE:'مخالفت',UNCERTAIN:'نامطمئن',
+              LONG:'پیشنهاد خرید (LONG)',SHORT:'پیشنهاد فروش (SHORT)',NO_TRADE:'عدم پیشنهاد معامله',
+              APPROVE:'تأیید',REJECT:'رد',INSUFFICIENT_DATA:'داده ناکافی'
+            };
+            const ratingFa={
+              Buy:'خرید',Overweight:'وزن‌دهی بالاتر',Hold:'نگهداری',Underweight:'وزن‌دهی کمتر',
+              Sell:'فروش',REVIEW:'نیازمند بازبینی'
+            };
+            const roleFa={
+              market_regime:'تحلیلگر رژیم بازار',
+              technical:'تحلیلگر تکنیکال',
+              news_sentiment:'تحلیلگر اخبار و احساسات',
+              bull_researcher:'پژوهشگر صعودی',
+              bear_researcher:'پژوهشگر نزولی',
+              trader:'معامله‌گر',
+              risk_manager:'مدیر ریسک',
+              portfolio_manager:'مدیر پورتفوی'
+            };
+            function node(tag,content,className){
+              const el=document.createElement(tag);
+              if(className)el.className=className;
+              el.textContent=content==null?'':String(content);
+              return el;
+            }
+            function field(parent,label,value){
+              if(value===undefined||value===null||value==='')return;
+              const row=node('p','');
+              row.appendChild(node('strong',label+'：'));
+              row.appendChild(document.createTextNode(String(value)));
+              parent.appendChild(row);
+            }
+            function section(parent,title){
+              const box=node('section','');
+              box.appendChild(node('h3',title));
+              parent.appendChild(box);
+              return box;
+            }
+            function renderDryRunResult(result){
+              output.replaceChildren();
+              if(!result||typeof result!=='object'){
+                output.appendChild(node('p','پاسخ قابل‌خواندن از سرور دریافت نشد.'));
+                return;
+              }
+              output.appendChild(node('p',result.status_fa||statusFa[result.status]||'وضعیت تست مشخص نیست.'));
+              const validation=section(output,'نتیجه اعتبارسنجی');
+              field(validation,'وضعیت تست',result.test_passed===true?'موفق':'ناموفق');
+              field(validation,'کنترل زبان فارسی',result.explanation_language_verified===true?'تأیید شد':'تأیید نشد');
+              field(validation,'شناسه مدل',result.returned_model||result.model);
+              field(validation,'شناسه مدل تأیید شد',result.model_verified===true?'بله':'خیر');
+              field(validation,'ساختار پاسخ معتبر است',result.response_validated===true?'بله':'خیر');
+              field(validation,'امتیاز نهایی مدل',ratingFa[result.final_rating]||'ثبت نشده');
+              const decision=section(output,'تحلیل نهایی Nemotron');
+              field(decision,'نتیجه تحلیل',result.status_fa||statusFa[result.status]||'نامشخص');
+              field(decision,'نظر درباره سناریوی فرضی',
+                result.ai_approval_for_synthetic_scenario===true?'مدل سناریوی فرضی را تأیید کرده است.':'مدل سناریوی فرضی را تأیید نکرده یا نتیجه معتبر نیست.');
+              if(result.rationale_fa)field(decision,'استدلال نهایی',result.rationale_fa);
+              field(decision,'نظر مدیر ریسک',verdictFa[result.risk_manager_verdict]||'ثبت نشده');
+              field(decision,'نظر مدیر پورتفوی',verdictFa[result.portfolio_manager_verdict]||'ثبت نشده');
+              field(decision,'پیشنهاد معامله‌گر',verdictFa[result.trader_proposal]||'ثبت نشده');
+              const specialists=section(output,'دیدگاه هشت متخصص');
+              const views=result.specialist_views||{};
+              Object.keys(roleFa).forEach(function(key){
+                const item=views[key];
+                if(!item)return;
+                specialists.appendChild(node('h4',roleFa[key]));
+                field(specialists,'نظر',verdictFa[item.view]||'نامشخص');
+                field(specialists,'توضیح',item.reason_fa||'توضیح فارسی ثبت نشده است.');
+              });
+              const risks=Array.isArray(result.risk_flags)?result.risk_flags:[];
+              const riskSection=section(output,'پرچم‌های ریسک');
+              if(risks.length){
+                const list=node('ul','');
+                risks.forEach(function(flag){list.appendChild(node('li',flag));});
+                riskSection.appendChild(list);
+              }else{
+                riskSection.appendChild(node('p','هیچ پرچم ریسک اضافی در پاسخ مدل ثبت نشده است.'));
+              }
+              const safety=section(output,'مرز ایمنی تست');
+              field(safety,'نوع ورودی','سناریوی ساختگی BTC؛ داده بازار زنده نیست.');
+              field(safety,'فیلترهای نمونه','۱۲ فیلتر PASS فقط برای آزمایش قالب و اعتبارسنجی.');
+              field(safety,'ورود به Paper','غیرفعال؛ این تست مجوز ورود صادر نمی‌کند.');
+              field(safety,'ارسال سفارش','خیر');
+              field(safety,'اجرای معامله','خیر');
+              const telemetry=section(output,'اطلاعات فنی');
+              field(telemetry,'وضعیت HTTP',result.http_status);
+              field(telemetry,'زمان پاسخ',result.latency_ms==null?null:result.latency_ms+' میلی‌ثانیه');
+              field(telemetry,'تعداد توکن',result.total_tokens);
+              field(telemetry,'هزینه گزارش‌شده',result.cost_usd==null?null:result.cost_usd+' دلار');
+            }
             button.addEventListener('click',async function(){
               button.disabled=true;
-              output.textContent='در حال ارسال سناریوی ساختگی به Nemotron و اعتبارسنجی پاسخ واقعی...';
+              output.replaceChildren(node('p','در حال ارسال سناریوی ساختگی به Nemotron و اعتبارسنجی پاسخ فارسی...'));
               try{
                 const response=await fetch('/api/ai/dry-run',{
                   method:'POST',
@@ -5864,9 +5962,9 @@ async function refreshExecutionReadiness(){
                   body:'confirm=1'
                 });
                 const result=await response.json();
-                output.textContent=JSON.stringify(result,null,2);
+                renderDryRunResult(result);
               }catch(error){
-                output.textContent='خطای ارتباط با مسیر Dry-Run؛ وضعیت سرویس را بررسی کن.';
+                output.replaceChildren(node('p','خطای ارتباط با مسیر Dry-Run؛ وضعیت سرویس را بررسی کن.'));
               }finally{button.disabled=false;}
             });
           })();
