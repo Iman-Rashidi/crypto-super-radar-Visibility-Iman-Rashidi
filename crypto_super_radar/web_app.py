@@ -5479,10 +5479,18 @@ async function refreshExecutionReadiness(){
                 fields.regime.textContent=({TRENDING:'رونددار',RANGE_OR_TRANSITION:'رنج / گذار'}[d.regime]||'نامشخص');
                 fields.trend.textContent=faDirection(d.trend);
                 const divergence=d.divergence||{},fib=d.fibonacci||{};
-                fields.indicators.textContent='EMA20: '+number(d.ema20)+' · EMA50: '+number(d.ema50)+' · EMA200: '+number(d.ema200)+
-                  ' · ADX(14): '+number(d.adx14)+' · RSI(14): '+number(d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[d.rsi_state]||'')+')'+
-                  ' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
-                  ' · RVOL کندلی: '+number(d.volume_ratio)+'x · واگرایی: '+(divergence.type||'NONE')+
+                const tech=analysis.technical_indicators||{},ma=tech.moving_averages||{},obv=tech.obv||{},rsiTech=tech.rsi||{},env=ma.envelopes||{};
+                const crossLabel=({GOLDEN_CROSS:'تقاطع طلایی',DEATH_CROSS:'تقاطع مرگ',NONE:'بدون تقاطع',UNKNOWN:'نامشخص'});
+                const divLabel=({BULLISH:'واگرایی صعودی',BEARISH:'واگرایی نزولی',NONE:'بدون واگرایی'});
+                fields.indicators.textContent='EMA20/50/200: '+number(d.ema20)+' / '+number(d.ema50)+' / '+number(d.ema200)+
+                  ' · SMA20/50/200: '+number(ma.sma20)+' / '+number(ma.sma50)+' / '+number(ma.sma200)+
+                  ' · تقاطع SMA50/200: '+(crossLabel[ma.sma50_sma200_cross]||'نامشخص')+' · تقاطع EMA50/200: '+(crossLabel[ma.ema50_ema200_cross]||'نامشخص')+
+                  ' · باند SMA50 ±'+number(env.percentage)+'%: '+number(env.lower)+' تا '+number(env.upper)+' ('+(env.position||'نامشخص')+')'+
+                  ' · OBV: '+number(obv.value)+' · روند OBV: '+(obv.trend||'نامشخص')+' · واگرایی OBV: '+(divLabel[obv.divergence]||'نامشخص')+' · تأیید شکست: '+(obv.breakout_confirmation||'نامشخص')+
+                  ' · RSI(14): '+number(rsiTech.value??d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[rsiTech.state||d.rsi_state]||'')+')'+
+                  ' · عبور RSI از ۵۰: '+(rsiTech.midline_50||'نامشخص')+' · واگرایی RSI: '+(divLabel[rsiTech.divergence]||'نامشخص')+' · شکست خط روند RSI: '+(rsiTech.trendline_breakout||'نامشخص')+
+                  ' · ADX(14): '+number(d.adx14)+' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
+                  ' · RVOL کندلی: '+number(d.volume_ratio)+'x · واگرایی پیوت RSI: '+(divergence.type||'NONE')+
                   ' · فیبوناچی: '+(fib.status||'نامشخص')+' '+number(fib.retracement)+' · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
                 const qualityLabel=({PASS:'تطبیق دو منبع موفق',FAIL:'اختلاف دو منبع؛ سیگنال مسدود',UNKNOWN:'تطبیق دو منبع نامشخص'}[quality.cross_validation_status]||'تطبیق نامشخص');
                 const freshnessLabel=quality.freshness_status==='FRESH'?'داده تازه':quality.freshness_status==='STALE'?'داده کهنه':'تازگی نامشخص';
