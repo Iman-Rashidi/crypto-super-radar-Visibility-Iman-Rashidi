@@ -172,6 +172,118 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "BEARISH_BREAKDOWN" if segment[-1] < projected and slope > 0 else "NONE"
         )
 
+    # MACD (12, 26, 9): line, signal, histogram and crossovers.
+    macd_fast = close.ewm(span=12, adjust=False, min_periods=12).mean()
+    macd_slow = close.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = macd_fast - macd_slow
+    macd_signal = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
+    macd_hist = macd_line - macd_signal
+    macd_cross = "UNKNOWN"
+    if all(_finite(x) for x in (macd_line.iloc[-2], macd_line.iloc[-1], macd_signal.iloc[-2], macd_signal.iloc[-1])):
+        if macd_line.iloc[-2] <= macd_signal.iloc[-2] and macd_line.iloc[-1] > macd_signal.iloc[-1]:
+            macd_cross = "BULLISH_CROSS"
+        elif macd_line.iloc[-2] >= macd_signal.iloc[-2] and macd_line.iloc[-1] < macd_signal.iloc[-1]:
+            macd_cross = "BEARISH_CROSS"
+        else:
+            macd_cross = "NONE"
+    macd_zero = "UNKNOWN"
+    if _finite(macd_line.iloc[-2]) and _finite(macd_line.iloc[-1]):
+        macd_zero = "BULLISH_ZERO_CROSS" if macd_line.iloc[-2] <= 0 < macd_line.iloc[-1] else (
+            "BEARISH_ZERO_CROSS" if macd_line.iloc[-2] >= 0 > macd_line.iloc[-1] else "ABOVE_ZERO" if macd_line.iloc[-1] > 0 else "BELOW_ZERO"
+        )
+    macd_divergence = "NONE"
+    macd_array = macd_line.to_numpy(dtype=float)
+    if len(price_highs) == 2 and all(_finite(macd_array[i]) for i, _ in price_highs):
+        (i1, p1), (i2, p2) = price_highs
+        if p2 > p1 and macd_array[i2] < macd_array[i1]:
+            macd_divergence = "BEARISH"
+    if macd_divergence == "NONE" and len(price_lows) == 2 and all(_finite(macd_array[i]) for i, _ in price_lows):
+        (i1, p1), (i2, p2) = price_lows
+        if p2 < p1 and macd_array[i2] > macd_array[i1]:
+            macd_divergence = "BULLISH"
+
+    # Wilder ATR(14), independent of price direction.
+    atr_value = float(atr) if _finite(atr) else None
+    atr_pct_value = atr_value / last * 100.0 if atr_value is not None and last > 0 else None
+    atr_risk = {
+        "stop_distance_1x": atr_value,
+        "stop_distance_1_5x": atr_value * 1.5 if atr_value is not None else None,
+        "stop_distance_2x": atr_value * 2.0 if atr_value is not None else None,
+        "long_stop_reference_2x": last - 2.0 * atr_value if atr_value is not None else None,
+        "short_stop_reference_2x": last + 2.0 * atr_value if atr_value is not None else None,
+        "position_sizing": "REQUIRES_ACCOUNT_EQUITY_AND_RISK_BUDGET",
+    }
+
+    # Parabolic SAR using Wilder's acceleration factor and reversal clamps.
+    sar_values = np.full(len(frame), np.nan, dtype=float)
+    sar_trend = "UNKNOWN"
+    sar_flip = "NONE"
+    sar_af = 0.02
+    sar_max_af = 0.20
+    if len(frame) >= 3:
+        rising = close.iloc[1] >= close.iloc[0]
+        sar = float(low.iloc[0] if rising else high.iloc[0])
+        ep = float(high.iloc[1] if rising else low.iloc[1])
+        sar_values[1] = sar
+        for i in range(2, len(frame)):
+            previous_sar = sar
+            sar = previous_sar + sar_af * (ep - previous_sar)
+            if rising:
+                sar = min(sar, float(low.iloc[i - 1]), float(low.iloc[i - 2]))
+                if low.iloc[i] < sar:
+                    rising = False
+                    sar = ep
+                    ep = float(low.iloc[i])
+                    sar_af = 0.02
+                    sar_flip = "BEARISH"
+                else:
+                    if high.iloc[i] > ep:
+                        ep = float(high.iloc[i])
+                        sar_af = min(sar_af + 0.02, sar_max_af)
+            else:
+                sar = max(sar, float(high.iloc[i - 1]), float(high.iloc[i - 2]))
+                if high.iloc[i] > sar:
+                    rising = True
+                    sar = ep
+                    ep = float(high.iloc[i])
+                    sar_af = 0.02
+                    sar_flip = "BULLISH"
+                else:
+                    if low.iloc[i] < ep:
+                        ep = float(low.iloc[i])
+                        sar_af = min(sar_af + 0.02, sar_max_af)
+            sar_values[i] = sar
+        sar_trend = "BULLISH" if rising else "BEARISH"
+    sar_current = float(sar_values[-1]) if _finite(sar_values[-1]) else None
+    sar_relation = "UNKNOWN" if sar_current is None else "BELOW_PRICE_BULLISH" if sar_current < last else "ABOVE_PRICE_BEARISH"
+
+    # Fibonacci retracement from the latest two alternating confirmed swing pivots.
+    fib_pivots_high = _last_two_pivots(high.to_numpy(dtype=float), "HIGH")
+    fib_pivots_low = _last_two_pivots(low.to_numpy(dtype=float), "LOW")
+    swing_candidates = sorted(
+        [(i, price, "HIGH") for i, price in fib_pivots_high if i >= max(0, len(frame) - 100)]
+        + [(i, price, "LOW") for i, price in fib_pivots_low if i >= max(0, len(frame) - 100)],
+        key=lambda item: item[0],
+    )
+    fib = {"status": "INSUFFICIENT_SWING_PIVOTS", "direction": "UNKNOWN", "levels": {}, "nearest_level": None, "swing_low": None, "swing_high": None}
+    if len(swing_candidates) >= 2:
+        first, second = swing_candidates[-2], swing_candidates[-1]
+        if first[2] != second[2] and second[1] != first[1]:
+            swing_low, swing_high = sorted((first[1], second[1]))
+            impulse = "BULLISH" if first[2] == "LOW" and second[2] == "HIGH" else "BEARISH"
+            span = swing_high - swing_low
+            ratios = (0.236, 0.382, 0.5, 0.618, 0.786)
+            levels = {
+                f"{ratio * 100:.1f}%": (swing_high - span * ratio if impulse == "BULLISH" else swing_low + span * ratio)
+                for ratio in ratios
+            }
+            nearest_key, nearest_price = min(levels.items(), key=lambda item: abs(last - item[1]))
+            fib = {
+                "status": "CALCULATED", "direction": impulse, "swing_low": swing_low, "swing_high": swing_high,
+                "levels": levels, "nearest_level": {"level": nearest_key, "price": nearest_price, "distance_pct": abs(last-nearest_price)/last*100},
+                "golden_zone": {"lower": min(levels["50.0%"], levels["61.8%"]), "upper": max(levels["50.0%"], levels["61.8%"])},
+            }
+
     return {
         "status": "KNOWN",
         "moving_averages": {
@@ -189,5 +301,5 @@ def analyze_technical_indicators(candles: pd.DataFrame, *, envelope_pct: float =
             "state": rsi_state, "midline_50": midline,
             "divergence": rsi_divergence, "trendline_breakout": rsi_trendline,
         },
-        "summary_fa": "میانگین‌های متحرک جهت روند، OBV همراهی حجم و RSI مومنتوم را می‌سنجند؛ این شواهد به‌تنهایی سیگنال ورود یا مجوز سفارش نیستند.",
+        "summary_fa": "MA جهت روند، OBV همراهی حجم، RSI و MACD مومنتوم، فیبوناچی نواحی اصلاح، SAR جهت و حد متحرک، و ATR فقط نوسان را می‌سنجند؛ هیچ‌کدام به‌تنهایی مجوز سفارش نیستند.",
     }
