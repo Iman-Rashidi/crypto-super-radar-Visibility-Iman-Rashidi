@@ -2667,93 +2667,207 @@ def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
 
 
 def _blofin_demo_live_monitor_snapshot() -> dict:
-    """Fetch a fresh read-only Demo snapshot plus fills and closed-position history."""
+    """Build a complete, read-only Demo monitor snapshot with partial-source disclosure."""
     client = BloFinDemoReadOnly(timeout=8.0)
     store = BloFinDemoEventStore()
+    read_errors: list[dict[str, str]] = []
+
+    def read(endpoint: str, operation, default):
+        try:
+            return operation()
+        except Exception as exc:
+            # Do not leak exchange response bodies, credentials, or signed request data.
+            read_errors.append({"endpoint": endpoint, "error_type": type(exc).__name__})
+            return default
+
+    def rows(value, allowed):
+        if isinstance(value, dict):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [
+            {key: row[key] for key in allowed if key in row}
+            for row in value if isinstance(row, dict)
+        ]
+
     try:
-        latest = store.latest_order()
-        ticker_rows = client.get_tickers(inst_id="BTC-USDT")
-        balance = client.get_futures_balance(product_type="USDT-FUTURES")
-        positions = client.get_positions(inst_id="BTC-USDT")
-        open_orders = client.get_open_orders(inst_id="BTC-USDT")
+        latest = read("local_latest_order", store.latest_order, None)
+        ticker_rows = read(
+            "market_ticker", lambda: client.get_tickers(inst_id="BTC-USDT"), []
+        )
+        mark_rows = read(
+            "mark_price", lambda: client.get_mark_price(inst_id="BTC-USDT"), []
+        )
+        balance = read(
+            "futures_balance",
+            lambda: client.get_futures_balance(product_type="USDT-FUTURES"),
+            {},
+        )
+        positions = read(
+            "positions", lambda: client.get_positions(inst_id="BTC-USDT"), []
+        )
+        open_orders = read(
+            "open_orders", lambda: client.get_open_orders(inst_id="BTC-USDT"), []
+        )
+        open_tpsl = read(
+            "open_tpsl_orders",
+            lambda: client.get_open_tpsl_orders(inst_id="BTC-USDT", limit=100),
+            [],
+        )
+        tpsl_history = read(
+            "tpsl_orders_history",
+            lambda: client.get_tpsl_orders_history(inst_id="BTC-USDT", limit=100),
+            [],
+        )
+        fills = read(
+            "fills_history",
+            lambda: client.get_fills_history(inst_id="BTC-USDT", limit=100),
+            [],
+        )
+        completed_orders = read(
+            "orders_history",
+            lambda: client.get_orders_history(inst_id="BTC-USDT", limit=100),
+            [],
+        )
+        closed_positions = read(
+            "closed_positions_history",
+            lambda: client.get_positions_history(
+                inst_id="BTC-USDT", state="closed", limit=100,
+            ),
+            [],
+        )
+
         order_detail = None
-        if latest:
-            detail = client.get_order_detail(
-                "BTC-USDT", client_order_id=str(latest["client_order_id"]),
+        if isinstance(latest, dict) and latest.get("client_order_id"):
+            detail = read(
+                "latest_local_order_detail",
+                lambda: client.get_order_detail(
+                    "BTC-USDT", client_order_id=str(latest["client_order_id"]),
+                ),
+                [],
             )
             if isinstance(detail, list):
-                order_detail = next((row for row in detail if isinstance(row, dict)), None)
+                order_detail = next(
+                    (row for row in detail if isinstance(row, dict)), None
+                )
             elif isinstance(detail, dict):
                 order_detail = detail
-        fills = client.get_fills_history(inst_id="BTC-USDT", limit=100)
-        completed_orders = client.get_orders_history(inst_id="BTC-USDT", limit=20)
-        closed_positions = client.get_positions_history(
-            inst_id="BTC-USDT", state="closed", limit=20,
+
+        ticker = (
+            ticker_rows[0]
+            if isinstance(ticker_rows, list) and ticker_rows
+            and isinstance(ticker_rows[0], dict) else {}
         )
+        mark = (
+            mark_rows[0]
+            if isinstance(mark_rows, list) and mark_rows
+            and isinstance(mark_rows[0], dict) else {}
+        )
+        balance = balance if isinstance(balance, dict) else {}
 
-        def rows(value, allowed):
-            if not isinstance(value, list):
-                return []
-            return [
-                {key: row[key] for key in allowed if key in row}
-                for row in value if isinstance(row, dict)
-            ]
+        position_fields = (
+            "positionId", "instId", "instType", "marginMode", "positionSide",
+            "positions", "availablePositions", "averagePrice", "markPrice",
+            "unrealizedPnl", "unrealizedPnlRatio", "realizedPnl", "leverage",
+            "liquidationPrice", "marginRatio", "initialMargin",
+            "maintenanceMargin", "createTime", "updateTime",
+        )
+        order_fields = (
+            "orderId", "clientOrderId", "instId", "instType", "marginMode",
+            "positionSide", "side", "orderType", "orderCategory", "price",
+            "averagePrice", "size", "filledSize", "filledAmount", "fee", "pnl",
+            "state", "leverage", "reduceOnly", "createTime", "updateTime",
+            "tpTriggerPrice", "tpOrderPrice", "tpTriggerPriceType",
+            "slTriggerPrice", "slOrderPrice", "slTriggerPriceType",
+            "attachAlgoOrders",
+        )
+        fill_fields = (
+            "tradeId", "orderId", "instId", "positionSide", "side",
+            "fillPrice", "fillSize", "fillPnl", "fee", "ts",
+        )
+        closed_fields = (
+            "historyId", "positionId", "instId", "instType", "side",
+            "positionSide", "marginMode", "closePositions", "maxPositions",
+            "liquidationPositions", "openAveragePrice", "closeAveragePrice",
+            "createTime", "updateTime", "leverage", "realizedPnl",
+            "realizedPnlRatio", "fee",
+        )
+        tpsl_fields = (
+            "tpslId", "clientOrderId", "instId", "marginMode", "positionSide",
+            "side", "tpTriggerPrice", "tpOrderPrice", "tpTriggerPriceType",
+            "slTriggerPrice", "slOrderPrice", "slTriggerPriceType", "size",
+            "state", "leverage", "reduceOnly", "actualSize", "createTime",
+            "updateTime", "brokerId",
+        )
+        balance_fields = (
+            "currency", "equity", "balance", "available", "availableEquity",
+            "frozen", "orderFrozen", "equityUsd", "isolatedEquity",
+            "isolatedUnrealizedPnl", "bonus", "ts",
+        )
+        balance_details = balance.get("details")
+        balance_details = [
+            {key: item[key] for key in balance_fields if key in item}
+            for item in balance_details
+            if isinstance(balance_details, list) and isinstance(item, dict)
+        ] if isinstance(balance.get("details"), list) else []
 
-        ticker = ticker_rows[0] if isinstance(ticker_rows, list) and ticker_rows and isinstance(ticker_rows[0], dict) else {}
-        position_rows = rows(positions, (
-            "positionId", "instId", "marginMode", "positionSide", "positions",
-            "averagePrice", "markPrice", "unrealizedPnl", "unrealizedPnlRatio",
-            "leverage", "liquidationPrice", "createTime", "updateTime",
-        ))
-        order_rows = rows(open_orders, (
+        safe_detail_fields = (
             "orderId", "clientOrderId", "instId", "side", "positionSide",
-            "orderType", "size", "filledSize", "price", "state", "createTime", "updateTime",
-        ))
-        fill_rows = rows(fills, (
-            "tradeId", "orderId", "instId", "side", "fillPrice", "fillSize",
-            "fillPnl", "fee", "ts",
-        ))
-        completed_rows = rows(completed_orders, (
-            "orderId", "clientOrderId", "instId", "side", "orderType", "size",
-            "filledSize", "averagePrice", "fee", "pnl", "state", "createTime", "updateTime",
-        ))
-        closed_rows = rows(closed_positions, (
-            "historyId", "positionId", "instId", "side", "positionSide",
-            "closePositions", "openAveragePrice", "closeAveragePrice",
-            "createTime", "updateTime", "leverage", "realizedPnl", "realizedPnlRatio", "fee",
-        ))
-        detail_fields = (
-            "orderId", "clientOrderId", "instId", "side", "positionSide",
-            "orderType", "size", "filledSize", "averagePrice", "price", "state",
-            "createTime", "updateTime", "fee", "pnl",
+            "marginMode", "orderType", "orderCategory", "size", "filledSize",
+            "filledAmount", "averagePrice", "price", "state", "createTime",
+            "updateTime", "fee", "pnl", "leverage", "tpTriggerPrice",
+            "tpOrderPrice", "tpTriggerPriceType", "slTriggerPrice",
+            "slOrderPrice", "slTriggerPriceType", "attachAlgoOrders",
         )
         safe_detail = (
-            {key: order_detail[key] for key in detail_fields if key in order_detail}
+            {key: order_detail[key] for key in safe_detail_fields if key in order_detail}
             if isinstance(order_detail, dict) else None
+        )
+        safe_latest = None
+        if isinstance(latest, dict):
+            allowed_local = (
+                "client_order_id", "signal_id", "instrument_id", "side",
+                "quantity", "entry_price", "stop_loss", "take_profit",
+                "leverage", "status", "exchange_order_id", "created_at", "updated_at",
+            )
+            safe_latest = {key: latest[key] for key in allowed_local if key in latest}
+
+        execution_events = read(
+            "local_execution_events", lambda: store.recent_all_events(limit=100), []
         )
         return {
             "status": "CONNECTED_READ_ONLY",
             "environment": "BLOFIN_DEMO",
+            "permission_mode": "READ_ONLY",
+            "orders_enabled": False,
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             "refresh_interval_seconds": 5,
+            "data_completeness": "COMPLETE" if not read_errors else "PARTIAL",
+            "read_errors": read_errors,
             "market": {
                 "instId": "BTC-USDT",
                 "last": ticker.get("last"),
-                "markPrice": ticker.get("markPrice"),
+                "markPrice": mark.get("markPrice"),
+                "indexPrice": mark.get("indexPrice"),
                 "ts": ticker.get("ts"),
+                "markPriceTs": mark.get("ts"),
             },
             "account": {
-                "totalEquity": balance.get("totalEquity") if isinstance(balance, dict) else None,
-                "isolatedEquity": balance.get("isolatedEquity") if isinstance(balance, dict) else None,
+                "ts": balance.get("ts"),
+                "totalEquity": balance.get("totalEquity"),
+                "isolatedEquity": balance.get("isolatedEquity"),
+                "details": balance_details,
             },
-            "latest_local_order": latest,
+            "latest_local_order": safe_latest,
             "order_detail": safe_detail,
-            "positions": position_rows,
-            "open_orders": order_rows,
-            "fills": fill_rows,
-            "completed_orders": completed_rows,
-            "closed_positions": closed_rows,
-            "execution_events": store.recent_events(str(latest["client_order_id"])) if latest else [],
+            "positions": rows(positions, position_fields),
+            "open_orders": rows(open_orders, order_fields),
+            "fills": rows(fills, fill_fields),
+            "completed_orders": rows(completed_orders, order_fields),
+            "closed_positions": rows(closed_positions, closed_fields),
+            "open_tpsl_orders": rows(open_tpsl, tpsl_fields),
+            "tpsl_orders_history": rows(tpsl_history, tpsl_fields),
+            "execution_events": execution_events,
         }
     finally:
         store.close()
