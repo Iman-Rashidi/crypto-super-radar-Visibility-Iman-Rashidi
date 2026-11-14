@@ -154,6 +154,124 @@ def comparable_projects(project: Mapping[str, Any], peers: Sequence[Mapping[str,
             "reason": None if relative else "No valid same-sector peer multiple comparison."}
 
 
+
+def debt_to_equity_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Calculate sourced company leverage; non-positive equity is not a valid D/E denominator."""
+    asset_class = str(evidence.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None, "debt_to_equity": None,
+                "reason": "D/E شرکتی برای توکن کاربرد ندارد."}
+    source, observed = evidence.get("source"), evidence.get("observed_at_utc")
+    sourced = (isinstance(source, str) and source.startswith(("https://", "http://"))
+               and isinstance(observed, str) and bool(observed.strip()))
+    liabilities = _number(evidence.get("total_liabilities"))
+    equity = _number(evidence.get("total_equity"))
+    debt_to_equity = (liabilities / equity
+                      if sourced and liabilities is not None and liabilities >= 0
+                      and equity is not None and equity > 0 else None)
+    ebit = _number(evidence.get("ebit"))
+    interest_expense = _positive(evidence.get("interest_expense"))
+    interest_coverage = (ebit / interest_expense
+                         if sourced and ebit is not None and interest_expense is not None else None)
+    peer_median = _positive(evidence.get("peer_median_debt_to_equity"))
+    industry_median = _positive(evidence.get("industry_median_debt_to_equity"))
+    return {
+        "status": "KNOWN" if debt_to_equity is not None else "UNKNOWN",
+        "score": None, "debt_to_equity": round(debt_to_equity, 4) if debt_to_equity is not None else None,
+        "total_liabilities": liabilities if sourced else None,
+        "total_equity": equity if sourced else None,
+        "interest_coverage_ratio": round(interest_coverage, 4) if interest_coverage is not None else None,
+        "peer_median_debt_to_equity": peer_median if sourced else None,
+        "industry_median_debt_to_equity": industry_median if sourced else None,
+        "relative_to_peer_pct": round((debt_to_equity / peer_median - 1) * 100, 2)
+            if debt_to_equity is not None and peer_median is not None else None,
+        "relative_to_industry_pct": round((debt_to_equity / industry_median - 1) * 100, 2)
+            if debt_to_equity is not None and industry_median is not None else None,
+        "source": source if sourced else None, "observed_at_utc": observed if sourced else None,
+        "reason": ("D/E محاسبه شد." if debt_to_equity is not None else
+                   "برای D/E به بدهی کل، حقوق صاحبان سهام مثبت، منبع و زمان معتبر نیاز است؛ حقوق صاحبان سهام صفر یا منفی نسبت را نامعتبر می‌کند."),
+        "limitations": ["D/E بین صنایع و استانداردهای گزارشگری متفاوت قابل مقایسه مستقیم نیست.",
+                        "برای بانک‌ها و مؤسسات مالی باید معیارهای اهرمی اختصاصی صنعت به‌کار رود.",
+                        "D/E به‌تنهایی ریسک نکول یا توان پرداخت بهره را نشان نمی‌دهد؛ پوشش بهره مکمل آن است."],
+    }
+
+
+def comparative_company_analysis(company: Mapping[str, Any],
+                                 peers: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Evidence-gated, like-for-like equity peer comparison; no composite score."""
+    asset_class = str(company.get("asset_class") or "").strip().lower()
+    if asset_class in {"crypto", "cryptocurrency", "token", "digital_asset"}:
+        return {"status": "NOT_APPLICABLE", "score": None,
+                "reason": "مقایسه شرکت‌های بورسی برای توکن کاربرد ندارد؛ از مقایسه پروژه‌های هم‌گروه رمزارزی استفاده شود."}
+    sector = str(company.get("sector") or "").strip().lower()
+    subsector = str(company.get("subsector") or "").strip().lower()
+    cap = _positive(company.get("market_cap"))
+    metrics = ("revenue_growth_pct", "operating_margin_pct", "net_margin_pct",
+               "roe_pct", "debt_to_equity", "interest_coverage_ratio",
+               "pe_ratio", "pb_ratio", "dividend_yield_pct")
+    def verified(row: Mapping[str, Any]) -> bool:
+        source, observed = row.get("source"), row.get("observed_at_utc")
+        return (isinstance(source, str) and source.startswith(("https://", "http://"))
+                and isinstance(observed, str) and bool(observed.strip()))
+    company_valid = bool(sector and subsector and cap is not None and verified(company))
+    eligible, excluded = [], []
+    for peer in peers:
+        if not isinstance(peer, Mapping):
+            excluded.append("INVALID_RECORD")
+            continue
+        peer_cap = _positive(peer.get("market_cap"))
+        same_group = (str(peer.get("sector") or "").strip().lower() == sector
+                      and str(peer.get("subsector") or "").strip().lower() == subsector)
+        similar_size = bool(cap and peer_cap and 0.5 <= peer_cap / cap <= 2.0)
+        if not company_valid or not same_group or not similar_size or not verified(peer):
+            excluded.append(str(peer.get("symbol") or peer.get("name") or "UNKNOWN_PEER"))
+            continue
+        eligible.append(peer)
+    comparisons = {}
+    if company_valid:
+        for metric in metrics:
+            current = _number(company.get(metric))
+            peer_values = [_number(peer.get(metric)) for peer in eligible]
+            peer_values = [value for value in peer_values if value is not None]
+            if current is None or not peer_values:
+                continue
+            peer_median = median(peer_values)
+            comparisons[metric] = {
+                "company_value": current, "peer_median": round(peer_median, 6),
+                "peer_min": min(peer_values), "peer_max": max(peer_values),
+                "peer_count": len(peer_values),
+                "relative_to_peer_median_pct": (round((current / peer_median - 1) * 100, 2)
+                    if peer_median != 0 else None),
+                "status": "KNOWN",
+            }
+    qualitative = {}
+    for key in ("management_quality", "brand_strength", "market_reputation"):
+        item = company.get(key)
+        if isinstance(item, Mapping) and isinstance(item.get("description"), str) and verified(item):
+            qualitative[key] = {"description": item["description"], "source": item["source"],
+                                "observed_at_utc": item["observed_at_utc"], "status": "KNOWN"}
+        else:
+            qualitative[key] = {"description": None, "source": None,
+                                "observed_at_utc": None, "status": "UNKNOWN"}
+    return {
+        "status": "KNOWN" if comparisons else "UNKNOWN", "score": None,
+        "sector": sector or None, "subsector": subsector or None,
+        "company": company.get("symbol") or company.get("name"),
+        "eligible_peer_count": len(eligible), "excluded_peer_count": len(excluded),
+        "excluded_peers": excluded, "comparisons": comparisons,
+        "qualitative_context": qualitative,
+        "peer_selection": {"same_sector_and_subsector": True,
+                           "market_cap_range": "50%-200% of company market capitalization"},
+        "source": company.get("source") if company_valid else None,
+        "observed_at_utc": company.get("observed_at_utc") if company_valid else None,
+        "reason": None if comparisons else "داده معتبر شرکت و حداقل یک همتای هم‌صنعت، هم‌زیرصنعت و هم‌اندازه لازم است.",
+        "limitations": ["مقایسه فقط با دوره مالی و مبنای حسابداری همسان معتبر است؛ دوره/واحد داده باید پیش از ارسال استاندارد شود.",
+                        "میانه همتایان شاخص توصیفی است، نه ارزش ذاتی یا سیگنال خرید و فروش.",
+                        "کیفیت مدیریت، قدرت برند و شهرت بازار فقط زمینه کیفی منبع‌دار هستند و امتیاز عددی نمی‌گیرند.",
+                        "شرکت‌های مالی، بیمه و بانک‌ها ممکن است به معیارهای تخصصی صنعت نیاز داشته باشند."],
+    }
+
+
 def accounting_principles_analysis(evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Assess financial-reporting quality without misapplying industrial accounting to tokens.
 
@@ -888,6 +1006,9 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
     modules["dividend_analysis"] = dividend_analysis(evidence.get("dividend_analysis", {}))
     modules["share_buybacks"] = share_buyback_analysis(evidence.get("share_buybacks", {}))
     modules["eps_analysis"] = eps_analysis(evidence.get("eps_analysis", {}))
+    modules["debt_to_equity"] = debt_to_equity_analysis(evidence.get("debt_to_equity", {}))
+    modules["comparative_company_analysis"] = comparative_company_analysis(
+        evidence.get("company", {}), evidence.get("company_peers", []))
     esg_module = esg_analysis(evidence.get("esg_analysis", {}))
     esg_module["diagnostic_score"] = esg_module.get("score")
     esg_module["score"] = None  # Supporting ESG diagnostic must never enter the weighted score.
@@ -924,6 +1045,7 @@ def build_fundamental_report(evidence: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = ["MODULE_WEIGHTS", "MIN_COVERAGE_PCT", "classify_industry",
            "industry_analysis", "accounting_principles_analysis", "market_analysis", "event_analysis", "dividend_analysis",
            "mergers_acquisitions_analysis", "sector_rotation_analysis",
-           "share_buyback_analysis", "eps_analysis", "esg_analysis",
+           "share_buyback_analysis", "eps_analysis", "debt_to_equity_analysis",
+           "comparative_company_analysis", "esg_analysis",
            "discounted_protocol_cashflows", "comparable_projects",
            "build_fundamental_report"]
