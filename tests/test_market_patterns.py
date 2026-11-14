@@ -327,5 +327,50 @@ class MarketPatternTests(unittest.TestCase):
         self.assertFalse(any(p["name_en"] == "Piercing Line" for p in analysis["candlestick_patterns"]))
 
 
+    def _set_bullish_marubozu(self, frame: pd.DataFrame, *, with_confirmation: bool = False) -> pd.DataFrame:
+        index = -2 if with_confirmation else -1
+        frame.iloc[index] = [96.0, 101.0, 96.0, 101.0, 1800.0]
+        if with_confirmation:
+            frame.iloc[-1] = [101.0, 103.0, 100.8, 102.5, 1900.0]
+        return frame
+
+    def test_bullish_marubozu_detected_after_downtrend_as_pending_evidence(self):
+        frame = self._set_bullish_marubozu(candle_frame("down"))
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bullish Marubozu")
+        self.assertEqual(pattern["name_fa"], "ماروبوزوی صعودی")
+        self.assertEqual(pattern["direction"], "NEUTRAL")
+        self.assertEqual(pattern["potential_direction"], "BULLISH")
+        self.assertEqual(pattern["state"], "NEEDS_CONFIRMATION")
+        self.assertEqual(pattern["trigger_price"], 101.0)
+        self.assertEqual(pattern["invalidation_price"], 96.0)
+
+    def test_bullish_marubozu_confirmed_by_next_close_above_high(self):
+        frame = self._set_bullish_marubozu(candle_frame("down"), with_confirmation=True)
+        analysis = analyze_market_patterns(frame, [])
+        pattern = next(p for p in analysis["candlestick_patterns"] if p["name_en"] == "Bullish Marubozu")
+        self.assertEqual(pattern["state"], "CONFIRMED")
+        self.assertEqual(pattern["direction"], "BULLISH")
+        self.assertIsNone(pattern["potential_direction"])
+
+    def test_bullish_marubozu_rejected_when_shadows_are_too_long(self):
+        frame = self._set_bullish_marubozu(candle_frame("down"))
+        frame.iloc[-1] = [96.0, 102.0, 95.0, 100.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bullish Marubozu" for p in analysis["candlestick_patterns"]))
+
+    def test_bullish_marubozu_rejected_when_body_is_not_long_relative_to_prior_candles(self):
+        frame = self._set_bullish_marubozu(candle_frame("down"))
+        frame.iloc[-1] = [96.0, 97.0, 96.0, 97.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bullish Marubozu" for p in analysis["candlestick_patterns"]))
+
+    def test_bullish_marubozu_rejected_for_bearish_or_doji_candle(self):
+        frame = self._set_bullish_marubozu(candle_frame("down"))
+        frame.iloc[-1] = [101.0, 101.0, 96.0, 96.0, 1800.0]
+        analysis = analyze_market_patterns(frame, [])
+        self.assertFalse(any(p["name_en"] == "Bullish Marubozu" for p in analysis["candlestick_patterns"]))
+
+
 if __name__ == "__main__":
     unittest.main()
