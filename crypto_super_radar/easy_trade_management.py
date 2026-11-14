@@ -9,6 +9,7 @@ import math
 import threading
 import time
 import uuid
+import numpy as np
 from typing import Any, Optional
 
 from .database import connect_database
