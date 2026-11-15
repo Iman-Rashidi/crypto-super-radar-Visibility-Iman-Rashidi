@@ -9,7 +9,9 @@ from crypto_super_radar.challenge_01_runner import (
     Challenge01DataError,
     Challenge01Runner,
     MIN_SAMPLES_PER_ROUND,
+    get_challenge_01_status,
 )
+from crypto_super_radar.learning_experience_memory import LearningExperienceMemory
 from crypto_super_radar.blofin_demo_spot_readonly import (
     BloFinDemoSpotReadOnly,
     DEMO_SPOT_REST_URL,
@@ -61,6 +63,7 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
             connection_factory=self.connection_factory,
             backend_factory=lambda: "TEST_SQLITE_FILE",
             now_ms=lambda: self.now_ms,
+            allow_non_durable_for_tests=True,
         )
 
     def test_real_memory_write_close_reopen_and_verify_100_candles(self):
@@ -70,7 +73,53 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.assertTrue(result["memory_recovery_verified"])
         self.assertEqual(result["memory_records_verified"], 100)
         self.assertEqual(result["memory_integrity"], "PASS")
+        self.assertEqual(result["memory_backend"], "TEST_SQLITE_FILE")
+        self.assertEqual(result["rule_reference_agreement"], 1.0)
+        self.assertEqual(result["decision_correctness"], "UNKNOWN")
+        self.assertNotIn("classification_accuracy", result)
         self.assertFalse(result["orders_submitted"])
+
+        db = self.connection_factory()
+        try:
+            memory = LearningExperienceMemory(db)
+            saved = memory.get_experience(result["first_experience_id"])
+            decision = next(event for event in saved["events"] if event["event_type"] == "DECISION_RECORDED")
+            outcome = next(event for event in saved["events"] if event["event_type"] == "OUTCOME_LABELLED")
+            self.assertEqual(decision["payload"]["decision"]["action"], "OBSERVE_ONLY")
+            self.assertEqual(outcome["payload"]["decision_correctness"], "UNKNOWN")
+            self.assertEqual(outcome["payload"]["realized_result"], "NOT_EXECUTED")
+            self.assertEqual(
+                outcome["payload"]["evidence"]["comparison"],
+                "DETERMINISTIC_OHLC_LABEL_CONSISTENCY_NOT_PREDICTIVE_GROUND_TRUTH",
+            )
+        finally:
+            db.close()
+
+    def test_runtime_runner_blocks_local_sqlite_before_provider_access(self):
+        client = FakeSpotClient(self.rows)
+        runner = Challenge01Runner(
+            client=client,
+            connection_factory=self.connection_factory,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            now_ms=lambda: self.now_ms,
+        )
+        result = runner.run_bot_only_round(round_number=1, sample_count=100)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["reason_code"], "DURABLE_LEARNING_MEMORY_REQUIRED")
+        self.assertEqual(result["memory_backend"], "TEST_SQLITE_FILE")
+        self.assertEqual(client.calls, [])
+        self.assertFalse(result["orders_submitted"])
+
+    def test_status_endpoint_never_reports_local_sqlite_as_durable(self):
+        status = get_challenge_01_status(
+            connection_factory=self.connection_factory,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+        )
+        self.assertEqual(status["status"], "BLOCKED")
+        self.assertEqual(status["reason_code"], "DURABLE_LEARNING_MEMORY_REQUIRED")
+        self.assertEqual(status["memory_backend"], "TEST_SQLITE_FILE")
+        self.assertIsNone(status["next_round"])
+        self.assertFalse(status["orders_submitted"])
 
     def test_open_latest_candle_is_excluded_and_completed_candles_are_used(self):
         rows = [candle(self.now_ms - 5 * 60 * 1000, "100", "106", "99", "105", "0")] + self.rows
@@ -106,6 +155,7 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
             connection_factory=self.connection_factory,
             backend_factory=lambda: "TEST_SQLITE_FILE",
             now_ms=lambda: stale_now,
+            allow_non_durable_for_tests=True,
         )
         result = runner.run_bot_only_round(round_number=1, sample_count=100)
         self.assertEqual(result["status"], "UNKNOWN")
