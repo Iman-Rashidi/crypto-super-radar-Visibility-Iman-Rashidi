@@ -10,6 +10,7 @@ from crypto_super_radar.challenge_01_ai_mentor import (
     review_locked_baseline,
 )
 from crypto_super_radar.learning_experience_memory import LearningExperienceMemory
+from crypto_super_radar.challenge_01_runner import get_challenge_01_status
 
 
 class Challenge01AIMentorTests(unittest.TestCase):
@@ -126,6 +127,22 @@ class Challenge01AIMentorTests(unittest.TestCase):
             self.memory.get_experience(f"baseline-{index}")["verification"]["status"] == "PASS"
             for index in range(100)
         ))
+        retry = review_locked_baseline(
+            connection_factory=self.new_connection,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            allow_non_durable_for_tests=True,
+        )
+        self.assertEqual(retry["status"], "MENTOR_REVIEW_RECORDED")
+        self.assertEqual(retry["mentor_reviews_recorded"], 100)
+        status = get_challenge_01_status(
+            connection_factory=self.new_connection,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            allow_non_durable_for_tests=True,
+        )
+        self.assertTrue(status["mentor_review_complete"])
+        self.assertEqual(status["mentor_reviewed_samples"], 100)
+        self.assertEqual(status["next_stage"], "ASSISTED_ROUND_RUNNER_REQUIRED")
+        self.assertTrue(status["later_rounds_blocked"])
 
 
 if __name__ == "__main__":
