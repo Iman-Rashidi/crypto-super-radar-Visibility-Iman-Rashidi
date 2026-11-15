@@ -2752,10 +2752,62 @@ def _blofin_demo_execution_readiness() -> dict:
     }
 
 def _blofin_demo_smoke_test_readiness() -> dict:
-    """Readiness for the separately gated, signal-independent Demo connectivity test."""
+    """Require a complete read-only flat-account check before the independent Demo test."""
     base = _blofin_demo_execution_readiness()
     enabled = os.getenv("BLOFIN_DEMO_SMOKE_TEST_ENABLED", "").strip().lower() == "true"
-    ready = base.get("status") == "READY" and enabled
+    blockers: list[str] = []
+    open_position_count = None
+    open_order_count = None
+
+    if base.get("status") == "READY" and enabled:
+        try:
+            snapshot = _blofin_demo_live_monitor_snapshot("BTC-USDT")
+        except Exception:
+            snapshot = None
+            blockers.append("LIVE_MONITOR_FAILED")
+
+        if not isinstance(snapshot, dict):
+            if "LIVE_MONITOR_FAILED" not in blockers:
+                blockers.append("LIVE_MONITOR_UNAVAILABLE")
+        elif (
+            snapshot.get("status") != "CONNECTED_READ_ONLY"
+            or snapshot.get("data_completeness") != "COMPLETE"
+            or snapshot.get("read_errors")
+        ):
+            blockers.append("LIVE_MONITOR_INCOMPLETE")
+        else:
+            try:
+                open_position_count = _active_position_count(snapshot.get("positions"))
+                open_order_count = _active_order_count(snapshot.get("open_orders"))
+            except Exception:
+                blockers.append("POSITION_OR_ORDER_STATE_UNVERIFIABLE")
+            else:
+                if open_position_count:
+                    blockers.append("EXISTING_OPEN_POSITION")
+                if open_order_count:
+                    blockers.append("EXISTING_OPEN_ORDER")
+
+    ready = base.get("status") == "READY" and enabled and not blockers
+    if blockers:
+        message_fa = (
+            "تست مستقل مسدود شد؛ وضعیت کامل و بدون ابهام حساب BTC-USDT لازم است. "
+            "پوزیشن یا سفارش قبلی به‌هیچ‌وجه توسط تست بسته یا لغو نمی‌شود."
+        )
+    elif base.get("status") != "READY":
+        message_fa = (
+            "تست مستقل مسدود است؛ پیش‌نیازهای کلید Trade، احراز هویت، فعال‌سازی Demo "
+            "و ذخیره‌سازی پایدار کامل نیستند."
+        )
+    elif not enabled:
+        message_fa = (
+            "برای فعال‌کردن تست مستقل، BLOFIN_DEMO_SMOKE_TEST_ENABLED=true را در Environment سرویس Demo تنظیم کن."
+        )
+    else:
+        message_fa = (
+            "تست مستقل آماده است: حساب BTC-USDT در Demo بدون پوزیشن و سفارش باز تأیید شد؛ "
+            "تست فقط LONG، حداقل حجم و ایزوله 1x است و فقط پوزیشن متعلق به همان تست را می‌بندد."
+        )
+
     return {
         **base,
         "status": "READY" if ready else "BLOCKED",
@@ -2765,13 +2817,10 @@ def _blofin_demo_smoke_test_readiness() -> dict:
         "smoke_test_direction": "LONG",
         "smoke_test_minimum_size_only": True,
         "smoke_test_auto_close": True,
-        "message_fa": (
-            "تست مستقل آماده است: بدون سیگنال، فقط BTC-USDT Demo، LONG، حداقل حجم و ایزوله 1x؛ پوزیشن ایجادشده خودکار بسته و راستی‌آزمایی می‌شود."
-            if ready else
-            ("برای فعال‌کردن تست مستقل، BLOFIN_DEMO_SMOKE_TEST_ENABLED=true را در Environment سرویس Demo تنظیم کن؛ سایر پیش‌نیازهای Trade و ذخیره‌سازی نیز باید READY باشند."
-             if base.get("status") == "READY" else
-             "تست مستقل مسدود است؛ کلید Trade دمو، فعال‌سازی معامله Demo، توکن پنل و حافظه پایدار Turso هنوز کامل نیستند.")
-        ),
+        "smoke_test_blockers": blockers,
+        "smoke_test_open_position_count": open_position_count,
+        "smoke_test_open_order_count": open_order_count,
+        "message_fa": message_fa,
     }
 
 
