@@ -164,7 +164,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
             backend_factory=lambda: "TEST_SQLITE_FILE",
             allow_non_durable_for_tests=True,
         )
-        self.assertEqual(result["status"], "MENTOR_REVIEW_RECORDED")
+        self.assertEqual(result["status"], "MENTOR_REVIEW_RECORDED", msg=repr(result))
         self.assertEqual(result["baseline_samples"], 100)
         self.assertEqual(result["mentor_reviews_recorded"], 100)
         self.assertEqual(result["next_stage"], "FORWARD_HOLDOUT_VALIDATION_REQUIRED")
