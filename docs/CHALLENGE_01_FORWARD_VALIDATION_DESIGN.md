@@ -8,10 +8,11 @@
 
 - Challenge 1 BOT_ONLY currently classifies the same completed candle using its final Open and Close.
 - This is a descriptive candle-label consistency task. It is not a forecast of a later candle and its 100% score must never be described as predictive accuracy or trading edge.
-- A deterministic Mentor audit now reviews the locked baseline and records append-only feedback. It is deliberately provider-free and is not an LLM.
-- A protected dashboard endpoint invokes the batch audit only when at least 100 valid, final-labelled baseline experiences exist and the configured memory backend is Turso Cloud SQLite.
-- The dashboard status keeps all later rounds blocked after Mentor review because a predictive assisted-round runner is not yet implemented.
-- Current code changes have passed GitHub Actions run 1532: both jobs succeeded, including the extracted source-bundle tests and Streamlit smoke test. This proves CI only, not Render execution or persistent runtime memory.
+- The Mentor performs an append-only audit of each locked baseline and trains a pure-Python multinomial logistic-regression candidate from the oldest 80 feature/target pairs, with the newest 20 as a temporal validation split.
+- The candidate artifact stores the feature schema, normalization statistics, weights, biases, training/validation dataset hashes, validation metrics and artifact SHA-256 in a LESSON_PROPOSED event. The hash is independently recalculated on read-back.
+- A protected dashboard endpoint invokes the batch Mentor only when exactly 100 valid, final-labelled forward samples exist and the configured memory backend is Turso Cloud SQLite.
+- Dashboard status distinguishes completed Mentor feedback from a verified candidate artifact. Missing or invalid artifact keeps the stage at AI_MENTOR_MODEL_BUILD_REQUIRED; a valid artifact advances only to FORWARD_HOLDOUT_VALIDATION_REQUIRED. All assisted rounds remain blocked.
+- GitHub Actions run 1573 passed: focused Challenge 1 tests 20/20, full repository suite 673/673, and Streamlit smoke. This proves CI only, not Render execution or persistent runtime memory.
 
 ## 2. Why the next rounds must change
 
