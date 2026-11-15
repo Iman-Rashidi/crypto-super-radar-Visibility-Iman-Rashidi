@@ -6718,10 +6718,15 @@ async function loadBlofinInstruments(){
                     or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
                 ):
                     return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
-                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                # A separately managed smoke-test token lets an operator launch
+                # this one-purpose Demo test without changing the dashboard token.
+                expected_token = (
+                    os.getenv("BLOFIN_DEMO_SMOKE_TEST_TOKEN", "").strip()
+                    or os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                )
                 if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
                     return self._send(401, json.dumps({
-                        "status": "UNAUTHORIZED", "message_fa": "توکن پنل معتبر نیست."
+                        "status": "UNAUTHORIZED", "message_fa": "مجوز تست مستقل معتبر نیست."
                     }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 if form.get("confirm", [""])[0] != "1":
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
