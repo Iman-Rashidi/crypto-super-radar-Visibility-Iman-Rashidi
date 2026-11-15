@@ -538,9 +538,9 @@ class EasyTraderLearningMemory:
 
     def _escalate_controls_locked(self, symbol: str, interval: str) -> dict[str, Any]:
         rows = self.db.execute("""
-            SELECT error_flag,label
+            SELECT error_flag,label,net_return_pct
             FROM easy_learning_samples
-            WHERE symbol=? AND interval=? AND label IS NOT NULL AND error_flag IS NOT NULL
+            WHERE symbol=? AND interval=? AND label IS NOT NULL
             ORDER BY outcome_at_ms DESC LIMIT 50
         """, (symbol, interval)).fetchall()
         level_row = self.db.execute(
@@ -549,12 +549,26 @@ class EasyTraderLearningMemory:
         ).fetchone()
         level = int(level_row["control_level"]) if level_row else 0
         count = len(rows)
-        error_rate = (
-            sum(int(row["error_flag"] or 0) for row in rows) / count if count else None
+        prediction_rows = [row for row in rows if row["error_flag"] is not None]
+        prediction_error_rate = (
+            sum(int(row["error_flag"] or 0) for row in prediction_rows) / len(prediction_rows)
+            if prediction_rows else None
         )
+        loss_rate = (
+            sum(1 for row in rows if int(row["label"] or 0) == 0) / count
+            if count else None
+        )
+        error_rate = max(
+            value for value in (prediction_error_rate, loss_rate)
+            if value is not None
+        ) if prediction_error_rate is not None or loss_rate is not None else None
         consecutive_errors = 0
         for row in rows:
-            if int(row["error_flag"] or 0) == 1:
+            is_error = (
+                int(row["error_flag"] or 0) == 1
+                if row["error_flag"] is not None else int(row["label"] or 0) == 0
+            )
+            if is_error:
                 consecutive_errors += 1
             else:
                 break
@@ -604,11 +618,13 @@ class EasyTraderLearningMemory:
             recent = self.db.execute("""
                 SELECT event_time_ms,payload_json FROM easy_learning_events
                 WHERE event_type='LEARNING_ERROR'
-                ORDER BY event_time_ms DESC LIMIT 10
+                ORDER BY event_time_ms DESC LIMIT 50
             """).fetchall()
             repeated = sum(
                 1 for row in recent
                 if json.loads(row["payload_json"]).get("code") == safe_code
+                and json.loads(row["payload_json"]).get("symbol") == market
+                and json.loads(row["payload_json"]).get("interval") == timeframe
                 and int(time.time() * 1000) - int(row["event_time_ms"]) <= 3_600_000
             )
             state = self.db.execute(
