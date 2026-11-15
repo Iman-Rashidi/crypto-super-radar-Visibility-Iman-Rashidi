@@ -612,6 +612,7 @@ def get_challenge_01_status(
         )
 
         candidate_model_sha256 = None
+        candidate_model_through_round = 0
         for item in experiences:
             if item.get("verification", {}).get("status") != "PASS":
                 continue
@@ -627,23 +628,39 @@ def get_challenge_01_status(
                     calculated_hash = hashlib.sha256(json.dumps(
                         artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False
                     ).encode("utf-8")).hexdigest()
+                    trained_round = artifact.get("trained_through_round")
+                    total_samples = artifact.get("training", {}).get("total_samples")
                     if (
                         saved_hash == calculated_hash
                         and artifact.get("schema") == "CSR_CH01_SOFTMAX_CANDIDATE_V1"
                         and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
-                        and artifact.get("training", {}).get("samples") == 80
-                        and artifact.get("temporal_validation", {}).get("samples") == 20
+                        and isinstance(trained_round, int)
+                        and artifact.get("training", {}).get("samples", 0) >= 60
+                        and artifact.get("temporal_validation", {}).get("samples", 0) >= 20
+                        and total_samples == artifact.get("training", {}).get("samples", 0)
+                        + artifact.get("temporal_validation", {}).get("samples", 0)
+                        and trained_round >= candidate_model_through_round
                     ):
                         candidate_model_sha256 = saved_hash
-                        break
+                        candidate_model_through_round = trained_round
                 except (TypeError, ValueError, KeyError):
                     continue
-            if candidate_model_sha256:
-                break
 
         candidate_model_present = candidate_model_sha256 is not None
-        mentor_review_ready = baseline_locked and (
-            not mentor_review_complete or not candidate_model_present
+        highest_completed_round = 1 if baseline_locked and mentor_review_complete else 0
+        for number in range(2, MAX_ROUNDS + 1):
+            if paired_rounds.get(number, False) and highest_completed_round == number - 1:
+                highest_completed_round = number
+            else:
+                break
+        candidate_model_ready = (
+            candidate_model_present
+            and candidate_model_through_round == highest_completed_round
+            and highest_completed_round >= 1
+        )
+        mentor_review_ready = baseline_locked and not mentor_review_complete
+        model_build_required = (
+            baseline_locked and mentor_review_complete and not candidate_model_ready
         )
         if not baseline_locked:
             next_round = 1
@@ -651,7 +668,7 @@ def get_challenge_01_status(
         elif not mentor_review_complete:
             next_round = None
             next_stage = "AI_MENTOR_REQUIRED"
-        elif not candidate_model_present:
+        elif not candidate_model_ready:
             next_round = None
             next_stage = "AI_MENTOR_MODEL_BUILD_REQUIRED"
         else:
@@ -664,7 +681,6 @@ def get_challenge_01_status(
                 "FORWARD_HOLDOUT_VALIDATION_REQUIRED"
                 if next_round is not None else "CHALLENGE_REVIEW_REQUIRED"
             )
-
         return {
             "status": "PASS",
             "challenge_id": CHALLENGE_ID,
@@ -685,6 +701,10 @@ def get_challenge_01_status(
             "mentor_review_complete": mentor_review_complete,
             "candidate_model_present": candidate_model_present,
             "candidate_model_sha256": candidate_model_sha256,
+            "candidate_model_through_round": candidate_model_through_round,
+            "candidate_model_ready": candidate_model_ready,
+            "model_build_required": model_build_required,
+            "highest_completed_round": highest_completed_round,
             "next_round": next_round,
             "next_stage": next_stage,
             "later_rounds_blocked": next_round is None,
