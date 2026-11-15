@@ -1221,5 +1221,60 @@ class WebAppHttpTests(unittest.TestCase):
 
 
 
+    def test_challenge_01_panel_exposes_assisted_round_control(self):
+        status, _headers, payload = self.request("GET", "/")
+        page = payload.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("/api/learning/challenge-01/assisted-run", page)
+        self.assertIn("مقایسه BOT_ONLY و Mentor", page)
+
+    def test_challenge_01_assisted_endpoint_requires_dashboard_token(self):
+        with patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "mentor-test-token"}):
+            with patch.object(web_app, "Challenge01AssistedRunner") as runner:
+                headers = {
+                    "Origin": f"http://{self.host}:{self.port}",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": "Bearer wrong-token",
+                }
+                status, _response_headers, payload = self.request(
+                    "POST", "/api/learning/challenge-01/assisted-run",
+                    body="confirm=1&round_number=2&sample_count=100", headers=headers,
+                )
+                self.assertEqual(status, 401)
+                self.assertEqual(json.loads(payload)["status"], "UNAUTHORIZED")
+                runner.assert_not_called()
+
+    def test_challenge_01_assisted_endpoint_uses_verified_stage_gate(self):
+        expected = {
+            "status": "ROUND_RECORDED_NOT_MASTERY",
+            "round_number": 2,
+            "sample_count": 100,
+            "orders_submitted": False,
+            "mastery_awarded": False,
+        }
+        gate = {"status": "PASS", "next_round": 2}
+        with patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "mentor-test-token"}):
+            with patch.object(web_app, "get_challenge_01_status", return_value=gate) as status_gate:
+                with patch.object(web_app, "Challenge01AssistedRunner") as runner_class:
+                    runner_class.return_value.run_round.return_value = expected
+                    headers = {
+                        "Origin": f"http://{self.host}:{self.port}",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Authorization": "Bearer mentor-test-token",
+                    }
+                    status, _response_headers, payload = self.request(
+                        "POST", "/api/learning/challenge-01/assisted-run",
+                        body="confirm=1&round_number=2&sample_count=100", headers=headers,
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(json.loads(payload), expected)
+                    status_gate.assert_called_once_with()
+                    runner_class.return_value.run_round.assert_called_once_with(
+                        round_number=2, sample_count=100,
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
