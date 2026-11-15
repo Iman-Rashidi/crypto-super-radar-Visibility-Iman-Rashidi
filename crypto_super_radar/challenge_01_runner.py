@@ -484,7 +484,7 @@ class Challenge01Runner:
                 "market": "SPOT",
                 "symbol": SYMBOL,
                 "timeframe": TIMEFRAME,
-                "sample_count": len(selected),
+                "sample_count": len(samples),
                 "dataset_version": dataset_version,
                 "dataset_sha256": dataset_hash,
                 "prediction_task": "NEXT_CANDLE_DIRECTION",
