@@ -229,7 +229,7 @@ def evaluate_flow_candle_signal(
     if buy_pct is not None:
         vote = "BUY" if buy_pct >= 55.0 else "SELL" if buy_pct <= 45.0 else None
         if vote:
-            votes.append({"source": "CANDLE_PRESSURE", "direction": vote})
+            votes.append({"source": "CANDLE_PRESSURE", "source_group": "CANDLE", "direction": vote})
 
     buy_quote = _finite(aggressor.get("buy_quote")) or 0.0
     sell_quote = _finite(aggressor.get("sell_quote")) or 0.0
@@ -240,13 +240,13 @@ def evaluate_flow_candle_signal(
         "SELL" if delta_ratio is not None and delta_ratio <= -0.02 else None
     )
     if vote:
-        votes.append({"source": "AGGRESSOR_CVD", "direction": vote})
+        votes.append({"source": "AGGRESSOR_CVD", "source_group": "AGGREGATE_TRADES", "direction": vote})
 
     imbalance = _finite(book.get("imbalance_pct"))
     if str(book.get("status") or "").upper() == "PASS" and imbalance is not None:
         vote = "BUY" if imbalance >= 12.0 else "SELL" if imbalance <= -12.0 else None
         if vote:
-            votes.append({"source": "TOP_20_DEPTH", "direction": vote})
+            votes.append({"source": "TOP_20_DEPTH", "source_group": "ORDER_BOOK", "direction": vote})
 
     large_buy = sum(
         _finite(item.get("quote_value")) or 0.0
@@ -261,10 +261,18 @@ def evaluate_flow_candle_signal(
             "SELL" if large_sell >= 1.5 * large_buy and large_sell > 0 else None
         )
         if vote:
-            votes.append({"source": "LARGE_PRINTS", "direction": vote})
+            votes.append({"source": "LARGE_PRINTS", "source_group": "AGGREGATE_TRADES", "direction": vote})
 
     supporting = sum(item["direction"] == side for item in votes)
     opposing = sum(item["direction"] != side for item in votes)
+    supporting_groups = {
+        item.get("source_group", item["source"])
+        for item in votes if item["direction"] == side
+    }
+    opposing_groups = {
+        item.get("source_group", item["source"])
+        for item in votes if item["direction"] != side
+    }
     latest = frame.iloc[-1]
     entry = _finite(latest.get("close"))
     timestamp = frame.index[-1].isoformat() if hasattr(frame.index[-1], "isoformat") else str(frame.index[-1])
@@ -281,13 +289,15 @@ def evaluate_flow_candle_signal(
         "flow_votes": votes,
         "supporting_flow_count": supporting,
         "opposing_flow_count": opposing,
+        "supporting_independent_sources": len(supporting_groups),
+        "opposing_independent_sources": len(opposing_groups),
         "signal_candle_at": timestamp,
         "entry_reference_price": entry,
     }
-    if supporting < 2 or supporting <= opposing:
+    if len(supporting_groups) < 2 or len(supporting_groups) <= len(opposing_groups):
         return {
             **base,
-            "reason_fa": f"الگوی {pattern.get('name_fa') or pattern.get('name_en')} تأیید شده، اما جریان سفارش کافی هم‌جهت نیست ({supporting} موافق / {opposing} مخالف).",
+            "reason_fa": f"الگوی {pattern.get('name_fa') or pattern.get('name_en')} تأیید شده، اما جریان سفارش کافی هم‌جهت نیست ({len(supporting_groups)} منبع مستقل موافق / {len(opposing_groups)} منبع مستقل مخالف).",
         }
     if entry is None or entry <= 0:
         return {**base, "status": "BLOCKED", "reason_fa": "قیمت کندل معتبر نیست."}
