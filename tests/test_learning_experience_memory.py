@@ -103,6 +103,15 @@ class LearningExperienceMemoryTests(unittest.TestCase):
                     decision={"action": "BUY", "confidence": 0.99},
                 )
 
+    def test_only_one_decision_per_engine_challenge_cycle_and_mode(self):
+        with self.db:
+            self.decision()
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.decision(
+                    experience_id="duplicate-cycle",
+                    event_id="duplicate-cycle-decision",
+                )
+
     def test_four_decision_outcome_combinations_are_distinguished(self):
         examples = [
             ("correct-profit", "CORRECT", "PROFIT", 5.0, "CORRECT_PROFIT"),
