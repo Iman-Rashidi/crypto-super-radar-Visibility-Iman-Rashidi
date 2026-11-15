@@ -45,6 +45,7 @@ from .blofin_demo_executor import (
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .database import storage_backend
 from .challenge_01_runner import Challenge01Runner, get_challenge_01_status
+from .challenge_01_ai_mentor import review_locked_baseline
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -4700,6 +4701,7 @@ class Handler(BaseHTTPRequestHandler):
             <h3>چالش ۱ · Single-Candle Direction · BloFin Demo Spot</h3>
             <p class="muted">۱۰۰ کندل کامل BTC-USDT در تایم‌فریم ۱ ساعته؛ فقط Open و Close. ابتدا BOT_ONLY ثبت می‌شود و حافظهٔ دائمی بازیابی و راستی‌آزمایی می‌شود. این آزمایش هیچ سفارش یا معامله‌ای ارسال نمی‌کند و هنوز مدرک قبولی نهایی نیست.</p>
             <button id="challenge-01-run" type="button" disabled>اجرای دور بعدی Challenge 1 (۱۰۰ نمونه)</button>
+            <button id="challenge-01-mentor" type="button" disabled>ممیزی ۱۰۰ تجربهٔ قفل‌شده با AI Mentor</button>
             <p id="challenge-01-status" class="muted" aria-live="polite">برای مشاهده وضعیت حافظه، توکن پنل را در کادر بالا وارد کن.</p>
             <pre id="challenge-01-report" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
           </div>
@@ -5377,13 +5379,14 @@ async function loadBlofinInstruments(){
           (function(){
             const tokenInput=document.getElementById('blofin-dashboard-token');
             const button=document.getElementById('challenge-01-run');
+            const mentorButton=document.getElementById('challenge-01-mentor');
             const status=document.getElementById('challenge-01-status');
             const report=document.getElementById('challenge-01-report');
-            if(!tokenInput||!button||!status||!report)return;
+            if(!tokenInput||!button||!mentorButton||!status||!report)return;
             let nextRound=null;
             async function refreshStatus(){
               const token=tokenInput.value.trim();
-              if(!token){nextRound=null;button.disabled=true;status.textContent='برای مشاهده وضعیت حافظه، توکن پنل را در کادر بالا وارد کن.';return;}
+              if(!token){nextRound=null;button.disabled=true;mentorButton.disabled=true;status.textContent='برای مشاهده وضعیت حافظه، توکن پنل را در کادر بالا وارد کن.';return;}
               button.disabled=true;status.textContent='در حال خواندن حافظهٔ Challenge 1...';
               try{
                 const response=await fetch('/api/learning/challenge-01/status',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
@@ -5391,13 +5394,15 @@ async function loadBlofinInstruments(){
                 if(!response.ok||data.status!=='PASS')throw new Error(data.status||'MEMORY_STATUS_UNKNOWN');
                 nextRound=data.next_round;
                 button.disabled=!nextRound;
+                mentorButton.disabled=!data.mentor_review_ready;
                 const rounds=(data.completed_rounds||[]).map(x=>'دور '+x.round_number+': '+x.verified_samples+'/100').join(' · ');
                 let stageText='مرحله آموزشی نامشخص است؛ تا رفع ابهام اجرای بعدی قفل می‌ماند.';
                 if(data.next_stage==='BOT_ONLY_BASELINE')stageText='مرحله فعال: خط پایه BOT_ONLY؛ پس از ثبت ۱۰۰ نمونه، نتیجه قفل می‌شود.';
-                if(data.next_stage==='AI_MENTOR_REQUIRED')stageText='خط پایه BOT_ONLY قفل شد. اکنون فقط مرحله AI Mentor مجاز است؛ دورهای مستقل ۲ تا ۵ تا ثبت بازخورد مربی قفل‌اند.';
+                if(data.next_stage==='AI_MENTOR_REQUIRED')stageText='خط پایه BOT_ONLY قفل شد. اکنون ممیزی ۱۰۰ تجربه توسط AI Mentor مجاز است؛ دورهای مستقل ۲ تا ۵ همچنان قفل‌اند.';
+                if(data.next_stage==='ASSISTED_ROUND_RUNNER_REQUIRED')stageText='ممیزی Mentor تکمیل شده است؛ اجرای دورهای مستقل هنوز تا آماده‌شدن Runner جداگانه قفل است.';
                 status.textContent='حافظه: '+data.memory_backend+' · رکوردهای تأییدشده: '+data.verified_experiences+' · '+(rounds||'هنوز دوری ثبت نشده')+' · '+stageText;
               }catch(error){
-                nextRound=null;button.disabled=true;
+                nextRound=null;button.disabled=true;mentorButton.disabled=true;
                 status.textContent='وضعیت حافظه دریافت نشد: '+String(error.message||error);
               }
             }
@@ -5421,6 +5426,28 @@ async function loadBlofinInstruments(){
                 else status.textContent='دور '+data.round_number+' ثبت شد؛ حافظه پس از بازگشایی دیتابیس تأیید شد.';
               }catch(error){
                 status.textContent='اجرای چالش ناموفق بود: '+String(error.message||error);
+              }
+              await refreshStatus();
+            });
+            mentorButton.addEventListener('click',async function(){
+              const token=tokenInput.value.trim();
+              if(!token||mentorButton.disabled)return;
+              mentorButton.disabled=true;button.disabled=true;
+              status.textContent='در حال ممیزی ۱۰۰ تجربهٔ BOT_ONLY و ثبت بازخورد append-only...';
+              report.textContent='';
+              try{
+                const body=new URLSearchParams({confirm:'1'});
+                const response=await fetch('/api/learning/challenge-01/mentor',{
+                  method:'POST',
+                  headers:{Authorization:'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
+                  body:body.toString(),credentials:'same-origin',cache:'no-store'
+                });
+                const data=await response.json();
+                report.textContent=JSON.stringify(data,null,2);
+                if(!response.ok)status.textContent='ممیزی Mentor تکمیل نشد؛ جزئیات در گزارش آمده است.';
+                else status.textContent='بازبینی '+data.mentor_reviews_recorded+' تجربه ثبت و از حافظه دوباره خوانده شد.';
+              }catch(error){
+                status.textContent='ممیزی Mentor ناموفق بود: '+String(error.message||error);
               }
               await refreshStatus();
             });
@@ -6943,7 +6970,7 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/learning/challenge-01/run"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/learning/challenge-01/run", "/api/learning/challenge-01/mentor"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -6957,6 +6984,34 @@ async function loadBlofinInstruments(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/learning/challenge-01/mentor":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                if not CHALLENGE_01_RUN_LOCK.acquire(blocking=False):
+                    return self._send(409, b'{"status":"CHALLENGE_ALREADY_RUNNING"}', "application/json; charset=utf-8")
+                try:
+                    result = review_locked_baseline()
+                    status_code = 200 if result.get("status") == "MENTOR_REVIEW_RECORDED" else 409
+                    return self._send(
+                        status_code,
+                        json.dumps(result, ensure_ascii=False, default=str).encode(),
+                        "application/json; charset=utf-8",
+                    )
+                except Exception as exc:
+                    payload = {"status": "ERROR", "error_type": type(exc).__name__, "orders_submitted": False}
+                    return self._send(500, json.dumps(payload, ensure_ascii=False).encode(),
+                                      "application/json; charset=utf-8")
+                finally:
+                    CHALLENGE_01_RUN_LOCK.release()
             if route == "/api/learning/challenge-01/run":
                 if (
                     not origin
