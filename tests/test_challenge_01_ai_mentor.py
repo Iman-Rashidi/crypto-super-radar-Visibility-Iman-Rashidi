@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
 from crypto_super_radar.challenge_01_ai_mentor import (
     review_baseline,
@@ -12,12 +14,19 @@ from crypto_super_radar.learning_experience_memory import LearningExperienceMemo
 
 class Challenge01AIMentorTests(unittest.TestCase):
     def setUp(self):
-        self.db = sqlite3.connect(":memory:")
-        self.db.row_factory = sqlite3.Row
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tempdir.name) / "mentor-test.sqlite3")
+        self.db = self.new_connection()
         self.memory = LearningExperienceMemory(self.db)
+
+    def new_connection(self):
+        db = sqlite3.connect(self.db_path)
+        db.row_factory = sqlite3.Row
+        return db
 
     def tearDown(self):
         self.db.close()
+        self.tempdir.cleanup()
 
     def add_baseline(self, index: int, challenge_id: str = "CHALLENGE-01"):
         experience_id = f"baseline-{index}"
@@ -81,7 +90,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
     def test_batch_review_requires_at_least_100_locked_samples(self):
         self.add_baseline(1)
         result = review_locked_baseline(
-            connection_factory=lambda: self.db,
+            connection_factory=self.new_connection,
             backend_factory=lambda: "TEST_SQLITE_FILE",
             allow_non_durable_for_tests=True,
         )
