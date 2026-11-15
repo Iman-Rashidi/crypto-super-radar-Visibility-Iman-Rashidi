@@ -112,8 +112,39 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
 
 
 MODEL_CLASSES = ("BEARISH_CANDLE", "NEUTRAL_CANDLE", "BULLISH_CANDLE")
-MODEL_FEATURES = ("body_return", "range_return", "close_location", "upper_wick_return", "lower_wick_return")
 BAR_MILLISECONDS = 60 * 60 * 1000
+FEATURE_WINDOW_LENGTH = 3
+CANDLE_CONTINUOUS_FEATURES = (
+    "body_return", "range_return", "close_location",
+    "upper_wick_return", "lower_wick_return",
+)
+PATTERN_FEATURES = (
+    "doji_last",
+    "hammer_last",
+    "inverted_hammer_last",
+    "shooting_star_last",
+    "hanging_man_last",
+    "bullish_marubozu_last",
+    "bearish_marubozu_last",
+    "spinning_top_last",
+    "bullish_engulfing_2bar",
+    "bearish_engulfing_2bar",
+    "bullish_harami_2bar",
+    "bearish_harami_2bar",
+    "piercing_line_2bar",
+    "dark_cloud_cover_2bar",
+    "morning_star_3bar",
+    "evening_star_3bar",
+    "three_white_soldiers_3bar",
+    "three_black_crows_3bar",
+    "tweezer_bottom_2bar",
+    "tweezer_top_2bar",
+)
+MODEL_FEATURES = tuple(
+    f"c{position}_{feature}"
+    for position in range(1, FEATURE_WINDOW_LENGTH + 1)
+    for feature in CANDLE_CONTINUOUS_FEATURES
+) + PATTERN_FEATURES
 
 
 def _target_label(candle: dict[str, Any]) -> str:
@@ -122,18 +153,138 @@ def _target_label(candle: dict[str, Any]) -> str:
     return "BULLISH_CANDLE" if closing > opening else "BEARISH_CANDLE" if closing < opening else "NEUTRAL_CANDLE"
 
 
-def _feature_vector(candle: dict[str, Any]) -> list[float]:
+def _candle_shape(candle: dict[str, Any]) -> dict[str, float]:
     opening, high, low, closing = (float(candle[key]) for key in ("open", "high", "low", "close"))
     if opening <= 0 or high < max(opening, closing, low) or low > min(opening, closing):
         raise ValueError("INVALID_FEATURE_CANDLE_OHLC")
     span = high - low
-    return [
-        (closing - opening) / opening,
-        span / opening,
-        (closing - low) / span if span else 0.5,
-        (high - max(opening, closing)) / opening,
-        (min(opening, closing) - low) / opening,
-    ]
+    body_high, body_low = max(opening, closing), min(opening, closing)
+    body = abs(closing - opening)
+    return {
+        "open": opening,
+        "high": high,
+        "low": low,
+        "close": closing,
+        "body": body,
+        "range": span,
+        "body_ratio": body / span if span else 0.0,
+        "upper_wick": high - body_high,
+        "lower_wick": body_low - low,
+        "direction": 1.0 if closing > opening else -1.0 if closing < opening else 0.0,
+    }
+
+
+def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
+    """Detect transparent heuristic 1-3 candle patterns on completed bars only.
+
+    Thresholds are engineering heuristics, not universal textbook definitions.
+    The detector never reads a target candle outside the supplied feature window.
+    """
+    if not isinstance(candles, list) or len(candles) != FEATURE_WINDOW_LENGTH:
+        raise ValueError("PATTERN_DETECTOR_REQUIRES_THREE_CANDLES")
+    shapes = [_candle_shape(candle) for candle in candles]
+    a, b, c = shapes
+    patterns: list[str] = []
+    eps = 1e-12
+
+    # Most recent candle: single-candle patterns.
+    if c["range"] > 0 and c["body_ratio"] <= 0.10:
+        patterns.append("DOJI")
+    if (
+        c["body"] > eps and c["lower_wick"] >= 2.0 * c["body"]
+        and c["upper_wick"] <= 0.5 * c["body"]
+        and min(c["open"], c["close"]) >= c["low"] + 0.55 * c["range"]
+    ):
+        patterns.append("HAMMER")
+    if (
+        c["body"] > eps and c["upper_wick"] >= 2.0 * c["body"]
+        and c["lower_wick"] <= 0.5 * c["body"]
+        and max(c["open"], c["close"]) <= c["low"] + 0.45 * c["range"]
+    ):
+        patterns.append("INVERTED_HAMMER")
+        patterns.append("SHOOTING_STAR")
+    if (
+        c["body"] > eps and c["lower_wick"] <= 0.5 * c["body"]
+        and c["upper_wick"] >= 2.0 * c["body"]
+        and max(c["open"], c["close"]) <= c["low"] + 0.45 * c["range"]
+    ):
+        patterns.append("HANGING_MAN")
+    if c["range"] > 0 and c["body_ratio"] >= 0.80:
+        patterns.append("BULLISH_MARUBOZU" if c["direction"] > 0 else "BEARISH_MARUBOZU")
+    if (
+        c["range"] > 0 and c["body_ratio"] <= 0.30
+        and c["upper_wick"] >= 0.5 * max(c["body"], eps)
+        and c["lower_wick"] >= 0.5 * max(c["body"], eps)
+    ):
+        patterns.append("SPINNING_TOP")
+
+    # Two-candle patterns on the last two completed candles.
+    a_low, a_high = min(a["open"], a["close"]), max(a["open"], a["close"])
+    b_low, b_high = min(b["open"], b["close"]), max(b["open"], b["close"])
+    if a["direction"] < 0 < b["direction"] and b_low <= a_low and b_high >= a_high:
+        patterns.append("BULLISH_ENGULFING")
+    if a["direction"] > 0 > b["direction"] and b_low <= a_low and b_high >= a_high:
+        patterns.append("BEARISH_ENGULFING")
+    if a["direction"] < 0 and b["direction"] > 0 and b_low >= a_low and b_high <= a_high:
+        patterns.append("BULLISH_HARAMI")
+    if a["direction"] > 0 and b["direction"] < 0 and b_low >= a_low and b_high <= a_high:
+        patterns.append("BEARISH_HARAMI")
+    a_mid = (a_low + a_high) / 2.0
+    if a["direction"] < 0 < b["direction"] and b["open"] <= a["close"] and b["close"] > a_mid and b["close"] < a["open"]:
+        patterns.append("PIERCING_LINE")
+    if a["direction"] > 0 > b["direction"] and b["open"] >= a["close"] and b["close"] < a_mid and b["close"] > a["open"]:
+        patterns.append("DARK_CLOUD_COVER")
+    tweezer_tolerance = max((a["high"] + b["high"] + a["low"] + b["low"]) / 4.0 * 0.001, eps)
+    if a["direction"] < 0 < b["direction"] and abs(a["low"] - b["low"]) <= tweezer_tolerance:
+        patterns.append("TWEEZER_BOTTOM")
+    if a["direction"] > 0 > b["direction"] and abs(a["high"] - b["high"]) <= tweezer_tolerance:
+        patterns.append("TWEEZER_TOP")
+
+    # Three-candle reversals/continuations. Crypto is a 24/7 market, so these
+    # heuristic definitions do not require overnight price gaps.
+    middle_small = b["range"] > 0 and b["body_ratio"] <= 0.30
+    first_strong = a["range"] > 0 and a["body_ratio"] >= 0.50
+    last_strong = c["range"] > 0 and c["body_ratio"] >= 0.40
+    if a["direction"] < 0 and middle_small and c["direction"] > 0 and last_strong and c["close"] > a_mid:
+        patterns.append("MORNING_STAR")
+    if a["direction"] > 0 and middle_small and c["direction"] < 0 and last_strong and c["close"] < a_mid:
+        patterns.append("EVENING_STAR")
+    if (
+        all(shape["direction"] > 0 for shape in shapes)
+        and a["close"] < b["close"] < c["close"]
+        and a["open"] <= b["open"] <= a["close"]
+        and b["open"] <= c["open"] <= b["close"]
+    ):
+        patterns.append("THREE_WHITE_SOLDIERS")
+    if (
+        all(shape["direction"] < 0 for shape in shapes)
+        and a["close"] > b["close"] > c["close"]
+        and a["close"] <= b["open"] <= a["open"]
+        and b["close"] <= c["open"] <= b["open"]
+    ):
+        patterns.append("THREE_BLACK_CROWS")
+    return patterns
+
+
+def _feature_vector(candles: list[dict[str, Any]]) -> list[float]:
+    """Encode three completed candles plus explicit pattern flags, no target data."""
+    if not isinstance(candles, list) or len(candles) != FEATURE_WINDOW_LENGTH:
+        raise ValueError("FEATURE_WINDOW_REQUIRES_THREE_COMPLETED_CANDLES")
+    values: list[float] = []
+    for candle in candles:
+        shape = _candle_shape(candle)
+        opening = shape["open"]
+        span = shape["range"]
+        values.extend([
+            (shape["close"] - opening) / opening,
+            span / opening,
+            (shape["close"] - shape["low"]) / span if span else 0.5,
+            shape["upper_wick"] / opening,
+            shape["lower_wick"] / opening,
+        ])
+    detected = set(detect_candlestick_patterns(candles))
+    values.extend(1.0 if pattern in detected else 0.0 for pattern in PATTERN_FEATURES)
+    return values
 
 
 def _softmax(logits: list[float]) -> list[float]:
@@ -151,7 +302,7 @@ def _train_candidate(
     train_rows, validation_rows = rows[:training_count], rows[training_count:]
     if len(train_rows) < 60 or len(validation_rows) < 20:
         raise ValueError("MENTOR_REQUIRES_80_TRAIN_20_TEMPORAL_VALIDATION")
-    raw = [_feature_vector(row["feature"]) for row in train_rows]
+    raw = [_feature_vector(row["feature_window"]) for row in train_rows]
     means = [sum(item[j] for item in raw) / len(raw) for j in range(len(MODEL_FEATURES))]
     stds = []
     for j, mean in enumerate(means):
@@ -182,8 +333,8 @@ def _train_candidate(
             for j in range(len(MODEL_FEATURES)):
                 weights[k][j] -= rate * (grad_w[k][j] + 0.001 * weights[k][j])
 
-    def predict(candle: dict[str, Any]) -> tuple[str, list[float]]:
-        values = _feature_vector(candle)
+    def predict(candles: list[dict[str, Any]]) -> tuple[str, list[float]]:
+        values = _feature_vector(candles)
         normalized = [(values[j] - means[j]) / stds[j] for j in range(len(MODEL_FEATURES))]
         probabilities = _softmax([
             biases[k] + sum(weights[k][j] * normalized[j] for j in range(len(MODEL_FEATURES)))
@@ -192,7 +343,7 @@ def _train_candidate(
         best = max(range(len(probabilities)), key=probabilities.__getitem__)
         return MODEL_CLASSES[best], probabilities
 
-    predicted = [predict(row["feature"])[0] for row in validation_rows]
+    predicted = [predict(row["feature_window"])[0] for row in validation_rows]
     actual = [row["label"] for row in validation_rows]
     per_class = {}
     recalls, f1s = [], []
@@ -221,11 +372,13 @@ def _train_candidate(
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     dataset_hash = digest(all_manifest)
     artifact = {
-        "schema": "CSR_CH01_SOFTMAX_CANDIDATE_V1",
-        "model_version": "ch01-softmax-multiclass-v1-" + dataset_hash[:12],
+        "schema": "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2",
+        "feature_window_length": FEATURE_WINDOW_LENGTH,
+        "pattern_features": list(PATTERN_FEATURES),
+        "model_version": "ch01-candle-pattern-softmax-v2-" + dataset_hash[:12],
         "trained_through_round": trained_through_round,
         "task": "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD",
-        "method": "MULTINOMIAL_LOGISTIC_REGRESSION_SOFTMAX",
+        "method": "MULTINOMIAL_LOGISTIC_REGRESSION_WITH_CANDLE_PATTERNS",
         "features": list(MODEL_FEATURES),
         "classes": list(MODEL_CLASSES),
         "normalization": {"means": means, "standard_deviations": stds},
@@ -451,7 +604,7 @@ def load_candidate_artifact(
                 if (
                     saved_sha != calculated
                     or (expected_sha256 is not None and saved_sha != expected_sha256)
-                    or artifact.get("schema") != "CSR_CH01_SOFTMAX_CANDIDATE_V1"
+                    or artifact.get("schema") != "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
                     or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
                     or artifact.get("training", {}).get("samples", 0) < 60
                     or artifact.get("temporal_validation", {}).get("samples", 0) < 20
@@ -474,9 +627,11 @@ def predict_candidate(
 ) -> tuple[str, list[float]]:
     """Apply the persisted candidate without refitting or seeing target data."""
     if (
-        artifact.get("schema") != "CSR_CH01_SOFTMAX_CANDIDATE_V1"
+        artifact.get("schema") != "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
         or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
         or artifact.get("features") != list(MODEL_FEATURES)
+        or artifact.get("feature_window_length") != FEATURE_WINDOW_LENGTH
+        or artifact.get("pattern_features") != list(PATTERN_FEATURES)
         or artifact.get("classes") != list(MODEL_CLASSES)
     ):
         raise ValueError("MENTOR_CANDIDATE_SCHEMA_OR_STATUS_INVALID")
