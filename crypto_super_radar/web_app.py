@@ -4400,6 +4400,27 @@ async function refreshExecutionReadiness(){
                 ['آستانه تأیید پیوت (%)',wave.pivot_reversal_threshold_pct]
               ]);
               node(waveBox,'p',wave.confidence_note_fa||'موج الیوت به‌تنهایی مجوز ورود صادر نمی‌کند.','muted');
+              const exchangeLinks=document.createElement('div');
+              exchangeLinks.style.display='flex';
+              exchangeLinks.style.flexWrap='wrap';
+              exchangeLinks.style.gap='8px';
+              exchangeLinks.style.marginTop='10px';
+              const blofinMarketLinks=[
+                {label:'بازار اصلی BTC-USDT Perpetual در BloFin ↗',href:'https://blofin.com/trade/en/futures/BTC-USDT'},
+                {label:'بازار کلی قراردادهای Futures در BloFin ↗',href:'https://blofin.com/market/derivatives'},
+                {label:'راهنمای رسمی ورود به BloFin Demo ↗',href:'https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading'}
+              ];
+              blofinMarketLinks.forEach(item=>{
+                const link=document.createElement('a');
+                link.className='analysis-link';
+                link.href=item.href;
+                link.target='_blank';
+                link.rel='noopener noreferrer';
+                link.textContent=item.label;
+                exchangeLinks.appendChild(link);
+              });
+              waveBox.appendChild(exchangeLinks);
+              node(waveBox,'p','بازار مورد تحلیل ربات: BTC-USDT Perpetual · USDT-M · قرارداد خطی. برای ورود به Demo، در وب‌سایت BloFin از منوی Futures گزینه Demo Trading را انتخاب کن و سپس BTCUSDT را باز کن.','muted');
               makeTable(executionReport,'پیوت‌های تأییدشدهٔ موج الیوت',wave.pivots||[],[
                 ['kind_fa','نوع پیوت'],['price','قیمت'],['timestamp_utc','زمان وقوع پیوت'],['confirmed_at_utc','زمان تأیید پیوت']
               ],'پیوت تأییدشده‌ای برای شماره‌گذاری موج در دسترس نیست.');
