@@ -159,6 +159,28 @@ PATTERN_FEATURES = (
     "tweezer_bottom_2bar",
     "tweezer_top_2bar",
 )
+PATTERN_FEATURE_TO_LABEL = {
+    "doji_last": "DOJI",
+    "hammer_last": "HAMMER",
+    "inverted_hammer_last": "INVERTED_HAMMER",
+    "shooting_star_last": "SHOOTING_STAR",
+    "hanging_man_last": "HANGING_MAN",
+    "bullish_marubozu_last": "BULLISH_MARUBOZU",
+    "bearish_marubozu_last": "BEARISH_MARUBOZU",
+    "spinning_top_last": "SPINNING_TOP",
+    "bullish_engulfing_2bar": "BULLISH_ENGULFING",
+    "bearish_engulfing_2bar": "BEARISH_ENGULFING",
+    "bullish_harami_2bar": "BULLISH_HARAMI",
+    "bearish_harami_2bar": "BEARISH_HARAMI",
+    "piercing_line_2bar": "PIERCING_LINE",
+    "dark_cloud_cover_2bar": "DARK_CLOUD_COVER",
+    "morning_star_3bar": "MORNING_STAR",
+    "evening_star_3bar": "EVENING_STAR",
+    "three_white_soldiers_3bar": "THREE_WHITE_SOLDIERS",
+    "three_black_crows_3bar": "THREE_BLACK_CROWS",
+    "tweezer_bottom_2bar": "TWEEZER_BOTTOM",
+    "tweezer_top_2bar": "TWEEZER_TOP",
+}
 MODEL_FEATURES = tuple(
     f"c{position}_{feature}"
     for position in range(1, FEATURE_WINDOW_LENGTH + 1)
@@ -339,7 +361,10 @@ def _feature_vector(candles: list[dict[str, Any]]) -> list[float]:
             shape["lower_wick"] / opening,
         ])
     detected = set(detect_candlestick_patterns(candles))
-    values.extend(1.0 if pattern in detected else 0.0 for pattern in PATTERN_FEATURES)
+    values.extend(
+        1.0 if PATTERN_FEATURE_TO_LABEL[feature_name] in detected else 0.0
+        for feature_name in PATTERN_FEATURES
+    )
     return values
 
 
@@ -446,6 +471,7 @@ def _train_candidate(
         "features": list(MODEL_FEATURES),
         "pattern_features": list(PATTERN_FEATURES),
         "pattern_catalog": PATTERN_DEFINITIONS,
+        "pattern_feature_mapping": PATTERN_FEATURE_TO_LABEL,
         "pattern_catalog_version": PATTERN_CATALOG_VERSION,
         "feature_window_length": FEATURE_WINDOW_LENGTH,
         "classes": list(MODEL_CLASSES),
@@ -691,6 +717,7 @@ def load_candidate_artifact(
                     or artifact.get("features") != list(MODEL_FEATURES)
                     or artifact.get("pattern_features") != list(PATTERN_FEATURES)
                     or artifact.get("pattern_catalog") != PATTERN_DEFINITIONS
+                    or artifact.get("pattern_feature_mapping") != PATTERN_FEATURE_TO_LABEL
                     or artifact.get("pattern_catalog_version") != PATTERN_CATALOG_VERSION
                     or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
                     or artifact.get("training", {}).get("samples", 0) < 60
@@ -720,6 +747,7 @@ def predict_candidate(
         or artifact.get("feature_window_length") != FEATURE_WINDOW_LENGTH
         or artifact.get("pattern_features") != list(PATTERN_FEATURES)
         or artifact.get("pattern_catalog") != PATTERN_DEFINITIONS
+        or artifact.get("pattern_feature_mapping") != PATTERN_FEATURE_TO_LABEL
         or artifact.get("pattern_catalog_version") != PATTERN_CATALOG_VERSION
         or artifact.get("classes") != list(MODEL_CLASSES)
     ):
