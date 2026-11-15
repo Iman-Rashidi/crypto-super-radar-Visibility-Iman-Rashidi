@@ -11,6 +11,8 @@ from crypto_super_radar.challenge_01_ai_mentor import (
     detect_candlestick_patterns,
     load_candidate_artifact,
     predict_candidate,
+    MODEL_FEATURES,
+    _feature_vector,
     review_baseline,
     review_locked_baseline,
 )
@@ -133,6 +135,8 @@ class Challenge01AIMentorTests(unittest.TestCase):
             {"open_time_ms": 7_200_000, "open": "99", "high": "106", "low": "98", "close": "105", "confirmed": True},
         ]
         self.assertIn("BULLISH_ENGULFING", detect_candlestick_patterns(engulfing_window))
+        engulfing_vector = dict(zip(MODEL_FEATURES, _feature_vector(engulfing_window)))
+        self.assertEqual(engulfing_vector["bullish_engulfing_2bar"], 1.0)
 
         morning_star_window = [
             {"open_time_ms": 0, "open": "110", "high": "111", "low": "99", "close": "100", "confirmed": True},
@@ -140,6 +144,8 @@ class Challenge01AIMentorTests(unittest.TestCase):
             {"open_time_ms": 7_200_000, "open": "100.5", "high": "109", "low": "100", "close": "108", "confirmed": True},
         ]
         self.assertIn("MORNING_STAR", detect_candlestick_patterns(morning_star_window))
+        morning_vector = dict(zip(MODEL_FEATURES, _feature_vector(morning_star_window)))
+        self.assertEqual(morning_vector["morning_star_3bar"], 1.0)
 
     def test_pattern_detector_rejects_incomplete_or_wrong_length_windows(self):
         with self.assertRaises(ValueError):
@@ -272,6 +278,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertEqual(stored_model["feature_window_length"], 3)
         self.assertIn("bullish_engulfing_2bar", stored_model["features"])
         self.assertIn("morning_star_3bar", stored_model["features"])
+        self.assertEqual(stored_model["pattern_feature_mapping"]["morning_star_3bar"], "MORNING_STAR")
         self.assertEqual(stored_model["pattern_catalog_version"], "CSR_CANDLE_HEURISTICS_3BAR_V1")
         self.assertIn("MORNING_STAR", stored_model["pattern_catalog"])
         loaded_artifact, loaded_anchor = load_candidate_artifact(self.memory)
