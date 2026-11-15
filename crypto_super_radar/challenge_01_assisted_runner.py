@@ -16,6 +16,7 @@ from .challenge_01_ai_mentor import (
     predict_candidate,
     review_baseline,
     train_candidate_from_completed_rounds,
+    detect_candlestick_patterns,
 )
 from .challenge_01_runner import (
     BAR_MILLISECONDS,
@@ -62,11 +63,12 @@ class Challenge01AssistedRunner:
 
     def _previous_round_seed(
         self, memory: LearningExperienceMemory, previous_round: int,
-    ) -> tuple[dict[str, Any], int, str | None, str | None]:
-        experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
+    ) -> tuple[list[dict[str, Any]], int, str | None, str | None]:
+        experiences = memory.recent_experiences(limit=1200, challenge_id=CHALLENGE_ID)
         by_target: dict[int, dict[str, Any]] = {}
         modes_by_target: dict[int, set[str]] = {}
         feature_by_target: dict[int, str] = {}
+        feature_windows_by_target: dict[int, list[dict[str, Any]]] = {}
         model_hashes: set[str] = set()
         for item in experiences:
             decision_event = next(
@@ -84,6 +86,7 @@ class Challenge01AssistedRunner:
                 target_time = snapshot.get("candle_open_time_ms")
             feature_time = snapshot.get("feature_candle_open_time_ms")
             feature = snapshot.get("feature_candle")
+            feature_window = snapshot.get("feature_window")
             if (
                 not isinstance(target_time, int)
                 or not isinstance(feature_time, int)
@@ -91,11 +94,23 @@ class Challenge01AssistedRunner:
                 or not isinstance(feature, dict)
                 or feature.get("open_time_ms") != feature_time
                 or feature.get("confirmed") is not True
+                or not isinstance(feature_window, list)
+                or len(feature_window) != 3
+                or any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in feature_window)
+                or feature_window[-1] != feature
+                or any(
+                    right["open_time_ms"] - left["open_time_ms"] != BAR_MILLISECONDS
+                    for left, right in zip(feature_window, feature_window[1:])
+                )
+                or snapshot.get("feature_window_open_times_ms")
+                != [candle["open_time_ms"] for candle in feature_window]
+                or snapshot.get("detected_candlestick_patterns")
+                != detect_candlestick_patterns(feature_window)
                 or snapshot.get("data_quality") != "VALID_COMPLETED_FEATURE_AND_TARGET"
                 or snapshot.get("target_candle_in_input") is not False
                 or "target_candle" in snapshot
             ):
-                raise Challenge01DataError("PRIOR_ROUND_FEATURE_TARGET_SNAPSHOT_INVALID")
+                raise Challenge01DataError("PRIOR_ROUND_CANDLE_PATTERN_WINDOW_INVALID")
             decision, outcome = self._decision_and_outcome(item)
             if item.get("verification", {}).get("status") != "PASS":
                 raise Challenge01DataError("PRIOR_ROUND_MEMORY_INTEGRITY_FAILED")
@@ -105,6 +120,8 @@ class Challenge01AssistedRunner:
                 evidence.get("comparison") != "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR"
                 or evidence.get("no_future_data_used_in_input") is not True
                 or evidence.get("feature_candle_open_time_ms") != feature_time
+                or evidence.get("feature_window_open_times_ms")
+                != [candle["open_time_ms"] for candle in feature_window]
                 or evidence.get("target_candle_open_time_ms") != target_time
                 or not isinstance(target, dict)
                 or target.get("open_time_ms") != target_time
@@ -119,10 +136,11 @@ class Challenge01AssistedRunner:
                 if not isinstance(model_hash, str) or model_hash != snapshot_hash:
                     raise Challenge01DataError("PRIOR_ROUND_MENTOR_MODEL_HASH_MISMATCH")
                 model_hashes.add(model_hash)
-            feature_canonical = json.dumps(feature, sort_keys=True, separators=(",", ":"))
+            feature_canonical = json.dumps(feature_window, sort_keys=True, separators=(",", ":"))
             prior_feature = feature_by_target.setdefault(target_time, feature_canonical)
             if prior_feature != feature_canonical:
                 raise Challenge01DataError("PAIRED_ROUND_FEATURE_INPUT_MISMATCH")
+            feature_windows_by_target[target_time] = feature_window
             if target_time in by_target and by_target[target_time] != target:
                 raise Challenge01DataError("PAIRED_ROUND_TARGET_EVIDENCE_MISMATCH")
             by_target[target_time] = target
@@ -138,8 +156,15 @@ class Challenge01AssistedRunner:
         ):
             raise Challenge01DataError("PRIOR_ROUND_PAIRED_DECISIONS_INCOMPLETE")
 
-        last_target_time = max(by_target)
-        last_target = by_target[last_target_time]
+        ordered_times = sorted(by_target)
+        last_target_time = ordered_times[-1]
+        last_window_times = ordered_times[-3:]
+        if len(last_window_times) != 3 or any(
+            right - left != BAR_MILLISECONDS
+            for left, right in zip(last_window_times, last_window_times[1:])
+        ):
+            raise Challenge01DataError("PRIOR_ROUND_MISSING_THREE_BAR_SEED_WINDOW")
+        last_window = [by_target[timestamp] for timestamp in last_window_times]
         if any(
             next_time - current_time != BAR_MILLISECONDS
             for current_time, next_time in zip(sorted(by_target), sorted(by_target)[1:])
@@ -164,7 +189,7 @@ class Challenge01AssistedRunner:
                     candidate_hash = snapshot.get("mentor_model_artifact_sha256")
                     if candidate_anchor and candidate_hash:
                         break
-        return last_target, last_target_time, candidate_anchor, candidate_hash
+        return last_window, last_target_time, candidate_anchor, candidate_hash
 
     def run_round(self, *, round_number: int, sample_count: int = 100) -> dict[str, Any]:
         if isinstance(round_number, bool) or not isinstance(round_number, int) or not 2 <= round_number <= MAX_ROUNDS:
@@ -222,10 +247,11 @@ class Challenge01AssistedRunner:
                 if target["open_time_ms"] != expected_time:
                     raise Challenge01DataError("FORWARD_HOLDOUT_HAS_GAP_OR_OVERLAP")
 
-            feature = previous_seed
+            feature_window = list(previous_seed)
             model_predictions_hash = hashlib.sha256()
             with connection:
                 for target in targets:
+                    feature = feature_window[-1]
                     feature_time = feature["open_time_ms"]
                     target_time = target["open_time_ms"]
                     if target_time - feature_time != BAR_MILLISECONDS:
@@ -235,7 +261,7 @@ class Challenge01AssistedRunner:
                     baseline_id = suffix
                     assisted_id = suffix + "-mentor"
                     bot_prediction, bot_action = _classify_bot(feature)
-                    mentor_prediction, probabilities = predict_candidate(feature, artifact)
+                    mentor_prediction, probabilities = predict_candidate(feature_window, artifact)
                     actual = _reference_label(target)
                     bot_predictions.append(bot_prediction)
                     mentor_predictions.append(mentor_prediction)
@@ -267,8 +293,16 @@ class Challenge01AssistedRunner:
                             "round_number": round_number,
                             "candle_open_time_ms": target_time,
                             "feature_candle_open_time_ms": feature_time,
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in feature_window
+                            ],
                             "target_candle_open_time_ms": target_time,
                             "feature_candle": feature,
+                            "feature_window": feature_window,
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in feature_window
+                            ],
+                            "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -285,6 +319,9 @@ class Challenge01AssistedRunner:
                             "source": "blofin_demo_spot_next_completed_candle",
                             "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
                             "feature_candle_open_time_ms": feature_time,
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in feature_window
+                            ],
                             "target_candle_open_time_ms": target_time,
                             "target_candle": target,
                             "reference_classification": actual,
@@ -328,6 +365,11 @@ class Challenge01AssistedRunner:
                             "feature_candle_open_time_ms": feature_time,
                             "target_candle_open_time_ms": target_time,
                             "feature_candle": feature,
+                            "feature_window": feature_window,
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in feature_window
+                            ],
+                            "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -360,7 +402,7 @@ class Challenge01AssistedRunner:
                     assisted_ids.append(assisted_id)
                     inserted_count += int(bool(base_decision.get("inserted")))
                     model_predictions_hash.update(f"{feature_time}:{mentor_prediction}:{target_time}:{actual}|".encode())
-                    feature = target
+                    feature_window = feature_window[1:] + [target]
 
             dataset_hash = model_predictions_hash.hexdigest()
             connection.close()
