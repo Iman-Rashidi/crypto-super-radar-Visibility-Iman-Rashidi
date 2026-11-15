@@ -46,6 +46,7 @@ from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .database import storage_backend
 from .challenge_01_runner import Challenge01Runner, get_challenge_01_status
 from .challenge_01_ai_mentor import review_locked_baseline
+from .challenge_01_assisted_runner import Challenge01AssistedRunner
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -4699,7 +4700,7 @@ class Handler(BaseHTTPRequestHandler):
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
           <div class="metric" id="challenge-01-panel" style="margin-top:14px;border-color:#557b60">
             <h3>چالش ۱ · Single-Candle Direction · BloFin Demo Spot</h3>
-            <p class="muted">۱۰۰ نمونهٔ پیش‌بینی یک کندل جلوتر با BTC-USDT در تایم‌فریم ۱ ساعته: ویژگی از کندل کامل قبلی، هدف از کندل بعدی. ۱۰۱ کندل بسته برای ساخت ۱۰۰ جفت زمانی لازم است. دادهٔ هدف در ورودی تصمیم قرار نمی‌گیرد. این خط پایه فقط Replay تاریخی است، مدل AI آموزش‌دیده یا معیار سودآوری نیست. ابتدا BOT_ONLY ثبت و حافظه پس از بازگشایی راستی‌آزمایی می‌شود؛ هیچ سفارش یا معامله‌ای ارسال نمی‌شود.</p>
+            <p class="muted">چالش با BTC-USDT Spot در تایم‌فریم ۱ ساعته، هر دور ۱۰۰ جفت زمانی دارد. ابتدا BOT_ONLY روی کندل t پیش‌بینی کندل t+1 را ثبت می‌کند؛ سپس Mentor مدل Candidate را با ۸۰ نمونه آموزش و با ۲۰ نمونه زمانی ارزیابی می‌کند. دورهای ۲ تا ۵، پیش‌بینی BOT_ONLY و Mentor را روی ۱۰۰ کندل کامل تازه و غیرهم‌پوشان مقایسه می‌کنند. امتیازها طبقه‌بندی تاریخی‌اند، نه سودآوری یا توصیه معامله. فقط دادهٔ عمومی Demo خوانده می‌شود و هیچ سفارشی ارسال نمی‌شود.</p>
             <button id="challenge-01-run" type="button" disabled>اجرای دور بعدی Challenge 1 (۱۰۰ نمونه)</button>
             <button id="challenge-01-mentor" type="button" disabled>ممیزی ۱۰۰ تجربهٔ قفل‌شده با AI Mentor</button>
             <p id="challenge-01-status" class="muted" aria-live="polite">برای مشاهده وضعیت حافظه، توکن پنل را در کادر بالا وارد کن.</p>
@@ -5394,6 +5395,9 @@ async function loadBlofinInstruments(){
                 if(!response.ok||data.status!=='PASS')throw new Error(data.status||'MEMORY_STATUS_UNKNOWN');
                 nextRound=data.next_round;
                 button.disabled=!nextRound;
+                button.textContent=nextRound===1
+                  ? 'اجرای خط پایه BOT_ONLY · ۱۰۰ نمونه'
+                  : nextRound ? 'اجرای دور '+nextRound+' · مقایسه BOT_ONLY و Mentor' : 'همه دورهای مستقل ثبت شده‌اند';
                 mentorButton.disabled=!data.mentor_review_ready;
                 const rounds=(data.completed_rounds||[]).map(x=>'دور '+x.round_number+': '+x.verified_samples+'/100').join(' · ');
                 let stageText='مرحله آموزشی نامشخص است؛ تا رفع ابهام اجرای بعدی قفل می‌ماند.';
@@ -5414,7 +5418,10 @@ async function loadBlofinInstruments(){
               report.textContent='';
               try{
                 const body=new URLSearchParams({confirm:'1',round_number:String(nextRound),sample_count:'100'});
-                const response=await fetch('/api/learning/challenge-01/run',{
+                const endpoint=nextRound===1
+                  ? '/api/learning/challenge-01/run'
+                  : '/api/learning/challenge-01/assisted-run';
+                const response=await fetch(endpoint,{
                   method:'POST',
                   headers:{Authorization:'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
                   body:body.toString(),
@@ -6971,7 +6978,7 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/learning/challenge-01/run", "/api/learning/challenge-01/mentor"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/learning/challenge-01/run", "/api/learning/challenge-01/mentor", "/api/learning/challenge-01/assisted-run"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -7039,6 +7046,53 @@ async function loadBlofinInstruments(){
                         round_number=round_number, sample_count=sample_count,
                     )
                     status_code = 200 if result.get("status") == "BASELINE_RECORDED" else 409
+                    return self._send(
+                        status_code,
+                        json.dumps(result, ensure_ascii=False, default=str).encode(),
+                        "application/json; charset=utf-8",
+                    )
+                except Exception as exc:
+                    payload = {"status": "ERROR", "error_type": type(exc).__name__, "orders_submitted": False}
+                    return self._send(500, json.dumps(payload, ensure_ascii=False).encode(),
+                                      "application/json; charset=utf-8")
+                finally:
+                    CHALLENGE_01_RUN_LOCK.release()
+            if route == "/api/learning/challenge-01/assisted-run":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                try:
+                    round_number = int(form.get("round_number", ["0"])[0])
+                    sample_count = int(form.get("sample_count", ["100"])[0])
+                except (TypeError, ValueError):
+                    return self._send(400, b'{"status":"INVALID_PARAMETERS"}', "application/json; charset=utf-8")
+                if sample_count != 100 or not 2 <= round_number <= 5:
+                    return self._send(400, b'{"status":"INVALID_CHALLENGE_SCOPE"}', "application/json; charset=utf-8")
+                gate = get_challenge_01_status()
+                if gate.get("status") != "PASS" or gate.get("next_round") != round_number:
+                    payload = {
+                        "status": "BLOCKED",
+                        "reason_code": "CHALLENGE_STAGE_GATE_NOT_SATISFIED",
+                        "challenge_status": gate,
+                        "orders_submitted": False,
+                    }
+                    return self._send(409, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                                      "application/json; charset=utf-8")
+                if not CHALLENGE_01_RUN_LOCK.acquire(blocking=False):
+                    return self._send(409, b'{"status":"CHALLENGE_ALREADY_RUNNING"}', "application/json; charset=utf-8")
+                try:
+                    result = Challenge01AssistedRunner().run_round(
+                        round_number=round_number, sample_count=sample_count,
+                    )
+                    status_code = 200 if result.get("status") == "ROUND_RECORDED_NOT_MASTERY" else 409
                     return self._send(
                         status_code,
                         json.dumps(result, ensure_ascii=False, default=str).encode(),
