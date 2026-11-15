@@ -4699,7 +4699,7 @@ class Handler(BaseHTTPRequestHandler):
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
           <div class="metric" id="challenge-01-panel" style="margin-top:14px;border-color:#557b60">
             <h3>چالش ۱ · Single-Candle Direction · BloFin Demo Spot</h3>
-            <p class="muted">۱۰۰ کندل کامل BTC-USDT در تایم‌فریم ۱ ساعته؛ فقط Open و Close. ابتدا BOT_ONLY ثبت می‌شود و حافظهٔ دائمی بازیابی و راستی‌آزمایی می‌شود. این آزمایش هیچ سفارش یا معامله‌ای ارسال نمی‌کند و هنوز مدرک قبولی نهایی نیست.</p>
+            <p class="muted">۱۰۰ نمونهٔ پیش‌بینی یک کندل جلوتر با BTC-USDT در تایم‌فریم ۱ ساعته: ویژگی از کندل کامل قبلی، هدف از کندل بعدی. ۱۰۱ کندل بسته برای ساخت ۱۰۰ جفت زمانی لازم است. دادهٔ هدف در ورودی تصمیم قرار نمی‌گیرد. این خط پایه فقط Replay تاریخی است، مدل AI آموزش‌دیده یا معیار سودآوری نیست. ابتدا BOT_ONLY ثبت و حافظه پس از بازگشایی راستی‌آزمایی می‌شود؛ هیچ سفارش یا معامله‌ای ارسال نمی‌شود.</p>
             <button id="challenge-01-run" type="button" disabled>اجرای دور بعدی Challenge 1 (۱۰۰ نمونه)</button>
             <button id="challenge-01-mentor" type="button" disabled>ممیزی ۱۰۰ تجربهٔ قفل‌شده با AI Mentor</button>
             <p id="challenge-01-status" class="muted" aria-live="polite">برای مشاهده وضعیت حافظه، توکن پنل را در کادر بالا وارد کن.</p>
