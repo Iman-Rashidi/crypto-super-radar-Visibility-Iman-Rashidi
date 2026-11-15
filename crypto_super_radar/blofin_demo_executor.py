@@ -293,7 +293,7 @@ def build_demo_order_plan(
 
 
 class BloFinDemoTradeClient(BloFinDemoReadOnly):
-    """Demo-only write adapter. It exposes only set-leverage and open-order methods."""
+    """Demo-only write adapter with allow-listed leverage, open-order and targeted close-position methods."""
 
     ORDER_PATH = "/api/v1/trade/order"
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
