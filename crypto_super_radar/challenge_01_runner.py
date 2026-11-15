@@ -16,6 +16,7 @@ from typing import Any, Callable
 from .blofin_demo_spot_readonly import BloFinDemoSpotReadOnly
 from .database import connect_database, storage_backend
 from .learning_experience_memory import LearningExperienceMemory
+from .challenge_01_ai_mentor import detect_candlestick_patterns
 
 
 CHALLENGE_ID = "CHALLENGE-01"
@@ -328,11 +329,11 @@ class Challenge01Runner:
                 completed = [item for item in parsed if item["confirmed"]]
                 # A one-bar-ahead sample needs one completed feature candle and
                 # one later completed target candle for every prediction.
-                if len(completed) < sample_count + 1:
-                    raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES_FOR_FORWARD_TARGET")
-                # Provider rows are newest-first. Choose the oldest contiguous
-                # block, then reverse it so every feature precedes its target.
-                selected_desc = completed[-(sample_count + 1):]
+                if len(completed) < sample_count + 3:
+                    raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES_FOR_THREE_BAR_FEATURE_WINDOW")
+                # Three completed feature candles plus one later target are
+                # needed per prediction; adjacent windows may overlap safely.
+                selected_desc = completed[-(sample_count + 3):]
                 selected = list(reversed(selected_desc))
                 for index in range(len(selected) - 1):
                     if selected[index + 1]["open_time_ms"] - selected[index]["open_time_ms"] != BAR_MILLISECONDS:
@@ -363,15 +364,19 @@ class Challenge01Runner:
                 return result
 
             samples = [
-                {"feature": selected[index], "target": selected[index + 1]}
+                {
+                    "feature_window": selected[index:index + 3],
+                    "feature": selected[index + 2],
+                    "target": selected[index + 3],
+                }
                 for index in range(sample_count)
             ]
             dataset_canonical = json.dumps(
                 [
                     [
-                        sample["feature"]["open_time_ms"],
-                        sample["feature"]["open"], sample["feature"]["high"],
-                        sample["feature"]["low"], sample["feature"]["close"],
+                        [candle["open_time_ms"] for candle in sample["feature_window"]],
+                        [[candle["open"], candle["high"], candle["low"], candle["close"]]
+                         for candle in sample["feature_window"]],
                         sample["target"]["open_time_ms"],
                         sample["target"]["open"], sample["target"]["high"],
                         sample["target"]["low"], sample["target"]["close"],
@@ -430,6 +435,13 @@ class Challenge01Runner:
                             "feature_candle_open_time_ms": feature_ts,
                             "target_candle_open_time_ms": target_ts,
                             "feature_candle": feature_candle,
+                            "feature_window": sample["feature_window"],
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in sample["feature_window"]
+                            ],
+                            "detected_candlestick_patterns": detect_candlestick_patterns(
+                                sample["feature_window"]
+                            ),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -448,6 +460,9 @@ class Challenge01Runner:
                             "reference_classification": reference,
                             "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
                             "feature_candle_open_time_ms": feature_ts,
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in sample["feature_window"]
+                            ],
                             "target_candle_open_time_ms": target_ts,
                             "target_candle": target_candle,
                             "prediction_horizon_bars": 1,
