@@ -7,7 +7,7 @@ from pathlib import Path
 
 from crypto_super_radar.challenge_01_ai_mentor import review_locked_baseline
 from crypto_super_radar.challenge_01_assisted_runner import Challenge01AssistedRunner
-from crypto_super_radar.challenge_01_runner import BAR_MILLISECONDS
+from crypto_super_radar.challenge_01_runner import BAR_MILLISECONDS, get_challenge_01_status
 from crypto_super_radar.learning_experience_memory import LearningExperienceMemory
 
 
@@ -194,6 +194,23 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
                 candidate["model_candidate"]["artifact_sha256"],
             )
         finally:
+            db.close()
+
+        status = get_challenge_01_status(
+            connection_factory=self.connection_factory,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            allow_non_durable_for_tests=True,
+        )
+        self.assertEqual(status["next_round"], 3)
+        self.assertEqual(status["next_stage"], "FORWARD_HOLDOUT_VALIDATION_REQUIRED")
+        self.assertTrue(status["completed_rounds"][1]["round_ready"])
+        self.assertEqual(status["completed_rounds"][1]["paired_samples"], 100)
+        self.assertFalse(status["later_rounds_blocked"])
+        return
+
+        # The explicit return makes this test's status assertions independent
+        # of any future cleanup below.
+        try:
             db.close()
 
     def test_round_two_blocks_without_100_verified_prior_round_targets(self):
