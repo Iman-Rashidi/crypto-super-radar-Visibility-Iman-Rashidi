@@ -2570,7 +2570,7 @@ def _ensure_scan_worker():
 
 
 def _blofin_demo_execution_readiness() -> dict:
-    """Expose the recurring Demo order budget and non-secret prerequisites."""
+    """Expose unlimited Demo order quota and non-secret execution prerequisites."""
     trade_names = (
         "BLOFIN_DEMO_TRADE_API_KEY",
         "BLOFIN_DEMO_TRADE_API_SECRET",
@@ -2589,7 +2589,6 @@ def _blofin_demo_execution_readiness() -> dict:
     trading_enabled = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
     autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
     dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
-    max_orders_per_utc_day = 2
     budget = None
     try:
         backend = storage_backend()
@@ -2600,47 +2599,48 @@ def _blofin_demo_execution_readiness() -> dict:
         try:
             store = BloFinDemoEventStore()
             try:
-                budget = store.trade_budget_status(max_orders_per_utc_day)
+                budget = store.trade_budget_status()
             finally:
                 store.close()
         except Exception:
             budget = None
     orders_today = budget.get("orders_today") if isinstance(budget, dict) else None
+    orders_total = budget.get("orders_total") if isinstance(budget, dict) else None
     unresolved_orders = budget.get("unresolved_orders") if isinstance(budget, dict) else None
-    daily_capacity_available = (
-        isinstance(orders_today, int)
-        and orders_today < max_orders_per_utc_day
-    )
+    event_store_readable = isinstance(budget, dict)
     ready = bool(
         trade_credentials_configured and trading_enabled and dashboard_auth_configured
-        and durable_storage and daily_capacity_available
+        and durable_storage and event_store_readable
     )
     return {
         "status": "READY" if ready else "BLOCKED",
         "environment": "BLOFIN_DEMO",
         "trade_credentials_configured": trade_credentials_configured,
         "credential_source": credential_source,
-        "trade_permission_verified_each_cycle": False,
+        "trade_permission_verified_each_cycle": True,
         "trading_enabled": trading_enabled,
         "autopilot_enabled": autopilot_enabled,
         "durable_storage": durable_storage,
         "dashboard_auth_configured": dashboard_auth_configured,
+        "order_quota_unlimited": True,
         "orders_today_utc": orders_today,
-        "max_orders_per_utc_day": max_orders_per_utc_day,
-        "daily_capacity_available": daily_capacity_available,
+        "orders_total": orders_total,
+        "max_orders_per_utc_day": None,
+        "daily_capacity_available": event_store_readable,
         "unresolved_orders": unresolved_orders,
-        # Backward-compatible names retained for existing dashboard clients.
-        "one_order_available": daily_capacity_available,
-        "one_order_used": bool(orders_today) if isinstance(orders_today, int) else None,
         "leverage": 1,
+        "margin_mode": "isolated",
         "risk_per_trade_pct": 0.25,
         "daily_loss_limit_pct": 1.0,
         "max_drawdown_pct": 5.0,
+        "max_margin_usage_pct": 10.0,
         "max_concurrent_positions": 1,
+        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_DAILY_CANDLE",
         "message_fa": (
-            "پیش‌نیازهای چرخه Demo آماده‌اند؛ مجوز واقعی Trade، قیمت، ۱۲ گیت و Nemotron در هر چرخه دوباره بررسی می‌شوند."
+            "پیش‌نیازهای BloFin Demo آماده‌اند؛ تعداد سفارش‌ها سقف مادام‌العمر یا روزانه ندارد. "
+            "مجوز Trade، قیمت، ۱۲ گیت، Nemotron و کنترل‌های ریسک در هر چرخه دوباره بررسی می‌شوند."
             if ready else
-            "چرخه معامله مسدود است؛ کلید Demo دارای مجوز Trade، فعال‌سازی کنترل‌ها، توکن پنل، Turso پایدار و ظرفیت روزانه بدون سفارش مبهم لازم است."
+            "اجرای سفارش مسدود است؛ کلید Demo دارای مجوز Trade، فعال‌سازی معامله Demo، توکن پنل و حافظه پایدار Turso باید در دسترس باشند."
         ),
     }
 
@@ -3141,7 +3141,7 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             return
 
         store = BloFinDemoEventStore()
-        prior_budget = store.trade_budget_status(2)
+        prior_budget = store.trade_budget_status()
         if prior_budget.get("unresolved_orders", 0) > 0:
             latest = store.latest_order()
             if not isinstance(latest, dict) or latest.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
@@ -3359,10 +3359,7 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             trade_context=trade_context,
         )
         client = BloFinDemoTradeClient(timeout=10.0)
-        policy = BloFinDemoRiskPolicy(
-            max_leverage=1, max_orders_per_utc_day=2,
-            min_seconds_between_orders=1800,
-        )
+        policy = BloFinDemoRiskPolicy(max_leverage=1)
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
         )
@@ -3818,10 +3815,10 @@ class Handler(BaseHTTPRequestHandler):
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
-            <h3>اجرای یک سفارش آزمایشی · BTC-USDT Perpetual</h3>
-            <p class="muted">سهمیه فقط یک سفارش در کل عمر سرویس؛ اهرم ایزوله 1x، حداقل اندازه قرارداد، حد ضرر و حد سود. شرط ورود: ۱۲ گیت PASS، تأیید Nemotron و عبور همه کنترل‌های حساب و قیمت. در صورت رد هر شرط، سفارش ارسال نمی‌شود.</p>
+            <h3>معاملات آزمایشی نامحدود · BTC-USDT Perpetual</h3>
+            <p class="muted">تعداد سفارش‌ها در کل عمر سرویس و در هر روز نامحدود است؛ سقف روزانه و وقفه اجباری بین معاملات حذف شده‌اند. برای جلوگیری از ورود تکراری، هر کندل روزانه فقط یک سیگنال سفارش می‌سازد و تا زمان بسته‌شدن پوزیشن قبلی، پوزیشن جدید باز نمی‌شود. اهرم ایزوله 1x، حداقل اندازه مجاز قرارداد، حد ضرر و حد سود اجباری‌اند؛ ۱۲ گیت، Nemotron، مجوز Trade، قیمت و سقف ریسک در هر چرخه دوباره بررسی می‌شوند.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
-            <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک معامله در BloFin Demo</button>
+            <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>
             <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
               <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
             </div>
@@ -4129,12 +4126,9 @@ async function refreshExecutionReadiness(){
                 const response=await fetch('/api/blofin/demo/execution-readiness',{cache:'no-store'});
                 const result=await response.json();
                 executionReadiness.textContent=result.message_fa||'وضعیت پیش‌نیازهای Demo مشخص نیست.';
-                if(result.status==='READY'&&result.one_order_available===true){
+                if(result.status==='READY'&&result.order_quota_unlimited===true){
                   executeButton.disabled=false;
-                  executionReadiness.textContent+=' آماده اجرای یک سفارش است.';
-                }
-                if(result.one_order_used===true){
-                  executionReadiness.textContent='سهمیه یک سفارش این سرویس قبلاً استفاده شده است؛ سفارش دیگری مجاز نیست.';
+                  executionReadiness.textContent+=' آماده اجرای چرخه جدید است؛ سقف تعداد سفارش وجود ندارد.';
                 }
               }catch(error){executionReadiness.textContent='بررسی پیش‌نیازهای سفارش Demo ممکن نشد.';}
             }
