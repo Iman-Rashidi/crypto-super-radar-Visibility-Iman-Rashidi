@@ -109,6 +109,14 @@ class BloFinDemoSmokeTestRunner:
             raise BloFinDemoExecutionBlocked("Smoke test is pinned to BloFin Demo only.")
         if not all((client.api_key, client.api_secret, client.passphrase)):
             raise BloFinDemoExecutionBlocked("BloFin Demo Trade credentials are not configured.")
+        try:
+            client.verify_trade_permission()
+        except BloFinDemoExecutionBlocked:
+            raise
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked(
+                "مجوز Trade کلید BloFin قابل تأیید نیست؛ هیچ سفارش تغییردهنده‌ای ارسال نشد."
+            ) from exc
 
         self._emit("PREFLIGHT", "آزمایش مستقل آغاز شد؛ نماد BTC-USDT و محیط Demo بررسی می‌شوند.")
         self._emit("PREFLIGHT_CLOCK", "در حال بررسی اختلاف ساعت صرافی و سرور.")
