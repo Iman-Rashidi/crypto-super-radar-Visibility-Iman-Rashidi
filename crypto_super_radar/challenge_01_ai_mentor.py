@@ -439,8 +439,6 @@ def _train_candidate(
     dataset_hash = digest(all_manifest)
     artifact = {
         "schema": "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2",
-        "feature_window_length": FEATURE_WINDOW_LENGTH,
-        "pattern_features": list(PATTERN_FEATURES),
         "model_version": "ch01-candle-pattern-softmax-v2-" + dataset_hash[:12],
         "trained_through_round": trained_through_round,
         "task": "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD",
