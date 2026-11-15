@@ -43,6 +43,18 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
     target_candle = evidence.get("target_candle")
     if snapshot.get("data_quality") != "VALID_COMPLETED_FEATURE_AND_TARGET":
         issues.append("The baseline is not marked as a valid completed feature/target pair.")
+    feature_window = snapshot.get("feature_window")
+    if (
+        not isinstance(feature_window, list)
+        or len(feature_window) != FEATURE_WINDOW_LENGTH
+        or any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in feature_window)
+        or (
+            isinstance(feature_window, list)
+            and len(feature_window) == FEATURE_WINDOW_LENGTH
+            and snapshot.get("detected_candlestick_patterns") != detect_candlestick_patterns(feature_window)
+        )
+    ):
+        issues.append("The three-candle feature window or its pattern evidence is missing or inconsistent.")
     if evidence.get("comparison") != EXPECTED_COMPARISON:
         issues.append("The outcome label is not a verified next-candle target.")
     if decision.get("rule") != "previous_candle_body_direction":
@@ -366,8 +378,18 @@ def _train_candidate(
         "macro_f1_present_classes": sum(f1s) / len(f1s) if f1s else 0.0,
         "per_class": per_class,
     }
-    train_manifest = [[r["experience_id"], r["feature_ts"], r["target_ts"], r["label"]] for r in train_rows]
-    validation_manifest = [[r["experience_id"], r["feature_ts"], r["target_ts"], r["label"]] for r in validation_rows]
+    train_manifest = [
+        [r["experience_id"], r["feature_ts"], r["target_ts"],
+         [[candle["open_time_ms"], candle["open"], candle["high"], candle["low"], candle["close"]]
+          for candle in r["feature_window"]], r["label"]]
+        for r in train_rows
+    ]
+    validation_manifest = [
+        [r["experience_id"], r["feature_ts"], r["target_ts"],
+         [[candle["open_time_ms"], candle["open"], candle["high"], candle["low"], candle["close"]]
+          for candle in r["feature_window"]], r["label"]]
+        for r in validation_rows
+    ]
     all_manifest = train_manifest + validation_manifest
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     dataset_hash = digest(all_manifest)
@@ -380,6 +402,8 @@ def _train_candidate(
         "task": "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD",
         "method": "MULTINOMIAL_LOGISTIC_REGRESSION_WITH_CANDLE_PATTERNS",
         "features": list(MODEL_FEATURES),
+        "pattern_features": list(PATTERN_FEATURES),
+        "feature_window_length": FEATURE_WINDOW_LENGTH,
         "classes": list(MODEL_CLASSES),
         "normalization": {"means": means, "standard_deviations": stds},
         "weights": weights,
@@ -423,7 +447,9 @@ def _train_and_store_candidate(
         decision = decision_event.get("payload", {}).get("decision") or {}
         evidence = outcome_event.get("payload", {}).get("evidence") or {}
         round_number = snapshot.get("round_number")
-        feature, target = snapshot.get("feature_candle"), evidence.get("target_candle")
+        feature = snapshot.get("feature_candle")
+        feature_window = snapshot.get("feature_window")
+        target = evidence.get("target_candle")
         feature_ts, target_ts = snapshot.get("feature_candle_open_time_ms"), snapshot.get("target_candle_open_time_ms")
         if (
             not isinstance(round_number, int)
@@ -436,13 +462,24 @@ def _train_and_store_candidate(
             or decision.get("rule") != "previous_candle_body_direction"
             or decision.get("prediction_horizon_bars") != 1
             or not isinstance(feature, dict) or not isinstance(target, dict)
+            or not isinstance(feature_window, list)
+            or len(feature_window) != FEATURE_WINDOW_LENGTH
+            or any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in feature_window)
             or not isinstance(feature_ts, int) or not isinstance(target_ts, int)
             or target_ts - feature_ts != BAR_MILLISECONDS
             or feature.get("open_time_ms") != feature_ts
+            or feature_window[-1] != feature
             or target.get("open_time_ms") != target_ts
             or feature.get("confirmed") is not True or target.get("confirmed") is not True
+            or any(
+                right["open_time_ms"] - left["open_time_ms"] != BAR_MILLISECONDS
+                for left, right in zip(feature_window, feature_window[1:])
+            )
+            or snapshot.get("feature_window_open_times_ms") != [candle["open_time_ms"] for candle in feature_window]
+            or snapshot.get("detected_candlestick_patterns") != detect_candlestick_patterns(feature_window)
+            or evidence.get("feature_window_open_times_ms") != [candle["open_time_ms"] for candle in feature_window]
         ):
-            raise ValueError("FORWARD_FEATURE_TARGET_CONTRACT_FAILED")
+            raise ValueError("FORWARD_CANDLE_PATTERN_WINDOW_CONTRACT_FAILED")
         label = _target_label(target)
         rows.append({
             "experience_id": experience_id,
@@ -450,6 +487,7 @@ def _train_and_store_candidate(
             "feature_ts": feature_ts,
             "target_ts": target_ts,
             "feature": feature,
+            "feature_window": feature_window,
             "label": label,
         })
     rows.sort(key=lambda row: row["feature_ts"])
