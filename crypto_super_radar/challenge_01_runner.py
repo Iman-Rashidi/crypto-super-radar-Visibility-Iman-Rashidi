@@ -591,13 +591,49 @@ def get_challenge_01_status(
                 if any(event.get("event_type") == "MENTOR_FEEDBACK_RECORDED" for event in events):
                     mentor_reviewed_ids.add(experience_id)
         mentor_reviewed_samples = len(mentor_reviewed_ids)
-        mentor_review_ready = baseline_locked and mentor_reviewed_samples < baseline_samples
-        mentor_review_complete = baseline_locked and baseline_samples >= MIN_SAMPLES_PER_ROUND and mentor_reviewed_samples >= baseline_samples
+        mentor_review_complete = (
+            baseline_locked
+            and baseline_samples >= MIN_SAMPLES_PER_ROUND
+            and mentor_reviewed_samples >= baseline_samples
+        )
+        candidate_model_sha256 = None
+        for item in experiences:
+            for event in item.get("events") or []:
+                if event.get("event_type") != "LESSON_PROPOSED":
+                    continue
+                payload = event.get("payload") or {}
+                if not str(payload.get("lesson_id", "")).startswith("ch01-model-"):
+                    continue
+                try:
+                    artifact = json.loads(payload.get("lesson", ""))
+                    saved_hash = artifact.pop("artifact_sha256", None)
+                    calculated_hash = hashlib.sha256(json.dumps(
+                        artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8")).hexdigest()
+                    if (
+                        saved_hash == calculated_hash
+                        and artifact.get("schema") == "CSR_CH01_SOFTMAX_CANDIDATE_V1"
+                        and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
+                        and artifact.get("training", {}).get("samples") == 80
+                        and artifact.get("temporal_validation", {}).get("samples") == 20
+                    ):
+                        candidate_model_sha256 = saved_hash
+                        break
+                except (TypeError, ValueError, KeyError):
+                    continue
+            if candidate_model_sha256:
+                break
+        candidate_model_present = candidate_model_sha256 is not None
+        mentor_review_ready = baseline_locked and (
+            not mentor_review_complete or not candidate_model_present
+        )
         next_round = 1 if not baseline_locked else None
         if not baseline_locked:
             next_stage = "BOT_ONLY_BASELINE"
         elif not mentor_review_complete:
             next_stage = "AI_MENTOR_REQUIRED"
+        elif not candidate_model_present:
+            next_stage = "AI_MENTOR_MODEL_BUILD_REQUIRED"
         else:
             next_stage = "FORWARD_HOLDOUT_VALIDATION_REQUIRED"
         return {
@@ -618,6 +654,8 @@ def get_challenge_01_status(
             "mentor_review_required_samples": baseline_samples if baseline_locked else MIN_SAMPLES_PER_ROUND,
             "mentor_review_ready": mentor_review_ready,
             "mentor_review_complete": mentor_review_complete,
+            "candidate_model_present": candidate_model_present,
+            "candidate_model_sha256": candidate_model_sha256,
             "next_round": next_round,
             "next_stage": next_stage,
             "later_rounds_blocked": True,
