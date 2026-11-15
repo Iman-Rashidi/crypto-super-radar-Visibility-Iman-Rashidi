@@ -502,7 +502,7 @@ class Challenge01Runner:
                 "trade_outcome": "NOT_EXECUTED",
                 "inserted_decisions": inserted_decisions,
                 "inserted_outcomes": inserted_outcomes,
-                "memory_recovery_verified": verified == len(selected),
+                "memory_recovery_verified": verified == len(samples),
                 "memory_records_verified": verified,
                 "memory_integrity": "PASS",
                 "memory_backend": backend,
