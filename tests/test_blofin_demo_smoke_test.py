@@ -169,9 +169,23 @@ class BloFinDemoSmokeRunnerTests(unittest.TestCase):
         self.assertFalse(any(isinstance(item, tuple) and item[0] == "close" for item in client.calls))
 
 
+class FakeAPIKeyInfoResponse:
+    status_code = 200
+
+    def __init__(self, read_only=0):
+        self.read_only = read_only
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"code": "0", "data": {"apiKey": "demo-key", "readOnly": self.read_only}}
+
+
 class BloFinDemoCloseEndpointTests(unittest.TestCase):
     def test_close_position_uses_demo_allowlisted_endpoint_and_exact_position(self):
         session = Mock()
+        session.get.return_value = FakeAPIKeyInfoResponse(read_only=0)
         session.post.return_value = FakeResponse()
         client = BloFinDemoTradeClient(
             api_key="demo-key", api_secret="demo-secret", passphrase="demo-pass",
@@ -188,6 +202,23 @@ class BloFinDemoCloseEndpointTests(unittest.TestCase):
         self.assertEqual(body["positionId"], "position123")
         self.assertEqual(body["positionSide"], "long")
         self.assertEqual(body["marginMode"], "isolated")
+        self.assertTrue(session.get.call_args.args[0].endswith("/api/v1/user/query-apikey"))
+        self.assertIn("ACCESS-KEY", session.get.call_args.kwargs["headers"])
+
+    def test_close_position_blocks_read_only_api_key_before_post(self):
+        session = Mock()
+        session.get.return_value = FakeAPIKeyInfoResponse(read_only=1)
+        client = BloFinDemoTradeClient(
+            api_key="demo-key", api_secret="demo-secret", passphrase="demo-pass",
+            session=session, clock_ms=lambda: 1_800_000_000_000,
+        )
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            client.close_futures_position(
+                inst_id="BTC-USDT", margin_mode="isolated", position_side="long",
+                client_order_id="SMKC0123456789abcdef", position_id="position123",
+            )
+        session.get.assert_called_once()
+        session.post.assert_not_called()
 
     def test_close_position_rejects_invalid_position_id(self):
         session = Mock()
