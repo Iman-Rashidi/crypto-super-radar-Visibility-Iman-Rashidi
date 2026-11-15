@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -195,8 +197,19 @@ class Challenge01AIMentorTests(unittest.TestCase):
         )
         self.assertTrue(status["mentor_review_complete"])
         self.assertEqual(status["mentor_reviewed_samples"], 100)
-        self.assertEqual(status["next_stage"], "ASSISTED_ROUND_RUNNER_REQUIRED")
+        self.assertEqual(status["next_stage"], "FORWARD_HOLDOUT_VALIDATION_REQUIRED")
         self.assertTrue(status["later_rounds_blocked"])
+        anchor = self.memory.get_experience("baseline-0")
+        model_event = next(e for e in anchor["events"] if e["event_type"] == "LESSON_PROPOSED")
+        stored_model = json.loads(model_event["payload"]["lesson"])
+        model_hash = stored_model.pop("artifact_sha256")
+        self.assertEqual(
+            hashlib.sha256(json.dumps(stored_model, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest(),
+            model_hash,
+        )
+        self.assertEqual(stored_model["training"]["samples"], 80)
+        self.assertEqual(stored_model["temporal_validation"]["samples"], 20)
+
 
 
 if __name__ == "__main__":
