@@ -366,6 +366,26 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.store.reserve_order(self._plan())
         self.assertTrue(self.store.has_any_orders())
 
+    def test_autopilot_state_round_trips_through_durable_store(self):
+        state = {
+            "enabled": True,
+            "status": "SEARCHING_FOR_SIGNAL",
+            "cycles_started": 12,
+            "last_cycle_status": "completed",
+            "last_cycle_diagnostics": {
+                "signal": "NO_TRADE",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        self.assertIsNone(self.store.load_autopilot_state())
+        self.store.save_autopilot_state(state)
+        self.assertEqual(self.store.load_autopilot_state(), state)
+
+        updated = dict(state, cycles_started=13)
+        self.store.save_autopilot_state(updated)
+        self.assertEqual(self.store.load_autopilot_state(), updated)
+
     def test_trade_budget_tracks_daily_count_and_signal_idempotency(self):
         plan = self._plan()
         self.assertFalse(self.store.has_signal(plan["signal_id"]))
