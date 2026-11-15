@@ -538,8 +538,34 @@ def get_challenge_01_status(
         ]
         baseline_samples = len(rounds.get(1, set()))
         baseline_locked = baseline_samples >= MIN_SAMPLES_PER_ROUND
+        mentor_reviewed_ids = set()
+        baseline_experience_ids = set()
+        for item in experiences:
+            if item.get("decision_mode") != "BOT_ONLY":
+                continue
+            events = item.get("events") or []
+            decision = next(
+                (event.get("payload", {}) for event in events if event.get("event_type") == "DECISION_RECORDED"),
+                {},
+            )
+            snapshot = decision.get("input_snapshot") or {}
+            if snapshot.get("round_number") != 1:
+                continue
+            experience_id = item.get("experience_id")
+            if experience_id:
+                baseline_experience_ids.add(experience_id)
+                if any(event.get("event_type") == "MENTOR_FEEDBACK_RECORDED" for event in events):
+                    mentor_reviewed_ids.add(experience_id)
+        mentor_reviewed_samples = len(mentor_reviewed_ids)
+        mentor_review_ready = baseline_locked and mentor_reviewed_samples < baseline_samples
+        mentor_review_complete = baseline_locked and baseline_samples >= MIN_SAMPLES_PER_ROUND and mentor_reviewed_samples >= baseline_samples
         next_round = 1 if not baseline_locked else None
-        next_stage = "BOT_ONLY_BASELINE" if not baseline_locked else "AI_MENTOR_REQUIRED"
+        if not baseline_locked:
+            next_stage = "BOT_ONLY_BASELINE"
+        elif not mentor_review_complete:
+            next_stage = "AI_MENTOR_REQUIRED"
+        else:
+            next_stage = "ASSISTED_ROUND_RUNNER_REQUIRED"
         return {
             "status": "PASS",
             "challenge_id": CHALLENGE_ID,
@@ -554,11 +580,15 @@ def get_challenge_01_status(
             "completed_rounds": completed_rounds,
             "baseline_samples": baseline_samples,
             "baseline_locked": baseline_locked,
+            "mentor_reviewed_samples": mentor_reviewed_samples,
+            "mentor_review_required_samples": baseline_samples if baseline_locked else MIN_SAMPLES_PER_ROUND,
+            "mentor_review_ready": mentor_review_ready,
+            "mentor_review_complete": mentor_review_complete,
             "next_round": next_round,
             "next_stage": next_stage,
-            "later_rounds_blocked": baseline_locked,
+            "later_rounds_blocked": True,
             "mastery_status": "NOT_EARNED",
-            "mastery_rule": "BOT_ONLY baseline, AI Mentor review, then four independent assisted rounds; this endpoint never awards mastery",
+            "mastery_rule": "BOT_ONLY baseline, 100% mentor audit, then four independent assisted rounds; this endpoint never awards mastery",
             "orders_submitted": False,
         }
     except Exception as exc:
