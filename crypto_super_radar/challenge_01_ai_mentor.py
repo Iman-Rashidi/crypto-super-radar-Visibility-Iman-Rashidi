@@ -1,25 +1,26 @@
-"""Challenge 1 AI Mentor: audit the baseline without rewriting BOT_ONLY decisions.
+"""Challenge 1 deterministic audit mentor.
 
-The mentor is deliberately deterministic and provider-free for the zero-cost pilot.
-It reviews the locked baseline's evidence, explains the task's limitations, and
-records append-only feedback. It never changes a decision, submits orders, or
-awards mastery.
+This zero-cost first version audits locked BOT_ONLY experiences. It is not an
+LLM or predictive model: it records transparent, evidence-bound feedback and
+never edits the baseline decision, submits orders, or awards mastery.
 """
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, Callable
 
+from .database import connect_database, storage_backend
 from .learning_experience_memory import LearningExperienceMemory
 
 MENTOR_VERSION = "ch01-audit-mentor-v1"
 CHALLENGE_ID = "CHALLENGE-01"
 EXPECTED_SCOPE = "CLOSED_CANDLE_OHLC_CLASSIFICATION_ONLY_NOT_FORWARD_PREDICTION_OR_PNL"
 EXPECTED_COMPARISON = "DETERMINISTIC_OHLC_LABEL_CONSISTENCY_NOT_PREDICTIVE_GROUND_TRUTH"
+MIN_BASELINE_SAMPLES = 100
 
 
 def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dict[str, Any]:
-    """Review one finalized BOT_ONLY experience and append evidence-bound feedback."""
+    """Audit one finalized BOT_ONLY experience and append immutable feedback."""
     item = memory.get_experience(experience_id)
     if item.get("challenge_id") != CHALLENGE_ID or item.get("decision_mode") != "BOT_ONLY":
         raise ValueError("MENTOR_REQUIRES_CHALLENGE_01_BOT_ONLY_BASELINE")
@@ -46,20 +47,21 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
     if outcome_payload.get("realized_result") != "NOT_EXECUTED":
         issues.append("This exercise must not be interpreted as a trade result.")
 
+    finding_text = " ".join(issues) if issues else "Data and label integrity checks passed."
     feedback = (
-        "Baseline audit: " + (" ".join(issues) if issues else
-        "Data and label integrity checks passed. However, Open-versus-Close "
-        "classification uses the completed candle's final close to classify "
-        "that same candle. It is a deterministic description, not a forecast "
-        "of a future candle, profitable trade, or market edge. A 100% score "
-        "is therefore not evidence of predictive learning. The next challenge "
-        "dataset must define a future, non-overlapping target before any "
-        "assisted round can count toward mastery.")
+        "Baseline audit: " + finding_text + " Open-versus-Close classification "
+        "uses the completed candle's final close to classify that same candle. "
+        "It is a deterministic description, not a forecast of a future candle, "
+        "profitable trade, or market edge. A 100% score is not evidence of "
+        "predictive learning. A future predictive task must define its target "
+        "on a later candle, freeze feature time before that target begins, and "
+        "use non-overlapping holdout data."
+    )
     proposed_change = (
-        "Keep BOT_ONLY immutable. For future predictive evaluation, define the "
-        "target on a later candle, freeze the feature timestamp before that "
-        "target begins, and use non-overlapping holdout data. Until then return "
-        "NOT_MASTERY."
+        "Keep BOT_ONLY immutable. Before any assisted round, define a later-candle "
+        "target, freeze feature timestamps before the target period, and use "
+        "non-overlapping holdout data. Until this is implemented and tested, "
+        "return NOT_MASTERY."
     )
     event_id = "ch01-mentor-" + hashlib.sha256(experience_id.encode("utf-8")).hexdigest()[:24]
     with memory._db:
@@ -92,4 +94,122 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
     }
 
 
-__all__ = ["review_baseline", "MENTOR_VERSION"]
+def review_locked_baseline(
+    *,
+    connection_factory: Callable[[], Any] = connect_database,
+    backend_factory: Callable[[], str] = storage_backend,
+    allow_non_durable_for_tests: bool = False,
+) -> dict[str, Any]:
+    """Review all 100+ locked round-one experiences, requiring durable storage."""
+    connection = None
+    try:
+        backend = backend_factory()
+        if backend != "TURSO_CLOUD_SQLITE" and not allow_non_durable_for_tests:
+            return {
+                "status": "BLOCKED",
+                "reason_code": "DURABLE_LEARNING_MEMORY_REQUIRED",
+                "memory_backend": backend,
+                "mentor_reviews_recorded": 0,
+                "mastery_awarded": False,
+                "orders_submitted": False,
+            }
+
+        connection = connection_factory()
+        memory = LearningExperienceMemory(connection)
+        experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
+        baseline_ids = []
+        for item in experiences:
+            if item.get("decision_mode") != "BOT_ONLY":
+                continue
+            decision_event = next(
+                (e for e in item.get("events", []) if e.get("event_type") == "DECISION_RECORDED"),
+                None,
+            )
+            if not decision_event:
+                continue
+            snapshot = (decision_event.get("payload") or {}).get("input_snapshot") or {}
+            if snapshot.get("round_number") == 1:
+                baseline_ids.append(item.get("experience_id"))
+
+        baseline_ids = sorted(set(value for value in baseline_ids if value))
+        if len(baseline_ids) < MIN_BASELINE_SAMPLES:
+            return {
+                "status": "BLOCKED",
+                "reason_code": "BOT_ONLY_BASELINE_INCOMPLETE",
+                "baseline_samples": len(baseline_ids),
+                "required_samples": MIN_BASELINE_SAMPLES,
+                "mentor_reviews_recorded": 0,
+                "mastery_awarded": False,
+                "orders_submitted": False,
+            }
+
+        # Preflight every experience before writing any feedback.
+        for experience_id in baseline_ids:
+            item = memory.get_experience(experience_id)
+            if item.get("verification", {}).get("status") != "PASS":
+                return {
+                    "status": "BLOCKED",
+                    "reason_code": "BASELINE_MEMORY_INTEGRITY_FAILED",
+                    "experience_id": experience_id,
+                    "mentor_reviews_recorded": 0,
+                    "mastery_awarded": False,
+                    "orders_submitted": False,
+                }
+            types = [event.get("event_type") for event in item.get("events", [])]
+            if "OUTCOME_LABELLED" not in types:
+                return {
+                    "status": "BLOCKED",
+                    "reason_code": "BASELINE_OUTCOME_NOT_FINAL",
+                    "experience_id": experience_id,
+                    "mentor_reviews_recorded": 0,
+                    "mastery_awarded": False,
+                    "orders_submitted": False,
+                }
+
+        results = [review_baseline(memory, experience_id) for experience_id in baseline_ids]
+        verified = sum(
+            1 for experience_id in baseline_ids
+            if any(
+                event.get("event_type") == "MENTOR_FEEDBACK_RECORDED"
+                for event in memory.get_experience(experience_id).get("events", [])
+            )
+        )
+        if verified != len(baseline_ids):
+            return {
+                "status": "UNKNOWN",
+                "reason_code": "MENTOR_FEEDBACK_VERIFICATION_INCOMPLETE",
+                "baseline_samples": len(baseline_ids),
+                "mentor_reviews_recorded": verified,
+                "mastery_awarded": False,
+                "orders_submitted": False,
+            }
+        return {
+            "status": "MENTOR_REVIEW_RECORDED",
+            "challenge_id": CHALLENGE_ID,
+            "memory_backend": backend,
+            "baseline_samples": len(baseline_ids),
+            "mentor_reviews_recorded": verified,
+            "issues_found": sum(bool(result.get("issues")) for result in results),
+            "mentor_model_version": MENTOR_VERSION,
+            "next_stage": "ASSISTED_ROUND_RUNNER_REQUIRED",
+            "mastery_awarded": False,
+            "orders_submitted": False,
+            "live_trading": False,
+        }
+    except Exception as exc:
+        return {
+            "status": "UNKNOWN",
+            "reason_code": type(exc).__name__,
+            "mentor_reviews_recorded": 0,
+            "mastery_awarded": False,
+            "orders_submitted": False,
+        }
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+__all__ = ["review_baseline", "review_locked_baseline", "MENTOR_VERSION"]
