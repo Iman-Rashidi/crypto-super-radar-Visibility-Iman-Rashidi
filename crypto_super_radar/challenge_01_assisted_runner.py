@@ -15,6 +15,7 @@ from .challenge_01_ai_mentor import (
     load_candidate_artifact,
     predict_candidate,
     review_baseline,
+    train_candidate_from_completed_rounds,
 )
 from .challenge_01_runner import (
     BAR_MILLISECONDS,
@@ -373,6 +374,10 @@ class Challenge01AssistedRunner:
                     raise RuntimeError("ASSISTED_ROUND_MEMORY_RECOVERY_FAILED")
                 verified += 1
 
+            next_model_candidate = train_candidate_from_completed_rounds(
+                recovered_memory,
+                through_round=round_number,
+            )
             bot_metrics = _classification_metrics(bot_predictions, references)
             mentor_metrics = _classification_metrics(mentor_predictions, references)
             return {
@@ -385,6 +390,7 @@ class Challenge01AssistedRunner:
                 "dataset_sha256": dataset_hash,
                 "bot_only_metrics": bot_metrics,
                 "mentor_metrics": mentor_metrics,
+                "next_model_candidate": next_model_candidate,
                 "balanced_accuracy_delta": round(
                     mentor_metrics["balanced_accuracy"] - bot_metrics["balanced_accuracy"], 6,
                 ),
