@@ -973,5 +973,64 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn(b"Cross-origin", payload)
 
 
+    def test_blofin_market_and_robot_are_human_selectable_and_contract_catalog_is_live(self):
+        status, _, home = self.request("GET", "/")
+        page = home.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn('id="blofin-market-type"', page)
+        self.assertIn('id="blofin-instrument"', page)
+        self.assertIn('id="blofin-engine-profile"', page)
+        self.assertIn("USDT Perpetual · Linear SWAP", page)
+        self.assertIn("EASY TRADER", page)
+        self.assertIn("جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود", page)
+
+        payload = {
+            "status": "PASS",
+            "market": "BloFin Demo USDT Perpetual (linear SWAP)",
+            "count": 1,
+            "instruments": [{
+                "inst_id": "ETH-USDT", "base_currency": "ETH", "quote_currency": "USDT",
+                "api_permission": "full", "min_size": 0.1,
+                "lot_size": 0.1, "contract_value": 0.001, "tick_size": 0.1,
+            }],
+        }
+        with patch.object(web_app, "_blofin_demo_instrument_options", return_value=payload) as options:
+            catalog_status, _, catalog_body = self.request(
+                "GET", "/api/blofin/demo/instruments?refresh=1",
+            )
+        self.assertEqual(catalog_status, 200)
+        self.assertEqual(json.loads(catalog_body), payload)
+        options.assert_called_once_with(force=True)
+
+    def test_blofin_farsi_execution_report_identifies_selected_contract_and_robot(self):
+        report = web_app._blofin_execution_report_fa({
+            "status": "completed",
+            "stage": "PROFILE_GATE_REVIEW",
+            "message_fa": "شرایط ورود هنوز کامل نیست.",
+            "trade_context": {
+                "instrument_id": "ETH-USDT",
+                "execution_profile": "EASY",
+                "analysis_time_utc": "2026-11-15T05:00:00+00:00",
+            },
+            "analysis": {
+                "signal": "NO_TRADE",
+                "gate_pass_count": 6,
+                "gate_fail_count": 0,
+                "gate_unknown_count": 6,
+            },
+            "result": {
+                "status": "NO_TRADE",
+                "orders_submitted": False,
+                "trade_executed": False,
+                "reason_fa": "گیت ضروری حساب تأیید نشد.",
+            },
+        })
+        self.assertIn("ETH-USDT", report["title_fa"])
+        self.assertEqual(report["instrument_id"], "ETH-USDT")
+        self.assertEqual(report["execution_profile"], "EASY")
+        self.assertIn("ربات آسان", report["stage_fa"])
+        self.assertFalse(report["orders_submitted"])
+        self.assertFalse(report["trade_executed"])
+
 if __name__ == "__main__":
     unittest.main()

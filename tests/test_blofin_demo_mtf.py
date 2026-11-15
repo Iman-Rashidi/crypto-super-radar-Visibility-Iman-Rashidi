@@ -64,5 +64,27 @@ class BloFinMtfTests(unittest.TestCase):
         self.assertEqual(r["status"], "BLOCKED")
         self.assertEqual(client.calls, [])
 
+    def test_easy_auto_direction_uses_live_15m_and_1h_signal_without_candle_pattern(self):
+        client = FakeCandles(self.now, "LONG")
+        r = _blofin_mtf_execution_signal(
+            client, desired_direction=None, inst_id="BTC-USDT", now_ms=self.now,
+        )
+        self.assertEqual(r["status"], "PASS")
+        self.assertEqual(r["direction"], "LONG")
+        self.assertFalse(r["candlestick_pattern_required"])
+        self.assertEqual(r["signal_id"], f"BTC-USDT|15m|{r['signal_bar_open_ms']}")
+
+    def test_human_selected_alt_contract_is_used_for_both_timeframes_and_signal_id(self):
+        client = FakeCandles(self.now, "SHORT")
+        r = _blofin_mtf_execution_signal(
+            client, desired_direction=None, inst_id="ETH-USDT", now_ms=self.now,
+        )
+        self.assertEqual(r["status"], "PASS")
+        self.assertEqual(r["instrument_id"], "ETH-USDT")
+        self.assertEqual(r["direction"], "SHORT")
+        self.assertEqual(r["signal_id"], f"ETH-USDT|15m|{r['signal_bar_open_ms']}")
+        self.assertEqual([call[0] for call in client.calls], ["ETH-USDT", "ETH-USDT"])
+
+
 if __name__ == "__main__":
     unittest.main()

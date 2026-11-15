@@ -165,21 +165,43 @@ def build_demo_order_plan(
     if not signal_id:
         raise BloFinDemoExecutionBlocked("A stable signal_id or signal_bar is required for idempotency.")
 
+    execution_profile = str(record.get("execution_profile") or "STRICT").strip().upper()
+    profile_rules = {
+        "EASY": {"required": {1, 2, 3, 4, 5, 6, 9}, "minimum_pass": 7, "minimum_score": 55.0},
+        "STANDARD": {"required": {1, 2, 3, 4, 5, 6, 8, 9}, "minimum_pass": 9, "minimum_score": 65.0},
+        "STRICT": {"required": set(range(1, 13)), "minimum_pass": 12, "minimum_score": 75.0},
+    }
+    if execution_profile not in profile_rules:
+        raise BloFinDemoExecutionBlocked("Unknown execution profile; select EASY, STANDARD or STRICT.")
+    profile_rule = profile_rules[execution_profile]
     score = _finite(record.get("confirmation_score"), "confirmation_score")
     risk_score = _finite(record.get("estimated_risk_score"), "estimated_risk_score")
-    if score < policy.min_confirmation_score or risk_score > policy.max_risk_score:
-        raise BloFinDemoExecutionBlocked("Signal score/risk score did not pass the execution policy.")
+    minimum_score = max(float(profile_rule["minimum_score"]), float(policy.min_confirmation_score))
+    if score < minimum_score or risk_score > policy.max_risk_score:
+        raise BloFinDemoExecutionBlocked("Signal score/risk score did not pass the selected execution profile.")
 
-    gate_pass = record.get("gate_pass_count")
-    gate_fail = record.get("gate_fail_count")
-    gate_unknown = record.get("gate_unknown_count")
-    gates = record.get("gates")
-    if isinstance(gates, list):
-        gate_pass = sum(1 for g in gates if isinstance(g, Mapping) and str(g.get("status", "")).upper() == "PASS")
-        gate_fail = sum(1 for g in gates if isinstance(g, Mapping) and str(g.get("status", "")).upper() == "FAIL")
-        gate_unknown = sum(1 for g in gates if isinstance(g, Mapping) and str(g.get("status", "")).upper() == "UNKNOWN")
-    if (gate_pass, gate_fail, gate_unknown) != (12, 0, 0):
-        raise BloFinDemoExecutionBlocked("All 12 confirmation gates must PASS; FAIL/UNKNOWN blocks entry.")
+    raw_gates = record.get("gates")
+    if not isinstance(raw_gates, list) or len(raw_gates) != 12:
+        raise BloFinDemoExecutionBlocked("The execution profile requires a complete 12-row gate report; missing evidence is not fabricated.")
+    gate_statuses: dict[int, str] = {}
+    for gate in raw_gates:
+        if not isinstance(gate, Mapping):
+            raise BloFinDemoExecutionBlocked("Gate report contains an invalid row.")
+        gate_id = gate.get("gate_id")
+        if isinstance(gate_id, bool) or not isinstance(gate_id, int) or gate_id in gate_statuses or gate_id not in range(1, 13):
+            raise BloFinDemoExecutionBlocked("Gate IDs must be unique and within 1-12.")
+        gate_statuses[gate_id] = str(gate.get("status", "")).upper()
+    if set(gate_statuses) != set(range(1, 13)):
+        raise BloFinDemoExecutionBlocked("The gate report is incomplete.")
+    gate_pass = sum(value == "PASS" for value in gate_statuses.values())
+    gate_fail = sum(value == "FAIL" for value in gate_statuses.values())
+    gate_unknown = sum(value == "UNKNOWN" for value in gate_statuses.values())
+    failed_required = sorted(gate_id for gate_id in profile_rule["required"] if gate_statuses[gate_id] != "PASS")
+    if failed_required or gate_pass < int(profile_rule["minimum_pass"]):
+        raise BloFinDemoExecutionBlocked(
+            f"{execution_profile} profile blocked: required gates not PASS={failed_required}; "
+            f"observed PASS={gate_pass}, FAIL={gate_fail}, UNKNOWN={gate_unknown}."
+        )
 
     if instrument.get("instId") != inst_id or instrument.get("apiPermission") != "full":
         raise BloFinDemoExecutionBlocked("Contract is not explicitly marked apiPermission=full.")

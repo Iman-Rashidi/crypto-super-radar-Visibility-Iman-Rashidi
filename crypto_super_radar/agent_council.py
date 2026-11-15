@@ -11,8 +11,24 @@ import math
 from typing import Any
 
 MANDATORY_GATE_IDS = frozenset(range(1, 13))
-MIN_CONFIRMATION_SCORE = 75.0
 MAX_ESTIMATED_RISK_SCORE = 45.0
+PROFILE_POLICIES = {
+    "EASY": {
+        "required_gate_ids": frozenset({1, 2, 3, 4, 5, 6, 9}),
+        "min_pass_count": 7,
+        "min_confirmation_score": 55.0,
+    },
+    "STANDARD": {
+        "required_gate_ids": frozenset({1, 2, 3, 4, 5, 6, 8, 9}),
+        "min_pass_count": 9,
+        "min_confirmation_score": 65.0,
+    },
+    "STRICT": {
+        "required_gate_ids": MANDATORY_GATE_IDS,
+        "min_pass_count": 12,
+        "min_confirmation_score": 75.0,
+    },
+}
 
 _AGENT_GROUPS = (
     ("Data integrity analyst", "تحلیل‌گر صحت داده", (1,)),
@@ -65,7 +81,14 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
         else:
             gates[gate_id] = _gate_status(gate)
 
-    missing_ids = sorted(MANDATORY_GATE_IDS - set(gates))
+    metrics = getattr(result, "metrics", {})
+    metrics = metrics if isinstance(metrics, dict) else {}
+    execution_profile = _enum_text(metrics.get("execution_profile") or "STRICT")
+    if execution_profile not in PROFILE_POLICIES:
+        execution_profile = "STRICT"
+    profile_policy = PROFILE_POLICIES[execution_profile]
+    required_gate_ids = profile_policy["required_gate_ids"]
+    missing_ids = sorted(required_gate_ids - set(gates))
     unexpected_ids = sorted(set(gates) - MANDATORY_GATE_IDS)
     duplicate_ids = sorted(set(duplicate_ids))
 
@@ -101,27 +124,53 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
     def add_check(label: str, status: str, detail: str) -> None:
         checks.append({"check": label, "status": status, "detail": detail})
 
-    if missing_ids or duplicate_ids or invalid_ids:
+    if duplicate_ids or invalid_ids:
         add_check(
-            "Complete, unique 12-gate evidence",
+            "Unique gate evidence",
             "UNKNOWN",
-            "Missing=" + str(missing_ids) + "; duplicate=" + str(duplicate_ids)
-            + "; invalid_ids=" + str(invalid_ids),
+            "duplicate=" + str(duplicate_ids) + "; invalid_ids=" + str(invalid_ids),
         )
     elif unexpected_ids:
         add_check(
-            "Exact mandatory gate set",
+            "Known gate identifiers",
             "FAIL",
             "Unexpected gate IDs=" + str(unexpected_ids),
         )
+    elif missing_ids:
+        add_check(
+            "Profile-required gate evidence",
+            "UNKNOWN",
+            "Missing required gate IDs=" + str(missing_ids),
+        )
     else:
-        statuses = [gates[gate_id] for gate_id in sorted(MANDATORY_GATE_IDS)]
-        if all(value == "PASS" for value in statuses):
-            add_check("All 12 mandatory gates", "PASS", "All twelve gates report PASS.")
-        elif "FAIL" in statuses:
-            add_check("All 12 mandatory gates", "FAIL", "At least one mandatory gate reports FAIL.")
+        statuses = [gates[gate_id] for gate_id in sorted(required_gate_ids)]
+        pass_count = sum(value == "PASS" for value in gates.values())
+        min_pass = int(profile_policy["min_pass_count"])
+        if all(value == "PASS" for value in statuses) and pass_count >= min_pass:
+            add_check(
+                "Profile-required gate evidence",
+                "PASS",
+                f"{execution_profile} requires {sorted(required_gate_ids)} and at least {min_pass} PASS gates; observed {pass_count} PASS.",
+            )
+        elif any(value == "FAIL" for value in statuses):
+            add_check(
+                "Profile-required gate evidence",
+                "FAIL",
+                f"A required {execution_profile} gate failed: "
+                + str({gate_id: gates[gate_id] for gate_id in required_gate_ids}),
+            )
         else:
-            add_check("All 12 mandatory gates", "UNKNOWN", "At least one mandatory gate is UNKNOWN.")
+            add_check(
+                "Profile-required gate evidence",
+                "UNKNOWN",
+                f"{execution_profile} requires {min_pass} PASS gates; observed {pass_count}.",
+            )
+        if execution_profile != "STRICT":
+            add_check(
+                "Additional research gates",
+                "PASS",
+                "Non-required research gates remain visible as advisory evidence; UNKNOWN/FAIL values were not rewritten as PASS.",
+            )
 
     signal = _enum_text(getattr(result, "signal", None)).replace("_", " ")
     asset_name = str(getattr(result, "asset", "") or "")
@@ -139,10 +188,12 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
     confirmation = _finite_number(getattr(result, "confirmation_score", None))
     if confirmation is None:
         add_check("Confirmation score", "UNKNOWN", "No finite confirmation score was supplied.")
-    elif confirmation >= MIN_CONFIRMATION_SCORE:
-        add_check("Confirmation score", "PASS", f"Score {confirmation:.2f} meets the {MIN_CONFIRMATION_SCORE:.0f} minimum.")
+    elif confirmation >= float(profile_policy["min_confirmation_score"]):
+        minimum = float(profile_policy["min_confirmation_score"])
+        add_check("Confirmation score", "PASS", f"Score {confirmation:.2f} meets the {minimum:.0f} {execution_profile} minimum.")
     else:
-        add_check("Confirmation score", "FAIL", f"Score {confirmation:.2f} is below the {MIN_CONFIRMATION_SCORE:.0f} minimum.")
+        minimum = float(profile_policy["min_confirmation_score"])
+        add_check("Confirmation score", "FAIL", f"Score {confirmation:.2f} is below the {minimum:.0f} {execution_profile} minimum.")
 
     risk = _finite_number(getattr(result, "estimated_risk_score", None))
     if risk is None:
@@ -188,8 +239,11 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
     )
 
     return {
-        "version": "native-agent-council-v1",
+        "version": "native-agent-council-v2",
         "mode": "LOCAL_RULES_ONLY",
+        "execution_profile": execution_profile,
+        "required_gate_ids": sorted(required_gate_ids),
+        "min_pass_count": int(profile_policy["min_pass_count"]),
         "status": status,
         "status_fa": status_fa,
         "paper_entry_eligible": status == "APPROVED",

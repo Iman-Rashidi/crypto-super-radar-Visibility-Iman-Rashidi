@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
-from .models import AssetSpec, GateStatus, Signal
+from .models import AssetSpec, AnalysisResult, GateResult, GateStatus, SafetyStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .futures_paper_trading import FUTURES_PAPER_ASSETS, FuturesPaperTradingBot
 from .market_intelligence import search_dex_tokens
@@ -40,6 +40,7 @@ from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDe
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
+    _active_order_count, _active_position_count, _equity_from_balance,
 )
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
@@ -59,6 +60,7 @@ SCAN_QUEUE = queue.Queue(maxsize=50)
 SCAN_WORKER_STARTED = False
 
 BLOFIN_STATUS_CACHE = {"expires_at": 0.0, "payload": None}
+BLOFIN_INSTRUMENT_CACHE = {"expires_at": 0.0, "payload": None}
 BLOFIN_STATUS_LOCK = threading.Lock()
 BLOFIN_EXECUTION_GUARD = threading.Lock()
 BLOFIN_EXECUTION_JOBS: dict[str, dict] = {}
@@ -70,6 +72,8 @@ BLOFIN_AUTOPILOT_STATE = {
     "status": "DISABLED",
     "environment": "BLOFIN_DEMO",
     "market": "BTC-USDT",
+    "instrument_id": "BTC-USDT",
+    "execution_profile": "EASY",
     "interval_seconds": 300,
     "last_cycle_started_at_utc": None,
     "last_cycle_finished_at_utc": None,
@@ -2666,8 +2670,11 @@ def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
         BLOFIN_EXECUTION_JOBS[job_id] = current
 
 
-def _blofin_demo_live_monitor_snapshot() -> dict:
+def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
     """Build a complete, read-only Demo monitor snapshot with partial-source disclosure."""
+    inst_id = str(inst_id or "BTC-USDT").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id):
+        raise BloFinDemoExecutionBlocked("Only a USDT linear perpetual can be monitored.")
     client = BloFinDemoReadOnly(timeout=8.0)
     read_errors: list[dict[str, str]] = []
     try:
@@ -2697,10 +2704,10 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
     try:
         latest = read("local_latest_order", store.latest_order, None) if store is not None else None
         ticker_rows = read(
-            "market_ticker", lambda: client.get_tickers(inst_id="BTC-USDT"), []
+            "market_ticker", lambda: client.get_tickers(inst_id=inst_id), []
         )
         mark_rows = read(
-            "mark_price", lambda: client.get_mark_price(inst_id="BTC-USDT"), []
+            "mark_price", lambda: client.get_mark_price(inst_id=inst_id), []
         )
         balance = read(
             "futures_balance",
@@ -2708,45 +2715,49 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
             {},
         )
         positions = read(
-            "positions", lambda: client.get_positions(inst_id="BTC-USDT"), []
+            "positions", lambda: client.get_positions(inst_id=inst_id), []
         )
         open_orders = read(
-            "open_orders", lambda: client.get_open_orders(inst_id="BTC-USDT"), []
+            "open_orders", lambda: client.get_open_orders(inst_id=inst_id), []
         )
         open_tpsl = read(
             "open_tpsl_orders",
-            lambda: client.get_open_tpsl_orders(inst_id="BTC-USDT", limit=100),
+            lambda: client.get_open_tpsl_orders(inst_id=inst_id, limit=100),
             [],
         )
         tpsl_history = read(
             "tpsl_orders_history",
-            lambda: client.get_tpsl_orders_history(inst_id="BTC-USDT", limit=100),
+            lambda: client.get_tpsl_orders_history(inst_id=inst_id, limit=100),
             [],
         )
         fills = read(
             "fills_history",
-            lambda: client.get_fills_history(inst_id="BTC-USDT", limit=100),
+            lambda: client.get_fills_history(inst_id=inst_id, limit=100),
             [],
         )
         completed_orders = read(
             "orders_history",
-            lambda: client.get_orders_history(inst_id="BTC-USDT", limit=100),
+            lambda: client.get_orders_history(inst_id=inst_id, limit=100),
             [],
         )
         closed_positions = read(
             "closed_positions_history",
             lambda: client.get_positions_history(
-                inst_id="BTC-USDT", state="closed", limit=100,
+                inst_id=inst_id, state="closed", limit=100,
             ),
             [],
         )
 
         order_detail = None
-        if isinstance(latest, dict) and latest.get("client_order_id"):
+        latest_matches_instrument = (
+            isinstance(latest, dict)
+            and str(latest.get("instrument_id") or "BTC-USDT").upper() == inst_id
+        )
+        if latest_matches_instrument and latest.get("client_order_id"):
             detail = read(
                 "latest_local_order_detail",
                 lambda: client.get_order_detail(
-                    "BTC-USDT", client_order_id=str(latest["client_order_id"]),
+                    inst_id, client_order_id=str(latest["client_order_id"]),
                 ),
                 [],
             )
@@ -2834,7 +2845,7 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
             if isinstance(order_detail, dict) else None
         )
         safe_latest = None
-        if isinstance(latest, dict):
+        if latest_matches_instrument:
             allowed_local = (
                 "client_order_id", "signal_id", "instrument_id", "side",
                 "quantity", "entry_price", "stop_loss", "take_profit",
@@ -2848,6 +2859,7 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
             [],
         )
         return {
+            "instrument_id": inst_id,
             "status": (
                 "AUTH_FAILED"
                 if any(item.get("error_type") == "BloFinDemoAuthError" for item in read_errors)
@@ -2861,7 +2873,7 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
             "data_completeness": "COMPLETE" if not read_errors else "PARTIAL",
             "read_errors": read_errors,
             "market": {
-                "instId": "BTC-USDT",
+                "instId": inst_id,
                 "last": ticker.get("last"),
                 "markPrice": mark.get("markPrice"),
                 "indexPrice": mark.get("indexPrice"),
@@ -2886,7 +2898,8 @@ def _blofin_demo_live_monitor_snapshot() -> dict:
             "execution_events": execution_events,
         }
     finally:
-        store.close()
+        if store is not None:
+            store.close()
 
 
 
@@ -3011,6 +3024,8 @@ def _blofin_execution_report_fa(job: dict) -> dict:
     status = str(result.get("status") or current.get("status") or "UNKNOWN").upper()
     stage = str(current.get("stage") or status).upper()
     direction = str(analysis.get("signal") or result.get("signal") or order.get("side") or "NO_TRADE").upper()
+    instrument_id = str(context.get("instrument_id") or result.get("instrument_id") or order.get("instrument_id") or "—")
+    execution_profile = str(context.get("execution_profile") or result.get("execution_profile") or analysis.get("execution_profile") or "EASY")
 
     status_labels = {
         "QUEUED": "در صف اجرا",
@@ -3036,6 +3051,9 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "READ_ONLY_ORDER_RECONCILIATION": "تطبیق فقط‌خواندنی سفارش قبلی",
         "ORDER_REMAINS_UNKNOWN": "نتیجه سفارش قبلی هنوز مشخص نیست",
         "LIVE_12_GATE_ANALYSIS": "تحلیل زندهٔ ۱۲ فیلتر",
+        "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده ربات آسان · روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
+        "PROFILE_GATE_REVIEW": "بررسی گیت‌های الزامی پروفایل انتخابی",
+        "MTF_TRIGGER_BLOCKED": "عدم تطبیق روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
         "ELLIOTT_WAVE_ANALYSIS": "تحلیل و انتخاب سناریوی موج الیوت",
         "NO_TRADE": "عدم ورود؛ شرایط کامل نیست",
         "DUPLICATE_CANDLE_SKIPPED": "جلوگیری از معامله تکراری",
@@ -3079,7 +3097,9 @@ def _blofin_execution_report_fa(job: dict) -> dict:
     fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
     count_fa = lambda value: str(value if value is not None else "—").translate(fa_digits)
     return {
-        "title_fa": "گزارش فارسی اجرای معامله آزمایشی",
+        "title_fa": "گزارش فارسی اجرای معامله آزمایشی · " + instrument_id,
+        "instrument_id": instrument_id,
+        "execution_profile": execution_profile,
         "status_fa": status_labels.get(status, status_labels.get(str(current.get("status") or "").upper(), "وضعیت نامشخص")),
         "stage_fa": stage_labels.get(stage, "مرحلهٔ پردازش"),
         "signal_fa": signal_fa,
@@ -3160,20 +3180,26 @@ def _blofin_ema(values: list[float], period: int) -> float:
     return current
 
 
-def _blofin_mtf_execution_signal(client, *, desired_direction: str, now_ms: int | None = None) -> dict:
-    """Use daily gates as strategy filter, 1H trend and 15m trigger for entries."""
-    direction = str(desired_direction or "").upper()
-    if direction not in {"LONG", "SHORT"}:
-        return {"status": "BLOCKED", "reason_fa": "سیگنال روزانه جهت‌دار نیست."}
+def _blofin_mtf_execution_signal(
+    client, *, desired_direction: str | None = None, inst_id: str = "BTC-USDT",
+    now_ms: int | None = None,
+) -> dict:
+    """Use only completed BloFin 1H and 15m candles; no candle pattern is required."""
+    requested_direction = str(desired_direction or "").upper()
+    if requested_direction and requested_direction not in {"LONG", "SHORT"}:
+        return {"status": "BLOCKED", "reason_fa": "سیگنال جهت‌دار LONG یا SHORT نیست."}
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", str(inst_id or "")):
+        return {"status": "BLOCKED", "reason_fa": "قرارداد باید یک نماد خطی USDT معتبر باشد."}
+    direction = requested_direction
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
     ms15, ms1h = 15 * 60 * 1000, 60 * 60 * 1000
     try:
         c15 = _blofin_parse_completed_candles(
-            client, inst_id="BTC-USDT", bar="15m", limit=120,
+            client, inst_id=inst_id, bar="15m", limit=120,
             interval_ms=ms15, minimum_rows=30, now_ms=now,
         )
         c1h = _blofin_parse_completed_candles(
-            client, inst_id="BTC-USDT", bar="1H", limit=120,
+            client, inst_id=inst_id, bar="1H", limit=120,
             interval_ms=ms1h, minimum_rows=55, now_ms=now,
         )
     except (BloFinDemoError, BloFinDemoExecutionBlocked, ValueError) as exc:
@@ -3195,11 +3221,14 @@ def _blofin_mtf_execution_signal(client, *, desired_direction: str, now_ms: int 
                         and last15["close"] > prev15["close"] else
                "SHORT" if ema9 < ema21 and last15["close"] < ema9
                          and last15["close"] < prev15["close"] else "NEUTRAL")
-    if trend != direction or trigger != direction:
+    if not direction:
+        direction = trend if trend == trigger and trend in {"LONG", "SHORT"} else ""
+    if not direction or trend != direction or trigger != direction:
         return {"status": "BLOCKED",
-                "reason_fa": "جهت روزانه، روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای همسو نیستند.",
-                "daily_direction": direction, "hourly_direction": trend,
-                "trigger_15m_direction": trigger}
+                "reason_fa": "روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای جهت مشترک ندارند.",
+                "requested_direction": requested_direction or "AUTO",
+                "candidate_direction": trend if trend == trigger else "NO_TRADE",
+                "hourly_direction": trend, "trigger_15m_direction": trigger}
     ranges = []
     for i in range(1, len(c15)):
         x, prev_close = c15[i], c15[i-1]["close"]
@@ -3218,7 +3247,8 @@ def _blofin_mtf_execution_signal(client, *, desired_direction: str, now_ms: int 
     close_utc = datetime.fromtimestamp(last15["close_time_ms"]/1000, tz=timezone.utc).isoformat()
     return {
         "status": "PASS", "direction": direction,
-        "signal_id": f"BTC-USDT|15m|{last15['timestamp_ms']}",
+        "instrument_id": inst_id,
+        "signal_id": f"{inst_id}|15m|{last15['timestamp_ms']}",
         "signal_bar_open_ms": last15["timestamp_ms"],
         "signal_bar_open_utc": open_utc, "signal_bar_close_utc": close_utc,
         "entry_price": entry, "stop_loss": stop, "take_profit": target,
@@ -3227,14 +3257,335 @@ def _blofin_mtf_execution_signal(client, *, desired_direction: str, now_ms: int 
         "hourly_direction": trend, "trigger_15m_direction": trigger,
         "completed_15m_candle_age_seconds": last15["age_ms"]/1000.0,
         "completed_1h_candle_age_seconds": last1h["age_ms"]/1000.0,
+        "candlestick_pattern_required": False,
     }
 
 
-def _run_blofin_demo_execution_job(job_id: str) -> None:
-    """Analyze one BTC perpetual candle and submit one guarded Demo order if approved."""
+def _blofin_easy_trader_analysis(
+    client: BloFinDemoReadOnly, store: BloFinDemoEventStore, asset: AssetSpec, inst_id: str,
+) -> AnalysisResult:
+    """Build EASY_TRADER's transparent signal from BloFin-only exchange evidence.
+
+    The Easy profile uses seven core checks. Research-only evidence (news,
+    whale coverage and walk-forward) remains UNKNOWN/advisory rather than being
+    falsely marked PASS. The executor independently repeats every account,
+    order, price, margin and risk check before sending anything.
+    """
+    evidence: dict[str, Any] = {"instrument_id": inst_id, "execution_profile": "EASY"}
+    error_types: list[str] = []
+    instrument: dict[str, Any] = {}
+    ticker: dict[str, Any] = {}
+    mark: dict[str, Any] = {}
+    account_gate = "UNKNOWN"
+    account_reason = "وضعیت حساب و بودجه ریسک قابل تأیید نیست."
+    liquidity_gate = "UNKNOWN"
+    liquidity_reason = "داده نقدشوندگی کامل نیست."
+    instrument_gate = "UNKNOWN"
+    instrument_reason = "مشخصات مجاز قرارداد تأیید نشده است."
+    mtf = _blofin_mtf_execution_signal(client, desired_direction=None, inst_id=inst_id)
+    direction = str(mtf.get("direction") or "").upper() if mtf.get("status") == "PASS" else ""
+
+    def safe_read(label: str, operation):
+        try:
+            return operation()
+        except Exception as exc:
+            error_types.append(type(exc).__name__)
+            evidence.setdefault("read_errors", []).append(label + ":" + type(exc).__name__)
+            return None
+
+    instrument_value = safe_read("instrument", lambda: client.get_tradable_instrument(inst_id))
+    if isinstance(instrument_value, dict):
+        instrument = instrument_value
+        instrument_gate = "PASS"
+        instrument_reason = "قرارداد خطی USDT، زنده و دارای مجوز کامل API برای بازکردن موقعیت تأیید شد."
+    else:
+        instrument_gate = "FAIL"
+        instrument_reason = "قرارداد زنده، خطی USDT و مجاز برای بازکردن موقعیت تأیید نشد."
+
+    ticker_rows = safe_read("ticker", lambda: client.get_tickers(inst_id=inst_id))
+    if isinstance(ticker_rows, list) and ticker_rows and isinstance(ticker_rows[0], dict):
+        ticker = ticker_rows[0]
+    mark_rows = safe_read("mark_price", lambda: client.get_mark_price(inst_id=inst_id))
+    if isinstance(mark_rows, list) and mark_rows and isinstance(mark_rows[0], dict):
+        mark = mark_rows[0]
+
+    now_ms = int(time.time() * 1000)
+    ticker_last = None
+    mark_price = None
+    spread_pct = None
+    quote_volume_usdt = None
+    ticker_age_seconds = None
+    mark_deviation_pct = None
+    try:
+        ticker_last = float(ticker.get("last"))
+        bid = float(ticker.get("bidPrice"))
+        ask = float(ticker.get("askPrice"))
+        turnover_base = float(ticker.get("volCurrency24h"))
+        ticker_ts = int(ticker.get("ts"))
+        mid = (ask + bid) / 2.0
+        if min(ticker_last, bid, ask, turnover_base, mid) <= 0 or ask < bid:
+            raise ValueError("invalid ticker values")
+        spread_pct = (ask - bid) / mid * 100.0
+        quote_volume_usdt = ticker_last * turnover_base
+        ticker_age_seconds = max(0.0, (now_ms - ticker_ts) / 1000.0)
+        mark_price = float(mark.get("markPrice"))
+        if mark_price <= 0:
+            raise ValueError("invalid mark price")
+        mark_deviation_pct = abs(mark_price - ticker_last) / ticker_last * 100.0
+        if ticker_age_seconds <= 60.0 and spread_pct <= 0.30 and quote_volume_usdt >= 250_000.0 and mark_deviation_pct <= 0.50:
+            liquidity_gate = "PASS"
+            liquidity_reason = "قیمت، مارک‌پرایس، تازگی، اسپرد و گردش ۲۴ ساعته قرارداد در محدوده مجازند."
+        else:
+            liquidity_gate = "FAIL"
+            liquidity_reason = "اسپرد، حجم ۲۴ ساعته، تازگی قیمت یا اختلاف مارک‌پرایس از حد مجاز عبور کرده است."
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        liquidity_gate = "UNKNOWN"
+        liquidity_reason = "تیکر، بهترین Bid/Ask، گردش ۲۴ ساعته یا Mark Price قابل اعتبارسنجی نیست."
+
+    try:
+        balance = client.get_futures_balance(product_type="USDT-FUTURES")
+        equity = _equity_from_balance(balance)
+        guard = store.equity_guard(equity)
+        positions = client.get_positions()
+        open_orders = client.get_open_orders()
+        budget = store.trade_budget_status()
+        active_positions = _active_position_count(positions)
+        active_orders = _active_order_count(open_orders)
+        evidence.update({
+            "daily_loss_pct": round(float(guard.get("daily_loss_pct", 1.0)) * 100.0, 4),
+            "drawdown_pct": round(float(guard.get("drawdown_pct", 1.0)) * 100.0, 4),
+            "active_positions": active_positions,
+            "pending_orders": active_orders,
+            "unresolved_orders": int(budget.get("unresolved_orders", 1)),
+        })
+        account_pass = (
+            float(guard.get("daily_loss_pct", 1.0)) < 0.01
+            and float(guard.get("drawdown_pct", 1.0)) < 0.05
+            and active_positions == 0 and active_orders == 0
+            and int(budget.get("unresolved_orders", 1)) == 0
+        )
+        account_gate = "PASS" if account_pass else "FAIL"
+        account_reason = (
+            "حساب Demo معتبر است؛ سقف زیان، افت سرمایه، پوزیشن باز، سفارش معلق و سفارش حل‌نشده بررسی شدند."
+            if account_pass else
+            "حساب/ریسک مجوز ورود نمی‌دهد: پوزیشن یا سفارش باز، سفارش حل‌نشده یا حد زیان/افت سرمایه فعال است."
+        )
+    except Exception as exc:
+        error_types.append(type(exc).__name__)
+        account_gate = "UNKNOWN"
+        account_reason = "داده حساب یا دفترکل پایدار برای کنترل ریسک قابل تأیید نیست."
+
+    mtf_ok = mtf.get("status") == "PASS"
+    data_status = "PASS" if mtf_ok and ticker_age_seconds is not None and ticker_age_seconds <= 60.0 else "UNKNOWN"
+    regime_status = "PASS" if mtf_ok and mtf.get("hourly_direction") in {"LONG", "SHORT"} else "UNKNOWN"
+    trend_status = "PASS" if mtf_ok and direction in {"LONG", "SHORT"} else "FAIL"
+    momentum_status = "PASS" if mtf_ok and mtf.get("trigger_15m_direction") == direction else "FAIL"
+    if data_status != "PASS":
+        data_reason = mtf.get("reason_fa") or "کندل تکمیل‌شده و تیکر تازه تأیید نشدند."
+    else:
+        data_reason = "کندل‌های ۱۵ دقیقه و یک‌ساعت تکمیل‌شده و تازه از BloFin دریافت شدند."
+    if not mtf_ok:
+        trend_reason = mtf.get("reason_fa") or "تطبیق روند و تریگر تایم‌فریمی تأیید نشد."
+        momentum_reason = trend_reason
+    else:
+        trend_reason = "جهت روند ۱ ساعته با سیگنال ۱۵ دقیقه‌ای هم‌جهت است."
+        momentum_reason = "EMA9/EMA21 و بسته‌شدن کندل ۱۵ دقیقه‌ای مومنتوم هم‌جهت را تأیید می‌کنند."
+
+    gates = [
+        GateResult(1, "Data integrity and freshness", "اعتبار و تازگی داده", GateStatus(data_status), data_reason,
+                   "فقط کندل‌های کامل و تیکر تازه BloFin استفاده می‌شوند.",
+                   {"ticker_age_seconds": ticker_age_seconds, "mark_deviation_pct": mark_deviation_pct}),
+        GateResult(2, "Market regime", "رژیم بازار", GateStatus(regime_status),
+                   "روند ۱ ساعته جهت‌دار است." if regime_status == "PASS" else mtf.get("reason_fa", "رژیم نامشخص است."),
+                   "رژیم خنثی به‌تنهایی سیگنال ورود نیست.",
+                   {"hourly_direction": mtf.get("hourly_direction")}),
+        GateResult(3, "Trend alignment", "هم‌جهتی روند", GateStatus(trend_status), trend_reason,
+                   "تأیید جهت با روند ۱ ساعته و کندل ۱۵ دقیقه‌ای؛ الگوی کندلی شاخص شرط اجباری نیست.",
+                   {"direction": direction or "NO_TRADE", "ema20_1h": mtf.get("ema20_1h"),
+                    "ema50_1h": mtf.get("ema50_1h")}),
+        GateResult(4, "Momentum confirmation", "تأیید مومنتوم", GateStatus(momentum_status), momentum_reason,
+                   "الگوی کندلی خاص لازم نیست؛ EMA و ساختار بسته‌شدن کندل بررسی می‌شوند.",
+                   {"trigger_15m_direction": mtf.get("trigger_15m_direction"),
+                    "ema9_15m": mtf.get("ema9_15m"), "ema21_15m": mtf.get("ema21_15m")}),
+        GateResult(5, "Market liquidity and spread", "نقدشوندگی و اسپرد", GateStatus(liquidity_gate),
+                   liquidity_reason, "گردش ۲۴ ساعته، بهترین Bid/Ask، اسپرد و Mark Price کنترل می‌شوند.",
+                   {"spread_pct": spread_pct, "quote_volume_24h_usdt": quote_volume_usdt,
+                    "mark_deviation_pct": mark_deviation_pct}),
+        GateResult(6, "Tradable contract permission", "مجوز قرارداد", GateStatus(instrument_gate),
+                   instrument_reason, "فقط قرارداد زنده Linear-USDT با apiPermission=full پذیرفته می‌شود.",
+                   {"contract_type": instrument.get("contractType"), "settle_currency": instrument.get("settleCurrency"),
+                    "api_permission": instrument.get("apiPermission"), "inst_type": instrument.get("instType")}),
+        GateResult(7, "News and sentiment", "خبر و احساسات", GateStatus.UNKNOWN,
+                   "در پروفایل EASY این ورودی برای صدور جهت لازم نیست؛ داده غایب به‌عنوان PASS ثبت نمی‌شود.",
+                   "خبر/احساسات تکمیلی است و به‌عنوان هشدار نگه‌داری می‌شود.", {}),
+        GateResult(8, "Out-of-sample validation", "اعتبارسنجی خارج از نمونه", GateStatus.UNKNOWN,
+                   "Walk-forward کامل در چرخه سبک BloFin اجرا نشده است.",
+                   "این گیت در Standard/Strict اجباری می‌ماند.", {}),
+        GateResult(9, "Account and portfolio risk", "ریسک حساب و پرتفوی", GateStatus(account_gate),
+                   account_reason, "موجودی، زیان روزانه، افت سرمایه، پوزیشن‌ها و سفارش‌های معلق تأیید می‌شوند.",
+                   {k: evidence[k] for k in ("daily_loss_pct", "drawdown_pct", "active_positions", "pending_orders", "unresolved_orders") if k in evidence}),
+        GateResult(10, "Whale intelligence", "هوش نهنگ‌ها", GateStatus.UNKNOWN,
+                   "پوشش نهنگ برای این چرخه سبک از APIهای مستقل فراخوانی نشد.",
+                   "این داده تکمیلی است و نبود آن به‌عنوان تأیید مثبت ثبت نمی‌شود.", {}),
+        GateResult(11, "Full market sentiment coverage", "پوشش احساسات بازار", GateStatus.UNKNOWN,
+                   "پوشش کامل News/Social/Fear & Greed در چرخه سبک اجرا نشده است.",
+                   "در صورت انتخاب Standard/Strict، این ورودی بررسی می‌شود.", {}),
+        GateResult(12, "Walk-forward and historical analog risk", "اعتبارسنجی زمانی و ریسک تاریخی", GateStatus.UNKNOWN,
+                   "این ارزیابی آماری در مسیر سبک اجرای BloFin اجرا نشده است.",
+                   "گیت‌های پژوهشی کامل همچنان در پروفایل Strict اجباری هستند.", {}),
+    ]
+    if mtf_ok:
+        entry = float(mtf["entry_price"])
+        atr = float(mtf["atr_15m"])
+        atr_pct = atr / entry * 100.0
+        spread_strength = abs(float(mtf["ema9_15m"]) - float(mtf["ema21_15m"])) / entry * 10_000.0
+        trend_strength = abs(float(mtf["ema20_1h"]) - float(mtf["ema50_1h"])) / entry * 10_000.0
+        confirmation = min(95.0, 65.0 + min(12.0, spread_strength * 2.0) + min(8.0, trend_strength * 0.5) + 5.0)
+        volatility_risk = min(44.0, max(10.0, 15.0 + atr_pct * 20.0))
+        signal_side = Signal(direction)
+        signal_levels = (entry, float(mtf["take_profit"]), float(mtf["stop_loss"]))
+        pass_count = sum(g.status == GateStatus.PASS for g in gates)
+        blockers = [g.name_fa for g in gates if g.gate_id in {1, 2, 3, 4, 5, 6, 9} and g.status != GateStatus.PASS]
+        allowed = not blockers and pass_count >= 7
+        if not allowed:
+            signal_side = Signal.NO_TRADE
+            signal_levels = (None, None, None)
+        metrics = {
+            "execution_profile": "EASY",
+            "execution_profile_label": "EASY_TRADER",
+            "execution_timeframe": "15m",
+            "trend_confirmation_timeframe": "1H",
+            "blofin_mtf_execution": mtf,
+            "quote_volume_24h_usdt": quote_volume_usdt,
+            "spread_pct": spread_pct,
+            "mark_deviation_pct": mark_deviation_pct,
+            "risk_score_semantics": "Volatility-based preliminary proxy from 15m ATR only; exchange/account limits are checked independently by the Demo executor.",
+            "confirmation_score_semantics": "Deterministic MTF evidence score, not a probability of profit.",
+            "decision_blockers": blockers,
+        }
+        return AnalysisResult(
+            asset=asset.raw, signal=signal_side,
+            safety_status=SafetyStatus.LOW_RISK if volatility_risk < 35 else SafetyStatus.UNKNOWN,
+            confirmation_score=confirmation, estimated_risk_score=volatility_risk,
+            opportunity_rank=None, entry_price=signal_levels[0],
+            take_profit=signal_levels[1], stop_loss=signal_levels[2],
+            expected_holding_days=1, position_notional_usd=None,
+            risk_budget_usd=None, gates=gates,
+            summary_en="EASY profile: completed BloFin 1H trend and 15m trigger aligned; no candle-pattern label is required.",
+            summary_fa=(
+                "ربات آسان: روند یک‌ساعته و تریگر ۱۵ دقیقه‌ای BloFin هم‌جهت‌اند؛ الگوی کندلی خاص شرط ورود نیست."
+                if allowed else
+                "ربات آسان: سیگنال یا یکی از کنترل‌های ضروری BloFin تأیید نشد؛ علت در گیت‌ها مشخص است."
+            ),
+            metrics=metrics,
+        )
+    # Keep all actual observations and blockers visible even when no signal exists.
+    unknown = volatility_risk = 50.0
+    blockers = [mtf.get("reason_fa") or "سیگنال چندتایم‌فریمی در دسترس نیست."]
+    metrics = {
+        "execution_profile": "EASY",
+        "execution_profile_label": "EASY_TRADER",
+        "execution_timeframe": "15m",
+        "trend_confirmation_timeframe": "1H",
+        "blofin_mtf_execution": mtf,
+        "risk_score_semantics": "Not calculated because a valid directional MTF setup was unavailable.",
+        "decision_blockers": blockers,
+    }
+    if instrument_gate != "PASS":
+        blockers.append(instrument_reason)
+    if liquidity_gate != "PASS":
+        blockers.append(liquidity_reason)
+    if account_gate != "PASS":
+        blockers.append(account_reason)
+    return AnalysisResult(
+        asset=asset.raw, signal=Signal.NO_TRADE, safety_status=SafetyStatus.UNKNOWN,
+        confirmation_score=None, estimated_risk_score=unknown, opportunity_rank=None,
+        entry_price=None, take_profit=None, stop_loss=None, expected_holding_days=None,
+        position_notional_usd=None, risk_budget_usd=None, gates=gates,
+        summary_en="EASY profile blocked: one or more required BloFin market or account checks are not confirmed.",
+        summary_fa="ربات آسان متوقف شد: دست‌کم یکی از کنترل‌های ضروری بازار، قرارداد یا حساب BloFin تأیید نشد.",
+        metrics=metrics,
+    )
+
+
+def _blofin_demo_instrument_options(*, force: bool = False) -> dict:
+    """Return live USDT-margined linear SWAP choices from BloFin's public catalog."""
+    now = time.monotonic()
+    with BLOFIN_STATUS_LOCK:
+        cached = BLOFIN_INSTRUMENT_CACHE.get("payload")
+        if not force and cached is not None and BLOFIN_INSTRUMENT_CACHE.get("expires_at", 0.0) > now:
+            return copy.deepcopy(cached)
+    try:
+        client = BloFinDemoReadOnly(timeout=8.0)
+        rows = client.get_futures_instruments()
+        if not isinstance(rows, list):
+            raise BloFinDemoResponseError("BloFin instrument catalog is not a list.")
+        options = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if (
+                row.get("state") != "live"
+                or row.get("instType") != "SWAP"
+                or row.get("contractType") != "linear"
+                or row.get("settleCurrency") != "USDT"
+                or row.get("apiPermission") != "full"
+            ):
+                continue
+            inst_id = str(row.get("instId") or "").upper()
+            if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id):
+                continue
+            try:
+                min_size = float(row.get("minSize"))
+                lot_size = float(row.get("lotSize"))
+                contract_value = float(row.get("contractValue"))
+                tick_size = float(row.get("tickSize"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if min(min_size, lot_size, contract_value, tick_size) <= 0:
+                continue
+            options.append({
+                "inst_id": inst_id,
+                "base_currency": str(row.get("baseCurrency") or inst_id.split("-", 1)[0]),
+                "quote_currency": "USDT",
+                "api_permission": str(row.get("apiPermission") or "UNKNOWN"),
+                "min_size": min_size,
+                "lot_size": lot_size,
+                "contract_value": contract_value,
+                "tick_size": tick_size,
+            })
+        options.sort(key=lambda item: (item["inst_id"] != "BTC-USDT", item["inst_id"]))
+        result = {
+            "status": "PASS" if options else "UNKNOWN",
+            "market": "BloFin Demo USDT Perpetual (linear SWAP)",
+            "instruments": options[:300],
+            "count": len(options),
+        }
+    except Exception as exc:
+        result = {
+            "status": "UNKNOWN", "market": "BloFin Demo USDT Perpetual (linear SWAP)",
+            "instruments": [], "count": 0, "error_type": type(exc).__name__,
+            "message_fa": "فهرست زنده قراردادهای BloFin دریافت نشد؛ انتخاب بازار تا بازیابی فهرست متوقف است.",
+        }
+    with BLOFIN_STATUS_LOCK:
+        BLOFIN_INSTRUMENT_CACHE.update({"expires_at": now + 60.0, "payload": result})
+    return copy.deepcopy(result)
+
+
+
+def _run_blofin_demo_execution_job(
+    job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "EASY",
+) -> None:
+    """Analyze a selected BloFin linear USDT perpetual with the selected robot profile."""
     store = None
     submission_started = False
     try:
+        instrument_id = str(instrument_id or "").strip().upper()
+        execution_profile = str(execution_profile or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+            raise BloFinDemoExecutionBlocked("Invalid BloFin USDT perpetual instrument.")
+        if execution_profile not in {"EASY", "STANDARD", "STRICT"}:
+            raise BloFinDemoExecutionBlocked("Invalid execution profile.")
         _set_blofin_execution_job(
             job_id, "running", stage="READINESS_CHECK",
             message_fa="در حال بررسی مجوزهای Demo، کلید Trade و ذخیره‌سازی پایدار.",
@@ -3279,7 +3630,7 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             )
             try:
                 reconciliation = reconciler.reconcile_unknown_order(
-                    inst_id=str(latest.get("instrument_id") or "BTC-USDT"),
+                    inst_id=str(latest.get("instrument_id") or instrument_id),
                     client_order_id=str(latest.get("client_order_id") or ""),
                 )
             except Exception as exc:
@@ -3296,36 +3647,69 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
                 )
                 return
 
-        asset = AssetSpec.parse("perp:BTCUSDT")
-        _set_blofin_execution_job(
-            job_id, "running", stage="LIVE_12_GATE_ANALYSIS",
-            message_fa="دریافت داده زنده BTC Perpetual و اجرای موتور ۱۲ گیت.",
-        )
-        analysis = ENGINE.analyze(asset)
-        record = analysis.to_record()
-        gates = record.get("gates")
+        profile_rules = {
+            "EASY": {"required": {1, 2, 3, 4, 5, 6, 9}, "min_pass": 7, "min_score": 55.0},
+            "STANDARD": {"required": {1, 2, 3, 4, 5, 6, 8, 9}, "min_pass": 9, "min_score": 65.0},
+            "STRICT": {"required": set(range(1, 13)), "min_pass": 12, "min_score": 75.0},
+        }
+        profile_rule = profile_rules[execution_profile]
+        asset = AssetSpec.parse("perp:" + instrument_id.replace("-", ""))
         analysis_time_utc = datetime.now(timezone.utc).isoformat()
-        wave_report = _blofin_elliott_wave_report_fa(record.get("elliott_wave"), str(record.get("signal") or "NO_TRADE"))
-        frames = getattr(ENGINE.data, "candle_frames", {})
-        frame = frames.get(asset.raw) if isinstance(frames, dict) else None
-        last_candle_close = None
-        last_candle_time = None
-        if frame is not None and not getattr(frame, "empty", True):
-            try:
-                last_candle_close = float(frame["close"].iloc[-1])
-                if not math.isfinite(last_candle_close):
+        read_client = BloFinDemoReadOnly(timeout=10.0)
+        if execution_profile == "EASY":
+            _set_blofin_execution_job(
+                job_id, "running", stage="LIVE_EASY_MTF_ANALYSIS",
+                message_fa=f"ربات آسان در حال بررسی {instrument_id} با روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای BloFin است.",
+                trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
+            )
+            analysis = _blofin_easy_trader_analysis(read_client, store, asset, instrument_id)
+            mtf_signal = (analysis.metrics or {}).get("blofin_mtf_execution") or {}
+            last_candle_time = mtf_signal.get("signal_bar_open_utc")
+            last_candle_close = mtf_signal.get("entry_price")
+        else:
+            _set_blofin_execution_job(
+                job_id, "running", stage="LIVE_12_GATE_ANALYSIS",
+                message_fa=f"دریافت داده زنده {instrument_id} و اجرای موتور {execution_profile}.",
+            )
+            analysis = ENGINE.analyze(asset)
+            mtf_signal = {}
+            frames = getattr(ENGINE.data, "candle_frames", {})
+            frame = frames.get(asset.raw) if isinstance(frames, dict) else None
+            last_candle_close = None
+            last_candle_time = None
+            if frame is not None and not getattr(frame, "empty", True):
+                try:
+                    last_candle_close = float(frame["close"].iloc[-1])
+                    if not math.isfinite(last_candle_close):
+                        last_candle_close = None
+                except (KeyError, IndexError, TypeError, ValueError, OverflowError):
                     last_candle_close = None
-            except (KeyError, IndexError, TypeError, ValueError, OverflowError):
-                last_candle_close = None
-            try:
-                last_candle_time = frame.index[-1].isoformat()
-            except (IndexError, AttributeError, TypeError):
-                last_candle_time = None
+                try:
+                    last_candle_time = frame.index[-1].isoformat()
+                except (IndexError, AttributeError, TypeError):
+                    last_candle_time = None
+        analysis.metrics["execution_profile"] = execution_profile
+        analysis.metrics["execution_profile_label"] = {
+            "EASY": "EASY TRADER", "STANDARD": "STANDARD TRADER", "STRICT": "STRICT TRADER",
+        }[execution_profile]
+        record = analysis.to_record()
+        record.update({
+            "execution_profile": execution_profile,
+            "instrument_id": instrument_id,
+            "inst_id": instrument_id,
+        })
+        gates = record.get("gates")
+        wave_report = _blofin_elliott_wave_report_fa(
+            record.get("elliott_wave"), str(record.get("signal") or "NO_TRADE"),
+        )
         trade_context = {
-            "asset": asset.raw,
+            "asset": asset.raw, "instrument_id": instrument_id,
+            "execution_profile": execution_profile,
             "analysis_time_utc": analysis_time_utc,
             "last_completed_candle_time_utc": last_candle_time,
             "last_candle_close": last_candle_close,
+            "execution_timeframe": "15m",
+            "trend_confirmation_timeframe": "1H",
         }
         pass_count = sum(
             1 for item in gates
@@ -3341,10 +3725,12 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
         ) if isinstance(gates, list) else 12
         direction = str(record.get("signal") or "").upper()
         gate_summary = {
+            "instrument_id": instrument_id, "execution_profile": execution_profile,
             "signal": direction or "UNKNOWN",
-            "gate_pass_count": pass_count,
-            "gate_fail_count": fail_count,
+            "gate_pass_count": pass_count, "gate_fail_count": fail_count,
             "gate_unknown_count": unknown_count,
+            "required_gate_ids": sorted(profile_rule["required"]),
+            "min_pass_count": profile_rule["min_pass"],
             "confirmation_score": record.get("confirmation_score"),
             "estimated_risk_score": record.get("estimated_risk_score"),
             "entry_reference_price": record.get("entry_price_usd"),
@@ -3353,101 +3739,122 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             "signal_fa": {"LONG": "خرید (LONG)", "SHORT": "فروش استقراضی (SHORT)"}.get(direction, "بدون معامله"),
             "gates_fa": _blofin_gate_rows_fa(gates),
         }
-        wave_message = (
-            f"ساختار موج الیوت: {wave_report.get('selected_wave_fa')} "
-            f"{wave_report.get('direction_alignment_fa')}"
-        )
         _set_blofin_execution_job(
-            job_id, "running", stage="ELLIOTT_WAVE_ANALYSIS",
-            message_fa=wave_message,
-            analysis=gate_summary,
-            elliott_wave=wave_report,
-            trade_context=trade_context,
+            job_id, "running", stage="PROFILE_GATE_REVIEW",
+            message_fa=f"ربات {execution_profile} · {instrument_id} · {pass_count}/12 گیت PASS؛ الگوی کندلی شاخص شرط اجباری نیست.",
+            analysis=gate_summary, elliott_wave=wave_report, trade_context=trade_context,
+        )
+        statuses_by_id = {
+            int(item["gate_id"]): str(item.get("status", "")).upper()
+            for item in gates if isinstance(item, dict) and isinstance(item.get("gate_id"), int)
+        } if isinstance(gates, list) else {}
+        required_blockers = sorted(
+            gate_id for gate_id in profile_rule["required"]
+            if statuses_by_id.get(gate_id) != "PASS"
         )
         if (
             not isinstance(gates, list) or len(gates) != 12
-            or (pass_count, fail_count, unknown_count) != (12, 0, 0)
+            or set(statuses_by_id) != set(range(1, 13))
+            or required_blockers or pass_count < profile_rule["min_pass"]
             or direction not in {"LONG", "SHORT"}
         ):
+            reasons = []
+            if direction not in {"LONG", "SHORT"}:
+                reasons.append((mtf_signal or {}).get("reason_fa") or "سیگنال جهت‌دار LONG/SHORT ساخته نشد.")
+            if required_blockers:
+                reasons.append("گیت‌های ضروری این پروفایل PASS نیستند: " + ", ".join(map(str, required_blockers)))
+            if pass_count < profile_rule["min_pass"]:
+                reasons.append(f"حداقل {profile_rule['min_pass']} گیت PASS لازم است؛ {pass_count} مورد PASS شد.")
+            if len(gates) != 12 or set(statuses_by_id) != set(range(1, 13)):
+                reasons.append("گزارش ۱۲ گیت کامل و یکتا نیست.")
+            reason_fa = "؛ ".join(reasons) or "شرایط ورود تکمیل نشد."
             _set_blofin_execution_job(
                 job_id, "completed", stage="NO_TRADE",
-                message_fa="شرایط ورود تأیید نشد؛ تمام ۱۲ گیت باید PASS و سیگنال LONG یا SHORT باشد.",
-                analysis=gate_summary,
-                elliott_wave=wave_report,
-                trade_context=trade_context,
+                message_fa=f"ربات {execution_profile}: ورود مسدود شد؛ " + reason_fa,
+                analysis=gate_summary, elliott_wave=wave_report, trade_context=trade_context,
                 result={
                     "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
-                    **gate_summary,
-                    "elliott_wave": wave_report,
-                    "trade_context": trade_context,
-                    "reason_fa": "سیگنال جهت‌دار با ۱۲ گیت PASS به دست نیامد؛ هیچ سفارشی ارسال نشد.",
+                    **gate_summary, "elliott_wave": wave_report,
+                    "trade_context": trade_context, "reason_fa": reason_fa,
                     "orders_submitted": False, "trade_executed": False,
                 },
             )
             return
 
-        if frame is None or getattr(frame, "empty", True) or not hasattr(frame.index[-1], "isoformat"):
-            _set_blofin_execution_job(
-                job_id, "completed", stage="NO_TRADE",
-                message_fa="کندل کامل و زمان‌دار برای جلوگیری از سفارش تکراری موجود نیست.",
-                elliott_wave=wave_report,
-                trade_context=trade_context,
-                result={
-                    "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
-                    "elliott_wave": wave_report,
-                    "trade_context": trade_context,
-                    "reason_fa": "کندل کامل و معتبر در دسترس نبود؛ سفارش ارسال نشد.",
-                    "orders_submitted": False, "trade_executed": False,
-                },
+        if execution_profile == "EASY":
+            if mtf_signal.get("status") != "PASS" or mtf_signal.get("direction") != direction:
+                reason_fa = mtf_signal.get("reason_fa") or "روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای تأیید نشدند."
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="MTF_TRIGGER_BLOCKED",
+                    message_fa=reason_fa, analysis=gate_summary, trade_context=trade_context,
+                    result={
+                        "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                        **gate_summary, "mtf_confirmation": mtf_signal,
+                        "reason_fa": reason_fa, "orders_submitted": False, "trade_executed": False,
+                    },
+                )
+                return
+        else:
+            if not last_candle_time:
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="NO_TRADE",
+                    message_fa="کندل روزانه تکمیل‌شده و زمان‌دار برای تحلیل این پروفایل موجود نیست.",
+                    analysis=gate_summary, trade_context=trade_context,
+                    result={
+                        "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                        "reason_fa": "کندل تحلیلی تکمیل‌شده موجود نیست.",
+                        "orders_submitted": False, "trade_executed": False,
+                    },
+                )
+                return
+            mtf_signal = _blofin_mtf_execution_signal(
+                read_client, desired_direction=direction, inst_id=instrument_id,
             )
-            return
-        mtf_signal = _blofin_mtf_execution_signal(
-            BloFinDemoReadOnly(timeout=10.0), desired_direction=direction,
-        )
-        if mtf_signal.get("status") != "PASS":
-            trade_context["mtf_confirmation"] = mtf_signal
-            _set_blofin_execution_job(
-                job_id, "completed", stage="MTF_TRIGGER_BLOCKED",
-                message_fa=mtf_signal.get("reason_fa") or "تأیید چندتایم‌فریمی کامل نشد؛ سفارشی ارسال نشد.",
-                analysis=gate_summary, elliott_wave=wave_report,
-                trade_context=trade_context,
-                result={
-                    "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
-                    "reason_fa": mtf_signal.get("reason_fa") or "تأیید ۱۵ دقیقه و ۱ ساعت ناموفق بود.",
-                    "mtf_confirmation": mtf_signal,
-                    "orders_submitted": False, "trade_executed": False,
-                },
-            )
-            return
-
-        # Daily 12-gate output remains the strategic filter; the live execution
-        # levels and idempotency key come from the completed 15m candle.
+            if mtf_signal.get("status") != "PASS":
+                reason_fa = mtf_signal.get("reason_fa") or "روند و تریگر چندتایم‌فریمی هم‌سو نیستند."
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="MTF_TRIGGER_BLOCKED",
+                    message_fa=reason_fa, analysis=gate_summary, trade_context=trade_context,
+                    result={
+                        "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                        **gate_summary, "mtf_confirmation": mtf_signal,
+                        "reason_fa": reason_fa, "orders_submitted": False, "trade_executed": False,
+                    },
+                )
+                return
         signal_bar = mtf_signal["signal_bar_open_utc"]
-        record["signal_id"] = mtf_signal["signal_id"]
-        record["inst_id"] = "BTC-USDT"
-        record["entry_price_usd"] = mtf_signal["entry_price"]
-        record["stop_loss_usd"] = mtf_signal["stop_loss"]
-        record["take_profit_usd"] = mtf_signal["take_profit"]
+        record.update({
+            "signal_id": mtf_signal["signal_id"],
+            "instrument_id": instrument_id, "inst_id": instrument_id,
+            "execution_profile": execution_profile,
+            "entry_price_usd": mtf_signal["entry_price"],
+            "stop_loss_usd": mtf_signal["stop_loss"],
+            "take_profit_usd": mtf_signal["take_profit"],
+        })
         analysis.entry_price = mtf_signal["entry_price"]
         analysis.stop_loss = mtf_signal["stop_loss"]
         analysis.take_profit = mtf_signal["take_profit"]
+        analysis.metrics["execution_profile"] = execution_profile
         analysis.metrics["blofin_mtf_execution"] = {
             key: value for key, value in mtf_signal.items()
             if key not in {"status", "reason_fa"}
         }
+        trade_context.update({
+            "last_completed_candle_time_utc": signal_bar,
+            "mtf_confirmation": mtf_signal,
+            "execution_timeframe": "15m",
+            "trend_confirmation_timeframe": "1H",
+        })
         gate_summary.update({
             "entry_reference_price": mtf_signal["entry_price"],
             "stop_loss": mtf_signal["stop_loss"],
             "take_profit": mtf_signal["take_profit"],
-            "execution_timeframe": "15m",
-            "trend_confirmation_timeframe": "1H",
         })
-        trade_context.update({
-            "last_completed_daily_candle_time_utc": last_candle_time,
-            "last_completed_candle_time_utc": signal_bar,
-            "execution_timeframe": "15m",
-            "trend_confirmation_timeframe": "1H",
-            "mtf_confirmation": mtf_signal,
+        record = analysis.to_record()
+        record.update({
+            "signal_id": mtf_signal["signal_id"],
+            "instrument_id": instrument_id, "inst_id": instrument_id,
+            "execution_profile": execution_profile,
         })
         if store.has_signal(record["signal_id"]):
             _set_blofin_execution_job(
@@ -3516,13 +3923,15 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             trade_context=trade_context,
         )
         client = BloFinDemoTradeClient(timeout=10.0)
-        policy = BloFinDemoRiskPolicy(max_leverage=1)
+        policy = BloFinDemoRiskPolicy(
+            max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),
+        )
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
         )
         submission_started = True
         execution = trader.execute(
-            record, inst_id="BTC-USDT", leverage=1,
+            record, inst_id=instrument_id, leverage=1,
             allow_demo_orders=True, minimum_size_only=True,
         )
         _set_blofin_execution_job(
@@ -3552,13 +3961,13 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
         for attempt in range(3):
             try:
                 raw_detail = client.get_order_detail(
-                    "BTC-USDT", client_order_id=execution["client_order_id"],
+                    instrument_id, client_order_id=execution["client_order_id"],
                 )
                 if isinstance(raw_detail, list):
                     order_detail = next((row for row in raw_detail if isinstance(row, dict)), None)
                 elif isinstance(raw_detail, dict):
                     order_detail = raw_detail
-                raw_fills = client.get_fills_history(inst_id="BTC-USDT", order_id=execution["exchange_order_id"], limit=100)
+                raw_fills = client.get_fills_history(inst_id=instrument_id, order_id=execution["exchange_order_id"], limit=100)
                 fills = raw_fills if isinstance(raw_fills, list) else []
                 if fills or (
                     isinstance(order_detail, dict)
@@ -3623,7 +4032,7 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
         positions = []
         position_history = []
         try:
-            rows = client.get_positions(inst_id="BTC-USDT")
+            rows = client.get_positions(inst_id=instrument_id)
             positions = [
                 {key: row[key] for key in (
                     "positionId", "instId", "positionSide", "positions",
@@ -3635,7 +4044,7 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
         except Exception:
             pass
         try:
-            rows = client.get_positions_history(inst_id="BTC-USDT", state="closed", limit=20)
+            rows = client.get_positions_history(inst_id=instrument_id, state="closed", limit=20)
             position_history = [
                 {key: row[key] for key in (
                     "historyId", "positionId", "instId", "side", "positionSide",
@@ -3677,6 +4086,8 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
             **execution,
             "status": mapped_state or execution.get("status", "ACCEPTED"),
             "environment": "BLOFIN_DEMO",
+            "instrument_id": instrument_id,
+            "execution_profile": execution_profile,
             "analysis": gate_summary,
             "elliott_wave": wave_report,
             "trade_context": trade_context,
@@ -3790,10 +4201,18 @@ class Handler(BaseHTTPRequestHandler):
             payload = _blofin_demo_execution_readiness()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/blofin/demo/instruments":
+            payload = _blofin_demo_instrument_options(
+                force=parse_qs(parsed.query).get("refresh", [""])[0] == "1"
+            )
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/autopilot/status":
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
             payload["enabled"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+            payload["instrument_id"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENT", "BTC-USDT").strip().upper()
+            payload["execution_profile"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "EASY").strip().upper()
             payload["readiness"] = _blofin_demo_execution_readiness()
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
@@ -3802,7 +4221,8 @@ class Handler(BaseHTTPRequestHandler):
             if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
                 return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
             try:
-                payload = _blofin_demo_live_monitor_snapshot()
+                requested = parse_qs(parsed.query).get("instrument", ["BTC-USDT"])[0].upper()
+                payload = _blofin_demo_live_monitor_snapshot(requested)
                 return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                                   "application/json; charset=utf-8")
             except BloFinDemoError as exc:
@@ -3972,8 +4392,28 @@ class Handler(BaseHTTPRequestHandler):
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
-            <h3>معاملات آزمایشی نامحدود · BTC-USDT Perpetual</h3>
-            <p class="muted">تعداد سفارش‌ها در کل عمر سرویس و در هر روز نامحدود است؛ سقف روزانه و وقفه اجباری حذف شده‌اند. فیلتر ۱۲ گیتی روزانه با روند ۱ ساعته و تریگر هر کندل تکمیل‌شده ۱۵ دقیقه‌ای ترکیب می‌شود؛ هر کندل ۱۵ دقیقه‌ای فقط یک سفارش می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل اندازه مجاز قرارداد، حد ضرر و حد سود اجباری‌اند؛ ۱۲ گیت، Nemotron، مجوز Trade، قیمت و سقف ریسک در هر چرخه دوباره بررسی می‌شوند.</p>
+            <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
+            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف مادام‌العمر و روزانه وجود ندارد، اما هر کندل کامل ۱۵ دقیقه فقط یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
+            <div class="grid" style="margin:10px 0">
+              <div>
+                <label for="blofin-market-type">نوع بازار</label>
+                <select id="blofin-market-type" disabled><option value="USDT-LINEAR-SWAP">USDT Perpetual · Linear SWAP</option></select>
+              </div>
+              <div>
+                <label for="blofin-instrument">رمزارز / قرارداد BloFin</label>
+                <select id="blofin-instrument" disabled><option value="">در حال دریافت فهرست قراردادها...</option></select>
+              </div>
+              <div>
+                <label for="blofin-engine-profile">ربات انتخابی</label>
+                <select id="blofin-engine-profile">
+                  <option value="EASY">EASY TRADER · ربات آسان</option>
+                  <option value="STANDARD">STANDARD · ربات استاندارد</option>
+                  <option value="STRICT">STRICT · ربات سخت‌گیر</option>
+                </select>
+              </div>
+            </div>
+            <p id="blofin-instrument-status" class="muted" aria-live="polite">قراردادهای زنده با مجوز Full برای بازکردن موقعیت در حال دریافت‌اند.</p>
+            <p class="muted">EASY: هفت کنترل اصلی داده، رژیم، روند، مومنتوم، نقدشوندگی، مجوز قرارداد و ریسک حساب اجباری‌اند؛ پنج گیت پژوهشی دیگر به‌صورت هشدار واقعی نمایش داده می‌شوند و به‌جای PASS جعلی، UNKNOWN می‌مانند. STANDARD: حداقل ۹ گیت با مجموعه ضروری گسترده‌تر. STRICT: هر ۱۲ گیت PASS.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>
             <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
@@ -3999,13 +4439,16 @@ class Handler(BaseHTTPRequestHandler):
             const accountView=document.getElementById('blofin-demo-account-view');
             const safety=document.getElementById('blofin-demo-safety');
             const executeButton=document.getElementById('blofin-demo-execute-once');
+            const instrumentSelect=document.getElementById('blofin-instrument');
+            const profileSelect=document.getElementById('blofin-engine-profile');
+            const instrumentStatus=document.getElementById('blofin-instrument-status');
             const executionReadiness=document.getElementById('blofin-execution-readiness');
             const executionReport=document.getElementById('blofin-execution-report');
             const monitorToggle=document.getElementById('blofin-demo-monitor-toggle');
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -4182,7 +4625,7 @@ class Handler(BaseHTTPRequestHandler):
               const latestFill=fills[0]||{},latestClosed=closed[0]||{};
               const summary=document.createElement('div');summary.className='grid';
               const metrics=[
-                ['آخرین قیمت BTC',m.last],['Mark Price واقعی',m.markPrice??position.markPrice],
+                ['آخرین قیمت '+(snapshot.instrument_id||'قرارداد انتخابی'),m.last],['Mark Price واقعی',m.markPrice??position.markPrice],
                 ['Index Price',m.indexPrice],['وضعیت موقعیت',active.length?'پوزیشن باز':(detail.state||localOrder.status||'بدون پوزیشن باز')],
                 ['جهت پوزیشن',position.positionSide||localOrder.side],
                 ['میانگین قیمت ورود',position.averagePrice??detail.averagePrice??localOrder.entry_price],
@@ -4277,23 +4720,55 @@ class Handler(BaseHTTPRequestHandler):
                 ['event_type','رویداد'],['occurred_at','زمان ثبت'],['payload','جزئیات']
               ],'هنوز رویدادی در دفتر ثبت داخلی ربات ذخیره نشده است.'));
             }
-async function refreshExecutionReadiness(){
+async function loadBlofinInstruments(){
+              instrumentSelect.disabled=true;
+              instrumentStatus.textContent='در حال دریافت قراردادهای زنده USDT Perpetual با مجوز Full...';
+              try{
+                const response=await fetch('/api/blofin/demo/instruments',{cache:'no-store'});
+                const payload=await response.json();
+                if(!response.ok||payload.status!=='PASS'||!Array.isArray(payload.instruments)||!payload.instruments.length)
+                  throw new Error(payload.message_fa||'فهرست قرارداد مجاز در دسترس نیست.');
+                const previous=instrumentSelect.value||'BTC-USDT';
+                instrumentSelect.replaceChildren();
+                payload.instruments.forEach(item=>{
+                  const option=document.createElement('option');
+                  option.value=item.inst_id;
+                  option.textContent=item.inst_id+' · '+item.base_currency+'/USDT · Full · min '+item.min_size;
+                  instrumentSelect.appendChild(option);
+                });
+                instrumentSelect.value=payload.instruments.some(x=>x.inst_id===previous)?previous:payload.instruments[0].inst_id;
+                instrumentSelect.disabled=false;
+                instrumentStatus.textContent=payload.count+' قرارداد زنده مجاز دریافت شد؛ انتخاب فعلی: '+instrumentSelect.value;
+              }catch(error){
+                instrumentSelect.replaceChildren();
+                const option=document.createElement('option');option.value='';option.textContent='فهرست قراردادها دریافت نشد';
+                instrumentSelect.appendChild(option);
+                instrumentStatus.textContent='انتخاب بازار تا دریافت فهرست معتبر مسدود است: '+String(error.message||error);
+              }
+            }
+            async function refreshExecutionReadiness(){
               executeButton.disabled=true;
               try{
                 const response=await fetch('/api/blofin/demo/execution-readiness',{cache:'no-store'});
                 const result=await response.json();
                 executionReadiness.textContent=result.message_fa||'وضعیت پیش‌نیازهای Demo مشخص نیست.';
-                if(result.status==='READY'&&result.order_quota_unlimited===true){
+                if(result.status==='READY'&&result.order_quota_unlimited===true&&instrumentSelect.value){
                   executeButton.disabled=false;
-                  executionReadiness.textContent+=' آماده اجرای چرخه جدید است؛ سقف تعداد سفارش وجود ندارد.';
+                  executionReadiness.textContent+=' آماده اجرای چرخه جدید است؛ سهمیه تعداد سفارش وجود ندارد.';
                 }
               }catch(error){executionReadiness.textContent='بررسی پیش‌نیازهای سفارش Demo ممکن نشد.';}
             }
+            instrumentSelect.addEventListener('change',()=>{
+              instrumentStatus.textContent='قرارداد انتخابی: '+instrumentSelect.value+' · جهت خرید/فروش از سیگنال زنده می‌آید.';
+            });
+            profileSelect.addEventListener('change',()=>{
+              executionReadiness.textContent='ربات انتخابی: '+profileSelect.options[profileSelect.selectedIndex].text+' · کنترل‌های ضروری پیش از سفارش بررسی می‌شوند.';
+            });
             async function fetchLiveMonitor(){
               const token=tokenInput.value.trim();
               if(!token){monitorStatus.textContent='ابتدا توکن پنل را در کادر بالا وارد کن.';monitorActive=false;monitorToggle.textContent='شروع مانیتور زنده';return;}
               try{
-                const response=await fetch('/api/blofin/demo/live-monitor',{
+                const response=await fetch('/api/blofin/demo/live-monitor?instrument='+encodeURIComponent(instrumentSelect.value||'BTC-USDT'),{
                   cache:'no-store',headers:{'Authorization':'Bearer '+token}
                 });
                 const snapshot=await response.json();
@@ -4372,6 +4847,8 @@ async function refreshExecutionReadiness(){
               const summary=section('خلاصه تصمیم و وضعیت چرخه');
               metricGrid(summary,[
                 ['وضعیت',report.status_fa],
+                ['قرارداد',report.instrument_id],
+                ['ربات',report.execution_profile],
                 ['مرحله فعلی',report.stage_fa],
                 ['جهت تحلیل',report.signal_fa],
                 ['سفارش ارسال شد؟',report.orders_submitted===true?'بله، در Demo':report.orders_submitted==='UNKNOWN'?'وضعیت نامشخص':'خیر'],
@@ -4405,8 +4882,9 @@ async function refreshExecutionReadiness(){
               exchangeLinks.style.flexWrap='wrap';
               exchangeLinks.style.gap='8px';
               exchangeLinks.style.marginTop='10px';
+              const selectedInstrument=report.instrument_id||instrumentSelect.value||'BTC-USDT';
               const blofinMarketLinks=[
-                {label:'بازار اصلی BTC-USDT Perpetual در BloFin ↗',href:'https://blofin.com/trade/en/futures/BTC-USDT'},
+                {label:'بازار '+selectedInstrument+' Perpetual در BloFin ↗',href:'https://blofin.com/trade/en/futures/'+encodeURIComponent(selectedInstrument)},
                 {label:'بازار کلی قراردادهای Futures در BloFin ↗',href:'https://blofin.com/market/derivatives'},
                 {label:'راهنمای رسمی ورود به BloFin Demo ↗',href:'https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading'}
               ];
@@ -4420,7 +4898,7 @@ async function refreshExecutionReadiness(){
                 exchangeLinks.appendChild(link);
               });
               waveBox.appendChild(exchangeLinks);
-              node(waveBox,'p','بازار مورد تحلیل ربات: BTC-USDT Perpetual · USDT-M · قرارداد خطی. برای ورود به Demo، در وب‌سایت BloFin از منوی Futures گزینه Demo Trading را انتخاب کن و سپس BTCUSDT را باز کن.','muted');
+              node(waveBox,'p','بازار مورد تحلیل ربات: '+selectedInstrument+' · USDT-M Perpetual · قرارداد خطی. اجرا فقط در محیط BloFin Demo انجام می‌شود.','muted');
               makeTable(executionReport,'پیوت‌های تأییدشدهٔ موج الیوت',wave.pivots||[],[
                 ['kind_fa','نوع پیوت'],['price','قیمت'],['timestamp_utc','زمان وقوع پیوت'],['confirmed_at_utc','زمان تأیید پیوت']
               ],'پیوت تأییدشده‌ای برای شماره‌گذاری موج در دسترس نیست.');
@@ -4462,18 +4940,21 @@ async function refreshExecutionReadiness(){
             executeButton.addEventListener('click',async function(){
               const token=tokenInput.value.trim();
               if(!token){executionReadiness.textContent='ابتدا توکن پنل را در کادر بالا وارد کن.';return;}
-              if(!window.confirm('این اقدام یک سفارش بازار BTC-USDT را فقط در BloFin Demo ارسال می‌کند؛ اهرم ایزوله 1x، حداقل حجم قرارداد و حد ضرر/حد سود. اگر تحلیل اجازه ندهد معامله‌ای انجام نمی‌شود. ادامه؟'))return;
+              const selectedInstrument=instrumentSelect.value;
+              const selectedProfile=profileSelect.value;
+              if(!selectedInstrument){executionReadiness.textContent='ابتدا قرارداد مجاز را از فهرست زنده انتخاب کن.';return;}
+              if(!window.confirm('یک چرخه '+selectedProfile+' روی '+selectedInstrument+' Perpetual فقط در BloFin Demo اجرا می‌شود؛ جهت LONG/SHORT از سیگنال زنده، اهرم ایزوله 1x و SL/TP اجباری است. در نبود سیگنال معتبر هیچ سفارشی ارسال نمی‌شود. ادامه؟'))return;
               executeButton.disabled=true;
               executionReport.replaceChildren();
               const runningMessage=document.createElement('p');
               runningMessage.className='muted';
-              runningMessage.textContent='در حال آغاز تحلیل زندهٔ ۱۲ فیلتر و بررسی ساختار موج الیوت؛ هنوز سفارشی ارسال نشده است.';
+              runningMessage.textContent='در حال تحلیل زنده '+selectedInstrument+' با ربات '+selectedProfile+' و تأیید ۱۵ دقیقه/۱ ساعت؛ هنوز سفارشی ارسال نشده است.';
               executionReport.appendChild(runningMessage);
               try{
                 const response=await fetch('/api/blofin/demo/execute-once',{
                   method:'POST',cache:'no-store',
                   headers:{'Authorization':'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
-                  body:new URLSearchParams({confirm:'1',instrument:'BTC-USDT'})
+                  body:new URLSearchParams({confirm:'1',instrument:selectedInstrument,profile:selectedProfile})
                 });
                 const started=await response.json();
                 if(!response.ok||!started.job_id){
@@ -4495,6 +4976,7 @@ async function refreshExecutionReadiness(){
                 executionReadiness.textContent='از فشردن دوباره دکمه خودداری کن تا وضعیت درخواست روشن شود.';
               }
             });
+            loadBlofinInstruments().then(refreshExecutionReadiness);
             refreshExecutionReadiness();
             clearButton.addEventListener('click',function(){
               tokenInput.value='';
@@ -6044,7 +6526,13 @@ async function refreshExecutionReadiness(){
                 expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
                 if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
                     return self._send(401, json.dumps({"status":"UNAUTHORIZED","message_fa":"توکن پنل معتبر نیست."}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-                if form.get("confirm", [""])[0] != "1" or form.get("instrument", [""])[0] != "BTC-USDT":
+                instrument_id = str(form.get("instrument", [""])[0] or "").strip().upper()
+                execution_profile = str(form.get("profile", ["EASY"])[0] or "EASY").strip().upper()
+                if (
+                    form.get("confirm", [""])[0] != "1"
+                    or not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id)
+                    or execution_profile not in {"EASY", "STANDARD", "STRICT"}
+                ):
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
                 readiness = _blofin_demo_execution_readiness()
                 if readiness.get("status") != "READY":
@@ -6063,11 +6551,13 @@ async function refreshExecutionReadiness(){
                     job_id = uuid.uuid4().hex
                     _set_blofin_execution_job(
                         job_id, "queued", stage="QUEUED",
-                        message_fa="درخواست چرخه Demo ثبت شد؛ هنوز سفارشی ارسال نشده است.",
+                        message_fa=f"چرخه Demo برای {instrument_id} با ربات {execution_profile} ثبت شد؛ هنوز سفارشی ارسال نشده است.",
+                        trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
                     )
                     worker = threading.Thread(
                         target=_run_blofin_demo_execution_job,
-                        args=(job_id,), daemon=True, name="blofin-demo-manual-cycle",
+                        args=(job_id, instrument_id, execution_profile),
+                        daemon=True, name="blofin-demo-manual-cycle",
                     )
                     try:
                         worker.start()
@@ -6249,17 +6739,25 @@ async function refreshExecutionReadiness(){
 
 
 def _blofin_demo_autopilot_worker() -> None:
-    """Run guarded BTC-USDT Demo cycles while the Render web process is awake."""
+    """Run guarded, profile-configurable BloFin Demo cycles while the process is awake."""
     try:
         configured_interval = int(os.getenv("BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS", "300"))
     except (TypeError, ValueError):
         configured_interval = 900
     interval_seconds = max(300, min(configured_interval, 900))
+    instrument_id = os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENT", "BTC-USDT").strip().upper()
+    execution_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "EASY").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+        instrument_id = "BTC-USDT"
+    if execution_profile not in {"EASY", "STANDARD", "STRICT"}:
+        execution_profile = "EASY"
     with LOCK:
         BLOFIN_AUTOPILOT_STATE.update({
             "enabled": True,
             "status": "STARTING",
             "interval_seconds": interval_seconds,
+            "instrument_id": instrument_id,
+            "execution_profile": execution_profile,
             "last_message_fa": "اتوپایلوت Demo فعال شد؛ چرخهٔ اول در حال آماده‌سازی است.",
         })
     while True:
@@ -6291,14 +6789,81 @@ def _blofin_demo_autopilot_worker() -> None:
                     "status": "RUNNING",
                     "last_cycle_started_at_utc": started,
                     "last_stage": "READINESS_CHECK",
-                    "last_message_fa": "چرخه خودکار BTC-USDT Perpetual آغاز شد.",
+                    "instrument_id": instrument_id,
+                    "execution_profile": execution_profile,
+                    "last_message_fa": f"چرخه خودکار {instrument_id} با ربات {execution_profile} آغاز شد.",
                     "cycles_started": int(BLOFIN_AUTOPILOT_STATE.get("cycles_started") or 0) + 1,
                 })
             _set_blofin_execution_job(
                 job_id, "queued", stage="AUTOPILOT_CYCLE",
-                message_fa="چرخه خودکار توسط زمان‌بند Demo آغاز شد.",
+                message_fa=f"چرخه خودکار {instrument_id} / {execution_profile} توسط زمان‌بند Demo آغاز شد.",
+                trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
             )
-            _run_blofin_demo_execution_job(job_id)
+            _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
+            exchange_monitor = {}
+            try:
+                snapshot = _blofin_demo_live_monitor_snapshot(instrument_id)
+                live_positions = [
+                    row for row in snapshot.get("positions", [])
+                    if isinstance(row, dict) and abs(float(row.get("positions") or 0)) > 0
+                ]
+                closed_rows = [
+                    row for row in snapshot.get("closed_positions", [])
+                    if isinstance(row, dict)
+                ]
+                def safe_exchange_timestamp(row):
+                    try:
+                        return int(row.get("updateTime") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        return 0
+                closed_rows.sort(key=safe_exchange_timestamp, reverse=True)
+                latest_closed = closed_rows[0] if closed_rows else {}
+                try:
+                    latest_realized_pnl = float(latest_closed.get("realizedPnl"))
+                    if not math.isfinite(latest_realized_pnl):
+                        latest_realized_pnl = None
+                except (TypeError, ValueError, OverflowError):
+                    latest_realized_pnl = None
+                exchange_monitor = {
+                    "exchange_monitor_status": snapshot.get("status"),
+                    "exchange_data_completeness": snapshot.get("data_completeness"),
+                    "exchange_open_position_count": len(live_positions),
+                    "exchange_open_positions": [
+                        {
+                            "instId": row.get("instId"),
+                            "positionSide": row.get("positionSide"),
+                            "positions": row.get("positions"),
+                            "averagePrice": row.get("averagePrice"),
+                            "markPrice": row.get("markPrice"),
+                            "unrealizedPnl": row.get("unrealizedPnl"),
+                            "leverage": row.get("leverage"),
+                        } for row in live_positions[:3]
+                    ],
+                    "latest_closed_position": (
+                        {
+                            "instId": latest_closed.get("instId"),
+                            "side": latest_closed.get("side"),
+                            "openAveragePrice": latest_closed.get("openAveragePrice"),
+                            "closeAveragePrice": latest_closed.get("closeAveragePrice"),
+                            "realizedPnl": latest_closed.get("realizedPnl"),
+                            "realizedPnlRatio": latest_closed.get("realizedPnlRatio"),
+                            "fee": latest_closed.get("fee"),
+                            "createTime": latest_closed.get("createTime"),
+                            "updateTime": latest_closed.get("updateTime"),
+                        } if latest_closed else None
+                    ),
+                    "exchange_closed_positions_observed": len(closed_rows),
+                    "latest_closed_realized_pnl": latest_realized_pnl,
+                    "latest_closed_profitable": (
+                        latest_realized_pnl > 0 if latest_realized_pnl is not None else None
+                    ),
+                    "exchange_read_errors": snapshot.get("read_errors", []),
+                }
+            except Exception as monitor_exc:
+                exchange_monitor = {
+                    "exchange_monitor_status": "UNKNOWN",
+                    "exchange_monitor_error_type": type(monitor_exc).__name__,
+                }
             with LOCK:
                 job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 result = job.get("result") if isinstance(job.get("result"), dict) else {}
@@ -6309,6 +6874,22 @@ def _blofin_demo_autopilot_worker() -> None:
                     "last_message_fa": job.get("message_fa") or "چرخه پایان یافت.",
                     "last_result_status": result.get("status") or job.get("stage"),
                     "last_job_id": job_id,
+                    "last_cycle_diagnostics": {
+                        "instrument_id": instrument_id,
+                        "execution_profile": execution_profile,
+                        "signal": (result.get("analysis") or {}).get("signal"),
+                        "gate_pass_count": (result.get("analysis") or {}).get("gate_pass_count"),
+                        "gate_fail_count": (result.get("analysis") or {}).get("gate_fail_count"),
+                        "gate_unknown_count": (result.get("analysis") or {}).get("gate_unknown_count"),
+                        "orders_submitted": result.get("orders_submitted", False),
+                        "trade_executed": result.get("trade_executed", False),
+                        "average_fill_price": result.get("average_fill_price"),
+                        "filled_size": result.get("filled_size"),
+                        "reason_fa": result.get("reason_fa") or job.get("message_fa"),
+                        "open_positions": len(result.get("positions") or []),
+                        "closed_positions": len(result.get("closed_positions") or []),
+                        **exchange_monitor,
+                    },
                 })
         except Exception as exc:
             with LOCK:
