@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from crypto_super_radar.challenge_01_ai_mentor import detect_candlestick_patterns
 from crypto_super_radar.challenge_01_runner import (
     Challenge01DataError,
     Challenge01Runner,
@@ -113,6 +114,23 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["feature_candle"]["open_time_ms"],
                 snapshot["feature_candle_open_time_ms"],
+            )
+            self.assertEqual(len(snapshot["feature_window"]), 3)
+            self.assertEqual(
+                snapshot["feature_window"][-1],
+                snapshot["feature_candle"],
+            )
+            self.assertEqual(
+                snapshot["feature_window_open_times_ms"],
+                [candle["open_time_ms"] for candle in snapshot["feature_window"]],
+            )
+            self.assertEqual(
+                snapshot["detected_candlestick_patterns"],
+                detect_candlestick_patterns(snapshot["feature_window"]),
+            )
+            self.assertEqual(
+                evidence["feature_window_open_times_ms"],
+                snapshot["feature_window_open_times_ms"],
             )
             self.assertEqual(
                 evidence["comparison"],
