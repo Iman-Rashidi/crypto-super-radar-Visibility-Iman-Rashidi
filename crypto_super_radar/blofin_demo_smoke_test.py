@@ -111,23 +111,28 @@ class BloFinDemoSmokeTestRunner:
             raise BloFinDemoExecutionBlocked("BloFin Demo Trade credentials are not configured.")
 
         self._emit("PREFLIGHT", "آزمایش مستقل آغاز شد؛ نماد BTC-USDT و محیط Demo بررسی می‌شوند.")
+        self._emit("PREFLIGHT_CLOCK", "در حال بررسی اختلاف ساعت صرافی و سرور.")
         clock = client.check_clock_skew(inst_id=self.INSTRUMENT_ID)
         if abs(int(clock.get("offset_ms", 10**12))) >= 60_000:
             raise BloFinDemoExecutionBlocked("Exchange/local clock skew is 60 seconds or more.")
 
+        self._emit("PREFLIGHT_MARKET_DATA", "در حال دریافت قیمت آخرین معامله و Mark Price بیت‌کوین.")
         ticker = self._first_row(client.get_tickers(inst_id=self.INSTRUMENT_ID), "Ticker")
         mark_row = self._first_row(client.get_mark_price(inst_id=self.INSTRUMENT_ID), "Mark price")
         mark_price = _decimal(mark_row.get("markPrice"), "mark_price")
         if mark_price <= 0 or ticker.get("last") in (None, ""):
             raise BloFinDemoExecutionBlocked("Fresh BTC-USDT ticker and mark price are required.")
 
+        self._emit("PREFLIGHT_CONTRACT", "در حال اعتبارسنجی مشخصات قرارداد BTC-USDT.")
         instrument = client.get_tradable_instrument(self.INSTRUMENT_ID)
+        self._emit("PREFLIGHT_POSITION_MODE", "در حال خواندن حالت حساب و موقعیت‌ها.")
         mode = client.get_position_mode()
         position_mode = mode.get("positionMode")
         if position_mode not in {"net_mode", "long_short_mode"}:
             raise BloFinDemoExecutionBlocked("BloFin position mode could not be confirmed.")
 
         # Never absorb or close a pre-existing user position/order on the same instrument.
+        self._emit("PREFLIGHT_EXISTING_POSITION", "در حال بررسی پوزیشن باز قبلی BTC-USDT.")
         existing_positions = self._active_positions(
             client.get_positions(inst_id=self.INSTRUMENT_ID), self.INSTRUMENT_ID
         )
@@ -135,6 +140,7 @@ class BloFinDemoSmokeTestRunner:
             raise BloFinDemoExecutionBlocked(
                 "BTC-USDT already has an open position; smoke test stopped without touching it."
             )
+        self._emit("PREFLIGHT_PENDING_ORDERS", "در حال بررسی سفارش‌های معلق BTC-USDT.")
         pending = client.get_open_orders(inst_id=self.INSTRUMENT_ID)
         if not isinstance(pending, list):
             raise BloFinDemoExecutionBlocked("BTC-USDT pending-orders response is invalid.")
@@ -143,6 +149,7 @@ class BloFinDemoSmokeTestRunner:
                 "BTC-USDT has pending orders; smoke test stopped without changing them."
             )
 
+        self._emit("PREFLIGHT_EQUITY", "در حال خواندن موجودی و Equity حساب Demo.")
         equity = Decimal(str(_equity_from_balance(
             client.get_futures_balance(product_type="USDT-FUTURES")
         )))
