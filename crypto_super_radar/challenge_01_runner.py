@@ -1,0 +1,385 @@
+"""Challenge 1: completed single-candle classification with append-only memory.
+
+This module reads only the public BloFin Demo Spot candle endpoint. It has no
+order, account, transfer, or withdrawal capability. The result is a candle
+classification exercise, not a price forecast or trading-performance metric.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Callable
+
+from .blofin_demo_spot_readonly import BloFinDemoSpotReadOnly
+from .database import connect_database, storage_backend
+from .learning_experience_memory import LearningExperienceMemory
+
+
+CHALLENGE_ID = "CHALLENGE-01"
+ENGINE_ID = "CH01_SINGLE_CANDLE"
+SYMBOL = "BTC-USDT"
+TIMEFRAME = "1H"
+BAR_MILLISECONDS = 60 * 60 * 1000
+MAX_STALE_AFTER_CLOSE_MS = 2 * BAR_MILLISECONDS + 5 * 60 * 1000
+MIN_SAMPLES_PER_ROUND = 100
+MAX_ROUNDS = 5
+
+
+class Challenge01DataError(ValueError):
+    """Invalid, stale, incomplete, duplicated, or insufficient Challenge 1 data."""
+
+
+def _decimal(value: Any, field: str) -> Decimal:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise Challenge01DataError(f"INVALID_{field.upper()}") from exc
+    if not number.is_finite():
+        raise Challenge01DataError(f"NON_FINITE_{field.upper()}")
+    return number
+
+
+def _parse_candle(row: Any) -> dict[str, Any]:
+    if isinstance(row, (list, tuple)):
+        if len(row) < 9:
+            raise Challenge01DataError("CANDLE_FIELD_MISSING")
+        raw = {
+            "ts": row[0], "open": row[1], "high": row[2], "low": row[3],
+            "close": row[4], "confirm": row[8],
+        }
+    elif isinstance(row, dict):
+        raw = row
+    else:
+        raise Challenge01DataError("INVALID_CANDLE_SHAPE")
+
+    try:
+        timestamp = int(str(raw["ts"]))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise Challenge01DataError("INVALID_CANDLE_TIMESTAMP") from exc
+    # BloFin timestamps are Unix milliseconds. Seconds or ambiguous units are rejected.
+    if timestamp < 100_000_000_000:
+        raise Challenge01DataError("TIMESTAMP_NOT_MILLISECONDS")
+
+    prices = {
+        name: _decimal(raw.get(name), name)
+        for name in ("open", "high", "low", "close")
+    }
+    if any(value <= 0 for value in prices.values()):
+        raise Challenge01DataError("NON_POSITIVE_OHLC")
+    if prices["high"] < max(prices["open"], prices["close"], prices["low"]):
+        raise Challenge01DataError("INCONSISTENT_HIGH")
+    if prices["low"] > min(prices["open"], prices["close"], prices["high"]):
+        raise Challenge01DataError("INCONSISTENT_LOW")
+    if prices["high"] < prices["low"]:
+        raise Challenge01DataError("INCONSISTENT_RANGE")
+
+    confirm_raw = raw.get("confirm")
+    if str(confirm_raw) not in {"0", "1"}:
+        raise Challenge01DataError("INVALID_CANDLE_CONFIRM")
+    return {
+        "open_time_ms": timestamp,
+        **{key: str(value) for key, value in prices.items()},
+        "confirmed": str(confirm_raw) == "1",
+    }
+
+
+def _classify_bot(candle: dict[str, Any]) -> tuple[str, str]:
+    opening = Decimal(candle["open"])
+    closing = Decimal(candle["close"])
+    if closing > opening:
+        return "BULLISH_CANDLE", "BUY_CANDIDATE"
+    if closing < opening:
+        return "BEARISH_CANDLE", "NO_SIGNAL"
+    return "NEUTRAL_CANDLE", "NO_SIGNAL"
+
+
+def _reference_label(candle: dict[str, Any]) -> str:
+    """Separate reference implementation for the deterministic OHLC rule."""
+    opening = Decimal(candle["open"])
+    closing = Decimal(candle["close"])
+    relation = (closing > opening) - (closing < opening)
+    return {1: "BULLISH_CANDLE", -1: "BEARISH_CANDLE", 0: "NEUTRAL_CANDLE"}[relation]
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _round_prefix(round_number: int) -> str:
+    return f"CH01-R{round_number:02d}"
+
+
+def _existing_rounds(memory: LearningExperienceMemory) -> dict[int, list[int]]:
+    found: dict[int, list[int]] = {}
+    for item in memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID):
+        events = item.get("events") or []
+        if not events:
+            continue
+        decision = next(
+            (event.get("payload", {}) for event in events if event.get("event_type") == "DECISION_RECORDED"),
+            {},
+        )
+        snapshot = decision.get("input_snapshot") or {}
+        round_number = snapshot.get("round_number")
+        candle_time = snapshot.get("candle_open_time_ms")
+        if isinstance(round_number, int) and isinstance(candle_time, int):
+            found.setdefault(round_number, []).append(candle_time)
+    return found
+
+
+class Challenge01Runner:
+    def __init__(
+        self,
+        *,
+        client: Any = None,
+        connection_factory: Callable[[], Any] = connect_database,
+        backend_factory: Callable[[], str] = storage_backend,
+        now_ms: Callable[[], int] | None = None,
+    ):
+        self.client = client or BloFinDemoSpotReadOnly()
+        self.connection_factory = connection_factory
+        self.backend_factory = backend_factory
+        self.now_ms = now_ms or (lambda: int(time.time() * 1000))
+
+    def _record_unknown_run(
+        self, memory: LearningExperienceMemory, connection: Any,
+        *, round_number: int, reason_code: str,
+    ) -> dict[str, Any]:
+        run_id = hashlib.sha256(
+            f"{_round_prefix(round_number)}:{reason_code}:{self.now_ms()}".encode()
+        ).hexdigest()[:24]
+        experience_id = f"ch01-unknown-{run_id}"
+        cycle_id = f"{_round_prefix(round_number)}:UNKNOWN:{run_id}"
+        with connection:
+            memory.record_decision(
+                experience_id=experience_id,
+                event_id=f"{experience_id}:decision",
+                engine_id=ENGINE_ID,
+                challenge_id=CHALLENGE_ID,
+                cycle_id=cycle_id,
+                decision_mode="BOT_ONLY",
+                environment="BLOFIN_DEMO",
+                market="SPOT",
+                symbol=SYMBOL,
+                timeframe=TIMEFRAME,
+                model_version="ch01-rule-v1",
+                dataset_version=f"{_round_prefix(round_number)}:UNAVAILABLE",
+                decision={
+                    "candle_classification": "UNKNOWN",
+                    "action": "NO_SIGNAL",
+                    "reason_code": reason_code,
+                },
+                input_snapshot={
+                    "source": "blofin_demo_spot_public_candles",
+                    "round_number": round_number,
+                    "data_quality": "UNKNOWN",
+                },
+            )
+            memory.record_outcome(
+                experience_id=experience_id,
+                event_id=f"{experience_id}:outcome",
+                decision_correctness="UNKNOWN",
+                realized_result="NOT_EXECUTED",
+                realized_net_pnl=None,
+                final=True,
+                evidence={
+                    "source": "challenge_01_data_validation",
+                    "reason_code": reason_code,
+                    "orders_submitted": False,
+                },
+            )
+        return {
+            "status": "UNKNOWN",
+            "reason_code": reason_code,
+            "experience_id": experience_id,
+            "orders_submitted": False,
+        }
+
+    def run_bot_only_round(self, *, round_number: int = 1, sample_count: int = 100) -> dict[str, Any]:
+        if isinstance(round_number, bool) or not isinstance(round_number, int) or not 1 <= round_number <= MAX_ROUNDS:
+            raise ValueError("round_number must be between 1 and 5")
+        if isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count < MIN_SAMPLES_PER_ROUND:
+            raise ValueError("Challenge 1 requires at least 100 samples per round")
+        if sample_count > 1400:
+            raise ValueError("sample_count must not exceed 1400")
+
+        connection = self.connection_factory()
+        try:
+            memory = LearningExperienceMemory(connection)
+            prior_rounds = _existing_rounds(memory)
+            expected_round = max(prior_rounds, default=0) + 1
+            if round_number != expected_round:
+                raise Challenge01DataError(f"ROUND_SEQUENCE_BLOCKED_EXPECTED_{expected_round}")
+            after = None
+            if round_number > 1:
+                previous_times = prior_rounds.get(round_number - 1, [])
+                if len(previous_times) < MIN_SAMPLES_PER_ROUND:
+                    raise Challenge01DataError("PRIOR_ROUND_SAMPLE_INSUFFICIENT")
+                after = min(previous_times)
+
+            try:
+                rows = self.client.get_candles(
+                    SYMBOL, bar=TIMEFRAME, limit=min(sample_count + 5, 1440), after=after,
+                )
+                if not isinstance(rows, list) or not rows:
+                    raise Challenge01DataError("EMPTY_CANDLE_RESPONSE")
+                parsed = [_parse_candle(row) for row in rows]
+                timestamps = [item["open_time_ms"] for item in parsed]
+                if len(set(timestamps)) != len(timestamps):
+                    raise Challenge01DataError("DUPLICATE_CANDLE_TIMESTAMP")
+                if any(timestamps[index] <= timestamps[index + 1] for index in range(len(timestamps) - 1)):
+                    raise Challenge01DataError("CANDLE_ORDER_NOT_NEWEST_FIRST")
+                completed = [item for item in parsed if item["confirmed"]]
+                if len(completed) < sample_count:
+                    raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES")
+                selected = completed[:sample_count]
+                newest_close_ms = selected[0]["open_time_ms"] + BAR_MILLISECONDS
+                age_ms = self.now_ms() - newest_close_ms
+                if age_ms < -5 * 60 * 1000:
+                    raise Challenge01DataError("LATEST_CANDLE_CLOSE_IN_FUTURE")
+                if age_ms > MAX_STALE_AFTER_CLOSE_MS:
+                    raise Challenge01DataError("LATEST_COMPLETED_CANDLE_STALE")
+                if after is not None and any(item["open_time_ms"] >= int(after) for item in selected):
+                    raise Challenge01DataError("ROUND_DATA_OVERLAP")
+            except Challenge01DataError as exc:
+                result = self._record_unknown_run(
+                    memory, connection, round_number=round_number, reason_code=str(exc),
+                )
+                result["memory_backend"] = self.backend_factory()
+                return result
+            except Exception as exc:
+                result = self._record_unknown_run(
+                    memory, connection, round_number=round_number,
+                    reason_code=f"PROVIDER_{type(exc).__name__.upper()}",
+                )
+                result["memory_backend"] = self.backend_factory()
+                return result
+
+            dataset_canonical = json.dumps(
+                [
+                    [item["open_time_ms"], item["open"], item["high"], item["low"], item["close"]]
+                    for item in selected
+                ],
+                separators=(",", ":"), sort_keys=False,
+            )
+            dataset_hash = hashlib.sha256(dataset_canonical.encode("utf-8")).hexdigest()
+            dataset_version = f"{_round_prefix(round_number)}:{dataset_hash[:16]}"
+            inserted_decisions = 0
+            inserted_outcomes = 0
+            correct = 0
+            first_experience_id = None
+            with connection:
+                for candle in selected:
+                    candle_ts = candle["open_time_ms"]
+                    experience_id = (
+                        f"ch01-r{round_number:02d}-btc-usdt-1h-{candle_ts}"
+                    )
+                    first_experience_id = first_experience_id or experience_id
+                    classification, action = _classify_bot(candle)
+                    reference = _reference_label(candle)
+                    is_correct = classification == reference
+                    correct += int(is_correct)
+                    decision_event = memory.record_decision(
+                        experience_id=experience_id,
+                        event_id=f"{experience_id}:decision",
+                        engine_id=ENGINE_ID,
+                        challenge_id=CHALLENGE_ID,
+                        cycle_id=f"{_round_prefix(round_number)}:{SYMBOL}:{TIMEFRAME}:{candle_ts}",
+                        decision_mode="BOT_ONLY",
+                        environment="BLOFIN_DEMO",
+                        market="SPOT",
+                        symbol=SYMBOL,
+                        timeframe=TIMEFRAME,
+                        model_version="ch01-rule-v1",
+                        dataset_version=dataset_version,
+                        decision={
+                            "candle_classification": classification,
+                            "action": action,
+                            "confidence": 1.0,
+                            "rule": "close_vs_open_only",
+                            "reason": f"close={candle['close']}; open={candle['open']}",
+                        },
+                        input_snapshot={
+                            "source": "blofin_demo_spot_public_candles",
+                            "round_number": round_number,
+                            "candle_open_time_ms": candle_ts,
+                            "candle": candle,
+                            "data_quality": "VALID_COMPLETED_CANDLE",
+                        },
+                    )
+                    inserted_decisions += int(bool(decision_event.get("inserted")))
+                    outcome_event = memory.record_outcome(
+                        experience_id=experience_id,
+                        event_id=f"{experience_id}:outcome",
+                        decision_correctness="CORRECT" if is_correct else "INCORRECT",
+                        realized_result="NOT_EXECUTED",
+                        realized_net_pnl=None,
+                        final=True,
+                        evidence={
+                            "source": "challenge_01_ohlc_rule_reference",
+                            "reference_classification": reference,
+                            "comparison": "BOT_ONLY_CLASSIFICATION_VS_INDEPENDENT_RULE_FUNCTION",
+                            "orders_submitted": False,
+                            "not_a_trade_outcome": True,
+                        },
+                    )
+                    inserted_outcomes += int(bool(outcome_event.get("inserted")))
+
+            backend = self.backend_factory()
+            connection.close()
+            connection = self.connection_factory()
+            recovered_memory = LearningExperienceMemory(connection)
+            verified = 0
+            for candle in selected:
+                experience_id = f"ch01-r{round_number:02d}-btc-usdt-1h-{candle['open_time_ms']}"
+                recovered = recovered_memory.get_experience(experience_id)
+                if recovered["verification"]["status"] != "PASS":
+                    raise RuntimeError("LEARNING_MEMORY_INTEGRITY_FAILED")
+                if recovered["learning_status"] != "OUTCOME_RECORDED":
+                    raise RuntimeError("LEARNING_MEMORY_LIFECYCLE_INCOMPLETE")
+                verified += 1
+
+            accuracy = correct / len(selected)
+            return {
+                "status": "BASELINE_RECORDED",
+                "challenge_id": CHALLENGE_ID,
+                "engine_id": ENGINE_ID,
+                "round_number": round_number,
+                "round_status": "FUNCTIONAL_BASELINE_RECORDED_NOT_MASTERY",
+                "decision_mode": "BOT_ONLY",
+                "environment": "BLOFIN_DEMO",
+                "market": "SPOT",
+                "symbol": SYMBOL,
+                "timeframe": TIMEFRAME,
+                "sample_count": len(selected),
+                "dataset_version": dataset_version,
+                "dataset_sha256": dataset_hash,
+                "classification_rule": "close_vs_open_only",
+                "classification_accuracy": round(accuracy, 6),
+                "accuracy_scope": "deterministic_OHLC_rule_check_not_market_prediction",
+                "inserted_decisions": inserted_decisions,
+                "inserted_outcomes": inserted_outcomes,
+                "memory_recovery_verified": verified == len(selected),
+                "memory_records_verified": verified,
+                "memory_integrity": "PASS",
+                "memory_backend": backend,
+                "next_stage": "AI_MENTOR_NOT_RUN",
+                "orders_submitted": False,
+                "live_trading": False,
+                "first_experience_id": first_experience_id,
+                "example_experience_ids": [
+                    f"ch01-r{round_number:02d}-btc-usdt-1h-{item['open_time_ms']}"
+                    for item in selected[:3]
+                ],
+            }
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+__all__ = ["Challenge01Runner", "Challenge01DataError"]
