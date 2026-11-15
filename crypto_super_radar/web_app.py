@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import atexit
 import hashlib
 import copy
 import concurrent.futures
@@ -34,12 +35,27 @@ from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
+from .learning_memory import LearningMemory
+from .engine_profiles import AGGRESSIVE, STRICT, SHARED_PORTFOLIO_RISK_CAP_PCT
+from .binance_demo import configuration_status as binance_demo_configuration_status
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
 PAPER_BOT = PaperTradingBot(ENGINE)
 FUTURES_PAPER_BOT = FuturesPaperTradingBot(ENGINE)
 GLOBAL_MARKET_BOARD = GlobalMarketBoard(ENGINE.data.http)
+LEARNING_MEMORY: LearningMemory | None = None
+LEARNING_MEMORY_LOCK = threading.RLock()
+
+
+def _get_learning_memory() -> LearningMemory:
+    """Create the learning journal lazily so web startup stays lightweight."""
+    global LEARNING_MEMORY
+    with LEARNING_MEMORY_LOCK:
+        if LEARNING_MEMORY is None:
+            LEARNING_MEMORY = LearningMemory()
+            atexit.register(LEARNING_MEMORY.close)
+        return LEARNING_MEMORY
 JOBS: dict[str, dict] = {}
 ACTIVE_SCAN_KEYS: dict[str, str] = {}
 JOB_FENCE_COUNTER = 0
@@ -1694,10 +1710,21 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
             str(cycle.get("status") or "UNKNOWN").upper(), "وضعیت نامشخص"
         )
         cycle["reason_fa"] = _paper_reason_fa(cycle.get("reason")) if cycle.get("reason") else None
+        memory_result = {"status": "NOT_RECORDED"}
+        try:
+            _get_learning_memory().record_paper_cycle(
+                engine_id="LEGACY_SPOT_PAPER", asset=asset.raw, cycle=cycle,
+                model_version="legacy-spot-paper-v1",
+            )
+            memory_result = {"status": "RECORDED", "engine_id": "LEGACY_SPOT_PAPER"}
+        except Exception as memory_exc:
+            # Memory telemetry must never alter the paper bot's account or risk state.
+            memory_result = {"status": "WRITE_FAILED", "error_type": type(memory_exc).__name__}
         payload = {
             "safety": safety,
             "cycle": cycle,
             "paper_state": paper_state,
+            "learning_memory": memory_result,
             "report_fa": _paper_tick_report_fa(cycle, paper_state, safety),
         }
         with LOCK:
@@ -1962,6 +1989,16 @@ def _run_futures_paper_tick(job_id: str, asset: AssetSpec) -> None:
     try:
         cycle = FUTURES_PAPER_BOT.run_once(asset)
         state = FUTURES_PAPER_BOT.state()
+        memory_result = {"status": "NOT_RECORDED"}
+        try:
+            _get_learning_memory().record_paper_cycle(
+                engine_id="LEGACY_FUTURES_PAPER", asset=asset.raw, cycle=cycle,
+                model_version="legacy-futures-paper-v1",
+            )
+            memory_result = {"status": "RECORDED", "engine_id": "LEGACY_FUTURES_PAPER"}
+        except Exception as memory_exc:
+            # Memory telemetry must never change futures paper balances or risk controls.
+            memory_result = {"status": "WRITE_FAILED", "error_type": type(memory_exc).__name__}
         payload = {
             "safety": {
                 "read_only": True,
@@ -1974,6 +2011,7 @@ def _run_futures_paper_tick(job_id: str, asset: AssetSpec) -> None:
             },
             "cycle": cycle,
             "futures_state": state,
+            "learning_memory": memory_result,
         }
         with LOCK:
             JOBS[job_id] = {"status": "completed", "result": payload}
@@ -2150,6 +2188,45 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json; charset=utf-8")
         if parsed.path == "/futures-paper-bot/status":
             payload = FUTURES_PAPER_BOT.state()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+
+        if parsed.path == "/learning-memory/status":
+            try:
+                payload = _get_learning_memory().status()
+                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status": "UNAVAILABLE", "error_type": type(exc).__name__,
+                           "episodes_total": 0, "lessons_validated": 0}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+        if parsed.path == "/learning-memory/episodes":
+            raw_limit = parse_qs(parsed.query).get("limit", ["25"])[0]
+            try:
+                limit = max(1, min(int(raw_limit), 100))
+                payload = {"episodes": _get_learning_memory().list_episodes(limit)}
+                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except (TypeError, ValueError):
+                return self._send(400, b'{"error":"limit must be an integer from 1 to 100"}', "application/json")
+            except Exception as exc:
+                return self._send(503, json.dumps({"error_type": type(exc).__name__}).encode(),
+                                  "application/json; charset=utf-8")
+        if parsed.path == "/demo-readiness":
+            payload = {
+                "demo": binance_demo_configuration_status(),
+                "engines": [
+                    {"engine_id": AGGRESSIVE.engine_id, "risk_pct": AGGRESSIVE.strategy_risk_pct * 100,
+                     "strategy_gates": "SKIPPED_BY_AGGRESSIVE_PROFILE"},
+                    {"engine_id": STRICT.engine_id, "risk_pct": STRICT.strategy_risk_pct * 100,
+                     "strategy_gates": "EXACTLY_12_PASS_REQUIRED"},
+                ],
+                "shared_portfolio_risk_cap_pct": SHARED_PORTFOLIO_RISK_CAP_PCT * 100,
+                "runtime_execution": "LOCKED_NOT_IMPLEMENTED",
+                "orders_submitted": False,
+                "reason": "Read-only Demo account preflight and policy checks only; protective-order executor and STOP BOT runtime are not implemented.",
+            }
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/history":
@@ -2934,6 +3011,48 @@ class Handler(BaseHTTPRequestHandler):
           button.addEventListener('click',refresh);refresh();
         })();
         </script>
+
+        <section class="card" id="learning-memory-dashboard">
+          <h2>حافظهٔ یادگیرنده و آمادگی Binance Demo</h2>
+          <p class="muted">هر چرخهٔ Paper ثبت می‌شود؛ درس‌ها تا زمان اعتبارسنجی انسانی وارد دانش قابل استفاده نمی‌شوند. این پنل به‌تنهایی ربات خودآموز یا سفارش‌گذار Demo را فعال نمی‌کند.</p>
+          <div class="grid">
+            <div class="metric"><span>تجربه‌های ثبت‌شده</span><strong id="learning-episodes-count">—</strong></div>
+            <div class="metric"><span>درس‌های تأییدشده</span><strong id="learning-lessons-count">—</strong></div>
+            <div class="metric"><span>وضعیت ماندگاری حافظه</span><strong id="learning-storage-status">در حال بررسی</strong></div>
+            <div class="metric"><span>وضعیت اتصال Binance Demo</span><strong id="binance-demo-status">در حال بررسی</strong></div>
+          </div>
+          <p id="learning-memory-note" class="muted" aria-live="polite">در حال بررسی حافظه و تنظیمات Demo...</p>
+          <p id="demo-engine-policy" class="muted">Aggressive: ریسک ۱٪ · Strict: ریسک ۰٫۵٪ · سقف مشترک: ۲٪. هر دو سیاست در این نسخه فقط ارزیابی می‌شوند و مجوز ارسال سفارش ندارند.</p>
+          <button type="button" id="learning-memory-refresh">به‌روزرسانی وضعیت</button>
+          <script>
+          (function(){
+            const button=document.getElementById('learning-memory-refresh');
+            const episodes=document.getElementById('learning-episodes-count');
+            const lessons=document.getElementById('learning-lessons-count');
+            const storage=document.getElementById('learning-storage-status');
+            const demo=document.getElementById('binance-demo-status');
+            const note=document.getElementById('learning-memory-note');
+            async function refresh(){
+              button.disabled=true;
+              try{
+                const [memoryResponse,demoResponse]=await Promise.all([
+                  fetch('/learning-memory/status',{cache:'no-store'}),
+                  fetch('/demo-readiness',{cache:'no-store'})
+                ]);
+                const memory=await memoryResponse.json(),readiness=await demoResponse.json();
+                episodes.textContent=memory.episodes_total??'—';
+                lessons.textContent=memory.lessons_validated??'—';
+                storage.textContent=memory.persistence||memory.storage_backend||'نامشخص';
+                const d=readiness.demo||{};
+                demo.textContent=d.spot_credentials_configured||d.futures_credentials_configured?'کلید Demo تنظیم شده':'کلید Demo تنظیم نشده';
+                note.textContent=(memory.note||'وضعیت حافظه در دسترس نیست')+' · اجرای سفارش: '+(readiness.runtime_execution||'نامشخص');
+              }catch(error){note.textContent='دریافت وضعیت حافظه یا Demo ناموفق بود.';}
+              finally{button.disabled=false;}
+            }
+            button.addEventListener('click',refresh);refresh();
+          })();
+          </script>
+        </section>
         <section class="card" id="paper-bot">
           <h2>ربات معامله‌گر آزمایشی (Paper Trading)</h2>
           <style>

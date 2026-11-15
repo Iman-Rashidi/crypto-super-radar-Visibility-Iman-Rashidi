@@ -90,6 +90,10 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("اجزای کارمزد مشاهده‌شده", page)
         self.assertIn('action="/paper-bot/tick"', page)
         self.assertIn('id="futures-paper-bot"', page)
+        self.assertIn('id="learning-memory-dashboard"', page)
+        self.assertIn("/learning-memory/status", page)
+        self.assertIn("حافظهٔ یادگیرنده", page)
+        self.assertIn("سفارش‌گذار Demo را فعال نمی‌کند", page)
         self.assertIn('action="/futures-paper-bot/tick"', page)
         self.assertIn('value="perp:BTCUSDT"', page)
         self.assertIn("/futures-paper-bot/status", page)
@@ -133,6 +137,28 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('class="app-header"', page)
         self.assertIn("var(--teal)", page)
         self.assertLess(page.index('id="crypto-markets"'), page.index('id="scan-section"'))
+
+    def test_learning_memory_status_endpoint_is_read_only(self):
+        payload = {
+            "status": "AVAILABLE", "storage_backend": "LOCAL_SQLITE",
+            "persistence": "LOCAL_FILE", "episodes_total": 3,
+            "lessons_validated": 1, "model_training_active": False,
+        }
+        with patch.object(web_app, "_get_learning_memory") as memory:
+            memory.return_value.status.return_value = payload
+            status, _, body = self.request("GET", "/learning-memory/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), payload)
+        memory.return_value.status.assert_called_once_with()
+
+    def test_demo_readiness_never_authorizes_orders(self):
+        status, _, body = self.request("GET", "/demo-readiness")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["runtime_execution"], "LOCKED_NOT_IMPLEMENTED")
+        self.assertFalse(payload["orders_submitted"])
+        self.assertEqual(payload["shared_portfolio_risk_cap_pct"], 2.0)
+        self.assertEqual(len(payload["engines"]), 2)
 
     def test_futures_paper_status_endpoint_returns_paper_only_state(self):
         payload = {
