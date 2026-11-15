@@ -7174,22 +7174,43 @@ def _blofin_demo_autopilot_worker() -> None:
             with LOCK:
                 job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 result = job.get("result") if isinstance(job.get("result"), dict) else {}
+                analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+                cycle_status = str(job.get("status") or "UNKNOWN").lower()
+                orders_submitted = bool(result.get("orders_submitted", False))
+                trade_executed = bool(result.get("trade_executed", False))
+                signal_value = str(analysis.get("signal") or result.get("signal") or "").upper()
+                no_entry = (
+                    cycle_status == "completed"
+                    and not orders_submitted
+                    and not trade_executed
+                    and signal_value in {"", "NONE", "NO_TRADE", "HOLD", "NEUTRAL", "UNKNOWN"}
+                )
+                # A completed analysis cycle is not the end of the autonomous search.
+                # Keep the worker visibly searching and let the next scheduled cycle run.
+                autopilot_status = "SEARCHING_FOR_SIGNAL" if no_entry else job.get("status", "UNKNOWN")
+                autopilot_message = (
+                    f"چرخهٔ {job_id} تمام شد و سیگنال ورود معتبر پیدا نشد؛ جست‌وجوی خودکار ادامه دارد و چرخهٔ بعدی در صف زمان‌بندی است."
+                    if no_entry else (job.get("message_fa") or "چرخه پایان یافت.")
+                )
                 BLOFIN_AUTOPILOT_STATE.update({
-                    "status": job.get("status", "UNKNOWN"),
+                    "status": autopilot_status,
+                    "last_cycle_status": job.get("status", "UNKNOWN"),
                     "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
                     "last_stage": job.get("stage"),
-                    "last_message_fa": job.get("message_fa") or "چرخه پایان یافت.",
+                    "last_message_fa": autopilot_message,
                     "last_result_status": result.get("status") or job.get("stage"),
                     "last_job_id": job_id,
+                    "search_continues": bool(no_entry),
+                    "next_cycle_scheduled": True,
                     "last_cycle_diagnostics": {
                         "instrument_id": instrument_id,
                         "execution_profile": execution_profile,
-                        "signal": (result.get("analysis") or {}).get("signal"),
-                        "gate_pass_count": (result.get("analysis") or {}).get("gate_pass_count"),
-                        "gate_fail_count": (result.get("analysis") or {}).get("gate_fail_count"),
-                        "gate_unknown_count": (result.get("analysis") or {}).get("gate_unknown_count"),
-                        "orders_submitted": result.get("orders_submitted", False),
-                        "trade_executed": result.get("trade_executed", False),
+                        "signal": signal_value or None,
+                        "gate_pass_count": analysis.get("gate_pass_count"),
+                        "gate_fail_count": analysis.get("gate_fail_count"),
+                        "gate_unknown_count": analysis.get("gate_unknown_count"),
+                        "orders_submitted": orders_submitted,
+                        "trade_executed": trade_executed,
                         "average_fill_price": result.get("average_fill_price"),
                         "filled_size": result.get("filled_size"),
                         "reason_fa": result.get("reason_fa") or job.get("message_fa"),
