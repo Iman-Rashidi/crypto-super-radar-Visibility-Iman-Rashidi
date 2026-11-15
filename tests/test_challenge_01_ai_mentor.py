@@ -198,6 +198,8 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertTrue(status["mentor_review_complete"])
         self.assertEqual(status["mentor_reviewed_samples"], 100)
         self.assertEqual(status["next_stage"], "FORWARD_HOLDOUT_VALIDATION_REQUIRED")
+        self.assertTrue(status["candidate_model_present"])
+        self.assertEqual(status["candidate_model_sha256"], candidate["artifact_sha256"])
         self.assertTrue(status["later_rounds_blocked"])
         anchor = self.memory.get_experience("baseline-0")
         model_event = next(e for e in anchor["events"] if e["event_type"] == "LESSON_PROPOSED")
