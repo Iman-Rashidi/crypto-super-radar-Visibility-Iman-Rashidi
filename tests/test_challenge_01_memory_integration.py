@@ -74,10 +74,15 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(result["memory_records_verified"], 100)
         self.assertEqual(result["memory_integrity"], "PASS")
         self.assertEqual(result["memory_backend"], "TEST_SQLITE_FILE")
-        self.assertEqual(result["balanced_accuracy"], 1.0)
-        self.assertEqual(result["macro_f1"], 1.0)
-        self.assertEqual(result["signal_precision"], 1.0)
-        self.assertEqual(result["metrics_scope"], "CLOSED_CANDLE_OHLC_CLASSIFICATION_ONLY_NOT_FORWARD_PREDICTION_OR_PNL")
+        self.assertEqual(result["prediction_task"], "NEXT_CANDLE_DIRECTION")
+        self.assertEqual(result["prediction_horizon_bars"], 1)
+        self.assertEqual(result["classification_rule"], "previous_candle_body_direction")
+        self.assertEqual(result["data_split"], "CHRONOLOGICAL_FEATURE_TO_NEXT_BAR_TARGET")
+        self.assertEqual(result["metrics_scope"], "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD_HISTORICAL_REPLAY_NOT_PNL")
+        self.assertGreaterEqual(result["balanced_accuracy"], 0.0)
+        self.assertLessEqual(result["balanced_accuracy"], 1.0)
+        self.assertGreaterEqual(result["macro_f1"], 0.0)
+        self.assertLessEqual(result["macro_f1"], 1.0)
         self.assertEqual(result["next_stage"], "AI_MENTOR_REQUIRED")
         self.assertTrue(result["baseline_locked"])
         self.assertFalse(result["orders_submitted"])
@@ -88,14 +93,41 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
             saved = memory.get_experience(result["first_experience_id"])
             decision = next(event for event in saved["events"] if event["event_type"] == "DECISION_RECORDED")
             outcome = next(event for event in saved["events"] if event["event_type"] == "OUTCOME_LABELLED")
-            self.assertEqual(decision["payload"]["decision"]["action"], "BUY_CANDIDATE")
-            self.assertEqual(decision["payload"]["decision"]["confidence_scope"], "DETERMINISTIC_CLOSED_CANDLE_CLASSIFICATION_NOT_MARKET_FORECAST")
-            self.assertEqual(outcome["payload"]["decision_correctness"], "CORRECT")
-            self.assertEqual(outcome["payload"]["realized_result"], "NOT_EXECUTED")
-            self.assertEqual(
-                outcome["payload"]["evidence"]["comparison"],
-                "DETERMINISTIC_OHLC_LABEL_CONSISTENCY_NOT_PREDICTIVE_GROUND_TRUTH",
+            decision_payload = decision["payload"]
+            decision_data = decision_payload["decision"]
+            snapshot = decision_payload["input_snapshot"]
+            evidence = outcome["payload"]["evidence"]
+            self.assertIn(decision_data["action"], {
+                "PREDICT_NEXT_BULLISH", "PREDICT_NEXT_BEARISH", "PREDICT_NEXT_NEUTRAL",
+            })
+            self.assertEqual(decision_data["rule"], "previous_candle_body_direction")
+            self.assertEqual(decision_data["prediction_horizon_bars"], 1)
+            self.assertIsNone(decision_data["confidence"])
+            self.assertEqual(snapshot["data_quality"], "VALID_COMPLETED_FEATURE_AND_TARGET")
+            self.assertFalse(snapshot["target_candle_in_input"])
+            self.assertNotIn("target_candle", snapshot)
+            self.assertLess(
+                snapshot["feature_candle_open_time_ms"],
+                snapshot["target_candle_open_time_ms"],
             )
+            self.assertEqual(
+                snapshot["feature_candle"]["open_time_ms"],
+                snapshot["feature_candle_open_time_ms"],
+            )
+            self.assertEqual(
+                evidence["comparison"],
+                "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
+            )
+            self.assertTrue(evidence["no_future_data_used_in_input"])
+            self.assertGreater(
+                evidence["target_candle_open_time_ms"],
+                evidence["feature_candle_open_time_ms"],
+            )
+            self.assertEqual(
+                evidence["target_candle"]["open_time_ms"],
+                evidence["target_candle_open_time_ms"],
+            )
+            self.assertEqual(outcome["payload"]["realized_result"], "NOT_EXECUTED")
         finally:
             db.close()
 
