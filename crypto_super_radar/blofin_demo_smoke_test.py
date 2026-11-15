@@ -54,6 +54,11 @@ class BloFinDemoSmokeTestRunner:
 
     @staticmethod
     def _first_row(value: Any, label: str) -> dict[str, Any]:
+        # Trade POST methods return a BloFin response envelope; GET methods may return decoded data.
+        if isinstance(value, Mapping) and "data" in value:
+            if value.get("code") not in (None, "0", 0):
+                raise BloFinDemoExecutionBlocked(f"{label} was rejected by BloFin.")
+            value = value.get("data")
         if isinstance(value, list):
             value = next((item for item in value if isinstance(item, Mapping)), None)
         if not isinstance(value, Mapping):
