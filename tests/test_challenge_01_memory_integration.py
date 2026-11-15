@@ -147,6 +147,10 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(blocked["status"], "BLOCKED")
         self.assertEqual(blocked["reason_code"], "AI_MENTOR_PHASE_REQUIRED")
         self.assertEqual(len(runner.client.calls), calls_before)
+        repeated_baseline = runner.run_bot_only_round(round_number=1, sample_count=100)
+        self.assertEqual(repeated_baseline["status"], "BLOCKED")
+        self.assertEqual(repeated_baseline["reason_code"], "BOT_ONLY_BASELINE_ALREADY_LOCKED")
+        self.assertEqual(len(runner.client.calls), calls_before)
         self.assertFalse(blocked["orders_submitted"])
 
     def test_open_latest_candle_is_excluded_and_completed_candles_are_used(self):
