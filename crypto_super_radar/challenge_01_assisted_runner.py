@@ -65,6 +65,8 @@ class Challenge01AssistedRunner:
         experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
         by_target: dict[int, dict[str, Any]] = {}
         modes_by_target: dict[int, set[str]] = {}
+        feature_by_target: dict[int, str] = {}
+        model_hashes: set[str] = set()
         for item in experiences:
             decision_event = next(
                 (e for e in item.get("events", []) if e.get("event_type") == "DECISION_RECORDED"),
@@ -72,25 +74,60 @@ class Challenge01AssistedRunner:
             )
             if decision_event is None:
                 continue
-            snapshot = (decision_event.get("payload") or {}).get("input_snapshot") or {}
+            payload = decision_event.get("payload") or {}
+            snapshot = payload.get("input_snapshot") or {}
             if snapshot.get("round_number") != previous_round:
                 continue
             target_time = snapshot.get("target_candle_open_time_ms")
             if not isinstance(target_time, int):
                 target_time = snapshot.get("candle_open_time_ms")
-            if not isinstance(target_time, int):
-                continue
+            feature_time = snapshot.get("feature_candle_open_time_ms")
+            feature = snapshot.get("feature_candle")
+            if (
+                not isinstance(target_time, int)
+                or not isinstance(feature_time, int)
+                or target_time - feature_time != BAR_MILLISECONDS
+                or not isinstance(feature, dict)
+                or feature.get("open_time_ms") != feature_time
+                or feature.get("confirmed") is not True
+                or snapshot.get("data_quality") != "VALID_COMPLETED_FEATURE_AND_TARGET"
+                or snapshot.get("target_candle_in_input") is not False
+                or "target_candle" in snapshot
+            ):
+                raise Challenge01DataError("PRIOR_ROUND_FEATURE_TARGET_SNAPSHOT_INVALID")
             decision, outcome = self._decision_and_outcome(item)
             if item.get("verification", {}).get("status") != "PASS":
                 raise Challenge01DataError("PRIOR_ROUND_MEMORY_INTEGRITY_FAILED")
             evidence = (outcome.get("payload") or {}).get("evidence") or {}
             target = evidence.get("target_candle")
-            if not isinstance(target, dict) or target.get("open_time_ms") != target_time:
+            if (
+                evidence.get("comparison") != "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR"
+                or evidence.get("no_future_data_used_in_input") is not True
+                or evidence.get("feature_candle_open_time_ms") != feature_time
+                or evidence.get("target_candle_open_time_ms") != target_time
+                or not isinstance(target, dict)
+                or target.get("open_time_ms") != target_time
+                or target.get("confirmed") is not True
+                or decision.get("prediction_horizon_bars") != 1
+            ):
                 raise Challenge01DataError("PRIOR_ROUND_TARGET_EVIDENCE_MISMATCH")
-            if target.get("confirmed") is not True:
-                raise Challenge01DataError("PRIOR_ROUND_TARGET_NOT_COMPLETED")
+            mode = item.get("decision_mode", "")
+            if mode == "BOT_WITH_AI_MENTOR":
+                model_hash = decision.get("model_artifact_sha256")
+                snapshot_hash = snapshot.get("mentor_model_artifact_sha256")
+                if not isinstance(model_hash, str) or model_hash != snapshot_hash:
+                    raise Challenge01DataError("PRIOR_ROUND_MENTOR_MODEL_HASH_MISMATCH")
+                model_hashes.add(model_hash)
+            feature_canonical = json.dumps(feature, sort_keys=True, separators=(",", ":"))
+            prior_feature = feature_by_target.setdefault(target_time, feature_canonical)
+            if prior_feature != feature_canonical:
+                raise Challenge01DataError("PAIRED_ROUND_FEATURE_INPUT_MISMATCH")
+            if target_time in by_target and by_target[target_time] != target:
+                raise Challenge01DataError("PAIRED_ROUND_TARGET_EVIDENCE_MISMATCH")
             by_target[target_time] = target
-            modes_by_target.setdefault(target_time, set()).add(item.get("decision_mode", ""))
+            modes_by_target.setdefault(target_time, set()).add(mode)
+        if len(model_hashes) > 1:
+            raise Challenge01DataError("PRIOR_ROUND_USED_MULTIPLE_MENTOR_MODELS")
 
         if len(by_target) != MIN_SAMPLES_PER_ROUND:
             raise Challenge01DataError("PRIOR_ROUND_MUST_HAVE_100_DISTINCT_TARGETS")
@@ -162,7 +199,7 @@ class Challenge01AssistedRunner:
             )
             before_time = previous_target_time
             rows = self.client.get_candles(
-                SYMBOL, bar=TIMEFRAME, limit=min(sample_count + 10, 1440),
+                SYMBOL, bar=TIMEFRAME, limit=1440,
                 before=before_time,
             )
             if not isinstance(rows, list) or not rows:
