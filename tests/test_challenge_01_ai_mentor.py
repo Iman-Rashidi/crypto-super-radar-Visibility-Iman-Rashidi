@@ -9,6 +9,8 @@ from pathlib import Path
 
 from crypto_super_radar.challenge_01_ai_mentor import (
     detect_candlestick_patterns,
+    load_candidate_artifact,
+    predict_candidate,
     review_baseline,
     review_locked_baseline,
 )
@@ -266,6 +268,17 @@ class Challenge01AIMentorTests(unittest.TestCase):
         )
         self.assertEqual(stored_model["training"]["samples"], 80)
         self.assertEqual(stored_model["temporal_validation"]["samples"], 20)
+        self.assertEqual(stored_model["schema"], "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2")
+        self.assertEqual(stored_model["feature_window_length"], 3)
+        self.assertIn("bullish_engulfing_2bar", stored_model["features"])
+        self.assertIn("morning_star_3bar", stored_model["features"])
+        loaded_artifact, loaded_anchor = load_candidate_artifact(self.memory)
+        self.assertEqual(loaded_artifact["artifact_sha256"], candidate["artifact_sha256"])
+        self.assertEqual(loaded_anchor, "baseline-0")
+        feature_window = self.memory.get_experience("baseline-0")["events"][0]["payload"]["input_snapshot"]["feature_window"]
+        predicted, probabilities = predict_candidate(feature_window, loaded_artifact)
+        self.assertIn(predicted, {"BULLISH_CANDLE", "BEARISH_CANDLE", "NEUTRAL_CANDLE"})
+        self.assertAlmostEqual(sum(probabilities), 1.0, places=7)
 
 
 
