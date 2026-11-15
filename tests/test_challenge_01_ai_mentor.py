@@ -272,6 +272,8 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertEqual(stored_model["feature_window_length"], 3)
         self.assertIn("bullish_engulfing_2bar", stored_model["features"])
         self.assertIn("morning_star_3bar", stored_model["features"])
+        self.assertEqual(stored_model["pattern_catalog_version"], "CSR_CANDLE_HEURISTICS_3BAR_V1")
+        self.assertIn("MORNING_STAR", stored_model["pattern_catalog"])
         loaded_artifact, loaded_anchor = load_candidate_artifact(self.memory)
         self.assertEqual(loaded_artifact["artifact_sha256"], candidate["artifact_sha256"])
         self.assertEqual(loaded_anchor, "baseline-0")
