@@ -82,7 +82,7 @@ class FakeSmokeClient:
             "instId": "BTC-USDT", "positionSide": "net",
             "positions": kwargs["size"], "positionId": "pos-test-1",
         }
-        return [{"orderId": "entry-order-1", "clientOrderId": kwargs["client_order_id"]}]
+        return {"code": "0", "data": [{"orderId": "entry-order-1", "clientOrderId": kwargs["client_order_id"]}]}
 
     def get_order_detail(self, inst_id, *, client_order_id):
         self.calls.append("order_detail")
@@ -99,7 +99,7 @@ class FakeSmokeClient:
         self.calls.append(("close", dict(kwargs)))
         self.close_kwargs = dict(kwargs)
         self.position = None
-        return {"instId": "BTC-USDT", "clientOrderId": kwargs["client_order_id"]}
+        return {"code": "0", "data": {"instId": "BTC-USDT", "clientOrderId": kwargs["client_order_id"]}}
 
     def get_positions_history(self, *, inst_id, state=None, limit=20):
         return [{"instId": inst_id, "state": state, "realizedPnl": "-0.01"}]
