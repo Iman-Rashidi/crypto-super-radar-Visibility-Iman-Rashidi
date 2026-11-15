@@ -14,8 +14,8 @@ from .learning_experience_memory import LearningExperienceMemory
 
 MENTOR_VERSION = "ch01-audit-mentor-v1"
 CHALLENGE_ID = "CHALLENGE-01"
-EXPECTED_SCOPE = "CLOSED_CANDLE_OHLC_CLASSIFICATION_ONLY_NOT_FORWARD_PREDICTION_OR_PNL"
-EXPECTED_COMPARISON = "DETERMINISTIC_OHLC_LABEL_CONSISTENCY_NOT_PREDICTIVE_GROUND_TRUTH"
+EXPECTED_SCOPE = "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD_HISTORICAL_REPLAY_NOT_PNL"
+EXPECTED_COMPARISON = "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR"
 MIN_BASELINE_SAMPLES = 100
 
 
@@ -36,32 +36,46 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
     snapshot = decision_payload.get("input_snapshot") or {}
 
     issues = []
-    if snapshot.get("data_quality") != "VALID_COMPLETED_CANDLE":
-        issues.append("Data quality is not verified as a completed candle.")
+    feature_ts = snapshot.get("feature_candle_open_time_ms")
+    target_ts = snapshot.get("target_candle_open_time_ms")
+    target_candle = evidence.get("target_candle")
+    if snapshot.get("data_quality") != "VALID_COMPLETED_FEATURE_AND_TARGET":
+        issues.append("The baseline is not marked as a valid completed feature/target pair.")
     if evidence.get("comparison") != EXPECTED_COMPARISON:
-        issues.append("The outcome label is not independently grounded.")
-    if decision.get("confidence_scope") != (
-        "DETERMINISTIC_CLOSED_CANDLE_CLASSIFICATION_NOT_MARKET_FORECAST"
-    ):
-        issues.append("Confidence scope is missing or overstated.")
+        issues.append("The outcome label is not a verified next-candle target.")
+    if decision.get("rule") != "previous_candle_body_direction":
+        issues.append("The baseline is not the declared one-bar momentum rule.")
+    if decision.get("prediction_horizon_bars") != 1:
+        issues.append("The prediction horizon is not exactly one completed bar.")
+    if not isinstance(feature_ts, int) or not isinstance(target_ts, int) or target_ts <= feature_ts:
+        issues.append("The target timestamp does not strictly follow the feature timestamp.")
+    if "target_candle" in snapshot or snapshot.get("target_candle_in_input") is not False:
+        issues.append("Future target data appears in, or is not explicitly excluded from, the decision input.")
+    if evidence.get("no_future_data_used_in_input") is not True:
+        issues.append("The outcome evidence does not certify feature/target isolation.")
+    if not isinstance(target_candle, dict) or target_candle.get("open_time_ms") != target_ts:
+        issues.append("The outcome does not contain the completed target candle matching its timestamp.")
     if outcome_payload.get("realized_result") != "NOT_EXECUTED":
         issues.append("This exercise must not be interpreted as a trade result.")
 
-    finding_text = " ".join(issues) if issues else "Data and label integrity checks passed."
+    finding_text = " ".join(issues) if issues else "Feature/target chronology and input isolation checks passed."
     feedback = (
-        "Baseline audit: " + finding_text + " Open-versus-Close classification "
-        "uses the completed candle's final close to classify that same candle. "
-        "It is a deterministic description, not a forecast of a future candle, "
-        "profitable trade, or market edge. A 100% score is not evidence of "
-        "predictive learning. A future predictive task must define its target "
-        "on a later candle, freeze feature time before that target begins, and "
-        "use non-overlapping holdout data."
+        "Baseline audit: " + finding_text + " The current BOT_ONLY baseline is a "
+        "naive one-bar momentum rule: it copies the prior completed candle's body "
+        "direction to predict the next completed candle. This is a genuine "
+        "one-step-ahead historical classification test, but it is not a trained "
+        "AI model, not a calibrated probability, and not proof of a profitable "
+        "market edge. Its score is not net trading performance, does not include "
+        "fees or execution, and must be confirmed on later non-overlapping data. "
+        "A successful baseline only establishes a benchmark for Mentor-assisted "
+        "evaluation; it does not earn mastery."
     )
     proposed_change = (
-        "Keep BOT_ONLY immutable. Before any assisted round, define a later-candle "
-        "target, freeze feature timestamps before the target period, and use "
-        "non-overlapping holdout data. Until this is implemented and tested, "
-        "return NOT_MASTERY."
+        "Keep the BOT_ONLY baseline and outcomes immutable. Train a candidate "
+        "model only from the frozen round-one feature/target pairs, record the "
+        "model artifact hash and version, and compare it against BOT_ONLY on "
+        "strictly later non-overlapping samples. Do not reuse round-one targets "
+        "as a scored holdout and do not award mastery from baseline accuracy."
     )
     event_id = "ch01-mentor-" + hashlib.sha256(experience_id.encode("utf-8")).hexdigest()[:24]
     with memory._db:
