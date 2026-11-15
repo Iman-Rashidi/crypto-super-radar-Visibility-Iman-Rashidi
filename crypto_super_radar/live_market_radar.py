@@ -15,6 +15,11 @@ import pandas as pd
 from .elliott_waves import monitor_elliott_waves
 from .market_patterns import analyze_market_patterns
 from .market_flow import analyze_market_flow
+from .easy_trader_learning import (
+    build_easy_trader_features,
+    evaluate_flow_candle_signal,
+    get_default_memory,
+)
 
 INTERVAL_MS = {
     "1s": 1_000,
@@ -400,6 +405,129 @@ def build_live_market_radar_payload(
         closed, pivots, quality_status=quality_status, freshness_status=freshness_status,
         divergence=market_analysis.get("direction", {}).get("divergence"),
     )
+
+    # Easy Trader has a deliberately separate decision path: only confirmed
+    # candle patterns and the displayed order-flow evidence are signal inputs.
+    # The legacy multi-factor alert above remains unchanged for other modes.
+    easy_trader = evaluate_flow_candle_signal(
+        closed,
+        market_flow,
+        market_analysis.get("candlestick_patterns", []),
+        freshness_status=freshness_status,
+    )
+    learning_state = {
+        "phase": "OBSERVE",
+        "phase_fa": "فاز صفر: مشاهده و ذخیره تجربه",
+        "control_level": 0,
+        "control_label_fa": "سطح صفر: فقط ثبت تجربه",
+        "sample_count": 0,
+        "labelled_count": 0,
+        "rolling_prediction_error_rate": None,
+        "active_model_version": None,
+        "active_model_kind": None,
+        "minimum_probability_threshold": 0.55,
+        "paper_learning_eligible": False,
+        "demo_or_live_orders_enabled": False,
+        "ai_dependency": "NONE",
+        "storage_backend": "UNAVAILABLE",
+        "memory_error": None,
+    }
+    training_result = {"status": "NOT_RUN"}
+    try:
+        memory = get_default_memory()
+        completed_closes = [
+            (timestamp.isoformat(), float(row["close"]))
+            for timestamp, row in closed.iterrows()
+        ]
+        matured = memory.label_matured(
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            completed_closes=completed_closes,
+        )
+        # Train only from already matured outcomes. No current/future candle
+        # is included in the feature vector or training target.
+        training_result = memory.train_if_ready(normalized_symbol, normalized_interval)
+        pattern = easy_trader.get("pattern")
+        if not isinstance(pattern, dict):
+            pattern = next((
+                item for item in market_analysis.get("candlestick_patterns", [])
+                if isinstance(item, dict)
+            ), None)
+        easy_side = str(easy_trader.get("signal") or "WAIT").upper()
+        feature_side = easy_side if easy_side in {"BUY", "SELL"} else "WAIT"
+        features = build_easy_trader_features(
+            closed, market_flow, pattern, feature_side,
+        )
+        prediction = (
+            memory.predict(normalized_symbol, normalized_interval, features)
+            if feature_side in {"BUY", "SELL"}
+            else {"probability": None, "model_version": None, "model_kind": "WARMUP",
+                  "status": "NO_DIRECTIONAL_CANDIDATE"}
+        )
+        learning_state = memory.snapshot(normalized_symbol, normalized_interval)
+        sample = memory.record_observation(
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            candle_at=closed.index[-1].isoformat(),
+            observed_at_ms=int(current.timestamp() * 1000),
+            reference_price=float(closed["close"].iloc[-1]),
+            side=feature_side,
+            features=features,
+            pattern_name=(
+                str(pattern.get("name_en") or pattern.get("name_fa") or "")[:100]
+                if isinstance(pattern, dict) else None
+            ),
+            probability=prediction.get("probability"),
+            model_version=prediction.get("model_version"),
+            phase=str(learning_state.get("phase") or "OBSERVE"),
+            control_level=int(learning_state.get("control_level") or 0),
+        )
+        # A newly matured batch may have trained a model in this same cycle.
+        # Refresh the status after storing the observation for an auditable count.
+        learning_state = memory.snapshot(normalized_symbol, normalized_interval)
+        threshold = float(learning_state.get("minimum_probability_threshold") or 0.55)
+        probability = prediction.get("probability")
+        easy_trader.update({
+            "learning": {
+                **learning_state,
+                "training_status": training_result.get("status"),
+                "newly_labelled_outcomes": matured.get("labelled", 0),
+                "observation_saved": bool(sample.get("inserted")),
+                "model_prediction_status": prediction.get("status"),
+            },
+            "predicted_success_probability": probability,
+            "probability_threshold": threshold,
+            "model_version": prediction.get("model_version"),
+            "model_kind": prediction.get("model_kind"),
+            "paper_candidate_eligible": False,
+            "exchange_order_sent": False,
+        })
+        if feature_side in {"BUY", "SELL"}:
+            if probability is not None and probability < threshold:
+                easy_trader["signal"] = "WAIT"
+                easy_trader["status"] = "LEARNING_FILTERED"
+                easy_trader["reason_fa"] = (
+                    f"مدل محلی احتمال موفقیت را {probability:.1%} برآورد کرد؛ "
+                    f"حداقل این فاز {threshold:.1%} است. نمونه ثبت شد و سفارش صادر نشد."
+                )
+            elif learning_state.get("paper_learning_eligible") is True and probability is not None:
+                easy_trader["paper_candidate_eligible"] = True
+                easy_trader["status"] = "PAPER_CANDIDATE"
+                easy_trader["reason_fa"] += (
+                    f" احتمال موفقیت محلی {probability:.1%} است؛ فقط نامزد Paper، بدون سفارش صرافی."
+                )
+            else:
+                easy_trader["status"] = "SHADOW_CANDIDATE"
+                easy_trader["reason_fa"] += (
+                    " این فاز فقط مشاهده و یادگیری است؛ هنوز مجوز اجرای Paper یا Demo ندارد."
+                )
+    except Exception as exc:
+        learning_state["memory_error"] = type(exc).__name__
+        learning_state["storage_backend"] = "ERROR"
+        easy_trader["learning"] = learning_state
+        easy_trader["predicted_success_probability"] = None
+        easy_trader["paper_candidate_eligible"] = False
+        easy_trader["exchange_order_sent"] = False
     chart = []
     for timestamp, row in display_frame.iterrows():
         opened = _interval_end(timestamp, normalized_interval)
@@ -436,6 +564,9 @@ def build_live_market_radar_payload(
         "market_analysis": market_analysis,
         "market_flow": market_flow,
         "signal": signal,
+        "easy_trader": easy_trader,
+        "learning_state": learning_state,
+        "learning_training": training_result,
         "signal_only": True,
         "paper_bot_connected": False,
         "orders_submitted": False,
