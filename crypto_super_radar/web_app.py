@@ -5399,7 +5399,8 @@ async function loadBlofinInstruments(){
                 let stageText='مرحله آموزشی نامشخص است؛ تا رفع ابهام اجرای بعدی قفل می‌ماند.';
                 if(data.next_stage==='BOT_ONLY_BASELINE')stageText='مرحله فعال: خط پایه BOT_ONLY؛ پس از ثبت ۱۰۰ نمونه، نتیجه قفل می‌شود.';
                 if(data.next_stage==='AI_MENTOR_REQUIRED')stageText='خط پایه BOT_ONLY قفل شد. اکنون ممیزی ۱۰۰ تجربه توسط AI Mentor مجاز است؛ دورهای مستقل ۲ تا ۵ همچنان قفل‌اند.';
-                if(data.next_stage==='FORWARD_HOLDOUT_VALIDATION_REQUIRED')stageText='مدل Mentor به‌صورت Candidate در حافظه ثبت شد؛ ارتقا ممنوع است تا روی داده‌های جدید و مستقل ارزیابی شود. دورهای ۲ تا ۵ فعلاً قفل‌اند.';
+                if(data.next_stage==='AI_MENTOR_MODEL_BUILD_REQUIRED')stageText='ممیزی ۱۰۰ تجربه ثبت شده است، اما مدل Candidate در حافظه تأیید نشده؛ ساخت/بازیابی مدل Mentor هنوز لازم است.';
+                if(data.next_stage==='FORWARD_HOLDOUT_VALIDATION_REQUIRED')stageText='مدل Mentor به‌صورت Candidate در حافظه ثبت و Hash آن تأیید شد؛ ارتقا ممنوع است تا روی داده‌های جدید و مستقل ارزیابی شود. دورهای ۲ تا ۵ فعلاً قفل‌اند.';
                 status.textContent='حافظه: '+data.memory_backend+' · رکوردهای تأییدشده: '+data.verified_experiences+' · '+(rounds||'هنوز دوری ثبت نشده')+' · '+stageText;
               }catch(error){
                 nextRound=null;button.disabled=true;mentorButton.disabled=true;
