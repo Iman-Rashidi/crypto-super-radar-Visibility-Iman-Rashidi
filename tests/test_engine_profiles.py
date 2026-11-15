@@ -48,11 +48,11 @@ class EngineProfileTests(unittest.TestCase):
 
     def test_shared_portfolio_cap_blocks_new_risk(self):
         args = self.base()
-        args["current_open_risk_pct"] = 1.9
+        args["current_open_risk_pct"] = 0.019
         result = evaluate_demo_candidate(AGGRESSIVE.engine_id, **args)
         self.assertTrue(result["eligible"])
         self.assertEqual(result["available_risk_budget_pct"], 0.001)
-        args["current_open_risk_pct"] = 2.0
+        args["current_open_risk_pct"] = 0.020
         self.assertFalse(evaluate_demo_candidate(AGGRESSIVE.engine_id, **args)["eligible"])
 
     def test_stop_bot_and_duplicate_signal_block(self):

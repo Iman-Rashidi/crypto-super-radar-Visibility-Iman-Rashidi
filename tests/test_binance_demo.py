@@ -60,8 +60,10 @@ class BinanceDemoReadOnlyTests(unittest.TestCase):
     def test_demo_hosts_are_fixed_non_production_hosts(self):
         self.assertEqual(SPOT_DEMO_HOST, "https://demo-api.binance.com")
         self.assertEqual(FUTURES_DEMO_HOST, "https://demo-fapi.binance.com")
-        self.assertNotIn("api.binance.com", SPOT_DEMO_HOST)
-        self.assertNotIn("fapi.binance.com", FUTURES_DEMO_HOST)
+        self.assertNotEqual(SPOT_DEMO_HOST, "https://api.binance.com")
+        self.assertNotEqual(FUTURES_DEMO_HOST, "https://fapi.binance.com")
+        self.assertTrue(SPOT_DEMO_HOST.startswith("https://demo-"))
+        self.assertTrue(FUTURES_DEMO_HOST.startswith("https://demo-"))
 
 
 if __name__ == "__main__":
