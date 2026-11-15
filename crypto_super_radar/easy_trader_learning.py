@@ -922,12 +922,17 @@ class EasyTraderLearningMemory:
             ).fetchone()
             control_level = int(state["control_level"]) if state else 0
             error_rows = self.db.execute("""
-                SELECT error_flag FROM easy_learning_samples
-                WHERE symbol=? AND interval=? AND label IS NOT NULL AND error_flag IS NOT NULL
+                SELECT error_flag,label FROM easy_learning_samples
+                WHERE symbol=? AND interval=? AND label IS NOT NULL
                 ORDER BY outcome_at_ms DESC LIMIT 50
             """, (market, timeframe)).fetchall()
+            prediction_rows = [row for row in error_rows if row["error_flag"] is not None]
             error_rate = (
-                sum(int(row["error_flag"] or 0) for row in error_rows) / len(error_rows)
+                sum(int(row["error_flag"] or 0) for row in prediction_rows) / len(prediction_rows)
+                if prediction_rows else None
+            )
+            loss_rate = (
+                sum(1 for row in error_rows if int(row["label"] or 0) == 0) / len(error_rows)
                 if error_rows else None
             )
             model = self._active_model(market, timeframe)
@@ -956,6 +961,7 @@ class EasyTraderLearningMemory:
             "labelled_count": labelled,
             "unlabelled_count": max(0, total - labelled),
             "rolling_prediction_error_rate": round(error_rate, 4) if error_rate is not None else None,
+            "rolling_loss_rate": round(loss_rate, 4) if loss_rate is not None else None,
             "active_model_version": model["model_version"] if model else None,
             "active_model_kind": model["model_kind"] if model else None,
             "active_model_metrics": model["metrics"] if model else None,
