@@ -44,6 +44,7 @@ from .blofin_demo_executor import (
 )
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .database import storage_backend
+from .challenge_01_runner import Challenge01Runner, get_challenge_01_status
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
 ENGINE = WhaleAwareConfirmationEngine()
@@ -56,6 +57,7 @@ ACTIVE_SCAN_KEYS: dict[str, str] = {}
 JOB_FENCE_COUNTER = 0
 JOB_LEASE_SECONDS = 1800
 LOCK = threading.RLock()
+CHALLENGE_01_RUN_LOCK = threading.Lock()
 SCAN_RUNNING = False
 SCAN_QUEUE = queue.Queue(maxsize=50)
 SCAN_WORKER_STARTED = False
@@ -4469,6 +4471,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
+        if parsed.path == "/api/learning/challenge-01/status":
+            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            payload = get_challenge_01_status()
+            status_code = 200 if payload.get("status") == "PASS" else 503
+            return self._send(status_code, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/ai/status":
             payload = ai_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -4686,6 +4696,13 @@ class Handler(BaseHTTPRequestHandler):
           </div>
           <p class="muted" id="blofin-demo-account-status" aria-live="polite">اطلاعات خصوصی حساب تا زمان تأیید توکن نمایش داده نمی‌شود.</p>
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
+          <div class="metric" id="challenge-01-panel" style="margin-top:14px;border-color:#557b60">
+            <h3>چالش ۱ · Single-Candle Direction · BloFin Demo Spot</h3>
+            <p class="muted">۱۰۰ کندل کامل BTC-USDT در تایم‌فریم ۱ ساعته؛ فقط Open و Close. ابتدا BOT_ONLY ثبت می‌شود و حافظهٔ دائمی بازیابی و راستی‌آزمایی می‌شود. این آزمایش هیچ سفارش یا معامله‌ای ارسال نمی‌کند و هنوز مدرک قبولی نهایی نیست.</p>
+            <button id="challenge-01-run" type="button" disabled>اجرای دور بعدی Challenge 1 (۱۰۰ نمونه)</button>
+            <p id="challenge-01-status" class="muted" aria-live="polite">برای مشاهده وضعیت حافظه، توکن پنل را در کادر بالا وارد کن.</p>
+            <pre id="challenge-01-report" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          </div>
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
@@ -5354,6 +5371,58 @@ async function loadBlofinInstruments(){
             });
             // Safely verify the read-only BloFin connection as soon as the dashboard loads.
             checkButton.click();
+          })();
+          </script>
+          <script>
+          (function(){
+            const tokenInput=document.getElementById('blofin-dashboard-token');
+            const button=document.getElementById('challenge-01-run');
+            const status=document.getElementById('challenge-01-status');
+            const report=document.getElementById('challenge-01-report');
+            if(!tokenInput||!button||!status||!report)return;
+            let nextRound=null;
+            async function refreshStatus(){
+              const token=tokenInput.value.trim();
+              if(!token){nextRound=null;button.disabled=true;status.textContent='برای مشاهده وضعیت حافظه، توکن پنل را در کادر بالا وارد کن.';return;}
+              button.disabled=true;status.textContent='در حال خواندن حافظهٔ Challenge 1...';
+              try{
+                const response=await fetch('/api/learning/challenge-01/status',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+                const data=await response.json();
+                if(!response.ok||data.status!=='PASS')throw new Error(data.status||'MEMORY_STATUS_UNKNOWN');
+                nextRound=data.next_round;
+                button.disabled=!nextRound;
+                const rounds=(data.completed_rounds||[]).map(x=>'دور '+x.round_number+': '+x.verified_samples+'/100').join(' · ');
+                status.textContent='حافظه: '+data.memory_backend+' · رکوردهای تأییدشده: '+data.verified_experiences+' · '+(rounds||'هنوز دوری ثبت نشده')+' · '+(nextRound?'دور بعدی: '+nextRound:'پنج دور تکمیل شده؛ قبولی نهایی هنوز نیازمند ممیزی است');
+              }catch(error){
+                nextRound=null;button.disabled=true;
+                status.textContent='وضعیت حافظه دریافت نشد: '+String(error.message||error);
+              }
+            }
+            button.addEventListener('click',async function(){
+              const token=tokenInput.value.trim();
+              if(!token||!nextRound)return;
+              button.disabled=true;status.textContent='در حال دریافت ۱۰۰ کندل کامل Demo Spot و ثبت BOT_ONLY...';
+              report.textContent='';
+              try{
+                const body=new URLSearchParams({confirm:'1',round_number:String(nextRound),sample_count:'100'});
+                const response=await fetch('/api/learning/challenge-01/run',{
+                  method:'POST',
+                  headers:{Authorization:'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
+                  body:body.toString(),
+                  credentials:'same-origin',
+                  cache:'no-store'
+                });
+                const data=await response.json();
+                report.textContent=JSON.stringify(data,null,2);
+                if(!response.ok)status.textContent='دور اجرا نشد یا داده نامعتبر بود؛ جزئیات در گزارش آمده است.';
+                else status.textContent='دور '+data.round_number+' ثبت شد؛ حافظه پس از بازگشایی دیتابیس تأیید شد.';
+              }catch(error){
+                status.textContent='اجرای چالش ناموفق بود: '+String(error.message||error);
+              }
+              await refreshStatus();
+            });
+            tokenInput.addEventListener('input',refreshStatus);
+            refreshStatus();
           })();
           </script>
         </section>
@@ -6871,7 +6940,7 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/learning/challenge-01/run"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -6885,6 +6954,43 @@ async function loadBlofinInstruments(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/learning/challenge-01/run":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                try:
+                    round_number = int(form.get("round_number", ["1"])[0])
+                    sample_count = int(form.get("sample_count", ["100"])[0])
+                except (TypeError, ValueError):
+                    return self._send(400, b'{"status":"INVALID_PARAMETERS"}', "application/json; charset=utf-8")
+                if sample_count != 100 or not 1 <= round_number <= 5:
+                    return self._send(400, b'{"status":"INVALID_CHALLENGE_SCOPE"}', "application/json; charset=utf-8")
+                if not CHALLENGE_01_RUN_LOCK.acquire(blocking=False):
+                    return self._send(409, b'{"status":"CHALLENGE_ALREADY_RUNNING"}', "application/json; charset=utf-8")
+                try:
+                    result = Challenge01Runner().run_bot_only_round(
+                        round_number=round_number, sample_count=sample_count,
+                    )
+                    status_code = 200 if result.get("status") == "BASELINE_RECORDED" else 409
+                    return self._send(
+                        status_code,
+                        json.dumps(result, ensure_ascii=False, default=str).encode(),
+                        "application/json; charset=utf-8",
+                    )
+                except Exception as exc:
+                    payload = {"status": "ERROR", "error_type": type(exc).__name__, "orders_submitted": False}
+                    return self._send(500, json.dumps(payload, ensure_ascii=False).encode(),
+                                      "application/json; charset=utf-8")
+                finally:
+                    CHALLENGE_01_RUN_LOCK.release()
             if route == "/api/blofin/demo/smoke-test":
                 if (
                     not origin
