@@ -124,6 +124,7 @@ class LearningExperienceMemoryTests(unittest.TestCase):
                 self.decision(
                     experience_id=experience_id,
                     event_id=f"{experience_id}-decision",
+                    cycle_id=f"cycle-{experience_id}",
                 )
                 item = self.outcome(
                     experience_id=experience_id,
