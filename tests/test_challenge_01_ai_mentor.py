@@ -29,8 +29,35 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.db.close()
         self.tempdir.cleanup()
 
-    def add_baseline(self, index: int, challenge_id: str = "CHALLENGE-01"):
+    def add_baseline(
+        self, index: int, challenge_id: str = "CHALLENGE-01",
+        include_target_in_input: bool = False,
+    ):
         experience_id = f"baseline-{index}"
+        feature_ts = 1_800_000_000_000 + index * 3_600_000
+        target_ts = feature_ts + 3_600_000
+        feature = {
+            "open_time_ms": feature_ts,
+            "open": "100", "high": "105", "low": "95", "close": "101",
+            "confirmed": True,
+        }
+        target = {
+            "open_time_ms": target_ts,
+            "open": "101", "high": "106", "low": "96", "close": "102",
+            "confirmed": True,
+        }
+        snapshot = {
+            "round_number": 1,
+            "candle_open_time_ms": target_ts,
+            "feature_candle_open_time_ms": feature_ts,
+            "target_candle_open_time_ms": target_ts,
+            "feature_candle": feature,
+            "prediction_horizon_bars": 1,
+            "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
+            "target_candle_in_input": False,
+        }
+        if include_target_in_input:
+            snapshot["target_candle"] = target
         with self.db:
             self.memory.record_decision(
                 experience_id=experience_id, event_id=f"decision-{index}",
@@ -41,12 +68,14 @@ class Challenge01AIMentorTests(unittest.TestCase):
                 dataset_version="round-1",
                 decision={
                     "candle_classification": "BULLISH_CANDLE",
-                    "confidence_scope": "DETERMINISTIC_CLOSED_CANDLE_CLASSIFICATION_NOT_MARKET_FORECAST",
+                    "action": "PREDICT_NEXT_BULLISH",
+                    "confidence": None,
+                    "rule": "previous_candle_body_direction",
+                    "prediction_horizon_bars": 1,
+                    "confidence_scope": "UNSCORED_BASELINE_RULE_NOT_CALIBRATED_PROBABILITY",
                 },
                 input_snapshot={
-                    "round_number": 1,
-                    "candle_open_time_ms": 1_800_000_000_000 + index * 3_600_000,
-                    "data_quality": "VALID_COMPLETED_CANDLE",
+                    **snapshot,
                 },
             )
             self.memory.record_outcome(
@@ -54,8 +83,13 @@ class Challenge01AIMentorTests(unittest.TestCase):
                 decision_correctness="CORRECT", realized_result="NOT_EXECUTED",
                 realized_net_pnl=None, final=True,
                 evidence={
-                    "source": "challenge_01_ohlc_rule_reference",
-                    "comparison": "DETERMINISTIC_OHLC_LABEL_CONSISTENCY_NOT_PREDICTIVE_GROUND_TRUTH",
+                    "source": "blofin_demo_spot_next_completed_candle",
+                    "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
+                    "feature_candle_open_time_ms": feature_ts,
+                    "target_candle_open_time_ms": target_ts,
+                    "target_candle": target,
+                    "prediction_horizon_bars": 1,
+                    "no_future_data_used_in_input": not include_target_in_input,
                 },
             )
         return experience_id
@@ -67,6 +101,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertFalse(result["mastery_awarded"])
         self.assertFalse(result["bot_only_decision_changed"])
         self.assertFalse(result["orders_submitted"])
+        self.assertEqual(result["issues"], [])
         saved = self.memory.get_experience("baseline-1")
         self.assertEqual(saved["decision_mode"], "BOT_ONLY")
         self.assertEqual(
@@ -74,7 +109,19 @@ class Challenge01AIMentorTests(unittest.TestCase):
             ["DECISION_RECORDED", "OUTCOME_LABELLED", "MENTOR_FEEDBACK_RECORDED"],
         )
         feedback = saved["events"][-1]["payload"]["feedback"]
-        self.assertIn("not a forecast", feedback)
+        self.assertIn("naive one-bar momentum", feedback)
+        self.assertIn("not a trained AI model", feedback)
+
+    def test_mentor_flags_target_candle_leakage_in_decision_input(self):
+        self.add_baseline(2, include_target_in_input=True)
+        result = review_baseline(self.memory, "baseline-2")
+        self.assertIn(
+            "Future target data appears in, or is not explicitly excluded from, the decision input.",
+            result["issues"],
+        )
+        saved = self.memory.get_experience("baseline-2")
+        self.assertEqual(saved["decision_mode"], "BOT_ONLY")
+        self.assertEqual(saved["events"][-1]["event_type"], "MENTOR_FEEDBACK_RECORDED")
 
     def test_mentor_is_idempotent_for_same_baseline(self):
         self.add_baseline(1)
