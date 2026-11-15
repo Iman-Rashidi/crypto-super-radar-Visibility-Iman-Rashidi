@@ -2575,22 +2575,41 @@ def _ensure_scan_worker():
 
 
 def _blofin_demo_execution_readiness() -> dict:
-    """Expose unlimited Demo order quota and non-secret execution prerequisites."""
+    """Expose Demo execution prerequisites; READY requires verified read/write API permission."""
     trade_names = (
         "BLOFIN_DEMO_TRADE_API_KEY",
         "BLOFIN_DEMO_TRADE_API_SECRET",
         "BLOFIN_DEMO_TRADE_PASSPHRASE",
     )
+    demo_names = (
+        "BLOFIN_DEMO_API_KEY",
+        "BLOFIN_DEMO_API_SECRET",
+        "BLOFIN_DEMO_PASSPHRASE",
+    )
     dedicated_trade_credentials = all(bool(os.getenv(name, "").strip()) for name in trade_names)
-    existing_demo_credentials = all(bool(os.getenv(name, "").strip()) for name in (
-        "BLOFIN_DEMO_API_KEY", "BLOFIN_DEMO_API_SECRET", "BLOFIN_DEMO_PASSPHRASE",
+    existing_demo_credentials = all(bool(os.getenv(name, "").strip()) for name in demo_names)
+    # Use the same credential fallback resolver as the actual write client.
+    trade_client = BloFinDemoTradeClient(timeout=8.0)
+    trade_credentials_configured = all(bool(value) for value in (
+        trade_client.api_key, trade_client.api_secret, trade_client.passphrase
     ))
-    trade_credentials_configured = dedicated_trade_credentials or existing_demo_credentials
     credential_source = (
         "DEDICATED_TRADE_KEY" if dedicated_trade_credentials else
-        "EXISTING_DEMO_KEY_REQUIRES_TRADE_PERMISSION" if existing_demo_credentials else
-        "MISSING"
+        "EXISTING_DEMO_KEY" if existing_demo_credentials else
+        "MIXED_OR_INCOMPLETE"
     )
+    trade_permission_status = "NOT_CHECKED"
+    trade_permission_verified = False
+    if trade_credentials_configured:
+        try:
+            trade_client.verify_trade_permission()
+            trade_permission_status = "READ_WRITE_CONFIRMED"
+            trade_permission_verified = True
+        except BloFinDemoExecutionBlocked as exc:
+            trade_permission_status = "READ_ONLY" if "readOnly=1" in str(exc) else "BLOCKED"
+        except Exception:
+            trade_permission_status = "CHECK_FAILED"
+
     trading_enabled = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
     autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
     dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
@@ -2614,15 +2633,31 @@ def _blofin_demo_execution_readiness() -> dict:
     unresolved_orders = budget.get("unresolved_orders") if isinstance(budget, dict) else None
     event_store_readable = isinstance(budget, dict)
     ready = bool(
-        trade_credentials_configured and trading_enabled and dashboard_auth_configured
+        trade_credentials_configured and trade_permission_verified
+        and trading_enabled and dashboard_auth_configured
         and durable_storage and event_store_readable
     )
+    if not trade_credentials_configured:
+        message_fa = "کلید، Secret و Passphrase مربوط به BloFin Demo Trade کامل نیستند."
+    elif trade_permission_status == "READ_ONLY":
+        message_fa = "کلید API به‌صورت readOnly=1 فقط‌خواندنی است؛ در BloFin مجوز Read/Write یا Trade را برای همین کلید فعال کن. هیچ سفارشی ارسال نمی‌شود."
+    elif not trade_permission_verified:
+        message_fa = "مجوز Trade با query-apikey تأیید نشد؛ وضعیت کلید نامشخص است و اجرای سفارش مسدود می‌ماند."
+    elif not trading_enabled or not dashboard_auth_configured or not durable_storage or not event_store_readable:
+        message_fa = "اجرای سفارش مسدود است؛ فعال‌سازی Demo، توکن پنل و حافظه پایدار Turso باید در دسترس باشند."
+    else:
+        message_fa = (
+            "پیش‌نیازهای BloFin Demo آماده‌اند؛ مجوز Read/Write کلید واقعی با query-apikey تأیید شد. "
+            "قیمت، ۱۲ گیت، Nemotron و کنترل‌های ریسک در هر چرخه دوباره بررسی می‌شوند."
+        )
     return {
         "status": "READY" if ready else "BLOCKED",
         "environment": "BLOFIN_DEMO",
         "trade_credentials_configured": trade_credentials_configured,
         "credential_source": credential_source,
-        "trade_permission_verified_each_cycle": True,
+        "trade_permission_status": trade_permission_status,
+        "trade_permission_verified": trade_permission_verified,
+        "trade_permission_verified_each_cycle": trade_permission_verified,
         "trading_enabled": trading_enabled,
         "autopilot_enabled": autopilot_enabled,
         "durable_storage": durable_storage,
@@ -2641,12 +2676,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "max_margin_usage_pct": 10.0,
         "max_concurrent_positions": 1,
         "signal_deduplication": "ONE_ORDER_PER_COMPLETED_15M_CANDLE",
-        "message_fa": (
-            "پیش‌نیازهای BloFin Demo آماده‌اند؛ تعداد سفارش‌ها سقف مادام‌العمر یا روزانه ندارد و سیگنال اجرایی از کندل ۱۵ دقیقه‌ای با تأیید روند ۱ ساعته ساخته می‌شود. "
-            "مجوز Trade، قیمت، ۱۲ گیت، Nemotron و کنترل‌های ریسک در هر چرخه دوباره بررسی می‌شوند."
-            if ready else
-            "اجرای سفارش مسدود است؛ کلید Demo دارای مجوز Trade، فعال‌سازی معامله Demo، توکن پنل و حافظه پایدار Turso باید در دسترس باشند."
-        ),
+        "message_fa": message_fa,
     }
 
 def _blofin_demo_smoke_test_readiness() -> dict:
