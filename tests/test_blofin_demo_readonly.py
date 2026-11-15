@@ -85,6 +85,40 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
         self.assertEqual(headers["ACCESS-SIGN"], expected)
         self.assertEqual(kwargs["timeout"], 10.0)
 
+    def test_api_key_info_confirms_exact_key_and_read_write_permission(self):
+        self.session.get.return_value = FakeResponse({
+            "code": "0",
+            "data": {"apiKey": "demo-key", "readOnly": 0, "apiName": "trade-demo"}
+        })
+        result = self.client.get_api_key_info()
+        self.assertEqual(result, {"readOnly": 0, "trade_permission": True})
+        args, kwargs = self.session.get.call_args
+        self.assertTrue(args[0].startswith(DEMO_REST_URL))
+        self.assertTrue(args[0].endswith("/api/v1/user/query-apikey"))
+        self.assertEqual(kwargs["headers"]["ACCESS-KEY"], "demo-key")
+        self.assertIn("ACCESS-SIGN", kwargs["headers"])
+        self.assertNotIn("apiKey", str(result))
+
+    def test_api_key_info_reports_read_only_without_granting_trade(self):
+        self.session.get.return_value = FakeResponse({
+            "code": "0", "data": {"apiKey": "demo-key", "readOnly": "1"}
+        })
+        result = self.client.get_api_key_info()
+        self.assertEqual(result, {"readOnly": 1, "trade_permission": False})
+
+    def test_api_key_info_rejects_mismatched_key_or_unknown_permission(self):
+        from crypto_super_radar.blofin_demo_readonly import BloFinDemoResponseError
+        self.session.get.return_value = FakeResponse({
+            "code": "0", "data": {"apiKey": "some-other-key", "readOnly": 0}
+        })
+        with self.assertRaises(BloFinDemoAuthError):
+            self.client.get_api_key_info()
+        self.session.get.return_value = FakeResponse({
+            "code": "0", "data": {"apiKey": "demo-key", "readOnly": 2}
+        })
+        with self.assertRaises(BloFinDemoResponseError):
+            self.client.get_api_key_info()
+
     def test_positions_and_open_orders_use_only_read_endpoints(self):
         self.client.get_positions(inst_id="BTC-USDT")
         call_args1, _ = self.session.get.call_args
