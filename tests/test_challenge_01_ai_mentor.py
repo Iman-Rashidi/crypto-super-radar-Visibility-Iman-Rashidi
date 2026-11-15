@@ -61,8 +61,20 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertEqual(self.memory.get_experience("baseline-1")["verification"]["status"], "PASS")
 
     def test_mentor_rejects_other_challenge(self):
+        with self.db:
+            self.memory.record_decision(
+                experience_id="other-challenge", event_id="other-decision",
+                engine_id="OTHER", challenge_id="CHALLENGE-02", cycle_id="cycle-2",
+                decision_mode="BOT_ONLY", environment="HISTORICAL_REPLAY",
+                decision={"action": "WAIT"}, input_snapshot={"data_quality": "VALID"},
+            )
+            self.memory.record_outcome(
+                experience_id="other-challenge", event_id="other-outcome",
+                decision_correctness="UNKNOWN", realized_result="NOT_EXECUTED",
+                evidence={"source": "unit_test"},
+            )
         with self.assertRaises(ValueError):
-            review_baseline(self.memory, "missing-baseline")
+            review_baseline(self.memory, "other-challenge")
 
 
 if __name__ == "__main__":
