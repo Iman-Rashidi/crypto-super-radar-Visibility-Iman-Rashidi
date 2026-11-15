@@ -530,7 +530,7 @@ def get_challenge_01_status(
     backend_factory: Callable[[], str] = storage_backend,
     allow_non_durable_for_tests: bool = False,
 ) -> dict[str, Any]:
-    """Read verified Challenge 1 progress; ephemeral/local storage is never PASS."""
+    """Read verified Challenge 1 progress and the next safe round gate."""
     connection = None
     try:
         backend = backend_factory()
@@ -551,53 +551,70 @@ def get_challenge_01_status(
         connection = connection_factory()
         memory = LearningExperienceMemory(connection)
         experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
-        rounds: dict[int, set[int]] = {}
+        round_targets: dict[int, dict[int, set[str]]] = {}
+        mentor_reviewed_ids: set[str] = set()
         for item in experiences:
-            for event in item.get("events", []):
-                if event.get("event_type") != "DECISION_RECORDED":
-                    continue
-                snapshot = (event.get("payload") or {}).get("input_snapshot") or {}
-                round_number = snapshot.get("round_number")
-                candle_time = snapshot.get("candle_open_time_ms")
-                if isinstance(round_number, int) and isinstance(candle_time, int):
-                    rounds.setdefault(round_number, set()).add(candle_time)
-                break
-        completed_rounds = [
-            {
-                "round_number": number,
-                "verified_samples": len(samples),
-                "round_ready": len(samples) >= MIN_SAMPLES_PER_ROUND,
-            }
-            for number, samples in sorted(rounds.items())
-        ]
-        baseline_samples = len(rounds.get(1, set()))
-        baseline_locked = baseline_samples >= MIN_SAMPLES_PER_ROUND
-        mentor_reviewed_ids = set()
-        baseline_experience_ids = set()
-        for item in experiences:
-            if item.get("decision_mode") != "BOT_ONLY":
-                continue
             events = item.get("events") or []
-            decision = next(
-                (event.get("payload", {}) for event in events if event.get("event_type") == "DECISION_RECORDED"),
-                {},
+            decision_event = next(
+                (event for event in events if event.get("event_type") == "DECISION_RECORDED"),
+                None,
             )
-            snapshot = decision.get("input_snapshot") or {}
-            if snapshot.get("round_number") != 1:
+            if decision_event is None:
                 continue
-            experience_id = item.get("experience_id")
-            if experience_id:
-                baseline_experience_ids.add(experience_id)
+            payload = decision_event.get("payload") or {}
+            snapshot = payload.get("input_snapshot") or {}
+            round_number = snapshot.get("round_number")
+            target_time = snapshot.get("target_candle_open_time_ms")
+            if not isinstance(target_time, int):
+                target_time = snapshot.get("candle_open_time_ms")
+            if not isinstance(round_number, int) or not isinstance(target_time, int):
+                continue
+            mode = item.get("decision_mode")
+            round_targets.setdefault(round_number, {}).setdefault(target_time, set()).add(mode)
+
+            if round_number == 1 and mode == "BOT_ONLY":
                 if any(event.get("event_type") == "MENTOR_FEEDBACK_RECORDED" for event in events):
-                    mentor_reviewed_ids.add(experience_id)
+                    mentor_reviewed_ids.add(item.get("experience_id"))
+
+        completed_rounds = []
+        paired_rounds: dict[int, bool] = {}
+        for number, target_modes in sorted(round_targets.items()):
+            target_times = set(target_modes)
+            bot_samples = sum("BOT_ONLY" in modes for modes in target_modes.values())
+            mentor_samples = sum("BOT_WITH_AI_MENTOR" in modes for modes in target_modes.values())
+            paired_samples = sum(
+                {"BOT_ONLY", "BOT_WITH_AI_MENTOR"}.issubset(modes)
+                for modes in target_modes.values()
+            )
+            if number == 1:
+                ready = bot_samples >= MIN_SAMPLES_PER_ROUND
+                paired_rounds[number] = ready
+            else:
+                ready = paired_samples >= MIN_SAMPLES_PER_ROUND
+                paired_rounds[number] = ready
+            completed_rounds.append({
+                "round_number": number,
+                "verified_samples": len(target_times),
+                "bot_only_samples": bot_samples,
+                "mentor_samples": mentor_samples,
+                "paired_samples": paired_samples,
+                "round_ready": ready,
+            })
+
+        baseline_samples = sum(
+            "BOT_ONLY" in modes
+            for modes in round_targets.get(1, {}).values()
+        )
+        baseline_locked = baseline_samples >= MIN_SAMPLES_PER_ROUND
         mentor_reviewed_samples = len(mentor_reviewed_ids)
         mentor_review_complete = (
-            baseline_locked
-            and baseline_samples >= MIN_SAMPLES_PER_ROUND
-            and mentor_reviewed_samples >= baseline_samples
+            baseline_locked and mentor_reviewed_samples >= baseline_samples
         )
+
         candidate_model_sha256 = None
         for item in experiences:
+            if item.get("verification", {}).get("status") != "PASS":
+                continue
             for event in item.get("events") or []:
                 if event.get("event_type") != "LESSON_PROPOSED":
                     continue
@@ -623,19 +640,31 @@ def get_challenge_01_status(
                     continue
             if candidate_model_sha256:
                 break
+
         candidate_model_present = candidate_model_sha256 is not None
         mentor_review_ready = baseline_locked and (
             not mentor_review_complete or not candidate_model_present
         )
-        next_round = 1 if not baseline_locked else None
         if not baseline_locked:
+            next_round = 1
             next_stage = "BOT_ONLY_BASELINE"
         elif not mentor_review_complete:
+            next_round = None
             next_stage = "AI_MENTOR_REQUIRED"
         elif not candidate_model_present:
+            next_round = None
             next_stage = "AI_MENTOR_MODEL_BUILD_REQUIRED"
         else:
-            next_stage = "FORWARD_HOLDOUT_VALIDATION_REQUIRED"
+            next_round = next(
+                (number for number in range(2, MAX_ROUNDS + 1)
+                 if not paired_rounds.get(number, False)),
+                None,
+            )
+            next_stage = (
+                "FORWARD_HOLDOUT_VALIDATION_REQUIRED"
+                if next_round is not None else "CHALLENGE_REVIEW_REQUIRED"
+            )
+
         return {
             "status": "PASS",
             "challenge_id": CHALLENGE_ID,
@@ -658,9 +687,9 @@ def get_challenge_01_status(
             "candidate_model_sha256": candidate_model_sha256,
             "next_round": next_round,
             "next_stage": next_stage,
-            "later_rounds_blocked": True,
+            "later_rounds_blocked": next_round is None,
             "mastery_status": "NOT_EARNED",
-            "mastery_rule": "BOT_ONLY baseline, 100% mentor audit, then four independent assisted rounds; this endpoint never awards mastery",
+            "mastery_rule": "BOT_ONLY baseline, 100% mentor audit, then four paired independent assisted rounds; this endpoint never awards mastery",
             "orders_submitted": False,
         }
     except Exception as exc:
