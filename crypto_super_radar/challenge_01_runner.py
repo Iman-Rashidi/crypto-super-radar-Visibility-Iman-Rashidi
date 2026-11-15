@@ -647,7 +647,10 @@ def get_challenge_01_status(
                     total_samples = artifact.get("training", {}).get("total_samples")
                     if (
                         saved_hash == calculated_hash
-                        and artifact.get("schema") == "CSR_CH01_SOFTMAX_CANDIDATE_V1"
+                        and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
+                        and artifact.get("feature_window_length") == 3
+                        and isinstance(artifact.get("pattern_features"), list)
+                        and len(artifact.get("pattern_features")) >= 15
                         and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
                         and isinstance(trained_round, int)
                         and artifact.get("training", {}).get("samples", 0) >= 60
