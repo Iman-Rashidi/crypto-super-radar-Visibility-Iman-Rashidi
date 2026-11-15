@@ -297,7 +297,8 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
 
     ORDER_PATH = "/api/v1/trade/order"
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
-    ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH})
+    CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
+    ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH})
 
     def __init__(self, **kwargs: Any) -> None:
         # Prefer a dedicated Demo Trade key, but reuse the already-configured
@@ -419,6 +420,29 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             "slTriggerPriceType": "mark",
         }
         return self._post(self.ORDER_PATH, body)
+
+    def close_futures_position(
+        self, *, inst_id: str, margin_mode: str, position_side: str,
+        client_order_id: str, position_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Close one already-identified Demo position at market, never close-all."""
+        if not re.fullmatch(r"[A-Za-z0-9]{1,32}", client_order_id or ""):
+            raise ValueError("client_order_id must be 1-32 alphanumeric characters.")
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
+            raise ValueError("Only a USDT linear Demo perpetual can be closed.")
+        if margin_mode != "isolated" or position_side not in {"net", "long", "short"}:
+            raise ValueError("Smoke-test close requires isolated margin and a known position side.")
+        if position_id is not None and not re.fullmatch(r"[A-Za-z0-9]{1,64}", position_id):
+            raise ValueError("position_id is invalid.")
+        body: dict[str, Any] = {
+            "instId": inst_id,
+            "marginMode": margin_mode,
+            "positionSide": position_side,
+            "clientOrderId": client_order_id,
+        }
+        if position_id:
+            body["positionId"] = position_id
+        return self._post(self.CLOSE_POSITION_PATH, body)
 
 
 class BloFinDemoEventStore:
