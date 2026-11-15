@@ -106,8 +106,8 @@ class BloFinDemoRiskPolicy:
     max_margin_usage_pct: float = 0.10
     max_leverage: int = 3
     max_concurrent_positions: int = 1
-    max_orders_per_utc_day: int = 2
-    min_seconds_between_orders: int = 1800
+    max_orders_per_utc_day: int | None = None
+    min_seconds_between_orders: int = 0
     min_confirmation_score: float = 75.0
     max_risk_score: float = 45.0
     min_reward_risk: float = 1.8
@@ -129,8 +129,11 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Maximum drawdown must be in (0, 15%]")
         if not 0 < self.max_margin_usage_pct <= 0.25:
             raise ValueError("Margin usage must be in (0, 25%]")
-        if isinstance(self.max_orders_per_utc_day, bool) or not 1 <= int(self.max_orders_per_utc_day) <= 5:
-            raise ValueError("Demo orders per UTC day must be between 1 and 5")
+        if self.max_orders_per_utc_day is not None and (
+            isinstance(self.max_orders_per_utc_day, bool)
+            or not 1 <= int(self.max_orders_per_utc_day) <= 5
+        ):
+            raise ValueError("An optional Demo daily order limit must be between 1 and 5")
         if isinstance(self.min_seconds_between_orders, bool) or not 0 <= int(self.min_seconds_between_orders) <= 86400:
             raise ValueError("Minimum seconds between Demo orders must be between 0 and 86400")
         if isinstance(self.max_leverage, bool) or not 1 <= int(self.max_leverage) <= 3:
@@ -538,7 +541,7 @@ class BloFinDemoEventStore:
         }
 
     def has_any_orders(self) -> bool:
-        """Return whether this one-shot Demo service has ever reserved an order."""
+        """Return whether this Demo service has ever reserved an order."""
         with self._lock:
             row = self._db.execute(
                 "SELECT 1 FROM blofin_demo_orders LIMIT 1"
@@ -556,14 +559,17 @@ class BloFinDemoEventStore:
             ).fetchone()
         return row is not None
 
-    def trade_budget_status(self, max_orders_per_utc_day: int, *, now: int | None = None) -> dict[str, Any]:
-        """Count every reserved attempt in the UTC day and surface unresolved outcomes."""
+    def trade_budget_status(self, max_orders_per_utc_day: int | None = None, *, now: int | None = None) -> dict[str, Any]:
+        """Report Demo order history without imposing a quota unless explicitly configured."""
         sampled_at = int(time.time()) if now is None else int(now)
         utc_day_start = sampled_at - (sampled_at % 86400)
         with self._lock:
             today_row = self._db.execute(
                 "SELECT COUNT(*) FROM blofin_demo_orders WHERE created_at>=?",
                 (utc_day_start,),
+            ).fetchone()
+            total_row = self._db.execute(
+                "SELECT COUNT(*) FROM blofin_demo_orders"
             ).fetchone()
             latest_row = self._db.execute(
                 "SELECT created_at, status FROM blofin_demo_orders ORDER BY created_at DESC LIMIT 1"
@@ -572,13 +578,16 @@ class BloFinDemoEventStore:
                 "SELECT COUNT(*) FROM blofin_demo_orders WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET')"
             ).fetchone()
         orders_today = int(today_row[0] or 0)
+        orders_total = int(total_row[0] or 0)
+        daily_limit = None if max_orders_per_utc_day is None else int(max_orders_per_utc_day)
         latest_created_at = int(latest_row["created_at"]) if latest_row is not None else None
         latest_status = str(latest_row["status"]) if latest_row is not None else None
         age = max(0, sampled_at - latest_created_at) if latest_created_at is not None else None
         return {
             "orders_today": orders_today,
-            "max_orders_per_utc_day": int(max_orders_per_utc_day),
-            "daily_capacity_available": orders_today < int(max_orders_per_utc_day),
+            "orders_total": orders_total,
+            "max_orders_per_utc_day": daily_limit,
+            "daily_capacity_available": daily_limit is None or orders_today < daily_limit,
             "latest_order_age_seconds": age,
             "latest_order_status": latest_status,
             "unresolved_orders": int(unresolved_row[0] or 0),
@@ -764,13 +773,17 @@ class BloFinDemoExecutor:
         if self.store.backend != "TURSO_CLOUD_SQLITE":
             raise BloFinDemoExecutionBlocked("Durable Turso storage is required before Demo trading.")
         budget = self.store.trade_budget_status(self.policy.max_orders_per_utc_day)
-        if budget["orders_today"] >= self.policy.max_orders_per_utc_day:
-            raise BloFinDemoExecutionBlocked("The daily Demo order limit has been reached.")
+        if (
+            self.policy.max_orders_per_utc_day is not None
+            and budget["orders_today"] >= self.policy.max_orders_per_utc_day
+        ):
+            raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
         latest_age = budget.get("latest_order_age_seconds")
         if (
-            latest_age is not None
+            self.policy.min_seconds_between_orders > 0
+            and latest_age is not None
             and latest_age < self.policy.min_seconds_between_orders
         ):
             raise BloFinDemoExecutionBlocked("The minimum cooldown between Demo orders has not elapsed.")
