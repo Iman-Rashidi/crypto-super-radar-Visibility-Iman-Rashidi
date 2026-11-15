@@ -105,7 +105,10 @@ def _classification_metrics(
     if not predictions or len(predictions) != len(references):
         raise ValueError("predictions and references must have equal non-empty lengths")
     labels = tuple(sorted(set(predictions) | set(references)))
-    confusion = {actual: {predicted: 0 for predicted in labels} for actual in labels}
+    confusion = {
+        actual: {predicted: 0 for predicted in CLASS_LABELS}
+        for actual in CLASS_LABELS
+    }
     for predicted, actual in zip(predictions, references):
         if predicted not in CLASS_LABELS or actual not in CLASS_LABELS:
             raise ValueError("unknown Challenge 1 class label")
@@ -117,7 +120,7 @@ def _classification_metrics(
     for label in labels:
         true_positive = confusion[label][label]
         support = sum(confusion[label].values())
-        predicted_count = sum(confusion[actual][label] for actual in labels)
+        predicted_count = sum(confusion[actual][label] for actual in CLASS_LABELS)
         recall = true_positive / support if support else 0.0
         precision = true_positive / predicted_count if predicted_count else 0.0
         f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0.0
