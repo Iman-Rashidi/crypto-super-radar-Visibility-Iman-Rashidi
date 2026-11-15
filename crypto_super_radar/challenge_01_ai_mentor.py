@@ -333,6 +333,89 @@ def _train_and_store_candidate(memory: LearningExperienceMemory, baseline_ids: l
     }
 
 
+
+def load_candidate_artifact(
+    memory: LearningExperienceMemory,
+    *,
+    anchor_experience_id: str | None = None,
+    expected_sha256: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Load and re-hash a persisted, unpromoted candidate model."""
+    candidates = (
+        [memory.get_experience(anchor_experience_id)]
+        if anchor_experience_id
+        else memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
+    )
+    for item in candidates:
+        if item.get("verification", {}).get("status") != "PASS":
+            continue
+        for event in item.get("events") or []:
+            if event.get("event_type") != "LESSON_PROPOSED":
+                continue
+            payload = event.get("payload") or {}
+            if not str(payload.get("lesson_id", "")).startswith("ch01-model-"):
+                continue
+            try:
+                artifact = json.loads(payload.get("lesson", ""))
+                saved_sha = artifact.pop("artifact_sha256", None)
+                calculated = hashlib.sha256(json.dumps(
+                    artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode("utf-8")).hexdigest()
+                if (
+                    saved_sha != calculated
+                    or (expected_sha256 is not None and saved_sha != expected_sha256)
+                    or artifact.get("schema") != "CSR_CH01_SOFTMAX_CANDIDATE_V1"
+                    or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
+                    or artifact.get("training", {}).get("samples") != 80
+                    or artifact.get("temporal_validation", {}).get("samples") != 20
+                ):
+                    continue
+                artifact["artifact_sha256"] = saved_sha
+                return artifact, item["experience_id"]
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+    raise ValueError("VERIFIED_MENTOR_CANDIDATE_ARTIFACT_NOT_FOUND")
+
+
+def predict_candidate(
+    feature_candle: dict[str, Any],
+    artifact: dict[str, Any],
+) -> tuple[str, list[float]]:
+    """Apply the persisted candidate without refitting or seeing target data."""
+    if (
+        artifact.get("schema") != "CSR_CH01_SOFTMAX_CANDIDATE_V1"
+        or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
+        or artifact.get("features") != list(MODEL_FEATURES)
+        or artifact.get("classes") != list(MODEL_CLASSES)
+    ):
+        raise ValueError("MENTOR_CANDIDATE_SCHEMA_OR_STATUS_INVALID")
+    normalization = artifact.get("normalization") or {}
+    means = normalization.get("means") or []
+    stds = normalization.get("standard_deviations") or []
+    weights = artifact.get("weights") or []
+    biases = artifact.get("biases") or []
+    if (
+        len(means) != len(MODEL_FEATURES)
+        or len(stds) != len(MODEL_FEATURES)
+        or len(weights) != len(MODEL_CLASSES)
+        or len(biases) != len(MODEL_CLASSES)
+        or any(len(row) != len(MODEL_FEATURES) for row in weights)
+        or any(not math.isfinite(float(value)) for value in means + stds + biases)
+        or any(not math.isfinite(float(value)) for row in weights for value in row)
+        or any(float(value) <= 0 for value in stds)
+    ):
+        raise ValueError("MENTOR_CANDIDATE_PARAMETERS_INVALID")
+    raw = _feature_vector(feature_candle)
+    normalized = [(raw[j] - float(means[j])) / float(stds[j]) for j in range(len(MODEL_FEATURES))]
+    probabilities = _softmax([
+        float(biases[k]) + sum(
+            float(weights[k][j]) * normalized[j] for j in range(len(MODEL_FEATURES))
+        )
+        for k in range(len(MODEL_CLASSES))
+    ])
+    best = max(range(len(probabilities)), key=probabilities.__getitem__)
+    return MODEL_CLASSES[best], probabilities
+
 def review_locked_baseline(
     *,
     connection_factory: Callable[[], Any] = connect_database,
@@ -468,4 +551,4 @@ def review_locked_baseline(
                 pass
 
 
-__all__ = ["review_baseline", "review_locked_baseline", "MENTOR_VERSION"]
+__all__ = ["review_baseline", "review_locked_baseline", "load_candidate_artifact", "predict_candidate", "MENTOR_VERSION"]
