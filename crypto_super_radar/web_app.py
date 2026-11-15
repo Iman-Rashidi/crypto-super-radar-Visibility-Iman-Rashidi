@@ -7067,7 +7067,7 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
         or result.get("status")
     )
     raw_signal = getattr(raw_signal, "value", raw_signal)
-    signal_value = re.sub(r"_+", "_", re.sub(r"[\\s-]+", "_", str(raw_signal or "").strip().upper())).strip("_")
+    signal_value = re.sub(r"_+", "_", re.sub(r"[\s-]+", "_", str(raw_signal or "").strip().upper())).strip("_")
     cycle_status = str(job.get("status") or "UNKNOWN").strip().lower()
     orders_submitted = bool(result.get("orders_submitted", job.get("orders_submitted", False)))
     trade_executed = bool(result.get("trade_executed", job.get("trade_executed", False)))
