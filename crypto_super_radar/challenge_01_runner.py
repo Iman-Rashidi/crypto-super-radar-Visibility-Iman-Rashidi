@@ -259,16 +259,6 @@ class Challenge01Runner:
             raise ValueError("Challenge 1 requires at least 100 samples per round")
         if sample_count > 1400:
             raise ValueError("sample_count must not exceed 1400")
-        if round_number > 1:
-            return {
-                "status": "BLOCKED",
-                "reason_code": "AI_MENTOR_PHASE_REQUIRED",
-                "blocked_round": round_number,
-                "next_stage": "AI_MENTOR_REQUIRED",
-                "orders_submitted": False,
-                "live_trading": False,
-            }
-
         try:
             backend = self.backend_factory()
         except Exception as exc:
@@ -293,8 +283,29 @@ class Challenge01Runner:
             memory = LearningExperienceMemory(connection)
             prior_rounds = _existing_rounds(memory)
             expected_round = max(prior_rounds, default=0) + 1
+            if round_number > 1:
+                reason = (
+                    "BOT_ONLY_BASELINE_REQUIRED"
+                    if expected_round == 1 else "AI_MENTOR_PHASE_REQUIRED"
+                )
+                return {
+                    "status": "BLOCKED",
+                    "reason_code": reason,
+                    "blocked_round": round_number,
+                    "expected_round": expected_round,
+                    "next_stage": "BOT_ONLY_BASELINE" if expected_round == 1 else "AI_MENTOR_REQUIRED",
+                    "orders_submitted": False,
+                    "live_trading": False,
+                }
             if round_number != expected_round:
-                raise Challenge01DataError(f"ROUND_SEQUENCE_BLOCKED_EXPECTED_{expected_round}")
+                return {
+                    "status": "BLOCKED",
+                    "reason_code": "BOT_ONLY_BASELINE_ALREADY_LOCKED",
+                    "expected_round": expected_round,
+                    "next_stage": "AI_MENTOR_REQUIRED",
+                    "orders_submitted": False,
+                    "live_trading": False,
+                }
             after = None
             if round_number > 1:
                 previous_times = prior_rounds.get(round_number - 1, [])
