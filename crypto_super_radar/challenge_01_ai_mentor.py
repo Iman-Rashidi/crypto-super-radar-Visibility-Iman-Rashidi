@@ -451,7 +451,7 @@ def review_locked_baseline(
     except Exception as exc:
         return {
             "status": "UNKNOWN",
-            "reason_code": type(exc).__name__,
+            "reason_code": f"{type(exc).__name__}:{str(exc)[:160]}",
             "mentor_reviews_recorded": reviewed_count,
             "partial_write_possible": reviewed_count > 0,
             "retry_safe": True,
