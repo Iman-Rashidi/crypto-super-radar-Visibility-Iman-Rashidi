@@ -264,17 +264,47 @@ class LearningExperienceMemory:
                 )
             baseline = self.get_experience(baseline_id)
             baseline_types = [item["event_type"] for item in baseline["events"]]
+            baseline_decision = next(
+                (item.get("payload", {}) for item in baseline["events"]
+                 if item["event_type"] == "DECISION_RECORDED"),
+                {},
+            )
+            baseline_snapshot = baseline_decision.get("input_snapshot") or {}
+            assisted_snapshot = dict(input_snapshot)
+            same_cycle = baseline["cycle_id"] == metadata["cycle_id"]
+            if not same_cycle:
+                baseline_round = baseline_snapshot.get("round_number")
+                assisted_round = assisted_snapshot.get("round_number")
+                baseline_target_time = baseline_snapshot.get("target_candle_open_time_ms")
+                if baseline_target_time is None:
+                    baseline_target_time = baseline_snapshot.get("candle_open_time_ms")
+                assisted_feature_time = assisted_snapshot.get("feature_candle_open_time_ms")
+                assisted_target_time = assisted_snapshot.get("target_candle_open_time_ms")
+                temporal_transfer_valid = (
+                    isinstance(baseline_round, int)
+                    and isinstance(assisted_round, int)
+                    and baseline_round < assisted_round
+                    and isinstance(baseline_target_time, int)
+                    and isinstance(assisted_feature_time, int)
+                    and isinstance(assisted_target_time, int)
+                    and baseline_target_time <= assisted_feature_time < assisted_target_time
+                )
+            else:
+                # Preserve same-cycle behaviour for existing integrations.
+                temporal_transfer_valid = True
             if (
                 baseline["decision_mode"] != "BOT_ONLY"
                 or baseline["engine_id"] != metadata["engine_id"]
                 or baseline["challenge_id"] != metadata["challenge_id"]
-                or baseline["cycle_id"] != metadata["cycle_id"]
+                or not temporal_transfer_valid
                 or "OUTCOME_LABELLED" not in baseline_types
                 or "MENTOR_FEEDBACK_RECORDED" not in baseline_types
             ):
                 raise ExperienceStateError(
-                    "mentor-assisted decision requires a final-labelled BOT_ONLY "
-                    "baseline and mentor feedback from the same engine/challenge/cycle"
+                    "mentor-assisted decision requires a verified final-labelled BOT_ONLY "
+                    "baseline with Mentor feedback from the same challenge/engine and "
+                    "either the same cycle or a strictly earlier round whose target is "
+                    "available before the assisted feature timestamp"
                 )
         payload = {
             **metadata,
