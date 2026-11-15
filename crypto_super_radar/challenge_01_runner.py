@@ -550,7 +550,7 @@ def get_challenge_01_status(
 
         connection = connection_factory()
         memory = LearningExperienceMemory(connection)
-        experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
+        experiences = memory.recent_experiences(limit=1200, challenge_id=CHALLENGE_ID)
         round_targets: dict[int, dict[int, set[str]]] = {}
         mentor_reviewed_ids: set[str] = set()
         for item in experiences:
