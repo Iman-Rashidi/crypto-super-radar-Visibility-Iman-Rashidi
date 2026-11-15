@@ -102,6 +102,7 @@ def review_locked_baseline(
 ) -> dict[str, Any]:
     """Review all 100+ locked round-one experiences, requiring durable storage."""
     connection = None
+    reviewed_count = 0
     try:
         backend = backend_factory()
         if backend != "TURSO_CLOUD_SQLITE" and not allow_non_durable_for_tests:
@@ -166,7 +167,10 @@ def review_locked_baseline(
                     "orders_submitted": False,
                 }
 
-        results = [review_baseline(memory, experience_id) for experience_id in baseline_ids]
+        results = []
+        for experience_id in baseline_ids:
+            results.append(review_baseline(memory, experience_id))
+            reviewed_count += 1
         verified = sum(
             1 for experience_id in baseline_ids
             if any(
@@ -200,7 +204,9 @@ def review_locked_baseline(
         return {
             "status": "UNKNOWN",
             "reason_code": type(exc).__name__,
-            "mentor_reviews_recorded": 0,
+            "mentor_reviews_recorded": reviewed_count,
+            "partial_write_possible": reviewed_count > 0,
+            "retry_safe": True,
             "mastery_awarded": False,
             "orders_submitted": False,
         }
