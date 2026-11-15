@@ -189,15 +189,16 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(result["reason_code"], "LATEST_COMPLETED_CANDLE_STALE")
 
-    def test_second_round_uses_non_overlapping_historical_candles_without_live_stale_check(self):
+    def test_second_round_is_locked_until_ai_mentor_phase(self):
         runner = self.runner()
         first = runner.run_bot_only_round(round_number=1, sample_count=100)
+        calls_before = len(runner.client.calls)
         second = runner.run_bot_only_round(round_number=2, sample_count=100)
         self.assertEqual(first["status"], "BASELINE_RECORDED")
-        self.assertEqual(second["status"], "BASELINE_RECORDED")
-        self.assertEqual(second["round_number"], 2)
-        self.assertTrue(second["memory_recovery_verified"])
-        self.assertEqual(second["memory_records_verified"], 100)
+        self.assertEqual(second["status"], "BLOCKED")
+        self.assertEqual(second["reason_code"], "AI_MENTOR_PHASE_REQUIRED")
+        self.assertEqual(len(runner.client.calls), calls_before)
+        self.assertFalse(second["orders_submitted"])
 
     def test_round_requires_100_samples(self):
         with self.assertRaises(ValueError):
