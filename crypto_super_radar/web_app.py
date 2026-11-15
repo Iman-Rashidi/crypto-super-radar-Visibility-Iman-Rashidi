@@ -5392,7 +5392,10 @@ async function loadBlofinInstruments(){
                 nextRound=data.next_round;
                 button.disabled=!nextRound;
                 const rounds=(data.completed_rounds||[]).map(x=>'دور '+x.round_number+': '+x.verified_samples+'/100').join(' · ');
-                status.textContent='حافظه: '+data.memory_backend+' · رکوردهای تأییدشده: '+data.verified_experiences+' · '+(rounds||'هنوز دوری ثبت نشده')+' · '+(nextRound?'دور بعدی: '+nextRound:'پنج دور تکمیل شده؛ قبولی نهایی هنوز نیازمند ممیزی است');
+                let stageText='مرحله آموزشی نامشخص است؛ تا رفع ابهام اجرای بعدی قفل می‌ماند.';
+                if(data.next_stage==='BOT_ONLY_BASELINE')stageText='مرحله فعال: خط پایه BOT_ONLY؛ پس از ثبت ۱۰۰ نمونه، نتیجه قفل می‌شود.';
+                if(data.next_stage==='AI_MENTOR_REQUIRED')stageText='خط پایه BOT_ONLY قفل شد. اکنون فقط مرحله AI Mentor مجاز است؛ دورهای مستقل ۲ تا ۵ تا ثبت بازخورد مربی قفل‌اند.';
+                status.textContent='حافظه: '+data.memory_backend+' · رکوردهای تأییدشده: '+data.verified_experiences+' · '+(rounds||'هنوز دوری ثبت نشده')+' · '+stageText;
               }catch(error){
                 nextRound=null;button.disabled=true;
                 status.textContent='وضعیت حافظه دریافت نشد: '+String(error.message||error);
