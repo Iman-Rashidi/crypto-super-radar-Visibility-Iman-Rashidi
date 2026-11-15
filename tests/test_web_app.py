@@ -1032,5 +1032,92 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
+    def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
+        class StopAfterTwoCycles(Exception):
+            pass
+
+        old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        old_job_ids = set(web_app.BLOFIN_EXECUTION_JOBS)
+        cycle_ids = []
+        sleep_calls = []
+
+        def record_job(job_id, status, **values):
+            with web_app.LOCK:
+                job = web_app.BLOFIN_EXECUTION_JOBS.setdefault(job_id, {})
+                job.update({"status": status, **values})
+
+        def complete_no_trade_cycle(job_id, instrument_id, execution_profile):
+            cycle_ids.append(job_id)
+            record_job(
+                job_id,
+                "completed",
+                stage="NO_TRADE",
+                message_fa="شرایط ورود تأیید نشد؛ سفارش ارسال نشد.",
+                analysis={
+                    "signal": web_app.Signal.NO_TRADE.value,
+                    "gate_pass_count": 6,
+                    "gate_fail_count": 0,
+                    "gate_unknown_count": 6,
+                },
+                result={
+                    "status": "NO_TRADE",
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                    "reason_fa": "سیگنال ورود معتبر وجود ندارد.",
+                },
+            )
+
+        def stop_after_second_cycle_sleep(seconds):
+            sleep_calls.append(seconds)
+            if len(sleep_calls) == 2:
+                raise StopAfterTwoCycles()
+
+        web_app.BLOFIN_AUTOPILOT_STATE.update({
+            "enabled": False,
+            "status": "DISABLED",
+            "cycles_started": 0,
+        })
+        try:
+            with (
+                patch.dict(os.environ, {
+                    "BLOFIN_DEMO_AUTOPILOT_ENABLED": "true",
+                    "BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS": "300",
+                    "BLOFIN_DEMO_AUTOPILOT_INSTRUMENT": "BTC-USDT",
+                    "BLOFIN_DEMO_AUTOPILOT_PROFILE": "EASY",
+                }),
+                patch.object(web_app, "SCAN_RUNNING", False),
+                patch.object(web_app, "_set_blofin_execution_job", side_effect=record_job),
+                patch.object(web_app, "_run_blofin_demo_execution_job", side_effect=complete_no_trade_cycle),
+                patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                    "status": "PASS",
+                    "data_completeness": "COMPLETE",
+                    "positions": [],
+                    "closed_positions": [],
+                    "read_errors": [],
+                }),
+                patch.object(web_app.time, "sleep", side_effect=stop_after_second_cycle_sleep),
+                patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
+            ):
+                with self.assertRaises(StopAfterTwoCycles):
+                    web_app._blofin_demo_autopilot_worker()
+
+            self.assertEqual(len(cycle_ids), 2)
+            self.assertEqual(sleep_calls, [300, 300])
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SEARCHING_FOR_SIGNAL")
+            self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
+            self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["last_cycle_status"], "completed")
+            diagnostics = web_app.BLOFIN_AUTOPILOT_STATE["last_cycle_diagnostics"]
+            self.assertEqual(diagnostics["signal"], "NO_TRADE")
+            self.assertFalse(diagnostics["orders_submitted"])
+            self.assertFalse(diagnostics["trade_executed"])
+        finally:
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE.clear()
+                web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
+                for job_id in set(web_app.BLOFIN_EXECUTION_JOBS) - old_job_ids:
+                    web_app.BLOFIN_EXECUTION_JOBS.pop(job_id, None)
+
 if __name__ == "__main__":
     unittest.main()
