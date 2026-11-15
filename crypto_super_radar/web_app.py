@@ -70,7 +70,7 @@ BLOFIN_AUTOPILOT_STATE = {
     "status": "DISABLED",
     "environment": "BLOFIN_DEMO",
     "market": "BTC-USDT",
-    "interval_seconds": 900,
+    "interval_seconds": 300,
     "last_cycle_started_at_utc": None,
     "last_cycle_finished_at_utc": None,
     "last_stage": None,
@@ -2635,9 +2635,9 @@ def _blofin_demo_execution_readiness() -> dict:
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
         "max_concurrent_positions": 1,
-        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_DAILY_CANDLE",
+        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_15M_CANDLE",
         "message_fa": (
-            "پیش‌نیازهای BloFin Demo آماده‌اند؛ تعداد سفارش‌ها سقف مادام‌العمر یا روزانه ندارد. "
+            "پیش‌نیازهای BloFin Demo آماده‌اند؛ تعداد سفارش‌ها سقف مادام‌العمر یا روزانه ندارد و سیگنال اجرایی از کندل ۱۵ دقیقه‌ای با تأیید روند ۱ ساعته ساخته می‌شود. "
             "مجوز Trade، قیمت، ۱۲ گیت، Nemotron و کنترل‌های ریسک در هر چرخه دوباره بررسی می‌شوند."
             if ready else
             "اجرای سفارش مسدود است؛ کلید Demo دارای مجوز Trade، فعال‌سازی معامله Demo، توکن پنل و حافظه پایدار Turso باید در دسترس باشند."
@@ -3118,6 +3118,118 @@ def _blofin_execution_report_fa(job: dict) -> dict:
     }
 
 
+def _blofin_parse_completed_candles(client, *, inst_id: str, bar: str, limit: int, interval_ms: int, minimum_rows: int, now_ms: int):
+    """Parse only completed BloFin candles and sort oldest to newest."""
+    rows = client.get_candles(inst_id, bar=bar, limit=limit)
+    if not isinstance(rows, list):
+        raise BloFinDemoExecutionBlocked(f"Invalid {bar} candle response.")
+    indexed = {}
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 9 or str(row[8]) != "1":
+            continue
+        try:
+            ts = int(row[0])
+            o, h, low, close = (float(row[i]) for i in (1, 2, 3, 4))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        values = (o, h, low, close)
+        if ts <= 0 or any(not math.isfinite(v) or v <= 0 for v in values):
+            continue
+        if h < max(o, low, close) or low > min(o, h, close):
+            continue
+        close_ms = ts + interval_ms
+        age = now_ms - close_ms
+        if age < -60_000:
+            continue
+        indexed[ts] = {"timestamp_ms": ts, "close_time_ms": close_ms,
+                       "age_ms": max(0, age), "open": o, "high": h,
+                       "low": low, "close": close}
+    result = [indexed[k] for k in sorted(indexed)]
+    if len(result) < minimum_rows:
+        raise BloFinDemoExecutionBlocked(f"Insufficient completed {bar} candles.")
+    return result
+
+
+def _blofin_ema(values: list[float], period: int) -> float:
+    if period < 2 or len(values) < period:
+        raise ValueError("Insufficient EMA history.")
+    alpha = 2.0 / (period + 1.0)
+    current = sum(values[:period]) / period
+    for value in values[period:]:
+        current = alpha * value + (1.0 - alpha) * current
+    return current
+
+
+def _blofin_mtf_execution_signal(client, *, desired_direction: str, now_ms: int | None = None) -> dict:
+    """Use daily gates as strategy filter, 1H trend and 15m trigger for entries."""
+    direction = str(desired_direction or "").upper()
+    if direction not in {"LONG", "SHORT"}:
+        return {"status": "BLOCKED", "reason_fa": "سیگنال روزانه جهت‌دار نیست."}
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    ms15, ms1h = 15 * 60 * 1000, 60 * 60 * 1000
+    try:
+        c15 = _blofin_parse_completed_candles(
+            client, inst_id="BTC-USDT", bar="15m", limit=120,
+            interval_ms=ms15, minimum_rows=30, now_ms=now,
+        )
+        c1h = _blofin_parse_completed_candles(
+            client, inst_id="BTC-USDT", bar="1H", limit=120,
+            interval_ms=ms1h, minimum_rows=55, now_ms=now,
+        )
+    except (BloFinDemoError, BloFinDemoExecutionBlocked, ValueError) as exc:
+        return {"status": "BLOCKED",
+                "reason_fa": "تاریخچه معتبر کندل ۱۵ دقیقه‌ای یا یک‌ساعته موجود نیست.",
+                "error_type": type(exc).__name__}
+    last15, prev15, last1h = c15[-1], c15[-2], c1h[-1]
+    if last15["age_ms"] > 2 * ms15:
+        return {"status": "BLOCKED", "reason_fa": "کندل ۱۵ دقیقه‌ای قدیمی است."}
+    if last1h["age_ms"] > 2 * ms1h:
+        return {"status": "BLOCKED", "reason_fa": "کندل یک‌ساعته قدیمی است."}
+    close15 = [x["close"] for x in c15]
+    close1h = [x["close"] for x in c1h]
+    ema9, ema21 = _blofin_ema(close15, 9), _blofin_ema(close15, 21)
+    ema20h, ema50h = _blofin_ema(close1h, 20), _blofin_ema(close1h, 50)
+    trend = ("LONG" if last1h["close"] > ema20h > ema50h else
+             "SHORT" if last1h["close"] < ema20h < ema50h else "NEUTRAL")
+    trigger = ("LONG" if ema9 > ema21 and last15["close"] > ema9
+                        and last15["close"] > prev15["close"] else
+               "SHORT" if ema9 < ema21 and last15["close"] < ema9
+                         and last15["close"] < prev15["close"] else "NEUTRAL")
+    if trend != direction or trigger != direction:
+        return {"status": "BLOCKED",
+                "reason_fa": "جهت روزانه، روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای همسو نیستند.",
+                "daily_direction": direction, "hourly_direction": trend,
+                "trigger_15m_direction": trigger}
+    ranges = []
+    for i in range(1, len(c15)):
+        x, prev_close = c15[i], c15[i-1]["close"]
+        ranges.append(max(x["high"]-x["low"], abs(x["high"]-prev_close),
+                          abs(x["low"]-prev_close)))
+    atr = sum(ranges[-14:]) / 14.0
+    entry = last15["close"]
+    if not math.isfinite(atr) or atr <= 0 or entry <= 0:
+        return {"status": "BLOCKED", "reason_fa": "ATR یا قیمت ورود معتبر نیست."}
+    distance = 2.0 * atr
+    stop = entry - distance if direction == "LONG" else entry + distance
+    target = entry + 2.0 * distance if direction == "LONG" else entry - 2.0 * distance
+    if min(entry, stop, target) <= 0:
+        return {"status": "BLOCKED", "reason_fa": "حد ضرر یا حد سود نامعتبر است."}
+    open_utc = datetime.fromtimestamp(last15["timestamp_ms"]/1000, tz=timezone.utc).isoformat()
+    close_utc = datetime.fromtimestamp(last15["close_time_ms"]/1000, tz=timezone.utc).isoformat()
+    return {
+        "status": "PASS", "direction": direction,
+        "signal_id": f"BTC-USDT|15m|{last15['timestamp_ms']}",
+        "signal_bar_open_ms": last15["timestamp_ms"],
+        "signal_bar_open_utc": open_utc, "signal_bar_close_utc": close_utc,
+        "entry_price": entry, "stop_loss": stop, "take_profit": target,
+        "atr_15m": atr, "ema9_15m": ema9, "ema21_15m": ema21,
+        "ema20_1h": ema20h, "ema50_1h": ema50h,
+        "hourly_direction": trend, "trigger_15m_direction": trigger,
+        "completed_15m_candle_age_seconds": last15["age_ms"]/1000.0,
+        "completed_1h_candle_age_seconds": last1h["age_ms"]/1000.0,
+    }
+
+
 def _run_blofin_demo_execution_job(job_id: str) -> None:
     """Analyze one BTC perpetual candle and submit one guarded Demo order if approved."""
     store = None
@@ -3289,9 +3401,54 @@ def _run_blofin_demo_execution_job(job_id: str) -> None:
                 },
             )
             return
-        signal_bar = frame.index[-1].isoformat()
-        record["signal_id"] = asset.raw + "|" + signal_bar
+        mtf_signal = _blofin_mtf_execution_signal(
+            BloFinDemoReadOnly(timeout=10.0), desired_direction=direction,
+        )
+        if mtf_signal.get("status") != "PASS":
+            trade_context["mtf_confirmation"] = mtf_signal
+            _set_blofin_execution_job(
+                job_id, "completed", stage="MTF_TRIGGER_BLOCKED",
+                message_fa=mtf_signal.get("reason_fa") or "تأیید چندتایم‌فریمی کامل نشد؛ سفارشی ارسال نشد.",
+                analysis=gate_summary, elliott_wave=wave_report,
+                trade_context=trade_context,
+                result={
+                    "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                    "reason_fa": mtf_signal.get("reason_fa") or "تأیید ۱۵ دقیقه و ۱ ساعت ناموفق بود.",
+                    "mtf_confirmation": mtf_signal,
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
+
+        # Daily 12-gate output remains the strategic filter; the live execution
+        # levels and idempotency key come from the completed 15m candle.
+        signal_bar = mtf_signal["signal_bar_open_utc"]
+        record["signal_id"] = mtf_signal["signal_id"]
         record["inst_id"] = "BTC-USDT"
+        record["entry_price_usd"] = mtf_signal["entry_price"]
+        record["stop_loss_usd"] = mtf_signal["stop_loss"]
+        record["take_profit_usd"] = mtf_signal["take_profit"]
+        analysis.entry_price = mtf_signal["entry_price"]
+        analysis.stop_loss = mtf_signal["stop_loss"]
+        analysis.take_profit = mtf_signal["take_profit"]
+        analysis.metrics["blofin_mtf_execution"] = {
+            key: value for key, value in mtf_signal.items()
+            if key not in {"status", "reason_fa"}
+        }
+        gate_summary.update({
+            "entry_reference_price": mtf_signal["entry_price"],
+            "stop_loss": mtf_signal["stop_loss"],
+            "take_profit": mtf_signal["take_profit"],
+            "execution_timeframe": "15m",
+            "trend_confirmation_timeframe": "1H",
+        })
+        trade_context.update({
+            "last_completed_daily_candle_time_utc": last_candle_time,
+            "last_completed_candle_time_utc": signal_bar,
+            "execution_timeframe": "15m",
+            "trend_confirmation_timeframe": "1H",
+            "mtf_confirmation": mtf_signal,
+        })
         if store.has_signal(record["signal_id"]):
             _set_blofin_execution_job(
                 job_id, "completed", stage="DUPLICATE_CANDLE_SKIPPED",
@@ -3816,7 +3973,7 @@ class Handler(BaseHTTPRequestHandler):
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · BTC-USDT Perpetual</h3>
-            <p class="muted">تعداد سفارش‌ها در کل عمر سرویس و در هر روز نامحدود است؛ سقف روزانه و وقفه اجباری بین معاملات حذف شده‌اند. برای جلوگیری از ورود تکراری، هر کندل روزانه فقط یک سیگنال سفارش می‌سازد و تا زمان بسته‌شدن پوزیشن قبلی، پوزیشن جدید باز نمی‌شود. اهرم ایزوله 1x، حداقل اندازه مجاز قرارداد، حد ضرر و حد سود اجباری‌اند؛ ۱۲ گیت، Nemotron، مجوز Trade، قیمت و سقف ریسک در هر چرخه دوباره بررسی می‌شوند.</p>
+            <p class="muted">تعداد سفارش‌ها در کل عمر سرویس و در هر روز نامحدود است؛ سقف روزانه و وقفه اجباری حذف شده‌اند. فیلتر ۱۲ گیتی روزانه با روند ۱ ساعته و تریگر هر کندل تکمیل‌شده ۱۵ دقیقه‌ای ترکیب می‌شود؛ هر کندل ۱۵ دقیقه‌ای فقط یک سفارش می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل اندازه مجاز قرارداد، حد ضرر و حد سود اجباری‌اند؛ ۱۲ گیت، Nemotron، مجوز Trade، قیمت و سقف ریسک در هر چرخه دوباره بررسی می‌شوند.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>
             <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
@@ -5885,11 +6042,11 @@ async function refreshExecutionReadiness(){
                     job_id = uuid.uuid4().hex
                     _set_blofin_execution_job(
                         job_id, "queued", stage="QUEUED",
-                        message_fa="درخواست یک‌باره ثبت شد؛ هنوز سفارشی ارسال نشده است.",
+                        message_fa="درخواست چرخه Demo ثبت شد؛ هنوز سفارشی ارسال نشده است.",
                     )
                     worker = threading.Thread(
                         target=_run_blofin_demo_execution_job,
-                        args=(job_id,), daemon=True, name="blofin-demo-one-shot-order",
+                        args=(job_id,), daemon=True, name="blofin-demo-manual-cycle",
                     )
                     try:
                         worker.start()
@@ -6073,10 +6230,10 @@ async function refreshExecutionReadiness(){
 def _blofin_demo_autopilot_worker() -> None:
     """Run guarded BTC-USDT Demo cycles while the Render web process is awake."""
     try:
-        configured_interval = int(os.getenv("BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS", "900"))
+        configured_interval = int(os.getenv("BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS", "300"))
     except (TypeError, ValueError):
         configured_interval = 900
-    interval_seconds = max(300, min(configured_interval, 3600))
+    interval_seconds = max(300, min(configured_interval, 900))
     with LOCK:
         BLOFIN_AUTOPILOT_STATE.update({
             "enabled": True,
