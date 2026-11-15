@@ -7045,6 +7045,48 @@ async function loadBlofinInstruments(){
         super().log_message(fmt, *args)
 
 
+def _blofin_autopilot_cycle_summary(job: dict) -> dict:
+    """Normalize signal labels and classify completed no-entry Demo cycles safely."""
+    job = job if isinstance(job, dict) else {}
+    raw_result = job.get("result")
+    result = raw_result if isinstance(raw_result, dict) else {}
+    result_analysis = result.get("analysis")
+    job_analysis = job.get("analysis")
+    if isinstance(result_analysis, dict) and result_analysis:
+        analysis = result_analysis
+    elif isinstance(job_analysis, dict):
+        analysis = job_analysis
+    else:
+        analysis = {}
+
+    raw_signal = (
+        (result_analysis.get("signal") if isinstance(result_analysis, dict) else None)
+        or (job_analysis.get("signal") if isinstance(job_analysis, dict) else None)
+        or result.get("signal")
+        or job.get("signal")
+        or result.get("status")
+    )
+    raw_signal = getattr(raw_signal, "value", raw_signal)
+    signal_value = re.sub(r"_+", "_", re.sub(r"[\\s-]+", "_", str(raw_signal or "").strip().upper())).strip("_")
+    cycle_status = str(job.get("status") or "UNKNOWN").strip().lower()
+    orders_submitted = bool(result.get("orders_submitted", job.get("orders_submitted", False)))
+    trade_executed = bool(result.get("trade_executed", job.get("trade_executed", False)))
+    no_entry = (
+        cycle_status == "completed"
+        and not orders_submitted
+        and not trade_executed
+        and signal_value in {"", "NONE", "NO_TRADE", "NO_SIGNAL", "HOLD", "NEUTRAL", "UNKNOWN"}
+    )
+    return {
+        "analysis": analysis,
+        "cycle_status": cycle_status,
+        "signal": signal_value or None,
+        "orders_submitted": orders_submitted,
+        "trade_executed": trade_executed,
+        "no_entry": no_entry,
+    }
+
+
 def _blofin_demo_autopilot_worker() -> None:
     """Run guarded, profile-configurable BloFin Demo cycles while the process is awake."""
     try:
@@ -7174,25 +7216,30 @@ def _blofin_demo_autopilot_worker() -> None:
             with LOCK:
                 job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 result = job.get("result") if isinstance(job.get("result"), dict) else {}
-                analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
-                cycle_status = str(job.get("status") or "UNKNOWN").lower()
-                orders_submitted = bool(result.get("orders_submitted", False))
-                trade_executed = bool(result.get("trade_executed", False))
-                signal_value = str(analysis.get("signal") or result.get("signal") or "").upper()
-                no_entry = (
-                    cycle_status == "completed"
-                    and not orders_submitted
-                    and not trade_executed
-                    and signal_value in {"", "NONE", "NO_TRADE", "HOLD", "NEUTRAL", "UNKNOWN"}
-                )
+                cycle_summary = _blofin_autopilot_cycle_summary(job)
+                analysis = cycle_summary["analysis"]
+                cycle_status = cycle_summary["cycle_status"]
+                orders_submitted = cycle_summary["orders_submitted"]
+                trade_executed = cycle_summary["trade_executed"]
+                signal_value = cycle_summary["signal"]
+                no_entry = cycle_summary["no_entry"]
                 # A completed analysis cycle is not the end of the autonomous search.
                 # Keep the worker visibly searching and let the next scheduled cycle run.
-                autopilot_status = "SEARCHING_FOR_SIGNAL" if no_entry else job.get("status", "UNKNOWN")
+                autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+                continue_search = bool(no_entry and autopilot_enabled)
+                autopilot_status = (
+                    "SEARCHING_FOR_SIGNAL" if continue_search
+                    else ("DISABLED" if not autopilot_enabled else job.get("status", "UNKNOWN"))
+                )
                 autopilot_message = (
                     f"چرخهٔ {job_id} تمام شد و سیگنال ورود معتبر پیدا نشد؛ جست‌وجوی خودکار ادامه دارد و چرخهٔ بعدی در صف زمان‌بندی است."
-                    if no_entry else (job.get("message_fa") or "چرخه پایان یافت.")
+                    if continue_search else (
+                        "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
+                        if not autopilot_enabled else (job.get("message_fa") or "چرخه پایان یافت.")
+                    )
                 )
                 BLOFIN_AUTOPILOT_STATE.update({
+                    "enabled": bool(autopilot_enabled),
                     "status": autopilot_status,
                     "last_cycle_status": job.get("status", "UNKNOWN"),
                     "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -7200,8 +7247,8 @@ def _blofin_demo_autopilot_worker() -> None:
                     "last_message_fa": autopilot_message,
                     "last_result_status": result.get("status") or job.get("stage"),
                     "last_job_id": job_id,
-                    "search_continues": bool(no_entry),
-                    "next_cycle_scheduled": True,
+                    "search_continues": continue_search,
+                    "next_cycle_scheduled": bool(autopilot_enabled),
                     "last_cycle_diagnostics": {
                         "instrument_id": instrument_id,
                         "execution_profile": execution_profile,
