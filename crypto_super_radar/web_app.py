@@ -42,6 +42,7 @@ from .blofin_demo_executor import (
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
     _active_order_count, _active_position_count, _equity_from_balance,
 )
+from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
@@ -2648,6 +2649,30 @@ def _blofin_demo_execution_readiness() -> dict:
         ),
     }
 
+def _blofin_demo_smoke_test_readiness() -> dict:
+    """Readiness for the separately gated, signal-independent Demo connectivity test."""
+    base = _blofin_demo_execution_readiness()
+    enabled = os.getenv("BLOFIN_DEMO_SMOKE_TEST_ENABLED", "").strip().lower() == "true"
+    ready = base.get("status") == "READY" and enabled
+    return {
+        **base,
+        "status": "READY" if ready else "BLOCKED",
+        "smoke_test_enabled": enabled,
+        "smoke_test_signal_independent": True,
+        "smoke_test_instrument": "BTC-USDT",
+        "smoke_test_direction": "LONG",
+        "smoke_test_minimum_size_only": True,
+        "smoke_test_auto_close": True,
+        "message_fa": (
+            "تست مستقل آماده است: بدون سیگنال، فقط BTC-USDT Demo، LONG، حداقل حجم و ایزوله 1x؛ پوزیشن ایجادشده خودکار بسته و راستی‌آزمایی می‌شود."
+            if ready else
+            ("برای فعال‌کردن تست مستقل، BLOFIN_DEMO_SMOKE_TEST_ENABLED=true را در Environment سرویس Demo تنظیم کن؛ سایر پیش‌نیازهای Trade و ذخیره‌سازی نیز باید READY باشند."
+             if base.get("status") == "READY" else
+             "تست مستقل مسدود است؛ کلید Trade دمو، فعال‌سازی معامله Demo، توکن پنل و حافظه پایدار Turso هنوز کامل نیستند.")
+        ),
+    }
+
+
 def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with LOCK:
@@ -4161,6 +4186,92 @@ def _run_blofin_demo_execution_job(
                 store.close()
             except Exception:
                 pass
+
+
+def _run_blofin_demo_smoke_test_job(job_id: str) -> None:
+    """Run the dedicated signal-independent open/close test, strictly on BloFin Demo."""
+    _set_blofin_execution_job(
+        job_id, "running", stage="READINESS_CHECK",
+        message_fa="در حال بررسی قفل مستقل تست، کلید Trade و محیط BloFin Demo.",
+        test_name="تست ربات در محیط دمو صرافی",
+    )
+    readiness = _blofin_demo_smoke_test_readiness()
+    if readiness.get("status") != "READY":
+        _set_blofin_execution_job(
+            job_id, "completed", stage="BLOCKED",
+            message_fa=readiness.get("message_fa"),
+            result={
+                "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                "test_name": "تست ربات در محیط دمو صرافی",
+                "reason_fa": readiness.get("message_fa"),
+                "orders_submitted": False, "trade_executed": False,
+                "position_closed": False,
+            },
+        )
+        return
+
+    def record_event(**event: Any) -> None:
+        stage = str(event.pop("stage", "RUNNING"))
+        message = str(event.pop("message_fa", stage))
+        _set_blofin_execution_job(
+            job_id, "running", stage=stage, message_fa=message,
+            smoke_test_event=event,
+        )
+
+    try:
+        runner = BloFinDemoSmokeTestRunner(
+            client=BloFinDemoTradeClient(timeout=10.0),
+            on_event=record_event,
+        )
+        result = runner.run()
+        _set_blofin_execution_job(
+            job_id, "completed", stage=result.get("status", "COMPLETED"),
+            message_fa=(
+                "تست مستقل موفق شد: ربات سفارش Demo را خودش باز کرد، Fill را دید و همان پوزیشن را بست."
+                if result.get("status") == "CLOSED_VERIFIED" else
+                "تست مستقل پایان یافت؛ وضعیت نهایی را در گزارش بررسی کن."
+            ),
+            result=result,
+            completed_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+    except BloFinDemoExecutionUnknown as exc:
+        _set_blofin_execution_job(
+            job_id, "completed", stage="ORDER_OUTCOME_UNKNOWN",
+            message_fa="نتیجه ورود یا خروج نامشخص است؛ هیچ سفارش تکراری ارسال نمی‌شود. پوزیشن و تاریخچه Demo را بررسی کن.",
+            result={
+                "status": "UNKNOWN", "environment": "BLOFIN_DEMO",
+                "test_name": "تست ربات در محیط دمو صرافی",
+                "reason_fa": str(exc), "error_type": type(exc).__name__,
+                "orders_submitted": "UNKNOWN", "trade_executed": "UNKNOWN",
+                "position_closed": False,
+            },
+            completed_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+    except BloFinDemoExecutionBlocked as exc:
+        _set_blofin_execution_job(
+            job_id, "completed", stage="BLOCKED",
+            message_fa=str(exc),
+            result={
+                "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                "test_name": "تست ربات در محیط دمو صرافی",
+                "reason_fa": str(exc), "error_type": type(exc).__name__,
+                "orders_submitted": False, "trade_executed": False,
+                "position_closed": False,
+            },
+            completed_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:
+        _set_blofin_execution_job(
+            job_id, "failed", stage="SMOKE_TEST_ERROR",
+            message_fa="تست مستقل با خطای کنترل‌شده متوقف شد؛ پیش از تلاش دوباره، وضعیت سفارش و پوزیشن BloFin Demo را بررسی کن.",
+            result={
+                "status": "UNKNOWN", "environment": "BLOFIN_DEMO",
+                "test_name": "تست ربات در محیط دمو صرافی",
+                "error_type": type(exc).__name__,
+                "orders_submitted": "UNKNOWN", "trade_executed": "UNKNOWN",
+                "position_closed": False,
+            },
+        )
 
 
 class Handler(BaseHTTPRequestHandler):
