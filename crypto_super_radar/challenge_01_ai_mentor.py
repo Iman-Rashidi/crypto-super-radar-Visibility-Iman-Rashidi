@@ -194,6 +194,17 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
     """
     if not isinstance(candles, list) or len(candles) != FEATURE_WINDOW_LENGTH:
         raise ValueError("PATTERN_DETECTOR_REQUIRES_THREE_CANDLES")
+    if any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in candles):
+        raise ValueError("PATTERN_DETECTOR_REQUIRES_COMPLETED_CANDLES")
+    timestamps = [candle.get("open_time_ms") for candle in candles]
+    if any(
+        not isinstance(timestamp, int)
+        for timestamp in timestamps
+    ) or any(
+        right - left != BAR_MILLISECONDS
+        for left, right in zip(timestamps, timestamps[1:])
+    ):
+        raise ValueError("PATTERN_DETECTOR_REQUIRES_CONTIGUOUS_CHRONOLOGICAL_CANDLES")
     shapes = [_candle_shape(candle) for candle in candles]
     a, b, c = shapes
     patterns: list[str] = []
@@ -202,25 +213,28 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
     # Most recent candle: single-candle patterns.
     if c["range"] > 0 and c["body_ratio"] <= 0.10:
         patterns.append("DOJI")
-    if (
-        c["body"] > eps and c["lower_wick"] >= 2.0 * c["body"]
+    lower_wick_reversal_shape = (
+        c["body"] > eps
+        and c["lower_wick"] >= 2.0 * c["body"]
         and c["upper_wick"] <= 0.5 * c["body"]
         and min(c["open"], c["close"]) >= c["low"] + 0.55 * c["range"]
-    ):
-        patterns.append("HAMMER")
-    if (
-        c["body"] > eps and c["upper_wick"] >= 2.0 * c["body"]
+    )
+    upper_wick_reversal_shape = (
+        c["body"] > eps
+        and c["upper_wick"] >= 2.0 * c["body"]
         and c["lower_wick"] <= 0.5 * c["body"]
         and max(c["open"], c["close"]) <= c["low"] + 0.45 * c["range"]
-    ):
-        patterns.append("INVERTED_HAMMER")
-        patterns.append("SHOOTING_STAR")
-    if (
-        c["body"] > eps and c["lower_wick"] <= 0.5 * c["body"]
-        and c["upper_wick"] >= 2.0 * c["body"]
-        and max(c["open"], c["close"]) <= c["low"] + 0.45 * c["range"]
-    ):
-        patterns.append("HANGING_MAN")
+    )
+    if lower_wick_reversal_shape:
+        if a["direction"] > 0 and b["direction"] > 0:
+            patterns.append("HANGING_MAN")
+        else:
+            patterns.append("HAMMER")
+    if upper_wick_reversal_shape:
+        if a["direction"] < 0 and b["direction"] < 0:
+            patterns.append("INVERTED_HAMMER")
+        else:
+            patterns.append("SHOOTING_STAR")
     if c["range"] > 0 and c["body_ratio"] >= 0.80:
         patterns.append("BULLISH_MARUBOZU" if c["direction"] > 0 else "BEARISH_MARUBOZU")
     if (
