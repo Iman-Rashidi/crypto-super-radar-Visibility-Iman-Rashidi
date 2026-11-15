@@ -143,7 +143,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
             allow_non_durable_for_tests=True,
         )
         self.assertEqual(result["status"], "BLOCKED")
-        self.assertEqual(result["reason_code"], "BOT_ONLY_BASELINE_INCOMPLETE")
+        self.assertEqual(result["reason_code"], "BOT_ONLY_BASELINE_MUST_BE_EXACTLY_100_VALID_FORWARD_SAMPLES")
         saved = self.memory.get_experience("baseline-1")
         self.assertNotIn("MENTOR_FEEDBACK_RECORDED", [e["event_type"] for e in saved["events"]])
 
@@ -167,7 +167,13 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertEqual(result["status"], "MENTOR_REVIEW_RECORDED")
         self.assertEqual(result["baseline_samples"], 100)
         self.assertEqual(result["mentor_reviews_recorded"], 100)
-        self.assertEqual(result["next_stage"], "ASSISTED_ROUND_RUNNER_REQUIRED")
+        self.assertEqual(result["next_stage"], "FORWARD_HOLDOUT_VALIDATION_REQUIRED")
+        candidate = result["model_candidate"]
+        self.assertEqual(candidate["status"], "CANDIDATE_STORED_NOT_PROMOTED")
+        self.assertEqual(candidate["training_samples"], 80)
+        self.assertEqual(candidate["validation_samples"], 20)
+        self.assertEqual(len(candidate["artifact_sha256"]), 64)
+        self.assertEqual(candidate["promotion_status"], "CANDIDATE_NOT_PROMOTED")
         self.assertFalse(result["mastery_awarded"])
         self.assertFalse(result["orders_submitted"])
         self.assertTrue(all(
@@ -181,6 +187,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         )
         self.assertEqual(retry["status"], "MENTOR_REVIEW_RECORDED")
         self.assertEqual(retry["mentor_reviews_recorded"], 100)
+        self.assertEqual(retry["model_candidate"]["artifact_sha256"], candidate["artifact_sha256"])
         status = get_challenge_01_status(
             connection_factory=self.new_connection,
             backend_factory=lambda: "TEST_SQLITE_FILE",
