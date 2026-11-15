@@ -4360,14 +4360,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
         if parsed.path.startswith("/api/blofin/demo/execution-jobs/"):
-            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
-            if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+            authorization = self.headers.get("Authorization", "")
+            dashboard_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+            smoke_test_token = os.getenv("BLOFIN_DEMO_SMOKE_TEST_TOKEN", "").strip()
+            dashboard_authorized = _blofin_dashboard_token_valid(authorization, dashboard_token)
+            smoke_test_authorized = (
+                bool(smoke_test_token)
+                and _blofin_dashboard_token_valid(authorization, smoke_test_token)
+            )
+            if not (dashboard_authorized or smoke_test_authorized):
                 return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
             job_id = parsed.path.rsplit("/", 1)[-1]
             with LOCK:
                 job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id))
             if job is None:
                 return self._send(404, b'{"status":"NOT_FOUND"}', "application/json; charset=utf-8")
+            if (
+                smoke_test_authorized and not dashboard_authorized
+                and job.get("test_name") != "تست ربات در محیط دمو صرافی"
+            ):
+                return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
             job["report_fa"] = _blofin_execution_report_fa(job)
             return self._send(200, json.dumps(job, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
