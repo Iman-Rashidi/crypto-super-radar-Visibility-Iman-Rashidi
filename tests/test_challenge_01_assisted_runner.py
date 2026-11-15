@@ -206,13 +206,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
         self.assertTrue(status["completed_rounds"][1]["round_ready"])
         self.assertEqual(status["completed_rounds"][1]["paired_samples"], 100)
         self.assertFalse(status["later_rounds_blocked"])
-        return
-
-        # The explicit return makes this test's status assertions independent
-        # of any future cleanup below.
-        try:
-            db.close()
-
+    
     def test_round_two_blocks_without_100_verified_prior_round_targets(self):
         runner = Challenge01AssistedRunner(
             client=self.client,
