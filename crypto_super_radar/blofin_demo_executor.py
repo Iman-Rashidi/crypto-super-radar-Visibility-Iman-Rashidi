@@ -316,6 +316,19 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             os.getenv("BLOFIN_DEMO_TRADE_PASSPHRASE") or os.getenv("BLOFIN_DEMO_PASSPHRASE", ""),
         )
         super().__init__(**kwargs)
+        self._trade_permission_verified = False
+
+    def verify_trade_permission(self) -> dict[str, Any]:
+        """Confirm this exact Demo key is read/write before any write operation."""
+        info = self.get_api_key_info()
+        if info.get("readOnly") != 0 or info.get("trade_permission") is not True:
+            self._trade_permission_verified = False
+            raise BloFinDemoExecutionBlocked(
+                "BloFin API key is read-only (readOnly=1); enable Trade/Read-Write permission. "
+                "No write request was sent."
+            )
+        self._trade_permission_verified = True
+        return {"readOnly": 0, "trade_permission": True}
 
     def _post(self, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
         if path not in self.ALLOWED_POST_PATHS:
@@ -324,6 +337,9 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             raise BloFinDemoExecutionBlocked("Only the pinned BloFin Demo host is permitted.")
         if not all((self.api_key, self.api_secret, self.passphrase)):
             raise BloFinDemoError("Demo trade credentials are not configured.")
+        # Direct POST calls cannot bypass the dashboard or executor readiness checks.
+        if not self._trade_permission_verified:
+            self.verify_trade_permission()
         timestamp = str(int(self.clock_ms()))
         nonce = str(uuid.uuid4())
         body_text = json.dumps(dict(body), separators=(",", ":"), ensure_ascii=False)
@@ -837,6 +853,14 @@ class BloFinDemoExecutor:
             self.client.api_key, self.client.api_secret, self.client.passphrase
         )):
             raise BloFinDemoExecutionBlocked("Separate BLOFIN_DEMO_TRADE_* credentials are required.")
+        try:
+            self.client.verify_trade_permission()
+        except BloFinDemoExecutionBlocked:
+            raise
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked(
+                "BloFin Trade permission could not be verified; no order was sent."
+            ) from exc
         if int(leverage) > self.policy.max_leverage or int(leverage) < 1:
             raise BloFinDemoExecutionBlocked("Leverage is outside the 1x-3x Demo test range.")
 
