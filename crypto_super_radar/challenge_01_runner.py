@@ -26,6 +26,7 @@ BAR_MILLISECONDS = 60 * 60 * 1000
 MAX_STALE_AFTER_CLOSE_MS = 2 * BAR_MILLISECONDS + 5 * 60 * 1000
 MIN_SAMPLES_PER_ROUND = 100
 MAX_ROUNDS = 5
+CLASS_LABELS = ("BULLISH_CANDLE", "BEARISH_CANDLE", "NEUTRAL_CANDLE")
 
 
 class Challenge01DataError(ValueError):
@@ -87,14 +88,61 @@ def _parse_candle(row: Any) -> dict[str, Any]:
 
 
 def _classify_bot(candle: dict[str, Any]) -> tuple[str, str]:
-    """Describe a completed candle only; this is not a forward trading signal."""
+    """Classify a closed candle; the action is an educational label, never an order."""
     opening = Decimal(candle["open"])
     closing = Decimal(candle["close"])
     if closing > opening:
-        return "BULLISH_CANDLE", "OBSERVE_ONLY"
+        return "BULLISH_CANDLE", "BUY_CANDIDATE"
     if closing < opening:
-        return "BEARISH_CANDLE", "OBSERVE_ONLY"
-    return "NEUTRAL_CANDLE", "OBSERVE_ONLY"
+        return "BEARISH_CANDLE", "NO_SIGNAL"
+    return "NEUTRAL_CANDLE", "NO_SIGNAL"
+
+
+def _classification_metrics(
+    predictions: list[str], references: list[str],
+) -> dict[str, Any]:
+    """Compute descriptive classification metrics against the OHLC label rule."""
+    if not predictions or len(predictions) != len(references):
+        raise ValueError("predictions and references must have equal non-empty lengths")
+    labels = tuple(sorted(set(predictions) | set(references)))
+    confusion = {actual: {predicted: 0 for predicted in labels} for actual in labels}
+    for predicted, actual in zip(predictions, references):
+        if predicted not in CLASS_LABELS or actual not in CLASS_LABELS:
+            raise ValueError("unknown Challenge 1 class label")
+        confusion[actual][predicted] += 1
+
+    recalls = []
+    f1_scores = []
+    per_class = {}
+    for label in labels:
+        true_positive = confusion[label][label]
+        support = sum(confusion[label].values())
+        predicted_count = sum(confusion[actual][label] for actual in labels)
+        recall = true_positive / support if support else 0.0
+        precision = true_positive / predicted_count if predicted_count else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0.0
+        recalls.append(recall)
+        f1_scores.append(f1)
+        per_class[label] = {
+            "support": support,
+            "precision": round(precision, 6),
+            "recall": round(recall, 6),
+            "f1": round(f1, 6),
+        }
+
+    bullish_predicted = sum(confusion[actual]["BULLISH_CANDLE"] for actual in labels)
+    bullish_true_positive = confusion.get("BULLISH_CANDLE", {}).get("BULLISH_CANDLE", 0)
+    signal_precision = (
+        bullish_true_positive / bullish_predicted if bullish_predicted else None
+    )
+    return {
+        "balanced_accuracy": round(sum(recalls) / len(recalls), 6),
+        "macro_f1": round(sum(f1_scores) / len(f1_scores), 6),
+        "signal_precision": round(signal_precision, 6) if signal_precision is not None else None,
+        "per_class": per_class,
+        "confusion_matrix": confusion,
+        "metric_scope": "CLOSED_CANDLE_OHLC_CLASSIFICATION_ONLY_NOT_FORWARD_PREDICTION_OR_PNL",
+    }
 
 
 def _reference_label(candle: dict[str, Any]) -> str:
@@ -208,6 +256,15 @@ class Challenge01Runner:
             raise ValueError("Challenge 1 requires at least 100 samples per round")
         if sample_count > 1400:
             raise ValueError("sample_count must not exceed 1400")
+        if round_number > 1:
+            return {
+                "status": "BLOCKED",
+                "reason_code": "AI_MENTOR_PHASE_REQUIRED",
+                "blocked_round": round_number,
+                "next_stage": "AI_MENTOR_REQUIRED",
+                "orders_submitted": False,
+                "live_trading": False,
+            }
 
         try:
             backend = self.backend_factory()
@@ -295,7 +352,8 @@ class Challenge01Runner:
             dataset_version = f"{_round_prefix(round_number)}:{dataset_hash[:16]}"
             inserted_decisions = 0
             inserted_outcomes = 0
-            reference_agreements = 0
+            predictions: list[str] = []
+            references: list[str] = []
             first_experience_id = None
             with connection:
                 for candle in selected:
@@ -306,7 +364,8 @@ class Challenge01Runner:
                     first_experience_id = first_experience_id or experience_id
                     classification, action = _classify_bot(candle)
                     reference = _reference_label(candle)
-                    reference_agreements += int(classification == reference)
+                    predictions.append(classification)
+                    references.append(reference)
                     decision_event = memory.record_decision(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:decision",
@@ -324,6 +383,7 @@ class Challenge01Runner:
                             "candle_classification": classification,
                             "action": action,
                             "confidence": 1.0,
+                            "confidence_scope": "DETERMINISTIC_CLOSED_CANDLE_CLASSIFICATION_NOT_MARKET_FORECAST",
                             "rule": "close_vs_open_only",
                             "reason": f"close={candle['close']}; open={candle['open']}",
                         },
@@ -339,9 +399,9 @@ class Challenge01Runner:
                     outcome_event = memory.record_outcome(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:outcome",
-                        # A completed candle's own OHLC defines its descriptive label.
-                        # This is not independent forward ground truth or a trade outcome.
-                        decision_correctness="UNKNOWN",
+                        # The final label evaluates the stated classification task only.
+                        # It is not a realized trade outcome or a prediction of a future candle.
+                        decision_correctness="CORRECT" if classification == reference else "INCORRECT",
                         realized_result="NOT_EXECUTED",
                         realized_net_pnl=None,
                         final=True,
@@ -368,7 +428,7 @@ class Challenge01Runner:
                     raise RuntimeError("LEARNING_MEMORY_LIFECYCLE_INCOMPLETE")
                 verified += 1
 
-            rule_reference_agreement = reference_agreements / len(selected)
+            metrics = _classification_metrics(predictions, references)
             return {
                 "status": "BASELINE_RECORDED",
                 "challenge_id": CHALLENGE_ID,
@@ -384,9 +444,13 @@ class Challenge01Runner:
                 "dataset_version": dataset_version,
                 "dataset_sha256": dataset_hash,
                 "classification_rule": "close_vs_open_only",
-                "rule_reference_agreement": round(rule_reference_agreement, 6),
-                "agreement_scope": "DETERMINISTIC_OHLC_LABEL_CHECK_ONLY_NOT_MARKET_PREDICTION",
-                "decision_correctness": "UNKNOWN",
+                "balanced_accuracy": metrics["balanced_accuracy"],
+                "macro_f1": metrics["macro_f1"],
+                "signal_precision": metrics["signal_precision"],
+                "per_class_metrics": metrics["per_class"],
+                "confusion_matrix": metrics["confusion_matrix"],
+                "metrics_scope": metrics["metric_scope"],
+                "decision_correctness_scope": "CLOSED_CANDLE_CLASSIFICATION_ONLY",
                 "trade_outcome": "NOT_EXECUTED",
                 "inserted_decisions": inserted_decisions,
                 "inserted_outcomes": inserted_outcomes,
@@ -394,7 +458,8 @@ class Challenge01Runner:
                 "memory_records_verified": verified,
                 "memory_integrity": "PASS",
                 "memory_backend": backend,
-                "next_stage": "AI_MENTOR_NOT_RUN",
+                "next_stage": "AI_MENTOR_REQUIRED",
+                "baseline_locked": True,
                 "orders_submitted": False,
                 "live_trading": False,
                 "first_experience_id": first_experience_id,
@@ -457,7 +522,10 @@ def get_challenge_01_status(
             }
             for number, samples in sorted(rounds.items())
         ]
-        expected = max(rounds, default=0) + 1
+        baseline_samples = len(rounds.get(1, set()))
+        baseline_locked = baseline_samples >= MIN_SAMPLES_PER_ROUND
+        next_round = 1 if not baseline_locked else None
+        next_stage = "BOT_ONLY_BASELINE" if not baseline_locked else "AI_MENTOR_REQUIRED"
         return {
             "status": "PASS",
             "challenge_id": CHALLENGE_ID,
@@ -470,9 +538,13 @@ def get_challenge_01_status(
             "memory_backend": backend,
             "verified_experiences": len(experiences),
             "completed_rounds": completed_rounds,
-            "next_round": expected if expected <= MAX_ROUNDS else None,
+            "baseline_samples": baseline_samples,
+            "baseline_locked": baseline_locked,
+            "next_round": next_round,
+            "next_stage": next_stage,
+            "later_rounds_blocked": baseline_locked,
             "mastery_status": "NOT_EARNED",
-            "mastery_rule": "5 independent rounds × 100 samples; this status endpoint never awards mastery",
+            "mastery_rule": "BOT_ONLY baseline, AI Mentor review, then four independent assisted rounds; this endpoint never awards mastery",
             "orders_submitted": False,
         }
     except Exception as exc:
