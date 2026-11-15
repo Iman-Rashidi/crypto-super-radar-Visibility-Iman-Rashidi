@@ -261,6 +261,101 @@ class LearningExperienceMemoryTests(unittest.TestCase):
                     baseline_experience_id="exp-001",
                 )
 
+    def test_mentor_can_reuse_verified_baseline_from_earlier_round_without_cycle_aliasing(self):
+        feature_time = 1_800_000_000_000
+        target_time = feature_time + 3_600_000
+        with self.db:
+            self.decision(
+                experience_id="round1-baseline",
+                event_id="round1-baseline-decision",
+                cycle_id="challenge-round-1",
+                input_snapshot={
+                    "round_number": 1,
+                    "feature_candle_open_time_ms": feature_time,
+                    "target_candle_open_time_ms": target_time,
+                    "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
+                },
+            )
+            self.memory.record_outcome(
+                experience_id="round1-baseline",
+                event_id="round1-baseline-outcome",
+                decision_correctness="CORRECT",
+                realized_result="NOT_EXECUTED",
+                realized_net_pnl=None,
+                evidence={"source": "next_candle", "target_candle_open_time_ms": target_time},
+            )
+            self.memory.record_mentor_feedback(
+                experience_id="round1-baseline",
+                event_id="round1-baseline-mentor",
+                mentor_model_version="ch01-softmax-multiclass-v1",
+                feedback="The earlier round baseline is reviewed and immutable.",
+            )
+            assisted = self.memory.record_decision(
+                experience_id="round2-assisted",
+                event_id="round2-assisted-decision",
+                engine_id="EASY",
+                challenge_id="CHALLENGE-01",
+                cycle_id="challenge-round-2",
+                decision_mode="BOT_WITH_AI_MENTOR",
+                environment="HISTORICAL_REPLAY",
+                decision={"action": "PREDICT_NEXT_BULLISH"},
+                input_snapshot={
+                    "round_number": 2,
+                    "feature_candle_open_time_ms": target_time,
+                    "target_candle_open_time_ms": target_time + 3_600_000,
+                },
+                baseline_experience_id="round1-baseline",
+                model_version="ch01-softmax-multiclass-v1",
+                dataset_version="round-2-forward-holdout",
+            )
+        self.assertEqual(assisted["payload"]["baseline_experience_id"], "round1-baseline")
+
+    def test_mentor_rejects_future_round_baseline_reference(self):
+        feature_time = 1_800_000_000_000
+        target_time = feature_time + 3_600_000
+        with self.db:
+            self.decision(
+                experience_id="round3-baseline",
+                event_id="round3-baseline-decision",
+                cycle_id="challenge-round-3",
+                input_snapshot={
+                    "round_number": 3,
+                    "feature_candle_open_time_ms": feature_time,
+                    "target_candle_open_time_ms": target_time,
+                },
+            )
+            self.memory.record_outcome(
+                experience_id="round3-baseline",
+                event_id="round3-baseline-outcome",
+                decision_correctness="CORRECT",
+                realized_result="NOT_EXECUTED",
+                realized_net_pnl=None,
+                evidence={"source": "next_candle"},
+            )
+            self.memory.record_mentor_feedback(
+                experience_id="round3-baseline",
+                event_id="round3-baseline-mentor",
+                mentor_model_version="mentor-v1",
+                feedback="Reviewed.",
+            )
+            with self.assertRaises(ExperienceStateError):
+                self.memory.record_decision(
+                    experience_id="round2-invalid",
+                    event_id="round2-invalid-decision",
+                    engine_id="EASY",
+                    challenge_id="CHALLENGE-01",
+                    cycle_id="challenge-round-2",
+                    decision_mode="BOT_WITH_AI_MENTOR",
+                    environment="HISTORICAL_REPLAY",
+                    decision={"action": "WAIT"},
+                    input_snapshot={
+                        "round_number": 2,
+                        "feature_candle_open_time_ms": target_time - 3_600_000,
+                        "target_candle_open_time_ms": target_time,
+                    },
+                    baseline_experience_id="round3-baseline",
+                )
+
     def test_lesson_requires_outcome_and_independent_validation(self):
         with self.db:
             self.decision()
