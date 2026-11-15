@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from crypto_super_radar.challenge_01_ai_mentor import (
+    detect_candlestick_patterns,
     review_baseline,
     review_locked_baseline,
 )
@@ -38,11 +39,24 @@ class Challenge01AIMentorTests(unittest.TestCase):
         experience_id = f"baseline-{index}"
         feature_ts = 1_800_000_000_000 + index * 3_600_000
         target_ts = feature_ts + 3_600_000
-        feature = {
-            "open_time_ms": feature_ts,
-            "open": "100", "high": "105", "low": "95", "close": "101",
-            "confirmed": True,
-        }
+        feature_window = [
+            {
+                "open_time_ms": feature_ts - 2 * 3_600_000,
+                "open": "100", "high": "103", "low": "98", "close": "99",
+                "confirmed": True,
+            },
+            {
+                "open_time_ms": feature_ts - 3_600_000,
+                "open": "99", "high": "102", "low": "97", "close": "100",
+                "confirmed": True,
+            },
+            {
+                "open_time_ms": feature_ts,
+                "open": "100", "high": "105", "low": "95", "close": "101",
+                "confirmed": True,
+            },
+        ]
+        feature = feature_window[-1]
         target = {
             "open_time_ms": target_ts,
             "open": "101", "high": "106", "low": "96", "close": "102",
@@ -54,6 +68,9 @@ class Challenge01AIMentorTests(unittest.TestCase):
             "feature_candle_open_time_ms": feature_ts,
             "target_candle_open_time_ms": target_ts,
             "feature_candle": feature,
+            "feature_window": feature_window,
+            "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
+            "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
             "prediction_horizon_bars": 1,
             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
             "target_candle_in_input": False,
@@ -88,6 +105,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
                     "source": "blofin_demo_spot_next_completed_candle",
                     "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
                     "feature_candle_open_time_ms": feature_ts,
+                    "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
                     "target_candle_open_time_ms": target_ts,
                     "target_candle": target,
                     "prediction_horizon_bars": 1,
