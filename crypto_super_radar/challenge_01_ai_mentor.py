@@ -643,6 +643,9 @@ def load_candidate_artifact(
                     saved_sha != calculated
                     or (expected_sha256 is not None and saved_sha != expected_sha256)
                     or artifact.get("schema") != "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
+                    or artifact.get("feature_window_length") != FEATURE_WINDOW_LENGTH
+                    or artifact.get("features") != list(MODEL_FEATURES)
+                    or artifact.get("pattern_features") != list(PATTERN_FEATURES)
                     or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
                     or artifact.get("training", {}).get("samples", 0) < 60
                     or artifact.get("temporal_validation", {}).get("samples", 0) < 20
@@ -660,7 +663,7 @@ def load_candidate_artifact(
 
 
 def predict_candidate(
-    feature_candle: dict[str, Any],
+    feature_window: list[dict[str, Any]],
     artifact: dict[str, Any],
 ) -> tuple[str, list[float]]:
     """Apply the persisted candidate without refitting or seeing target data."""
@@ -689,7 +692,7 @@ def predict_candidate(
         or any(float(value) <= 0 for value in stds)
     ):
         raise ValueError("MENTOR_CANDIDATE_PARAMETERS_INVALID")
-    raw = _feature_vector(feature_candle)
+    raw = _feature_vector(feature_window)
     normalized = [(raw[j] - float(means[j])) / float(stds[j]) for j in range(len(MODEL_FEATURES))]
     probabilities = _softmax([
         float(biases[k]) + sum(
