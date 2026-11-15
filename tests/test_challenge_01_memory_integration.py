@@ -21,13 +21,14 @@ def candle(ts: int, opening: str, high: str, low: str, closing: str, confirm: st
 
 
 class FakeSpotClient:
-    def __init__(self, rows):
+    def __init__(self, rows, older_rows=None):
         self.rows = rows
+        self.older_rows = older_rows
         self.calls = []
 
     def get_candles(self, inst_id, *, bar, limit, after=None):
         self.calls.append({"inst_id": inst_id, "bar": bar, "limit": limit, "after": after})
-        return self.rows
+        return self.older_rows if after is not None and self.older_rows is not None else self.rows
 
 
 class Challenge01MemoryIntegrationTests(unittest.TestCase):
@@ -38,6 +39,11 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.rows = [
             candle(self.now_ms - 60 * 60 * 1000 - index * 60 * 60 * 1000,
                    "100", "105", "95", "101" if index % 3 == 0 else ("99" if index % 3 == 1 else "100"))
+            for index in range(MIN_SAMPLES_PER_ROUND + 5)
+        ]
+        self.older_rows = [
+            candle(self.now_ms - (MIN_SAMPLES_PER_ROUND + 1 + index) * 60 * 60 * 1000,
+                   "100", "105", "95", "101" if index % 3 == 0 else "99")
             for index in range(MIN_SAMPLES_PER_ROUND + 5)
         ]
 
@@ -51,7 +57,7 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
 
     def runner(self, rows=None):
         return Challenge01Runner(
-            client=FakeSpotClient(rows if rows is not None else self.rows),
+            client=FakeSpotClient(rows if rows is not None else self.rows, older_rows=self.older_rows),
             connection_factory=self.connection_factory,
             backend_factory=lambda: "TEST_SQLITE_FILE",
             now_ms=lambda: self.now_ms,
@@ -104,6 +110,16 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         result = runner.run_bot_only_round(round_number=1, sample_count=100)
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(result["reason_code"], "LATEST_COMPLETED_CANDLE_STALE")
+
+    def test_second_round_uses_non_overlapping_historical_candles_without_live_stale_check(self):
+        runner = self.runner()
+        first = runner.run_bot_only_round(round_number=1, sample_count=100)
+        second = runner.run_bot_only_round(round_number=2, sample_count=100)
+        self.assertEqual(first["status"], "BASELINE_RECORDED")
+        self.assertEqual(second["status"], "BASELINE_RECORDED")
+        self.assertEqual(second["round_number"], 2)
+        self.assertTrue(second["memory_recovery_verified"])
+        self.assertEqual(second["memory_records_verified"], 100)
 
     def test_round_requires_100_samples(self):
         with self.assertRaises(ValueError):
