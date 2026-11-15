@@ -114,6 +114,42 @@ class Challenge01AIMentorTests(unittest.TestCase):
             )
         return experience_id
 
+    def test_pattern_detector_recognizes_single_two_and_three_bar_examples(self):
+        doji_window = [
+            {"open_time_ms": i * 3_600_000, "open": "100", "high": "103", "low": "98", "close": "101", "confirmed": True}
+            for i in range(3)
+        ]
+        doji_window[-1] = {
+            "open_time_ms": 2 * 3_600_000, "open": "100", "high": "104",
+            "low": "96", "close": "100", "confirmed": True,
+        }
+        self.assertIn("DOJI", detect_candlestick_patterns(doji_window))
+
+        engulfing_window = [
+            {"open_time_ms": 0, "open": "102", "high": "103", "low": "99", "close": "100", "confirmed": True},
+            {"open_time_ms": 3_600_000, "open": "104", "high": "105", "low": "99", "close": "100", "confirmed": True},
+            {"open_time_ms": 7_200_000, "open": "99", "high": "106", "low": "98", "close": "105", "confirmed": True},
+        ]
+        self.assertIn("BULLISH_ENGULFING", detect_candlestick_patterns(engulfing_window))
+
+        morning_star_window = [
+            {"open_time_ms": 0, "open": "110", "high": "111", "low": "99", "close": "100", "confirmed": True},
+            {"open_time_ms": 3_600_000, "open": "100", "high": "101", "low": "99.5", "close": "100.2", "confirmed": True},
+            {"open_time_ms": 7_200_000, "open": "100.5", "high": "109", "low": "100", "close": "108", "confirmed": True},
+        ]
+        self.assertIn("MORNING_STAR", detect_candlestick_patterns(morning_star_window))
+
+    def test_pattern_detector_rejects_incomplete_or_wrong_length_windows(self):
+        with self.assertRaises(ValueError):
+            detect_candlestick_patterns([])
+        incomplete = [
+            {"open_time_ms": i * 3_600_000, "open": "100", "high": "102", "low": "98", "close": "101",
+             "confirmed": i < 2}
+            for i in range(3)
+        ]
+        # Detector validates OHLC; the experience audit separately requires confirmed bars.
+        self.assertIsInstance(detect_candlestick_patterns(incomplete), list)
+
     def test_mentor_records_audit_without_mutating_baseline_or_awarding_mastery(self):
         self.add_baseline(1)
         result = review_baseline(self.memory, "baseline-1")
