@@ -36,6 +36,7 @@ class BloFinDemoSpotReadOnly:
         bar: str = "1H",
         limit: int = 120,
         after: int | str | None = None,
+        before: int | str | None = None,
     ) -> list:
         if not isinstance(inst_id, str) or not inst_id.strip():
             raise ValueError("inst_id is required")
@@ -43,6 +44,8 @@ class BloFinDemoSpotReadOnly:
             raise ValueError("unsupported BloFin Spot candle interval")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1440:
             raise ValueError("limit must be between 1 and 1440")
+        if after is not None and before is not None:
+            raise ValueError("after and before cannot be used simultaneously")
         params = {
             "instType": "SPOT",
             "instId": inst_id.strip().upper(),
@@ -51,6 +54,8 @@ class BloFinDemoSpotReadOnly:
         }
         if after is not None:
             params["after"] = str(after)
+        if before is not None:
+            params["before"] = str(before)
         try:
             response = self.session.get(
                 f"{self.base_url}/api/v1/spot/market/candles",
