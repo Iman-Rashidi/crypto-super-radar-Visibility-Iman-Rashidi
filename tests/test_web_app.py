@@ -1078,23 +1078,25 @@ class WebAppHttpTests(unittest.TestCase):
             "cycles_started": 0,
         })
         try:
-            with patch.dict(os.environ, {
-                "BLOFIN_DEMO_AUTOPILOT_ENABLED": "true",
-                "BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS": "300",
-                "BLOFIN_DEMO_AUTOPILOT_INSTRUMENT": "BTC-USDT",
-                "BLOFIN_DEMO_AUTOPILOT_PROFILE": "EASY",
-            }, clear=False), \\
-                 patch.object(web_app, "SCAN_RUNNING", False), \\
-                 patch.object(web_app, "_set_blofin_execution_job", side_effect=record_job), \\
-                 patch.object(web_app, "_run_blofin_demo_execution_job", side_effect=complete_no_trade_cycle), \\
-                 patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
-                     "status": "PASS",
-                     "data_completeness": "COMPLETE",
-                     "positions": [],
-                     "closed_positions": [],
-                     "read_errors": [],
-                 }), \\
-                 patch.object(web_app.time, "sleep", side_effect=stop_after_second_cycle_sleep):
+            with (
+                patch.dict(os.environ, {
+                    "BLOFIN_DEMO_AUTOPILOT_ENABLED": "true",
+                    "BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS": "300",
+                    "BLOFIN_DEMO_AUTOPILOT_INSTRUMENT": "BTC-USDT",
+                    "BLOFIN_DEMO_AUTOPILOT_PROFILE": "EASY",
+                }),
+                patch.object(web_app, "SCAN_RUNNING", False),
+                patch.object(web_app, "_set_blofin_execution_job", side_effect=record_job),
+                patch.object(web_app, "_run_blofin_demo_execution_job", side_effect=complete_no_trade_cycle),
+                patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                    "status": "PASS",
+                    "data_completeness": "COMPLETE",
+                    "positions": [],
+                    "closed_positions": [],
+                    "read_errors": [],
+                }),
+                patch.object(web_app.time, "sleep", side_effect=stop_after_second_cycle_sleep),
+            ):
                 with self.assertRaises(StopAfterTwoCycles):
                     web_app._blofin_demo_autopilot_worker()
 
