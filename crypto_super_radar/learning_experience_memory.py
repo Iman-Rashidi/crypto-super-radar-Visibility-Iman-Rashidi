@@ -840,7 +840,7 @@ class LearningExperienceMemory:
         """List recent verified experiences; corrupt histories raise an error."""
         if isinstance(limit, bool) or not isinstance(limit, int):
             raise ValueError("limit must be an integer")
-        bounded = max(1, min(limit, 500))
+        bounded = max(1, min(limit, 2000))
         if challenge_id is None:
             rows = self._db.execute(
                 """SELECT experience_id FROM learning_experience_events
