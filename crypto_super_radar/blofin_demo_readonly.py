@@ -274,6 +274,28 @@ class BloFinDemoReadOnly:
             private=True,
         )
 
+    def get_api_key_info(self) -> dict[str, Any]:
+        """Read permission metadata for the exact API key used by this client."""
+        result = self._get("/api/v1/user/query-apikey", private=True)
+        if not isinstance(result, dict):
+            raise BloFinDemoResponseError("BloFin API-key information is not an object.")
+        returned_key = result.get("apiKey")
+        if not isinstance(returned_key, str) or not hmac.compare_digest(
+            returned_key, self.api_key
+        ):
+            raise BloFinDemoAuthError(
+                "BloFin API-key identity could not be confirmed for this credential."
+            )
+        raw_read_only = result.get("readOnly")
+        valid_integer = isinstance(raw_read_only, int) and not isinstance(raw_read_only, bool) and raw_read_only in (0, 1)
+        valid_string = isinstance(raw_read_only, str) and raw_read_only.strip() in {"0", "1"}
+        if not (valid_integer or valid_string):
+            raise BloFinDemoResponseError(
+                "BloFin API-key readOnly permission is missing or invalid."
+            )
+        read_only = int(raw_read_only)
+        return {"readOnly": read_only, "trade_permission": read_only == 0}
+
     def get_open_tpsl_orders(self, *, inst_id: str | None = None, limit: int = 100) -> Any:
         """Read untriggered exchange-managed take-profit / stop-loss orders."""
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
