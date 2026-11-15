@@ -382,4 +382,66 @@ class Challenge01Runner:
                 pass
 
 
-__all__ = ["Challenge01Runner", "Challenge01DataError"]
+
+def get_challenge_01_status(
+    *,
+    connection_factory: Callable[[], Any] = connect_database,
+    backend_factory: Callable[[], str] = storage_backend,
+) -> dict[str, Any]:
+    """Read verified Challenge 1 progress without contacting BloFin."""
+    connection = connection_factory()
+    try:
+        memory = LearningExperienceMemory(connection)
+        experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
+        rounds: dict[int, set[int]] = {}
+        for item in experiences:
+            for event in item.get("events", []):
+                if event.get("event_type") != "DECISION_RECORDED":
+                    continue
+                snapshot = (event.get("payload") or {}).get("input_snapshot") or {}
+                round_number = snapshot.get("round_number")
+                candle_time = snapshot.get("candle_open_time_ms")
+                if isinstance(round_number, int) and isinstance(candle_time, int):
+                    rounds.setdefault(round_number, set()).add(candle_time)
+                break
+        completed_rounds = [
+            {
+                "round_number": number,
+                "verified_samples": len(samples),
+                "round_ready": len(samples) >= MIN_SAMPLES_PER_ROUND,
+            }
+            for number, samples in sorted(rounds.items())
+        ]
+        expected = max(rounds, default=0) + 1
+        return {
+            "status": "PASS",
+            "challenge_id": CHALLENGE_ID,
+            "engine_id": ENGINE_ID,
+            "environment": "BLOFIN_DEMO",
+            "market": "SPOT",
+            "symbol": SYMBOL,
+            "timeframe": TIMEFRAME,
+            "decision_mode": "BOT_ONLY",
+            "memory_backend": backend_factory(),
+            "verified_experiences": len(experiences),
+            "completed_rounds": completed_rounds,
+            "next_round": expected if expected <= MAX_ROUNDS else None,
+            "mastery_status": "NOT_EARNED",
+            "mastery_rule": "5 independent rounds × 100 samples; this status endpoint never awards mastery",
+            "orders_submitted": False,
+        }
+    except Exception as exc:
+        return {
+            "status": "UNKNOWN",
+            "error_type": type(exc).__name__,
+            "orders_submitted": False,
+        }
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+__all__ = ["Challenge01Runner", "Challenge01DataError", "get_challenge_01_status"]
+
