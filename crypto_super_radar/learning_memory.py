@@ -210,12 +210,11 @@ class LearningMemory:
     def add_lesson(
         self, *, source_case_id: str, title: str, condition: dict[str, Any],
         evidence: dict[str, Any], root_cause: str, application_scope: str,
-        confidence: float | None = None, status: str = "PENDING",
+        confidence: float | None = None,
     ) -> str:
         self._ensure_open()
-        state = str(status).upper()
-        if state not in {"PENDING", "VALIDATED", "REJECTED"}:
-            raise ValueError("Lesson status must be PENDING, VALIDATED or REJECTED.")
+        # New lessons always start pending; only validate_lesson() may promote them.
+        state = "PENDING"
         score = None if confidence is None else float(confidence)
         if score is not None and (not 0 <= score <= 1):
             raise ValueError("Lesson confidence must be between 0 and 1.")
@@ -256,7 +255,7 @@ class LearningMemory:
             """SELECT episode_id,case_id,engine_id,protocol_stage,asset,market_type,
                       timeframe,observed_at_ms,recorded_at_ms,snapshot_hash,
                       snapshot_json,decision_json,model_version,outcome_json
-               FROM learning_episodes ORDER BY recorded_at_ms DESC LIMIT ?""",
+               FROM learning_episodes ORDER BY recorded_at_ms DESC, rowid DESC LIMIT ?""",
             (bounded,),
         ).fetchall()
         return [{

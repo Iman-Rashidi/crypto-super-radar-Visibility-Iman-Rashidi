@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -23,7 +24,7 @@ class LearningMemoryTests(unittest.TestCase):
             protocol_stage="BOT_ONLY",
             snapshot={"close": 100.0, "secret_key": "must-not-be-stored"},
             decision={"signal": "LONG", "confidence": 0.7},
-            asset="BTCUSDT", observed_at_ms=1_800_000_000_000,
+            asset="BTCUSDT", observed_at_ms=int(time.time() * 1000),
         )
         self.assertTrue(row["episode_id"])
         self.memory.close()
@@ -36,7 +37,7 @@ class LearningMemoryTests(unittest.TestCase):
 
     def test_ai_mentor_requires_same_frozen_snapshot_and_bot_only_first(self):
         snapshot = {"close": 100.0, "bar": "2026-11-15T10:00:00Z"}
-        timestamp = 1_800_000_000_000
+        timestamp = int(time.time() * 1000)
         self.memory.record_episode(
             case_id="paired", engine_id="STRICT_12_GATE", protocol_stage="BOT_ONLY",
             snapshot=snapshot, decision={"signal": "NO_TRADE"}, observed_at_ms=timestamp,

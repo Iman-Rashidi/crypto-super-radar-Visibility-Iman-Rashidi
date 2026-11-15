@@ -33,9 +33,9 @@ def configuration_status() -> dict[str, Any]:
     return {
         "mode": "BINANCE_DEMO_READ_ONLY_PREFLIGHT",
         "spot_credentials_configured": spot_key and spot_secret,
-        "spot_credentials_complete": spot_key == spot_secret,
+        "spot_credentials_state": "READY" if spot_key and spot_secret else "PARTIAL" if spot_key or spot_secret else "MISSING",
         "futures_credentials_configured": futures_key and futures_secret,
-        "futures_credentials_complete": futures_key == futures_secret,
+        "futures_credentials_state": "READY" if futures_key and futures_secret else "PARTIAL" if futures_key or futures_secret else "MISSING",
         "order_submission_available": False,
         "orders_submitted": False,
         "private_keys_requested": False,

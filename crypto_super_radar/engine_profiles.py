@@ -61,7 +61,10 @@ def evaluate_demo_candidate(
     profile = ENGINE_PROFILES.get(str(engine_id).upper())
     if profile is None:
         return {"eligible": False, "reason": "UNKNOWN_ENGINE", "execution_authorized": False}
-    current = float(current_open_risk_pct)
+    try:
+        current = float(current_open_risk_pct)
+    except (TypeError, ValueError, OverflowError):
+        current = float("nan")
     if not math.isfinite(current) or current < 0:
         return {"eligible": False, "reason": "INVALID_PORTFOLIO_RISK", "execution_authorized": False}
     blockers = []

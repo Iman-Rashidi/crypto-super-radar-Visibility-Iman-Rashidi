@@ -2201,18 +2201,6 @@ class Handler(BaseHTTPRequestHandler):
                            "episodes_total": 0, "lessons_validated": 0}
                 return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
-        if parsed.path == "/learning-memory/episodes":
-            raw_limit = parse_qs(parsed.query).get("limit", ["25"])[0]
-            try:
-                limit = max(1, min(int(raw_limit), 100))
-                payload = {"episodes": _get_learning_memory().list_episodes(limit)}
-                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
-                                  "application/json; charset=utf-8")
-            except (TypeError, ValueError):
-                return self._send(400, b'{"error":"limit must be an integer from 1 to 100"}', "application/json")
-            except Exception as exc:
-                return self._send(503, json.dumps({"error_type": type(exc).__name__}).encode(),
-                                  "application/json; charset=utf-8")
         if parsed.path == "/demo-readiness":
             payload = {
                 "demo": binance_demo_configuration_status(),
