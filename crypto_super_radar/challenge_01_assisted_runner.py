@@ -173,22 +173,36 @@ class Challenge01AssistedRunner:
 
         candidate_anchor = None
         candidate_hash = None
-        if previous_round >= 2:
-            for item in experiences:
-                if item.get("decision_mode") != "BOT_WITH_AI_MENTOR":
+        for item in experiences:
+            if item.get("verification", {}).get("status") != "PASS":
+                continue
+            for event in item.get("events") or []:
+                if event.get("event_type") != "LESSON_PROPOSED":
                     continue
-                decision_event = next(
-                    (e for e in item.get("events", []) if e.get("event_type") == "DECISION_RECORDED"),
-                    None,
-                )
-                if decision_event is None:
+                payload = event.get("payload") or {}
+                if not str(payload.get("lesson_id", "")).startswith("ch01-model-"):
                     continue
-                snapshot = (decision_event.get("payload") or {}).get("input_snapshot") or {}
-                if snapshot.get("round_number") == previous_round:
-                    candidate_anchor = snapshot.get("mentor_model_anchor_experience_id")
-                    candidate_hash = snapshot.get("mentor_model_artifact_sha256")
-                    if candidate_anchor and candidate_hash:
-                        break
+                try:
+                    artifact = json.loads(payload.get("lesson", ""))
+                    saved_hash = artifact.pop("artifact_sha256", None)
+                    calculated_hash = hashlib.sha256(json.dumps(
+                        artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8")).hexdigest()
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if (
+                    saved_hash == calculated_hash
+                    and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
+                    and artifact.get("trained_through_round") == previous_round
+                    and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
+                ):
+                    candidate_anchor = item.get("experience_id")
+                    candidate_hash = saved_hash
+                    break
+            if candidate_anchor:
+                break
+        if not candidate_anchor or not candidate_hash:
+            raise Challenge01DataError("LATEST_ROUND_MENTOR_CANDIDATE_NOT_FOUND")
         return last_window, last_target_time, candidate_anchor, candidate_hash
 
     def run_round(self, *, round_number: int, sample_count: int = 100) -> dict[str, Any]:
@@ -293,9 +307,6 @@ class Challenge01AssistedRunner:
                             "round_number": round_number,
                             "candle_open_time_ms": target_time,
                             "feature_candle_open_time_ms": feature_time,
-                            "feature_window_open_times_ms": [
-                                candle["open_time_ms"] for candle in feature_window
-                            ],
                             "target_candle_open_time_ms": target_time,
                             "feature_candle": feature,
                             "feature_window": feature_window,
