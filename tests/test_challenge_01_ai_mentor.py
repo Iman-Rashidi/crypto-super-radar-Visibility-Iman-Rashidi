@@ -147,8 +147,8 @@ class Challenge01AIMentorTests(unittest.TestCase):
              "confirmed": i < 2}
             for i in range(3)
         ]
-        # Detector validates OHLC; the experience audit separately requires confirmed bars.
-        self.assertIsInstance(detect_candlestick_patterns(incomplete), list)
+        with self.assertRaises(ValueError):
+            detect_candlestick_patterns(incomplete)
 
     def test_mentor_records_audit_without_mutating_baseline_or_awarding_mastery(self):
         self.add_baseline(1)
