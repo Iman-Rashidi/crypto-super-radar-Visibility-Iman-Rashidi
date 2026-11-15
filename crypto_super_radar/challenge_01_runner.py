@@ -599,7 +599,7 @@ def get_challenge_01_status(
         elif not mentor_review_complete:
             next_stage = "AI_MENTOR_REQUIRED"
         else:
-            next_stage = "ASSISTED_ROUND_RUNNER_REQUIRED"
+            next_stage = "FORWARD_HOLDOUT_VALIDATION_REQUIRED"
         return {
             "status": "PASS",
             "challenge_id": CHALLENGE_ID,
