@@ -64,6 +64,8 @@ as a successful decision.
 - Reuse of an event ID with changed content is rejected.
 - Payloads are canonical JSON and SHA-256 hashed.
 - Event hashes include the preceding event hash.
+- A unique cycle index prevents duplicate BOT_ONLY or mentor-assisted root
+  decisions for the same engine/challenge/cycle/mode.
 - SQLite triggers reject UPDATE and DELETE of event rows.
 - Verification checks sequence, metadata, timestamps, payload hashes, lifecycle,
   previous hashes and event hashes.
