@@ -143,7 +143,9 @@ def _softmax(logits: list[float]) -> list[float]:
     return [value / total for value in exps]
 
 
-def _train_candidate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _train_candidate(
+    rows: list[dict[str, Any]], *, trained_through_round: int,
+) -> dict[str, Any]:
     """Pure-Python multinomial logistic regression, chronological 80/20 split."""
     training_count = int(len(rows) * 0.8)
     train_rows, validation_rows = rows[:training_count], rows[training_count:]
@@ -215,10 +217,13 @@ def _train_candidate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
     train_manifest = [[r["experience_id"], r["feature_ts"], r["target_ts"], r["label"]] for r in train_rows]
     validation_manifest = [[r["experience_id"], r["feature_ts"], r["target_ts"], r["label"]] for r in validation_rows]
+    all_manifest = train_manifest + validation_manifest
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    dataset_hash = digest(all_manifest)
     artifact = {
         "schema": "CSR_CH01_SOFTMAX_CANDIDATE_V1",
-        "model_version": "ch01-softmax-multiclass-v1",
+        "model_version": "ch01-softmax-multiclass-v1-" + dataset_hash[:12],
+        "trained_through_round": trained_through_round,
         "task": "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD",
         "method": "MULTINOMIAL_LOGISTIC_REGRESSION_SOFTMAX",
         "features": list(MODEL_FEATURES),
@@ -226,7 +231,7 @@ def _train_candidate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "normalization": {"means": means, "standard_deviations": stds},
         "weights": weights,
         "biases": biases,
-        "training": {"samples": len(train_rows), "dataset_sha256": digest(train_manifest),
+        "training": {"samples": len(train_rows), "total_samples": len(rows), "dataset_sha256": digest(train_manifest),
                      "first_target_time_ms": train_rows[0]["target_ts"], "last_target_time_ms": train_rows[-1]["target_ts"]},
         "temporal_validation": {"samples": len(validation_rows), "dataset_sha256": digest(validation_manifest),
                                 "first_target_time_ms": validation_rows[0]["target_ts"],
@@ -241,7 +246,13 @@ def _train_candidate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"artifact": artifact, "sha256": artifact_hash}
 
 
-def _train_and_store_candidate(memory: LearningExperienceMemory, baseline_ids: list[str]) -> dict[str, Any]:
+def _train_and_store_candidate(
+    memory: LearningExperienceMemory,
+    baseline_ids: list[str],
+    *,
+    trained_through_round: int = 1,
+    anchor_experience_id: str | None = None,
+) -> dict[str, Any]:
     rows = []
     for experience_id in baseline_ids:
         item = memory.get_experience(experience_id)
@@ -252,15 +263,18 @@ def _train_and_store_candidate(memory: LearningExperienceMemory, baseline_ids: l
         events = item.get("events") or []
         decision_event = next((e for e in events if e.get("event_type") == "DECISION_RECORDED"), None)
         outcome_event = next((e for e in events if e.get("event_type") == "OUTCOME_LABELLED"), None)
-        if not decision_event or not outcome_event:
-            raise ValueError("BASELINE_OUTCOME_NOT_FINAL")
+        feedback_event = next((e for e in events if e.get("event_type") == "MENTOR_FEEDBACK_RECORDED"), None)
+        if not decision_event or not outcome_event or not feedback_event:
+            raise ValueError("BASELINE_OUTCOME_OR_MENTOR_REVIEW_NOT_FINAL")
         snapshot = decision_event.get("payload", {}).get("input_snapshot") or {}
         decision = decision_event.get("payload", {}).get("decision") or {}
         evidence = outcome_event.get("payload", {}).get("evidence") or {}
+        round_number = snapshot.get("round_number")
         feature, target = snapshot.get("feature_candle"), evidence.get("target_candle")
         feature_ts, target_ts = snapshot.get("feature_candle_open_time_ms"), snapshot.get("target_candle_open_time_ms")
         if (
-            snapshot.get("round_number") != 1
+            not isinstance(round_number, int)
+            or not 1 <= round_number <= trained_through_round
             or snapshot.get("data_quality") != "VALID_COMPLETED_FEATURE_AND_TARGET"
             or snapshot.get("target_candle_in_input") is not False
             or "target_candle" in snapshot
@@ -277,27 +291,47 @@ def _train_and_store_candidate(memory: LearningExperienceMemory, baseline_ids: l
         ):
             raise ValueError("FORWARD_FEATURE_TARGET_CONTRACT_FAILED")
         label = _target_label(target)
-        rows.append({"experience_id": experience_id, "feature_ts": feature_ts,
-                     "target_ts": target_ts, "feature": feature, "label": label})
+        rows.append({
+            "experience_id": experience_id,
+            "round_number": round_number,
+            "feature_ts": feature_ts,
+            "target_ts": target_ts,
+            "feature": feature,
+            "label": label,
+        })
     rows.sort(key=lambda row: row["feature_ts"])
-    if len(rows) != 100:
-        raise ValueError("MENTOR_REQUIRES_EXACTLY_100_FORWARD_SAMPLES")
+    expected_total = trained_through_round * MIN_BASELINE_SAMPLES
+    if len(rows) != expected_total:
+        raise ValueError("MENTOR_REQUIRES_100_VALID_BOT_ONLY_SAMPLES_PER_COMPLETED_ROUND")
+    if any(
+        sum(1 for row in rows if row["round_number"] == number) != MIN_BASELINE_SAMPLES
+        for number in range(1, trained_through_round + 1)
+    ):
+        raise ValueError("MENTOR_TRAINING_HISTORY_HAS_INCOMPLETE_ROUND")
     if len({row["target_ts"] for row in rows}) != len(rows):
         raise ValueError("DUPLICATE_TARGET_TIMESTAMP")
     for previous, current in zip(rows, rows[1:]):
         if current["feature_ts"] != previous["target_ts"]:
             raise ValueError("BASELINE_FEATURE_TARGET_SEQUENCE_GAP")
 
-    trained = _train_candidate(rows)
+    trained = _train_candidate(rows, trained_through_round=trained_through_round)
     artifact, artifact_hash = trained["artifact"], trained["sha256"]
-    anchor_id = rows[0]["experience_id"]
+    anchor_id = anchor_experience_id or rows[0]["experience_id"]
     anchor = memory.get_experience(anchor_id)
-    existing = next((event for event in anchor["events"]
-                     if event.get("event_type") == "LESSON_PROPOSED"
-                     and (event.get("payload") or {}).get("lesson_id") == "ch01-model-" + artifact_hash[:24]), None)
+    if anchor.get("decision_mode") != "BOT_ONLY" or anchor.get("verification", {}).get("status") != "PASS":
+        raise ValueError("MENTOR_MODEL_ANCHOR_NOT_VERIFIED_BOT_ONLY")
+    existing = next((
+        event for event in anchor["events"]
+        if event.get("event_type") == "LESSON_PROPOSED"
+        and (event.get("payload") or {}).get("lesson_id") == "ch01-model-" + artifact_hash[:24]
+    ), None)
     if not existing:
-        evidence_ids = [event["event_id"] for event in anchor["events"]
-                        if event.get("event_type") in {"DECISION_RECORDED", "OUTCOME_LABELLED", "MENTOR_FEEDBACK_RECORDED"}]
+        evidence_ids = [
+            event["event_id"] for event in anchor["events"]
+            if event.get("event_type") in {
+                "DECISION_RECORDED", "OUTCOME_LABELLED", "MENTOR_FEEDBACK_RECORDED",
+            }
+        ]
         with memory._db:
             memory.propose_lesson(
                 experience_id=anchor_id,
@@ -309,28 +343,81 @@ def _train_and_store_candidate(memory: LearningExperienceMemory, baseline_ids: l
     persisted = memory.get_experience(anchor_id)
     if persisted.get("verification", {}).get("status") != "PASS":
         raise ValueError("MENTOR_MODEL_ARTIFACT_INTEGRITY_FAILED")
-    stored = next((event for event in persisted["events"]
-                   if event.get("event_type") == "LESSON_PROPOSED"
-                   and (event.get("payload") or {}).get("lesson_id") == "ch01-model-" + artifact_hash[:24]), None)
+    stored = next((
+        event for event in persisted["events"]
+        if event.get("event_type") == "LESSON_PROPOSED"
+        and (event.get("payload") or {}).get("lesson_id") == "ch01-model-" + artifact_hash[:24]
+    ), None)
     if not stored:
         raise ValueError("MENTOR_MODEL_ARTIFACT_NOT_PERSISTED")
     saved_artifact = json.loads(stored["payload"]["lesson"])
     saved_hash = saved_artifact.pop("artifact_sha256", None)
-    calculated_hash = hashlib.sha256(json.dumps(saved_artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    calculated_hash = hashlib.sha256(json.dumps(
+        saved_artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
     if saved_hash != artifact_hash or calculated_hash != artifact_hash:
         raise ValueError("PERSISTED_MENTOR_MODEL_HASH_MISMATCH")
     return {
         "status": "CANDIDATE_STORED_NOT_PROMOTED",
         "model_version": artifact["model_version"],
         "artifact_sha256": artifact_hash,
+        "trained_through_round": trained_through_round,
         "training_samples": artifact["training"]["samples"],
         "validation_samples": artifact["temporal_validation"]["samples"],
+        "total_samples": artifact["training"]["total_samples"],
         "training_dataset_sha256": artifact["training"]["dataset_sha256"],
         "validation_dataset_sha256": artifact["temporal_validation"]["dataset_sha256"],
         "validation_metrics": artifact["temporal_validation"]["metrics"],
         "promotion_status": "CANDIDATE_NOT_PROMOTED",
         "anchor_experience_id": anchor_id,
     }
+
+
+def train_candidate_from_completed_rounds(
+    memory: LearningExperienceMemory,
+    *,
+    through_round: int,
+) -> dict[str, Any]:
+    """Retrain only from completed, mentor-reviewed BOT_ONLY rounds before the next holdout."""
+    if isinstance(through_round, bool) or not isinstance(through_round, int) or not 1 <= through_round <= 4:
+        raise ValueError("through_round must be between 1 and 4")
+    experiences = memory.recent_experiences(limit=1200, challenge_id=CHALLENGE_ID)
+    ids_by_round: dict[int, list[tuple[int, str]]] = {}
+    for item in experiences:
+        if item.get("decision_mode") != "BOT_ONLY" or item.get("verification", {}).get("status") != "PASS":
+            continue
+        events = item.get("events") or []
+        decision = next((e for e in events if e.get("event_type") == "DECISION_RECORDED"), None)
+        if decision is None:
+            continue
+        snapshot = (decision.get("payload") or {}).get("input_snapshot") or {}
+        number = snapshot.get("round_number")
+        target_time = snapshot.get("target_candle_open_time_ms")
+        if not isinstance(number, int) or not 1 <= number <= through_round or not isinstance(target_time, int):
+            continue
+        if not any(event.get("event_type") == "OUTCOME_LABELLED" for event in events):
+            raise ValueError("TRAINING_ROUND_OUTCOME_NOT_FINAL")
+        if not any(event.get("event_type") == "MENTOR_FEEDBACK_RECORDED" for event in events):
+            raise ValueError("TRAINING_ROUND_MENTOR_REVIEW_MISSING")
+        ids_by_round.setdefault(number, []).append((target_time, item["experience_id"]))
+
+    ordered_ids: list[str] = []
+    latest_round_anchor = None
+    for number in range(1, through_round + 1):
+        rows = sorted(ids_by_round.get(number, []))
+        if len(rows) != MIN_BASELINE_SAMPLES or len({timestamp for timestamp, _ in rows}) != MIN_BASELINE_SAMPLES:
+            raise ValueError("TRAINING_REQUIRES_100_REVIEWED_BOT_ONLY_SAMPLES_PER_ROUND")
+        ordered_ids.extend(experience_id for _, experience_id in rows)
+        if number == through_round:
+            latest_round_anchor = rows[0][1]
+    if latest_round_anchor is None:
+        raise ValueError("TRAINING_ANCHOR_NOT_FOUND")
+    return _train_and_store_candidate(
+        memory,
+        ordered_ids,
+        trained_through_round=through_round,
+        anchor_experience_id=latest_round_anchor,
+    )
 
 
 
@@ -344,7 +431,7 @@ def load_candidate_artifact(
     candidates = (
         [memory.get_experience(anchor_experience_id)]
         if anchor_experience_id
-        else memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
+        else memory.recent_experiences(limit=1200, challenge_id=CHALLENGE_ID)
     )
     for item in candidates:
         if item.get("verification", {}).get("status") != "PASS":
@@ -366,8 +453,12 @@ def load_candidate_artifact(
                     or (expected_sha256 is not None and saved_sha != expected_sha256)
                     or artifact.get("schema") != "CSR_CH01_SOFTMAX_CANDIDATE_V1"
                     or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
-                    or artifact.get("training", {}).get("samples") != 80
-                    or artifact.get("temporal_validation", {}).get("samples") != 20
+                    or artifact.get("training", {}).get("samples", 0) < 60
+                    or artifact.get("temporal_validation", {}).get("samples", 0) < 20
+                    or artifact.get("training", {}).get("total_samples")
+                    != artifact.get("training", {}).get("samples", 0)
+                    + artifact.get("temporal_validation", {}).get("samples", 0)
+                    or not isinstance(artifact.get("trained_through_round"), int)
                 ):
                     continue
                 artifact["artifact_sha256"] = saved_sha
@@ -551,4 +642,4 @@ def review_locked_baseline(
                 pass
 
 
-__all__ = ["review_baseline", "review_locked_baseline", "load_candidate_artifact", "predict_candidate", "MENTOR_VERSION"]
+__all__ = ["review_baseline", "review_locked_baseline", "load_candidate_artifact", "predict_candidate", "train_candidate_from_completed_rounds", "MENTOR_VERSION"]
