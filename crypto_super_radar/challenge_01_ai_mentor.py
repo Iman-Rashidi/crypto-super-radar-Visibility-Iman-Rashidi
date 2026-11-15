@@ -296,26 +296,28 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
     ):
         patterns.append("SPINNING_TOP")
 
-    # Two-candle patterns on the last two completed candles.
-    a_low, a_high = min(a["open"], a["close"]), max(a["open"], a["close"])
-    b_low, b_high = min(b["open"], b["close"]), max(b["open"], b["close"])
-    if a["direction"] < 0 < b["direction"] and b_low <= a_low and b_high >= a_high:
+    # Two-candle patterns use the final two bars (b, c), not the
+    # first two bars of the three-candle feature window.
+    prev, last = b, c
+    prev_low, prev_high = min(prev["open"], prev["close"]), max(prev["open"], prev["close"])
+    last_low, last_high = min(last["open"], last["close"]), max(last["open"], last["close"])
+    if prev["direction"] < 0 < last["direction"] and last_low <= prev_low and last_high >= prev_high:
         patterns.append("BULLISH_ENGULFING")
-    if a["direction"] > 0 > b["direction"] and b_low <= a_low and b_high >= a_high:
+    if prev["direction"] > 0 > last["direction"] and last_low <= prev_low and last_high >= prev_high:
         patterns.append("BEARISH_ENGULFING")
-    if a["direction"] < 0 and b["direction"] > 0 and b_low >= a_low and b_high <= a_high:
+    if prev["direction"] < 0 and last["direction"] > 0 and last_low >= prev_low and last_high <= prev_high:
         patterns.append("BULLISH_HARAMI")
-    if a["direction"] > 0 and b["direction"] < 0 and b_low >= a_low and b_high <= a_high:
+    if prev["direction"] > 0 and last["direction"] < 0 and last_low >= prev_low and last_high <= prev_high:
         patterns.append("BEARISH_HARAMI")
-    a_mid = (a_low + a_high) / 2.0
-    if a["direction"] < 0 < b["direction"] and b["open"] <= a["close"] and b["close"] > a_mid and b["close"] < a["open"]:
+    prev_mid = (prev_low + prev_high) / 2.0
+    if prev["direction"] < 0 < last["direction"] and last["open"] <= prev["close"] and last["close"] > prev_mid and last["close"] < prev["open"]:
         patterns.append("PIERCING_LINE")
-    if a["direction"] > 0 > b["direction"] and b["open"] >= a["close"] and b["close"] < a_mid and b["close"] > a["open"]:
+    if prev["direction"] > 0 > last["direction"] and last["open"] >= prev["close"] and last["close"] < prev_mid and last["close"] > prev["open"]:
         patterns.append("DARK_CLOUD_COVER")
-    tweezer_tolerance = max((a["high"] + b["high"] + a["low"] + b["low"]) / 4.0 * 0.001, eps)
-    if a["direction"] < 0 < b["direction"] and abs(a["low"] - b["low"]) <= tweezer_tolerance:
+    tweezer_tolerance = max((prev["high"] + last["high"] + prev["low"] + last["low"]) / 4.0 * 0.001, eps)
+    if prev["direction"] < 0 < last["direction"] and abs(prev["low"] - last["low"]) <= tweezer_tolerance:
         patterns.append("TWEEZER_BOTTOM")
-    if a["direction"] > 0 > b["direction"] and abs(a["high"] - b["high"]) <= tweezer_tolerance:
+    if prev["direction"] > 0 > last["direction"] and abs(prev["high"] - last["high"]) <= tweezer_tolerance:
         patterns.append("TWEEZER_TOP")
 
     # Three-candle reversals/continuations. Crypto is a 24/7 market, so these
