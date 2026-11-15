@@ -95,8 +95,8 @@ def build_easy_trader_features(
     """Construct only the Easy Trader's permitted flow/candle feature vector."""
     if frame is None or getattr(frame, "empty", True):
         raise ValueError("completed candle frame is unavailable")
-    if side not in {"BUY", "SELL"}:
-        raise ValueError("side must be BUY or SELL")
+    if side not in {"BUY", "SELL", "WAIT"}:
+        raise ValueError("side must be BUY, SELL or WAIT")
     flow = market_flow if isinstance(market_flow, Mapping) else {}
     pressure = flow.get("pressure") if isinstance(flow.get("pressure"), Mapping) else {}
     aggressor = flow.get("aggressor_flow") if isinstance(flow.get("aggressor_flow"), Mapping) else {}
@@ -142,7 +142,7 @@ def build_easy_trader_features(
     score_scaled = _clamp((score or 0.0) / 30.0, -1.0, 1.0)
 
     return {
-        "side_sign": 1.0 if side == "BUY" else -1.0,
+        "side_sign": 1.0 if side == "BUY" else -1.0 if side == "SELL" else 0.0,
         "candle_pressure": _clamp((buy_pct - 50.0) / 50.0, -1.0, 1.0),
         "aggressor_delta_ratio": delta_ratio,
         "depth_imbalance": _clamp(imbalance / 100.0, -1.0, 1.0),
@@ -597,7 +597,10 @@ class EasyTraderLearningMemory:
         safe_code = str(code or "UNKNOWN_ERROR")[:80]
         safe_detail = str(detail or "")[:240]
         with self.lock:
-            self._event("LEARNING_ERROR", {"code": safe_code, "detail": safe_detail})
+            self._event("LEARNING_ERROR", {
+                "symbol": market, "interval": timeframe,
+                "code": safe_code, "detail": safe_detail,
+            })
             recent = self.db.execute("""
                 SELECT event_time_ms,payload_json FROM easy_learning_events
                 WHERE event_type='LEARNING_ERROR'
@@ -631,9 +634,8 @@ class EasyTraderLearningMemory:
             self.db.commit()
         return {"control_level": new_level, "repetitions_last_hour": repeated, "phase": phase}
 
-    @staticmethod
-    def _phase_for(market: str, interval: str, control_level: int) -> str:
-        return "OBSERVE"
+    def _phase_for(self, market: str, interval: str, control_level: int) -> str:
+        return self._derive_phase(market, interval, control_level)
 
     def _labelled_dataset(self, symbol: str, interval: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
         rows = self.db.execute("""
@@ -935,12 +937,20 @@ class EasyTraderLearningMemory:
             "paper_learning_eligible": eligible,
             "demo_or_live_orders_enabled": False,
             "ai_dependency": "NONE",
-            "storage_backend": "CONFIGURED_SQLITE_COMPATIBLE",
+            "storage_backend": self._storage_backend(),
             "note_fa": (
                 "حافظه و آموزش مستقل از Nemotron است. در فاز یادگیری هیچ سفارش صرافی ارسال نمی‌شود. "
                 "آمادگی Demo به معنی مجوز اجرای خودکار یا معامله Live نیست."
             ),
         }
+
+    @staticmethod
+    def _storage_backend() -> str:
+        try:
+            from .database import storage_backend
+            return storage_backend()
+        except Exception:
+            return "UNKNOWN"
 
     def close(self) -> None:
         close = getattr(self.db, "close", None)
