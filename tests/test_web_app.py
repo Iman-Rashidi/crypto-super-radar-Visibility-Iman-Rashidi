@@ -1096,6 +1096,7 @@ class WebAppHttpTests(unittest.TestCase):
                     "read_errors": [],
                 }),
                 patch.object(web_app.time, "sleep", side_effect=stop_after_second_cycle_sleep),
+                patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
                 with self.assertRaises(StopAfterTwoCycles):
                     web_app._blofin_demo_autopilot_worker()
