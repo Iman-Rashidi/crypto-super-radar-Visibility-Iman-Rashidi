@@ -4315,6 +4315,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = _blofin_demo_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/blofin/demo/smoke-test-readiness":
+            payload = _blofin_demo_smoke_test_readiness()
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/execution-readiness":
             payload = _blofin_demo_execution_readiness()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -6621,7 +6625,7 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -6635,6 +6639,60 @@ async function loadBlofinInstruments(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/blofin/demo/smoke-test":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({
+                        "status": "UNAUTHORIZED", "message_fa": "توکن پنل معتبر نیست."
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                readiness = _blofin_demo_smoke_test_readiness()
+                if readiness.get("status") != "READY":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
+                        "readiness": readiness,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with BLOFIN_EXECUTION_GUARD:
+                    with LOCK:
+                        active = any(
+                            item.get("status") in {"queued", "running"}
+                            for item in BLOFIN_EXECUTION_JOBS.values()
+                        )
+                    if active:
+                        return self._send(409, json.dumps({
+                            "status": "ALREADY_RUNNING",
+                            "message_fa": "یک چرخه اجرای Demo هم‌اکنون در حال اجراست."
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    job_id = uuid.uuid4().hex
+                    _set_blofin_execution_job(
+                        job_id, "queued", stage="QUEUED",
+                        message_fa="تست ربات در محیط دمو صرافی در صف اجرای مستقل قرار گرفت؛ هنوز سفارشی ارسال نشده است.",
+                        test_name="تست ربات در محیط دمو صرافی",
+                    )
+                    worker = threading.Thread(
+                        target=_run_blofin_demo_smoke_test_job,
+                        args=(job_id,), daemon=True, name="blofin-demo-smoke-test",
+                    )
+                    try:
+                        worker.start()
+                    except Exception:
+                        _set_blofin_execution_job(
+                            job_id, "failed", stage="WORKER_START_FAILED",
+                            message_fa="کارگر تست مستقل شروع نشد.",
+                        )
+                        return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "QUEUED", "job_id": job_id,
+                    "message_fa": "تست مستقل ربات در BloFin Demo آغاز شد.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
             if route == "/api/blofin/demo/execute-once":
                 if (
                     not origin
