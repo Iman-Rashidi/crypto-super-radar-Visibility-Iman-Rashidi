@@ -211,6 +211,17 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
         self.assertEqual(status["next_stage"], "FORWARD_HOLDOUT_VALIDATION_REQUIRED")
         self.assertTrue(status["completed_rounds"][1]["round_ready"])
         self.assertEqual(status["completed_rounds"][1]["paired_samples"], 100)
+        self.assertEqual(result["next_model_candidate"]["trained_through_round"], 2)
+        self.assertEqual(status["candidate_model_through_round"], 2)
+        self.assertTrue(status["candidate_model_ready"])
+        self.assertEqual(
+            status["candidate_model_sha256"],
+            result["next_model_candidate"]["artifact_sha256"],
+        )
+        self.assertNotEqual(
+            result["model_artifact_sha256"],
+            result["next_model_candidate"]["artifact_sha256"],
+        )
         self.assertFalse(status["later_rounds_blocked"])
     
     def test_round_two_blocks_without_100_verified_prior_round_targets(self):
