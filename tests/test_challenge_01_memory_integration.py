@@ -74,9 +74,12 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(result["memory_records_verified"], 100)
         self.assertEqual(result["memory_integrity"], "PASS")
         self.assertEqual(result["memory_backend"], "TEST_SQLITE_FILE")
-        self.assertEqual(result["rule_reference_agreement"], 1.0)
-        self.assertEqual(result["decision_correctness"], "UNKNOWN")
-        self.assertNotIn("classification_accuracy", result)
+        self.assertEqual(result["balanced_accuracy"], 1.0)
+        self.assertEqual(result["macro_f1"], 1.0)
+        self.assertEqual(result["signal_precision"], 1.0)
+        self.assertEqual(result["metrics_scope"], "CLOSED_CANDLE_OHLC_CLASSIFICATION_ONLY_NOT_FORWARD_PREDICTION_OR_PNL")
+        self.assertEqual(result["next_stage"], "AI_MENTOR_REQUIRED")
+        self.assertTrue(result["baseline_locked"])
         self.assertFalse(result["orders_submitted"])
 
         db = self.connection_factory()
@@ -85,8 +88,9 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
             saved = memory.get_experience(result["first_experience_id"])
             decision = next(event for event in saved["events"] if event["event_type"] == "DECISION_RECORDED")
             outcome = next(event for event in saved["events"] if event["event_type"] == "OUTCOME_LABELLED")
-            self.assertEqual(decision["payload"]["decision"]["action"], "OBSERVE_ONLY")
-            self.assertEqual(outcome["payload"]["decision_correctness"], "UNKNOWN")
+            self.assertEqual(decision["payload"]["decision"]["action"], "BUY_CANDIDATE")
+            self.assertEqual(decision["payload"]["decision"]["confidence_scope"], "DETERMINISTIC_CLOSED_CANDLE_CLASSIFICATION_NOT_MARKET_FORECAST")
+            self.assertEqual(outcome["payload"]["decision_correctness"], "CORRECT")
             self.assertEqual(outcome["payload"]["realized_result"], "NOT_EXECUTED")
             self.assertEqual(
                 outcome["payload"]["evidence"]["comparison"],
@@ -120,6 +124,30 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(status["memory_backend"], "TEST_SQLITE_FILE")
         self.assertIsNone(status["next_round"])
         self.assertFalse(status["orders_submitted"])
+
+    def test_baseline_locks_stage_and_later_bot_only_rounds_are_blocked(self):
+        runner = self.runner()
+        baseline = runner.run_bot_only_round(round_number=1, sample_count=100)
+        self.assertEqual(baseline["status"], "BASELINE_RECORDED")
+
+        status = get_challenge_01_status(
+            connection_factory=self.connection_factory,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            allow_non_durable_for_tests=True,
+        )
+        self.assertEqual(status["status"], "PASS")
+        self.assertTrue(status["baseline_locked"])
+        self.assertEqual(status["baseline_samples"], 100)
+        self.assertIsNone(status["next_round"])
+        self.assertEqual(status["next_stage"], "AI_MENTOR_REQUIRED")
+        self.assertTrue(status["later_rounds_blocked"])
+
+        calls_before = len(runner.client.calls)
+        blocked = runner.run_bot_only_round(round_number=2, sample_count=100)
+        self.assertEqual(blocked["status"], "BLOCKED")
+        self.assertEqual(blocked["reason_code"], "AI_MENTOR_PHASE_REQUIRED")
+        self.assertEqual(len(runner.client.calls), calls_before)
+        self.assertFalse(blocked["orders_submitted"])
 
     def test_open_latest_candle_is_excluded_and_completed_candles_are_used(self):
         rows = [candle(self.now_ms - 5 * 60 * 1000, "100", "106", "99", "105", "0")] + self.rows
