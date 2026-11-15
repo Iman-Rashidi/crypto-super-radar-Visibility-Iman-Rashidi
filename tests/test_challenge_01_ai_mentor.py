@@ -112,7 +112,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         for index in range(100):
             self.add_baseline(index)
         result = review_locked_baseline(
-            connection_factory=lambda: self.db,
+            connection_factory=self.new_connection,
             backend_factory=lambda: "TEST_SQLITE_FILE",
             allow_non_durable_for_tests=True,
         )
