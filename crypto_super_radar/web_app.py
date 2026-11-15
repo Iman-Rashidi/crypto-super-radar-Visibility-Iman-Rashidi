@@ -82,7 +82,79 @@ BLOFIN_AUTOPILOT_STATE = {
     "last_message_fa": "اتوپایلوت هنوز فعال نشده است.",
     "last_result_status": None,
     "cycles_started": 0,
+    "persistence_status": "NOT_INITIALIZED",
+    "restored_from_storage": False,
 }
+
+def _persist_blofin_autopilot_state() -> bool:
+    """Persist the operational snapshot only when durable Turso storage is configured."""
+    store = None
+    try:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise RuntimeError("Durable Turso storage is not configured.")
+        store = BloFinDemoEventStore()
+        with LOCK:
+            snapshot = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
+        snapshot["persistence_status"] = "DURABLE"
+        store.save_autopilot_state(snapshot)
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE["persistence_status"] = "DURABLE"
+            BLOFIN_AUTOPILOT_STATE.pop("persistence_error_type", None)
+        return True
+    except Exception as exc:
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE["persistence_status"] = "UNAVAILABLE"
+            BLOFIN_AUTOPILOT_STATE["persistence_error_type"] = type(exc).__name__
+        return False
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
+def _restore_blofin_autopilot_state() -> bool:
+    """Restore the last durable operational snapshot without claiming a worker is running."""
+    store = None
+    try:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise RuntimeError("Durable Turso storage is not configured.")
+        store = BloFinDemoEventStore()
+        saved = store.load_autopilot_state()
+        with LOCK:
+            if isinstance(saved, dict):
+                previous_enabled = bool(saved.get("enabled"))
+                previous_status = str(saved.get("status") or "UNKNOWN")
+                BLOFIN_AUTOPILOT_STATE.update(saved)
+                BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                BLOFIN_AUTOPILOT_STATE["persistence_status"] = "DURABLE"
+                BLOFIN_AUTOPILOT_STATE["restored_from_storage"] = True
+                if previous_enabled and previous_status not in {"DISABLED", "ERROR"}:
+                    BLOFIN_AUTOPILOT_STATE["status"] = "RECOVERED"
+                    BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                        "آخرین وضعیت پایدار بازیابی شد؛ اجرای چرخه جدید فقط با فعال‌بودن تنظیم Demo آغاز می‌شود."
+                    )
+                snapshot = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
+            else:
+                BLOFIN_AUTOPILOT_STATE["persistence_status"] = "DURABLE"
+                BLOFIN_AUTOPILOT_STATE["restored_from_storage"] = False
+                snapshot = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
+        snapshot["persistence_status"] = "DURABLE"
+        store.save_autopilot_state(snapshot)
+        return True
+    except Exception as exc:
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE["persistence_status"] = "UNAVAILABLE"
+            BLOFIN_AUTOPILOT_STATE["persistence_error_type"] = type(exc).__name__
+        return False
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
 
 AI_DIAGNOSTIC_LOCK = threading.Lock()
 AI_DIAGNOSTIC_STATE = {"day": "", "count": 0, "last_started": 0.0}
@@ -7109,6 +7181,7 @@ def _blofin_demo_autopilot_worker() -> None:
             "execution_profile": execution_profile,
             "last_message_fa": "اتوپایلوت Demo فعال شد؛ چرخهٔ اول در حال آماده‌سازی است.",
         })
+    _persist_blofin_autopilot_state()
     while True:
         if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
             with LOCK:
@@ -7116,6 +7189,7 @@ def _blofin_demo_autopilot_worker() -> None:
                     "enabled": False, "status": "DISABLED",
                     "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
                 })
+            _persist_blofin_autopilot_state()
             time.sleep(30)
             continue
         if not BLOFIN_AUTOPILOT_LOCK.acquire(blocking=False):
@@ -7128,6 +7202,7 @@ def _blofin_demo_autopilot_worker() -> None:
                         "status": "WAITING_FOR_SCAN_QUEUE",
                         "last_message_fa": "اسکن دیگری در حال اجراست؛ برای جلوگیری از تداخل، چرخه Demo به تعویق افتاد.",
                     })
+                _persist_blofin_autopilot_state()
                 time.sleep(30)
                 continue
             job_id = uuid.uuid4().hex
@@ -7143,6 +7218,7 @@ def _blofin_demo_autopilot_worker() -> None:
                     "last_message_fa": f"چرخه خودکار {instrument_id} با ربات {execution_profile} آغاز شد.",
                     "cycles_started": int(BLOFIN_AUTOPILOT_STATE.get("cycles_started") or 0) + 1,
                 })
+            _persist_blofin_autopilot_state()
             _set_blofin_execution_job(
                 job_id, "queued", stage="AUTOPILOT_CYCLE",
                 message_fa=f"چرخه خودکار {instrument_id} / {execution_profile} توسط زمان‌بند Demo آغاز شد.",
@@ -7266,6 +7342,7 @@ def _blofin_demo_autopilot_worker() -> None:
                         **exchange_monitor,
                     },
                 })
+            _persist_blofin_autopilot_state()
         except Exception as exc:
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
@@ -7273,20 +7350,23 @@ def _blofin_demo_autopilot_worker() -> None:
                     "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
                     "last_message_fa": "چرخه خودکار با خطای کنترل‌شده متوقف شد: " + type(exc).__name__,
                 })
+            _persist_blofin_autopilot_state()
         finally:
             BLOFIN_AUTOPILOT_LOCK.release()
         time.sleep(interval_seconds)
 
 
 def _start_blofin_demo_autopilot() -> None:
-    """Start at most one automatic Demo loop per web-service process."""
+    """Restore operational state, then start at most one Demo loop per process."""
     global BLOFIN_AUTOPILOT_THREAD
+    _restore_blofin_autopilot_state()
     if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
                 "enabled": False, "status": "DISABLED",
                 "last_message_fa": "BLOFIN_DEMO_AUTOPILOT_ENABLED فعال نیست.",
             })
+        _persist_blofin_autopilot_state()
         return
     with BLOFIN_AUTOPILOT_START_LOCK:
         if BLOFIN_AUTOPILOT_THREAD is not None and BLOFIN_AUTOPILOT_THREAD.is_alive():
