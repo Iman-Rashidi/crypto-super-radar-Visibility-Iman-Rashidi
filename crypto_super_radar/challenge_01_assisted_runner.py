@@ -1,0 +1,380 @@
+"""Challenge 1 forward-only Mentor-assisted holdout rounds.
+
+This runner is read-only with respect to BloFin: it fetches Demo Spot candles via
+GET only, records paired BOT_ONLY and BOT_WITH_AI_MENTOR classifications, and
+never places an order. Candidate models stay unpromoted.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any, Callable
+
+from .blofin_demo_spot_readonly import BloFinDemoSpotReadOnly
+from .challenge_01_ai_mentor import (
+    load_candidate_artifact,
+    predict_candidate,
+    review_baseline,
+)
+from .challenge_01_runner import (
+    BAR_MILLISECONDS,
+    CHALLENGE_ID,
+    ENGINE_ID,
+    MAX_ROUNDS,
+    MIN_SAMPLES_PER_ROUND,
+    SYMBOL,
+    TIMEFRAME,
+    Challenge01DataError,
+    _classification_metrics,
+    _classify_bot,
+    _parse_candle,
+    _reference_label,
+)
+from .database import connect_database, storage_backend
+from .learning_experience_memory import LearningExperienceMemory
+
+
+class Challenge01AssistedRunner:
+    """Run one later, non-overlapping 100-pair forward holdout block."""
+
+    def __init__(
+        self,
+        *,
+        client: Any = None,
+        connection_factory: Callable[[], Any] = connect_database,
+        backend_factory: Callable[[], str] = storage_backend,
+        allow_non_durable_for_tests: bool = False,
+    ):
+        self.client = client or BloFinDemoSpotReadOnly()
+        self.connection_factory = connection_factory
+        self.backend_factory = backend_factory
+        self.allow_non_durable_for_tests = bool(allow_non_durable_for_tests)
+
+    @staticmethod
+    def _decision_and_outcome(item: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        events = item.get("events") or []
+        decision = next((e for e in events if e.get("event_type") == "DECISION_RECORDED"), None)
+        outcome = next((e for e in events if e.get("event_type") == "OUTCOME_LABELLED"), None)
+        if decision is None or outcome is None:
+            raise Challenge01DataError("PRIOR_ROUND_DECISION_OR_OUTCOME_MISSING")
+        return decision, outcome
+
+    def _previous_round_seed(
+        self, memory: LearningExperienceMemory, previous_round: int,
+    ) -> tuple[dict[str, Any], int, str | None, str | None]:
+        experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
+        by_target: dict[int, dict[str, Any]] = {}
+        modes_by_target: dict[int, set[str]] = {}
+        for item in experiences:
+            decision_event = next(
+                (e for e in item.get("events", []) if e.get("event_type") == "DECISION_RECORDED"),
+                None,
+            )
+            if decision_event is None:
+                continue
+            snapshot = (decision_event.get("payload") or {}).get("input_snapshot") or {}
+            if snapshot.get("round_number") != previous_round:
+                continue
+            target_time = snapshot.get("target_candle_open_time_ms")
+            if not isinstance(target_time, int):
+                target_time = snapshot.get("candle_open_time_ms")
+            if not isinstance(target_time, int):
+                continue
+            decision, outcome = self._decision_and_outcome(item)
+            if item.get("verification", {}).get("status") != "PASS":
+                raise Challenge01DataError("PRIOR_ROUND_MEMORY_INTEGRITY_FAILED")
+            evidence = (outcome.get("payload") or {}).get("evidence") or {}
+            target = evidence.get("target_candle")
+            if not isinstance(target, dict) or target.get("open_time_ms") != target_time:
+                raise Challenge01DataError("PRIOR_ROUND_TARGET_EVIDENCE_MISMATCH")
+            if target.get("confirmed") is not True:
+                raise Challenge01DataError("PRIOR_ROUND_TARGET_NOT_COMPLETED")
+            by_target[target_time] = target
+            modes_by_target.setdefault(target_time, set()).add(item.get("decision_mode", ""))
+
+        if len(by_target) != MIN_SAMPLES_PER_ROUND:
+            raise Challenge01DataError("PRIOR_ROUND_MUST_HAVE_100_DISTINCT_TARGETS")
+        if previous_round >= 2 and any(
+            not {"BOT_ONLY", "BOT_WITH_AI_MENTOR"}.issubset(modes_by_target.get(ts, set()))
+            for ts in by_target
+        ):
+            raise Challenge01DataError("PRIOR_ROUND_PAIRED_DECISIONS_INCOMPLETE")
+
+        last_target_time = max(by_target)
+        last_target = by_target[last_target_time]
+        if any(
+            next_time - current_time != BAR_MILLISECONDS
+            for current_time, next_time in zip(sorted(by_target), sorted(by_target)[1:])
+        ):
+            raise Challenge01DataError("PRIOR_ROUND_TARGETS_NOT_CONTIGUOUS")
+
+        candidate_anchor = None
+        candidate_hash = None
+        if previous_round >= 2:
+            for item in experiences:
+                if item.get("decision_mode") != "BOT_WITH_AI_MENTOR":
+                    continue
+                decision_event = next(
+                    (e for e in item.get("events", []) if e.get("event_type") == "DECISION_RECORDED"),
+                    None,
+                )
+                if decision_event is None:
+                    continue
+                snapshot = (decision_event.get("payload") or {}).get("input_snapshot") or {}
+                if snapshot.get("round_number") == previous_round:
+                    candidate_anchor = snapshot.get("mentor_model_anchor_experience_id")
+                    candidate_hash = snapshot.get("mentor_model_artifact_sha256")
+                    if candidate_anchor and candidate_hash:
+                        break
+        return last_target, last_target_time, candidate_anchor, candidate_hash
+
+    def run_round(self, *, round_number: int, sample_count: int = 100) -> dict[str, Any]:
+        if isinstance(round_number, bool) or not isinstance(round_number, int) or not 2 <= round_number <= MAX_ROUNDS:
+            raise ValueError("assisted round_number must be between 2 and 5")
+        if isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count != MIN_SAMPLES_PER_ROUND:
+            raise ValueError("Challenge 1 assisted rounds require exactly 100 samples")
+
+        backend = self.backend_factory()
+        if backend != "TURSO_CLOUD_SQLITE" and not self.allow_non_durable_for_tests:
+            return {
+                "status": "BLOCKED",
+                "reason_code": "DURABLE_LEARNING_MEMORY_REQUIRED",
+                "memory_backend": backend,
+                "orders_submitted": False,
+            }
+
+        connection = self.connection_factory()
+        baseline_ids: list[str] = []
+        assisted_ids: list[str] = []
+        bot_predictions: list[str] = []
+        mentor_predictions: list[str] = []
+        references: list[str] = []
+        inserted_count = 0
+        try:
+            memory = LearningExperienceMemory(connection)
+            previous_seed, previous_target_time, anchor_id, expected_hash = self._previous_round_seed(
+                memory, round_number - 1,
+            )
+            artifact, model_anchor = load_candidate_artifact(
+                memory,
+                anchor_experience_id=anchor_id,
+                expected_sha256=expected_hash,
+            )
+            before_time = previous_target_time
+            rows = self.client.get_candles(
+                SYMBOL, bar=TIMEFRAME, limit=min(sample_count + 10, 1440),
+                before=before_time,
+            )
+            if not isinstance(rows, list) or not rows:
+                raise Challenge01DataError("EMPTY_FORWARD_HOLDOUT_RESPONSE")
+            parsed = [_parse_candle(row) for row in rows]
+            times = [row["open_time_ms"] for row in parsed]
+            if len(set(times)) != len(times):
+                raise Challenge01DataError("DUPLICATE_FORWARD_HOLDOUT_TIMESTAMP")
+            if any(times[index] <= times[index + 1] for index in range(len(times) - 1)):
+                raise Challenge01DataError("FORWARD_HOLDOUT_ORDER_NOT_NEWEST_FIRST")
+            if any(timestamp <= before_time for timestamp in times):
+                raise Challenge01DataError("FORWARD_HOLDOUT_NOT_AFTER_PRIOR_ROUND")
+            completed = [row for row in parsed if row["confirmed"]]
+            if len(completed) < sample_count:
+                raise Challenge01DataError("INSUFFICIENT_NEW_COMPLETED_HOLDOUT_CANDLES")
+            targets = list(reversed(completed[-sample_count:]))
+            for index, target in enumerate(targets):
+                expected_time = before_time + (index + 1) * BAR_MILLISECONDS
+                if target["open_time_ms"] != expected_time:
+                    raise Challenge01DataError("FORWARD_HOLDOUT_HAS_GAP_OR_OVERLAP")
+
+            feature = previous_seed
+            model_predictions_hash = hashlib.sha256()
+            with connection:
+                for target in targets:
+                    feature_time = feature["open_time_ms"]
+                    target_time = target["open_time_ms"]
+                    if target_time - feature_time != BAR_MILLISECONDS:
+                        raise Challenge01DataError("FEATURE_TARGET_NOT_ONE_BAR_APART")
+                    cycle_id = f"CH01-R{round_number:02d}:{SYMBOL}:{TIMEFRAME}:{target_time}"
+                    suffix = f"ch01-r{round_number:02d}-btc-usdt-1h-{target_time}"
+                    baseline_id = suffix
+                    assisted_id = suffix + "-mentor"
+                    bot_prediction, bot_action = _classify_bot(feature)
+                    mentor_prediction, probabilities = predict_candidate(feature, artifact)
+                    actual = _reference_label(target)
+                    bot_predictions.append(bot_prediction)
+                    mentor_predictions.append(mentor_prediction)
+                    references.append(actual)
+
+                    base_decision = memory.record_decision(
+                        experience_id=baseline_id,
+                        event_id=f"{baseline_id}:decision",
+                        engine_id=ENGINE_ID,
+                        challenge_id=CHALLENGE_ID,
+                        cycle_id=cycle_id,
+                        decision_mode="BOT_ONLY",
+                        environment="BLOFIN_DEMO",
+                        market="SPOT",
+                        symbol=SYMBOL,
+                        timeframe=TIMEFRAME,
+                        model_version="ch01-momentum-baseline-v2",
+                        dataset_version=f"CH01-R{round_number:02d}-FORWARD-HOLDOUT",
+                        decision={
+                            "candle_classification": bot_prediction,
+                            "action": bot_action,
+                            "rule": "previous_candle_body_direction",
+                            "prediction_horizon_bars": 1,
+                            "confidence": None,
+                            "confidence_scope": "UNSCORED_BASELINE_RULE_NOT_CALIBRATED_PROBABILITY",
+                        },
+                        input_snapshot={
+                            "source": "blofin_demo_spot_public_candles",
+                            "round_number": round_number,
+                            "candle_open_time_ms": target_time,
+                            "feature_candle_open_time_ms": feature_time,
+                            "target_candle_open_time_ms": target_time,
+                            "feature_candle": feature,
+                            "prediction_horizon_bars": 1,
+                            "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
+                            "target_candle_in_input": False,
+                        },
+                    )
+                    memory.record_outcome(
+                        experience_id=baseline_id,
+                        event_id=f"{baseline_id}:outcome",
+                        decision_correctness="CORRECT" if bot_prediction == actual else "INCORRECT",
+                        realized_result="NOT_EXECUTED",
+                        realized_net_pnl=None,
+                        final=True,
+                        evidence={
+                            "source": "blofin_demo_spot_next_completed_candle",
+                            "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
+                            "feature_candle_open_time_ms": feature_time,
+                            "target_candle_open_time_ms": target_time,
+                            "target_candle": target,
+                            "reference_classification": actual,
+                            "prediction_horizon_bars": 1,
+                            "no_future_data_used_in_input": True,
+                            "orders_submitted": False,
+                        },
+                    )
+                    review_baseline(memory, baseline_id)
+                    assisted_decision = memory.record_decision(
+                        experience_id=assisted_id,
+                        event_id=f"{assisted_id}:decision",
+                        engine_id=ENGINE_ID,
+                        challenge_id=CHALLENGE_ID,
+                        cycle_id=cycle_id,
+                        decision_mode="BOT_WITH_AI_MENTOR",
+                        environment="BLOFIN_DEMO",
+                        market="SPOT",
+                        symbol=SYMBOL,
+                        timeframe=TIMEFRAME,
+                        baseline_experience_id=baseline_id,
+                        model_version=artifact["model_version"],
+                        dataset_version=f"CH01-R{round_number:02d}-FORWARD-HOLDOUT",
+                        decision={
+                            "candle_classification": mentor_prediction,
+                            "action": "PREDICT_NEXT_" + mentor_prediction.removesuffix("_CANDLE"),
+                            "probabilities": {
+                                label: round(float(probability), 8)
+                                for label, probability in zip(artifact["classes"], probabilities)
+                            },
+                            "rule": "MENTOR_SOFTMAX_CANDIDATE",
+                            "prediction_horizon_bars": 1,
+                            "confidence_scope": "MODEL_SCORE_NOT_CALIBRATED_PROBABILITY",
+                            "model_artifact_sha256": artifact["artifact_sha256"],
+                            "paired_bot_only_prediction": bot_prediction,
+                        },
+                        input_snapshot={
+                            "source": "blofin_demo_spot_public_candles",
+                            "round_number": round_number,
+                            "candle_open_time_ms": target_time,
+                            "feature_candle_open_time_ms": feature_time,
+                            "target_candle_open_time_ms": target_time,
+                            "feature_candle": feature,
+                            "prediction_horizon_bars": 1,
+                            "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
+                            "target_candle_in_input": False,
+                            "mentor_model_anchor_experience_id": model_anchor,
+                            "mentor_model_artifact_sha256": artifact["artifact_sha256"],
+                        },
+                    )
+                    memory.record_outcome(
+                        experience_id=assisted_id,
+                        event_id=f"{assisted_id}:outcome",
+                        decision_correctness="CORRECT" if mentor_prediction == actual else "INCORRECT",
+                        realized_result="NOT_EXECUTED",
+                        realized_net_pnl=None,
+                        final=True,
+                        evidence={
+                            "source": "blofin_demo_spot_next_completed_candle",
+                            "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
+                            "feature_candle_open_time_ms": feature_time,
+                            "target_candle_open_time_ms": target_time,
+                            "target_candle": target,
+                            "reference_classification": actual,
+                            "prediction_horizon_bars": 1,
+                            "no_future_data_used_in_input": True,
+                            "paired_bot_only_experience_id": baseline_id,
+                            "model_artifact_sha256": artifact["artifact_sha256"],
+                            "orders_submitted": False,
+                        },
+                    )
+                    baseline_ids.append(baseline_id)
+                    assisted_ids.append(assisted_id)
+                    inserted_count += int(bool(base_decision.get("inserted")))
+                    model_predictions_hash.update(f"{feature_time}:{mentor_prediction}:{target_time}:{actual}|".encode())
+                    feature = target
+
+            dataset_hash = model_predictions_hash.hexdigest()
+            connection.close()
+            connection = self.connection_factory()
+            recovered_memory = LearningExperienceMemory(connection)
+            verified = 0
+            for experience_id in baseline_ids + assisted_ids:
+                recovered = recovered_memory.get_experience(experience_id)
+                expected_status = "MENTOR_REVIEWED" if experience_id in baseline_ids else "OUTCOME_RECORDED"
+                if recovered["verification"]["status"] != "PASS" or recovered["learning_status"] != expected_status:
+                    raise RuntimeError("ASSISTED_ROUND_MEMORY_RECOVERY_FAILED")
+                verified += 1
+
+            bot_metrics = _classification_metrics(bot_predictions, references)
+            mentor_metrics = _classification_metrics(mentor_predictions, references)
+            return {
+                "status": "ROUND_RECORDED_NOT_MASTERY",
+                "round_number": round_number,
+                "sample_count": len(targets),
+                "decision_mode": "BOT_WITH_AI_MENTOR_PAIRED_WITH_BOT_ONLY",
+                "model_version": artifact["model_version"],
+                "model_artifact_sha256": artifact["artifact_sha256"],
+                "dataset_sha256": dataset_hash,
+                "bot_only_metrics": bot_metrics,
+                "mentor_metrics": mentor_metrics,
+                "balanced_accuracy_delta": round(
+                    mentor_metrics["balanced_accuracy"] - bot_metrics["balanced_accuracy"], 6,
+                ),
+                "memory_backend": backend,
+                "memory_records_verified": verified,
+                "memory_integrity": "PASS",
+                "round_status": "EVALUATED_NOT_MASTERY",
+                "mastery_awarded": False,
+                "orders_submitted": False,
+                "live_trading": False,
+            }
+        except Challenge01DataError as exc:
+            return {
+                "status": "BLOCKED",
+                "reason_code": str(exc),
+                "orders_submitted": False,
+                "mastery_awarded": False,
+            }
+        except Exception as exc:
+            return {
+                "status": "UNKNOWN",
+                "reason_code": f"{type(exc).__name__}:{str(exc)[:160]}",
+                "orders_submitted": False,
+                "mastery_awarded": False,
+            }
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
