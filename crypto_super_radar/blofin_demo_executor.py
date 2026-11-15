@@ -506,6 +506,13 @@ class BloFinDemoEventStore:
                 )
             """)
             self._db.execute("""
+                CREATE TABLE IF NOT EXISTS blofin_demo_autopilot_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            self._db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_blofin_demo_events_order
                 ON blofin_demo_execution_events(client_order_id, sequence)
             """)
@@ -609,6 +616,39 @@ class BloFinDemoEventStore:
                 "SELECT 1 FROM blofin_demo_orders LIMIT 1"
             ).fetchone()
         return row is not None
+
+    def save_autopilot_state(self, state: Mapping[str, Any]) -> None:
+        """Persist the latest operational AutoPilot snapshot in the configured durable store."""
+        if not isinstance(state, Mapping):
+            raise TypeError("AutoPilot state must be a mapping.")
+        state_json = json.dumps(
+            dict(state), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        now = int(time.time())
+        with self._lock, self._db:
+            self._db.execute(
+                """INSERT INTO blofin_demo_autopilot_state(state_key, state_json, updated_at)
+                VALUES ('default', ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    state_json=excluded.state_json,
+                    updated_at=excluded.updated_at""",
+                (state_json, now),
+            )
+
+    def load_autopilot_state(self) -> dict[str, Any] | None:
+        """Load the last operational AutoPilot snapshot, if one was saved."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT state_json FROM blofin_demo_autopilot_state WHERE state_key='default'"
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["state_json"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def has_signal(self, signal_id: str) -> bool:
         """Return whether this exact completed-candle signal has ever been reserved."""
