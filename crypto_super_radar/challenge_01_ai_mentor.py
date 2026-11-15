@@ -73,8 +73,13 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
         issues.append("This exercise must not be interpreted as a trade result.")
 
     finding_text = " ".join(issues) if issues else "Feature/target chronology and input isolation checks passed."
+    detected_patterns = snapshot.get("detected_candlestick_patterns") or []
+    pattern_text = ", ".join(detected_patterns) if detected_patterns else "NO_PATTERN_MATCH"
     feedback = (
-        "Baseline audit: " + finding_text + " The current BOT_ONLY baseline is a "
+        "Baseline audit: " + finding_text
+        + " Three-candle experience patterns detected: " + pattern_text + "."
+        + " Pattern names are transparent heuristic labels, not guaranteed signals."
+        + " The current BOT_ONLY baseline is a "
         "naive one-bar momentum rule: it copies the prior completed candle's body "
         "direction to predict the next completed candle. This is a genuine "
         "one-step-ahead historical classification test, but it is not a trained "
@@ -88,8 +93,10 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
         "Keep the BOT_ONLY baseline and outcomes immutable. Train a candidate "
         "model only from the frozen round-one feature/target pairs, record the "
         "model artifact hash and version, and compare it against BOT_ONLY on "
-        "strictly later non-overlapping samples. Do not reuse round-one targets "
-        "as a scored holdout and do not award mastery from baseline accuracy."
+        "strictly later non-overlapping samples. Keep each three-candle input "
+        "window separate from its next-candle target and record detected heuristic "
+        "pattern labels with their catalogue version. Do not reuse scored holdout "
+        "targets as training evidence and do not award mastery from baseline accuracy."
     )
     event_id = "ch01-mentor-" + hashlib.sha256(experience_id.encode("utf-8")).hexdigest()[:24]
     with memory._db:
@@ -157,6 +164,29 @@ MODEL_FEATURES = tuple(
     for position in range(1, FEATURE_WINDOW_LENGTH + 1)
     for feature in CANDLE_CONTINUOUS_FEATURES
 ) + PATTERN_FEATURES
+PATTERN_DEFINITIONS = {
+    "DOJI": "One completed candle with real body at most 10% of its high-low range.",
+    "HAMMER": "Long lower shadow at least 2x the body, short upper shadow, body near the high; heuristic reversal shape.",
+    "INVERTED_HAMMER": "Long upper shadow at least 2x the body with short lower shadow after two bearish feature candles.",
+    "SHOOTING_STAR": "Long upper shadow at least 2x the body with short lower shadow outside the prior two-bearish context.",
+    "HANGING_MAN": "Hammer-shaped long lower shadow after two bullish feature candles.",
+    "BULLISH_MARUBOZU": "Bullish real body at least 80% of the candle range.",
+    "BEARISH_MARUBOZU": "Bearish real body at least 80% of the candle range.",
+    "SPINNING_TOP": "Small real body at most 30% of range with meaningful upper and lower shadows.",
+    "BULLISH_ENGULFING": "Latest bullish real body fully covers the preceding bearish real body.",
+    "BEARISH_ENGULFING": "Latest bearish real body fully covers the preceding bullish real body.",
+    "BULLISH_HARAMI": "Latest bullish real body is contained within the preceding bearish real body.",
+    "BEARISH_HARAMI": "Latest bearish real body is contained within the preceding bullish real body.",
+    "PIERCING_LINE": "Latest bullish body closes above the midpoint of the preceding bearish body, without requiring a session gap.",
+    "DARK_CLOUD_COVER": "Latest bearish body closes below the midpoint of the preceding bullish body, without requiring a session gap.",
+    "MORNING_STAR": "Large bearish candle, small middle body, then strong bullish candle closing above the first body's midpoint.",
+    "EVENING_STAR": "Large bullish candle, small middle body, then strong bearish candle closing below the first body's midpoint.",
+    "THREE_WHITE_SOLDIERS": "Three bullish bodies with successively higher closes and opens inside the preceding real body.",
+    "THREE_BLACK_CROWS": "Three bearish bodies with successively lower closes and opens inside the preceding real body.",
+    "TWEEZER_BOTTOM": "Bearish then bullish candles with lows within 0.1% tolerance.",
+    "TWEEZER_TOP": "Bullish then bearish candles with highs within 0.1% tolerance.",
+}
+PATTERN_CATALOG_VERSION = "CSR_CANDLE_HEURISTICS_3BAR_V1"
 
 
 def _target_label(candle: dict[str, Any]) -> str:
@@ -417,6 +447,8 @@ def _train_candidate(
         "method": "MULTINOMIAL_LOGISTIC_REGRESSION_WITH_CANDLE_PATTERNS",
         "features": list(MODEL_FEATURES),
         "pattern_features": list(PATTERN_FEATURES),
+        "pattern_catalog": PATTERN_DEFINITIONS,
+        "pattern_catalog_version": PATTERN_CATALOG_VERSION,
         "feature_window_length": FEATURE_WINDOW_LENGTH,
         "classes": list(MODEL_CLASSES),
         "normalization": {"means": means, "standard_deviations": stds},
@@ -660,6 +692,8 @@ def load_candidate_artifact(
                     or artifact.get("feature_window_length") != FEATURE_WINDOW_LENGTH
                     or artifact.get("features") != list(MODEL_FEATURES)
                     or artifact.get("pattern_features") != list(PATTERN_FEATURES)
+                    or artifact.get("pattern_catalog") != PATTERN_DEFINITIONS
+                    or artifact.get("pattern_catalog_version") != PATTERN_CATALOG_VERSION
                     or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
                     or artifact.get("training", {}).get("samples", 0) < 60
                     or artifact.get("temporal_validation", {}).get("samples", 0) < 20
@@ -687,6 +721,8 @@ def predict_candidate(
         or artifact.get("features") != list(MODEL_FEATURES)
         or artifact.get("feature_window_length") != FEATURE_WINDOW_LENGTH
         or artifact.get("pattern_features") != list(PATTERN_FEATURES)
+        or artifact.get("pattern_catalog") != PATTERN_DEFINITIONS
+        or artifact.get("pattern_catalog_version") != PATTERN_CATALOG_VERSION
         or artifact.get("classes") != list(MODEL_CLASSES)
     ):
         raise ValueError("MENTOR_CANDIDATE_SCHEMA_OR_STATUS_INVALID")
