@@ -87,15 +87,15 @@ def _parse_candle(row: Any) -> dict[str, Any]:
     }
 
 
-def _classify_bot(candle: dict[str, Any]) -> tuple[str, str]:
-    """Classify a closed candle; the action is an educational label, never an order."""
-    opening = Decimal(candle["open"])
-    closing = Decimal(candle["close"])
+def _classify_bot(feature_candle: dict[str, Any]) -> tuple[str, str]:
+    """One-bar momentum baseline: prior candle body predicts the next candle class."""
+    opening = Decimal(feature_candle["open"])
+    closing = Decimal(feature_candle["close"])
     if closing > opening:
-        return "BULLISH_CANDLE", "BUY_CANDIDATE"
+        return "BULLISH_CANDLE", "PREDICT_NEXT_BULLISH"
     if closing < opening:
-        return "BEARISH_CANDLE", "NO_SIGNAL"
-    return "NEUTRAL_CANDLE", "NO_SIGNAL"
+        return "BEARISH_CANDLE", "PREDICT_NEXT_BEARISH"
+    return "NEUTRAL_CANDLE", "PREDICT_NEXT_NEUTRAL"
 
 
 def _classification_metrics(
@@ -144,7 +144,7 @@ def _classification_metrics(
         "signal_precision": round(signal_precision, 6) if signal_precision is not None else None,
         "per_class": per_class,
         "confusion_matrix": confusion,
-        "metric_scope": "CLOSED_CANDLE_OHLC_CLASSIFICATION_ONLY_NOT_FORWARD_PREDICTION_OR_PNL",
+        "metric_scope": "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD_HISTORICAL_REPLAY_NOT_PNL",
     }
 
 
@@ -326,14 +326,21 @@ class Challenge01Runner:
                 if any(timestamps[index] <= timestamps[index + 1] for index in range(len(timestamps) - 1)):
                     raise Challenge01DataError("CANDLE_ORDER_NOT_NEWEST_FIRST")
                 completed = [item for item in parsed if item["confirmed"]]
-                if len(completed) < sample_count:
-                    raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES")
-                selected = completed[:sample_count]
+                # A one-bar-ahead sample needs one completed feature candle and
+                # one later completed target candle for every prediction.
+                if len(completed) < sample_count + 1:
+                    raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES_FOR_FORWARD_TARGET")
+                # Provider rows are newest-first. Choose the oldest contiguous
+                # block, then reverse it so every feature precedes its target.
+                selected_desc = completed[-(sample_count + 1):]
+                selected = list(reversed(selected_desc))
+                for index in range(len(selected) - 1):
+                    if selected[index + 1]["open_time_ms"] - selected[index]["open_time_ms"] != BAR_MILLISECONDS:
+                        raise Challenge01DataError("NON_CONTIGUOUS_FEATURE_TARGET_CANDLES")
                 if after is None:
-                    # Round 1 consumes the current Demo feed and must be fresh.
-                    # Later rounds deliberately page backward into completed
-                    # historical candles, so live-feed staleness does not apply.
-                    newest_close_ms = selected[0]["open_time_ms"] + BAR_MILLISECONDS
+                    # Validate freshness against the newest completed market bar,
+                    # not against the older chronological training block.
+                    newest_close_ms = completed[0]["open_time_ms"] + BAR_MILLISECONDS
                     age_ms = self.now_ms() - newest_close_ms
                     if age_ms < -5 * 60 * 1000:
                         raise Challenge01DataError("LATEST_CANDLE_CLOSE_IN_FUTURE")
@@ -355,10 +362,21 @@ class Challenge01Runner:
                 result["memory_backend"] = self.backend_factory()
                 return result
 
+            samples = [
+                {"feature": selected[index], "target": selected[index + 1]}
+                for index in range(sample_count)
+            ]
             dataset_canonical = json.dumps(
                 [
-                    [item["open_time_ms"], item["open"], item["high"], item["low"], item["close"]]
-                    for item in selected
+                    [
+                        sample["feature"]["open_time_ms"],
+                        sample["feature"]["open"], sample["feature"]["high"],
+                        sample["feature"]["low"], sample["feature"]["close"],
+                        sample["target"]["open_time_ms"],
+                        sample["target"]["open"], sample["target"]["high"],
+                        sample["target"]["low"], sample["target"]["close"],
+                    ]
+                    for sample in samples
                 ],
                 separators=(",", ":"), sort_keys=False,
             )
@@ -370,59 +388,70 @@ class Challenge01Runner:
             references: list[str] = []
             first_experience_id = None
             with connection:
-                for candle in selected:
-                    candle_ts = candle["open_time_ms"]
-                    experience_id = (
-                        f"ch01-r{round_number:02d}-btc-usdt-1h-{candle_ts}"
-                    )
+                for sample in samples:
+                    feature_candle = sample["feature"]
+                    target_candle = sample["target"]
+                    feature_ts = feature_candle["open_time_ms"]
+                    target_ts = target_candle["open_time_ms"]
+                    experience_id = f"ch01-r{round_number:02d}-btc-usdt-1h-{target_ts}"
                     first_experience_id = first_experience_id or experience_id
-                    classification, action = _classify_bot(candle)
-                    reference = _reference_label(candle)
-                    predictions.append(classification)
+                    prediction, action = _classify_bot(feature_candle)
+                    reference = _reference_label(target_candle)
+                    predictions.append(prediction)
                     references.append(reference)
                     decision_event = memory.record_decision(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:decision",
                         engine_id=ENGINE_ID,
                         challenge_id=CHALLENGE_ID,
-                        cycle_id=f"{_round_prefix(round_number)}:{SYMBOL}:{TIMEFRAME}:{candle_ts}",
+                        cycle_id=f"{_round_prefix(round_number)}:{SYMBOL}:{TIMEFRAME}:{target_ts}",
                         decision_mode="BOT_ONLY",
                         environment="BLOFIN_DEMO",
                         market="SPOT",
                         symbol=SYMBOL,
                         timeframe=TIMEFRAME,
-                        model_version="ch01-rule-v1",
+                        model_version="ch01-momentum-baseline-v2",
                         dataset_version=dataset_version,
                         decision={
-                            "candle_classification": classification,
+                            "candle_classification": prediction,
+                            "predicted_next_candle_classification": prediction,
                             "action": action,
-                            "confidence": 1.0,
-                            "confidence_scope": "DETERMINISTIC_CLOSED_CANDLE_CLASSIFICATION_NOT_MARKET_FORECAST",
-                            "rule": "close_vs_open_only",
-                            "reason": f"close={candle['close']}; open={candle['open']}",
+                            "confidence": None,
+                            "confidence_scope": "UNSCORED_BASELINE_RULE_NOT_CALIBRATED_PROBABILITY",
+                            "rule": "previous_candle_body_direction",
+                            "prediction_horizon_bars": 1,
+                            "reason": f"feature_close={feature_candle['close']}; feature_open={feature_candle['open']}",
                         },
                         input_snapshot={
                             "source": "blofin_demo_spot_public_candles",
                             "round_number": round_number,
-                            "candle_open_time_ms": candle_ts,
-                            "candle": candle,
-                            "data_quality": "VALID_COMPLETED_CANDLE",
+                            # Compatibility key now identifies the target timestamp.
+                            "candle_open_time_ms": target_ts,
+                            "feature_candle_open_time_ms": feature_ts,
+                            "target_candle_open_time_ms": target_ts,
+                            "feature_candle": feature_candle,
+                            "prediction_horizon_bars": 1,
+                            "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
+                            "target_candle_in_input": False,
                         },
                     )
                     inserted_decisions += int(bool(decision_event.get("inserted")))
                     outcome_event = memory.record_outcome(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:outcome",
-                        # The final label evaluates the stated classification task only.
-                        # It is not a realized trade outcome or a prediction of a future candle.
-                        decision_correctness="CORRECT" if classification == reference else "INCORRECT",
+                        decision_correctness="CORRECT" if prediction == reference else "INCORRECT",
                         realized_result="NOT_EXECUTED",
                         realized_net_pnl=None,
                         final=True,
                         evidence={
-                            "source": "challenge_01_ohlc_rule_reference",
+                            "source": "blofin_demo_spot_next_completed_candle",
                             "reference_classification": reference,
-                            "comparison": "DETERMINISTIC_OHLC_LABEL_CONSISTENCY_NOT_PREDICTIVE_GROUND_TRUTH",
+                            "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
+                            "feature_candle_open_time_ms": feature_ts,
+                            "target_candle_open_time_ms": target_ts,
+                            "target_candle": target_candle,
+                            "prediction_horizon_bars": 1,
+                            "no_future_data_used_in_input": True,
                             "orders_submitted": False,
                             "not_a_trade_outcome": True,
                         },
@@ -433,8 +462,9 @@ class Challenge01Runner:
             connection = self.connection_factory()
             recovered_memory = LearningExperienceMemory(connection)
             verified = 0
-            for candle in selected:
-                experience_id = f"ch01-r{round_number:02d}-btc-usdt-1h-{candle['open_time_ms']}"
+            for sample in samples:
+                target_ts = sample["target"]["open_time_ms"]
+                experience_id = f"ch01-r{round_number:02d}-btc-usdt-1h-{target_ts}"
                 recovered = recovered_memory.get_experience(experience_id)
                 if recovered["verification"]["status"] != "PASS":
                     raise RuntimeError("LEARNING_MEMORY_INTEGRITY_FAILED")
@@ -457,14 +487,18 @@ class Challenge01Runner:
                 "sample_count": len(selected),
                 "dataset_version": dataset_version,
                 "dataset_sha256": dataset_hash,
-                "classification_rule": "close_vs_open_only",
+                "prediction_task": "NEXT_CANDLE_DIRECTION",
+                "prediction_horizon_bars": 1,
+                "classification_rule": "previous_candle_body_direction",
+                "data_split": "CHRONOLOGICAL_FEATURE_TO_NEXT_BAR_TARGET",
+
                 "balanced_accuracy": metrics["balanced_accuracy"],
                 "macro_f1": metrics["macro_f1"],
                 "signal_precision": metrics["signal_precision"],
                 "per_class_metrics": metrics["per_class"],
                 "confusion_matrix": metrics["confusion_matrix"],
                 "metrics_scope": metrics["metric_scope"],
-                "decision_correctness_scope": "CLOSED_CANDLE_CLASSIFICATION_ONLY",
+                "decision_correctness_scope": "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD",
                 "trade_outcome": "NOT_EXECUTED",
                 "inserted_decisions": inserted_decisions,
                 "inserted_outcomes": inserted_outcomes,
@@ -478,8 +512,8 @@ class Challenge01Runner:
                 "live_trading": False,
                 "first_experience_id": first_experience_id,
                 "example_experience_ids": [
-                    f"ch01-r{round_number:02d}-btc-usdt-1h-{item['open_time_ms']}"
-                    for item in selected[:3]
+                    f"ch01-r{round_number:02d}-btc-usdt-1h-{item['target']['open_time_ms']}"
+                    for item in samples[:3]
                 ],
             }
         finally:
