@@ -87,13 +87,14 @@ def _parse_candle(row: Any) -> dict[str, Any]:
 
 
 def _classify_bot(candle: dict[str, Any]) -> tuple[str, str]:
+    """Describe a completed candle only; this is not a forward trading signal."""
     opening = Decimal(candle["open"])
     closing = Decimal(candle["close"])
     if closing > opening:
-        return "BULLISH_CANDLE", "BUY_CANDIDATE"
+        return "BULLISH_CANDLE", "OBSERVE_ONLY"
     if closing < opening:
-        return "BEARISH_CANDLE", "NO_SIGNAL"
-    return "NEUTRAL_CANDLE", "NO_SIGNAL"
+        return "BEARISH_CANDLE", "OBSERVE_ONLY"
+    return "NEUTRAL_CANDLE", "OBSERVE_ONLY"
 
 
 def _reference_label(candle: dict[str, Any]) -> str:
@@ -138,11 +139,13 @@ class Challenge01Runner:
         connection_factory: Callable[[], Any] = connect_database,
         backend_factory: Callable[[], str] = storage_backend,
         now_ms: Callable[[], int] | None = None,
+        allow_non_durable_for_tests: bool = False,
     ):
         self.client = client or BloFinDemoSpotReadOnly()
         self.connection_factory = connection_factory
         self.backend_factory = backend_factory
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self.allow_non_durable_for_tests = bool(allow_non_durable_for_tests)
 
     def _record_unknown_run(
         self, memory: LearningExperienceMemory, connection: Any,
@@ -205,6 +208,25 @@ class Challenge01Runner:
             raise ValueError("Challenge 1 requires at least 100 samples per round")
         if sample_count > 1400:
             raise ValueError("sample_count must not exceed 1400")
+
+        try:
+            backend = self.backend_factory()
+        except Exception as exc:
+            return {
+                "status": "BLOCKED",
+                "reason_code": "LEARNING_MEMORY_BACKEND_UNAVAILABLE",
+                "error_type": type(exc).__name__,
+                "orders_submitted": False,
+                "live_trading": False,
+            }
+        if backend != "TURSO_CLOUD_SQLITE" and not self.allow_non_durable_for_tests:
+            return {
+                "status": "BLOCKED",
+                "reason_code": "DURABLE_LEARNING_MEMORY_REQUIRED",
+                "memory_backend": backend,
+                "orders_submitted": False,
+                "live_trading": False,
+            }
 
         connection = self.connection_factory()
         try:
@@ -273,7 +295,7 @@ class Challenge01Runner:
             dataset_version = f"{_round_prefix(round_number)}:{dataset_hash[:16]}"
             inserted_decisions = 0
             inserted_outcomes = 0
-            correct = 0
+            reference_agreements = 0
             first_experience_id = None
             with connection:
                 for candle in selected:
@@ -284,8 +306,7 @@ class Challenge01Runner:
                     first_experience_id = first_experience_id or experience_id
                     classification, action = _classify_bot(candle)
                     reference = _reference_label(candle)
-                    is_correct = classification == reference
-                    correct += int(is_correct)
+                    reference_agreements += int(classification == reference)
                     decision_event = memory.record_decision(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:decision",
@@ -318,21 +339,22 @@ class Challenge01Runner:
                     outcome_event = memory.record_outcome(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:outcome",
-                        decision_correctness="CORRECT" if is_correct else "INCORRECT",
+                        # A completed candle's own OHLC defines its descriptive label.
+                        # This is not independent forward ground truth or a trade outcome.
+                        decision_correctness="UNKNOWN",
                         realized_result="NOT_EXECUTED",
                         realized_net_pnl=None,
                         final=True,
                         evidence={
                             "source": "challenge_01_ohlc_rule_reference",
                             "reference_classification": reference,
-                            "comparison": "BOT_ONLY_CLASSIFICATION_VS_INDEPENDENT_RULE_FUNCTION",
+                            "comparison": "DETERMINISTIC_OHLC_LABEL_CONSISTENCY_NOT_PREDICTIVE_GROUND_TRUTH",
                             "orders_submitted": False,
                             "not_a_trade_outcome": True,
                         },
                     )
                     inserted_outcomes += int(bool(outcome_event.get("inserted")))
 
-            backend = self.backend_factory()
             connection.close()
             connection = self.connection_factory()
             recovered_memory = LearningExperienceMemory(connection)
@@ -346,7 +368,7 @@ class Challenge01Runner:
                     raise RuntimeError("LEARNING_MEMORY_LIFECYCLE_INCOMPLETE")
                 verified += 1
 
-            accuracy = correct / len(selected)
+            rule_reference_agreement = reference_agreements / len(selected)
             return {
                 "status": "BASELINE_RECORDED",
                 "challenge_id": CHALLENGE_ID,
@@ -362,8 +384,10 @@ class Challenge01Runner:
                 "dataset_version": dataset_version,
                 "dataset_sha256": dataset_hash,
                 "classification_rule": "close_vs_open_only",
-                "classification_accuracy": round(accuracy, 6),
-                "accuracy_scope": "deterministic_OHLC_rule_check_not_market_prediction",
+                "rule_reference_agreement": round(rule_reference_agreement, 6),
+                "agreement_scope": "DETERMINISTIC_OHLC_LABEL_CHECK_ONLY_NOT_MARKET_PREDICTION",
+                "decision_correctness": "UNKNOWN",
+                "trade_outcome": "NOT_EXECUTED",
                 "inserted_decisions": inserted_decisions,
                 "inserted_outcomes": inserted_outcomes,
                 "memory_recovery_verified": verified == len(selected),
@@ -391,10 +415,27 @@ def get_challenge_01_status(
     *,
     connection_factory: Callable[[], Any] = connect_database,
     backend_factory: Callable[[], str] = storage_backend,
+    allow_non_durable_for_tests: bool = False,
 ) -> dict[str, Any]:
-    """Read verified Challenge 1 progress without contacting BloFin."""
-    connection = connection_factory()
+    """Read verified Challenge 1 progress; ephemeral/local storage is never PASS."""
+    connection = None
     try:
+        backend = backend_factory()
+        if backend != "TURSO_CLOUD_SQLITE" and not allow_non_durable_for_tests:
+            return {
+                "status": "BLOCKED",
+                "reason_code": "DURABLE_LEARNING_MEMORY_REQUIRED",
+                "challenge_id": CHALLENGE_ID,
+                "engine_id": ENGINE_ID,
+                "memory_backend": backend,
+                "verified_experiences": 0,
+                "completed_rounds": [],
+                "next_round": None,
+                "mastery_status": "NOT_EARNED",
+                "orders_submitted": False,
+            }
+
+        connection = connection_factory()
         memory = LearningExperienceMemory(connection)
         experiences = memory.recent_experiences(limit=500, challenge_id=CHALLENGE_ID)
         rounds: dict[int, set[int]] = {}
@@ -426,7 +467,7 @@ def get_challenge_01_status(
             "symbol": SYMBOL,
             "timeframe": TIMEFRAME,
             "decision_mode": "BOT_ONLY",
-            "memory_backend": backend_factory(),
+            "memory_backend": backend,
             "verified_experiences": len(experiences),
             "completed_rounds": completed_rounds,
             "next_round": expected if expected <= MAX_ROUNDS else None,
@@ -441,10 +482,11 @@ def get_challenge_01_status(
             "orders_submitted": False,
         }
     finally:
-        try:
-            connection.close()
-        except Exception:
-            pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 __all__ = ["Challenge01Runner", "Challenge01DataError", "get_challenge_01_status"]
