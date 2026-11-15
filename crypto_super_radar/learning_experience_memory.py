@@ -30,8 +30,9 @@ DECISION_CORRECTNESS = frozenset({"CORRECT", "INCORRECT", "UNKNOWN"})
 REALIZED_RESULTS = frozenset({"PROFIT", "LOSS", "BREAKEVEN", "NOT_EXECUTED"})
 SENSITIVE_KEYS = frozenset({
     "password", "passwd", "secret", "api_key", "apikey", "api_secret",
-    "auth_token", "access_token", "refresh_token", "passphrase",
-    "private_key", "seed_phrase", "authorization", "bearer_token",
+    "auth_token", "api_token", "access_token", "refresh_token", "client_secret",
+    "secret_key", "token", "passphrase", "private_key", "seed_phrase",
+    "wallet_seed", "authorization", "bearer_token",
 })
 
 
@@ -165,6 +166,11 @@ class LearningExperienceMemory:
             self._db.execute(
                 """CREATE INDEX IF NOT EXISTS idx_learning_experience_challenge
                    ON learning_experience_events(challenge_id, sequence)"""
+            )
+            self._db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_experience_cycle_mode
+                   ON learning_experience_events(engine_id, challenge_id, cycle_id, decision_mode)
+                   WHERE experience_sequence = 1"""
             )
             self._db.execute(
                 """CREATE INDEX IF NOT EXISTS idx_learning_experience_cycle
