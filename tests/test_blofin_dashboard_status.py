@@ -29,12 +29,75 @@ class FakeBloFinClient:
         return [{"orderId": "private-order-id"}]
 
 
+class FakeTradePermissionClient:
+    permission_ok = True
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.api_key = "demo-key"
+        self.api_secret = "demo-secret"
+        self.passphrase = "demo-pass"
+
+    def verify_trade_permission(self):
+        if not self.permission_ok:
+            raise web_app.BloFinDemoExecutionBlocked(
+                "BloFin API key is read-only (readOnly=1); no write request was sent."
+            )
+        return {"readOnly": 0, "trade_permission": True}
+
+
+class FakeReadinessStore:
+    def trade_budget_status(self):
+        return {"orders_today": 0, "orders_total": 0, "unresolved_orders": 0}
+
+    def close(self):
+        pass
+
+
 class BloFinDashboardStatusTests(unittest.TestCase):
     def setUp(self):
         web_app.BLOFIN_STATUS_CACHE.update({"expires_at": 0.0, "payload": None})
 
     def tearDown(self):
         web_app.BLOFIN_STATUS_CACHE.update({"expires_at": 0.0, "payload": None})
+
+    def test_execution_readiness_blocks_read_only_key_even_when_env_is_complete(self):
+        values = {
+            "BLOFIN_DEMO_TRADE_API_KEY": "demo-key",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "demo-secret",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "demo-pass",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "BLOFIN_DASHBOARD_TOKEN": "dashboard-token",
+        }
+        FakeTradePermissionClient.permission_ok = False
+        with patch.dict(os.environ, values, clear=False), \
+             patch.object(web_app, "BloFinDemoTradeClient", FakeTradePermissionClient), \
+             patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"), \
+             patch.object(web_app, "BloFinDemoEventStore", return_value=FakeReadinessStore()):
+            result = web_app._blofin_demo_execution_readiness()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["trade_permission_status"], "READ_ONLY")
+        self.assertFalse(result["trade_permission_verified"])
+        self.assertFalse(result["trade_permission_verified_each_cycle"])
+
+    def test_execution_readiness_requires_and_accepts_verified_read_write_key(self):
+        values = {
+            "BLOFIN_DEMO_TRADE_API_KEY": "demo-key",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "demo-secret",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "demo-pass",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "BLOFIN_DASHBOARD_TOKEN": "dashboard-token",
+        }
+        FakeTradePermissionClient.permission_ok = True
+        with patch.dict(os.environ, values, clear=False), \
+             patch.object(web_app, "BloFinDemoTradeClient", FakeTradePermissionClient), \
+             patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"), \
+             patch.object(web_app, "BloFinDemoEventStore", return_value=FakeReadinessStore()):
+            result = web_app._blofin_demo_execution_readiness()
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["trade_permission_status"], "READ_WRITE_CONFIRMED")
+        self.assertTrue(result["trade_permission_verified"])
+        self.assertTrue(result["trade_permission_verified_each_cycle"])
 
     def test_missing_credentials_return_not_configured_without_api_call(self):
         with patch.dict(os.environ, {
