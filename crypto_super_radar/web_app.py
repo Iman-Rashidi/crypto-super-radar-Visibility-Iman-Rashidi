@@ -3094,6 +3094,13 @@ def _blofin_execution_report_fa(job: dict) -> dict:
             "message_fa": event.get("message_fa") or "رویداد ثبت شد.",
         })
 
+    stage_fa = stage_labels.get(stage, "مرحلهٔ پردازش")
+    if execution_profile == "EASY":
+        stage_fa = "ربات آسان · " + stage_fa
+    elif execution_profile == "STANDARD":
+        stage_fa = "ربات استاندارد · " + stage_fa
+    elif execution_profile == "STRICT":
+        stage_fa = "ربات سخت‌گیر · " + stage_fa
     fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
     count_fa = lambda value: str(value if value is not None else "—").translate(fa_digits)
     return {
@@ -3101,7 +3108,7 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "instrument_id": instrument_id,
         "execution_profile": execution_profile,
         "status_fa": status_labels.get(status, status_labels.get(str(current.get("status") or "").upper(), "وضعیت نامشخص")),
-        "stage_fa": stage_labels.get(stage, "مرحلهٔ پردازش"),
+        "stage_fa": stage_fa,
         "signal_fa": signal_fa,
         "reason_fa": reason_fa,
         "gate_pass_count": pass_count,
@@ -4413,6 +4420,7 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </div>
             <p id="blofin-instrument-status" class="muted" aria-live="polite">قراردادهای زنده با مجوز Full برای بازکردن موقعیت در حال دریافت‌اند.</p>
+            <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
             <p class="muted">EASY: هفت کنترل اصلی داده، رژیم، روند، مومنتوم، نقدشوندگی، مجوز قرارداد و ریسک حساب اجباری‌اند؛ پنج گیت پژوهشی دیگر به‌صورت هشدار واقعی نمایش داده می‌شوند و به‌جای PASS جعلی، UNKNOWN می‌مانند. STANDARD: حداقل ۹ گیت با مجموعه ضروری گسترده‌تر. STRICT: هر ۱۲ گیت PASS.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>

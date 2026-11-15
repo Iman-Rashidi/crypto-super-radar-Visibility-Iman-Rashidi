@@ -9,7 +9,7 @@ from crypto_super_radar.agent_council import build_native_agent_council_review
 def result_for(profile: str):
     required = {
         "EASY": {1, 2, 3, 4, 5, 6, 9},
-        "STANDARD": {1, 2, 3, 4, 5, 6, 8, 9},
+        "STANDARD": {1, 2, 3, 4, 5, 6, 8, 9, 10},
         "STRICT": set(range(1, 13)),
     }[profile]
     gates = [
@@ -58,7 +58,9 @@ class AgentCouncilProfilePolicyTests(unittest.TestCase):
         self.assertEqual(result["required_gate_ids"], [1, 2, 3, 4, 5, 6, 8, 9])
 
     def test_strict_vetoes_any_unknown_gate(self):
-        result = build_native_agent_council_review(result_for("STRICT"))
+        candidate = result_for("STRICT")
+        candidate.gates[11].status = "UNKNOWN"
+        result = build_native_agent_council_review(candidate)
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertFalse(result["paper_entry_eligible"])
         self.assertEqual(result["required_gate_ids"], list(range(1, 13)))
