@@ -236,12 +236,16 @@ class Challenge01Runner:
                 if len(completed) < sample_count:
                     raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES")
                 selected = completed[:sample_count]
-                newest_close_ms = selected[0]["open_time_ms"] + BAR_MILLISECONDS
-                age_ms = self.now_ms() - newest_close_ms
-                if age_ms < -5 * 60 * 1000:
-                    raise Challenge01DataError("LATEST_CANDLE_CLOSE_IN_FUTURE")
-                if age_ms > MAX_STALE_AFTER_CLOSE_MS:
-                    raise Challenge01DataError("LATEST_COMPLETED_CANDLE_STALE")
+                if after is None:
+                    # Round 1 consumes the current Demo feed and must be fresh.
+                    # Later rounds deliberately page backward into completed
+                    # historical candles, so live-feed staleness does not apply.
+                    newest_close_ms = selected[0]["open_time_ms"] + BAR_MILLISECONDS
+                    age_ms = self.now_ms() - newest_close_ms
+                    if age_ms < -5 * 60 * 1000:
+                        raise Challenge01DataError("LATEST_CANDLE_CLOSE_IN_FUTURE")
+                    if age_ms > MAX_STALE_AFTER_CLOSE_MS:
+                        raise Challenge01DataError("LATEST_COMPLETED_CANDLE_STALE")
                 if after is not None and any(item["open_time_ms"] >= int(after) for item in selected):
                     raise Challenge01DataError("ROUND_DATA_OVERLAP")
             except Challenge01DataError as exc:
