@@ -236,6 +236,9 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
 class BloFinDemoTradeClientTests(unittest.TestCase):
     def setUp(self):
         self.session = Mock()
+        self.session.get.return_value = FakeResponse({
+            "code": "0", "data": {"apiKey": "not-a-real-key", "readOnly": 0}
+        })
         self.session.post.return_value = FakeResponse({
             "code": "0", "data": {"code": "0", "orderId": "demo-order-1"}
         })
@@ -299,6 +302,14 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         self.assertEqual(payload["positionSide"], "long")
         with self.assertRaises(ValueError):
             self.client.set_futures_leverage("BTC-USDT", 4)
+
+    def test_write_post_is_blocked_when_key_is_read_only(self):
+        self.session.get.return_value = FakeResponse({
+            "code": "0", "data": {"apiKey": "not-a-real-key", "readOnly": 1}
+        })
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            self.client.set_futures_leverage("BTC-USDT", 1)
+        self.session.post.assert_not_called()
 
     def test_nested_order_error_is_rejected(self):
         self.session.post.return_value = FakeResponse({
@@ -394,6 +405,10 @@ class FakeExecutorClient:
         self.calls = []
         self.order_response = {"code": "0", "data": [{"code": "0", "orderId": "simulated-demo-id"}]}
 
+    def verify_trade_permission(self):
+        self.calls.append("trade_permission")
+        return {"readOnly": 0, "trade_permission": True}
+
     def check_clock_skew(self, *, inst_id):
         self.calls.append("clock")
         return {"offset_ms": 0}
@@ -441,6 +456,35 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         with self.assertRaises(BloFinDemoExecutionBlocked):
             executor.execute(signal_record(), inst_id="BTC-USDT", allow_demo_orders=True)
         client.check_clock_skew.assert_not_called()
+
+    def test_read_only_api_key_blocks_before_market_or_order_actions(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        def deny_trade_permission():
+            client.calls.append("trade_permission")
+            raise BloFinDemoExecutionBlocked(
+                "BloFin API key is read-only (readOnly=1); no write request was sent."
+            )
+        client.verify_trade_permission = deny_trade_permission
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT", leverage=1,
+                    allow_demo_orders=True,
+                )
+            self.assertEqual(client.calls, ["trade_permission"])
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
+        finally:
+            store.close()
 
     def test_demo_pipeline_submits_only_after_every_gate_and_reserves_once(self):
         with patch.dict(os.environ, {
