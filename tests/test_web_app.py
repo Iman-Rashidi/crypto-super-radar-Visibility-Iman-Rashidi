@@ -1119,5 +1119,52 @@ class WebAppHttpTests(unittest.TestCase):
                 for job_id in set(web_app.BLOFIN_EXECUTION_JOBS) - old_job_ids:
                     web_app.BLOFIN_EXECUTION_JOBS.pop(job_id, None)
 
+    def test_blofin_smoke_readiness_blocks_existing_open_position(self):
+        with patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}), \\
+             patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}), \\
+             patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                 "status": "CONNECTED_READ_ONLY",
+                 "data_completeness": "COMPLETE",
+                 "read_errors": [],
+                 "positions": [{"instId": "BTC-USDT", "positions": "-0.1"}],
+                 "open_orders": [],
+             }):
+            result = web_app._blofin_demo_smoke_test_readiness()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("EXISTING_OPEN_POSITION", result["smoke_test_blockers"])
+        self.assertEqual(result["smoke_test_open_position_count"], 1)
+        self.assertEqual(result["smoke_test_open_order_count"], 0)
+
+    def test_blofin_smoke_readiness_blocks_existing_pending_order(self):
+        with patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}), \\
+             patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}), \\
+             patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                 "status": "CONNECTED_READ_ONLY",
+                 "data_completeness": "COMPLETE",
+                 "read_errors": [],
+                 "positions": [],
+                 "open_orders": [{"instId": "BTC-USDT", "orderId": "prior-order"}],
+             }):
+            result = web_app._blofin_demo_smoke_test_readiness()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("EXISTING_OPEN_ORDER", result["smoke_test_blockers"])
+        self.assertEqual(result["smoke_test_open_position_count"], 0)
+        self.assertEqual(result["smoke_test_open_order_count"], 1)
+
+    def test_blofin_smoke_readiness_fails_closed_on_incomplete_monitor_data(self):
+        with patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}), \\
+             patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}), \\
+             patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                 "status": "CONNECTED_READ_ONLY",
+                 "data_completeness": "PARTIAL",
+                 "read_errors": [{"endpoint": "positions", "error_type": "Timeout"}],
+                 "positions": [],
+                 "open_orders": [],
+             }):
+            result = web_app._blofin_demo_smoke_test_readiness()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("LIVE_MONITOR_INCOMPLETE", result["smoke_test_blockers"])
+        self.assertIsNone(result["smoke_test_open_position_count"])
+
 if __name__ == "__main__":
     unittest.main()
