@@ -36,6 +36,10 @@ class FakeSmokeClient:
             if existing_position else None
         )
 
+    def verify_trade_permission(self):
+        self.calls.append("trade_permission")
+        return {"readOnly": 0, "trade_permission": True}
+
     def check_clock_skew(self, *, inst_id):
         self.calls.append("clock")
         return {"offset_ms": 0}
@@ -122,6 +126,23 @@ class BloFinDemoSmokeRunnerTests(unittest.TestCase):
         self.assertEqual(client.entry_kwargs["size"], "0.1")
         self.assertEqual(client.close_kwargs["position_side"], "net")
         self.assertEqual(client.calls.count("positions"), 3)
+
+    def test_read_only_api_key_blocks_before_any_order_write(self):
+        client = FakeSmokeClient()
+        def deny_trade_permission():
+            client.calls.append("trade_permission")
+            raise BloFinDemoExecutionBlocked(
+                "BloFin API key is read-only (readOnly=1); no write request was sent."
+            )
+        client.verify_trade_permission = deny_trade_permission
+        runner = BloFinDemoSmokeTestRunner(client=client, sleep_fn=lambda _seconds: None)
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            runner.run()
+        self.assertEqual(client.calls, ["trade_permission"])
+        self.assertFalse(any(
+            isinstance(item, tuple) and item[0] in {"leverage", "entry", "close"}
+            for item in client.calls
+        ))
 
     def test_existing_position_blocks_before_any_order_write(self):
         client = FakeSmokeClient(existing_position=True)
