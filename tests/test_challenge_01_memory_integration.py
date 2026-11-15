@@ -220,20 +220,29 @@ class BloFinDemoSpotAdapterTests(unittest.TestCase):
 
         class Session:
             def __init__(self):
-                self.call = None
+                self.calls = []
 
             def get(self, url, *, params, timeout):
-                self.call = (url, params, timeout)
+                self.calls.append((url, params, timeout))
                 return Response()
 
         session = Session()
         client = BloFinDemoSpotReadOnly(session=session)
         self.assertEqual(client.get_candles("BTC-USDT", bar="1H", limit=120), [])
-        url, params, _timeout = session.call
+        self.assertEqual(client.get_candles("BTC-USDT", bar="1H", limit=120, before=1800000000000), [])
+        url, params, _timeout = session.calls[0]
         self.assertEqual(url, f"{DEMO_SPOT_REST_URL}/api/v1/spot/market/candles")
         self.assertEqual(params["instType"], "SPOT")
         self.assertEqual(params["instId"], "BTC-USDT")
         self.assertEqual(params["bar"], "1H")
+        self.assertNotIn("after", params)
+        self.assertEqual(session.calls[1][1]["before"], "1800000000000")
+        self.assertNotIn("after", session.calls[1][1])
+
+    def test_after_and_before_cannot_be_used_together(self):
+        client = BloFinDemoSpotReadOnly(session=object())
+        with self.assertRaisesRegex(ValueError, "cannot be used simultaneously"):
+            client.get_candles("BTC-USDT", after=100, before=200)
 
 
 if __name__ == "__main__":
