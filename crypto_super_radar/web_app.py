@@ -5169,6 +5169,7 @@ async function refreshExecutionReadiness(){
                     <span class="easy-robot-chip" id="easy-robot-direction">جهت الگو: نامشخص</span>
                     <span class="easy-robot-chip" id="easy-robot-signal">سیگنال موتور: در انتظار داده</span>
                     <span class="easy-robot-chip" id="easy-robot-confirmation">وضعیت تأیید: نامشخص</span>
+                    <span class="easy-robot-chip" id="easy-robot-learning">حافظه: در حال آماده‌سازی</span>
                   </div>
                 </div>
                 <svg class="easy-robot-figure" viewBox="0 0 200 184" aria-hidden="true">
@@ -5182,7 +5183,8 @@ async function refreshExecutionReadiness(){
                   <path d="M82 168L77 177M118 168L123 177" stroke="#5bc8e8" stroke-width="9" stroke-linecap="round"/><path d="M72 176H84M116 176H128" stroke="#d6f6ff" stroke-width="5" stroke-linecap="round"/>
                 </svg>
               </div>
-              <p class="easy-robot-caption"><strong id="easy-robot-market">بازار: در انتظار داده</strong> · ربات فقط تحلیل را نمایش می‌دهد و مستقلاً سفارش نمی‌فرستد.</p>
+              <p class="easy-robot-caption"><strong id="easy-robot-market">بازار: در انتظار داده</strong> · Easy Trader در فاز یادگیری و Paper Shadow است؛ سفارش Demo یا Live ارسال نمی‌شود.</p>
+              <div id="easy-robot-learning-detail" class="live-radar-note" aria-live="polite">حافظهٔ ماندگار: در انتظار نخستین نمونهٔ کندل بسته‌شده...</div>
             </section>
             <section class="live-radar-analysis" aria-label="تحلیل چندگانه بازار">
               <section class="live-radar-flow" aria-label="فشار حجم و جریان معاملات">
@@ -5281,23 +5283,44 @@ async function refreshExecutionReadiness(){
                 target.appendChild(card);
               });
             }
-            const easyRobot={root:document.getElementById('easy-trader-robot'),pattern:document.getElementById('easy-robot-pattern'),direction:document.getElementById('easy-robot-direction'),signal:document.getElementById('easy-robot-signal'),confirmation:document.getElementById('easy-robot-confirmation'),market:document.getElementById('easy-robot-market')};
+            const easyRobot={root:document.getElementById('easy-trader-robot'),pattern:document.getElementById('easy-robot-pattern'),direction:document.getElementById('easy-robot-direction'),signal:document.getElementById('easy-robot-signal'),confirmation:document.getElementById('easy-robot-confirmation'),market:document.getElementById('easy-robot-market'),learning:document.getElementById('easy-robot-learning'),learningDetail:document.getElementById('easy-robot-learning-detail')};
              function updateEasyTraderRobot(analysis,signal,symbol,interval){
                if(!easyRobot.root)return;
                const items=Array.isArray(analysis&&analysis.candlestick_patterns)?analysis.candlestick_patterns:[];
                const rank=x=>x.state==='CONFIRMED'?2:(x.state==='NEEDS_CONFIRMATION'||x.state==='FORMING'?1:0);
-               const pattern=items.slice().sort((a,b)=>rank(b)-rank(a)||Math.abs(Number(b.score)||0)-Math.abs(Number(a.score)||0))[0];
+               const pattern=(signal&&signal.pattern)||items.slice().sort((a,b)=>rank(b)-rank(a)||Math.abs(Number(b.score)||0)-Math.abs(Number(a.score)||0))[0];
                const dir=pattern?(pattern.direction==='NEUTRAL'&&pattern.potential_direction?pattern.potential_direction:pattern.direction):'UNKNOWN';
                const faDir={BULLISH:'صعودی',BEARISH:'نزولی',NEUTRAL:'خنثی',UNKNOWN:'نامشخص'}[dir]||'نامشخص';
                const state=pattern?({CONFIRMED:'تأییدشده',NEEDS_CONFIRMATION:'در انتظار تأیید کندل بعدی',FORMING:'در حال شکل‌گیری'}[pattern.state]||'نامشخص'):'الگوی معتبر شناسایی نشد';
                const sig=String(signal&&signal.signal||'UNKNOWN').toUpperCase();
-               const faSig={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'سیگنال نامشخص'}[sig]||'سیگنال نامشخص';
+               const tradeCandidate=['CANDIDATE','SHADOW_CANDIDATE','PAPER_CANDIDATE'].includes(String(signal&&signal.status||'').toUpperCase());
+                const faSig=sig==='BUY'?(tradeCandidate?'نامزد خرید · یادگیری':'خرید'):sig==='SELL'?(tradeCandidate?'نامزد فروش · یادگیری':'فروش'):({WAIT:'در انتظار شواهد',UNKNOWN:'سیگنال نامشخص'}[sig]||'سیگنال نامشخص');
                const tone=sig==='BUY'?'bullish':sig==='SELL'?'bearish':sig==='WAIT'?'neutral':'unknown';
                easyRobot.pattern.textContent=pattern?((pattern.name_fa||pattern.name_en||'الگوی کندلی')+' · '+(pattern.name_en||'')):'در کندل بسته‌شده الگوی شاخصی شناسایی نشد';
                easyRobot.direction.textContent='جهت الگو: '+faDir;easyRobot.direction.dataset.tone=dir==='BULLISH'?'bullish':dir==='BEARISH'?'bearish':'neutral';
                easyRobot.signal.textContent='سیگنال موتور: '+faSig;easyRobot.signal.dataset.tone=tone;
                easyRobot.confirmation.textContent='وضعیت الگو: '+state;easyRobot.confirmation.dataset.tone=pattern&&pattern.state==='CONFIRMED'?'bullish':pattern?'neutral':'unknown';
                easyRobot.market.textContent='بازار: '+(symbol||'—')+' · '+(interval||'—');
+               const learning=signal&&signal.learning?signal.learning:{};
+               const probability=signal&&signal.predicted_success_probability;
+               const probabilityText=probability===null||probability===undefined?'احتمال مدل: آموزش اولیه':'احتمال مدل: '+(Number(probability)*100).toFixed(1)+'%';
+               if(easyRobot.learning){
+                 easyRobot.learning.textContent='حافظه '+(learning.phase_fa||'فاز مشاهده')+' · '+number(learning.sample_count||0)+' نمونه · '+probabilityText;
+                 easyRobot.learning.dataset.tone=(learning.control_level||0)>=4?'bearish':learning.paper_learning_eligible?'bullish':'neutral';
+               }
+               if(easyRobot.learningDetail){
+                 const errorRate=learning.rolling_prediction_error_rate;
+                 easyRobot.learningDetail.textContent=
+                   'فاز: '+(learning.phase_fa||'فاز مشاهده')+
+                   ' · سطح کنترل: '+(learning.control_label_fa||'سطح صفر')+
+                   ' · نمونه ثبت‌شده: '+number(learning.sample_count||0)+
+                   ' · نتیجه‌دار: '+number(learning.labelled_count||0)+
+                   ' · بدون نتیجه: '+number(learning.unlabelled_count||0)+
+                   ' · نرخ خطای اخیر: '+(errorRate===null||errorRate===undefined?'هنوز محاسبه نشده':(Number(errorRate)*100).toFixed(1)+'%')+
+                   ' · مدل: '+(learning.active_model_kind||'در حال جمع‌آوری داده')+
+                   ' · خطای حافظه: '+(learning.memory_error||'ندارد')+
+                   ' · مجوز سفارش Demo/Live: غیرفعال';
+               }
              }
              function renderFlow(flow){
               flow=flow||{};const p=flow.pressure||{},a=flow.aggressor_flow||{},book=flow.order_book||{},whale=flow.whale_flow||{};
@@ -5460,7 +5483,7 @@ async function refreshExecutionReadiness(){
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 renderFlow(data.market_flow||{});
-                 updateEasyTraderRobot(analysis,s,symbol.value,interval.value);
+                 updateEasyTraderRobot(analysis,data.easy_trader||s,symbol.value,interval.value);
                 const rsiDivergence=analysis.direction&&analysis.direction.divergence?analysis.direction.divergence:{};
                 const divergenceType=rsiDivergence.type||'NONE';
                 fields.divergence.className='live-radar-divergence '+(divergenceType==='BULLISH'?'bullish':divergenceType==='BEARISH'?'bearish':'neutral');
