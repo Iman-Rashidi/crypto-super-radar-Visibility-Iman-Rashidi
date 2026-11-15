@@ -4210,8 +4210,10 @@ def _run_blofin_demo_smoke_test_job(job_id: str) -> None:
         )
         return
 
+    last_stage = {"value": "PREFLIGHT"}
     def record_event(**event: Any) -> None:
         stage = str(event.pop("stage", "RUNNING"))
+        last_stage["value"] = stage
         message = str(event.pop("message_fa", stage))
         _set_blofin_execution_job(
             job_id, "running", stage=stage, message_fa=message,
@@ -4261,14 +4263,23 @@ def _run_blofin_demo_smoke_test_job(job_id: str) -> None:
             completed_at_utc=datetime.now(timezone.utc).isoformat(),
         )
     except Exception as exc:
+        failed_stage = last_stage["value"]
+        submission_may_have_started = failed_stage in {
+            "ENTRY_SUBMITTING", "ENTRY_ACCEPTED", "ENTRY_FILLED",
+            "CLOSE_SUBMITTING", "CLOSE_ACCEPTED",
+        }
         _set_blofin_execution_job(
             job_id, "failed", stage="SMOKE_TEST_ERROR",
-            message_fa="تست مستقل با خطای کنترل‌شده متوقف شد؛ پیش از تلاش دوباره، وضعیت سفارش و پوزیشن BloFin Demo را بررسی کن.",
+            message_fa="تست مستقل با خطای کنترل‌شده متوقف شد؛ مرحله دقیق خطا در گزارش ثبت شده است.",
             result={
-                "status": "UNKNOWN", "environment": "BLOFIN_DEMO",
+                "status": "UNKNOWN" if submission_may_have_started else "PREFLIGHT_FAILED",
+                "environment": "BLOFIN_DEMO",
                 "test_name": "تست ربات در محیط دمو صرافی",
                 "error_type": type(exc).__name__,
-                "orders_submitted": "UNKNOWN", "trade_executed": "UNKNOWN",
+                "error_message": str(exc)[:240],
+                "failed_stage": failed_stage,
+                "orders_submitted": "UNKNOWN" if submission_may_have_started else False,
+                "trade_executed": "UNKNOWN" if submission_may_have_started else False,
                 "position_closed": False,
             },
         )
