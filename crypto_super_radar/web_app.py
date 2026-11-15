@@ -4543,6 +4543,14 @@ class Handler(BaseHTTPRequestHandler):
               <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
             </div>
           </div>
+          <div class="metric" id="blofin-smoke-test-panel" style="margin-top:16px;border-color:#2d6470">
+            <h3>تست ربات در محیط دمو صرافی</h3>
+            <p class="muted">راه‌انداز مستقل و بدون سیگنال: خود ربات فقط روی BTC-USDT در BloFin Demo یک سفارش LONG با حداقل حجم، اهرم ایزوله 1x و TP/SL حفاظتی می‌فرستد؛ پس از تأیید Fill، همان پوزیشن را می‌بندد و تخت‌شدن حساب را بررسی می‌کند. این تست به ۱۲ گیت یا Nemotron وابسته نیست و به محیط Live دسترسی ندارد. اگر روی BTC-USDT پوزیشن یا سفارش بازی از قبل وجود داشته باشد، تست بدون تغییر آن متوقف می‌شود.</p>
+            <p id="blofin-smoke-test-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای تست مستقل...</p>
+            <button id="blofin-smoke-test-run" type="button" disabled>شروع «تست ربات در محیط دمو صرافی»</button>
+            <p id="blofin-smoke-test-status" class="muted" aria-live="polite">برای اجرای تست، توکن پنل را در کادر بالاتر وارد کن.</p>
+            <pre id="blofin-smoke-test-report" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          </div>
           <div class="metric" style="margin-top:16px">
             <h3>مانیتور زنده ورود و خروج ربات</h3>
             <p class="muted">زمان تصمیم، ارسال سفارش، Fill واقعی، قیمت ورود، Mark Price، سود/زیان شناور، سفارش‌های حد سود/ضرر، زمان خروج و PnL نهایی از داده‌های حساب Demo نمایش داده می‌شود.</p>
@@ -4562,6 +4570,10 @@ class Handler(BaseHTTPRequestHandler):
             const accountView=document.getElementById('blofin-demo-account-view');
             const safety=document.getElementById('blofin-demo-safety');
             const executeButton=document.getElementById('blofin-demo-execute-once');
+            const smokeButton=document.getElementById('blofin-smoke-test-run');
+            const smokeReadiness=document.getElementById('blofin-smoke-test-readiness');
+            const smokeStatus=document.getElementById('blofin-smoke-test-status');
+            const smokeReport=document.getElementById('blofin-smoke-test-report');
             const instrumentSelect=document.getElementById('blofin-instrument');
             const profileSelect=document.getElementById('blofin-engine-profile');
             const instrumentStatus=document.getElementById('blofin-instrument-status');
@@ -4571,7 +4583,7 @@ class Handler(BaseHTTPRequestHandler):
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -4906,7 +4918,66 @@ async function loadBlofinInstruments(){
               if(monitorActive){monitorToggle.textContent='توقف مانیتور زنده';fetchLiveMonitor();}
               else{clearTimeout(monitorTimer);monitorStatus.textContent='مانیتور زنده متوقف شد.';monitorToggle.textContent='شروع مانیتور زنده هر ۵ ثانیه';}
             });
-            function renderExecutionJob(job){
+            async function refreshSmokeTestReadiness(){
+               smokeButton.disabled=true;
+               try{
+                 const response=await fetch('/api/blofin/demo/smoke-test-readiness',{cache:'no-store'});
+                 const result=await response.json();
+                 smokeReadiness.textContent=result.message_fa||'وضعیت تست مستقل نامشخص است.';
+                 smokeButton.disabled=result.status!=='READY';
+               }catch(error){
+                 smokeReadiness.textContent='بررسی پیش‌نیازهای تست مستقل ناموفق بود؛ ورود مسدود می‌ماند.';
+               }
+             }
+             async function pollSmokeTestJob(jobId,token,attempt){
+               try{
+                 const response=await fetch('/api/blofin/demo/execution-jobs/'+jobId,{
+                   cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                 });
+                 const job=await response.json();
+                 smokeStatus.textContent=job.message_fa||job.stage||'تست در حال اجراست.';
+                 smokeReport.textContent=JSON.stringify({
+                   test_name:'تست ربات در محیط دمو صرافی',
+                   stage:job.stage, status:job.status, events:job.events||[],
+                   result:job.result||null
+                 },null,2);
+                 if(job.status==='completed'||job.status==='failed'){
+                   await refreshSmokeTestReadiness();
+                   return;
+                 }
+               }catch(error){
+                 smokeStatus.textContent='وضعیت همان تست در حال بازیابی است؛ تست جدید را اجرا نکن.';
+               }
+               if(attempt<90)setTimeout(()=>pollSmokeTestJob(jobId,token,attempt+1),2000);
+               else smokeStatus.textContent='مهلت نمایش تمام شد؛ همان شناسه را دنبال کن و تست تازه نفرست: '+jobId;
+             }
+             smokeButton.addEventListener('click',async function(){
+               const token=tokenInput.value.trim();
+               if(!token){smokeStatus.textContent='ابتدا توکن پنل را در کادر بالاتر وارد کن.';return;}
+               if(!window.confirm('ربات خودش یک معامله LONG با حداقل حجم در BloFin DEMO باز و همان پوزیشن را می‌بندد. هیچ سیگنال یا تحلیل بازار استفاده نمی‌شود. پوزیشن یا سفارش باز BTC-USDT باعث توقف تست خواهد شد. حساب Live انتخاب نشده است. ادامه؟'))return;
+               smokeButton.disabled=true;
+               smokeReport.textContent='';
+               smokeStatus.textContent='درخواست تست مستقل به سرویس ربات ارسال می‌شود...';
+               try{
+                 const response=await fetch('/api/blofin/demo/smoke-test',{
+                   method:'POST',cache:'no-store',
+                   headers:{'Authorization':'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
+                   body:new URLSearchParams({confirm:'1'})
+                 });
+                 const started=await response.json();
+                 if(!response.ok||!started.job_id){
+                   smokeStatus.textContent=started.message_fa||'درخواست تست پذیرفته نشد؛ پیش‌نیازها را بررسی کن.';
+                   await refreshSmokeTestReadiness();
+                   return;
+                 }
+                 smokeStatus.textContent='تست توسط ربات آغاز شد. شناسه: '+started.job_id;
+                 pollSmokeTestJob(started.job_id,token,0);
+               }catch(error){
+                 smokeStatus.textContent='نتیجه درخواست نامشخص است؛ قبل از تلاش مجدد، وضعیت حساب Demo را بررسی کن.';
+               }
+             });
+
+             function renderExecutionJob(job){
               const report=job&&job.report_fa?job.report_fa:{};
               executionReport.replaceChildren();
               function node(parent,tag,value,className){
@@ -5101,6 +5172,7 @@ async function loadBlofinInstruments(){
             });
             loadBlofinInstruments().then(refreshExecutionReadiness);
             refreshExecutionReadiness();
+             refreshSmokeTestReadiness();
             clearButton.addEventListener('click',function(){
               tokenInput.value='';
               accountView.replaceChildren();
