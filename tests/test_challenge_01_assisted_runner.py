@@ -166,6 +166,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
         self.assertEqual(result["memory_integrity"], "PASS")
         self.assertEqual(result["model_artifact_sha256"], candidate["model_candidate"]["artifact_sha256"])
         self.assertEqual(self.client.calls[0]["before"], self.last_target_time)
+        self.assertEqual(self.client.calls[0]["limit"], 1440)
         self.assertEqual(result["round_status"], "EVALUATED_NOT_MASTERY")
         self.assertFalse(result["mastery_awarded"])
         self.assertFalse(result["orders_submitted"])
