@@ -55,3 +55,23 @@ Signal mapping is deliberately conservative:
 - Missing, stale, or failed provider data remains unknown.
 
 The public market board and DEX search can display discovered assets, but they do not manufacture directional signals. BUY/SELL dots only appear when the corresponding backend result explicitly carries that decision. The radar does not place orders.
+
+
+## Challenge 1 AutoPilot — BloFin Demo
+
+The primary automated trading strategy is now **CHALLENGE_1**. EASY/STANDARD/STRICT
+remain legacy research profiles and are not the default Demo AutoPilot.
+
+- Scan a configurable watchlist (default: BTC-USDT, ETH-USDT, SOL-USDT, XRP-USDT, LINK-USDT).
+- Use completed 15m candles for pattern setup and the next completed candle for breakout confirmation.
+- Use completed 1h candle/chart-pattern evidence to reject a clearly opposing confirmed setup.
+- Require a directionally consistent confirmed pattern and volume/close-location confirmation; otherwise record NO_TRADE.
+- Compute a structural stop from pattern invalidation and ATR; target is initially 2R.
+- 12 generic gates are OBSERVATION_ONLY in Challenge 1 and never manufacture PASS evidence.
+- Universal account, API permission, contract, price freshness/deviation, margin, drawdown,
+  daily-loss, idempotency, unresolved-order, exchange-host, and attached TP/SL guards remain mandatory.
+- One concurrent position maximum; 1x leverage; default risk per trade remains 0.25% of Demo equity.
+- No TinyFish, OpenRouter, external LLM approval, or paid signal API is required on this order path.
+- BloFin credentials remain Render secrets and are never returned to ChatGPT or written to Git.
+- A Render Free web instance may sleep; this in-process AutoPilot loop is not a guarantee of 24/7 uptime.
+  The uptime architecture must be separately verified before Challenge 1 is declared passed.

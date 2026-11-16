@@ -43,6 +43,7 @@ from .blofin_demo_executor import (
     _active_order_count, _active_position_count, _equity_from_balance,
 )
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
+from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 
@@ -3227,7 +3228,7 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "READ_ONLY_ORDER_RECONCILIATION": "تطبیق فقط‌خواندنی سفارش قبلی",
         "ORDER_REMAINS_UNKNOWN": "نتیجه سفارش قبلی هنوز مشخص نیست",
         "LIVE_12_GATE_ANALYSIS": "تحلیل زندهٔ ۱۲ فیلتر",
-        "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده ربات آسان · روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
+        "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده موتور Challenge 1 · روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
         "PROFILE_GATE_REVIEW": "بررسی گیت‌های الزامی پروفایل انتخابی",
         "MTF_TRIGGER_BLOCKED": "عدم تطبیق روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
         "ELLIOTT_WAVE_ANALYSIS": "تحلیل و انتخاب سناریوی موج الیوت",
@@ -3272,7 +3273,7 @@ def _blofin_execution_report_fa(job: dict) -> dict:
 
     stage_fa = stage_labels.get(stage, "مرحلهٔ پردازش")
     if execution_profile == "EASY":
-        stage_fa = "ربات آسان · " + stage_fa
+        stage_fa = "موتور Challenge 1 · " + stage_fa
     elif execution_profile == "STANDARD":
         stage_fa = "ربات استاندارد · " + stage_fa
     elif execution_profile == "STRICT":
@@ -3656,9 +3657,9 @@ def _blofin_easy_trader_analysis(
             risk_budget_usd=None, gates=gates,
             summary_en="EASY profile: completed BloFin 1H trend and 15m trigger aligned; no candle-pattern label is required.",
             summary_fa=(
-                "ربات آسان: روند یک‌ساعته و تریگر ۱۵ دقیقه‌ای BloFin هم‌جهت‌اند؛ الگوی کندلی خاص شرط ورود نیست."
+                "موتور Challenge 1: روند یک‌ساعته و تریگر ۱۵ دقیقه‌ای BloFin هم‌جهت‌اند؛ الگوی کندلی خاص شرط ورود نیست."
                 if allowed else
-                "ربات آسان: سیگنال یا یکی از کنترل‌های ضروری BloFin تأیید نشد؛ علت در گیت‌ها مشخص است."
+                "موتور Challenge 1: سیگنال یا یکی از کنترل‌های ضروری BloFin تأیید نشد؛ علت در گیت‌ها مشخص است."
             ),
             metrics=metrics,
         )
@@ -3686,7 +3687,7 @@ def _blofin_easy_trader_analysis(
         entry_price=None, take_profit=None, stop_loss=None, expected_holding_days=None,
         position_notional_usd=None, risk_budget_usd=None, gates=gates,
         summary_en="EASY profile blocked: one or more required BloFin market or account checks are not confirmed.",
-        summary_fa="ربات آسان متوقف شد: دست‌کم یکی از کنترل‌های ضروری بازار، قرارداد یا حساب BloFin تأیید نشد.",
+        summary_fa="موتور Challenge 1 متوقف شد: دست‌کم یکی از کنترل‌های ضروری بازار، قرارداد یا حساب BloFin تأیید نشد.",
         metrics=metrics,
     )
 
@@ -3767,7 +3768,7 @@ def _run_blofin_demo_execution_job(
         execution_profile = str(execution_profile or "").strip().upper()
         if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
             raise BloFinDemoExecutionBlocked("Invalid BloFin USDT perpetual instrument.")
-        if execution_profile not in {"EASY", "STANDARD", "STRICT"}:
+        if execution_profile not in {"CHALLENGE_1", "EASY", "STANDARD", "STRICT"}:
             raise BloFinDemoExecutionBlocked("Invalid execution profile.")
         _set_blofin_execution_job(
             job_id, "running", stage="READINESS_CHECK",
@@ -3831,6 +3832,7 @@ def _run_blofin_demo_execution_job(
                 return
 
         profile_rules = {
+            "CHALLENGE_1": {"required": set(), "min_pass": 0, "min_score": 0.0},
             "EASY": {"required": {1, 2, 3, 4, 5, 6, 9}, "min_pass": 7, "min_score": 55.0},
             "STANDARD": {"required": {1, 2, 3, 4, 5, 6, 8, 9}, "min_pass": 9, "min_score": 65.0},
             "STRICT": {"required": set(range(1, 13)), "min_pass": 12, "min_score": 75.0},
@@ -3839,10 +3841,81 @@ def _run_blofin_demo_execution_job(
         asset = AssetSpec.parse("perp:" + instrument_id.replace("-", ""))
         analysis_time_utc = datetime.now(timezone.utc).isoformat()
         read_client = BloFinDemoReadOnly(timeout=10.0)
-        if execution_profile == "EASY":
+        if execution_profile == "CHALLENGE_1":
+            _set_blofin_execution_job(
+                job_id, "running", stage="CHALLENGE_1_PATTERN_ANALYSIS",
+                message_fa=f"موتور Challenge 1 در حال بررسی کندل‌های بسته‌شده و الگوهای {instrument_id} است؛ بدون TinyFish و بدون مدل پولی.",
+                trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
+            )
+            challenge_record = analyze_blofin_challenge1(read_client, instrument_id)
+            mtf_signal = challenge_record.get("execution") if isinstance(challenge_record.get("execution"), dict) else {}
+            last_candle_time = challenge_record.get("signal_bar_open_utc")
+            last_candle_close = challenge_record.get("entry_price_usd")
+            gates = [
+                {
+                    "gate_id": gate_id,
+                    "status": "UNKNOWN",
+                    "name_fa": f"فیلتر عمومی {gate_id}",
+                    "reason_fa": "در موتور Challenge 1 برای صدور سیگنال استفاده نمی‌شود؛ فقط در لایه نظارت جداگانه می‌ماند.",
+                    "execution_role": "OBSERVATION_ONLY",
+                }
+                for gate_id in range(1, 13)
+            ]
+            challenge_record["gates"] = gates
+            challenge_record["elliott_wave"] = {}
+            metrics = {
+                "execution_profile": "CHALLENGE_1",
+                "execution_profile_label": "CHALLENGE 1 · CANDLE & CHART PATTERNS",
+                "challenge1_evidence": challenge_record.get("challenge1_evidence", {}),
+                "legacy_12_gates_used_for_entry": False,
+                "external_ai_required": False,
+                "tinyfish_required": False,
+            }
+            analysis = SimpleNamespace(
+                asset=asset.raw,
+                signal=Signal(str(challenge_record.get("signal") or "NO_TRADE")),
+                metrics=metrics,
+                gates=gates,
+                entry_price=challenge_record.get("entry_price_usd"),
+                stop_loss=challenge_record.get("stop_loss_usd"),
+                take_profit=challenge_record.get("take_profit_usd"),
+                to_record=lambda: challenge_record,
+            )
+            if (
+                str(challenge_record.get("signal") or "").upper() not in {"LONG", "SHORT"}
+                or mtf_signal.get("status") != "PASS"
+            ):
+                reason_fa = str(challenge_record.get("reason_fa") or "الگوی معتبر Challenge 1 پیدا نشد؛ تصمیم صحیح عدم معامله است.")
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="NO_TRADE",
+                    message_fa=reason_fa,
+                    analysis={
+                        "instrument_id": instrument_id,
+                        "execution_profile": "CHALLENGE_1",
+                        "signal": "NO_TRADE",
+                        "legacy_12_gates_used_for_entry": False,
+                        "challenge1_evidence": challenge_record.get("challenge1_evidence", {}),
+                    },
+                    trade_context={
+                        "asset": asset.raw, "instrument_id": instrument_id,
+                        "execution_profile": "CHALLENGE_1",
+                        "execution_timeframe": "15m",
+                        "trend_confirmation_timeframe": "1H",
+                        "completed_candles_only": True,
+                    },
+                    result={
+                        **challenge_record,
+                        "status": "NO_TRADE",
+                        "environment": "BLOFIN_DEMO",
+                        "orders_submitted": False,
+                        "trade_executed": False,
+                    },
+                )
+                return
+        elif execution_profile == "EASY":
             _set_blofin_execution_job(
                 job_id, "running", stage="LIVE_EASY_MTF_ANALYSIS",
-                message_fa=f"ربات آسان در حال بررسی {instrument_id} با روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای BloFin است.",
+                message_fa=f"موتور Challenge 1 در حال بررسی {instrument_id} با روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای BloFin است.",
                 trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
             )
             analysis = _blofin_easy_trader_analysis(read_client, store, asset, instrument_id)
@@ -3873,7 +3946,7 @@ def _run_blofin_demo_execution_job(
                     last_candle_time = None
         analysis.metrics["execution_profile"] = execution_profile
         analysis.metrics["execution_profile_label"] = {
-            "EASY": "EASY TRADER", "STANDARD": "STANDARD TRADER", "STRICT": "STRICT TRADER",
+            "CHALLENGE_1": "CHALLENGE 1 · CANDLE & CHART PATTERNS", "EASY": "EASY TRADER", "STANDARD": "STANDARD TRADER", "STRICT": "STRICT TRADER",
         }[execution_profile]
         record = analysis.to_record()
         record.update({
@@ -3924,7 +3997,7 @@ def _run_blofin_demo_execution_job(
         }
         _set_blofin_execution_job(
             job_id, "running", stage="PROFILE_GATE_REVIEW",
-            message_fa=f"ربات {execution_profile} · {instrument_id} · {pass_count}/12 گیت PASS؛ الگوی کندلی شاخص شرط اجباری نیست.",
+            message_fa=(f"ربات Challenge 1 · {instrument_id} · تأیید الگوی کندلی/نموداری؛ ۱۲ فیلتر عمومی فقط نظارتی‌اند." if execution_profile == "CHALLENGE_1" else f"ربات {execution_profile} · {instrument_id} · {pass_count}/12 گیت PASS؛ الگوی کندلی شاخص شرط اجباری نیست."),
             analysis=gate_summary, elliott_wave=wave_report, trade_context=trade_context,
         )
         statuses_by_id = {
@@ -3973,6 +4046,20 @@ def _run_blofin_demo_execution_job(
                     result={
                         "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
                         **gate_summary, "mtf_confirmation": mtf_signal,
+                        "reason_fa": reason_fa, "orders_submitted": False, "trade_executed": False,
+                    },
+                )
+                return
+        elif execution_profile == "CHALLENGE_1":
+            if mtf_signal.get("status") != "PASS":
+                reason_fa = challenge_record.get("reason_fa") or "الگوی معتبر با کندل بسته‌شده تأیید نشد."
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="NO_TRADE",
+                    message_fa=reason_fa, analysis=gate_summary,
+                    trade_context={"instrument_id": instrument_id, "execution_profile": "CHALLENGE_1"},
+                    result={
+                        "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                        "challenge1_evidence": challenge_record.get("challenge1_evidence", {}),
                         "reason_fa": reason_fa, "orders_submitted": False, "trade_executed": False,
                     },
                 )
@@ -4063,15 +4150,24 @@ def _run_blofin_demo_execution_job(
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
-        try:
-            ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
-        except Exception as exc:
+        if execution_profile == "CHALLENGE_1":
             ai_review = {
-                "status": "UNKNOWN", "paper_entry_eligible": False,
-                "error_type": type(exc).__name__,
+                "status": "LOCAL_RULES_ONLY",
+                "paper_entry_eligible": True,
+                "model": "CHALLENGE_1_LOCAL_RULES_V1",
+                "reason": "No paid or external AI approval is required for this deterministic strategy.",
             }
+        else:
+            try:
+                ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
+            except Exception as exc:
+                ai_review = {
+                    "status": "UNKNOWN", "paper_entry_eligible": False,
+                    "error_type": type(exc).__name__,
+                }
+
         ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
-        if (
+        if execution_profile != "CHALLENGE_1" and (
             not isinstance(ai_review, dict) or ai_status != "APPROVED"
             or ai_review.get("paper_entry_eligible") is not True
         ):
@@ -4495,8 +4591,9 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
             payload["enabled"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
-            payload["instrument_id"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENT", "BTC-USDT").strip().upper()
-            payload["execution_profile"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "EASY").strip().upper()
+            payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
+            payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
+            payload["execution_profile"] = "CHALLENGE_1"
             payload["readiness"] = _blofin_demo_execution_readiness()
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
@@ -4700,17 +4797,15 @@ class Handler(BaseHTTPRequestHandler):
                 <select id="blofin-instrument" disabled><option value="">در حال دریافت فهرست قراردادها...</option></select>
               </div>
               <div>
-                <label for="blofin-engine-profile">ربات انتخابی</label>
+                <label for="blofin-engine-profile">استراتژی معامله Demo</label>
                 <select id="blofin-engine-profile">
-                  <option value="EASY">EASY TRADER · ربات آسان</option>
-                  <option value="STANDARD">STANDARD · ربات استاندارد</option>
-                  <option value="STRICT">STRICT · ربات سخت‌گیر</option>
+                  <option value="CHALLENGE_1" selected>CHALLENGE 1 · ربات الگوهای کندلی و نموداری</option>
                 </select>
               </div>
             </div>
             <p id="blofin-instrument-status" class="muted" aria-live="polite">قراردادهای زنده با مجوز Full برای بازکردن موقعیت در حال دریافت‌اند.</p>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
-            <p class="muted">EASY: هفت کنترل اصلی داده، رژیم، روند، مومنتوم، نقدشوندگی، مجوز قرارداد و ریسک حساب اجباری‌اند؛ پنج گیت پژوهشی دیگر به‌صورت هشدار واقعی نمایش داده می‌شوند و به‌جای PASS جعلی، UNKNOWN می‌مانند. STANDARD: حداقل ۹ گیت با مجموعه ضروری گسترده‌تر. STRICT: هر ۱۲ گیت PASS.</p>
+            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>
             <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
@@ -5071,7 +5166,7 @@ async function loadBlofinInstruments(){
               instrumentStatus.textContent='قرارداد انتخابی: '+instrumentSelect.value+' · جهت خرید/فروش از سیگنال زنده می‌آید.';
             });
             profileSelect.addEventListener('change',()=>{
-              executionReadiness.textContent='ربات انتخابی: '+profileSelect.options[profileSelect.selectedIndex].text+' · کنترل‌های ضروری پیش از سفارش بررسی می‌شوند.';
+              executionReadiness.textContent='استراتژی معامله Demo: '+profileSelect.options[profileSelect.selectedIndex].text+' · کنترل‌های ضروری پیش از سفارش بررسی می‌شوند.';
             });
             async function fetchLiveMonitor(){
               const token=tokenInput.value.trim();
@@ -6174,8 +6269,8 @@ async function loadBlofinInstruments(){
             <section class="easy-trader-robot" id="easy-trader-robot" aria-label="ربات متحرک تحلیل‌گر حالت آسان">
               <div class="easy-robot-stage">
                 <div class="easy-robot-bubble" role="status" aria-live="polite">
-                  <span class="easy-robot-bubble-title">گزارش زنده تحلیل · EASY TRADER</span>
-                  <strong class="easy-robot-pattern" id="easy-robot-pattern">در انتظار الگوی کندلی معتبر...</strong>
+                  <span class="easy-robot-bubble-title">گزارش زنده تحلیل · CHALLENGE 1</span>
+                  <strong class="easy-robot-pattern" id="easy-robot-pattern">در انتظار الگوی تأییدشده Challenge 1...</strong>
                   <div class="easy-robot-chips">
                     <span class="easy-robot-chip" id="easy-robot-direction">جهت الگو: نامشخص</span>
                     <span class="easy-robot-chip" id="easy-robot-signal">سیگنال موتور: در انتظار داده</span>
@@ -6955,11 +7050,11 @@ async function loadBlofinInstruments(){
                 if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
                     return self._send(401, json.dumps({"status":"UNAUTHORIZED","message_fa":"توکن پنل معتبر نیست."}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 instrument_id = str(form.get("instrument", [""])[0] or "").strip().upper()
-                execution_profile = str(form.get("profile", ["EASY"])[0] or "EASY").strip().upper()
+                execution_profile = str(form.get("profile", ["CHALLENGE_1"])[0] or "EASY").strip().upper()
                 if (
                     form.get("confirm", [""])[0] != "1"
                     or not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id)
-                    or execution_profile not in {"EASY", "STANDARD", "STRICT"}
+                    or execution_profile not in {"CHALLENGE_1", "EASY", "STANDARD", "STRICT"}
                 ):
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
                 readiness = _blofin_demo_execution_readiness()
@@ -7215,20 +7310,27 @@ def _blofin_demo_autopilot_worker() -> None:
     except (TypeError, ValueError):
         configured_interval = 900
     interval_seconds = max(300, min(configured_interval, 900))
-    instrument_id = os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENT", "BTC-USDT").strip().upper()
-    execution_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "EASY").strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
-        instrument_id = "BTC-USDT"
-    if execution_profile not in {"EASY", "STANDARD", "STRICT"}:
-        execution_profile = "EASY"
+    raw_symbols = os.getenv(
+        "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS",
+        ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS),
+    )
+    instrument_ids = tuple(dict.fromkeys(
+        symbol.strip().upper() for symbol in raw_symbols.split(",")
+        if re.fullmatch(r"[A-Z0-9]{2,20}-USDT", symbol.strip().upper())
+    ))
+    if not instrument_ids:
+        instrument_ids = DEFAULT_CHALLENGE1_INSTRUMENTS
+    execution_profile = "CHALLENGE_1"
+    instrument_id = instrument_ids[0]
     with LOCK:
         BLOFIN_AUTOPILOT_STATE.update({
             "enabled": True,
             "status": "STARTING",
             "interval_seconds": interval_seconds,
             "instrument_id": instrument_id,
+            "instrument_ids": list(instrument_ids),
             "execution_profile": execution_profile,
-            "last_message_fa": "اتوپایلوت Demo فعال شد؛ چرخهٔ اول در حال آماده‌سازی است.",
+            "last_message_fa": "اتوپایلوت Challenge 1 فعال شد؛ بازارهای منتخب برای الگوهای کندلی/نموداری پایش می‌شوند.",
         })
     _persist_blofin_autopilot_state()
     while True:
@@ -7254,26 +7356,46 @@ def _blofin_demo_autopilot_worker() -> None:
                 _persist_blofin_autopilot_state()
                 time.sleep(30)
                 continue
-            job_id = uuid.uuid4().hex
             started = datetime.now(timezone.utc).isoformat()
-            with LOCK:
-                BLOFIN_AUTOPILOT_STATE.update({
-                    "enabled": True,
-                    "status": "RUNNING",
-                    "last_cycle_started_at_utc": started,
-                    "last_stage": "READINESS_CHECK",
+            batch_results = []
+            batch_jobs = []
+            for scan_instrument in instrument_ids:
+                instrument_id = scan_instrument
+                job_id = uuid.uuid4().hex
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE.update({
+                        "enabled": True,
+                        "status": "RUNNING",
+                        "last_cycle_started_at_utc": started,
+                        "last_stage": "CHALLENGE_1_MULTI_SYMBOL_SCAN",
+                        "instrument_id": instrument_id,
+                        "instrument_ids": list(instrument_ids),
+                        "execution_profile": execution_profile,
+                        "last_message_fa": f"موتور Challenge 1 در حال اسکن {instrument_id} از {len(instrument_ids)} بازار منتخب است.",
+                        "cycles_started": int(BLOFIN_AUTOPILOT_STATE.get("cycles_started") or 0) + (1 if not batch_jobs else 0),
+                    })
+                _persist_blofin_autopilot_state()
+                _set_blofin_execution_job(
+                    job_id, "queued", stage="AUTOPILOT_CYCLE",
+                    message_fa=f"چرخه خودکار Challenge 1 برای {instrument_id} آغاز شد.",
+                    trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
+                )
+                _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
+                with LOCK:
+                    finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+                summary = _blofin_autopilot_cycle_summary(finished_job)
+                finished_result = finished_job.get("result") if isinstance(finished_job.get("result"), dict) else {}
+                batch_results.append({
                     "instrument_id": instrument_id,
-                    "execution_profile": execution_profile,
-                    "last_message_fa": f"چرخه خودکار {instrument_id} با ربات {execution_profile} آغاز شد.",
-                    "cycles_started": int(BLOFIN_AUTOPILOT_STATE.get("cycles_started") or 0) + 1,
+                    "job_id": job_id,
+                    "status": finished_job.get("status", "UNKNOWN"),
+                    "signal": summary.get("signal"),
+                    "orders_submitted": summary.get("orders_submitted"),
+                    "trade_executed": summary.get("trade_executed"),
+                    "reason_fa": finished_result.get("reason_fa") or finished_job.get("message_fa"),
                 })
-            _persist_blofin_autopilot_state()
-            _set_blofin_execution_job(
-                job_id, "queued", stage="AUTOPILOT_CYCLE",
-                message_fa=f"چرخه خودکار {instrument_id} / {execution_profile} توسط زمان‌بند Demo آغاز شد.",
-                trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
-            )
-            _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
+                batch_jobs.append((job_id, instrument_id))
+            job_id, instrument_id = batch_jobs[-1]
             exchange_monitor = {}
             try:
                 snapshot = _blofin_demo_live_monitor_snapshot(instrument_id)
@@ -7376,6 +7498,9 @@ def _blofin_demo_autopilot_worker() -> None:
                     "next_cycle_scheduled": bool(autopilot_enabled),
                     "last_cycle_diagnostics": {
                         "instrument_id": instrument_id,
+                        "instrument_ids": list(instrument_ids),
+                        "symbols_scanned": len(instrument_ids),
+                        "symbol_results": batch_results,
                         "execution_profile": execution_profile,
                         "signal": signal_value or None,
                         "gate_pass_count": analysis.get("gate_pass_count"),
