@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crypto_super_radar.challenge_01_ai_mentor import detect_candlestick_patterns
+from crypto_super_radar.challenge_01_ai_mentor import build_pattern_context, detect_candlestick_patterns
 from crypto_super_radar.challenge_01_runner import (
     Challenge01DataError,
     Challenge01Runner,
@@ -128,6 +128,10 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
                 snapshot["detected_candlestick_patterns"],
                 detect_candlestick_patterns(snapshot["feature_window"]),
             )
+            self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["feature_window"]))
+            self.assertIn("atr_5_pct", snapshot["pattern_context"])
+            self.assertIn("volume_data_quality", snapshot["pattern_context"])
+            self.assertEqual(snapshot["pattern_context"]["support_resistance_scope"], "LOCAL_FIVE_BAR_REFERENCE_NOT_STRUCTURAL_LEVEL")
             self.assertEqual(
                 evidence["feature_window_open_times_ms"],
                 snapshot["feature_window_open_times_ms"],

@@ -88,6 +88,13 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
     ):
         issues.append("This exercise must contain a final non-executed label, not a trade/PnL outcome.")
 
+    if isinstance(feature_window, list) and len(feature_window) == FEATURE_WINDOW_LENGTH:
+        try:
+            expected_context = build_pattern_context(feature_window)
+        except (TypeError, ValueError, KeyError):
+            expected_context = None
+        if snapshot.get("pattern_context") != expected_context:
+            issues.append("The stored five-bar trend/volatility/volume/local-level context is missing or inconsistent.")
     finding_text = " ".join(issues) if issues else "Feature/target chronology and input isolation checks passed."
     detected_patterns = snapshot.get("detected_candlestick_patterns") or []
     pattern_text = ", ".join(detected_patterns) if detected_patterns else "NO_PATTERN_MATCH"
@@ -258,6 +265,7 @@ PATTERN_DEFINITIONS = {
     "FALLING_THREE_METHODS": "Five-bar continuation setup: strong bearish first bar, three small countertrend bars inside its range, then a strong bearish close below its close.",
 }
 PATTERN_CATALOG_VERSION = "CSR_CANDLE_HEURISTICS_5BAR_V2"
+MARKET_CONTEXT_VERSION = "CSR_MARKET_CONTEXT_5BAR_V1"
 
 
 def _target_label(candle: dict[str, Any]) -> str:
@@ -284,6 +292,94 @@ def _candle_shape(candle: dict[str, Any]) -> dict[str, float]:
         "upper_wick": high - body_high,
         "lower_wick": body_low - low,
         "direction": 1.0 if closing > opening else -1.0 if closing < opening else 0.0,
+        "volume": float(candle.get("volume", 0) or 0),
+    }
+
+
+def build_pattern_context(candles: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute causal trend, range/ATR, volume and local-level context from five bars."""
+    if not isinstance(candles, list) or len(candles) != FEATURE_WINDOW_LENGTH:
+        raise ValueError("MARKET_CONTEXT_REQUIRES_FIVE_COMPLETED_CANDLES")
+    if any(not isinstance(item, dict) or item.get("confirmed") is not True for item in candles):
+        raise ValueError("MARKET_CONTEXT_REQUIRES_COMPLETED_CANDLES")
+    timestamps = [item.get("open_time_ms") for item in candles]
+    if any(not isinstance(value, int) for value in timestamps) or any(
+        right - left != BAR_MILLISECONDS for left, right in zip(timestamps, timestamps[1:])
+    ):
+        raise ValueError("MARKET_CONTEXT_REQUIRES_CONTIGUOUS_CHRONOLOGICAL_CANDLES")
+
+    shapes = [_candle_shape(item) for item in candles]
+    if any(not math.isfinite(shape["volume"]) or shape["volume"] < 0 for shape in shapes):
+        raise ValueError("MARKET_CONTEXT_REQUIRES_VALID_NON_NEGATIVE_VOLUME")
+
+    closes = [shape["close"] for shape in shapes]
+    x_mean = 2.0
+    close_mean = sum(closes) / len(closes)
+    slope_denominator = sum((index - x_mean) ** 2 for index in range(5))
+    slope = sum((index - x_mean) * (value - close_mean) for index, value in enumerate(closes)) / slope_denominator
+    normalized_slope = slope / close_mean if close_mean > 0 else 0.0
+    window_return = (closes[-1] - shapes[0]["open"]) / shapes[0]["open"]
+
+    true_ranges = []
+    for index, shape in enumerate(shapes):
+        previous_close = shapes[index - 1]["close"] if index else shape["close"]
+        true_ranges.append(max(
+            shape["high"] - shape["low"],
+            abs(shape["high"] - previous_close),
+            abs(shape["low"] - previous_close),
+        ))
+    atr_5 = sum(true_ranges) / len(true_ranges)
+    atr_5_pct = atr_5 / closes[-1] if closes[-1] > 0 else 0.0
+    range_mean = sum(true_ranges) / len(true_ranges)
+    range_cv = (
+        math.sqrt(sum((value - range_mean) ** 2 for value in true_ranges) / len(true_ranges)) / range_mean
+        if range_mean > 1e-12 else 0.0
+    )
+    prior_ranges = sorted(true_ranges[:-1])
+    prior_range_median = (prior_ranges[1] + prior_ranges[2]) / 2.0
+    range_ratio = true_ranges[-1] / prior_range_median if prior_range_median > 1e-12 else None
+
+    volume_values = [shape["volume"] for shape in shapes]
+    prior_volumes = sorted(volume_values[:-1])
+    prior_volume_median = (prior_volumes[1] + prior_volumes[2]) / 2.0
+    volume_available = prior_volume_median > 0
+    volume_ratio = volume_values[-1] / prior_volume_median if volume_available else None
+
+    prior_high = max(shape["high"] for shape in shapes[:-1])
+    prior_low = min(shape["low"] for shape in shapes[:-1])
+    proximity = max(0.25 * atr_5, 0.002 * closes[-1])
+    trend = (
+        "UP" if normalized_slope >= 0.0005 else
+        "DOWN" if normalized_slope <= -0.0005 else "RANGE"
+    )
+    volatility_regime = (
+        "EXPANSION" if range_ratio is not None and range_ratio >= 1.5 else
+        "CONTRACTION" if range_ratio is not None and range_ratio <= 0.7 else
+        "NORMAL" if range_ratio is not None else "UNKNOWN"
+    )
+    return {
+        "version": MARKET_CONTEXT_VERSION,
+        "window_trend": trend,
+        "window_return": window_return,
+        "normalized_close_slope": normalized_slope,
+        "atr_5": atr_5,
+        "atr_5_pct": atr_5_pct,
+        "range_coefficient_variation": range_cv,
+        "latest_range_vs_prior_median": range_ratio,
+        "volatility_regime": volatility_regime,
+        "volume_ratio_vs_prior_median": volume_ratio,
+        "volume_confirmation": (
+            "CONFIRMED" if volume_ratio is not None and volume_ratio >= 1.2 else
+            "NOT_CONFIRMED" if volume_ratio is not None else "UNKNOWN"
+        ),
+        "volume_data_quality": "AVAILABLE" if volume_available else "UNAVAILABLE",
+        "local_support_reference": prior_low,
+        "local_resistance_reference": prior_high,
+        "near_local_support": abs(shapes[-1]["close"] - prior_low) <= proximity,
+        "near_local_resistance": abs(shapes[-1]["close"] - prior_high) <= proximity,
+        "liquidity_sweep_high": shapes[-1]["high"] > prior_high and shapes[-1]["close"] < prior_high,
+        "liquidity_sweep_low": shapes[-1]["low"] < prior_low and shapes[-1]["close"] > prior_low,
+        "support_resistance_scope": "LOCAL_FIVE_BAR_REFERENCE_NOT_STRUCTURAL_LEVEL",
     }
 
 
@@ -579,13 +675,13 @@ def _train_candidate(
     }
     train_manifest = [
         [r["experience_id"], r["feature_ts"], r["target_ts"],
-         [[candle["open_time_ms"], candle["open"], candle["high"], candle["low"], candle["close"]]
+         [[candle["open_time_ms"], candle["open"], candle["high"], candle["low"], candle["close"], candle.get("volume", 0)]
           for candle in r["feature_window"]], r["label"]]
         for r in train_rows
     ]
     validation_manifest = [
         [r["experience_id"], r["feature_ts"], r["target_ts"],
-         [[candle["open_time_ms"], candle["open"], candle["high"], candle["low"], candle["close"]]
+         [[candle["open_time_ms"], candle["open"], candle["high"], candle["low"], candle["close"], candle.get("volume", 0)]
           for candle in r["feature_window"]], r["label"]]
         for r in validation_rows
     ]
@@ -593,8 +689,8 @@ def _train_candidate(
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     dataset_hash = digest(all_manifest)
     artifact = {
-        "schema": "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2",
-        "model_version": "ch01-candle-pattern-softmax-v2-" + dataset_hash[:12],
+        "schema": "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3",
+        "model_version": "ch01-candle-pattern-context-softmax-v3-" + dataset_hash[:12],
         "trained_through_round": trained_through_round,
         "task": "NEXT_CANDLE_DIRECTION_ONE_BAR_AHEAD",
         "method": "MULTINOMIAL_LOGISTIC_REGRESSION_WITH_CANDLE_PATTERNS",
@@ -603,6 +699,8 @@ def _train_candidate(
         "pattern_catalog": PATTERN_DEFINITIONS,
         "pattern_feature_mapping": PATTERN_FEATURE_TO_LABEL,
         "pattern_catalog_version": PATTERN_CATALOG_VERSION,
+        "market_context_version": MARKET_CONTEXT_VERSION,
+        "market_context_scope": "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES",
         "feature_window_length": FEATURE_WINDOW_LENGTH,
         "classes": list(MODEL_CLASSES),
         "normalization": {"means": means, "standard_deviations": stds},
@@ -683,6 +781,7 @@ def _train_and_store_candidate(
             )
             or snapshot.get("feature_window_open_times_ms") != [candle["open_time_ms"] for candle in feature_window]
             or snapshot.get("detected_candlestick_patterns") != detect_candlestick_patterns(feature_window)
+            or snapshot.get("pattern_context") != build_pattern_context(feature_window)
             or evidence.get("feature_window_open_times_ms") != [candle["open_time_ms"] for candle in feature_window]
             or evidence.get("reference_classification") != actual_label
             or outcome_payload.get("final") is not True
@@ -853,13 +952,15 @@ def load_candidate_artifact(
                 if (
                     saved_sha != calculated
                     or (expected_sha256 is not None and saved_sha != expected_sha256)
-                    or artifact.get("schema") != "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
+                    or artifact.get("schema") != "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3"
                     or artifact.get("feature_window_length") != FEATURE_WINDOW_LENGTH
                     or artifact.get("features") != list(MODEL_FEATURES)
                     or artifact.get("pattern_features") != list(PATTERN_FEATURES)
                     or artifact.get("pattern_catalog") != PATTERN_DEFINITIONS
                     or artifact.get("pattern_feature_mapping") != PATTERN_FEATURE_TO_LABEL
                     or artifact.get("pattern_catalog_version") != PATTERN_CATALOG_VERSION
+                    or artifact.get("market_context_version") != MARKET_CONTEXT_VERSION
+                    or artifact.get("market_context_scope") != "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES"
                     or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
                     or artifact.get("training", {}).get("samples", 0) < 60
                     or artifact.get("temporal_validation", {}).get("samples", 0) < 20
@@ -882,7 +983,7 @@ def predict_candidate(
 ) -> tuple[str, list[float]]:
     """Apply the persisted candidate without refitting or seeing target data."""
     if (
-        artifact.get("schema") != "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
+        artifact.get("schema") != "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3"
         or artifact.get("promotion_status") != "CANDIDATE_NOT_PROMOTED"
         or artifact.get("features") != list(MODEL_FEATURES)
         or artifact.get("feature_window_length") != FEATURE_WINDOW_LENGTH
@@ -890,6 +991,8 @@ def predict_candidate(
         or artifact.get("pattern_catalog") != PATTERN_DEFINITIONS
         or artifact.get("pattern_feature_mapping") != PATTERN_FEATURE_TO_LABEL
         or artifact.get("pattern_catalog_version") != PATTERN_CATALOG_VERSION
+        or artifact.get("market_context_version") != MARKET_CONTEXT_VERSION
+        or artifact.get("market_context_scope") != "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES"
         or artifact.get("classes") != list(MODEL_CLASSES)
     ):
         raise ValueError("MENTOR_CANDIDATE_SCHEMA_OR_STATUS_INVALID")

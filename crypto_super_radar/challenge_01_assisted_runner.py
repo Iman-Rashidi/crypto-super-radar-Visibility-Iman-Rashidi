@@ -17,6 +17,8 @@ from .challenge_01_ai_mentor import (
     review_baseline,
     train_candidate_from_completed_rounds,
     detect_candlestick_patterns,
+    build_pattern_context,
+    MARKET_CONTEXT_VERSION,
     FEATURE_WINDOW_LENGTH,
 )
 from .challenge_01_runner import (
@@ -107,6 +109,7 @@ class Challenge01AssistedRunner:
                 != [candle["open_time_ms"] for candle in feature_window]
                 or snapshot.get("detected_candlestick_patterns")
                 != detect_candlestick_patterns(feature_window)
+                or snapshot.get("pattern_context") != build_pattern_context(feature_window)
                 or snapshot.get("data_quality") != "VALID_COMPLETED_FEATURE_AND_TARGET"
                 or snapshot.get("target_candle_in_input") is not False
                 or "target_candle" in snapshot
@@ -206,8 +209,10 @@ class Challenge01AssistedRunner:
                     continue
                 if (
                     saved_hash == calculated_hash
-                    and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
+                    and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3"
                     and artifact.get("trained_through_round") == previous_round
+                    and artifact.get("market_context_version") == MARKET_CONTEXT_VERSION
+                    and artifact.get("market_context_scope") == "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES"
                     and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
                 ):
                     candidate_anchor = item.get("experience_id")
@@ -328,6 +333,7 @@ class Challenge01AssistedRunner:
                                 candle["open_time_ms"] for candle in feature_window
                             ],
                             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
+                            "pattern_context": build_pattern_context(feature_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -395,6 +401,7 @@ class Challenge01AssistedRunner:
                                 candle["open_time_ms"] for candle in feature_window
                             ],
                             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
+                            "pattern_context": build_pattern_context(feature_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,

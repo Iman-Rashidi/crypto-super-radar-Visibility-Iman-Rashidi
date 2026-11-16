@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crypto_super_radar.challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, detect_candlestick_patterns, review_locked_baseline
+from crypto_super_radar.challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, build_pattern_context, detect_candlestick_patterns, review_locked_baseline
 from crypto_super_radar.challenge_01_assisted_runner import Challenge01AssistedRunner
 from crypto_super_radar.challenge_01_runner import BAR_MILLISECONDS, get_challenge_01_status
 from crypto_super_radar.learning_experience_memory import LearningExperienceMemory
@@ -19,6 +19,7 @@ def _candle(ts: int, kind: int) -> dict:
         "high": "104",
         "low": "96",
         "close": close,
+        "volume": "10",
         "confirmed": True,
     }
 
@@ -122,6 +123,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
                             "feature_window": feature_window,
                             "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
                             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
+                            "pattern_context": build_pattern_context(feature_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -195,6 +197,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             outcome_event = next(e for e in assisted["events"] if e["event_type"] == "OUTCOME_LABELLED")
             snapshot = decision_event["payload"]["input_snapshot"]
             self.assertFalse(snapshot["target_candle_in_input"])
+            self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["feature_window"]))
             self.assertNotIn("target_candle", snapshot)
             self.assertEqual(
                 snapshot["mentor_model_artifact_sha256"],

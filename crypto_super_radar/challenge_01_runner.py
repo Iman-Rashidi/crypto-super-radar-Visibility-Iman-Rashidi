@@ -16,7 +16,7 @@ from typing import Any, Callable
 from .blofin_demo_spot_readonly import BloFinDemoSpotReadOnly
 from .database import connect_database, storage_backend
 from .learning_experience_memory import LearningExperienceMemory
-from .challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, detect_candlestick_patterns
+from .challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, MARKET_CONTEXT_VERSION, build_pattern_context, detect_candlestick_patterns
 
 
 CHALLENGE_ID = "CHALLENGE-01"
@@ -50,7 +50,7 @@ def _parse_candle(row: Any) -> dict[str, Any]:
             raise Challenge01DataError("CANDLE_FIELD_MISSING")
         raw = {
             "ts": row[0], "open": row[1], "high": row[2], "low": row[3],
-            "close": row[4], "confirm": row[8],
+            "close": row[4], "volume": row[5], "confirm": row[8],
         }
     elif isinstance(row, dict):
         raw = row
@@ -78,12 +78,16 @@ def _parse_candle(row: Any) -> dict[str, Any]:
     if prices["high"] < prices["low"]:
         raise Challenge01DataError("INCONSISTENT_RANGE")
 
+    volume = _decimal(raw.get("volume", raw.get("vol", 0)), "volume")
+    if volume < 0:
+        raise Challenge01DataError("NEGATIVE_CANDLE_VOLUME")
     confirm_raw = raw.get("confirm")
     if str(confirm_raw) not in {"0", "1"}:
         raise Challenge01DataError("INVALID_CANDLE_CONFIRM")
     return {
         "open_time_ms": timestamp,
         **{key: str(value) for key, value in prices.items()},
+        "volume": str(volume),
         "confirmed": str(confirm_raw) == "1",
     }
 
@@ -375,7 +379,7 @@ class Challenge01Runner:
                 [
                     [
                         [candle["open_time_ms"] for candle in sample["feature_window"]],
-                        [[candle["open"], candle["high"], candle["low"], candle["close"]]
+                        [[candle["open"], candle["high"], candle["low"], candle["close"], candle.get("volume", 0)]
                          for candle in sample["feature_window"]],
                         sample["target"]["open_time_ms"],
                         sample["target"]["open"], sample["target"]["high"],
@@ -442,6 +446,7 @@ class Challenge01Runner:
                             "detected_candlestick_patterns": detect_candlestick_patterns(
                                 sample["feature_window"]
                             ),
+                            "pattern_context": build_pattern_context(sample["feature_window"]),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -647,13 +652,15 @@ def get_challenge_01_status(
                     total_samples = artifact.get("training", {}).get("total_samples")
                     if (
                         saved_hash == calculated_hash
-                        and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
+                        and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3"
                         and artifact.get("feature_window_length") == FEATURE_WINDOW_LENGTH
                         and isinstance(artifact.get("pattern_features"), list)
                         and len(artifact.get("pattern_features")) >= 15
                         and isinstance(artifact.get("pattern_catalog"), dict)
                         and len(artifact.get("pattern_catalog")) == len(artifact.get("pattern_features"))
                         and artifact.get("pattern_catalog_version") == "CSR_CANDLE_HEURISTICS_5BAR_V2"
+                        and artifact.get("market_context_version") == MARKET_CONTEXT_VERSION
+                        and artifact.get("market_context_scope") == "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES"
                         and isinstance(artifact.get("pattern_feature_mapping"), dict)
                         and len(artifact.get("pattern_feature_mapping")) == len(artifact.get("pattern_features", []))
                         and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"

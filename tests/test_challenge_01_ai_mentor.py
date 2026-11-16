@@ -13,6 +13,8 @@ from crypto_super_radar.challenge_01_ai_mentor import (
     predict_candidate,
     MODEL_FEATURES,
     _feature_vector,
+    build_pattern_context,
+    MARKET_CONTEXT_VERSION,
     review_baseline,
     review_locked_baseline,
 )
@@ -70,6 +72,8 @@ class Challenge01AIMentorTests(unittest.TestCase):
                 "confirmed": True,
             },
         ]
+        for candle_item in feature_window:
+            candle_item["volume"] = "10"
         feature = feature_window[-1]
         target = {
             "open_time_ms": target_ts,
@@ -85,6 +89,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
             "feature_window": feature_window,
             "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
+            "pattern_context": build_pattern_context(feature_window),
             "prediction_horizon_bars": 1,
             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
             "target_candle_in_input": False,
@@ -227,6 +232,33 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertIn("THREE_WHITE_SOLDIERS", detect_candlestick_patterns(soldiers))
         self.assertIn("THREE_BLACK_CROWS", detect_candlestick_patterns(crows))
 
+
+    def test_market_context_is_causal_and_marks_missing_volume_unknown(self):
+        candles = [
+            {
+                "open_time_ms": index * 3_600_000,
+                "open": str(100 + index), "high": str(103 + index),
+                "low": str(99 + index), "close": str(102 + index),
+                "confirmed": True,
+            }
+            for index in range(5)
+        ]
+        context = build_pattern_context(candles)
+        self.assertEqual(context["version"], MARKET_CONTEXT_VERSION)
+        self.assertEqual(context["window_trend"], "UP")
+        self.assertEqual(context["volume_data_quality"], "UNAVAILABLE")
+        self.assertEqual(context["volume_confirmation"], "UNKNOWN")
+        self.assertEqual(context["support_resistance_scope"], "LOCAL_FIVE_BAR_REFERENCE_NOT_STRUCTURAL_LEVEL")
+        changed = [dict(item) for item in candles]
+        changed[-1]["close"] = "100"
+        self.assertNotEqual(build_pattern_context(changed), context)
+        with self.assertRaises(ValueError):
+            build_pattern_context(candles[:-1])
+        incomplete = [dict(item) for item in candles]
+        incomplete[-1]["confirmed"] = False
+        with self.assertRaises(ValueError):
+            build_pattern_context(incomplete)
+
     def test_pattern_detector_rejects_incomplete_or_wrong_length_windows(self):
         with self.assertRaises(ValueError):
             detect_candlestick_patterns([])
@@ -354,7 +386,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         )
         self.assertEqual(stored_model["training"]["samples"], 80)
         self.assertEqual(stored_model["temporal_validation"]["samples"], 20)
-        self.assertEqual(stored_model["schema"], "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2")
+        self.assertEqual(stored_model["schema"], "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3")
         self.assertEqual(stored_model["feature_window_length"], 5)
         self.assertIn("bullish_engulfing_2bar", stored_model["features"])
         self.assertIn("morning_star_3bar", stored_model["features"])
@@ -363,6 +395,8 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertEqual(len(stored_model["pattern_feature_mapping"]), 31)
         self.assertEqual(stored_model["pattern_feature_mapping"]["morning_star_3bar"], "MORNING_STAR")
         self.assertEqual(stored_model["pattern_catalog_version"], "CSR_CANDLE_HEURISTICS_5BAR_V2")
+        self.assertEqual(stored_model["market_context_version"], MARKET_CONTEXT_VERSION)
+        self.assertEqual(stored_model["market_context_scope"], "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES")
         self.assertIn("MORNING_STAR", stored_model["pattern_catalog"])
         loaded_artifact, loaded_anchor = load_candidate_artifact(self.memory)
         self.assertEqual(loaded_artifact["artifact_sha256"], candidate["artifact_sha256"])
