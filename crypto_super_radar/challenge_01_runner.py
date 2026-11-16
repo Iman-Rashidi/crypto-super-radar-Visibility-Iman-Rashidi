@@ -335,8 +335,8 @@ class Challenge01Runner:
                 # one later completed target candle for every prediction.
                 if len(completed) < sample_count + CONTEXT_WINDOW_LENGTH:
                     raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES_FOR_50_BAR_CONTEXT_WINDOW")
-                # Three completed feature candles plus one later target are
-                # needed per prediction; adjacent windows may overlap safely.
+                # Each prediction uses 50 completed context candles plus
+                # one later completed target; adjacent contexts may overlap safely.
                 selected_desc = completed[-(sample_count + CONTEXT_WINDOW_LENGTH):]
                 selected = list(reversed(selected_desc))
                 for index in range(len(selected) - 1):
@@ -505,7 +505,7 @@ class Challenge01Runner:
             recovered_memory = LearningExperienceMemory(connection)
             verified = 0
             for sample in samples:
-                target_ts = sample["target"]["open_time_ms"]
+                target_ts = sample["target_open_time_ms"]
                 experience_id = f"ch01-r{round_number:02d}-btc-usdt-1h-{target_ts}"
                 recovered = recovered_memory.get_experience(experience_id)
                 if recovered["verification"]["status"] != "PASS":
