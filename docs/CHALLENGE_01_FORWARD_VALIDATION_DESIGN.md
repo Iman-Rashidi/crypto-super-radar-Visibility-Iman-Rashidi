@@ -6,71 +6,72 @@
 
 ## 1. Current verified state
 
-- Challenge 1 BOT_ONLY currently classifies the same completed candle using its final Open and Close.
-- This is a descriptive candle-label consistency task. It is not a forecast of a later candle and its 100% score must never be described as predictive accuracy or trading edge.
-- The Mentor performs an append-only audit of each locked baseline and trains a pure-Python multinomial logistic-regression candidate from the oldest 80 feature/target pairs, with the newest 20 as a temporal validation split.
-- The candidate artifact stores the feature schema, normalization statistics, weights, biases, training/validation dataset hashes, validation metrics and artifact SHA-256 in a LESSON_PROPOSED event. The hash is independently recalculated on read-back.
-- A protected dashboard endpoint invokes the batch Mentor only when exactly 100 valid, final-labelled forward samples exist and the configured memory backend is Turso Cloud SQLite.
-- Dashboard status distinguishes completed Mentor feedback from a verified candidate artifact. Missing or invalid artifact keeps the stage at AI_MENTOR_MODEL_BUILD_REQUIRED; a valid artifact advances only to FORWARD_HOLDOUT_VALIDATION_REQUIRED. All assisted rounds remain blocked.
-- GitHub Actions run 1573 passed: focused Challenge 1 tests 20/20, full repository suite 673/673, and Streamlit smoke. This proves CI only, not Render execution or persistent runtime memory.
+- The active BOT_ONLY path predicts the next completed candle from information available through the final feature candle. Its frozen decision event is appended before the target OHLC is read and labelled. A regression test observes this event order.
+- Each sample stores 50 completed, contiguous context candles. The final five candles form the pattern window. The next candle is the target and appears only in later outcome evidence, not in the frozen input snapshot.
+- The BloFin adapter is a GET-only public Demo Spot candle reader. Challenge 1 does not submit Demo or Live orders; outcomes are recorded as NOT_EXECUTED with no PnL.
+- The Mentor deterministically audits locked BOT_ONLY experiences, appends feedback, and trains a pure-Python multinomial logistic-regression candidate. Training uses the oldest 80% of reviewed samples and the newest 20% for chronological validation.
+- The candidate artifact contains the feature schema, pattern catalogue/mapping, normalization, weights, biases, chronological dataset hashes, validation metrics, and SHA-256. It remains CANDIDATE_NOT_PROMOTED. The 50-bar context is currently audit/regime-stratification evidence, not model input; the Candidate uses five-bar candle features and candlestick-pattern flags.
+- The implemented lifecycle supports a BOT_ONLY baseline followed by paired BOT_ONLY and Candidate predictions on later, non-overlapping 100-sample rounds. A candidate for the next round is trained only after the previous round's outcomes and Mentor feedback are final. Round 5 does not create an unused round-6 model.
+- The memory API is append-only and validates event sequence, payload hashes, event-hash chain, duplicate event IDs, immutable outcomes, and Mentor/lesson lifecycle. It supports a prior-round BOT_ONLY reference only when that baseline is integrity-verified, final-labelled, has Mentor feedback, belongs to the same challenge/engine, and is chronologically available before the assisted feature time.
+- Runtime Turso durability is enforced by the production runner but remains unverified in the active Render service. CI uses test SQLite and synthetic/mock market providers; it does not prove that the deployed service connected to Turso or completed a real market-data challenge.
+- GitHub Actions run 1726 on commit d439189 passed: 27 focused Challenge 1 tests, 685 full-repository tests, Streamlit smoke, Render overlay build/startup check, and extracted source-bundle verification. This is code/CI evidence only, not proof of learning or market edge.
 
-## 2. Why the next rounds must change
+## 2. Original defect and current correction
 
-The same-candle Open/Close comparison contains the target inside the input. Repeating it on new candles would only repeat a tautology. It cannot establish generalization, learning, or future-market performance.
+The initial same-candle Open/Close classification was not a forecast: it included the candle being labelled and could not prove generalization. The active forward-validation path has replaced that task.
 
-The next implementation should convert the skill to:
+At the close of candle t, BOT_ONLY predicts the direction of t+1 using only the completed feature/context data through t. The BOT_ONLY decision is appended first. Only after that immutable event is written does the runner inspect the target candle's OHLC and append its final label.
 
-**At the close of candle t, use only information available through candle t to classify the direction of candle t+1.**
+For an assisted round, both the BOT_ONLY and frozen Candidate decisions are appended before the target label is read. The target outcome is then appended for both experiences, and Mentor review is appended only afterward. That feedback can influence a later candidate, never the prediction on the sample that generated it.
 
-The target label must be derived from the next candle only after the five-candle prediction snapshot is frozen. Five-bar continuation formations use the full feature window; three-bar formations use its latest three candles.
+The code-level order is now covered by a regression test. This does not yet constitute a real-market execution or a completed five-round evaluation.
 
-## 3. Proposed data protocol
+## 3. Implemented data protocol (code-level)
 
 For every sample:
 
 1. Select 50 fully completed, contiguous context candles ending at time t.
 2. Use only the last five candles of that context as the candlestick-pattern feature window.
-3. Freeze the complete 50-bar context, its derived Price Action evidence, the five-bar pattern window, and decision timestamp at or after t closes.
-4. Predict the next candle's direction using no fields from candle t+1.
-5. Once t+1 is complete, append the final outcome and its evidence.
-6. Keep the target candle and all later candles out of the decision snapshot and its derived context. The target OHLC may appear only in later outcome evidence.
+3. Derive and freeze the 50-bar Price Action evidence and five-bar pattern window using information available through t.
+4. Compute and append the BOT_ONLY prediction before reading the target OHLC.
+5. In paired rounds, append both BOT_ONLY and Candidate decisions before reading the target OHLC.
+6. After both decisions are immutable, inspect the completed t+1 candle, append the final labels and evidence, then append Mentor feedback for the BOT_ONLY baseline.
+7. Do not put target OHLC or later candles in the input snapshot or derived context. Target OHLC belongs only in final outcome evidence.
 
-The first round needs 150 consecutive completed candles to produce 100 samples: each prediction uses a 50-candle completed context window, the last five candles of that context form the candlestick-pattern feature window, and the next candle is the target. Each later round seeds its first sample with the prior round's final 50 completed target candles, then consumes 100 strictly newer completed target candles. The 50-candle context and five-candle pattern window must be contiguous, and the five-candle window must exactly equal the final five candles of the context window.
+The first baseline round requires 150 consecutive completed hourly candles for 100 samples: a 50-candle context plus one later target for each sample. Each assisted round seeds its first sample with the prior round's final 50 completed target candles, then consumes 100 strictly newer target candles. Context and pattern windows must be contiguous and the five-bar window must equal the final five bars of the 50-bar context.
 
 Required data guards:
 - strict 1H interval adjacency for the first version;
-- no duplicated timestamps;
-- newest-first provider ordering verified before chronological ordering;
-- no open candle (confirm=0) in a target;
-- no overlap of target timestamps between rounds;
-- no missing hourly bars inside a sample block;
-- fail closed as UNKNOWN/BLOCKED when the provider does not supply enough newer completed candles.
+- no duplicate timestamps and newest-first provider ordering;
+- exclude open candles (confirm=0) from both features and targets;
+- no target timestamp overlap between rounds;
+- no missing hourly bars in a sample block;
+- return UNKNOWN/BLOCKED rather than guess when completed data is insufficient.
 
-BloFin's documented candle pagination defines after as records earlier than the requested timestamp and before as records newer than the requested timestamp. The adapter now supports before and rejects simultaneous after and before. See https://docs.blofin.com/spot.html.
+The adapter supports BloFin's before pagination mode and rejects simultaneous after and before arguments. Its integration test checks request construction with a mock session; that test is not a live connectivity test. See https://docs.blofin.com/spot.html.
 
-## 4. Proposed learning sequence
+## 4. Implemented learning sequence (not yet proven on live market history)
 
-- **BOT_ONLY baseline:** a deliberately simple, frozen rule predicts the next candle from the prior completed candle. Record its prediction before its future label is appended.
-- **Mentor audit/training:** inspect all 100 baseline outcomes, reject data leakage, and train a small supervised model using only the baseline feature/target pairs. Persist its exact feature schema, normalization statistics, weights, training dataset hash, and model version in append-only durable memory.
-- **Assisted rounds 2–5:** evaluate the frozen candidate model on four chronologically later, non-overlapping 100-sample blocks. Pair the BOT_ONLY and BOT_WITH_AI_MENTOR predictions on the same targets to measure whether the assisted model adds value.
-- **Incremental updates:** after rounds 1–4 are final-labelled and locked, the Mentor may produce a new candidate model for the next round. Round 5 consumes the candidate trained after round 4; no unused round-5 model is trained because there is no round 6. A candidate may not alter predictions or labels already recorded.
-- **Holdout discipline:** a round's target outcomes may update a model only after that round is closed; the updated model is used on a later block, never on the same block.
+- **Round 1, BOT_ONLY:** record 100 next-candle forecasts using the frozen prior-candle baseline. The target candle is read only after the decision event is appended.
+- **Mentor audit and Candidate build:** audit the 100 final-labelled baseline experiences, verify the 50-bar context and five-bar pattern data, append Mentor feedback, and train a candidate from the oldest 80 samples with the newest 20 as chronological validation.
+- **Rounds 2–5, paired forward holdouts:** run the unchanged BOT_ONLY baseline and the Candidate on the same 100 newer, non-overlapping target candles. Neither model sees the target before both decisions are stored.
+- **Incremental training:** after rounds 1–4 are final-labelled and reviewed, train a candidate for the next round from eligible past BOT_ONLY experiences. Round 5 consumes the round-4 candidate; no round-6 model is needed.
+- **No same-round feedback:** a round's outcomes and Mentor feedback can update only a later candidate. Already-recorded predictions, labels, and model artifacts remain immutable.
 
-The exact model family and numeric pass thresholds remain open until the dataset and baseline distribution are measured. Accuracy, balanced accuracy, macro-F1, per-class support, confusion matrix, and uncertainty must be reported. A single score or profitable-looking sample must not award mastery.
+This is a chronological staged evaluation, not an EASY-to-HARD curriculum. The execution profiles named EASY/STANDARD/STRICT elsewhere in the repository are trade-gate profiles, not stages of Challenge 1 teaching. The candidate is still only a candidate, and no round-level market-performance improvement is claimed until actual forward results are produced.
 
-## 5. Memory contract change required
+## 5. Current cross-round memory contract
 
-The current memory API requires a BOT_WITH_AI_MENTOR decision to reference a BOT_ONLY baseline from the same cycle. That is too restrictive for genuine learning transfer from a previous, already-labelled round.
+The memory API supports both same-cycle paired decisions and strictly earlier-round transfer. For cross-round transfer, the referenced BOT_ONLY baseline must:
+- belong to the same challenge and engine;
+- pass integrity verification and have a final outcome;
+- already contain Mentor feedback;
+- have a lower round number than the assisted decision;
+- have a target timestamp no later than the assisted sample's feature timestamp.
 
-Proposed safe replacement:
-- the referenced baseline must be the same challenge and engine;
-- it must be BOT_ONLY, integrity-verified, final-labelled, and have Mentor feedback;
-- its event timestamp and round number must precede the assisted decision;
-- the assisted decision must carry the Mentor/model version and immutable model-artifact hash;
-- it must never reference a baseline from a future round;
-- every assisted prediction and outcome remains a separate append-only experience.
+The assisted prediction stores the referenced baseline ID, the Candidate version, and the immutable model-artifact SHA-256. The current assisted runner references the reviewed prior-round anchor that produced the frozen Candidate, not the paired current sample's baseline outcome. The paired current-round BOT_ONLY experience is separately recorded and reviewed after both decisions and outcomes are locked.
 
-Do not weaken the memory check to merely accept any baseline ID. Add positive and negative tests for cross-round references, future references, wrong challenge/engine, missing final outcome, and missing Mentor feedback.
+Future-round references, missing outcomes, missing Mentor feedback, mismatched challenge/engine, and invalid chronology must remain blocked.
 
 ## 6. Pass and safety rules
 
@@ -81,18 +82,17 @@ Do not weaken the memory check to merely accept any baseline ID. Add positive an
 - The Mentor cannot rewrite BOT_ONLY decisions, outcomes, previous model artifacts, or test labels.
 - XP, badge, and Challenge 2 remain locked until all evidence is verified.
 
-## 7. Implementation order
+## 7. Remaining acceptance work
 
-1. Add deterministic tests for the BloFin before pagination boundary and chronological non-overlap.
-2. Refactor the baseline runner to use prior-candle features and next-candle labels; update all existing tests that currently expect same-candle classification.
-3. Add a training artifact format and hash-chained persistence in the existing learning memory.
-4. Amend the assisted-decision memory contract with prior-round and timestamp checks.
-5. Add paired BOT_ONLY/BOT_WITH_AI_MENTOR holdout evaluation for rounds 2–5.
-6. Add UI/status controls only after the new runner and its tests are complete.
-7. Verify on a separate approved staging environment with Turso; do not change the active Render Demo service until separately authorized.
+1. Prove the active execution environment reports TURSO_CLOUD_SQLITE from its actual configured credentials without exposing secrets.
+2. Run a permitted read-only connectivity check against the BloFin Demo public Spot candles endpoint from the approved runtime, validating current completed OHLCV, ordering, timestamp adjacency, and freshness. No order endpoint is involved.
+3. Run BOT_ONLY round 1 on actual, non-overlapping completed market candles and verify persistent Turso writes, close/reopen recovery, append-only integrity, and exact decision-before-target ordering.
+4. Lock and SHA-256 the statistical acceptance protocol before the first scored forward run. Define the eligible sample policy, UNKNOWN handling, Balanced Accuracy/Macro-F1 thresholds, uncertainty method, regime reporting, and baseline comparison.
+5. Only after round 1 and Mentor candidate are verified, execute paired forward rounds 2–5 on fresh future market candles. Record all predictions before outcomes, then retrain only for the next round.
+6. Report sample counts, UNKNOWN, Balanced Accuracy, Macro-F1, per-class precision/recall, confidence intervals, regime-stratified performance, errors, baseline deltas, and stability. Do not promote a Candidate based on synthetic tests or in-sample fit.
+7. Keep Render deployment/configuration changes, Demo orders, Live orders, Candidate promotion, Challenge 2, XP, and mastery locked unless separately authorized and all acceptance evidence is complete.
 
-**Do not treat this design document as implementation evidence or permission to deploy.**
-
+The active Render Demo service has not been changed by this work. This document is a code/design record, not evidence of a completed runtime challenge or permission to deploy.
 
 ## 8. Five-candle pattern catalogue extension
 
