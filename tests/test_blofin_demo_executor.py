@@ -388,6 +388,43 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(outcome["realized_result"], "NOT_EXECUTED")
         self.assertIsNone(outcome["realized_net_pnl"])
 
+    def test_challenge1_analysis_failure_is_persisted_as_unknown_not_executed_without_fake_candles(self):
+        timestamp = "2026-11-16T14:00:00+00:00"
+        first = self.store.record_challenge1_analysis_failure(
+            cycle_id="cycle-market-data-failure-01",
+            instrument_id="ETH-USDT",
+            failure_stage="CHALLENGE_1_MARKET_DATA_ANALYSIS",
+            error_type="DataProviderError",
+            reason="Insufficient completed candle data.",
+            timestamp_utc=timestamp,
+        )
+        second = self.store.record_challenge1_analysis_failure(
+            cycle_id="cycle-market-data-failure-01",
+            instrument_id="ETH-USDT",
+            failure_stage="CHALLENGE_1_MARKET_DATA_ANALYSIS",
+            error_type="DataProviderError",
+            reason="Insufficient completed candle data.",
+            timestamp_utc=timestamp,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(self.store.learning_memory.verify_experience(first)["status"], "PASS")
+        experience = self.store.learning_memory.get_experience(first)
+        self.assertEqual(
+            [event["event_type"] for event in experience["events"]],
+            ["DECISION_RECORDED", "OUTCOME_LABELLED"],
+        )
+        decision = experience["events"][0]["payload"]
+        self.assertEqual(decision["decision"]["decision_class"], "DATA_INSUFFICIENT")
+        snapshot = decision["input_snapshot"]
+        self.assertEqual(snapshot["data_quality"], "UNKNOWN")
+        self.assertIsNone(snapshot["candle_timestamp_utc"])
+        self.assertFalse(snapshot["ohlcv_available"])
+        self.assertFalse(snapshot["future_data_in_input"])
+        outcome = experience["events"][-1]["payload"]
+        self.assertEqual(outcome["realized_result"], "NOT_EXECUTED")
+        self.assertEqual(outcome["decision_correctness"], "UNKNOWN")
+        self.assertIsNone(outcome["realized_net_pnl"])
+
     def test_closed_position_outcome_uses_exact_position_id_and_deducts_trading_fees(self):
         challenge = signal_record()
         experience_id = self.store.record_challenge1_decision(
