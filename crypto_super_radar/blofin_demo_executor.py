@@ -32,6 +32,7 @@ from .blofin_demo_readonly import (
     _signature,
 )
 from .database import connect_database, storage_backend
+from .learning_experience_memory import LearningExperienceMemory
 
 
 class BloFinDemoExecutionBlocked(RuntimeError):
@@ -96,6 +97,37 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError("signal record is invalid")
     return record
+
+
+def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str, Any]) -> str:
+    """Return a stable identity for one instrument's immutable closed-candle evidence."""
+    evidence = challenge_record.get("challenge1_evidence")
+    if not isinstance(evidence, Mapping):
+        raise ValueError("Challenge 1 evidence is required for learning memory.")
+    candle = evidence.get("confirmation_candle")
+    if not isinstance(candle, Mapping):
+        raise ValueError("A completed confirmation candle is required for learning memory.")
+    candle_time = str(candle.get("open_time_utc") or challenge_record.get("signal_bar_open_utc") or "")
+    if not candle_time:
+        raise ValueError("Completed candle timestamp is required for learning memory.")
+    identity = {
+        "engine_version": str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
+        "instrument_id": str(instrument_id).strip().upper(),
+        "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
+        "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
+        "signal_bar_open_utc": candle_time,
+        "confirmation_candle": dict(candle),
+        "detected_patterns": evidence.get("detected_patterns") or [],
+        "chosen_pattern": evidence.get("chosen_pattern"),
+        "chart_structure": evidence.get("chart_structure") or {},
+        "context_patterns": evidence.get("context_patterns") or [],
+        "volume_confirmation": evidence.get("volume_confirmation") or {},
+    }
+    canonical = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    )
+    return "blofin-ch1-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
 @dataclass(frozen=True)
@@ -511,10 +543,26 @@ class BloFinDemoEventStore:
                     leverage INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     exchange_order_id TEXT,
+                    experience_id TEXT,
+                    outcome_recorded_at INTEGER,
+                    position_history_id TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
             """)
+            order_columns = {
+                str(row["name"])
+                for row in self._db.execute("PRAGMA table_info(blofin_demo_orders)").fetchall()
+            }
+            for column_name, column_type in (
+                ("experience_id", "TEXT"),
+                ("outcome_recorded_at", "INTEGER"),
+                ("position_history_id", "TEXT"),
+            ):
+                if column_name not in order_columns:
+                    self._db.execute(
+                        f"ALTER TABLE blofin_demo_orders ADD COLUMN {column_name} {column_type}"
+                    )
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS blofin_demo_execution_events (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -555,6 +603,84 @@ class BloFinDemoEventStore:
                 BEFORE DELETE ON blofin_demo_execution_events
                 BEGIN SELECT RAISE(ABORT, 'BloFin Demo execution events are append-only'); END
             """)
+        # The decision journal shares the order-ledger connection and lock,
+        # making a decision and its order reservation one transaction.
+        self.learning_memory = LearningExperienceMemory(self._db, lock=self._lock)
+
+    def record_challenge1_decision(
+        self, *, instrument_id: str, challenge_record: Mapping[str, Any],
+    ) -> str:
+        """Persist one closed-candle Challenge 1 decision as an immutable event."""
+        if not isinstance(challenge_record, Mapping):
+            raise TypeError("challenge_record must be a mapping")
+        experience_id = _challenge1_experience_id(instrument_id, challenge_record)
+        evidence = challenge_record.get("challenge1_evidence")
+        evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
+        signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
+        signal_bar = str(challenge_record.get("signal_bar_open_utc") or "")
+        decision = {
+            "signal": signal,
+            "side": signal if signal in {"LONG", "SHORT"} else None,
+            "signal_id": challenge_record.get("signal_id"),
+            "entry_price": challenge_record.get("entry_price_usd"),
+            "stop_loss": challenge_record.get("stop_loss_usd"),
+            "take_profit": challenge_record.get("take_profit_usd"),
+            "reason": str(challenge_record.get("reason_fa") or ""),
+        }
+        input_snapshot = {
+            "instrument_id": str(instrument_id).strip().upper(),
+            "signal_bar_open_utc": signal_bar,
+            "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
+            "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
+            "completed_candles_only": evidence.get("completed_candles_only") is True,
+            "future_data_in_input": False,
+            "challenge1_evidence": evidence,
+        }
+        with self._lock, self._db:
+            self.learning_memory.record_decision(
+                experience_id=experience_id,
+                event_id=experience_id + "-decision",
+                engine_id="BLOFIN_DEMO_CHALLENGE1",
+                challenge_id="CHALLENGE_1_BLOFIN_DEMO",
+                cycle_id=experience_id,
+                decision_mode="BOT_ONLY",
+                environment="BLOFIN_DEMO",
+                decision=decision,
+                input_snapshot=input_snapshot,
+                market="CEX_FUTURES",
+                symbol=str(instrument_id).strip().upper(),
+                timeframe="15M",
+                model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
+                dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
+            )
+        return experience_id
+
+    def record_experience_not_executed(
+        self, *, experience_id: str, instrument_id: str, signal: str,
+        stage: str, reason: str,
+    ) -> dict[str, Any]:
+        """Close a decision with an explicit no-order label; never attach floating PnL."""
+        evidence = {
+            "source": "BLOFIN_DEMO_FINAL_EXECUTION_DECISION",
+            "instrument_id": str(instrument_id).strip().upper(),
+            "signal": str(signal or "NO_TRADE").strip().upper(),
+            "execution_stage": str(stage or "NO_TRADE").strip().upper(),
+            "reason": str(reason or "")[:500],
+            "orders_submitted": False,
+            "trade_executed": False,
+            "realized_pnl_source": "NONE_NOT_EXECUTED",
+        }
+        with self._lock, self._db:
+            return self.learning_memory.record_outcome(
+                experience_id=experience_id,
+                event_id=experience_id + "-not-executed",
+                decision_correctness="UNKNOWN",
+                realized_result="NOT_EXECUTED",
+                realized_net_pnl=None,
+                pnl_currency="USDT",
+                final=True,
+                evidence=evidence,
+            )
 
     def _append_event(self, client_order_id: str, event_type: str, details: Mapping[str, Any]) -> None:
         now = int(time.time())
@@ -581,18 +707,19 @@ class BloFinDemoEventStore:
             self._db.execute(
                 """INSERT INTO blofin_demo_orders
                 (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
-                 stop_loss, take_profit, leverage, status, exchange_order_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?)""",
+                 stop_loss, take_profit, leverage, status, exchange_order_id, experience_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?)""",
                 (
                     order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
                     str(plan["quantity"]), float(plan["entry_reference_price"]),
                     float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
-                    now, now,
+                    str(plan.get("experience_id") or "") or None, now, now,
                 ),
             )
             self._append_event(order_id, "RESERVED", {
                 "instrument_id": plan["inst_id"], "side": plan["side"],
                 "quantity": plan["quantity"], "leverage": plan["leverage"],
+                "learning_experience_id_present": bool(plan.get("experience_id")),
             })
             return True
 
@@ -787,6 +914,14 @@ class BloFinDemoEventStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_order_for_experience(self, experience_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM blofin_demo_orders WHERE experience_id=? ORDER BY created_at DESC LIMIT 1",
+                (experience_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
@@ -973,6 +1108,7 @@ class BloFinDemoExecutor:
             record, instrument, inst_id=inst_id, equity_usdt=equity,
             leverage=int(leverage), policy=self.policy,
         )
+        plan["experience_id"] = str(record.get("learning_experience_id") or "") or None
         if minimum_size_only:
             lot_size = _decimal(instrument.get("lotSize"), "lotSize")
             min_size = _decimal(instrument.get("minSize"), "minSize")
