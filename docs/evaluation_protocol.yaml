@@ -1,0 +1,66 @@
+protocol_id: CSR-EVALUATION-001
+protocol_version: 1
+protocol_status: DRAFT_BLOCKED
+evaluation_allowed: false
+description: >
+  Pre-registered evaluation contract for CRYPTO SUPER RADAR. This protocol is
+  intentionally blocked until every numeric threshold and sample requirement
+  is specified, reviewed, and frozen before any model evaluation.
+
+data_split:
+  method: chronological
+  shuffle: false
+  training: train_only
+  validation: model_selection_and_tuning_only
+  test: single_use_unseen_holdout
+  test_reuse_after_model_change: forbidden
+  purge_window_bars: null
+  embargo_window_bars: null
+  label_horizon_bars: null
+
+statistical_design:
+  alpha: null
+  power: null
+  minimum_effect_balanced_accuracy: null
+  minimum_effect_macro_f1: null
+  minimum_effect_signal_precision: null
+  minimum_total_samples: null
+  multiple_comparison_policy: one_final_model_on_test
+  if_multiple_models_reach_test: apply_pre_registered_multiple_testing_correction
+
+economic_risk:
+  minimum_net_return_after_fees_and_slippage: null
+  maximum_drawdown: null
+  sharpe_confidence_level: null
+  sharpe_block_bootstrap_method: moving_block_bootstrap
+  minimum_sharpe_lower_bound_improvement_vs_baseline: null
+
+market_regimes:
+  labels:
+    - trend
+    - range
+    - high_volatility
+  definitions_locked_before_test: false
+  minimum_samples_per_regime: null
+
+learning_controls:
+  pre_outcome_audit_required: true
+  post_outcome_review_required: true
+  learning_update_effective_only_after_recorded_at: true
+  historical_test_data_must_not_be_rewritten: true
+
+integrity:
+  hash_algorithm: SHA-256
+  hash_file: evaluation_protocol.sha256
+  hash_verification_required_before_evaluation: true
+  any_hash_mismatch: block_evaluation
+  numeric_thresholds_must_be_frozen_before_test: true
+
+execution_safety:
+  mock_unit_tests_first: true
+  staging_database_must_be_separate: true
+  staging_environment_variables_must_be_separate: true
+  production_secrets_in_staging: false
+  demo_orders_require_separate_explicit_authorization: true
+  live_orders_allowed: false
+  render_deploy_or_configuration_change_allowed_by_this_protocol: false
