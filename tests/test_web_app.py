@@ -65,6 +65,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
+        with open(web_app.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
+        self.assertIn(r"/^HTTP (429|5\\d\\d)$/.test(message);", source)
+
     def test_send_silently_handles_disconnected_client(self):
         class BrokenPipeStream:
             def write(self, _content):
