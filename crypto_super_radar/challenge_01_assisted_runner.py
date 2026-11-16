@@ -443,10 +443,14 @@ class Challenge01AssistedRunner:
                     raise RuntimeError("ASSISTED_ROUND_MEMORY_RECOVERY_FAILED")
                 verified += 1
 
-            next_model_candidate = train_candidate_from_completed_rounds(
-                recovered_memory,
-                through_round=round_number,
-            )
+            next_model_candidate = None
+            next_model_candidate_status = "NOT_REQUIRED_FINAL_ROUND"
+            if round_number < MAX_ROUNDS:
+                next_model_candidate = train_candidate_from_completed_rounds(
+                    recovered_memory,
+                    through_round=round_number,
+                )
+                next_model_candidate_status = "CANDIDATE_STORED_FOR_NEXT_ROUND"
             bot_metrics = _classification_metrics(bot_predictions, references)
             mentor_metrics = _classification_metrics(mentor_predictions, references)
             return {
@@ -460,6 +464,11 @@ class Challenge01AssistedRunner:
                 "bot_only_metrics": bot_metrics,
                 "mentor_metrics": mentor_metrics,
                 "next_model_candidate": next_model_candidate,
+                "next_model_candidate_status": next_model_candidate_status,
+                "next_stage": (
+                    "FORWARD_HOLDOUT_VALIDATION_REQUIRED"
+                    if round_number < MAX_ROUNDS else "CHALLENGE_REVIEW_REQUIRED"
+                ),
                 "balanced_accuracy_delta": round(
                     mentor_metrics["balanced_accuracy"] - bot_metrics["balanced_accuracy"], 6,
                 ),
