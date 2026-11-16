@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,41 +45,73 @@ def verify_protocol_hash(
     return actual
 
 
+def _scalar(content: str, field: str) -> str | None:
+    match = re.search(
+        rf"(?m)^[ \t]*{re.escape(field)}:[ \t]*([^\s#]+)[ \t]*$",
+        content,
+    )
+    return None if match is None else match.group(1)
+
+
 def require_evaluation_ready(protocol_path: str | Path = DEFAULT_PROTOCOL) -> None:
     content = Path(protocol_path).read_text(encoding="utf-8")
-    status = re.search(r"(?m)^protocol_status:\s*([^\s#]+)", content)
-    allowed = re.search(r"(?m)^evaluation_allowed:\s*([^\s#]+)", content)
-    if status is None or status.group(1) != "LOCKED":
-        raise ProtocolNotReadyError("protocol_status must be LOCKED before evaluation")
-    if allowed is None or allowed.group(1).lower() != "true":
-        raise ProtocolNotReadyError("evaluation_allowed must be true before evaluation")
 
-    required_numeric_fields = (
-        "purge_window_bars",
-        "embargo_window_bars",
-        "label_horizon_bars",
-        "alpha",
-        "power",
-        "minimum_effect_balanced_accuracy",
-        "minimum_effect_macro_f1",
-        "minimum_effect_signal_precision",
-        "minimum_total_samples",
-        "minimum_net_return_after_fees_and_slippage",
-        "maximum_drawdown",
-        "sharpe_confidence_level",
-        "minimum_sharpe_lower_bound_improvement_vs_baseline",
-        "minimum_samples_per_regime",
-    )
-    for field in required_numeric_fields:
-        match = re.search(rf"(?m)^\s*{re.escape(field)}:\s*([^\s#]+)", content)
-        if match is None or match.group(1).lower() in {"null", "~", "tbd", "unset"}:
-            raise ProtocolNotReadyError(f"required numeric field is not registered: {field}")
+    if _scalar(content, "protocol_status") != "LOCKED":
+        raise ProtocolNotReadyError("protocol_status must be LOCKED before evaluation")
+    if (_scalar(content, "evaluation_allowed") or "").lower() != "true":
+        raise ProtocolNotReadyError("evaluation_allowed must be true before evaluation")
+    if (_scalar(content, "definitions_locked_before_test") or "").lower() != "true":
+        raise ProtocolNotReadyError("market-regime definitions must be locked before Test")
+    
+    registered_at = _scalar(content, "pre_registered_at_utc")
+    if registered_at is None or registered_at.lower() in {"null", "~", "tbd", "unset"}:
+        raise ProtocolNotReadyError("pre_registered_at_utc must be registered")
+    try:
+        parsed = datetime.fromisoformat(
+            registered_at[:-1] + "+00:00" if registered_at.endswith("Z") else registered_at
+        )
+    except ValueError as exc:
+        raise ProtocolNotReadyError("pre_registered_at_utc must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ProtocolNotReadyError("pre_registered_at_utc must include a UTC timezone")
+
+    # Field, lower bound, upper bound, integer-only.
+    requirements: dict[str, tuple[float | None, float | None, bool]] = {
+        "purge_window_bars": (0, None, True),
+        "embargo_window_bars": (0, None, True),
+        "label_horizon_bars": (1, None, True),
+        "alpha": (0, 1, False),
+        "power": (0, 1, False),
+        "minimum_effect_balanced_accuracy": (0, None, False),
+        "minimum_effect_macro_f1": (0, None, False),
+        "minimum_effect_signal_precision": (0, None, False),
+        "minimum_total_samples": (1, None, True),
+        "minimum_net_return_after_fees_and_slippage": (None, None, False),
+        "maximum_drawdown": (0, 1, False),
+        "sharpe_confidence_level": (0, 1, False),
+        "sharpe_bootstrap_block_length_bars": (1, None, True),
+        "minimum_sharpe_lower_bound_improvement_vs_baseline": (0, None, False),
+        "trend_adx_min": (0, None, False),
+        "range_adx_max": (0, None, False),
+        "high_volatility_atr_percentile_min": (0, 100, False),
+        "minimum_samples_per_regime": (1, None, True),
+    }
+    for field, (lower, upper, integer_only) in requirements.items():
+        raw = _scalar(content, field)
+        if raw is None or raw.lower() in {"null", "~", "tbd", "unset"}:
+            raise ProtocolNotReadyError(f"required threshold is not registered: {field}")
         try:
-            value = float(match.group(1))
+            value = float(raw)
         except ValueError as exc:
-            raise ProtocolNotReadyError(f"required numeric field is not numeric: {field}") from exc
-        if not (value == value and abs(value) != float("inf")):
-            raise ProtocolNotReadyError(f"required numeric field is not finite: {field}")
+            raise ProtocolNotReadyError(f"required threshold is not numeric: {field}") from exc
+        if not math.isfinite(value):
+            raise ProtocolNotReadyError(f"required threshold is not finite: {field}")
+        if lower is not None and (value <= lower if field in {"alpha", "power", "maximum_drawdown", "sharpe_confidence_level"} else value < lower):
+            raise ProtocolNotReadyError(f"required threshold is below its valid bound: {field}")
+        if upper is not None and (value >= upper if field in {"alpha", "power", "sharpe_confidence_level"} else value > upper):
+            raise ProtocolNotReadyError(f"required threshold is above its valid bound: {field}")
+        if integer_only and not value.is_integer():
+            raise ProtocolNotReadyError(f"required threshold must be an integer: {field}")
 
 
 def verify_evaluation_protocol(
@@ -99,7 +133,7 @@ def main() -> int:
     parser.add_argument(
         "--require-ready",
         action="store_true",
-        help="also require all statistical and risk thresholds to be registered",
+        help="also require all statistical, risk, regime, and sample thresholds to be registered",
     )
     args = parser.parse_args()
     try:
