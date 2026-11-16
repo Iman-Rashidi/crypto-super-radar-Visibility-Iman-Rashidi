@@ -272,6 +272,61 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
         self.assertEqual(
             round_three_client.calls[0]["before"], round_two_last_target,
         )
+
+        # Continue the deterministic offline lifecycle through rounds four
+        # and five. Each round consumes only the immediately preceding round's
+        # verified target seed and freshly generated, non-overlapping candles.
+        previous_target_time = round_three_candles[-1]["open_time_ms"]
+        for next_round in (4, 5):
+            next_round_candles = [
+                _candle(
+                    previous_target_time + index * BAR_MILLISECONDS,
+                    [1, 0, -1][(300 + next_round * 100 + index) % 3],
+                )
+                for index in range(1, 101)
+            ]
+            next_round_client = FakeFutureSpotClient(
+                [_row(item) for item in reversed(next_round_candles)]
+            )
+            next_round_runner = Challenge01AssistedRunner(
+                client=next_round_client,
+                connection_factory=self.connection_factory,
+                backend_factory=lambda: "TEST_SQLITE_FILE",
+                allow_non_durable_for_tests=True,
+            )
+            next_result = next_round_runner.run_round(
+                round_number=next_round, sample_count=100,
+            )
+            self.assertEqual(
+                next_result["status"], "ROUND_RECORDED_NOT_MASTERY",
+                msg=repr(next_result),
+            )
+            self.assertEqual(next_result["sample_count"], 100)
+            self.assertEqual(next_result["memory_records_verified"], 200)
+            self.assertEqual(next_result["memory_integrity"], "PASS")
+            self.assertEqual(
+                next_result["next_model_candidate"]["trained_through_round"],
+                next_round,
+            )
+            self.assertFalse(next_result["mastery_awarded"])
+            self.assertFalse(next_result["orders_submitted"])
+            self.assertEqual(
+                next_round_client.calls[0]["before"], previous_target_time,
+            )
+            previous_target_time = next_round_candles[-1]["open_time_ms"]
+
+        final_status = get_challenge_01_status(
+            connection_factory=self.connection_factory,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            allow_non_durable_for_tests=True,
+        )
+        self.assertEqual(final_status["highest_completed_round"], 5)
+        self.assertEqual(final_status["candidate_model_through_round"], 5)
+        self.assertTrue(final_status["candidate_model_ready"])
+        self.assertIsNone(final_status["next_round"])
+        self.assertEqual(final_status["next_stage"], "CHALLENGE_REVIEW_REQUIRED")
+        self.assertEqual(final_status["mastery_status"], "NOT_EARNED")
+        self.assertTrue(final_status["later_rounds_blocked"])
     
     def test_round_two_blocks_without_100_verified_prior_round_targets(self):
         runner = Challenge01AssistedRunner(
