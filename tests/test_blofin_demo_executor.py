@@ -349,6 +349,223 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertTrue(budget["daily_capacity_available"])
         self.assertEqual(budget["unresolved_orders"], 1)
 
+    def test_challenge1_decision_and_not_executed_outcome_are_durable_and_idempotent(self):
+        challenge = signal_record(signal="NO_TRADE")
+        challenge["reason_fa"] = "No completed pattern confirmation."
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        duplicate_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        self.assertEqual(experience_id, duplicate_id)
+
+        first = self.store.record_experience_not_executed(
+            experience_id=experience_id,
+            instrument_id="BTC-USDT",
+            signal="NO_TRADE",
+            stage="CHALLENGE_1_SIGNAL_REJECTED",
+            reason="No completed pattern confirmation.",
+        )
+        second = self.store.record_experience_not_executed(
+            experience_id=experience_id,
+            instrument_id="BTC-USDT",
+            signal="NO_TRADE",
+            stage="CHALLENGE_1_SIGNAL_REJECTED",
+            reason="No completed pattern confirmation.",
+        )
+        self.assertEqual(first["event_id"], second["event_id"])
+        verified = self.store.learning_memory.verify_experience(experience_id)
+        self.assertEqual(verified["status"], "PASS")
+        experience = self.store.learning_memory.get_experience(experience_id)
+        self.assertEqual(
+            [event["event_type"] for event in experience["events"]],
+            ["DECISION_RECORDED", "OUTCOME_LABELLED"],
+        )
+        outcome = experience["events"][-1]["payload"]
+        self.assertEqual(outcome["realized_result"], "NOT_EXECUTED")
+        self.assertIsNone(outcome["realized_net_pnl"])
+
+    def test_closed_position_outcome_uses_exact_position_id_and_deducts_trading_fees(self):
+        challenge = signal_record()
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="demo-order-77")
+        self.assertTrue(self.store.attach_position_id(experience_id, "demo-position-77"))
+
+        mismatched = [{
+            "historyId": "h-wrong",
+            "positionId": "another-position",
+            "instId": "BTC-USDT",
+            "realizedPnl": "99",
+            "fee": "0",
+        }]
+        mismatch_result = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT", history_rows=mismatched,
+        )
+        self.assertEqual(mismatch_result["status"], "WAITING_FOR_FINAL_CLOSED_POSITION")
+
+        order_row = self.store.get_order(plan["client_order_id"])
+        opened_ms = int(order_row["created_at"]) * 1000 + 5_000
+        expected_size = str(plan["quantity"])
+        partial = [{
+            "historyId": "h-partial",
+            "positionId": "demo-position-77",
+            "instId": "BTC-USDT",
+            "side": "buy",
+            "createTime": str(opened_ms),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closePositions": str(float(expected_size) * 0.4),
+            "maxPositions": expected_size,
+            "realizedPnl": "0.5",
+            "fee": "0.1",
+        }]
+        closed = [{
+            "historyId": "h-closed",
+            "positionId": "demo-position-77",
+            "instId": "BTC-USDT",
+            "side": "buy",
+            "createTime": str(opened_ms),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closePositions": str(float(expected_size) * 0.6),
+            "maxPositions": expected_size,
+            "realizedPnl": "1.0",
+            "fee": "0.1",
+        }]
+        saved = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT",
+            history_rows=closed,
+            partial_rows=partial,
+        )
+        self.assertEqual(saved["status"], "RECORDED")
+        experience = self.store.learning_memory.get_experience(experience_id)
+        self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+        outcome = experience["events"][-1]["payload"]
+        self.assertEqual(outcome["realized_result"], "PROFIT")
+        self.assertAlmostEqual(outcome["realized_net_pnl"], 1.3)
+        self.assertFalse(outcome["evidence"]["funding_fees_included"])
+        self.assertAlmostEqual(
+            outcome["evidence"]["realized_pnl_after_reported_trading_fees"],
+            1.3,
+        )
+        self.assertEqual(self.store.orders_pending_learning_outcome(), [])
+
+    def test_closed_position_outcome_requires_exact_position_id_and_full_quantity(self):
+        challenge = signal_record()
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(
+            plan["client_order_id"], "FILLED", exchange_order_id="demo-open-order-1"
+        )
+        self.assertEqual(self.store.pending_learning_outcome_count(), 1)
+        self.assertTrue(self.store.attach_position_id(experience_id, "demo-position-77"))
+
+        history = {
+            "historyId": "closed-history-1",
+            "positionId": "demo-position-77",
+            "instId": "BTC-USDT",
+            "side": "buy",
+            "positionSide": "net",
+            "createTime": str((int(self.store.get_order(plan["client_order_id"])["created_at"]) * 1000) + 5_000),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closeAveragePrice": "104.0",
+            "closePositions": str(plan["quantity"]),
+            "maxPositions": str(plan["quantity"]),
+            "realizedPnl": "2.50",
+            "fee": "0.10",
+        }
+
+        # A close record for a different exchange position must not label this trade.
+        wrong_position = dict(history, positionId="another-position")
+        waiting = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT",
+            history_rows=[wrong_position],
+        )
+        self.assertEqual(waiting["status"], "WAITING_FOR_FINAL_CLOSED_POSITION")
+        self.assertEqual(
+            self.store.learning_memory.get_experience(experience_id)["learning_status"],
+            "PENDING_OUTCOME",
+        )
+
+        recorded = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT",
+            history_rows=[history],
+        )
+        self.assertEqual(recorded["status"], "RECORDED")
+        self.assertEqual(self.store.pending_learning_outcome_count(), 0)
+        self.assertEqual(recorded["realized_result"], "PROFIT")
+        self.assertAlmostEqual(recorded["realized_pnl_after_reported_trading_fees"], 2.40)
+
+        experience = self.store.learning_memory.get_experience(experience_id)
+        self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+        self.assertEqual(
+            [event["event_type"] for event in experience["events"]],
+            ["DECISION_RECORDED", "OUTCOME_LABELLED"],
+        )
+        outcome = experience["events"][-1]["payload"]
+        self.assertEqual(outcome["decision_correctness"], "UNKNOWN")
+        self.assertEqual(outcome["evidence"]["position_id"], "demo-position-77")
+        self.assertFalse(outcome["evidence"]["funding_fees_included"])
+        self.assertEqual(experience["verification"]["status"], "PASS")
+
+        duplicate = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT",
+            history_rows=[history],
+        )
+        self.assertEqual(duplicate["status"], "ALREADY_RECORDED")
+        self.assertEqual(
+            self.store._db.execute(
+                "SELECT COUNT(*) FROM learning_experience_events WHERE experience_id=?",
+                (experience_id,),
+            ).fetchone()[0],
+            2,
+        )
+
+    def test_outcome_waits_until_the_exchange_position_id_is_linked(self):
+        challenge = signal_record()
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(
+            plan["client_order_id"], "FILLED", exchange_order_id="demo-open-order-2"
+        )
+        waiting = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT",
+            history_rows=[{
+                "historyId": "closed-history-2",
+                "positionId": "demo-position-88",
+                "instId": "BTC-USDT",
+                "side": "buy",
+                "createTime": str((int(self.store.get_order(plan["client_order_id"])["created_at"]) * 1000) + 5_000),
+                "openAveragePrice": str(plan["entry_reference_price"]),
+                "closePositions": str(plan["quantity"]),
+                "maxPositions": str(plan["quantity"]),
+                "realizedPnl": "1.0",
+                "fee": "0.1",
+            }],
+        )
+        self.assertEqual(waiting["status"], "WAITING_FOR_EXCHANGE_POSITION_LINK")
+        self.assertEqual(
+            self.store.learning_memory.get_experience(experience_id)["learning_status"],
+            "PENDING_OUTCOME",
+        )
+
     def test_event_journal_is_append_only(self):
         plan = self._plan()
         self.store.reserve_order(plan)

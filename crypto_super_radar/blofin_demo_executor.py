@@ -32,6 +32,7 @@ from .blofin_demo_readonly import (
     _signature,
 )
 from .database import connect_database, storage_backend
+from .learning_experience_memory import LearningExperienceMemory
 
 
 class BloFinDemoExecutionBlocked(RuntimeError):
@@ -96,6 +97,37 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError("signal record is invalid")
     return record
+
+
+def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str, Any]) -> str:
+    """Return a stable identity for one instrument's immutable closed-candle evidence."""
+    evidence = challenge_record.get("challenge1_evidence")
+    if not isinstance(evidence, Mapping):
+        raise ValueError("Challenge 1 evidence is required for learning memory.")
+    candle = evidence.get("confirmation_candle")
+    if not isinstance(candle, Mapping):
+        raise ValueError("A completed confirmation candle is required for learning memory.")
+    candle_time = str(candle.get("open_time_utc") or challenge_record.get("signal_bar_open_utc") or "")
+    if not candle_time:
+        raise ValueError("Completed candle timestamp is required for learning memory.")
+    identity = {
+        "engine_version": str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
+        "instrument_id": str(instrument_id).strip().upper(),
+        "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
+        "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
+        "signal_bar_open_utc": candle_time,
+        "confirmation_candle": dict(candle),
+        "detected_patterns": evidence.get("detected_patterns") or [],
+        "chosen_pattern": evidence.get("chosen_pattern"),
+        "chart_structure": evidence.get("chart_structure") or {},
+        "context_patterns": evidence.get("context_patterns") or [],
+        "volume_confirmation": evidence.get("volume_confirmation") or {},
+    }
+    canonical = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    )
+    return "blofin-ch1-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
 @dataclass(frozen=True)
@@ -511,10 +543,28 @@ class BloFinDemoEventStore:
                     leverage INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     exchange_order_id TEXT,
+                    experience_id TEXT,
+                    outcome_recorded_at INTEGER,
+                    position_history_id TEXT,
+                    position_id TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
             """)
+            order_columns = {
+                str(row["name"])
+                for row in self._db.execute("PRAGMA table_info(blofin_demo_orders)").fetchall()
+            }
+            for column_name, column_type in (
+                ("experience_id", "TEXT"),
+                ("outcome_recorded_at", "INTEGER"),
+                ("position_history_id", "TEXT"),
+                ("position_id", "TEXT"),
+            ):
+                if column_name not in order_columns:
+                    self._db.execute(
+                        f"ALTER TABLE blofin_demo_orders ADD COLUMN {column_name} {column_type}"
+                    )
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS blofin_demo_execution_events (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -555,6 +605,84 @@ class BloFinDemoEventStore:
                 BEFORE DELETE ON blofin_demo_execution_events
                 BEGIN SELECT RAISE(ABORT, 'BloFin Demo execution events are append-only'); END
             """)
+        # The decision journal shares the order-ledger connection and lock,
+        # making a decision and its order reservation one transaction.
+        self.learning_memory = LearningExperienceMemory(self._db, lock=self._lock)
+
+    def record_challenge1_decision(
+        self, *, instrument_id: str, challenge_record: Mapping[str, Any],
+    ) -> str:
+        """Persist one closed-candle Challenge 1 decision as an immutable event."""
+        if not isinstance(challenge_record, Mapping):
+            raise TypeError("challenge_record must be a mapping")
+        experience_id = _challenge1_experience_id(instrument_id, challenge_record)
+        evidence = challenge_record.get("challenge1_evidence")
+        evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
+        signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
+        signal_bar = str(challenge_record.get("signal_bar_open_utc") or "")
+        decision = {
+            "signal": signal,
+            "side": signal if signal in {"LONG", "SHORT"} else None,
+            "signal_id": challenge_record.get("signal_id"),
+            "entry_price": challenge_record.get("entry_price_usd"),
+            "stop_loss": challenge_record.get("stop_loss_usd"),
+            "take_profit": challenge_record.get("take_profit_usd"),
+            "reason": str(challenge_record.get("reason_fa") or ""),
+        }
+        input_snapshot = {
+            "instrument_id": str(instrument_id).strip().upper(),
+            "signal_bar_open_utc": signal_bar,
+            "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
+            "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
+            "completed_candles_only": evidence.get("completed_candles_only") is True,
+            "future_data_in_input": False,
+            "challenge1_evidence": evidence,
+        }
+        with self._lock, self._db:
+            self.learning_memory.record_decision(
+                experience_id=experience_id,
+                event_id=experience_id + "-decision",
+                engine_id="BLOFIN_DEMO_CHALLENGE1",
+                challenge_id="CHALLENGE_1_BLOFIN_DEMO",
+                cycle_id=experience_id,
+                decision_mode="BOT_ONLY",
+                environment="BLOFIN_DEMO",
+                decision=decision,
+                input_snapshot=input_snapshot,
+                market="CEX_FUTURES",
+                symbol=str(instrument_id).strip().upper(),
+                timeframe="15M",
+                model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
+                dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
+            )
+        return experience_id
+
+    def record_experience_not_executed(
+        self, *, experience_id: str, instrument_id: str, signal: str,
+        stage: str, reason: str,
+    ) -> dict[str, Any]:
+        """Close a decision with an explicit no-order label; never attach floating PnL."""
+        evidence = {
+            "source": "BLOFIN_DEMO_FINAL_EXECUTION_DECISION",
+            "instrument_id": str(instrument_id).strip().upper(),
+            "signal": str(signal or "NO_TRADE").strip().upper(),
+            "execution_stage": str(stage or "NO_TRADE").strip().upper(),
+            "reason": str(reason or "")[:500],
+            "orders_submitted": False,
+            "trade_executed": False,
+            "realized_pnl_source": "NONE_NOT_EXECUTED",
+        }
+        with self._lock, self._db:
+            return self.learning_memory.record_outcome(
+                experience_id=experience_id,
+                event_id=experience_id + "-not-executed",
+                decision_correctness="UNKNOWN",
+                realized_result="NOT_EXECUTED",
+                realized_net_pnl=None,
+                pnl_currency="USDT",
+                final=True,
+                evidence=evidence,
+            )
 
     def _append_event(self, client_order_id: str, event_type: str, details: Mapping[str, Any]) -> None:
         now = int(time.time())
@@ -581,18 +709,19 @@ class BloFinDemoEventStore:
             self._db.execute(
                 """INSERT INTO blofin_demo_orders
                 (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
-                 stop_loss, take_profit, leverage, status, exchange_order_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?)""",
+                 stop_loss, take_profit, leverage, status, exchange_order_id, experience_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?)""",
                 (
                     order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
                     str(plan["quantity"]), float(plan["entry_reference_price"]),
                     float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
-                    now, now,
+                    str(plan.get("experience_id") or "") or None, now, now,
                 ),
             )
             self._append_event(order_id, "RESERVED", {
                 "instrument_id": plan["inst_id"], "side": plan["side"],
                 "quantity": plan["quantity"], "leverage": plan["leverage"],
+                "learning_experience_id_present": bool(plan.get("experience_id")),
             })
             return True
 
@@ -787,6 +916,244 @@ class BloFinDemoEventStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_order_for_experience(self, experience_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM blofin_demo_orders WHERE experience_id=? ORDER BY created_at DESC LIMIT 1",
+                (experience_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def has_final_experience(self, experience_id: str) -> bool:
+        """Return whether this closed-candle decision already has an immutable outcome."""
+        experience = self.learning_memory.get_experience(experience_id)
+        return any(event.get("event_type") == "OUTCOME_LABELLED" for event in experience["events"])
+
+    def record_closed_position_outcome(
+        self, *, instrument_id: str, history_rows: Any,
+        partial_rows: Any = None,
+    ) -> dict[str, Any] | None:
+        """Record one final Demo outcome only after exact positionId and full-size reconciliation."""
+        instrument = str(instrument_id or "").strip().upper()
+        with self._lock:
+            order_row = self._db.execute(
+                "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
+                "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (instrument,),
+            ).fetchone()
+            if order_row is None:
+                return None
+            order = dict(order_row)
+            if order.get("outcome_recorded_at") is not None:
+                return {"status": "ALREADY_RECORDED", "experience_id": order.get("experience_id")}
+        position_id = str(order.get("position_id") or "")
+        if not position_id:
+            return {
+                "status": "WAITING_FOR_EXCHANGE_POSITION_LINK",
+                "experience_id": order.get("experience_id"),
+            }
+        expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
+        try:
+            order_created_ms = int(order.get("created_at") or 0) * 1000
+            reference_entry = float(order.get("entry_price"))
+            expected_quantity = float(order.get("quantity"))
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
+        if not all(math.isfinite(value) and value > 0 for value in (
+            reference_entry, expected_quantity
+        )):
+            return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
+
+        # The final close record alone may represent only the last partial fill.
+        # Sum partial-close and full-close history for the same exchange positionId.
+        combined_rows = []
+        for state, source_rows in (
+            ("PARTIALLY_CLOSED", partial_rows or []),
+            ("CLOSED", history_rows or []),
+        ):
+            for row in source_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                if (
+                    str(row.get("positionId") or "") != position_id
+                    or str(row.get("instId") or "").upper() != instrument
+                    or str(row.get("side") or "").lower() != expected_side
+                ):
+                    continue
+                try:
+                    opened_ms = int(row.get("createTime") or 0)
+                    open_price = float(row.get("openAveragePrice"))
+                    close_quantity = float(row.get("closePositions"))
+                    total_quantity = float(row.get("maxPositions"))
+                    pnl = float(row.get("realizedPnl"))
+                    fee = float(row.get("fee") or 0.0)
+                    history_id = str(row.get("historyId") or "")
+                    values = (open_price, close_quantity, total_quantity, pnl, fee)
+                    if not all(math.isfinite(value) for value in values):
+                        continue
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (
+                    opened_ms < order_created_ms - 60_000
+                    or open_price <= 0
+                    or abs(open_price - reference_entry) / reference_entry > 0.005
+                    or close_quantity <= 0
+                    or total_quantity + 1e-9 < close_quantity
+                    or not history_id
+                ):
+                    continue
+                combined_rows.append({
+                    "history_id": history_id,
+                    "state": state,
+                    "close_quantity": close_quantity,
+                    "realized_pnl": pnl,
+                    "trading_fee": fee,
+                    "position_row": dict(row),
+                })
+        if not any(item["state"] == "CLOSED" for item in combined_rows):
+            return {
+                "status": "WAITING_FOR_FINAL_CLOSED_POSITION",
+                "experience_id": order.get("experience_id"),
+                "matched_partial_rows": len(combined_rows),
+            }
+        quantity_tolerance = max(1e-9, abs(expected_quantity) * 1e-6)
+        total_closed = sum(item["close_quantity"] for item in combined_rows)
+        if abs(total_closed - expected_quantity) > quantity_tolerance:
+            return {
+                "status": "WAITING_FOR_FULL_POSITION_SIZE_RECONCILIATION",
+                "experience_id": order.get("experience_id"),
+                "expected_quantity": expected_quantity,
+                "observed_closed_quantity": total_closed,
+            }
+        history_ids = sorted({item["history_id"] for item in combined_rows})
+        realized_pnl = sum(item["realized_pnl"] for item in combined_rows)
+        trading_fees = sum(item["trading_fee"] for item in combined_rows)
+        net_before_funding = realized_pnl - trading_fees
+        if not math.isfinite(net_before_funding):
+            raise ValueError("Closed-position PnL after reported trading fees is not finite.")
+        result = (
+            "PROFIT" if net_before_funding > 1e-8
+            else "LOSS" if net_before_funding < -1e-8
+            else "BREAKEVEN"
+        )
+        evidence = {
+            "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY",
+            "instrument_id": instrument,
+            "position_id": position_id,
+            "history_ids": history_ids,
+            "closed_history_ids": [
+                item["history_id"] for item in combined_rows if item["state"] == "CLOSED"
+            ],
+            "partial_history_ids": [
+                item["history_id"] for item in combined_rows if item["state"] == "PARTIALLY_CLOSED"
+            ],
+            "original_order_id": order.get("exchange_order_id"),
+            "expected_quantity": expected_quantity,
+            "observed_closed_quantity": total_closed,
+            "exchange_realized_pnl_before_trading_fees": realized_pnl,
+            "exchange_trading_fees": trading_fees,
+            "realized_pnl_after_reported_trading_fees": net_before_funding,
+            "funding_fees_included": False,
+            "funding_fee_attribution": "NOT_YET_RECONCILED",
+            "decision_correctness": "UNKNOWN_PENDING_INDEPENDENT_REVIEW",
+            "mark_to_market_pnl_used": False,
+            "orders_submitted": True,
+            "trade_executed": True,
+        }
+        experience_id = str(order["experience_id"])
+        now = int(time.time())
+        with self._lock, self._db:
+            latest = self._db.execute(
+                "SELECT outcome_recorded_at FROM blofin_demo_orders WHERE client_order_id=?",
+                (order["client_order_id"],),
+            ).fetchone()
+            if latest is None or latest["outcome_recorded_at"] is not None:
+                return {"status": "ALREADY_RECORDED", "experience_id": experience_id}
+            saved = self.learning_memory.record_outcome(
+                experience_id=experience_id,
+                event_id=experience_id + "-outcome",
+                decision_correctness="UNKNOWN",
+                realized_result=result,
+                realized_net_pnl=net_before_funding,
+                pnl_currency="USDT",
+                final=True,
+                evidence=evidence,
+            )
+            self._db.execute(
+                "UPDATE blofin_demo_orders SET outcome_recorded_at=?, position_history_id=?, updated_at=? "
+                "WHERE client_order_id=?",
+                (now, ",".join(history_ids), now, order["client_order_id"]),
+            )
+            self._append_event(order["client_order_id"], "OUTCOME_RECORDED", {
+                "experience_id": experience_id,
+                "position_id": position_id,
+                "history_ids": history_ids,
+                "realized_result": result,
+                "realized_pnl_after_reported_trading_fees": net_before_funding,
+                "funding_fee_attribution": "NOT_YET_RECONCILED",
+            })
+        return {
+            "status": "RECORDED",
+            "experience_id": experience_id,
+            "position_id": position_id,
+            "history_ids": history_ids,
+            "realized_result": result,
+            "realized_pnl_after_reported_trading_fees": net_before_funding,
+            "funding_fee_attribution": "NOT_YET_RECONCILED",
+            "learning_memory_status": saved.get("event_type"),
+        }
+
+    def orders_pending_learning_outcome(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 200))
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT * FROM blofin_demo_orders
+                   WHERE experience_id IS NOT NULL AND experience_id != ''
+                     AND position_id IS NOT NULL AND position_id != ''
+                     AND outcome_recorded_at IS NULL
+                     AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED')
+                   ORDER BY updated_at ASC LIMIT ?""",
+                (bounded,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+    def pending_learning_outcome_count(self) -> int:
+        """Count executed Demo experiences still awaiting exchange-finalized outcome data."""
+        with self._lock:
+            row = self._db.execute(
+                """SELECT COUNT(*) FROM blofin_demo_orders
+                   WHERE experience_id IS NOT NULL AND experience_id != ''
+                     AND outcome_recorded_at IS NULL
+                     AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED')"""
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def attach_position_id(self, experience_id: str, position_id: str) -> bool:
+        experience_key = str(experience_id or "").strip()
+        position_key = str(position_id or "").strip()
+        if not experience_key or not position_key:
+            return False
+        with self._lock, self._db:
+            order = self.get_order_for_experience(experience_key)
+            if order is None:
+                return False
+            existing = str(order.get("position_id") or "")
+            if existing and existing != position_key:
+                raise BloFinDemoExecutionBlocked(
+                    "A different exchange position is already linked to this learning experience."
+                )
+            self._db.execute(
+                "UPDATE blofin_demo_orders SET position_id=?, updated_at=? WHERE client_order_id=?",
+                (position_key, int(time.time()), order["client_order_id"]),
+            )
+            self._append_event(
+                str(order["client_order_id"]), "POSITION_LINKED",
+                {"position_id": position_key},
+            )
+        return True
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
@@ -911,6 +1278,10 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
+        if self.store.pending_learning_outcome_count() > 0:
+            raise BloFinDemoExecutionBlocked(
+                "A previous Demo position is still awaiting exchange-finalized learning outcome reconciliation."
+            )
         latest_age = budget.get("latest_order_age_seconds")
         if (
             self.policy.min_seconds_between_orders > 0
@@ -973,6 +1344,7 @@ class BloFinDemoExecutor:
             record, instrument, inst_id=inst_id, equity_usdt=equity,
             leverage=int(leverage), policy=self.policy,
         )
+        plan["experience_id"] = str(record.get("learning_experience_id") or "") or None
         if minimum_size_only:
             lot_size = _decimal(instrument.get("lotSize"), "lotSize")
             min_size = _decimal(instrument.get("minSize"), "minSize")

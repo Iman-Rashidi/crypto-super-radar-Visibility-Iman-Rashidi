@@ -2927,6 +2927,13 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             ),
             [],
         )
+        partially_closed_positions = read(
+            "partially_closed_positions_history",
+            lambda: client.get_positions_history(
+                inst_id=inst_id, state="partially_closed", limit=100,
+            ),
+            [],
+        )
 
         order_detail = None
         latest_matches_instrument = (
@@ -3075,6 +3082,7 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             "fills": rows(fills, fill_fields),
             "completed_orders": rows(completed_orders, order_fields),
             "closed_positions": rows(closed_positions, closed_fields),
+            "partially_closed_positions": rows(partially_closed_positions, closed_fields),
             "open_tpsl_orders": rows(open_tpsl, tpsl_fields),
             "tpsl_orders_history": rows(tpsl_history, tpsl_fields),
             "execution_events": execution_events,
@@ -3770,6 +3778,8 @@ def _run_blofin_demo_execution_job(
     """Analyze a selected BloFin linear USDT perpetual with the selected robot profile."""
     store = None
     submission_started = False
+    learning_experience_id = None
+    learning_signal = "NO_TRADE"
     try:
         instrument_id = str(instrument_id or "").strip().upper()
         execution_profile = str(execution_profile or "").strip().upper()
@@ -3795,6 +3805,31 @@ def _run_blofin_demo_execution_job(
             return
 
         store = BloFinDemoEventStore()
+        # Reconcile previously filled positions before evaluating or entering a new market.
+        # This prevents a fresh order from overtaking an exchange-close event that has not
+        # yet reached the durable learning journal.
+        pending_learning_orders = store.orders_pending_learning_outcome(limit=50)
+        if pending_learning_orders:
+            outcome_client = BloFinDemoReadOnly(timeout=8.0)
+            for pending_order in pending_learning_orders:
+                outcome_instrument = str(pending_order.get("instrument_id") or "").upper()
+                if not outcome_instrument:
+                    continue
+                try:
+                    closed_history = outcome_client.get_positions_history(
+                        inst_id=outcome_instrument, state="closed", limit=100,
+                    )
+                    partial_history = outcome_client.get_positions_history(
+                        inst_id=outcome_instrument, state="partially_closed", limit=100,
+                    )
+                    store.record_closed_position_outcome(
+                        instrument_id=outcome_instrument,
+                        history_rows=closed_history if isinstance(closed_history, list) else [],
+                        partial_rows=partial_history if isinstance(partial_history, list) else [],
+                    )
+                except Exception:
+                    # Keep the experience pending; the entry guard prevents new exposure.
+                    pass
         prior_budget = store.trade_budget_status()
         if prior_budget.get("unresolved_orders", 0) > 0:
             latest = store.latest_order()
@@ -3856,6 +3891,27 @@ def _run_blofin_demo_execution_job(
             )
             try:
                 challenge_record = analyze_blofin_challenge1(read_client, instrument_id)
+                # Persist every closed-candle decision before any execution branch.
+                # The stable candle identity deduplicates repeated five-minute polls.
+                learning_experience_id = store.record_challenge1_decision(
+                    instrument_id=instrument_id,
+                    challenge_record=challenge_record,
+                )
+                learning_signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
+                challenge_record["learning_experience_id"] = learning_experience_id
+                if store.has_final_experience(learning_experience_id):
+                    _set_blofin_execution_job(
+                        job_id, "completed", stage="DUPLICATE_CANDLE_FINALIZED",
+                        message_fa="برای این کندل نتیجهٔ نهایی قبلاً ثبت شده؛ از ورود تکراری جلوگیری شد.",
+                        result={
+                            "status": "SKIPPED_DUPLICATE_EXPERIENCE",
+                            "environment": "BLOFIN_DEMO",
+                            "learning_experience_id": learning_experience_id,
+                            "orders_submitted": False,
+                            "trade_executed": False,
+                        },
+                    )
+                    return
             except ValueError as exc:
                 reason_fa = (
                     f"تحلیل Challenge 1 برای {instrument_id} به‌دلیل دادهٔ کندل نامعتبر یا ناکافی متوقف شد: "
@@ -3924,6 +3980,13 @@ def _run_blofin_demo_execution_job(
                 or mtf_signal.get("status") != "PASS"
             ):
                 reason_fa = str(challenge_record.get("reason_fa") or "الگوی معتبر Challenge 1 پیدا نشد؛ تصمیم صحیح عدم معامله است.")
+                store.record_experience_not_executed(
+                    experience_id=learning_experience_id,
+                    instrument_id=instrument_id,
+                    signal=learning_signal,
+                    stage="CHALLENGE_1_SIGNAL_REJECTED",
+                    reason=reason_fa,
+                )
                 _set_blofin_execution_job(
                     job_id, "completed", stage="NO_TRADE",
                     message_fa=reason_fa,
@@ -4358,10 +4421,29 @@ def _run_blofin_demo_execution_job(
                 ) if key in row}
                 for row in rows if isinstance(row, dict)
             ] if isinstance(rows, list) else []
+            if trade_executed and learning_experience_id:
+                expected_side = "long" if execution.get("side") == "LONG" else "short"
+                matching_positions = []
+                for position in positions:
+                    position_side = str(position.get("positionSide") or "").lower()
+                    if position_side == expected_side:
+                        matching_positions.append(position)
+                    elif position_side == "net":
+                        try:
+                            signed_size = float(position.get("positions") or 0)
+                        except (TypeError, ValueError, OverflowError):
+                            signed_size = 0.0
+                        if (expected_side == "long" and signed_size > 0) or (expected_side == "short" and signed_size < 0):
+                            matching_positions.append(position)
+                if len(matching_positions) == 1 and matching_positions[0].get("positionId"):
+                    store.attach_position_id(
+                        learning_experience_id,
+                        str(matching_positions[0]["positionId"]),
+                    )
         except Exception:
             pass
         try:
-            rows = client.get_positions_history(inst_id=instrument_id, state="closed", limit=20)
+            rows = client.get_positions_history(inst_id=instrument_id, state="closed", limit=100)
             position_history = [
                 {key: row[key] for key in (
                     "historyId", "positionId", "instId", "side", "positionSide",
@@ -4373,7 +4455,6 @@ def _run_blofin_demo_execution_job(
             ] if isinstance(rows, list) else []
         except Exception:
             pass
-
         filled_at = None
         if safe_fills:
             latest_fill = max(safe_fills, key=lambda row: int(row.get("ts") or 0))
@@ -4446,6 +4527,19 @@ def _run_blofin_demo_execution_job(
             },
         )
     except BloFinDemoExecutionBlocked as exc:
+        if store is not None and learning_experience_id:
+            try:
+                prior_order = store.get_order_for_experience(learning_experience_id)
+                if prior_order is None or prior_order.get("status") == "REJECTED":
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="EXECUTION_BLOCKED",
+                        reason=str(exc),
+                    )
+            except Exception:
+                pass
         _set_blofin_execution_job(
             job_id, "completed", stage="BLOCKED",
             message_fa=str(exc),
@@ -4456,6 +4550,19 @@ def _run_blofin_demo_execution_job(
             },
         )
     except Exception as exc:
+        if store is not None and learning_experience_id and not submission_started:
+            try:
+                prior_order = store.get_order_for_experience(learning_experience_id)
+                if prior_order is None or prior_order.get("status") == "REJECTED":
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="EXECUTION_ERROR",
+                        reason=type(exc).__name__,
+                    )
+            except Exception:
+                pass
         _set_blofin_execution_job(
             job_id, "failed", stage="EXECUTION_ERROR",
             message_fa="اجرای آزمایشی با خطای کنترل‌شده متوقف شد؛ قبل از تلاش مجدد باید وضعیت سفارش در BloFin بررسی شود.",
@@ -7440,8 +7547,15 @@ def _blofin_demo_autopilot_worker() -> None:
                 batch_jobs.append((job_id, instrument_id))
             job_id, instrument_id = batch_jobs[-1]
             exchange_monitor = {}
+            monitor_store = None
             try:
-                snapshot = _blofin_demo_live_monitor_snapshot(instrument_id)
+                monitor_store = BloFinDemoEventStore()
+                latest_local_order = monitor_store.latest_order()
+                monitor_instrument_id = (
+                    str(latest_local_order.get("instrument_id") or instrument_id).upper()
+                    if isinstance(latest_local_order, dict) else instrument_id
+                )
+                snapshot = _blofin_demo_live_monitor_snapshot(monitor_instrument_id)
                 live_positions = [
                     row for row in snapshot.get("positions", [])
                     if isinstance(row, dict) and abs(float(row.get("positions") or 0)) > 0
@@ -7467,9 +7581,16 @@ def _blofin_demo_autopilot_worker() -> None:
                         latest_realized_pnl = None
                 except (TypeError, ValueError, OverflowError):
                     latest_realized_pnl = None
+                learning_outcome_update = monitor_store.record_closed_position_outcome(
+                    instrument_id=monitor_instrument_id,
+                    history_rows=closed_rows,
+                    partial_rows=snapshot.get("partially_closed_positions", []),
+                )
+                learning_integrity = monitor_store.learning_memory.integrity_report()
                 exchange_monitor = {
                     "exchange_monitor_status": snapshot.get("status"),
                     "exchange_data_completeness": snapshot.get("data_completeness"),
+                    "monitored_order_instrument": monitor_instrument_id,
                     "exchange_open_position_count": len(live_positions),
                     "exchange_open_positions": [
                         {
@@ -7498,6 +7619,7 @@ def _blofin_demo_autopilot_worker() -> None:
                     ],
                     "latest_closed_position": (
                         {
+                            "historyId": latest_closed.get("historyId"),
                             "instId": latest_closed.get("instId"),
                             "side": latest_closed.get("side"),
                             "openAveragePrice": latest_closed.get("openAveragePrice"),
@@ -7514,6 +7636,8 @@ def _blofin_demo_autopilot_worker() -> None:
                     "latest_closed_profitable": (
                         latest_realized_pnl > 0 if latest_realized_pnl is not None else None
                     ),
+                    "learning_outcome_update": learning_outcome_update,
+                    "learning_memory_integrity": learning_integrity,
                     "exchange_read_errors": snapshot.get("read_errors", []),
                 }
             except Exception as monitor_exc:
@@ -7521,6 +7645,12 @@ def _blofin_demo_autopilot_worker() -> None:
                     "exchange_monitor_status": "UNKNOWN",
                     "exchange_monitor_error_type": type(monitor_exc).__name__,
                 }
+            finally:
+                if monitor_store is not None:
+                    try:
+                        monitor_store.close()
+                    except Exception:
+                        pass
             with LOCK:
                 job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 result = job.get("result") if isinstance(job.get("result"), dict) else {}

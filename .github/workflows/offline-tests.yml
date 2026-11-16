@@ -4,6 +4,7 @@ on:
     branches:
       - main
       - feature/blofin-demo-adapter
+      - feature/blofin-demo-learning-memory
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
