@@ -80,6 +80,24 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(handler._send(200, b"response"))
         self.assertTrue(handler.close_connection)
 
+    def test_demo_ai_gate_requires_explicit_real_approval(self):
+        self.assertFalse(web_app._demo_ai_review_approved(None))
+        self.assertFalse(web_app._demo_ai_review_approved({"status": "UNKNOWN"}))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "LOCAL_RULES_ONLY",
+            "paper_entry_eligible": True,
+            "model": "CHALLENGE_1_LOCAL_RULES_V1",
+        }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": False, "model": "free-model"
+        }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": True
+        }))
+        self.assertTrue(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": True, "model": "free-model"
+        }))
+
     def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
         with open(web_app.__file__, encoding="utf-8") as source_file:
             source = source_file.read()
