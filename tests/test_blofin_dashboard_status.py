@@ -188,7 +188,20 @@ class BloFinDashboardStatusTests(unittest.TestCase):
         self.assertEqual(wave["selected_wave_fa"].split("؛")[0], "سناریوی ساختاری منتخب: موج ۳ صعودی")
         self.assertEqual(wave["timeframe_fa"], "یک‌ساعته")
         self.assertEqual(wave["confirmed_pivot_count"], 4)
+        self.assertIsNone(wave["invalidation_price_note_fa"])
         self.assertEqual(wave["pivots"][0]["kind_fa"], "کف تأییدشده")
+
+    def test_invalid_wave_count_explains_missing_invalidation_price(self):
+        report = web_app._blofin_elliott_wave_report_fa({
+            "status": "AMBIGUOUS", "pattern": "AMBIGUOUS",
+            "phase": "NO_RULE_VALID_IMPULSE",
+            "invalidation_price": None,
+            "pivot_reversal_threshold_pct": 0.18,
+            "pivots": [{"kind": "LOW", "price": 100.0}],
+        }, "NO_TRADE")
+        self.assertIsNone(report["invalidation_price"])
+        self.assertIn("شمارش معتبر", report["invalidation_price_note_fa"])
+        self.assertIsNone(report["pivot_reversal_threshold_note_fa"])
 
     def test_independent_smoke_test_report_hides_elliott_wave_card(self):
         job = {
