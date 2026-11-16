@@ -2741,6 +2741,8 @@ def _blofin_demo_execution_readiness() -> dict:
         "max_orders_per_utc_day": None,
         "daily_capacity_available": event_store_readable,
         "unresolved_orders": unresolved_orders,
+        "latest_order_status": budget.get("latest_order_status") if isinstance(budget, dict) else None,
+        "latest_order_age_seconds": budget.get("latest_order_age_seconds") if isinstance(budget, dict) else None,
         "leverage": 1,
         "margin_mode": "isolated",
         "risk_per_trade_pct": 0.25,
@@ -7395,6 +7397,11 @@ def _blofin_demo_autopilot_worker() -> None:
                     "orders_submitted": summary.get("orders_submitted"),
                     "trade_executed": summary.get("trade_executed"),
                     "reason_fa": finished_result.get("reason_fa") or finished_job.get("message_fa"),
+                    "failure_stage": finished_job.get("stage"),
+                    "error_type": (
+                        (finished_job.get("error") or {}).get("type")
+                        if isinstance(finished_job.get("error"), dict) else None
+                    ),
                 })
                 batch_jobs.append((job_id, instrument_id))
             job_id, instrument_id = batch_jobs[-1]
@@ -7513,6 +7520,10 @@ def _blofin_demo_autopilot_worker() -> None:
                         "average_fill_price": result.get("average_fill_price"),
                         "filled_size": result.get("filled_size"),
                         "reason_fa": result.get("reason_fa") or job.get("message_fa"),
+                        "error_type": (
+                            (job.get("error") or {}).get("type")
+                            if isinstance(job.get("error"), dict) else None
+                        ),
                         "open_positions": len(result.get("positions") or []),
                         "closed_positions": len(result.get("closed_positions") or []),
                         **exchange_monitor,
