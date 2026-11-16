@@ -3816,11 +3816,18 @@ def _run_blofin_demo_execution_job(
                 if not outcome_instrument:
                     continue
                 try:
+                    open_positions = outcome_client.get_positions(inst_id=outcome_instrument)
                     closed_history = outcome_client.get_positions_history(
                         inst_id=outcome_instrument, state="closed", limit=100,
                     )
                     partial_history = outcome_client.get_positions_history(
                         inst_id=outcome_instrument, state="partially_closed", limit=100,
+                    )
+                    store.recover_position_link(
+                        str(pending_order.get("experience_id") or ""),
+                        open_positions=open_positions if isinstance(open_positions, list) else [],
+                        closed_rows=closed_history if isinstance(closed_history, list) else [],
+                        partial_rows=partial_history if isinstance(partial_history, list) else [],
                     )
                     store.record_closed_position_outcome(
                         instrument_id=outcome_instrument,
@@ -4436,10 +4443,19 @@ def _run_blofin_demo_execution_job(
                         if (expected_side == "long" and signed_size > 0) or (expected_side == "short" and signed_size < 0):
                             matching_positions.append(position)
                 if len(matching_positions) == 1 and matching_positions[0].get("positionId"):
-                    store.attach_position_id(
-                        learning_experience_id,
-                        str(matching_positions[0]["positionId"]),
-                    )
+                    matched_position = matching_positions[0]
+                    try:
+                        actual_position_quantity = abs(
+                            float(matched_position.get("positions") or 0)
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        actual_position_quantity = 0.0
+                    if actual_position_quantity > 0 and math.isfinite(actual_position_quantity):
+                        store.attach_position_id(
+                            learning_experience_id,
+                            str(matched_position["positionId"]),
+                            quantity=actual_position_quantity,
+                        )
         except Exception:
             pass
         try:
