@@ -2,10 +2,12 @@ protocol_id: CSR-EVALUATION-001
 protocol_version: 1
 protocol_status: DRAFT_BLOCKED
 evaluation_allowed: false
+pre_registered_at_utc: null
 description: >
   Pre-registered evaluation contract for CRYPTO SUPER RADAR. This protocol is
-  intentionally blocked until every numeric threshold and sample requirement
-  is specified, reviewed, and frozen before any model evaluation.
+  intentionally blocked until every numeric threshold, regime definition,
+  and sample requirement is specified, reviewed, timestamped, and frozen
+  before any model evaluation.
 
 data_split:
   method: chronological
@@ -33,6 +35,7 @@ economic_risk:
   maximum_drawdown: null
   sharpe_confidence_level: null
   sharpe_block_bootstrap_method: moving_block_bootstrap
+  sharpe_bootstrap_block_length_bars: null
   minimum_sharpe_lower_bound_improvement_vs_baseline: null
 
 market_regimes:
@@ -41,6 +44,9 @@ market_regimes:
     - range
     - high_volatility
   definitions_locked_before_test: false
+  trend_adx_min: null
+  range_adx_max: null
+  high_volatility_atr_percentile_min: null
   minimum_samples_per_regime: null
 
 learning_controls:
