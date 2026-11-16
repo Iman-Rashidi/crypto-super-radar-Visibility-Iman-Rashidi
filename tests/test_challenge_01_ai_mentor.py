@@ -15,6 +15,7 @@ from crypto_super_radar.challenge_01_ai_mentor import (
     _feature_vector,
     build_pattern_context,
     CONTEXT_WINDOW_LENGTH,
+    FEATURE_WINDOW_LENGTH,
     MARKET_CONTEXT_VERSION,
     review_baseline,
     review_locked_baseline,
@@ -77,7 +78,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
             candle_item["volume"] = "10"
         context_prefix = [
             {
-                "open_time_ms": feature_ts - (CONTEXT_WINDOW_LENGTH - index) * 3_600_000,
+                "open_time_ms": feature_ts - (CONTEXT_WINDOW_LENGTH - 1 - index) * 3_600_000,
                 "open": "100", "high": "103", "low": "98", "close": "100",
                 "volume": "10", "confirmed": True,
             }
