@@ -676,9 +676,14 @@ def get_challenge_01_status(
                 highest_completed_round = number
             else:
                 break
+        # Round 5 is the final holdout: it consumes the candidate trained
+        # after round 4. No round-5 candidate is needed because there is no
+        # round 6. Earlier completed stages require a candidate through their
+        # own round so it can drive the next stage.
+        required_candidate_through_round = min(highest_completed_round, MAX_ROUNDS - 1)
         candidate_model_ready = (
             candidate_model_present
-            and candidate_model_through_round == highest_completed_round
+            and candidate_model_through_round == required_candidate_through_round
             and highest_completed_round >= 1
         )
         mentor_review_ready = baseline_locked and not mentor_review_complete
