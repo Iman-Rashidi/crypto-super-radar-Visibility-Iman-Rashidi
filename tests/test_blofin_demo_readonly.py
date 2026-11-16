@@ -4,7 +4,7 @@ import base64
 import hashlib
 import hmac
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_readonly import (
     BloFinDemoAuthError,
@@ -158,6 +158,28 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
         client = BloFinDemoReadOnly(session=self.session)
         with self.assertRaises(BloFinDemoAuthError):
             client.get_positions()
+
+    def test_read_only_client_reuses_dedicated_demo_trade_credentials(self):
+        # The dedicated Trade key is permitted as an auth source, while this
+        # client itself still exposes only read-only GET methods.
+        with patch.dict("os.environ", {
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+            "BLOFIN_DEMO_TRADE_API_KEY": "trade-demo-key",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "trade-demo-secret",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "trade-demo-pass",
+        }):
+            client = BloFinDemoReadOnly(
+                session=self.session,
+                clock_ms=lambda: 1_800_000_000_000,
+            )
+            client.get_positions()
+            _, kwargs = self.session.get.call_args
+            self.assertEqual(kwargs["headers"]["ACCESS-KEY"], "trade-demo-key")
+            self.assertEqual(kwargs["headers"]["ACCESS-PASSPHRASE"], "trade-demo-pass")
+            self.assertIn("ACCESS-SIGN", kwargs["headers"])
+            self.assertFalse(hasattr(client, "place_order"))
 
     def test_websocket_login_payload_uses_read_only_auth_scheme(self):
         payload = self.client.websocket_login_args()
