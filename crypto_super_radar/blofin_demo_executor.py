@@ -1115,6 +1115,17 @@ class BloFinDemoEventStore:
         return [dict(row) for row in rows]
 
 
+    def pending_learning_outcome_count(self) -> int:
+        """Count executed Demo experiences still awaiting exchange-finalized outcome data."""
+        with self._lock:
+            row = self._db.execute(
+                """SELECT COUNT(*) FROM blofin_demo_orders
+                   WHERE experience_id IS NOT NULL AND experience_id != ''
+                     AND outcome_recorded_at IS NULL
+                     AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED')"""
+            ).fetchone()
+        return int(row[0] or 0)
+
     def attach_position_id(self, experience_id: str, position_id: str) -> bool:
         experience_key = str(experience_id or "").strip()
         position_key = str(position_id or "").strip()
@@ -1263,6 +1274,10 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
+        if self.store.pending_learning_outcome_count() > 0:
+            raise BloFinDemoExecutionBlocked(
+                "A previous Demo position is still awaiting exchange-finalized learning outcome reconciliation."
+            )
         latest_age = budget.get("latest_order_age_seconds")
         if (
             self.policy.min_seconds_between_orders > 0
