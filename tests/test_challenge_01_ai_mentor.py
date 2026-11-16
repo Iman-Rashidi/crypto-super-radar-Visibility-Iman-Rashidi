@@ -108,6 +108,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
                 evidence={
                     "source": "blofin_demo_spot_next_completed_candle",
                     "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
+                    "reference_classification": "BULLISH_CANDLE",
                     "feature_candle_open_time_ms": feature_ts,
                     "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
                     "target_candle_open_time_ms": target_ts,
