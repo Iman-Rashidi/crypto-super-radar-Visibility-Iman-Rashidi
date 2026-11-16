@@ -407,7 +407,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "fee": "0",
         }]
         self.assertIsNone(self.store.record_closed_position_outcome(
-            experience_id, closed_rows=mismatched,
+            instrument_id="BTC-USDT", history_rows=mismatched,
         ))
 
         partial = [{
@@ -425,7 +425,9 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "fee": "0.1",
         }]
         saved = self.store.record_closed_position_outcome(
-            experience_id, closed_rows=closed, partial_rows=partial,
+            instrument_id="BTC-USDT",
+            history_rows=closed,
+            partial_history_rows=partial,
         )
         self.assertEqual(saved["learning_status"], "OUTCOME_RECORDED")
         outcome = saved["events"][-1]["payload"]
