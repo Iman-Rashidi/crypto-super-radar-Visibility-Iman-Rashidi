@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -255,8 +256,7 @@ def test_registered_evaluation_protocol_hash_matches_file() -> None:
 def test_protocol_tampering_or_unregistered_thresholds_block_evaluation(
     tmp_path: Path,
 ) -> None:
-    # The committed draft is integrity-protected but intentionally not evaluable:
-    # numeric thresholds, purge/embargo windows and regime sample sizes are unset.
+    # The committed draft is integrity-protected but intentionally not evaluable.
     with pytest.raises(ProtocolNotReadyError):
         verify_evaluation_protocol(require_ready=True)
 
@@ -264,8 +264,27 @@ def test_protocol_tampering_or_unregistered_thresholds_block_evaluation(
     original_hash = Path(__file__).resolve().parents[1] / "docs" / "evaluation_protocol.sha256"
     modified_protocol = tmp_path / "evaluation_protocol.yaml"
     copied_hash = tmp_path / "evaluation_protocol.sha256"
-    modified_protocol.write_bytes(original_protocol.read_bytes() + b"\n# unauthorized change\n")
-    copied_hash.write_bytes(original_hash.read_bytes())
 
+    # Even false LOCKED flags and a refreshed digest cannot hide unset thresholds.
+    falsely_locked = original_protocol.read_text(encoding="utf-8")
+    falsely_locked = falsely_locked.replace("protocol_status: DRAFT_BLOCKED", "protocol_status: LOCKED")
+    falsely_locked = falsely_locked.replace("evaluation_allowed: false", "evaluation_allowed: true")
+    falsely_locked = falsely_locked.replace(
+        "pre_registered_at_utc: null",
+        "pre_registered_at_utc: 2026-11-16T00:00:00Z",
+    )
+    falsely_locked = falsely_locked.replace(
+        "definitions_locked_before_test: false",
+        "definitions_locked_before_test: true",
+    )
+    modified_protocol.write_text(falsely_locked, encoding="utf-8")
+    digest = hashlib.sha256(modified_protocol.read_bytes()).hexdigest()
+    copied_hash.write_text(f"{digest}  evaluation_protocol.yaml\\n", encoding="utf-8")
+    with pytest.raises(ProtocolNotReadyError, match="purge_window_bars"):
+        verify_evaluation_protocol(modified_protocol, copied_hash, require_ready=True)
+
+    # Any byte-level change without updating the registered digest is rejected.
+    modified_protocol.write_bytes(original_protocol.read_bytes() + b"\\n# unauthorized change\\n")
+    copied_hash.write_bytes(original_hash.read_bytes())
     with pytest.raises(ProtocolIntegrityError):
         verify_evaluation_protocol(modified_protocol, copied_hash)
