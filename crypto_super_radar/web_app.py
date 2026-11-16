@@ -3202,7 +3202,15 @@ def _blofin_elliott_wave_report_fa(wave: dict | None, direction: str = "NO_TRADE
         "direction_alignment": alignment,
         "direction_alignment_fa": alignment_fa,
         "invalidation_price": source.get("invalidation_price"),
+        "invalidation_price_note_fa": (
+            "شمارش معتبر الیوت تشکیل نشده است؛ بنابراین سطح ابطال قابل تعیین نیست."
+            if source.get("invalidation_price") is None else None
+        ),
         "pivot_reversal_threshold_pct": source.get("pivot_reversal_threshold_pct"),
+        "pivot_reversal_threshold_note_fa": (
+            "کندل یا پیوت معتبر کافی برای محاسبه آستانه وجود ندارد."
+            if source.get("pivot_reversal_threshold_pct") is None else None
+        ),
         "pivots": pivots,
         "reason_fa": phase_fa,
         "confidence_note_fa": "شماره‌گذاری موج فقط شواهد ساختاری است، نه احتمال موفقیت، سیگنال مستقل یا تضمین حرکت بعدی.",
@@ -5629,8 +5637,8 @@ async function loadBlofinInstruments(){
                   ['مرحله موج',wave.phase_fa],
                   ['سناریوی موج منتخب',wave.selected_wave_fa],
                   ['مقایسه با جهت معامله',wave.direction_alignment_fa],
-                  ['سطح ابطال شمارش',wave.invalidation_price],
-                  ['آستانه تأیید پیوت (%)',wave.pivot_reversal_threshold_pct],
+                  ['سطح ابطال شمارش',wave.invalidation_price??wave.invalidation_price_note_fa],
+                  ['آستانه تأیید پیوت (%)',wave.pivot_reversal_threshold_pct??wave.pivot_reversal_threshold_note_fa],
                   ['پیوت‌های تأییدشده',wave.confirmed_pivot_count],
                   ['تایم‌فریم ساختار',wave.timeframe_fa||wave.timeframe]
                 ]);
