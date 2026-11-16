@@ -922,6 +922,142 @@ class BloFinDemoEventStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def has_final_experience(self, experience_id: str) -> bool:
+        """Return whether this closed-candle decision already has an immutable outcome."""
+        experience = self.learning_memory.get_experience(experience_id)
+        return any(event.get("event_type") == "OUTCOME_LABELLED" for event in experience["events"])
+
+    def record_closed_position_outcome(
+        self, *, instrument_id: str, history_rows: Any,
+    ) -> dict[str, Any] | None:
+        """Append one final outcome only when exchange history unambiguously matches our Demo order."""
+        candidates = [
+            row for row in history_rows
+            if isinstance(row, Mapping)
+            and str(row.get("instId") or "").upper() == str(instrument_id).upper()
+        ] if isinstance(history_rows, list) else []
+        with self._lock:
+            order_row = self._db.execute(
+                "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
+                "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(instrument_id).upper(),),
+            ).fetchone()
+            if order_row is None:
+                return None
+            order = dict(order_row)
+            if order.get("outcome_recorded_at") is not None:
+                return {"status": "ALREADY_RECORDED", "experience_id": order.get("experience_id")}
+        expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
+        try:
+            order_created_ms = int(order.get("created_at") or 0) * 1000
+            reference_entry = float(order.get("entry_price"))
+            expected_quantity = float(order.get("quantity"))
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
+        matches = []
+        for row in candidates:
+            try:
+                side = str(row.get("side") or "").lower()
+                opened_ms = int(row.get("createTime") or 0)
+                open_price = float(row.get("openAveragePrice"))
+                closed_quantity = float(row.get("closePositions"))
+                total_quantity = float(row.get("maxPositions"))
+                pnl = float(row.get("realizedPnl"))
+                fee = float(row.get("fee") or 0.0)
+                history_id = str(row.get("historyId") or "")
+                if not all(math.isfinite(value) for value in (
+                    open_price, closed_quantity, total_quantity, pnl, fee
+                )):
+                    continue
+            except (TypeError, ValueError, OverflowError):
+                continue
+            price_deviation = abs(open_price - reference_entry) / reference_entry
+            quantity_tolerance = max(1e-9, abs(expected_quantity) * 1e-6)
+            if (
+                side == expected_side
+                and opened_ms >= order_created_ms - 60_000
+                and price_deviation <= 0.005
+                and abs(closed_quantity - total_quantity) <= quantity_tolerance
+                and abs(total_quantity - expected_quantity) <= max(quantity_tolerance, 1e-6)
+                and history_id
+            ):
+                matches.append({
+                    "row": dict(row), "history_id": history_id,
+                    "realized_pnl": pnl, "trading_fee": fee,
+                    "realized_after_reported_fee": pnl - fee,
+                })
+        if len(matches) != 1:
+            return {
+                "status": "WAITING_FOR_UNAMBIGUOUS_EXCHANGE_HISTORY",
+                "candidate_count": len(matches),
+                "experience_id": order.get("experience_id"),
+            }
+        match = matches[0]
+        net_before_funding = match["realized_after_reported_fee"]
+        result = (
+            "PROFIT" if net_before_funding > 1e-8
+            else "LOSS" if net_before_funding < -1e-8
+            else "BREAKEVEN"
+        )
+        evidence = {
+            "source": "BLOFIN_DEMO_CLOSED_POSITION_HISTORY",
+            "exchange_history_id": match["history_id"],
+            "instrument_id": str(instrument_id).upper(),
+            "position_side": str(match["row"].get("positionSide") or ""),
+            "open_average_price": match["row"].get("openAveragePrice"),
+            "close_average_price": match["row"].get("closeAveragePrice"),
+            "closed_quantity": match["row"].get("closePositions"),
+            "exchange_realized_pnl": match["row"].get("realizedPnl"),
+            "exchange_trading_fee": match["row"].get("fee"),
+            "realized_pnl_after_reported_trading_fee": net_before_funding,
+            "funding_fees_included": False,
+            "funding_fee_attribution": "NOT_YET_RECONCILED",
+            "decision_correctness": "UNKNOWN_PENDING_INDEPENDENT_REVIEW",
+            "orders_submitted": True,
+            "trade_executed": True,
+        }
+        experience_id = str(order["experience_id"])
+        with self._lock, self._db:
+            latest = self._db.execute(
+                "SELECT outcome_recorded_at FROM blofin_demo_orders WHERE client_order_id=?",
+                (order["client_order_id"],),
+            ).fetchone()
+            if latest is None or latest["outcome_recorded_at"] is not None:
+                return {"status": "ALREADY_RECORDED", "experience_id": experience_id}
+            saved = self.learning_memory.record_outcome(
+                experience_id=experience_id,
+                event_id=experience_id + "-outcome",
+                decision_correctness="UNKNOWN",
+                realized_result=result,
+                realized_net_pnl=net_before_funding,
+                pnl_currency="USDT",
+                final=True,
+                evidence=evidence,
+            )
+            now = int(time.time())
+            self._db.execute(
+                "UPDATE blofin_demo_orders SET outcome_recorded_at=?, position_history_id=?, updated_at=? "
+                "WHERE client_order_id=?",
+                (now, match["history_id"], now, order["client_order_id"]),
+            )
+            self._append_event(order["client_order_id"], "OUTCOME_RECORDED", {
+                "experience_id": experience_id,
+                "exchange_history_id": match["history_id"],
+                "realized_result": result,
+                "realized_pnl_after_reported_trading_fee": net_before_funding,
+                "funding_fee_attribution": "NOT_YET_RECONCILED",
+            })
+        return {
+            "status": "RECORDED",
+            "experience_id": experience_id,
+            "exchange_history_id": match["history_id"],
+            "realized_result": result,
+            "realized_pnl_after_reported_trading_fee": net_before_funding,
+            "funding_fee_attribution": "NOT_YET_RECONCILED",
+            "learning_memory_status": saved.get("event_type"),
+        }
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
