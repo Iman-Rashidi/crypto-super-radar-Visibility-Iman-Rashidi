@@ -21,7 +21,7 @@ class FakeBloFin:
 
 def candle_rows(now_ms, interval_ms, count=65, unclosed_last=False):
     rows = []
-    start = now_ms - count * interval_ms - interval_ms
+    start = now_ms - count * interval_ms
     for i in range(count):
         stamp = start + i * interval_ms
         close = 100.0 + i * 0.05
@@ -45,6 +45,39 @@ class Challenge1CandleTests(unittest.TestCase):
         self.assertEqual(len(frame), 64)
         self.assertEqual(float(frame["volume"].iloc[-1]), 1000.0)
         self.assertTrue(frame.index.is_monotonic_increasing)
+
+    def test_completed_frame_rejects_stale_latest_candle(self):
+        now = 2_000_000_000_000
+        interval = 15 * 60 * 1000
+        rows = candle_rows(now, interval, count=65)
+        for row in rows:
+            row[0] -= 2 * interval
+        with self.assertRaisesRegex(ValueError, "stale"):
+            _completed_frame(
+                FakeBloFin({"15m": rows}), inst_id="BTC-USDT",
+                bar="15m", now_ms=now, minimum_rows=60,
+            )
+
+    def test_completed_frame_rejects_a_gap_in_recent_candles(self):
+        now = 2_000_000_000_000
+        interval = 15 * 60 * 1000
+        rows = candle_rows(now, interval, count=65)
+        rows.pop(-10)
+        with self.assertRaisesRegex(ValueError, "missing interval"):
+            _completed_frame(
+                FakeBloFin({"15m": rows}), inst_id="BTC-USDT",
+                bar="15m", now_ms=now, minimum_rows=60,
+            )
+
+    def test_analysis_rejects_stale_one_hour_context(self):
+        now = 2_000_000_000_000
+        fifteen = candle_rows(now, 15 * 60 * 1000, count=65)
+        hourly = candle_rows(now, 60 * 60 * 1000, count=65)
+        for row in hourly:
+            row[0] -= 2 * 60 * 60 * 1000
+        client = FakeBloFin({"15m": fifteen, "1H": hourly})
+        with self.assertRaisesRegex(ValueError, "stale"):
+            analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
 
     def test_no_trade_is_a_valid_result_when_no_confirmed_pattern_exists(self):
         now = 2_000_000_000_000
