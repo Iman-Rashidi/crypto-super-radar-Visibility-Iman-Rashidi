@@ -3907,7 +3907,11 @@ def _run_blofin_demo_execution_job(
             }
             analysis = SimpleNamespace(
                 asset=asset.raw,
-                signal=Signal(str(challenge_record.get("signal") or "NO_TRADE")),
+                signal=(
+                    Signal.LONG if str(challenge_record.get("signal") or "").upper() == "LONG"
+                    else Signal.SHORT if str(challenge_record.get("signal") or "").upper() == "SHORT"
+                    else Signal.NO_TRADE
+                ),
                 metrics=metrics,
                 gates=gates,
                 entry_price=challenge_record.get("entry_price_usd"),
