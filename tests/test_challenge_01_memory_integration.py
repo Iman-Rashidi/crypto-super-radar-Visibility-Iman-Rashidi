@@ -4,6 +4,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import crypto_super_radar.challenge_01_runner as challenge_01_runner_module
 
 from crypto_super_radar.challenge_01_ai_mentor import CONTEXT_WINDOW_LENGTH, build_pattern_context, detect_candlestick_patterns
 from crypto_super_radar.challenge_01_runner import (
@@ -162,6 +165,43 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
             self.assertEqual(outcome["payload"]["realized_result"], "NOT_EXECUTED")
         finally:
             db.close()
+
+    def test_bot_only_decision_is_persisted_before_target_label_is_read(self):
+        events = []
+        original_record_decision = LearningExperienceMemory.record_decision
+        original_reference_label = challenge_01_runner_module._reference_label
+
+        def tracked_record_decision(memory, *args, **kwargs):
+            result = original_record_decision(memory, *args, **kwargs)
+            events.append(("decision", kwargs["experience_id"]))
+            return result
+
+        def tracked_reference_label(target):
+            events.append(("target", target["open_time_ms"]))
+            return original_reference_label(target)
+
+        with (
+            patch.object(
+                LearningExperienceMemory,
+                "record_decision",
+                tracked_record_decision,
+            ),
+            patch.object(
+                challenge_01_runner_module,
+                "_reference_label",
+                tracked_reference_label,
+            ),
+        ):
+            result = self.runner().run_bot_only_round(round_number=1, sample_count=100)
+
+        self.assertEqual(result["status"], "BASELINE_RECORDED", msg=repr(result))
+        self.assertEqual(len(events), 2 * MIN_SAMPLES_PER_ROUND)
+        for index in range(0, len(events), 2):
+            decision_kind, experience_id = events[index]
+            target_kind, target_time = events[index + 1]
+            self.assertEqual(decision_kind, "decision")
+            self.assertEqual(target_kind, "target")
+            self.assertTrue(experience_id.endswith(f"-{target_time}"))
 
     def test_runtime_runner_blocks_local_sqlite_before_provider_access(self):
         client = FakeSpotClient(self.rows)
