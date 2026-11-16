@@ -6,6 +6,7 @@ on:
       - feature/blofin-demo-adapter
       - feature/blofin-demo-learning-memory
       - fix/ch01-analysis-independent-readiness
+      - staging/challenge1-integration-2026-11-16
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
