@@ -412,12 +412,18 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
         self.assertEqual(mismatch_result["status"], "WAITING_FOR_FINAL_CLOSED_POSITION")
 
+        order_row = self.store.get_order(plan["client_order_id"])
+        opened_ms = int(order_row["created_at"]) * 1000 + 5_000
+        expected_size = str(plan["quantity"])
         partial = [{
             "historyId": "h-partial",
             "positionId": "demo-position-77",
             "instId": "BTC-USDT",
-            "closePositions": "4",
-            "maxPositions": "10",
+            "side": "buy",
+            "createTime": str(opened_ms),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closePositions": str(float(expected_size) * 0.4),
+            "maxPositions": expected_size,
             "realizedPnl": "0.5",
             "fee": "0.1",
         }]
@@ -425,8 +431,11 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "historyId": "h-closed",
             "positionId": "demo-position-77",
             "instId": "BTC-USDT",
-            "closePositions": "6",
-            "maxPositions": "10",
+            "side": "buy",
+            "createTime": str(opened_ms),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closePositions": str(float(expected_size) * 0.6),
+            "maxPositions": expected_size,
             "realizedPnl": "1.0",
             "fee": "0.1",
         }]
@@ -484,7 +493,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             instrument_id="BTC-USDT",
             history_rows=[wrong_position],
         )
-        self.assertEqual(waiting["status"], "WAITING_FOR_UNAMBIGUOUS_EXCHANGE_HISTORY")
+        self.assertEqual(waiting["status"], "WAITING_FOR_FINAL_CLOSED_POSITION")
         self.assertEqual(
             self.store.learning_memory.get_experience(experience_id)["learning_status"],
             "PENDING_OUTCOME",
