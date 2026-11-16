@@ -7559,7 +7559,7 @@ def _blofin_demo_autopilot_worker() -> None:
                 learning_outcome_update = monitor_store.record_closed_position_outcome(
                     instrument_id=monitor_instrument_id,
                     history_rows=closed_rows,
-                    partial_history_rows=snapshot.get("partially_closed_positions", []),
+                    partial_rows=snapshot.get("partially_closed_positions", []),
                 )
                 learning_integrity = monitor_store.learning_memory.integrity_report()
                 exchange_monitor = {
