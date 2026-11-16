@@ -103,6 +103,83 @@ class WebAppHttpTests(unittest.TestCase):
             source = source_file.read()
         self.assertIn(r"/^HTTP (429|5\\d\\d)$/.test(message);", source)
 
+    def test_no_trade_job_creates_durable_robot_event_payload(self):
+        job = {
+            "status": "completed",
+            "stage": "NO_TRADE",
+            "updated_at_utc": "2026-11-16T18:00:00Z",
+            "message_fa": "ورود معتبر نبود.",
+            "result": {
+                "status": "NO_TRADE",
+                "signal": "NO_TRADE",
+                "reason_fa": "هیچ الگوی ۱۵ دقیقه‌ای معتبر نبود.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-no-trade", "ETH-USDT", job)
+        robot_event = next(item for item in events if item["actor"] == "Robot")
+        self.assertEqual(robot_event["event_type"], "NO_TRADE")
+        self.assertEqual(robot_event["signal"], "NO_TRADE")
+        self.assertEqual(robot_event["cycle_id"], "cycle-no-trade")
+        self.assertIn("orders_submitted", robot_event["details"])
+
+    def test_ai_veto_is_recorded_separately_from_robot_analysis(self):
+        ai_review = {
+            "status": "VETO",
+            "model": "free-test-model",
+            "rationale_fa": "ریسک نامتقارن است.",
+            "paper_entry_eligible": False,
+        }
+        job = {
+            "status": "completed",
+            "stage": "AI_BLOCKED",
+            "ai_review": ai_review,
+            "result": {
+                "status": "AI_BLOCKED",
+                "signal": "LONG",
+                "reason_fa": "ناظر ورود را رد کرد.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-ai-veto", "BTC-USDT", job)
+        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        self.assertEqual(ai_event["event_type"], "AI_VETO")
+        self.assertEqual(ai_event["ai_decision"], "REJECT")
+        self.assertEqual(ai_event["ai_model"], "free-test-model")
+        self.assertFalse(any(item["event_type"] == "ORDER_SUBMITTED" for item in events))
+
+    def test_verified_demo_fill_creates_order_and_ai_approval_events(self):
+        job = {
+            "status": "completed",
+            "stage": "MONITORING",
+            "ai_review": {
+                "status": "APPROVED",
+                "model": "free-test-model",
+                "rationale_fa": "ریسک قابل قبول است.",
+                "paper_entry_eligible": True,
+            },
+            "result": {
+                "status": "FILLED",
+                "signal": "LONG",
+                "orders_submitted": True,
+                "trade_executed": True,
+                "exchange_order_id": "demo-order-123",
+                "positions": [{"positionId": "demo-position-456"}],
+                "average_fill_price": 100.5,
+                "filled_size": "0.01",
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-fill", "BTC-USDT", job)
+        types = {item["event_type"] for item in events}
+        self.assertTrue({"ANALYSIS_COMPLETED", "ORDER_SUBMITTED", "ORDER_FILLED", "AI_APPROVAL"}.issubset(types))
+        filled = next(item for item in events if item["event_type"] == "ORDER_FILLED")
+        self.assertEqual(filled["order_id"], "demo-order-123")
+        self.assertEqual(filled["position_id"], "demo-position-456")
+        approval = next(item for item in events if item["event_type"] == "AI_APPROVAL")
+        self.assertEqual(approval["ai_decision"], "APPROVE")
+
     def test_home_page_is_persian_and_lists_twelve_gates(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
