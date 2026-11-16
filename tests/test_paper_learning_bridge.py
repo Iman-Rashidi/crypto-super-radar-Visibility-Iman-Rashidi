@@ -1,0 +1,219 @@
+"""Atomic integration tests for the paper ledger and learning-experience journal."""
+from __future__ import annotations
+
+import unittest
+import os
+import sqlite3
+import sys
+import types
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+from crypto_super_radar.paper_trading import PaperLedger, _paper_experience_id
+
+
+def _position(signal_bar: str = "2026-11-16T10:00:00+00:00") -> dict:
+    return {
+        "asset": "cex:BTCUSDT",
+        "quantity": 0.1,
+        "entry_price": 100.0,
+        "stop_loss": 90.0,
+        "initial_stop_loss": 90.0,
+        "take_profit": 120.0,
+        "entry_fee": 0.08,
+        "opened_at": 1_795_000_000,
+        "signal_bar": signal_bar,
+        "confirmation_score": 82.0,
+        "risk_budget": 10.0,
+        "max_holding_days": 14,
+        "learning_model_version": "test-model-v1",
+        "learning_dataset_version": "test-dataset-v1",
+        "learning_snapshot": {
+            "signal_bar": signal_bar,
+            "timeframe": "1h",
+            "feature_snapshot_status": "PARTIAL_NOT_FOR_CHALLENGE_SCORING",
+            "future_data_in_input": False,
+        },
+    }
+
+
+class PaperLearningBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.ledger = PaperLedger(path=":memory:", initial_equity_usd=1_000.0)
+
+    def tearDown(self):
+        self.ledger.close()
+
+    def test_open_and_final_close_append_one_verified_learning_experience(self):
+        position = _position()
+        self.assertTrue(self.ledger.open_position(position, debit=10.08))
+
+        experience_id = _paper_experience_id(position["asset"], position["signal_bar"])
+        pending = self.ledger.learning_memory.get_experience(experience_id)
+        self.assertEqual(pending["learning_status"], "PENDING_OUTCOME")
+        self.assertEqual([e["event_type"] for e in pending["events"]], ["DECISION_RECORDED"])
+        self.assertEqual(pending["challenge_id"], "PAPER_TRADING_EXPERIENCE")
+        self.assertEqual(pending["environment"], "PAPER")
+
+        closed = self.ledger.close_position(110.0, 0.0008, "TEST_EXIT")
+        self.assertIsNotNone(closed)
+        completed = self.ledger.learning_memory.get_experience(experience_id)
+        self.assertEqual(completed["learning_status"], "OUTCOME_RECORDED")
+        self.assertEqual(
+            [e["event_type"] for e in completed["events"]],
+            ["DECISION_RECORDED", "OUTCOME_LABELLED"],
+        )
+        outcome = completed["events"][-1]["payload"]
+        self.assertTrue(outcome["final"])
+        self.assertEqual(outcome["decision_correctness"], "UNKNOWN")
+        self.assertEqual(outcome["realized_result"], "PROFIT")
+        self.assertGreater(outcome["realized_net_pnl"], 0)
+        self.assertEqual(completed["verification"]["status"], "PASS")
+
+    def test_decision_and_entry_projection_roll_back_together(self):
+        position = _position()
+        original = self.ledger.learning_memory.record_decision
+
+        def fail(**kwargs):
+            raise RuntimeError("injected learning journal failure")
+
+        self.ledger.learning_memory.record_decision = fail
+        try:
+            with self.assertRaisesRegex(RuntimeError, "learning journal failure"):
+                self.ledger.open_position(position, debit=10.08)
+        finally:
+            self.ledger.learning_memory.record_decision = original
+
+        self.assertIsNone(self.ledger.position())
+        self.assertEqual(self.ledger.execution_ledger.event_count(), 0)
+        self.assertEqual(
+            self.ledger._db.execute(
+                "SELECT COUNT(*) FROM learning_experience_events"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_legacy_open_position_is_backfilled_without_fabricating_features(self):
+        position = _position("legacy-signal-bar")
+        position["opened_at"] = 1_700_000_000
+        original = self.ledger.learning_memory.record_decision
+        self.ledger.learning_memory.record_decision = lambda **kwargs: None
+        try:
+            self.assertTrue(self.ledger.open_position(position, debit=10.08))
+        finally:
+            self.ledger.learning_memory.record_decision = original
+
+        self.ledger.close_position(95.0, 0.0008, "LEGACY_TEST_EXIT")
+        experience = self.ledger.learning_memory.get_experience(
+            _paper_experience_id(position["asset"], position["signal_bar"])
+        )
+        self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+        snapshot = experience["events"][0]["payload"]["input_snapshot"]
+        self.assertTrue(snapshot["legacy_backfill"])
+        self.assertEqual(snapshot["feature_snapshot_status"], "LEGACY_NOT_CAPTURED")
+        self.assertEqual(experience["verification"]["status"], "PASS")
+
+    def test_learning_memory_survives_ledger_reopen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "paper-memory.sqlite3")
+            first = PaperLedger(path=database_path, initial_equity_usd=1_000.0)
+            position = _position("persistent-restart-signal")
+            self.assertTrue(first.open_position(position, debit=10.08))
+            first.close_position(110.0, 0.0008, "PERSISTENCE_TEST_EXIT")
+            first.close()
+
+            reopened = PaperLedger(path=database_path, initial_equity_usd=1_000.0)
+            try:
+                experience_id = _paper_experience_id(position["asset"], position["signal_bar"])
+                experience = reopened.learning_memory.get_experience(experience_id)
+                self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+                self.assertEqual(len(experience["events"]), 2)
+                self.assertEqual(experience["verification"]["status"], "PASS")
+                state = reopened.state()
+                self.assertEqual(state["storage"], "LOCAL_SQLITE")
+                self.assertEqual(state["learning_memory"]["integrity_status"], "PASS")
+                self.assertEqual(state["learning_memory"]["integrity_report"]["experiences_checked"], 1)
+            finally:
+                reopened.close()
+
+    def test_turso_backend_adapter_preserves_paper_memory_across_reconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            remote_database_path = str(Path(directory) / "mock-turso-remote.sqlite3")
+            def fake_connect(url, auth_token):
+                self.assertEqual(url, "libsql://csr-test.turso.io")
+                self.assertEqual(auth_token, "unit-test-token")
+                connection = sqlite3.connect(remote_database_path, check_same_thread=False)
+                return connection
+
+            fake_module = types.SimpleNamespace(connect=fake_connect)
+            env = {
+                "TURSO_DATABASE_URL": "libsql://csr-test.turso.io",
+                "TURSO_AUTH_TOKEN": "unit-test-token",
+            }
+            position = _position("mock-turso-reconnect-signal")
+            with patch.dict(os.environ, env, clear=False), patch.dict(
+                sys.modules, {"turso_serverless": fake_module}
+            ):
+                first = PaperLedger(path="data/paper.sqlite3", initial_equity_usd=1_000.0)
+                self.assertTrue(first.open_position(position, debit=10.08))
+                first.close_position(110.0, 0.0008, "MOCK_TURSO_EXIT")
+                self.assertEqual(first.state()["storage"], "TURSO_CLOUD_SQLITE")
+                first.close()
+
+                reopened = PaperLedger(path="data/paper.sqlite3", initial_equity_usd=1_000.0)
+                try:
+                    experience_id = _paper_experience_id(position["asset"], position["signal_bar"])
+                    experience = reopened.learning_memory.get_experience(experience_id)
+                    self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+                    self.assertEqual(experience["verification"]["status"], "PASS")
+                    state = reopened.state()
+                    self.assertEqual(state["storage"], "TURSO_CLOUD_SQLITE")
+                    self.assertEqual(state["learning_memory"]["integrity_status"], "PASS")
+                    self.assertEqual(state["learning_memory"]["integrity_report"]["experiences_checked"], 1)
+                finally:
+                    reopened.close()
+
+    def test_integrity_report_detects_persisted_payload_tampering(self):
+        position = _position("tampered-signal-bar")
+        self.assertTrue(self.ledger.open_position(position, debit=10.08))
+        experience_id = _paper_experience_id(position["asset"], position["signal_bar"])
+        # Simulate out-of-band disk corruption: normal SQL writes are blocked
+        # by append-only triggers, so remove the guard only inside this test.
+        self.ledger._db.execute("DROP TRIGGER learning_experience_no_update")
+        self.ledger._db.execute(
+            "UPDATE learning_experience_events SET payload_json=? WHERE experience_id=?",
+            ('{"signal":"SHORT"}', experience_id),
+        )
+        report = self.ledger.learning_memory.integrity_report()
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["experiences_checked"], 1)
+        self.assertEqual(report["failed_experiences"][0]["experience_id"], experience_id)
+
+    def test_final_outcome_and_close_projection_roll_back_together(self):
+        position = _position()
+        self.assertTrue(self.ledger.open_position(position, debit=10.08))
+        original = self.ledger.learning_memory.record_outcome
+
+        def fail(**kwargs):
+            raise RuntimeError("injected final outcome failure")
+
+        self.ledger.learning_memory.record_outcome = fail
+        try:
+            with self.assertRaisesRegex(RuntimeError, "final outcome failure"):
+                self.ledger.close_position(110.0, 0.0008, "TEST_EXIT")
+        finally:
+            self.ledger.learning_memory.record_outcome = original
+
+        self.assertIsNotNone(self.ledger.position())
+        self.assertEqual(
+            self.ledger._db.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0],
+            0,
+        )
+        self.assertEqual(self.ledger.learning_memory.get_experience(
+            _paper_experience_id(position["asset"], position["signal_bar"])
+        )["learning_status"], "PENDING_OUTCOME")
+
+
+if __name__ == "__main__":
+    unittest.main()

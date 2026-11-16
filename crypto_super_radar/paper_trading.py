@@ -4,11 +4,13 @@ This module never calls an exchange trading endpoint and has no live-order mode.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -18,6 +20,13 @@ from .signal_performance import summarize_closed_trades
 from .execution_costs import calculate_fill_costs
 from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
 from .ai_second_opinion import ai_connection_status, run_free_ai_second_opinion
+from .learning_experience_memory import LearningExperienceMemory, ExperienceNotFoundError
+
+
+def _paper_experience_id(asset: str, signal_bar: str) -> str:
+    """Stable, non-secret identity shared by a paper trade's decision and outcome."""
+    raw = f"{asset.strip().upper()}|{signal_bar.strip()}"
+    return "paper-exp-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 PAPER_ASSETS = frozenset({
@@ -97,6 +106,9 @@ class PaperLedger:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._db = connect_database(self.path)
+        # The learning journal deliberately shares this exact connection and
+        # lock with the paper ledger so decision/outcome events commit atomically.
+        self.learning_memory = LearningExperienceMemory(self._db, lock=self._lock)
         with self._db:
             self.execution_ledger = PaperExecutionEventLedger(self._db, lock=self._lock)
             self._db.execute("""
@@ -280,6 +292,34 @@ class PaperLedger:
                 ),
                 reason="PAPER_ENTRY", occurred_at=position["opened_at"],
             )
+            experience_id = _paper_experience_id(position["asset"], position["signal_bar"])
+            self.learning_memory.record_decision(
+                experience_id=experience_id,
+                event_id=experience_id + "-decision",
+                engine_id="PAPER_TRADING_BOT",
+                challenge_id="PAPER_TRADING_EXPERIENCE",
+                cycle_id=experience_id,
+                decision_mode="BOT_ONLY",
+                environment="PAPER",
+                decision={
+                    "signal": "LONG", "side": "LONG",
+                    "entry_price": float(position["entry_price"]),
+                    "stop_loss": float(position["stop_loss"]),
+                    "take_profit": float(position["take_profit"]),
+                    "quantity": float(position["quantity"]),
+                    "confirmation_score": float(position["confirmation_score"]),
+                    "risk_budget_usd": float(position["risk_budget"]),
+                },
+                input_snapshot=dict(position.get("learning_snapshot") or {
+                    "signal_bar": position["signal_bar"],
+                    "feature_snapshot_status": "PARTIAL_NOT_FOR_CHALLENGE_SCORING",
+                }),
+                market="CEX_SPOT", symbol=str(position["asset"]).split(":")[-1],
+                timeframe=str((position.get("learning_snapshot") or {}).get("timeframe", "UNKNOWN")),
+                model_version=str(position.get("learning_model_version", "PAPER_BOT_UNKNOWN")),
+                dataset_version=str(position.get("learning_dataset_version", "LIVE_PUBLIC_MARKET_SNAPSHOT")),
+                timestamp_utc=None,
+            )
         return True
 
     def update_management(self, price: float, stop_loss: float) -> None:
@@ -457,6 +497,68 @@ class PaperLedger:
                     if normalized_quote_source else "MODELLED_PAPER_FILL"
                 ),
                 reason=f"PAPER_EXIT:{reason}", occurred_at=closed_at,
+            )
+            experience_id = _paper_experience_id(p["asset"], p["signal_bar"])
+            # Positions opened before this bridge was deployed have no decision
+            # event. Backfill only the immutable facts available in the ledger,
+            # label the missing feature snapshot explicitly, and timestamp the
+            # decision at its original open time. Never invent candle features.
+            try:
+                self.learning_memory.get_experience(experience_id)
+            except ExperienceNotFoundError:
+                opened_at_utc = datetime.fromtimestamp(
+                    int(p["opened_at"]), tz=timezone.utc
+                ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                self.learning_memory.record_decision(
+                    experience_id=experience_id,
+                    event_id=experience_id + "-decision",
+                    engine_id="PAPER_TRADING_BOT",
+                    challenge_id="PAPER_TRADING_EXPERIENCE",
+                    cycle_id=experience_id,
+                    decision_mode="BOT_ONLY",
+                    environment="PAPER",
+                    decision={
+                        "signal": "LONG", "side": "LONG",
+                        "entry_price": float(p["entry_price"]),
+                        "stop_loss": float(p["initial_stop_loss"] or p["stop_loss"]),
+                        "take_profit": float(p["take_profit"]),
+                        "quantity": float(p["quantity"]),
+                        "confirmation_score": float(p["confirmation_score"]),
+                        "risk_budget_usd": float(p["risk_budget"]),
+                    },
+                    input_snapshot={
+                        "signal_bar": str(p["signal_bar"]),
+                        "feature_snapshot_status": "LEGACY_NOT_CAPTURED",
+                        "legacy_backfill": True,
+                        "future_data_in_input": False,
+                    },
+                    market="CEX_SPOT",
+                    symbol=str(p["asset"]).split(":")[-1],
+                    model_version="LEGACY_BACKFILL_UNKNOWN",
+                    dataset_version="LEGACY_PAPER_LEDGER",
+                    timestamp_utc=opened_at_utc,
+                )
+            realized_result = "PROFIT" if net > 1e-8 else "LOSS" if net < -1e-8 else "BREAKEVEN"
+            self.learning_memory.record_outcome(
+                experience_id=experience_id,
+                event_id=experience_id + "-outcome",
+                decision_correctness="UNKNOWN",
+                realized_result=realized_result,
+                realized_net_pnl=net,
+                pnl_currency="USD",
+                final=True,
+                evidence={
+                    "source": "PAPER_LEDGER_FINAL_FILL",
+                    "closed_at_unix": closed_at,
+                    "exit_reason": str(reason),
+                    "entry_price": float(p["entry_price"]),
+                    "exit_price": float(exit_price),
+                    "entry_fee_usd": float(p["entry_fee"]),
+                    "exit_fee_usd": float(exit_fee),
+                    "gross_pnl_usd": float(gross),
+                    "net_pnl_usd": float(net),
+                    "spread_attribution": "COMPLETE" if total_spread is not None else "INCOMPLETE",
+                },
             )
         return {
             "asset": p["asset"], "gross_pnl_usd": gross, "net_pnl_usd": net,
@@ -653,6 +755,10 @@ class PaperLedger:
                 - float(open_position["entry_fee"])
             )
         realized = float(realized_total)
+        learning_integrity = self.learning_memory.integrity_report()
+        recent_experiences = self.learning_memory.recent_experiences(
+            20, challenge_id="PAPER_TRADING_EXPERIENCE"
+        )
         return {
             "mode": "PAPER_ONLY",
             "live_orders_enabled": False,
@@ -667,6 +773,15 @@ class PaperLedger:
             },
             "open_position": open_position,
             "recent_trades": [dict(row) for row in trades],
+            "learning_memory": {
+                "challenge_id": "PAPER_TRADING_EXPERIENCE",
+                "recent_experiences": recent_experiences,
+                "integrity_status": learning_integrity["status"],
+                "integrity_report": learning_integrity,
+                "uses_same_database_transaction": True,
+                "training_labels_require_final_closed_trades": True,
+                "challenge_01_baseline_metrics_excluded": True,
+            },
             "execution_ledger": {
                 "event_count": self.execution_ledger.event_count(),
                 "recent_orders": self.execution_ledger.latest_orders(20),
@@ -972,6 +1087,21 @@ class PaperTradingBot:
             "entry_slippage_usd": entry_slippage,
             "entry_spread_cost_usd": entry_spread_cost,
             "entry_quote_source": entry_quote_source,
+            "learning_model_version": str(getattr(result, "model_version", "PAPER_BOT_UNKNOWN")),
+            "learning_dataset_version": str(getattr(result, "dataset_version", "LIVE_PUBLIC_MARKET_SNAPSHOT")),
+            "learning_snapshot": {
+                "signal_bar": signal_bar,
+                "timeframe": str(getattr(frame.index, "freqstr", None) or "UNKNOWN"),
+                "market_price_usd": float(price),
+                "confirmation_score": float(score),
+                "estimated_risk_score": float(risk),
+                "mandatory_gates": [
+                    {"gate_id": int(getattr(gate, "gate_id")), "status": _status(getattr(gate, "status", None))}
+                    for gate in gates
+                ],
+                "feature_snapshot_status": "PARTIAL_NOT_FOR_CHALLENGE_SCORING",
+                "future_data_in_input": False,
+            },
         }
         # Do not call the external reviewer until every deterministic, duplicate,
         # account, sizing, reward/risk and circuit-breaker check has passed.
