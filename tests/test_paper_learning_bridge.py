@@ -2,8 +2,13 @@
 from __future__ import annotations
 
 import unittest
+import os
+import sqlite3
+import sys
+import types
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from crypto_super_radar.paper_trading import PaperLedger, _paper_experience_id
 
@@ -131,6 +136,43 @@ class PaperLearningBridgeTests(unittest.TestCase):
                 self.assertEqual(state["learning_memory"]["integrity_report"]["experiences_checked"], 1)
             finally:
                 reopened.close()
+
+    def test_turso_backend_adapter_preserves_paper_memory_across_reconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            remote_database_path = str(Path(directory) / "mock-turso-remote.sqlite3")
+            def fake_connect(url, auth_token):
+                self.assertEqual(url, "libsql://csr-test.turso.io")
+                self.assertEqual(auth_token, "unit-test-token")
+                connection = sqlite3.connect(remote_database_path, check_same_thread=False)
+                return connection
+
+            fake_module = types.SimpleNamespace(connect=fake_connect)
+            env = {
+                "TURSO_DATABASE_URL": "libsql://csr-test.turso.io",
+                "TURSO_AUTH_TOKEN": "unit-test-token",
+            }
+            position = _position("mock-turso-reconnect-signal")
+            with patch.dict(os.environ, env, clear=False), patch.dict(
+                sys.modules, {"turso_serverless": fake_module}
+            ):
+                first = PaperLedger(path="data/paper.sqlite3", initial_equity_usd=1_000.0)
+                self.assertTrue(first.open_position(position, debit=10.08))
+                first.close_position(110.0, 0.0008, "MOCK_TURSO_EXIT")
+                self.assertEqual(first.state()["storage"], "TURSO_CLOUD_SQLITE")
+                first.close()
+
+                reopened = PaperLedger(path="data/paper.sqlite3", initial_equity_usd=1_000.0)
+                try:
+                    experience_id = _paper_experience_id(position["asset"], position["signal_bar"])
+                    experience = reopened.learning_memory.get_experience(experience_id)
+                    self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+                    self.assertEqual(experience["verification"]["status"], "PASS")
+                    state = reopened.state()
+                    self.assertEqual(state["storage"], "TURSO_CLOUD_SQLITE")
+                    self.assertEqual(state["learning_memory"]["integrity_status"], "PASS")
+                    self.assertEqual(state["learning_memory"]["integrity_report"]["experiences_checked"], 1)
+                finally:
+                    reopened.close()
 
     def test_integrity_report_detects_persisted_payload_tampering(self):
         position = _position("tampered-signal-bar")
