@@ -566,6 +566,22 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "PENDING_OUTCOME",
         )
 
+    def test_learning_memory_integrity_report_verifies_persisted_demo_experiences(self):
+        challenge = signal_record(signal="NO_TRADE")
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        report = self.store.learning_memory.integrity_report()
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["checked_count"], 1)
+        self.assertEqual(report["failed_count"], 0)
+        self.assertEqual(report["experience_count"], 1)
+        self.assertEqual(
+            self.store.learning_memory.verify_experience(experience_id)["status"],
+            "PASS",
+        )
+
     def test_event_journal_is_append_only(self):
         plan = self._plan()
         self.store.reserve_order(plan)
