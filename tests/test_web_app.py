@@ -319,6 +319,34 @@ class WebAppHttpTests(unittest.TestCase):
             **readiness, "event_store_readable": False,
         }))
 
+    def test_execution_readiness_exposes_event_store_readability(self):
+        class ReadableStore:
+            def trade_budget_status(self):
+                return {"orders_today": 0, "orders_total": 0, "unresolved_orders": 0}
+
+            def close(self):
+                pass
+
+        empty_credentials = {
+            "BLOFIN_DEMO_TRADE_API_KEY": "",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "",
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+            "BLOFIN_DEMO_TRADING_ENABLED": "false",
+            "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+            "BLOFIN_DASHBOARD_TOKEN": "",
+        }
+        with patch.dict(os.environ, empty_credentials, clear=False):
+            with patch.object(web_app, "storage_backend", return_value="LOCAL_SQLITE"):
+                with patch.object(web_app, "BloFinDemoEventStore", return_value=ReadableStore()):
+                    result = web_app._blofin_demo_execution_readiness()
+
+        self.assertFalse(result["durable_storage"])
+        self.assertTrue(result["event_store_readable"])
+        self.assertEqual(result["status"], "BLOCKED")
+
     def test_dashboard_does_not_label_risk_circuit_breaker_as_trade_permission(self):
         status, _, body = self.request("GET", "/")
         page = body.decode("utf-8")
