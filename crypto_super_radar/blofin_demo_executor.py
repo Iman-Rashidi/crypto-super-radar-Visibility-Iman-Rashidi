@@ -958,8 +958,12 @@ class BloFinDemoEventStore:
         except (TypeError, ValueError, OverflowError):
             return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
         matches = []
+        linked_position_id = str(order.get("position_id") or "")
         for row in candidates:
             try:
+                row_position_id = str(row.get("positionId") or "")
+                if linked_position_id and row_position_id != linked_position_id:
+                    continue
                 side = str(row.get("side") or "").lower()
                 opened_ms = int(row.get("createTime") or 0)
                 open_price = float(row.get("openAveragePrice"))
@@ -1060,19 +1064,6 @@ class BloFinDemoEventStore:
             "learning_memory_status": saved.get("event_type"),
         }
 
-    def orders_pending_learning_outcome(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        bounded = max(1, min(int(limit), 200))
-        with self._lock:
-            rows = self._db.execute(
-                """SELECT * FROM blofin_demo_orders
-                   WHERE experience_id IS NOT NULL AND experience_id != ''
-                     AND position_id IS NOT NULL AND position_id != ''
-                     AND outcome_recorded_at IS NULL
-                   ORDER BY updated_at ASC LIMIT ?""",
-                (bounded,),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
     def attach_position_id(self, experience_id: str, position_id: str) -> bool:
         experience_key = str(experience_id or "").strip()
         position_key = str(position_id or "").strip()
@@ -1096,94 +1087,6 @@ class BloFinDemoEventStore:
                 {"position_id": position_key},
             )
         return True
-
-    def record_closed_position_outcome(
-        self,
-        experience_id: str,
-        *,
-        closed_rows: list[Mapping[str, Any]],
-        partial_rows: list[Mapping[str, Any]] | None = None,
-    ) -> dict[str, Any] | None:
-        experience_key = str(experience_id or "").strip()
-        order = self.get_order_for_experience(experience_key)
-        if order is None or not order.get("position_id"):
-            return None
-        position_key = str(order["position_id"])
-        if order.get("outcome_recorded_at"):
-            return self.learning_memory.get_experience(experience_key)
-
-        final_rows = [
-            row for row in (closed_rows or [])
-            if isinstance(row, Mapping)
-            and str(row.get("positionId") or "") == position_key
-            and str(row.get("instId") or "").upper() == str(order["instrument_id"]).upper()
-        ]
-        if not final_rows:
-            return None
-        partial_matches = [
-            row for row in (partial_rows or [])
-            if isinstance(row, Mapping)
-            and str(row.get("positionId") or "") == position_key
-            and str(row.get("instId") or "").upper() == str(order["instrument_id"]).upper()
-        ]
-        all_rows = partial_matches + final_rows
-        history_ids = sorted({
-            str(row.get("historyId") or "")
-            for row in all_rows if row.get("historyId") not in (None, "")
-        })
-        if not history_ids:
-            return None
-        realized_pnl = 0.0
-        trading_fees = 0.0
-        for row in all_rows:
-            realized_pnl += _finite(row.get("realizedPnl"), "history.realizedPnl")
-            trading_fees += _finite(row.get("fee", 0), "history.fee")
-        net_pnl = realized_pnl - trading_fees
-        if not math.isfinite(net_pnl):
-            raise ValueError("Closed-position net PnL is not finite.")
-        result = "PROFIT" if net_pnl > 1e-8 else "LOSS" if net_pnl < -1e-8 else "BREAKEVEN"
-        correctness = "CORRECT" if result == "PROFIT" else "INCORRECT" if result == "LOSS" else "UNKNOWN"
-        evidence = {
-            "source": "BLOFIN_DEMO_POSITIONS_HISTORY",
-            "instrument_id": str(order["instrument_id"]),
-            "position_id": position_key,
-            "closed_history_ids": history_ids,
-            "partial_history_ids": sorted({
-                str(row.get("historyId") or "")
-                for row in partial_matches if row.get("historyId") not in (None, "")
-            }),
-            "realized_pnl_before_trading_fees": realized_pnl,
-            "trading_fees": trading_fees,
-            "net_pnl_method": "sum(realizedPnl) - sum(fee)",
-            "funding_fee_included": False,
-            "mark_to_market_pnl_used": False,
-        }
-        event_id = experience_key + "-closed-position-outcome"
-        with self._lock, self._db:
-            outcome = self.learning_memory.record_outcome(
-                experience_id=experience_key,
-                event_id=event_id,
-                decision_correctness=correctness,
-                realized_result=result,
-                realized_net_pnl=net_pnl,
-                pnl_currency="USDT",
-                final=True,
-                evidence=evidence,
-            )
-            self._db.execute(
-                """UPDATE blofin_demo_orders
-                   SET outcome_recorded_at=?, position_history_id=?, updated_at=?
-                   WHERE client_order_id=? AND outcome_recorded_at IS NULL""",
-                (
-                    int(time.time()), ",".join(history_ids),
-                    int(time.time()), order["client_order_id"],
-                ),
-            )
-            self._append_event(
-                str(order["client_order_id"]), "LEARNING_OUTCOME_RECORDED",
-                {"experience_id": experience_key, "position_id": position_key, "history_ids": history_ids},
-            )
-        return self.learning_memory.get_experience(experience_key)
 
     def close(self) -> None:
         with self._lock:
