@@ -796,6 +796,8 @@ class LearningExperienceMemory:
         experience_key = _required_text(experience_id, "experience_id")
         with self._lock:
             rows = self._load_rows(experience_key)
+            if not rows:
+                raise ExperienceNotFoundError(experience_key)
             verification = self._verify_rows(rows, experience_key)
             if verification["status"] != "PASS":
                 raise ExperienceIntegrityError("; ".join(verification["errors"]))
