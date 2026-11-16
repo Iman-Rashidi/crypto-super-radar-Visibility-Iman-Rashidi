@@ -72,6 +72,7 @@ BLOFIN_AUTOPILOT_THREAD = None
 BLOFIN_AUTOPILOT_STATE = {
     "enabled": False,
     "status": "DISABLED",
+    "runtime_role": "WEB",
     "environment": "BLOFIN_DEMO",
     "market": "BTC-USDT",
     "instrument_id": "BTC-USDT",
@@ -7554,8 +7555,8 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
     }
 
 
-def _blofin_demo_autopilot_worker() -> None:
-    """Run only Challenge 1 pattern-driven cycles on BloFin Demo while awake."""
+def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
+    """Run Challenge 1 on BloFin Demo; max_cycles enables safe scheduled one-shot runs."""
     try:
         configured_interval = int(os.getenv("BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS", "300"))
     except (TypeError, ValueError):
@@ -7573,10 +7574,12 @@ def _blofin_demo_autopilot_worker() -> None:
         instrument_ids = DEFAULT_CHALLENGE1_INSTRUMENTS
     execution_profile = "CHALLENGE_1"
     instrument_id = instrument_ids[0]
+    completed_cycles = 0
     with LOCK:
         BLOFIN_AUTOPILOT_STATE.update({
             "enabled": True,
             "status": "STARTING",
+            "runtime_role": "WORKER",
             "interval_seconds": interval_seconds,
             "instrument_id": instrument_id,
             "instrument_ids": list(instrument_ids),
@@ -7592,9 +7595,13 @@ def _blofin_demo_autopilot_worker() -> None:
                     "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
                 })
             _persist_blofin_autopilot_state()
+            if max_cycles is not None:
+                return
             time.sleep(30)
             continue
         if not BLOFIN_AUTOPILOT_LOCK.acquire(blocking=False):
+            if max_cycles is not None:
+                raise RuntimeError("Another Autopilot cycle already holds the worker lock.")
             time.sleep(10)
             continue
         try:
@@ -7605,6 +7612,8 @@ def _blofin_demo_autopilot_worker() -> None:
                         "last_message_fa": "اسکن دیگری در حال اجراست؛ برای جلوگیری از تداخل، چرخه Demo به تعویق افتاد.",
                     })
                 _persist_blofin_autopilot_state()
+                if max_cycles is not None:
+                    return
                 time.sleep(30)
                 continue
             started = datetime.now(timezone.utc).isoformat()
@@ -7823,12 +7832,36 @@ def _blofin_demo_autopilot_worker() -> None:
             _persist_blofin_autopilot_state()
         finally:
             BLOFIN_AUTOPILOT_LOCK.release()
+        completed_cycles += 1
+        if max_cycles is not None and completed_cycles >= max_cycles:
+            return
         time.sleep(interval_seconds)
 
 
 def _start_blofin_demo_autopilot() -> None:
-    """Restore operational state, then start at most one Demo loop per process."""
+    """Start the in-web worker only in WEB role; API and WORKER roles stay separate."""
     global BLOFIN_AUTOPILOT_THREAD
+    role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
+    if role not in {"WEB", "API", "WORKER"}:
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": False, "status": "ROLE_BLOCKED",
+                "runtime_role": role,
+                "last_message_fa": "نقش اجرای Autopilot نامعتبر است؛ هیچ چرخه‌ای شروع نشد.",
+            })
+        return
+    if role != "WEB":
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": False, "status": "DISABLED",
+                "runtime_role": role,
+                "last_message_fa": (
+                    "این پردازش فقط نقش API دارد؛ اجرای Worker در Runner مستقل انجام می‌شود."
+                    if role == "API" else
+                    "این پردازش در نقش Worker زمان‌بندی‌شده است؛ حلقهٔ دائمی وب اجرا نمی‌شود."
+                ),
+            })
+        return
     _restore_blofin_autopilot_state()
     if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
         with LOCK:
