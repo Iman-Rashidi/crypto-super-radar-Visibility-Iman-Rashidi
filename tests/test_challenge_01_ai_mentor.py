@@ -148,6 +148,13 @@ class Challenge01AIMentorTests(unittest.TestCase):
         morning_vector = dict(zip(MODEL_FEATURES, _feature_vector(morning_star_window)))
         self.assertEqual(morning_vector["morning_star_3bar"], 1.0)
 
+        weak_first_morning_window = [
+            {"open_time_ms": 0, "open": "110", "high": "111", "low": "99", "close": "105", "confirmed": True},
+            {"open_time_ms": 3_600_000, "open": "105", "high": "106", "low": "104.5", "close": "105.2", "confirmed": True},
+            {"open_time_ms": 7_200_000, "open": "105.5", "high": "109", "low": "105", "close": "108", "confirmed": True},
+        ]
+        self.assertNotIn("MORNING_STAR", detect_candlestick_patterns(weak_first_morning_window))
+
     def test_pattern_detector_rejects_incomplete_or_wrong_length_windows(self):
         with self.assertRaises(ValueError):
             detect_candlestick_patterns([])
