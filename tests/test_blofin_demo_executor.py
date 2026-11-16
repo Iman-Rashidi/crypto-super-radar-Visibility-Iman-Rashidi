@@ -397,6 +397,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         plan = self._plan()
         plan["experience_id"] = experience_id
         self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(plan["client_order_id"], "FILLED", exchange_order_id="demo-order-77")
         self.assertTrue(self.store.attach_position_id(experience_id, "demo-position-77"))
 
         mismatched = [{
@@ -414,6 +415,8 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "historyId": "h-partial",
             "positionId": "demo-position-77",
             "instId": "BTC-USDT",
+            "closePositions": "4",
+            "maxPositions": "10",
             "realizedPnl": "0.5",
             "fee": "0.1",
         }]
@@ -421,6 +424,8 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "historyId": "h-closed",
             "positionId": "demo-position-77",
             "instId": "BTC-USDT",
+            "closePositions": "6",
+            "maxPositions": "10",
             "realizedPnl": "1.0",
             "fee": "0.1",
         }]
