@@ -57,7 +57,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
         self.base_time = 1_800_000_000_000
         self.candles = [
             _candle(self.base_time + index * BAR_MILLISECONDS, [1, 0, -1][index % 3])
-            for index in range(103)
+            for index in range(105)
         ]
         self.last_target_time = self.candles[-1]["open_time_ms"]
         self.future_candles = [
