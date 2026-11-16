@@ -774,39 +774,92 @@ class BloFinDemoEventStore:
             (event_id, key, client_order_id, event_type, now, payload),
         )
 
-    def reserve_order(self, plan: Mapping[str, Any]) -> bool:
+    def reserve_order(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        max_concurrent_positions: int = 1,
+        external_open_positions: int = 0,
+        external_pending_orders: int = 0,
+    ) -> bool:
+        """Atomically reserve one account-wide slot across independent DB connections.
+
+        BEGIN IMMEDIATE is intentional: the capacity read and order/event inserts
+        must share one serialized write transaction. A process-local lock is not
+        sufficient when several Render instances share Turso.
+        """
+        for value, field in (
+            (max_concurrent_positions, "max_concurrent_positions"),
+            (external_open_positions, "external_open_positions"),
+            (external_pending_orders, "external_pending_orders"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{field} must be a non-negative integer.")
+        if not 1 <= max_concurrent_positions <= 3:
+            raise ValueError("max_concurrent_positions must be between 1 and 3.")
+
         now = int(time.time())
         order_id = str(plan["client_order_id"])
-        with self._lock, self._db:
-            existing = self._db.execute(
-                "SELECT client_order_id FROM blofin_demo_orders WHERE signal_id=? OR client_order_id=?",
-                (str(plan["signal_id"]), order_id),
-            ).fetchone()
-            if existing is not None:
-                return False
-            self._db.execute(
-                """INSERT INTO blofin_demo_orders
-                (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
-                 stop_loss, take_profit, leverage, status, exchange_order_id, experience_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?)""",
-                (
-                    order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
-                    str(plan["quantity"]), float(plan["entry_reference_price"]),
-                    float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
-                    str(plan.get("experience_id") or "") or None, now, now,
-                ),
-            )
-            self._append_event(order_id, "RESERVED", {
-                "instrument_id": plan["inst_id"], "side": plan["side"],
-                "quantity": plan["quantity"], "leverage": plan["leverage"],
-                "learning_experience_id_present": bool(plan.get("experience_id")),
-            })
-            return True
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._db.execute(
+                    "SELECT client_order_id FROM blofin_demo_orders "
+                    "WHERE signal_id=? OR client_order_id=?",
+                    (str(plan["signal_id"]), order_id),
+                ).fetchone()
+                if existing is not None:
+                    self._db.rollback()
+                    return False
+
+                active_row = self._db.execute(
+                    """SELECT COUNT(*) FROM blofin_demo_orders
+                       WHERE status IN (
+                           'RESERVED', 'LEVERAGE_SET', 'PENDING_RECONCILE', 'UNKNOWN',
+                           'ACCEPTED', 'PARTIALLY_FILLED', 'FILLED'
+                       )"""
+                ).fetchone()
+                local_active = int(active_row[0] or 0)
+                observed_total = (
+                    local_active + external_open_positions + external_pending_orders
+                )
+                if observed_total >= max_concurrent_positions:
+                    self._db.rollback()
+                    return False
+
+                self._db.execute(
+                    """INSERT INTO blofin_demo_orders
+                    (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
+                     stop_loss, take_profit, leverage, status, exchange_order_id, experience_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?)""",
+                    (
+                        order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
+                        str(plan["quantity"]), float(plan["entry_reference_price"]),
+                        float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
+                        str(plan.get("experience_id") or "") or None, now, now,
+                    ),
+                )
+                self._append_event(order_id, "RESERVED", {
+                    "instrument_id": plan["inst_id"], "side": plan["side"],
+                    "quantity": plan["quantity"], "leverage": plan["leverage"],
+                    "learning_experience_id_present": bool(plan.get("experience_id")),
+                    "capacity_snapshot": {
+                        "local_active_reservations": local_active,
+                        "exchange_open_positions": external_open_positions,
+                        "exchange_pending_orders": external_pending_orders,
+                        "max_concurrent_positions": max_concurrent_positions,
+                    },
+                })
+                self._db.commit()
+                return True
+            except Exception:
+                self._db.rollback()
+                raise
 
     def update_order(self, client_order_id: str, status: str, *, exchange_order_id: str | None = None) -> None:
         allowed = {
-            "LEVERAGE_SET", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
-            "CANCELED", "REJECTED", "UNKNOWN",
+            "LEVERAGE_SET", "PENDING_RECONCILE", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
+            "CANCELED", "REJECTED", "UNKNOWN", "CLOSED",
         }
         if status not in allowed:
             raise ValueError("Unsupported order status update.")
@@ -913,7 +966,8 @@ class BloFinDemoEventStore:
                 "SELECT created_at, status FROM blofin_demo_orders ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
             unresolved_row = self._db.execute(
-                "SELECT COUNT(*) FROM blofin_demo_orders WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET')"
+                "SELECT COUNT(*) FROM blofin_demo_orders "
+                "WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')"
             ).fetchone()
         orders_today = int(today_row[0] or 0)
         orders_total = int(total_row[0] or 0)
@@ -1159,10 +1213,15 @@ class BloFinDemoEventStore:
                 evidence=evidence,
             )
             self._db.execute(
-                "UPDATE blofin_demo_orders SET outcome_recorded_at=?, position_history_id=?, updated_at=? "
-                "WHERE client_order_id=?",
+                "UPDATE blofin_demo_orders SET status='CLOSED', outcome_recorded_at=?, "
+                "position_history_id=?, updated_at=? WHERE client_order_id=?",
                 (now, ",".join(history_ids), now, order["client_order_id"]),
             )
+            self._append_event(order["client_order_id"], "CLOSED", {
+                "experience_id": experience_id,
+                "position_id": position_id,
+                "history_ids": history_ids,
+            })
             self._append_event(order["client_order_id"], "OUTCOME_RECORDED", {
                 "experience_id": experience_id,
                 "position_id": position_id,
@@ -1297,7 +1356,7 @@ class BloFinDemoExecutor:
         order = self.store.get_order(client_order_id)
         if order is None or order.get("instrument_id") != inst_id:
             raise BloFinDemoExecutionBlocked("No matching locally reserved order exists.")
-        if order.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
+        if order.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET", "PENDING_RECONCILE"}:
             return {"status": order["status"], "client_order_id": client_order_id}
         detail = self.client.get_order_detail(inst_id, client_order_id=client_order_id)
         if isinstance(detail, list):
@@ -1445,8 +1504,15 @@ class BloFinDemoExecutor:
             plan["notional_usdt"] = float(quantity_notional)
             plan["estimated_initial_margin_usdt"] = float(quantity_margin)
             plan["minimum_size_only"] = True
-        if not self.store.reserve_order(plan):
-            raise BloFinDemoExecutionBlocked("This signal/order ID was already reserved; duplicate entry blocked.")
+        if not self.store.reserve_order(
+            plan,
+            max_concurrent_positions=self.policy.max_concurrent_positions,
+            external_open_positions=_active_position_count(positions),
+            external_pending_orders=_active_order_count(pending),
+        ):
+            raise BloFinDemoExecutionBlocked(
+                "Duplicate signal or account-wide Demo capacity is already reserved; entry blocked."
+            )
 
         position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
         exchange_side = "buy" if plan["side"] == "LONG" else "sell"
@@ -1460,6 +1526,10 @@ class BloFinDemoExecutor:
             self.store.update_order(plan["client_order_id"], "REJECTED")
             raise BloFinDemoExecutionBlocked("Leverage setup failed; no entry order was submitted.") from exc
 
+        # Persist the ambiguous state before the network write. If the process
+        # stops or the connection drops after this point, restart recovery knows
+        # that this client_order_id must be queried, never blindly resubmitted.
+        self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
         try:
             response = self.client.place_futures_order(
                 inst_id=inst_id,
@@ -1472,7 +1542,15 @@ class BloFinDemoExecutor:
                 margin_mode="isolated",
             )
         except Exception as exc:
-            self.store.update_order(plan["client_order_id"], "UNKNOWN")
+            try:
+                self.store.update_order(plan["client_order_id"], "UNKNOWN")
+            except Exception as state_error:
+                # PENDING_RECONCILE was committed before POST and remains the
+                # durable recovery state when this follow-up write also fails.
+                raise BloFinDemoExecutionUnknown(
+                    "Order outcome is unknown and PENDING_RECONCILE remains the durable state; "
+                    "reconcile with BloFin using clientOrderId before any retry."
+                ) from state_error
             raise BloFinDemoExecutionUnknown(
                 "Order outcome is unknown. Do not retry; reconcile with BloFin using clientOrderId."
             ) from exc

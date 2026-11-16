@@ -11,6 +11,7 @@ import hmac
 import os
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 from urllib.parse import urlencode
 
@@ -41,6 +42,21 @@ class BloFinDemoHTTPError(BloFinDemoError):
         self.status_code = int(status_code)
         self.retry_after_seconds = retry_after_seconds
         super().__init__(f"BloFin Demo HTTP request failed (status={self.status_code}).")
+
+
+def _positive_decimal_text(value: Any, field: str) -> str:
+    """Validate exchange contract metadata without passing through binary float."""
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise BloFinDemoResponseError(
+            f"Instrument {field} must be a valid decimal string."
+        ) from exc
+    if not number.is_finite() or number <= 0:
+        raise BloFinDemoResponseError(
+            f"Instrument {field} must be a finite positive decimal."
+        )
+    return format(number.normalize(), "f")
 
 
 def _check_response_codes(payload: Mapping[str, Any]) -> None:
@@ -213,15 +229,15 @@ class BloFinDemoReadOnly:
             raise BloFinDemoResponseError("Only USDT-settled contracts are accepted in this phase.")
         try:
             values = {
-                "contractValue": float(match["contractValue"]),
-                "minSize": float(match["minSize"]),
-                "lotSize": float(match["lotSize"]),
-                "tickSize": float(match["tickSize"]),
+                field: _positive_decimal_text(match[field], field)
+                for field in ("contractValue", "minSize", "lotSize", "tickSize")
             }
-        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            if match.get("maxMarketSize") not in (None, ""):
+                values["maxMarketSize"] = _positive_decimal_text(
+                    match["maxMarketSize"], "maxMarketSize"
+                )
+        except KeyError as exc:
             raise BloFinDemoResponseError("Instrument contract metadata is incomplete.") from exc
-        if any(not (value > 0) for value in values.values()):
-            raise BloFinDemoResponseError("Instrument contract metadata is invalid.")
         return {**match, **values}
 
     def get_tickers(self, *, inst_id: str | None = None) -> Any:

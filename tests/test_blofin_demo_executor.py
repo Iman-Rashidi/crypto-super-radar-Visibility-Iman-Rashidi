@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_executor import (
@@ -16,6 +19,8 @@ from crypto_super_radar.blofin_demo_executor import (
     build_demo_order_plan,
 )
 from crypto_super_radar.blofin_demo_readonly import (
+    BloFinDemoHTTPError,
+    BloFinDemoReadOnly,
     BloFinDemoResponseError,
     DEMO_REST_URL,
     _signature,
@@ -277,6 +282,47 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         with self.assertRaises(BloFinDemoExecutionBlocked):
             self.client._post("/api/v1/account/set-position-mode", {"positionMode": "net_mode"})
 
+    def test_order_post_429_is_not_retried(self):
+        self.session.post.return_value = FakeResponse(
+            {"code": "0", "data": {"code": "0", "orderId": "unused"}},
+            status=429,
+            headers={"Retry-After": "1"},
+        )
+        with self.assertRaises(BloFinDemoHTTPError) as caught:
+            self.client.place_futures_order(
+                inst_id="BTC-USDT", side="buy", position_side="net", size="1",
+                client_order_id="0123456789abcdef0123456789abcdef",
+                take_profit="104", stop_loss="98",
+            )
+        self.assertEqual(caught.exception.status_code, 429)
+        self.session.post.assert_called_once()
+
+    def test_tradable_instrument_preserves_exact_decimal_metadata_strings(self):
+        client = BloFinDemoReadOnly(session=Mock())
+        client.get_futures_instruments = Mock(return_value=[instrument_record(
+            contractValue="0.0000000100",
+            minSize="0.000000100",
+            lotSize="0.0000000100",
+            tickSize="0.100000",
+            maxMarketSize="10.0000",
+        )])
+        instrument = client.get_tradable_instrument("BTC-USDT")
+        self.assertEqual(instrument["contractValue"], "0.00000001")
+        self.assertEqual(instrument["minSize"], "0.0000001")
+        self.assertEqual(instrument["lotSize"], "0.00000001")
+        self.assertEqual(instrument["tickSize"], "0.1")
+        self.assertEqual(instrument["maxMarketSize"], "10")
+        for field in ("contractValue", "minSize", "lotSize", "tickSize", "maxMarketSize"):
+            self.assertIsInstance(instrument[field], str)
+
+    def test_tradable_instrument_rejects_non_finite_decimal_metadata(self):
+        client = BloFinDemoReadOnly(session=Mock())
+        client.get_futures_instruments = Mock(return_value=[
+            instrument_record(contractValue="NaN")
+        ])
+        with self.assertRaises(BloFinDemoResponseError):
+            client.get_tradable_instrument("BTC-USDT")
+
 
 class BloFinDemoEventStoreTests(unittest.TestCase):
     def setUp(self):
@@ -316,6 +362,52 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertFalse(self.store.has_any_orders())
         self.store.reserve_order(self._plan())
         self.assertTrue(self.store.has_any_orders())
+
+    def test_pending_reconcile_is_unresolved_and_blocks_new_capacity(self):
+        first = self._plan()
+        self.assertTrue(self.store.reserve_order(first))
+        self.store.update_order(first["client_order_id"], "PENDING_RECONCILE")
+        budget = self.store.trade_budget_status()
+        self.assertEqual(budget["unresolved_orders"], 1)
+        second = build_demo_order_plan(
+            signal_record(signal_id="another-completed-candle"),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        self.assertFalse(self.store.reserve_order(second, max_concurrent_positions=1))
+
+    def test_capacity_reservation_is_atomic_across_independent_connections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "shared-demo.sqlite3")
+            stores = [BloFinDemoEventStore(database_path) for _ in range(8)]
+            try:
+                plans = [
+                    build_demo_order_plan(
+                        signal_record(signal_id=f"parallel-candle-{index}"),
+                        instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+                    )
+                    for index in range(len(stores))
+                ]
+                barrier = threading.Barrier(len(stores))
+
+                def reserve_on_independent_connection(index):
+                    barrier.wait(timeout=10)
+                    return stores[index].reserve_order(
+                        plans[index], max_concurrent_positions=1,
+                    )
+
+                with ThreadPoolExecutor(max_workers=len(stores)) as pool:
+                    results = list(pool.map(
+                        reserve_on_independent_connection, range(len(stores))
+                    ))
+                self.assertEqual(results.count(True), 1)
+                self.assertEqual(results.count(False), len(stores) - 1)
+                total = stores[0]._db.execute(
+                    "SELECT COUNT(*) FROM blofin_demo_orders"
+                ).fetchone()[0]
+                self.assertEqual(total, 1)
+            finally:
+                for store in stores:
+                    store.close()
 
     def test_autopilot_state_round_trips_through_durable_store(self):
         state = {
@@ -740,6 +832,16 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         executor = BloFinDemoExecutor(
             client=client, store=store, trading_enabled=True,
         )
+        original_place = client.place_futures_order
+
+        def assert_pending_before_post(**kwargs):
+            order = store.get_order(kwargs["client_order_id"])
+            self.assertEqual(order["status"], "PENDING_RECONCILE")
+            events = store.recent_events(kwargs["client_order_id"])
+            self.assertEqual(events[-1]["event_type"], "PENDING_RECONCILE")
+            return original_place(**kwargs)
+
+        client.place_futures_order = assert_pending_before_post
         try:
             result = executor.execute(
                 signal_record(), inst_id="BTC-USDT", leverage=1,
@@ -753,6 +855,40 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             self.assertEqual(
                 store._db.execute("SELECT COUNT(*) FROM blofin_demo_orders").fetchone()[0], 1
             )
+        finally:
+            store.close()
+
+    def test_timeout_keeps_unknown_order_reserved_without_resubmission(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        attempts = []
+
+        def timeout_after_post(**kwargs):
+            attempts.append(dict(kwargs))
+            raise TimeoutError("simulated network timeout after request write")
+
+        client.place_futures_order = timeout_after_post
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionUnknown):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT", leverage=1,
+                    allow_demo_orders=True,
+                )
+            order = store.latest_order()
+            self.assertEqual(order["status"], "UNKNOWN")
+            self.assertEqual(len(attempts), 1)
+            event_types = [
+                event["event_type"]
+                for event in store.recent_events(order["client_order_id"])
+            ]
+            self.assertIn("PENDING_RECONCILE", event_types)
+            self.assertIn("UNKNOWN", event_types)
         finally:
             store.close()
 
@@ -794,10 +930,14 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         try:
             results = []
             for index in range(7):
-                results.append(executor.execute(
+                result = executor.execute(
                     signal_record(signal_id=f"new-completed-candle-{index}"),
                     inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
-                ))
+                )
+                results.append(result)
+                # This quota test models each Demo position as closed before the
+                # next cycle; it does not weaken the concurrent-position limit.
+                store.update_order(result["client_order_id"], "CLOSED")
             self.assertTrue(all(row["status"] == "ACCEPTED" for row in results))
             budget = store.trade_budget_status()
             self.assertEqual(budget["orders_today"], 7)
@@ -836,7 +976,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             equity_usdt=1000,
         )
         store.reserve_order(plan)
-        store.update_order(plan["client_order_id"], "UNKNOWN")
+        store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
         client = FakeExecutorClient()
         client.get_order_detail = lambda inst_id, *, client_order_id: {
             "clientOrderId": client_order_id,
