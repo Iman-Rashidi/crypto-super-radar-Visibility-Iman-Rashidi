@@ -136,6 +136,9 @@ class PaperLearningBridgeTests(unittest.TestCase):
         position = _position("tampered-signal-bar")
         self.assertTrue(self.ledger.open_position(position, debit=10.08))
         experience_id = _paper_experience_id(position["asset"], position["signal_bar"])
+        # Simulate out-of-band disk corruption: normal SQL writes are blocked
+        # by append-only triggers, so remove the guard only inside this test.
+        self.ledger._db.execute("DROP TRIGGER learning_experience_no_update")
         self.ledger._db.execute(
             "UPDATE learning_experience_events SET payload_json=? WHERE experience_id=?",
             ('{"signal":"SHORT"}', experience_id),
