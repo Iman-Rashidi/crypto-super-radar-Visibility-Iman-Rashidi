@@ -4681,13 +4681,20 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
     def _send(self, status: int, content: bytes, content_type: str = "text/html; charset=utf-8"):
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(content)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(content)
+        """Send a response without logging a traceback when the client disconnects."""
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(content)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # A probe/browser may close its socket before the body is written.
+            self.close_connection = True
+            return False
+        return True
 
     def do_HEAD(self):
         """Support Render's default HEAD health probe without returning a 501."""
@@ -5986,7 +5993,7 @@ async function loadBlofinInstruments(){
                 const message = String(error && error.message || error);
                 const retryable = error instanceof TypeError ||
                   (error && error.name === 'AbortError') ||
-                  /^HTTP (429|5\d\d)$/.test(message);
+                  /^HTTP (429|5\\d\\d)$/.test(message);
                 if (!retryable) throw error;
               }
               if (retry === 3) break;
