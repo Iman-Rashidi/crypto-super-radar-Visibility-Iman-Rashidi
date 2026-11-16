@@ -180,6 +180,7 @@ def test_event_reordering_is_detected(
 
 
 def test_event_parent_intent_foreign_key_rejects_orphans(
+    event_store: PersistentEventStore,
     event_db_path: Path,
 ) -> None:
     with sqlite3.connect(event_db_path) as connection:
