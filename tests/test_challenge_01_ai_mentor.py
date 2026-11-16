@@ -216,6 +216,16 @@ class Challenge01AIMentorTests(unittest.TestCase):
         features = dict(zip(MODEL_FEATURES, _feature_vector(rising)))
         self.assertEqual(features["rising_three_methods_5bar"], 1.0)
         self.assertIn("falling_three_methods_5bar", MODEL_FEATURES)
+        soldiers = bars([
+            neutral, neutral, (100, 105, 99, 104),
+            (102, 108, 101, 107), (105, 112, 104, 111),
+        ])
+        crows = bars([
+            neutral, neutral, (110, 111, 105, 106),
+            (108, 109, 102, 103), (105, 106, 99, 100),
+        ])
+        self.assertIn("THREE_WHITE_SOLDIERS", detect_candlestick_patterns(soldiers))
+        self.assertIn("THREE_BLACK_CROWS", detect_candlestick_patterns(crows))
 
     def test_pattern_detector_rejects_incomplete_or_wrong_length_windows(self):
         with self.assertRaises(ValueError):
