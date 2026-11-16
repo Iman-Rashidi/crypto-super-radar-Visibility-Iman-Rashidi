@@ -112,6 +112,28 @@ class BloFinDashboardStatusTests(unittest.TestCase):
         self.assertFalse(result["orders_enabled"])
         client.assert_not_called()
 
+    def test_dedicated_trade_credentials_also_enable_read_only_account_status(self):
+        values = {
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+            "BLOFIN_DEMO_TRADE_API_KEY": "demo-trade-key-not-real",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "demo-trade-secret-not-real",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "demo-trade-pass-not-real",
+        }
+        fake = FakeBloFinClient()
+        with patch.dict(os.environ, values, clear=False):
+            with patch.object(web_app, "BloFinDemoReadOnly", return_value=fake) as client:
+                result = web_app._blofin_demo_connection_status()
+        self.assertEqual(result["status"], "CONNECTED_READ_ONLY")
+        self.assertEqual(result["private_api"], "PASS")
+        self.assertFalse(result["orders_enabled"])
+        self.assertEqual(
+            [call[0] for call in fake.calls],
+            ["tickers", "balance", "positions", "orders"],
+        )
+        self.assertEqual(client.call_args.kwargs, {"timeout": 8.0})
+
     def test_success_requires_public_and_private_reads_but_returns_no_account_data(self):
         values = {
             "BLOFIN_DEMO_API_KEY": "demo-key-not-real",
