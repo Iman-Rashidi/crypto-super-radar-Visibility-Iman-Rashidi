@@ -2740,6 +2740,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "orders_total": orders_total,
         "max_orders_per_utc_day": None,
         "daily_capacity_available": event_store_readable,
+        "event_store_readable": event_store_readable,
         "unresolved_orders": unresolved_orders,
         "latest_order_status": budget.get("latest_order_status") if isinstance(budget, dict) else None,
         "latest_order_age_seconds": budget.get("latest_order_age_seconds") if isinstance(budget, dict) else None,
