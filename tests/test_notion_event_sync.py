@@ -104,6 +104,9 @@ class NotionEventOutboxTests(unittest.TestCase):
             create_body["properties"]["سیگنال ربات"]["select"]["name"],
             "NO_TRADE",
         )
+        self.assertIn("زمان رویداد UTC", create_body["properties"])
+        self.assertIn("زمان آخرین تلاش Sync", create_body["properties"])
+        self.assertNotIn("date:زمان رویداد UTC", create_body["properties"])
 
     def test_http_failure_keeps_event_pending_and_applies_backoff(self):
         self.outbox.enqueue(event())
