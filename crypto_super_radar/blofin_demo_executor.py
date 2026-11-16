@@ -1070,7 +1070,7 @@ class BloFinDemoEventStore:
         with self._lock:
             order_row = self._db.execute(
                 "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
-                "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED') "
+                "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED') "
                 "ORDER BY created_at DESC LIMIT 1",
                 (instrument,),
             ).fetchone()
