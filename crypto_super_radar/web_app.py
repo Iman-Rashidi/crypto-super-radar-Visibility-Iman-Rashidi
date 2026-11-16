@@ -46,6 +46,7 @@ from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
+from .ai_supervisor import ai_supervisor_status, run_ai_supervisor
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -213,12 +214,12 @@ AI_DRY_RUN_MIN_INTERVAL_SECONDS = 300
 
 def _run_ai_synthetic_dry_run_limited() -> dict:
     """Call the real configured LLM on synthetic evidence, with no bot or ledger access."""
-    configured = ai_connection_status()
+    configured = ai_supervisor_status()
     if not configured.get("configured"):
         return {
-            "provider": "OpenRouter", "model": configured.get("model"),
-            "status": "MISSING_API_KEY",
-            "status_fa": "کلید OpenRouter در محیط سرویس Demo تنظیم نشده است.",
+            "provider": "Independent Multi-Provider AI Supervisor", "model": configured.get("model"),
+            "status": "PROVIDERS_INSUFFICIENT",
+            "status_fa": configured.get("status_fa"),
             "test_passed": False, "paper_entry_eligible": False,
             "orders_submitted": False, "trade_executed": False,
         }
@@ -285,9 +286,9 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
             for gate_id in range(1, 13)
         ],
     )
-    review = run_free_ai_second_opinion(result, asset, bypass_cache=True)
+    review = run_ai_supervisor(result, asset, bypass_cache=True)
     payload = copy.deepcopy(review) if isinstance(review, dict) else {
-        "provider": "OpenRouter", "model": configured.get("model"),
+        "provider": "Independent Multi-Provider AI Supervisor", "model": configured.get("model"),
         "status": "UNKNOWN",
     }
     payload.update({
@@ -296,7 +297,9 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
         "synthetic_asset": "perp:BTCUSDT",
         "synthetic_gate_set": "12 PASS (synthetic fixture only)",
         "test_passed": bool(
-            payload.get("model_verified") is True
+            payload.get("status") == "APPROVED"
+            and payload.get("approved_provider_count", 0) >= 2
+            and payload.get("model_verified") is True
             and payload.get("response_validated") is True
         ),
         "ai_approval_for_synthetic_scenario": payload.get("paper_entry_eligible") is True,
@@ -4329,30 +4332,24 @@ def _run_blofin_demo_execution_job(
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
-        if execution_profile == "CHALLENGE_1":
+        try:
+            ai_review = run_ai_supervisor(analysis, asset, bypass_cache=True)
+        except Exception as exc:
             ai_review = {
-                "status": "LOCAL_RULES_ONLY",
-                "paper_entry_eligible": True,
-                "model": "CHALLENGE_1_LOCAL_RULES_V1",
-                "reason": "No paid or external AI approval is required for this deterministic strategy.",
+                "status": "UNKNOWN", "paper_entry_eligible": False,
+                "error_type": type(exc).__name__,
+                "provider": "Independent Multi-Provider AI Supervisor",
             }
-        else:
-            try:
-                ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
-            except Exception as exc:
-                ai_review = {
-                    "status": "UNKNOWN", "paper_entry_eligible": False,
-                    "error_type": type(exc).__name__,
-                }
 
         ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
-        if execution_profile != "CHALLENGE_1" and (
+        if (
             not isinstance(ai_review, dict) or ai_status != "APPROVED"
             or ai_review.get("paper_entry_eligible") is not True
+            or ai_review.get("approved_provider_count", 0) < 2
         ):
             _set_blofin_execution_job(
                 job_id, "completed", stage="AI_BLOCKED",
-                message_fa="Nemotron ورود را تأیید نکرد؛ هیچ سفارشی ارسال نشد.",
+                message_fa="شورای ناظر چندمدلی ورود را تأیید نکرد؛ هیچ سفارشی ارسال نشد.",
                 ai_review={
                     "status": ai_status,
                     "model": ai_review.get("model") if isinstance(ai_review, dict) else None,
@@ -4362,7 +4359,7 @@ def _run_blofin_demo_execution_job(
                     "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
                     **gate_summary, "ai_status": ai_status,
                     "elliott_wave": wave_report, "trade_context": trade_context,
-                    "reason_fa": "Nemotron نظر تأییدکننده و مجوز ورود صادر نکرد؛ هیچ سفارشی ارسال نشد.",
+                    "reason_fa": "شورای ناظر چندمدلی حداقل دو تأیید مستقل صادر نکرد؛ هیچ سفارشی ارسال نشد.",
                     "orders_submitted": False, "trade_executed": False,
                 },
             )
@@ -4826,7 +4823,7 @@ class Handler(BaseHTTPRequestHandler):
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
         if parsed.path == "/api/ai/status":
-            payload = ai_connection_status()
+            payload = ai_supervisor_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/status":
