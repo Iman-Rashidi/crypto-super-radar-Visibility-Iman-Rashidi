@@ -102,33 +102,37 @@ def _completed_frame(
     frame = pd.DataFrame(rows).drop_duplicates(subset=["timestamp"], keep="last")
     frame = frame.sort_values("timestamp").reset_index(drop=True)
     frame = frame.loc[:, ["timestamp", "open", "high", "low", "close", "volume", "quote_volume"]]
-    frame.index = pd.to_datetime(frame.pop("timestamp"), unit="ms", utc=True)
     if len(frame) < int(minimum_rows):
         raise ValueError(
             f"Only {len(frame)} completed {bar} candles are available; "
             f"{minimum_rows} are required."
         )
 
+    # Check raw integer millisecond timestamps before pandas converts them.
+    # Pandas 3 may preserve datetime64[ms], while older versions often expose
+    # datetime64[ns]; comparing raw exchange timestamps is version-independent.
+    timestamps_ms = frame["timestamp"].to_numpy(dtype="int64")
     # A closed flag alone is not enough: an exchange endpoint can keep returning
     # an old but internally valid candle series during an outage or stale cache.
     # The newest completed bar may be at most one interval old plus a 60s API
     # publication grace period. Reject a gap in the recent 40 bars as well,
     # because pattern and volume baselines assume an unbroken time series.
-    latest_close_ms = int(frame.index[-1].value // 1_000_000) + interval_ms
+    latest_close_ms = int(timestamps_ms[-1]) + interval_ms
     latest_age_ms = now_value - latest_close_ms
     if latest_age_ms > interval_ms + 60_000:
         raise ValueError(
             f"Latest confirmed {bar} candle is stale ({latest_age_ms} ms old)."
         )
-    recent_timestamps_ns = frame.index[-40:].asi8
-    expected_interval_ns = interval_ms * 1_000_000
-    if len(recent_timestamps_ns) > 1 and np.any(
-        np.diff(recent_timestamps_ns) != expected_interval_ns
+    recent_timestamps_ms = timestamps_ms[-40:]
+    if len(recent_timestamps_ms) > 1 and np.any(
+        np.diff(recent_timestamps_ms) != interval_ms
     ):
         raise ValueError(
             f"Recent {bar} candles contain a missing interval; "
             "refusing to analyze discontinuous data."
         )
+
+    frame.index = pd.to_datetime(frame.pop("timestamp"), unit="ms", utc=True)
 
     return frame.astype({
         "open": "float64", "high": "float64", "low": "float64",
