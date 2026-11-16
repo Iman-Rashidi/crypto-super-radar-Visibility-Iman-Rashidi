@@ -15,6 +15,8 @@ on:
       - feature/multi-stage-confirmation-engine
       - feature/blofin-demo-adapter
       - staging/challenge1-integration-2026-11-16
+permissions:
+  contents: write
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -62,6 +64,19 @@ jobs:
           python -m crypto_super_radar --help
           python -m crypto_super_radar.order_flow_service --help
           python scripts/paper_trading_bot.py --help
+      - name: Publish refreshed Render source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- dist/crypto-super-radar-source.tar.xz; then
+            echo "Render source archive is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/crypto-super-radar-source.tar.xz
+          git commit -m "chore: refresh Render source bundle"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
       - uses: actions/upload-artifact@v4
         with:
           name: crypto-super-radar-source-bundle
