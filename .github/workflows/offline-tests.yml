@@ -5,6 +5,7 @@ on:
       - main
       - feature/blofin-demo-adapter
       - feature/ch01-learning-memory-integration
+      - fix/paper-learning-memory-bridge
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
@@ -12,6 +13,7 @@ on:
       - feature/multi-stage-confirmation-engine
       - feature/blofin-demo-adapter
       - feature/learning-experience-memory
+      - feature/ch01-learning-memory-integration
 jobs:
   test:
     runs-on: ubuntu-latest
