@@ -238,6 +238,40 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             result["next_model_candidate"]["artifact_sha256"],
         )
         self.assertFalse(status["later_rounds_blocked"])
+
+        # Execute the complete third paired round using only the candidate
+        # produced after round two and candles strictly after its final target.
+        round_two_last_target = self.future_candles[99]["open_time_ms"]
+        round_three_candles = [
+            _candle(
+                round_two_last_target + index * BAR_MILLISECONDS,
+                [1, 0, -1][(200 + index) % 3],
+            )
+            for index in range(1, 101)
+        ]
+        round_three_client = FakeFutureSpotClient(
+            [_row(item) for item in reversed(round_three_candles)]
+        )
+        round_three_runner = Challenge01AssistedRunner(
+            client=round_three_client,
+            connection_factory=self.connection_factory,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            allow_non_durable_for_tests=True,
+        )
+        round_three = round_three_runner.run_round(round_number=3, sample_count=100)
+        self.assertEqual(
+            round_three["status"], "ROUND_RECORDED_NOT_MASTERY",
+            msg=repr(round_three),
+        )
+        self.assertEqual(round_three["sample_count"], 100)
+        self.assertEqual(round_three["memory_records_verified"], 200)
+        self.assertEqual(round_three["memory_integrity"], "PASS")
+        self.assertEqual(round_three["next_model_candidate"]["trained_through_round"], 3)
+        self.assertFalse(round_three["mastery_awarded"])
+        self.assertFalse(round_three["orders_submitted"])
+        self.assertEqual(
+            round_three_client.calls[0]["before"], round_two_last_target,
+        )
     
     def test_round_two_blocks_without_100_verified_prior_round_targets(self):
         runner = Challenge01AssistedRunner(
