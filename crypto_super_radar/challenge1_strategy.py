@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from .chart_patterns import monitor_chart_patterns
+from .elliott_waves import monitor_elliott_waves
 
 DEFAULT_CHALLENGE1_INSTRUMENTS = (
     "BTC-USDT",
@@ -305,6 +306,18 @@ def analyze_blofin_challenge1(
     frame_15m = _completed_frame(client, inst_id=instrument, bar="15m", now_ms=now_ms, minimum_rows=60)
     frame_1h = _completed_frame(client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=60)
 
+    # Elliott monitoring is descriptive evidence only. It uses completed 1H
+    # candles and cannot create, approve, or veto a Challenge 1 trade by itself.
+    elliott_wave = monitor_elliott_waves(
+        frame_1h, min_reversal_pct=0.0015, max_reversal_pct=0.08,
+    )
+    elliott_wave.update({
+        "timeframe": "1H",
+        "source": "BLOFIN_DEMO_COMPLETED_1H_CANDLES",
+        "completed_candle_count": int(len(frame_1h)),
+        "last_completed_candle_at": frame_1h.index[-1].isoformat(),
+    })
+
     patterns_15m = [dict(item, timeframe="15m") for item in _confirmed_pattern_candidates(frame_15m)]
     patterns_1h = [dict(item, timeframe="1H") for item in _confirmed_pattern_candidates(frame_1h)]
     chart_structure = monitor_chart_patterns(frame_15m)
@@ -411,6 +424,8 @@ def analyze_blofin_challenge1(
         "chart_structure": chart_structure,
         "context_patterns": patterns_1h,
         "volume_confirmation": volume,
+        "elliott_wave": elliott_wave,
+        "elliott_wave_role": "OBSERVATION_ONLY",
         "decision_reason_fa": reason_fa,
     }
     return {
@@ -424,6 +439,7 @@ def analyze_blofin_challenge1(
         "stop_loss_usd": stop,
         "take_profit_usd": target,
         "execution": execution,
+        "elliott_wave": elliott_wave,
         "challenge1_evidence": evidence,
         "reason_fa": reason_fa,
         "orders_submitted": False,
