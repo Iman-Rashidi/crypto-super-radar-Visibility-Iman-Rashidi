@@ -3797,28 +3797,6 @@ def _run_blofin_demo_execution_job(
             return
 
         store = BloFinDemoEventStore()
-        # Reconcile final outcomes from exchange history on every Demo cycle.
-        # Only exact positionId matches are eligible; floating PnL is never labelled.
-        try:
-            outcome_client = BloFinDemoReadOnly(timeout=8.0)
-            for pending_outcome in store.orders_pending_learning_outcome(limit=50):
-                outcome_instrument = str(pending_outcome.get("instrument_id") or "")
-                if not outcome_instrument:
-                    continue
-                closed_history = outcome_client.get_positions_history(
-                    inst_id=outcome_instrument, state="closed", limit=100,
-                )
-                partial_history = outcome_client.get_positions_history(
-                    inst_id=outcome_instrument, state="partially_closed", limit=100,
-                )
-                store.record_closed_position_outcome(
-                    str(pending_outcome["experience_id"]),
-                    closed_rows=closed_history if isinstance(closed_history, list) else [],
-                    partial_rows=partial_history if isinstance(partial_history, list) else [],
-                )
-        except Exception:
-            # Learning sync is retried on the next cycle; it never changes orders.
-            pass
         prior_budget = store.trade_budget_status()
         if prior_budget.get("unresolved_orders", 0) > 0:
             latest = store.latest_order()
@@ -4400,7 +4378,6 @@ def _run_blofin_demo_execution_job(
         trade_executed = filled_size > 0
         positions = []
         position_history = []
-        partial_position_history = []
         try:
             rows = client.get_positions(inst_id=instrument_id)
             positions = [
@@ -4445,31 +4422,6 @@ def _run_blofin_demo_execution_job(
             ] if isinstance(rows, list) else []
         except Exception:
             pass
-        try:
-            rows = client.get_positions_history(
-                inst_id=instrument_id, state="partially_closed", limit=100,
-            )
-            partial_position_history = [
-                {key: row[key] for key in (
-                    "historyId", "positionId", "instId", "side", "positionSide",
-                    "closePositions", "openAveragePrice", "closeAveragePrice",
-                    "createTime", "updateTime", "leverage", "realizedPnl",
-                    "realizedPnlRatio", "fee",
-                ) if key in row}
-                for row in rows if isinstance(row, dict)
-            ] if isinstance(rows, list) else []
-        except Exception:
-            pass
-        if learning_experience_id and store.get_order_for_experience(learning_experience_id):
-            try:
-                store.record_closed_position_outcome(
-                    learning_experience_id,
-                    closed_rows=position_history,
-                    partial_rows=partial_position_history,
-                )
-            except Exception:
-                pass
-
         filled_at = None
         if safe_fills:
             latest_fill = max(safe_fills, key=lambda row: int(row.get("ts") or 0))
