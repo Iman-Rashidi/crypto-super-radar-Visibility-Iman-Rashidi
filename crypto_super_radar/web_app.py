@@ -3127,6 +3127,20 @@ def _blofin_elliott_wave_report_fa(wave: dict | None, direction: str = "NO_TRADE
         "FIVE_WAVE_IMPULSE_CONFIRMED": "ساختار پنج‌موجی کامل تأیید شده است؛ جهت موج اصلاحی از این شمارش پیش‌بینی نمی‌شود.",
     }.get(phase, "مرحلهٔ موج به‌صورت قطعی قابل طبقه‌بندی نیست.")
 
+    timeframe = str(source.get("timeframe") or "").upper()
+    timeframe_fa = {"1H": "یک‌ساعته", "15M": "۱۵ دقیقه‌ای", "4H": "چهارساعته", "1D": "روزانه"}.get(timeframe, "نامشخص")
+    source_code = str(source.get("source") or "").upper()
+    source_fa = (
+        "منبع: کندل‌های بسته‌شده و تأییدشدهٔ BloFin Demo"
+        if source_code == "BLOFIN_DEMO_COMPLETED_1H_CANDLES" else
+        "منبع: کندل‌های زمان‌دار و تأییدشدهٔ موتور تحلیل"
+    )
+    completed_candle_count = source.get("completed_candle_count")
+    if completed_candle_count is not None:
+        source_fa += f" · کندل‌های بسته‌شده: {digit(completed_candle_count)}"
+    if source.get("last_completed_candle_at"):
+        source_fa += " · آخرین کندل: " + str(source.get("last_completed_candle_at"))
+
     next_wave = source.get("next_wave")
     try:
         next_wave = int(next_wave) if next_wave is not None else None
@@ -3175,6 +3189,12 @@ def _blofin_elliott_wave_report_fa(wave: dict | None, direction: str = "NO_TRADE
         "pattern_fa": pattern_fa,
         "phase": phase,
         "phase_fa": phase_fa,
+        "timeframe": timeframe,
+        "timeframe_fa": timeframe_fa,
+        "source_fa": source_fa,
+        "completed_candle_count": completed_candle_count,
+        "last_completed_candle_at": source.get("last_completed_candle_at"),
+        "confirmed_pivot_count": source.get("confirmed_pivot_count", len(source.get("pivots", [])) if isinstance(source.get("pivots"), list) else 0),
         "wave_count": source.get("wave_count"),
         "next_wave": next_wave,
         "selected_wave_fa": selected_wave_fa,
@@ -5601,7 +5621,7 @@ async function loadBlofinInstruments(){
               ]);
               if(report.wave_analysis_applicable!==false){
                 const wave=report.elliott_wave||{};
-                const waveBox=section('تحلیل ساختار موج الیوت',
+                const waveBox=section('انتخاب ساختار موج الیوت در لحظه تحلیل',
                   'شمارش فقط از کندل‌های بسته‌شدهٔ تأییدشده ساخته می‌شود؛ موج بعدی سناریو است، نه پیش‌بینی قطعی.');
                 metricGrid(waveBox,[
                   ['وضعیت شمارش',wave.status_fa],
