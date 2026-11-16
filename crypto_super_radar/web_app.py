@@ -72,6 +72,9 @@ BLOFIN_AUTOPILOT_THREAD = None
 BLOFIN_AUTOPILOT_STATE = {
     "enabled": False,
     "status": "DISABLED",
+    "runtime_role": "WEB",
+    "worker_heartbeat_at_utc": None,
+    "worker_instance_id": None,
     "environment": "BLOFIN_DEMO",
     "market": "BTC-USDT",
     "instrument_id": "BTC-USDT",
@@ -148,6 +151,31 @@ def _restore_blofin_autopilot_state() -> bool:
         with LOCK:
             BLOFIN_AUTOPILOT_STATE["persistence_status"] = "UNAVAILABLE"
             BLOFIN_AUTOPILOT_STATE["persistence_error_type"] = type(exc).__name__
+        return False
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
+def _refresh_blofin_autopilot_state_from_store() -> bool:
+    """Refresh the read-only dashboard view from the worker's durable Turso snapshot."""
+    store = None
+    try:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            return False
+        store = BloFinDemoEventStore()
+        saved = store.load_autopilot_state()
+        if not isinstance(saved, dict):
+            return False
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update(saved)
+            BLOFIN_AUTOPILOT_STATE["persistence_status"] = "DURABLE"
+            BLOFIN_AUTOPILOT_STATE["restored_from_storage"] = True
+        return True
+    except Exception:
         return False
     finally:
         if store is not None:
@@ -2720,8 +2748,8 @@ def _blofin_demo_execution_readiness() -> dict:
         message_fa = "اجرای سفارش مسدود است؛ فعال‌سازی Demo، توکن پنل و حافظه پایدار Turso باید در دسترس باشند."
     else:
         message_fa = (
-            "پیش‌نیازهای BloFin Demo آماده‌اند؛ مجوز Read/Write کلید واقعی با query-apikey تأیید شد. "
-            "قیمت، ۱۲ گیت، Nemotron و کنترل‌های ریسک در هر چرخه دوباره بررسی می‌شوند."
+            "پیش‌نیازهای BloFin Demo آماده‌اند؛ مجوز Read/Write کلید با query-apikey تأیید شد. "
+            "ورود فقط از شواهد Strategy 1 با کندل‌های بسته‌شده و کنترل‌های مستقل امنیت و ریسک عبور می‌کند."
         )
     return {
         "status": "READY" if ready else "BLOCKED",
@@ -4590,12 +4618,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/autopilot/status":
+            runtime_role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper()
+            if runtime_role == "API":
+                _refresh_blofin_autopilot_state_from_store()
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
             payload["enabled"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
             payload["execution_profile"] = "CHALLENGE_1"
+            payload["runtime_role"] = runtime_role
+            heartbeat = payload.get("worker_heartbeat_at_utc")
+            heartbeat_age = None
+            if heartbeat:
+                try:
+                    heartbeat_dt = datetime.fromisoformat(str(heartbeat).replace("Z", "+00:00"))
+                    if heartbeat_dt.tzinfo is None:
+                        heartbeat_dt = heartbeat_dt.replace(tzinfo=timezone.utc)
+                    heartbeat_age = max(0, int((datetime.now(timezone.utc) - heartbeat_dt).total_seconds()))
+                except (TypeError, ValueError, OverflowError):
+                    heartbeat_age = None
+            payload["worker_heartbeat_age_seconds"] = heartbeat_age
+            if runtime_role == "API":
+                stale_after = max(1800, int(payload.get("interval_seconds") or 300) * 2 + 600)
+                payload["worker_health"] = (
+                    "NO_HEARTBEAT" if heartbeat_age is None
+                    else "STALE" if heartbeat_age > stale_after
+                    else "ACTIVE"
+                )
             payload["readiness"] = _blofin_demo_execution_readiness()
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
@@ -7324,10 +7374,16 @@ def _blofin_demo_autopilot_worker() -> None:
         instrument_ids = DEFAULT_CHALLENGE1_INSTRUMENTS
     execution_profile = "CHALLENGE_1"
     instrument_id = instrument_ids[0]
+    runtime_role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper()
+    worker_instance_id = os.getenv("BLOFIN_DEMO_WORKER_INSTANCE_ID", "single-worker").strip()[:64]
+    heartbeat_now = datetime.now(timezone.utc).isoformat()
     with LOCK:
         BLOFIN_AUTOPILOT_STATE.update({
             "enabled": True,
             "status": "STARTING",
+            "runtime_role": runtime_role,
+            "worker_instance_id": worker_instance_id,
+            "worker_heartbeat_at_utc": heartbeat_now,
             "interval_seconds": interval_seconds,
             "instrument_id": instrument_id,
             "instrument_ids": list(instrument_ids),
@@ -7373,6 +7429,9 @@ def _blofin_demo_autopilot_worker() -> None:
                         "instrument_id": instrument_id,
                         "instrument_ids": list(instrument_ids),
                         "execution_profile": execution_profile,
+                        "runtime_role": runtime_role,
+                        "worker_instance_id": worker_instance_id,
+                        "worker_heartbeat_at_utc": datetime.now(timezone.utc).isoformat(),
                         "last_message_fa": f"موتور Challenge 1 در حال اسکن {instrument_id} از {len(instrument_ids)} بازار منتخب است.",
                         "cycles_started": int(BLOFIN_AUTOPILOT_STATE.get("cycles_started") or 0) + (1 if not batch_jobs else 0),
                     })
@@ -7492,6 +7551,9 @@ def _blofin_demo_autopilot_worker() -> None:
                     "status": autopilot_status,
                     "last_cycle_status": job.get("status", "UNKNOWN"),
                     "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "worker_heartbeat_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "runtime_role": runtime_role,
+                    "worker_instance_id": worker_instance_id,
                     "last_stage": job.get("stage"),
                     "last_message_fa": autopilot_message,
                     "last_result_status": result.get("status") or job.get("stage"),
@@ -7523,6 +7585,9 @@ def _blofin_demo_autopilot_worker() -> None:
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
                     "status": "ERROR",
+                    "worker_heartbeat_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "runtime_role": runtime_role,
+                    "worker_instance_id": worker_instance_id,
                     "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
                     "last_message_fa": "چرخه خودکار با خطای کنترل‌شده متوقف شد: " + type(exc).__name__,
                 })
@@ -7556,11 +7621,18 @@ def _start_blofin_demo_autopilot() -> None:
 
 
 def main():
+    runtime_role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper()
+    if runtime_role not in {"WEB", "API"}:
+        raise RuntimeError("web_app requires BLOFIN_DEMO_AUTOPILOT_ROLE=WEB or API.")
+
     port = int(os.getenv("PORT", "10000"))
     host = os.getenv("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), Handler)
-    _start_blofin_demo_autopilot()
-    print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
+    if runtime_role == "WEB":
+        _start_blofin_demo_autopilot()
+    else:
+        _refresh_blofin_autopilot_state_from_store()
+    print(f"CRYPTO SUPER RADAR listening on {host}:{port} (AutoPilot role: {runtime_role})")
     server.serve_forever()
 
 
