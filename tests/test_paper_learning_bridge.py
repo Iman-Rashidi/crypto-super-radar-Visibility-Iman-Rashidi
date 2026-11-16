@@ -87,6 +87,25 @@ class PaperLearningBridgeTests(unittest.TestCase):
             0,
         )
 
+    def test_legacy_open_position_is_backfilled_without_fabricating_features(self):
+        position = _position("legacy-signal-bar")
+        original = self.ledger.learning_memory.record_decision
+        self.ledger.learning_memory.record_decision = lambda **kwargs: None
+        try:
+            self.assertTrue(self.ledger.open_position(position, debit=10.08))
+        finally:
+            self.ledger.learning_memory.record_decision = original
+
+        self.ledger.close_position(95.0, 0.0008, "LEGACY_TEST_EXIT")
+        experience = self.ledger.learning_memory.get_experience(
+            _paper_experience_id(position["asset"], position["signal_bar"])
+        )
+        self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+        snapshot = experience["events"][0]["payload"]["input_snapshot"]
+        self.assertTrue(snapshot["legacy_backfill"])
+        self.assertEqual(snapshot["feature_snapshot_status"], "LEGACY_NOT_CAPTURED")
+        self.assertEqual(experience["verification"]["status"], "PASS")
+
     def test_final_outcome_and_close_projection_roll_back_together(self):
         position = _position()
         self.assertTrue(self.ledger.open_position(position, debit=10.08))
