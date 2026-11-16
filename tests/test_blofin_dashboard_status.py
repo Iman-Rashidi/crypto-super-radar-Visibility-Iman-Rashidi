@@ -152,6 +152,65 @@ class BloFinDashboardStatusTests(unittest.TestCase):
         self.assertFalse(result["orders_enabled"])
         self.assertNotIn("rejected", str(result))
 
+    def test_challenge1_report_translates_raw_wave_evidence_even_when_no_trade(self):
+        job = {
+            "status": "completed",
+            "stage": "NO_TRADE",
+            "trade_context": {"instrument_id": "BTC-USDT", "execution_profile": "CHALLENGE_1"},
+            "result": {
+                "status": "NO_TRADE",
+                "signal": "NO_TRADE",
+                "elliott_wave": {
+                    "status": "CANDIDATE",
+                    "pattern": "BULLISH",
+                    "phase": "WAVES_1_AND_2_CONFIRMED",
+                    "wave_count": 2,
+                    "next_wave": 3,
+                    "invalidation_price": 97500.0,
+                    "pivot_reversal_threshold_pct": 0.18,
+                    "confirmed_pivot_count": 4,
+                    "timeframe": "1H",
+                    "source": "BLOFIN_DEMO_COMPLETED_1H_CANDLES",
+                    "completed_candle_count": 65,
+                    "pivots": [
+                        {"kind": "LOW", "price": 97000.0, "timestamp": "2026-11-16T10:00:00+00:00",
+                         "confirmed_at": "2026-11-16T11:00:00+00:00"}
+                    ],
+                },
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        report = web_app._blofin_execution_report_fa(job)
+        wave = report["elliott_wave"]
+        self.assertTrue(report["wave_analysis_applicable"])
+        self.assertEqual(wave["status_fa"], "شمارش ساختاری موج نامزد است")
+        self.assertEqual(wave["selected_wave_fa"].split("؛")[0], "سناریوی ساختاری منتخب: موج ۳ صعودی")
+        self.assertEqual(wave["timeframe_fa"], "یک‌ساعته")
+        self.assertEqual(wave["confirmed_pivot_count"], 4)
+        self.assertEqual(wave["pivots"][0]["kind_fa"], "کف تأییدشده")
+
+    def test_independent_smoke_test_report_hides_elliott_wave_card(self):
+        job = {
+            "status": "completed",
+            "stage": "CLOSED_VERIFIED",
+            "test_name": "تست ربات در محیط دمو صرافی",
+            "result": {
+                "status": "CLOSED_VERIFIED",
+                "environment": "BLOFIN_DEMO",
+                "orders_submitted": True,
+                "trade_executed": True,
+                "position_closed": True,
+            },
+        }
+        report = web_app._blofin_execution_report_fa(job)
+        self.assertEqual(report["execution_profile"], "INDEPENDENT_DEMO_SMOKE_TEST")
+        self.assertEqual(report["execution_profile_fa"], "تست مستقل Demo بدون سیگنال")
+        self.assertFalse(report["wave_analysis_applicable"])
+        self.assertIn("تحلیل موج الیوت", report["wave_analysis_note_fa"])
+        self.assertEqual(report["elliott_wave"], {})
+        self.assertIn("۱۲ فیلتر", report["gate_summary_fa"])
+
 
 if __name__ == "__main__":
     unittest.main()
