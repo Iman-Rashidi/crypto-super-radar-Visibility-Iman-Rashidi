@@ -302,6 +302,23 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertNotIn("JSON.stringify(job,null,2)", page)
         self.assertNotIn('id="blofin-execution-result"', page)
 
+    def test_trade_permission_block_does_not_block_analysis_when_durable_storage_is_ready(self):
+        readiness = {
+            "status": "BLOCKED",
+            "trade_permission_status": "READ_ONLY",
+            "trade_permission_verified": False,
+            "trading_enabled": False,
+            "durable_storage": True,
+            "event_store_readable": True,
+        }
+        self.assertTrue(web_app._blofin_demo_analysis_storage_ready(readiness))
+        self.assertFalse(web_app._blofin_demo_analysis_storage_ready({
+            **readiness, "durable_storage": False,
+        }))
+        self.assertFalse(web_app._blofin_demo_analysis_storage_ready({
+            **readiness, "event_store_readable": False,
+        }))
+
     def test_dashboard_does_not_label_risk_circuit_breaker_as_trade_permission(self):
         status, _, body = self.request("GET", "/")
         page = body.decode("utf-8")

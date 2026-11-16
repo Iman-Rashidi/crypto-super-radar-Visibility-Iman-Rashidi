@@ -17,6 +17,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Mapping
 
@@ -654,6 +655,83 @@ class BloFinDemoEventStore:
                 timeframe="15M",
                 model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
                 dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
+            )
+        return experience_id
+
+    def record_challenge1_analysis_failure(
+        self, *, cycle_id: str, instrument_id: str, failure_stage: str,
+        error_type: str, reason: str, timestamp_utc: str | None = None,
+    ) -> str:
+        """Persist a failed analysis attempt as UNKNOWN/NOT_EXECUTED without fabricated market data."""
+        cycle_key = str(cycle_id or "").strip()
+        instrument = str(instrument_id or "").strip().upper()
+        stage = str(failure_stage or "ANALYSIS_FAILED").strip().upper()
+        kind = str(error_type or "UNKNOWN").strip()[:80]
+        detail = str(reason or "")[:240]
+        if not cycle_key or not instrument:
+            raise ValueError("cycle_id and instrument_id are required")
+        identity = hashlib.sha256(
+            f"challenge1-analysis-failure:{cycle_key}:{instrument}".encode("utf-8")
+        ).hexdigest()
+        experience_id = "ch1-failure-" + identity[:32]
+        occurred_at = timestamp_utc or datetime.now(timezone.utc).isoformat()
+        decision = {
+            "signal": "NO_TRADE",
+            "side": None,
+            "decision_class": "DATA_INSUFFICIENT",
+            "reason": detail,
+        }
+        input_snapshot = {
+            "instrument_id": instrument,
+            "analysis_attempt_id": cycle_key,
+            "analysis_attempted_at_utc": occurred_at,
+            "setup_timeframe": "15m",
+            "context_timeframe": "1H",
+            "data_quality": "UNKNOWN",
+            "analysis_completed": False,
+            "failure_stage": stage,
+            "error_type": kind,
+            "candle_timestamp_utc": None,
+            "ohlcv_available": False,
+            "future_data_in_input": False,
+        }
+        with self._lock, self._db:
+            self.learning_memory.record_decision(
+                experience_id=experience_id,
+                event_id=experience_id + "-decision",
+                engine_id="BLOFIN_DEMO_CHALLENGE1",
+                challenge_id="CHALLENGE_1_BLOFIN_DEMO",
+                cycle_id=cycle_key,
+                decision_mode="BOT_ONLY",
+                environment="BLOFIN_DEMO",
+                decision=decision,
+                input_snapshot=input_snapshot,
+                market="CEX_FUTURES",
+                symbol=instrument,
+                timeframe="15M",
+                model_version="CHALLENGE_1_LOCAL_RULES_V1",
+                dataset_version="BLOFIN_DEMO_ANALYSIS_FAILURE",
+                timestamp_utc=occurred_at,
+            )
+            self.learning_memory.record_outcome(
+                experience_id=experience_id,
+                event_id=experience_id + "-outcome",
+                decision_correctness="UNKNOWN",
+                realized_result="NOT_EXECUTED",
+                realized_net_pnl=None,
+                pnl_currency="USDT",
+                final=True,
+                evidence={
+                    "source": "BLOFIN_DEMO_CHALLENGE1_ANALYSIS_FAILURE",
+                    "instrument_id": instrument,
+                    "failure_stage": stage,
+                    "error_type": kind,
+                    "reason": detail,
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                    "realized_pnl_source": "NONE_NOT_EXECUTED",
+                },
+                timestamp_utc=occurred_at,
             )
         return experience_id
 

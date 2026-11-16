@@ -3772,6 +3772,15 @@ def _blofin_demo_instrument_options(*, force: bool = False) -> dict:
 
 
 
+def _blofin_demo_analysis_storage_ready(readiness: dict) -> bool:
+    """Analysis may proceed without Trade permission, but only with readable durable storage."""
+    return bool(
+        isinstance(readiness, dict)
+        and readiness.get("durable_storage") is True
+        and readiness.get("event_store_readable") is True
+    )
+
+
 def _run_blofin_demo_execution_job(
     job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "CHALLENGE_1",
 ) -> None:
@@ -3788,23 +3797,30 @@ def _run_blofin_demo_execution_job(
         if execution_profile != "CHALLENGE_1":
             raise BloFinDemoExecutionBlocked("Invalid execution profile.")
         _set_blofin_execution_job(
-            job_id, "running", stage="READINESS_CHECK",
-            message_fa="در حال بررسی مجوزهای Demo، کلید Trade و ذخیره‌سازی پایدار.",
+            job_id, "running", stage="ANALYSIS_STORAGE_CHECK",
+            message_fa="در حال بررسی فقط حافظه پایدار؛ مجوز سفارش در مرحله جداگانه بررسی می‌شود.",
         )
         readiness = _blofin_demo_execution_readiness()
-        if readiness.get("status") != "READY":
+        if not _blofin_demo_analysis_storage_ready(readiness):
+            reason_fa = (
+                readiness.get("message_fa")
+                or "حافظه پایدار Turso یا دفتر رویداد قابل خواندن نیست؛ تحلیل بدون ثبت پایدار آغاز نمی‌شود."
+            )
             _set_blofin_execution_job(
-                job_id, "completed", stage="BLOCKED",
-                message_fa=readiness.get("message_fa"),
+                job_id, "completed", stage="PERSISTENCE_BLOCKED",
+                message_fa="تحلیل به‌دلیل آماده نبودن حافظه پایدار شروع نشد: " + str(reason_fa),
                 result={
-                    "status": "BLOCKED", "environment": "BLOFIN_DEMO",
-                    "reason_fa": readiness.get("message_fa"),
+                    "status": "PERSISTENCE_BLOCKED", "environment": "BLOFIN_DEMO",
+                    "reason_fa": str(reason_fa),
                     "orders_submitted": False, "trade_executed": False,
+                    "analysis_started": False,
                 },
             )
             return
 
         store = BloFinDemoEventStore()
+        analysis_time_utc = datetime.now(timezone.utc).isoformat()
+        pending_entry_block_reason = None
         # Reconcile previously filled positions before evaluating or entering a new market.
         # This prevents a fresh order from overtaking an exchange-close event that has not
         # yet reached the durable learning journal.
@@ -3834,44 +3850,33 @@ def _run_blofin_demo_execution_job(
         if prior_budget.get("unresolved_orders", 0) > 0:
             latest = store.latest_order()
             if not isinstance(latest, dict) or latest.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
+                pending_entry_block_reason = "یک سفارش یا پوزیشن قبلی هنوز به‌صورت قطعی تطبیق نشده است."
+            else:
                 _set_blofin_execution_job(
-                    job_id, "completed", stage="UNRESOLVED_ORDER_BLOCK",
-                    message_fa="یک سفارش قبلی تعیین‌تکلیف نشده است؛ هیچ سفارش جدیدی ارسال نمی‌شود.",
-                    result={
-                        "status": "BLOCKED", "environment": "BLOFIN_DEMO",
-                        "reason_fa": "سفارش قبلی برای تطبیق امن در دسترس نیست.",
-                        "orders_submitted": False, "trade_executed": False,
-                    },
+                    job_id, "running", stage="READ_ONLY_ORDER_RECONCILIATION",
+                    message_fa="نتیجه سفارش قبلی فقط با درخواست READ بررسی می‌شود؛ تحلیل بازار مستقل ادامه دارد و سفارش جدید مجاز نیست.",
                 )
-                return
-            _set_blofin_execution_job(
-                job_id, "running", stage="READ_ONLY_ORDER_RECONCILIATION",
-                message_fa="نتیجه سفارش قبلی فقط با درخواست READ بررسی می‌شود؛ هیچ ارسال مجددی انجام نمی‌شود.",
-            )
-            reconciler = BloFinDemoExecutor(
-                client=BloFinDemoTradeClient(timeout=10.0),
-                store=store,
-                policy=BloFinDemoRiskPolicy(max_leverage=1),
-                trading_enabled=False,
-            )
-            try:
-                reconciliation = reconciler.reconcile_unknown_order(
-                    inst_id=str(latest.get("instrument_id") or instrument_id),
-                    client_order_id=str(latest.get("client_order_id") or ""),
+                reconciler = BloFinDemoExecutor(
+                    client=BloFinDemoTradeClient(timeout=10.0),
+                    store=store,
+                    policy=BloFinDemoRiskPolicy(max_leverage=1),
+                    trading_enabled=False,
                 )
-            except Exception as exc:
-                reconciliation = {"status": "UNKNOWN", "error_type": type(exc).__name__}
-            if reconciliation.get("status") == "UNKNOWN":
-                _set_blofin_demo_execution_job(
-                    job_id, "completed", stage="ORDER_REMAINS_UNKNOWN",
-                    message_fa="نتیجه سفارش قبلی هنوز روشن نیست؛ ربات متوقف می‌ماند و سفارش دیگری نمی‌فرستد.",
-                    result={
-                        "status": "ORDER_OUTCOME_UNKNOWN", "environment": "BLOFIN_DEMO",
-                        "reconciliation": "READ_ONLY",
-                        "orders_submitted": "UNKNOWN", "trade_executed": False,
-                    },
-                )
-                return
+                try:
+                    reconciliation = reconciler.reconcile_unknown_order(
+                        inst_id=str(latest.get("instrument_id") or instrument_id),
+                        client_order_id=str(latest.get("client_order_id") or ""),
+                    )
+                except Exception as exc:
+                    reconciliation = {"status": "UNKNOWN", "error_type": type(exc).__name__}
+                refreshed_budget = store.trade_budget_status()
+                if (
+                    reconciliation.get("status") == "UNKNOWN"
+                    or refreshed_budget.get("unresolved_orders", 0) > 0
+                ):
+                    pending_entry_block_reason = (
+                        "نتیجه سفارش یا پوزیشن قبلی هنوز به‌طور کامل و مستقل در BloFin Demo تطبیق نشده است."
+                    )
 
         profile_rules = {
             "CHALLENGE_1": {"required": set(), "min_pass": 0, "min_score": 0.0},
@@ -3881,7 +3886,6 @@ def _run_blofin_demo_execution_job(
         }
         profile_rule = profile_rules[execution_profile]
         asset = AssetSpec.parse("perp:" + instrument_id.replace("-", ""))
-        analysis_time_utc = datetime.now(timezone.utc).isoformat()
         read_client = BloFinDemoReadOnly(timeout=10.0)
         if execution_profile == "CHALLENGE_1":
             _set_blofin_execution_job(
@@ -3917,23 +3921,37 @@ def _run_blofin_demo_execution_job(
                     f"تحلیل Challenge 1 برای {instrument_id} به‌دلیل دادهٔ کندل نامعتبر یا ناکافی متوقف شد: "
                     + str(exc)[:160]
                 )
+                learning_experience_id = store.record_challenge1_analysis_failure(
+                    cycle_id=job_id,
+                    instrument_id=instrument_id,
+                    failure_stage="CHALLENGE_1_MARKET_DATA_ANALYSIS",
+                    error_type=type(exc).__name__,
+                    reason=str(exc),
+                    timestamp_utc=analysis_time_utc,
+                )
                 _set_blofin_execution_job(
-                    job_id, "completed", stage="NO_TRADE",
+                    job_id, "completed", stage="DATA_INSUFFICIENT",
                     message_fa=reason_fa,
                     analysis={
                         "instrument_id": instrument_id,
                         "execution_profile": "CHALLENGE_1",
                         "signal": "NO_TRADE",
-                        "error_type": "ValueError",
+                        "decision_class": "DATA_INSUFFICIENT",
+                        "data_quality": "UNKNOWN",
+                        "error_type": type(exc).__name__,
+                        "learning_experience_id": learning_experience_id,
                     },
                     trade_context={
                         "instrument_id": instrument_id,
                         "execution_profile": "CHALLENGE_1",
+                        "analysis_attempted_at_utc": analysis_time_utc,
                     },
                     result={
-                        "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
-                        "signal": "NO_TRADE", "reason_fa": reason_fa,
-                        "error_type": "ValueError",
+                        "status": "DATA_INSUFFICIENT", "environment": "BLOFIN_DEMO",
+                        "signal": "NO_TRADE", "decision_class": "DATA_INSUFFICIENT",
+                        "data_quality": "UNKNOWN", "reason_fa": reason_fa,
+                        "error_type": type(exc).__name__,
+                        "learning_experience_id": learning_experience_id,
                         "orders_submitted": False, "trade_executed": False,
                     },
                 )
@@ -4193,6 +4211,56 @@ def _run_blofin_demo_execution_job(
                     },
                 )
                 return
+        if pending_entry_block_reason:
+            reason_fa = pending_entry_block_reason
+            if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                store.record_experience_not_executed(
+                    experience_id=learning_experience_id,
+                    instrument_id=instrument_id,
+                    signal=learning_signal,
+                    stage="UNRESOLVED_ORDER_BLOCK",
+                    reason=reason_fa,
+                )
+            _set_blofin_execution_job(
+                job_id, "completed", stage="UNRESOLVED_ORDER_BLOCK",
+                message_fa=reason_fa + " تحلیل ثبت شد؛ هیچ سفارش تازه‌ای ارسال نمی‌شود.",
+                analysis=gate_summary, trade_context=trade_context,
+                result={
+                    "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                    "reason_fa": reason_fa,
+                    "learning_experience_id": learning_experience_id,
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
+
+        order_readiness = _blofin_demo_execution_readiness()
+        if order_readiness.get("status") != "READY":
+            reason_fa = (
+                order_readiness.get("message_fa")
+                or "پیش‌نیازهای اجرای سفارش BloFin Demo تأیید نشد."
+            )
+            if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                store.record_experience_not_executed(
+                    experience_id=learning_experience_id,
+                    instrument_id=instrument_id,
+                    signal=learning_signal,
+                    stage="TRADE_READINESS_BLOCKED",
+                    reason=str(reason_fa),
+                )
+            _set_blofin_execution_job(
+                job_id, "completed", stage="TRADE_READINESS_BLOCKED",
+                message_fa=str(reason_fa) + " تحلیل و علت عدم اجرا در حافظه ثبت شد.",
+                analysis=gate_summary, trade_context=trade_context,
+                result={
+                    "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                    "reason_fa": str(reason_fa),
+                    "learning_experience_id": learning_experience_id,
+                    "orders_submitted": False, "trade_executed": False,
+                },
+            )
+            return
+
         signal_bar = mtf_signal["signal_bar_open_utc"]
         record.update({
             "signal_id": mtf_signal["signal_id"],
@@ -4228,6 +4296,14 @@ def _run_blofin_demo_execution_job(
             "execution_profile": execution_profile,
         })
         if store.has_signal(record["signal_id"]):
+            if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                store.record_experience_not_executed(
+                    experience_id=learning_experience_id,
+                    instrument_id=instrument_id,
+                    signal=learning_signal,
+                    stage="DUPLICATE_SIGNAL_BLOCKED",
+                    reason="شناسه سیگنال قبلاً در دفتر سفارش رزرو شده است؛ سفارش تکراری ساخته نشد.",
+                )
             _set_blofin_execution_job(
                 job_id, "completed", stage="DUPLICATE_CANDLE_SKIPPED",
                 message_fa="کندل تکمیل‌شده قبلاً بررسی معاملاتی شده است؛ برای جلوگیری از تکرار، سفارش جدید ساخته نشد.",
@@ -4527,7 +4603,19 @@ def _run_blofin_demo_execution_job(
             },
         )
     except BloFinDemoExecutionBlocked as exc:
-        if store is not None and learning_experience_id:
+        if store is not None and not learning_experience_id:
+            try:
+                learning_experience_id = store.record_challenge1_analysis_failure(
+                    cycle_id=job_id,
+                    instrument_id=instrument_id,
+                    failure_stage="CHALLENGE_1_EXECUTION_SETUP_BLOCKED",
+                    error_type=type(exc).__name__,
+                    reason=str(exc),
+                    timestamp_utc=analysis_time_utc,
+                )
+            except Exception:
+                pass
+        elif store is not None and learning_experience_id:
             try:
                 prior_order = store.get_order_for_experience(learning_experience_id)
                 if prior_order is None or prior_order.get("status") == "REJECTED":
@@ -4550,7 +4638,21 @@ def _run_blofin_demo_execution_job(
             },
         )
     except Exception as exc:
-        if store is not None and learning_experience_id and not submission_started:
+        learning_memory_status = "NOT_APPLICABLE"
+        if store is not None and not learning_experience_id:
+            try:
+                learning_experience_id = store.record_challenge1_analysis_failure(
+                    cycle_id=job_id,
+                    instrument_id=instrument_id,
+                    failure_stage="CHALLENGE_1_CYCLE_FAILURE",
+                    error_type=type(exc).__name__,
+                    reason=str(exc),
+                    timestamp_utc=analysis_time_utc,
+                )
+                learning_memory_status = "PERSISTED"
+            except Exception as memory_exc:
+                learning_memory_status = "FAILED:" + type(memory_exc).__name__
+        elif store is not None and learning_experience_id and not submission_started:
             try:
                 prior_order = store.get_order_for_experience(learning_experience_id)
                 if prior_order is None or prior_order.get("status") == "REJECTED":
@@ -4561,13 +4663,16 @@ def _run_blofin_demo_execution_job(
                         stage="EXECUTION_ERROR",
                         reason=type(exc).__name__,
                     )
-            except Exception:
-                pass
+                    learning_memory_status = "PERSISTED"
+            except Exception as memory_exc:
+                learning_memory_status = "FAILED:" + type(memory_exc).__name__
         _set_blofin_execution_job(
             job_id, "failed", stage="EXECUTION_ERROR",
             message_fa="اجرای آزمایشی با خطای کنترل‌شده متوقف شد؛ قبل از تلاش مجدد باید وضعیت سفارش در BloFin بررسی شود.",
             error={
                 "type": type(exc).__name__,
+                "learning_memory_status": learning_memory_status,
+                "learning_experience_id": learning_experience_id,
                 "orders_submitted": "UNKNOWN" if submission_started else False,
                 "trade_executed": False,
             },
