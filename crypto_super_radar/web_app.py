@@ -3216,11 +3216,15 @@ def _blofin_execution_report_fa(job: dict) -> dict:
     fill = current.get("fill") if isinstance(current.get("fill"), dict) else {}
     context = current.get("trade_context") if isinstance(current.get("trade_context"), dict) else {}
     wave = current.get("elliott_wave") if isinstance(current.get("elliott_wave"), dict) else result.get("elliott_wave")
+    is_independent_smoke_test = str(current.get("test_name") or "") == BloFinDemoSmokeTestRunner.TEST_NAME
     status = str(result.get("status") or current.get("status") or "UNKNOWN").upper()
     stage = str(current.get("stage") or status).upper()
     direction = str(analysis.get("signal") or result.get("signal") or order.get("side") or "NO_TRADE").upper()
     instrument_id = str(context.get("instrument_id") or result.get("instrument_id") or order.get("instrument_id") or "—")
-    execution_profile = str(context.get("execution_profile") or result.get("execution_profile") or analysis.get("execution_profile") or "CHALLENGE_1")
+    execution_profile = (
+        "INDEPENDENT_DEMO_SMOKE_TEST" if is_independent_smoke_test else
+        str(context.get("execution_profile") or result.get("execution_profile") or analysis.get("execution_profile") or "CHALLENGE_1")
+    )
 
     status_labels = {
         "QUEUED": "در صف اجرا",
@@ -3277,6 +3281,13 @@ def _blofin_execution_report_fa(job: dict) -> dict:
     if not isinstance(gates_fa, list):
         gates_fa = _blofin_gate_rows_fa(analysis.get("gates", []))
 
+    if is_independent_smoke_test:
+        wave_report = {}
+    elif isinstance(wave, dict):
+        wave_report = wave if "status_fa" in wave else _blofin_elliott_wave_report_fa(wave, direction)
+    else:
+        wave_report = _blofin_elliott_wave_report_fa({})
+
     events_fa = []
     for event in current.get("events", []) if isinstance(current.get("events"), list) else []:
         if not isinstance(event, dict):
@@ -3304,6 +3315,14 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "title_fa": "گزارش فارسی اجرای معامله آزمایشی · " + instrument_id,
         "instrument_id": instrument_id,
         "execution_profile": execution_profile,
+        "execution_profile_fa": (
+            "تست مستقل Demo بدون سیگنال" if is_independent_smoke_test else execution_profile
+        ),
+        "wave_analysis_applicable": not is_independent_smoke_test,
+        "wave_analysis_note_fa": (
+            "این تست مستقل فقط مسیر سفارش، Fill، حفاظت TP/SL و بستن پوزیشن متعلق به خودش را می‌آزماید؛ تحلیل موج الیوت و ۱۲ فیلتر در آن اجرا نمی‌شوند."
+            if is_independent_smoke_test else None
+        ),
         "status_fa": status_labels.get(status, status_labels.get(str(current.get("status") or "").upper(), "وضعیت نامشخص")),
         "stage_fa": stage_fa,
         "signal_fa": signal_fa,
@@ -3312,17 +3331,14 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "gate_fail_count": fail_count,
         "gate_unknown_count": unknown_count,
         "gate_summary_fa": (
+            "در تست مستقل، ۱۲ فیلتر و تحلیل موج اجرا نمی‌شوند."
+            if is_independent_smoke_test else
             f"{count_fa(pass_count)} فیلتر تأیید، "
             f"{count_fa(fail_count)} فیلتر رد و "
             f"{count_fa(unknown_count)} فیلتر نامشخص."
         ),
         "gates_fa": gates_fa,
-        "elliott_wave": wave if isinstance(wave, dict) else {
-            "status_fa": "تحلیل موج در این مرحله هنوز ثبت نشده است.",
-            "selected_wave_fa": "هنوز سناریوی موجی انتخاب نشده است.",
-            "direction_alignment_fa": "مقایسه با جهت معامله هنوز انجام نشده است.",
-            "pivots": [],
-        },
+        "elliott_wave": wave_report,
         "analysis_time_utc": context.get("analysis_time_utc"),
         "last_completed_candle_time_utc": context.get("last_completed_candle_time_utc"),
         "last_candle_close": context.get("last_candle_close"),
@@ -3975,7 +3991,6 @@ def _run_blofin_demo_execution_job(
                 for gate_id in range(1, 13)
             ]
             challenge_record["gates"] = gates
-            challenge_record["elliott_wave"] = {}
             metrics = {
                 "execution_profile": "CHALLENGE_1",
                 "execution_profile_label": "CHALLENGE 1 · CANDLE & CHART PATTERNS",
@@ -5568,7 +5583,7 @@ async function loadBlofinInstruments(){
               metricGrid(summary,[
                 ['وضعیت',report.status_fa],
                 ['قرارداد',report.instrument_id],
-                ['ربات',report.execution_profile],
+                ['ربات',report.execution_profile_fa||report.execution_profile],
                 ['مرحله فعلی',report.stage_fa],
                 ['جهت تحلیل',report.signal_fa],
                 ['سفارش ارسال شد؟',report.orders_submitted===true?'بله، در Demo':report.orders_submitted==='UNKNOWN'?'وضعیت نامشخص':'خیر'],
@@ -5584,44 +5599,52 @@ async function loadBlofinInstruments(){
                 ['زمان ارسال سفارش',formatTime(report.submitted_at_utc)],
                 ['زمان تأیید Fill',formatTime(report.filled_at_utc)]
               ]);
-              const wave=report.elliott_wave||{};
-              const waveBox=section('انتخاب ساختار موج الیوت در لحظه تحلیل',
-                'شمارش موج از پیوت‌های تأییدشدهٔ کندل‌های بازار ساخته می‌شود؛ موج بعدی فقط سناریو است، نه پیش‌بینی قطعی.');
-              metricGrid(waveBox,[
-                ['وضعیت شمارش',wave.status_fa],
-                ['ساختار شناسایی‌شده',wave.pattern_fa],
-                ['مرحله موج',wave.phase_fa],
-                ['سناریوی موج منتخب',wave.selected_wave_fa],
-                ['مقایسه با جهت معامله',wave.direction_alignment_fa],
-                ['سطح ابطال شمارش',wave.invalidation_price],
-                ['آستانه تأیید پیوت (%)',wave.pivot_reversal_threshold_pct]
-              ]);
-              node(waveBox,'p',wave.confidence_note_fa||'موج الیوت به‌تنهایی مجوز ورود صادر نمی‌کند.','muted');
-              const exchangeLinks=document.createElement('div');
-              exchangeLinks.style.display='flex';
-              exchangeLinks.style.flexWrap='wrap';
-              exchangeLinks.style.gap='8px';
-              exchangeLinks.style.marginTop='10px';
-              const selectedInstrument=report.instrument_id||instrumentSelect.value||'BTC-USDT';
-              const blofinMarketLinks=[
-                {label:'بازار '+selectedInstrument+' Perpetual در BloFin ↗',href:'https://blofin.com/trade/en/futures/'+encodeURIComponent(selectedInstrument)},
-                {label:'بازار کلی قراردادهای Futures در BloFin ↗',href:'https://blofin.com/market/derivatives'},
-                {label:'راهنمای رسمی ورود به BloFin Demo ↗',href:'https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading'}
-              ];
-              blofinMarketLinks.forEach(item=>{
-                const link=document.createElement('a');
-                link.className='analysis-link';
-                link.href=item.href;
-                link.target='_blank';
-                link.rel='noopener noreferrer';
-                link.textContent=item.label;
-                exchangeLinks.appendChild(link);
-              });
-              waveBox.appendChild(exchangeLinks);
-              node(waveBox,'p','بازار مورد تحلیل ربات: '+selectedInstrument+' · USDT-M Perpetual · قرارداد خطی. اجرا فقط در محیط BloFin Demo انجام می‌شود.','muted');
-              makeTable(executionReport,'پیوت‌های تأییدشدهٔ موج الیوت',wave.pivots||[],[
-                ['kind_fa','نوع پیوت'],['price','قیمت'],['timestamp_utc','زمان وقوع پیوت'],['confirmed_at_utc','زمان تأیید پیوت']
-              ],'پیوت تأییدشده‌ای برای شماره‌گذاری موج در دسترس نیست.');
+              if(report.wave_analysis_applicable!==false){
+                const wave=report.elliott_wave||{};
+                const waveBox=section('تحلیل ساختار موج الیوت',
+                  'شمارش فقط از کندل‌های بسته‌شدهٔ تأییدشده ساخته می‌شود؛ موج بعدی سناریو است، نه پیش‌بینی قطعی.');
+                metricGrid(waveBox,[
+                  ['وضعیت شمارش',wave.status_fa],
+                  ['ساختار شناسایی‌شده',wave.pattern_fa],
+                  ['مرحله موج',wave.phase_fa],
+                  ['سناریوی موج منتخب',wave.selected_wave_fa],
+                  ['مقایسه با جهت معامله',wave.direction_alignment_fa],
+                  ['سطح ابطال شمارش',wave.invalidation_price],
+                  ['آستانه تأیید پیوت (%)',wave.pivot_reversal_threshold_pct],
+                  ['پیوت‌های تأییدشده',wave.confirmed_pivot_count],
+                  ['تایم‌فریم ساختار',wave.timeframe_fa||wave.timeframe]
+                ]);
+                node(waveBox,'p',wave.source_fa||'منبع: کندل‌های بسته‌شدهٔ BloFin Demo','muted');
+                node(waveBox,'p',wave.confidence_note_fa||'موج الیوت به‌تنهایی مجوز ورود صادر نمی‌کند.','muted');
+                const exchangeLinks=document.createElement('div');
+                exchangeLinks.style.display='flex';
+                exchangeLinks.style.flexWrap='wrap';
+                exchangeLinks.style.gap='8px';
+                exchangeLinks.style.marginTop='10px';
+                const selectedInstrument=report.instrument_id||instrumentSelect.value||'BTC-USDT';
+                const blofinMarketLinks=[
+                  {label:'بازار '+selectedInstrument+' Perpetual در BloFin ↗',href:'https://blofin.com/trade/en/futures/'+encodeURIComponent(selectedInstrument)},
+                  {label:'بازار کلی قراردادهای Futures در BloFin ↗',href:'https://blofin.com/market/derivatives'},
+                  {label:'راهنمای رسمی ورود به BloFin Demo ↗',href:'https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading'}
+                ];
+                blofinMarketLinks.forEach(item=>{
+                  const link=document.createElement('a');
+                  link.className='analysis-link';
+                  link.href=item.href;
+                  link.target='_blank';
+                  link.rel='noopener noreferrer';
+                  link.textContent=item.label;
+                  exchangeLinks.appendChild(link);
+                });
+                waveBox.appendChild(exchangeLinks);
+                node(waveBox,'p','بازار مورد تحلیل ربات: '+selectedInstrument+' · USDT-M Perpetual · ساختار موج از تایم‌فریم یک‌ساعته. اجرا فقط در محیط BloFin Demo انجام می‌شود.','muted');
+                makeTable(executionReport,'پیوت‌های تأییدشدهٔ موج الیوت',wave.pivots||[],[
+                  ['kind_fa','نوع پیوت'],['price','قیمت'],['timestamp_utc','زمان وقوع پیوت'],['confirmed_at_utc','زمان تأیید پیوت']
+                ],'پیوت تأییدشده‌ای برای شماره‌گذاری موج در دسترس نیست.');
+              }else{
+                section('دامنه تست مستقل Demo',
+                  report.wave_analysis_note_fa||'این تست مستقل شامل تحلیل موج الیوت نیست.');
+              }
               makeTable(executionReport,'وضعیت تک‌تک ۱۲ فیلتر',report.gates_fa||[],[
                 ['gate_id','شماره'],['name_fa','فیلتر'],['status_fa','وضعیت'],['reason_fa','دلیل']
               ],'جزئیات فیلترها هنوز ثبت نشده است.');
