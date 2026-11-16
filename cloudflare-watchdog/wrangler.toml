@@ -1,0 +1,9 @@
+name = "csr-render-watchdog"
+main = "src/index.js"
+compatibility_date = "2026-11-16"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+RENDER_HEALTH_URL = "https://crypto-super-radar-blofin-demo.onrender.com/health"
