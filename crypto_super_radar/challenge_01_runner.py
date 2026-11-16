@@ -653,7 +653,7 @@ def get_challenge_01_status(
                         and len(artifact.get("pattern_features")) >= 15
                         and isinstance(artifact.get("pattern_catalog"), dict)
                         and len(artifact.get("pattern_catalog")) == len(artifact.get("pattern_features"))
-                        and artifact.get("pattern_catalog_version") == "CSR_CANDLE_HEURISTICS_3BAR_V1"
+                        and artifact.get("pattern_catalog_version") == "CSR_CANDLE_HEURISTICS_5BAR_V2"
                         and isinstance(artifact.get("pattern_feature_mapping"), dict)
                         and len(artifact.get("pattern_feature_mapping")) == len(artifact.get("pattern_features", []))
                         and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
