@@ -119,17 +119,27 @@ class Challenge01AssistedRunner:
             outcome_payload = outcome_event.get("payload") or {}
             evidence = outcome_payload.get("evidence") or {}
             target = evidence.get("target_candle")
+            expected_feature_times = [candle["open_time_ms"] for candle in feature_window]
+            actual_label = _reference_label(target) if isinstance(target, dict) else None
+            predicted_label = decision_data.get("candle_classification")
+            expected_correctness = (
+                "CORRECT" if predicted_label == actual_label else "INCORRECT"
+            ) if actual_label is not None else None
             if (
                 evidence.get("comparison") != "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR"
                 or evidence.get("no_future_data_used_in_input") is not True
                 or evidence.get("feature_candle_open_time_ms") != feature_time
-                or evidence.get("feature_window_open_times_ms")
-                != [candle["open_time_ms"] for candle in feature_window]
+                or evidence.get("feature_window_open_times_ms") != expected_feature_times
                 or evidence.get("target_candle_open_time_ms") != target_time
                 or not isinstance(target, dict)
                 or target.get("open_time_ms") != target_time
                 or target.get("confirmed") is not True
                 or decision_data.get("prediction_horizon_bars") != 1
+                or evidence.get("reference_classification") != actual_label
+                or outcome_payload.get("final") is not True
+                or outcome_payload.get("decision_correctness") != expected_correctness
+                or outcome_payload.get("realized_result") != "NOT_EXECUTED"
+                or outcome_payload.get("realized_net_pnl") is not None
             ):
                 raise Challenge01DataError("PRIOR_ROUND_TARGET_EVIDENCE_MISMATCH")
             mode = item.get("decision_mode", "")
@@ -402,6 +412,9 @@ class Challenge01AssistedRunner:
                             "source": "blofin_demo_spot_next_completed_candle",
                             "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
                             "feature_candle_open_time_ms": feature_time,
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in feature_window
+                            ],
                             "target_candle_open_time_ms": target_time,
                             "target_candle": target,
                             "reference_classification": actual,
