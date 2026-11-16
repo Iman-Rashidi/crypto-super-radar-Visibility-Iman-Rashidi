@@ -7661,20 +7661,15 @@ def _blofin_demo_autopilot_worker() -> None:
                 trade_executed = cycle_summary["trade_executed"]
                 signal_value = cycle_summary["signal"]
                 no_entry = cycle_summary["no_entry"]
-                # A completed analysis cycle is not the end of the autonomous search.
-                # Keep the worker visibly searching and let the next scheduled cycle run.
+                # The scheduler keeps running even when a candle was already finalized,
+                # a signal was rejected, or a position is being managed. Reflect that fact
+                # instead of showing a false stopped state for duplicate-candle cycles.
                 autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
-                continue_search = bool(no_entry and autopilot_enabled)
-                autopilot_status = (
-                    "SEARCHING_FOR_SIGNAL" if continue_search
-                    else ("DISABLED" if not autopilot_enabled else job.get("status", "UNKNOWN"))
-                )
+                continue_search = bool(autopilot_enabled)
+                autopilot_status = "SEARCHING_FOR_SIGNAL" if continue_search else "DISABLED"
                 autopilot_message = (
-                    f"چرخهٔ {job_id} تمام شد و سیگنال ورود معتبر پیدا نشد؛ جست‌وجوی خودکار ادامه دارد و چرخهٔ بعدی در صف زمان‌بندی است."
-                    if continue_search else (
-                        "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
-                        if not autopilot_enabled else (job.get("message_fa") or "چرخه پایان یافت.")
-                    )
+                    f"چرخهٔ {job_id} پایان یافت؛ پایش خودکار ادامه دارد و چرخهٔ بعدی در صف زمان‌بندی است."
+                    if continue_search else "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
                 )
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": bool(autopilot_enabled),
