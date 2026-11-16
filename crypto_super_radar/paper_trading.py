@@ -755,6 +755,10 @@ class PaperLedger:
                 - float(open_position["entry_fee"])
             )
         realized = float(realized_total)
+        learning_integrity = self.learning_memory.integrity_report()
+        recent_experiences = self.learning_memory.recent_experiences(
+            20, challenge_id="PAPER_TRADING_EXPERIENCE"
+        )
         return {
             "mode": "PAPER_ONLY",
             "live_orders_enabled": False,
@@ -771,8 +775,9 @@ class PaperLedger:
             "recent_trades": [dict(row) for row in trades],
             "learning_memory": {
                 "challenge_id": "PAPER_TRADING_EXPERIENCE",
-                "recent_experiences": self.learning_memory.recent_experiences(20, challenge_id="PAPER_TRADING_EXPERIENCE"),
-                "integrity_status": "PASS",
+                "recent_experiences": recent_experiences,
+                "integrity_status": learning_integrity["status"],
+                "integrity_report": learning_integrity,
                 "uses_same_database_transaction": True,
                 "training_labels_require_final_closed_trades": True,
                 "challenge_01_baseline_metrics_excluded": True,
