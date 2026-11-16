@@ -533,6 +533,63 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             2,
         )
 
+    def test_unlinked_partial_fill_recovers_position_id_and_actual_size(self):
+        challenge = signal_record()
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.store.update_order(
+            plan["client_order_id"], "PARTIALLY_FILLED", exchange_order_id="demo-partial-order-1"
+        )
+        self.assertEqual(len(self.store.orders_pending_learning_outcome()), 1)
+        self.assertEqual(self.store.pending_learning_outcome_count(), 1)
+
+        order = self.store.get_order(plan["client_order_id"])
+        opened_ms = int(order["created_at"]) * 1000 + 5_000
+        actual_size = float(plan["quantity"]) * 0.5
+        open_position = {
+            "positionId": "demo-recovered-position",
+            "instId": "BTC-USDT",
+            "positionSide": "net",
+            "positions": str(actual_size),
+            "averagePrice": str(plan["entry_reference_price"]),
+            "createTime": str(opened_ms),
+        }
+        recovered = self.store.recover_position_link(
+            experience_id,
+            open_positions=[open_position],
+        )
+        self.assertEqual(recovered["status"], "LINKED")
+        self.assertEqual(recovered["position_id"], "demo-recovered-position")
+        self.assertAlmostEqual(recovered["position_quantity"], actual_size)
+
+        closed_history = [{
+            "historyId": "demo-recovered-close",
+            "positionId": "demo-recovered-position",
+            "instId": "BTC-USDT",
+            "side": "buy",
+            "createTime": str(opened_ms),
+            "openAveragePrice": str(plan["entry_reference_price"]),
+            "closeAveragePrice": "101.0",
+            "closePositions": str(actual_size),
+            "maxPositions": str(actual_size),
+            "realizedPnl": "0.75",
+            "fee": "0.05",
+        }]
+        saved = self.store.record_closed_position_outcome(
+            instrument_id="BTC-USDT",
+            history_rows=closed_history,
+        )
+        self.assertEqual(saved["status"], "RECORDED")
+        self.assertAlmostEqual(saved["realized_pnl_after_reported_trading_fees"], 0.70)
+        self.assertEqual(self.store.pending_learning_outcome_count(), 0)
+        experience = self.store.learning_memory.get_experience(experience_id)
+        self.assertEqual(experience["verification"]["status"], "PASS")
+
     def test_outcome_waits_until_the_exchange_position_id_is_linked(self):
         challenge = signal_record()
         experience_id = self.store.record_challenge1_decision(
