@@ -7446,6 +7446,10 @@ def _blofin_demo_autopilot_worker() -> None:
                     row for row in snapshot.get("positions", [])
                     if isinstance(row, dict) and abs(float(row.get("positions") or 0)) > 0
                 ]
+                open_tpsl_rows = [
+                    row for row in snapshot.get("open_tpsl_orders", [])
+                    if isinstance(row, dict)
+                ]
                 closed_rows = [
                     row for row in snapshot.get("closed_positions", [])
                     if isinstance(row, dict)
@@ -7477,6 +7481,20 @@ def _blofin_demo_autopilot_worker() -> None:
                             "unrealizedPnl": row.get("unrealizedPnl"),
                             "leverage": row.get("leverage"),
                         } for row in live_positions[:3]
+                    ],
+                    "exchange_open_tpsl_order_count": len(open_tpsl_rows),
+                    "exchange_open_tpsl_orders": [
+                        {
+                            "instId": row.get("instId"),
+                            "positionSide": row.get("positionSide"),
+                            "side": row.get("side"),
+                            "size": row.get("size"),
+                            "actualSize": row.get("actualSize"),
+                            "tpTriggerPrice": row.get("tpTriggerPrice"),
+                            "slTriggerPrice": row.get("slTriggerPrice"),
+                            "state": row.get("state"),
+                            "reduceOnly": row.get("reduceOnly"),
+                        } for row in open_tpsl_rows[:10]
                     ],
                     "latest_closed_position": (
                         {
