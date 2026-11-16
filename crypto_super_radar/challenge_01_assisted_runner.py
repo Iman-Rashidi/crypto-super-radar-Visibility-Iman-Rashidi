@@ -19,6 +19,7 @@ from .challenge_01_ai_mentor import (
     detect_candlestick_patterns,
     build_pattern_context,
     MARKET_CONTEXT_VERSION,
+    CONTEXT_WINDOW_LENGTH,
     FEATURE_WINDOW_LENGTH,
 )
 from .challenge_01_runner import (
@@ -72,6 +73,7 @@ class Challenge01AssistedRunner:
         modes_by_target: dict[int, set[str]] = {}
         feature_by_target: dict[int, str] = {}
         feature_windows_by_target: dict[int, list[dict[str, Any]]] = {}
+        context_windows_by_target: dict[int, str] = {}
         model_hashes: set[str] = set()
         for item in experiences:
             decision_event = next(
@@ -90,6 +92,7 @@ class Challenge01AssistedRunner:
             feature_time = snapshot.get("feature_candle_open_time_ms")
             feature = snapshot.get("feature_candle")
             feature_window = snapshot.get("feature_window")
+            context_window = snapshot.get("context_window")
             if (
                 not isinstance(target_time, int)
                 or not isinstance(feature_time, int)
@@ -99,7 +102,10 @@ class Challenge01AssistedRunner:
                 or feature.get("confirmed") is not True
                 or not isinstance(feature_window, list)
                 or len(feature_window) != FEATURE_WINDOW_LENGTH
-                or any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in feature_window)
+                or not isinstance(context_window, list)
+                or len(context_window) != CONTEXT_WINDOW_LENGTH
+                or any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in feature_window + context_window)
+                or context_window[-FEATURE_WINDOW_LENGTH:] != feature_window
                 or feature_window[-1] != feature
                 or any(
                     right["open_time_ms"] - left["open_time_ms"] != BAR_MILLISECONDS
@@ -107,9 +113,15 @@ class Challenge01AssistedRunner:
                 )
                 or snapshot.get("feature_window_open_times_ms")
                 != [candle["open_time_ms"] for candle in feature_window]
+                or snapshot.get("context_window_open_times_ms")
+                != [candle["open_time_ms"] for candle in context_window]
+                or any(
+                    right["open_time_ms"] - left["open_time_ms"] != BAR_MILLISECONDS
+                    for left, right in zip(context_window, context_window[1:])
+                )
                 or snapshot.get("detected_candlestick_patterns")
                 != detect_candlestick_patterns(feature_window)
-                or snapshot.get("pattern_context") != build_pattern_context(feature_window)
+                or snapshot.get("pattern_context") != build_pattern_context(context_window)
                 or snapshot.get("data_quality") != "VALID_COMPLETED_FEATURE_AND_TARGET"
                 or snapshot.get("target_candle_in_input") is not False
                 or "target_candle" in snapshot
@@ -124,6 +136,7 @@ class Challenge01AssistedRunner:
             evidence = outcome_payload.get("evidence") or {}
             target = evidence.get("target_candle")
             expected_feature_times = [candle["open_time_ms"] for candle in feature_window]
+            expected_context_times = [candle["open_time_ms"] for candle in context_window]
             actual_label = _reference_label(target) if isinstance(target, dict) else None
             predicted_label = decision_data.get("candle_classification")
             expected_correctness = (
@@ -134,6 +147,7 @@ class Challenge01AssistedRunner:
                 or evidence.get("no_future_data_used_in_input") is not True
                 or evidence.get("feature_candle_open_time_ms") != feature_time
                 or evidence.get("feature_window_open_times_ms") != expected_feature_times
+                or evidence.get("context_window_open_times_ms") != expected_context_times
                 or evidence.get("target_candle_open_time_ms") != target_time
                 or not isinstance(target, dict)
                 or target.get("open_time_ms") != target_time
@@ -157,6 +171,10 @@ class Challenge01AssistedRunner:
             prior_feature = feature_by_target.setdefault(target_time, feature_canonical)
             if prior_feature != feature_canonical:
                 raise Challenge01DataError("PAIRED_ROUND_FEATURE_INPUT_MISMATCH")
+            context_canonical = json.dumps(context_window, sort_keys=True, separators=(",", ":"))
+            prior_context = context_windows_by_target.setdefault(target_time, context_canonical)
+            if prior_context != context_canonical:
+                raise Challenge01DataError("PAIRED_ROUND_CONTEXT_INPUT_MISMATCH")
             feature_windows_by_target[target_time] = feature_window
             if target_time in by_target and by_target[target_time] != target:
                 raise Challenge01DataError("PAIRED_ROUND_TARGET_EVIDENCE_MISMATCH")
@@ -175,12 +193,12 @@ class Challenge01AssistedRunner:
 
         ordered_times = sorted(by_target)
         last_target_time = ordered_times[-1]
-        last_window_times = ordered_times[-FEATURE_WINDOW_LENGTH:]
-        if len(last_window_times) != FEATURE_WINDOW_LENGTH or any(
+        last_window_times = ordered_times[-CONTEXT_WINDOW_LENGTH:]
+        if len(last_window_times) != CONTEXT_WINDOW_LENGTH or any(
             right - left != BAR_MILLISECONDS
             for left, right in zip(last_window_times, last_window_times[1:])
         ):
-            raise Challenge01DataError("PRIOR_ROUND_MISSING_FEATURE_WINDOW_SEED")
+            raise Challenge01DataError("PRIOR_ROUND_MISSING_50_BAR_CONTEXT_SEED")
         last_window = [by_target[timestamp] for timestamp in last_window_times]
         if any(
             next_time - current_time != BAR_MILLISECONDS
@@ -209,10 +227,11 @@ class Challenge01AssistedRunner:
                     continue
                 if (
                     saved_hash == calculated_hash
-                    and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3"
+                    and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_PA_SOFTMAX_V4"
                     and artifact.get("trained_through_round") == previous_round
                     and artifact.get("market_context_version") == MARKET_CONTEXT_VERSION
                     and artifact.get("market_context_scope") == "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES"
+                    and artifact.get("context_window_length") == CONTEXT_WINDOW_LENGTH
                     and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
                 ):
                     candidate_anchor = item.get("experience_id")
@@ -280,10 +299,11 @@ class Challenge01AssistedRunner:
                 if target["open_time_ms"] != expected_time:
                     raise Challenge01DataError("FORWARD_HOLDOUT_HAS_GAP_OR_OVERLAP")
 
-            feature_window = list(previous_seed)
+            context_window = list(previous_seed)
             model_predictions_hash = hashlib.sha256()
             with connection:
                 for target in targets:
+                    feature_window = context_window[-FEATURE_WINDOW_LENGTH:]
                     feature = feature_window[-1]
                     feature_time = feature["open_time_ms"]
                     target_time = target["open_time_ms"]
@@ -329,11 +349,15 @@ class Challenge01AssistedRunner:
                             "target_candle_open_time_ms": target_time,
                             "feature_candle": feature,
                             "feature_window": feature_window,
+                            "context_window": context_window,
+                            "context_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in context_window
+                            ],
                             "feature_window_open_times_ms": [
                                 candle["open_time_ms"] for candle in feature_window
                             ],
                             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
-                            "pattern_context": build_pattern_context(feature_window),
+                            "pattern_context": build_pattern_context(context_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -352,6 +376,9 @@ class Challenge01AssistedRunner:
                             "feature_candle_open_time_ms": feature_time,
                             "feature_window_open_times_ms": [
                                 candle["open_time_ms"] for candle in feature_window
+                            ],
+                            "context_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in context_window
                             ],
                             "target_candle_open_time_ms": target_time,
                             "target_candle": target,
@@ -397,11 +424,15 @@ class Challenge01AssistedRunner:
                             "target_candle_open_time_ms": target_time,
                             "feature_candle": feature,
                             "feature_window": feature_window,
+                            "context_window": context_window,
+                            "context_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in context_window
+                            ],
                             "feature_window_open_times_ms": [
                                 candle["open_time_ms"] for candle in feature_window
                             ],
                             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
-                            "pattern_context": build_pattern_context(feature_window),
+                            "pattern_context": build_pattern_context(context_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -423,6 +454,9 @@ class Challenge01AssistedRunner:
                             "feature_window_open_times_ms": [
                                 candle["open_time_ms"] for candle in feature_window
                             ],
+                            "context_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in context_window
+                            ],
                             "target_candle_open_time_ms": target_time,
                             "target_candle": target,
                             "reference_classification": actual,
@@ -437,7 +471,7 @@ class Challenge01AssistedRunner:
                     assisted_ids.append(assisted_id)
                     inserted_count += int(bool(base_decision.get("inserted")))
                     model_predictions_hash.update(f"{feature_time}:{mentor_prediction}:{target_time}:{actual}|".encode())
-                    feature_window = feature_window[1:] + [target]
+                    context_window = context_window[1:] + [target]
 
             dataset_hash = model_predictions_hash.hexdigest()
             connection.close()
