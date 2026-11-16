@@ -210,7 +210,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             next_seed, prior_target_time, anchor_id, prior_model_hash = runner._previous_round_seed(
                 memory, 2,
             )
-            self.assertEqual(len(next_seed), 3)
+            self.assertEqual(len(next_seed), FEATURE_WINDOW_LENGTH)
             self.assertEqual(prior_target_time, self.future_candles[99]["open_time_ms"])
             self.assertTrue(anchor_id)
             self.assertEqual(prior_model_hash, result["next_model_candidate"]["artifact_sha256"])
