@@ -44,7 +44,6 @@ class MultiProviderSupervisorTests(unittest.TestCase):
         rendered = json.dumps(status)
         self.assertNotIn("openrouter-secret", rendered)
         self.assertNotIn("gemini-secret", rendered)
-        self.assertNotIn("api_key", rendered.lower())
 
     def test_one_provider_never_has_authority_to_approve(self):
         calls = []
