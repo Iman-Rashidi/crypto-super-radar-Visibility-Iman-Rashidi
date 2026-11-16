@@ -3772,6 +3772,17 @@ def _blofin_demo_instrument_options(*, force: bool = False) -> dict:
 
 
 
+def _demo_ai_review_approved(review: Any) -> bool:
+    """Fail closed unless a real AI review explicitly approves Demo entry."""
+    if not isinstance(review, dict):
+        return False
+    return (
+        str(review.get("status") or "").strip().upper() == "APPROVED"
+        and review.get("paper_entry_eligible") is True
+        and bool(str(review.get("model") or "").strip())
+    )
+
+
 def _run_blofin_demo_execution_job(
     job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "CHALLENGE_1",
 ) -> None:
@@ -4246,35 +4257,24 @@ def _run_blofin_demo_execution_job(
 
         _set_blofin_execution_job(
             job_id, "running", stage="NEMOTRON_SECOND_OPINION",
-            message_fa="تحلیل زنده به Nemotron فرستاده شد؛ هنوز هیچ سفارشی ارسال نشده است.",
+            message_fa="تحلیل زنده برای بازبینی واقعی ناظر هوش مصنوعی رایگان ارسال می‌شود؛ هنوز هیچ سفارشی ارسال نشده است.",
             analysis=gate_summary,
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
-        if execution_profile == "CHALLENGE_1":
+        try:
+            ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
+        except Exception as exc:
             ai_review = {
-                "status": "LOCAL_RULES_ONLY",
-                "paper_entry_eligible": True,
-                "model": "CHALLENGE_1_LOCAL_RULES_V1",
-                "reason": "No paid or external AI approval is required for this deterministic strategy.",
+                "status": "UNKNOWN", "paper_entry_eligible": False,
+                "error_type": type(exc).__name__,
             }
-        else:
-            try:
-                ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
-            except Exception as exc:
-                ai_review = {
-                    "status": "UNKNOWN", "paper_entry_eligible": False,
-                    "error_type": type(exc).__name__,
-                }
 
         ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
-        if execution_profile != "CHALLENGE_1" and (
-            not isinstance(ai_review, dict) or ai_status != "APPROVED"
-            or ai_review.get("paper_entry_eligible") is not True
-        ):
+        if not _demo_ai_review_approved(ai_review):
             _set_blofin_execution_job(
                 job_id, "completed", stage="AI_BLOCKED",
-                message_fa="Nemotron ورود را تأیید نکرد؛ هیچ سفارشی ارسال نشد.",
+                message_fa="ناظر هوش مصنوعی تأیید معتبر صادر نکرد؛ ورود مسدود شد و هیچ سفارشی ارسال نشد.",
                 ai_review={
                     "status": ai_status,
                     "model": ai_review.get("model") if isinstance(ai_review, dict) else None,
