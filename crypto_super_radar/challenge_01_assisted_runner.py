@@ -111,10 +111,13 @@ class Challenge01AssistedRunner:
                 or "target_candle" in snapshot
             ):
                 raise Challenge01DataError("PRIOR_ROUND_CANDLE_PATTERN_WINDOW_INVALID")
-            decision, outcome = self._decision_and_outcome(item)
+            decision_event, outcome_event = self._decision_and_outcome(item)
             if item.get("verification", {}).get("status") != "PASS":
                 raise Challenge01DataError("PRIOR_ROUND_MEMORY_INTEGRITY_FAILED")
-            evidence = (outcome.get("payload") or {}).get("evidence") or {}
+            decision_payload = decision_event.get("payload") or {}
+            decision_data = decision_payload.get("decision") or {}
+            outcome_payload = outcome_event.get("payload") or {}
+            evidence = outcome_payload.get("evidence") or {}
             target = evidence.get("target_candle")
             if (
                 evidence.get("comparison") != "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR"
@@ -126,12 +129,12 @@ class Challenge01AssistedRunner:
                 or not isinstance(target, dict)
                 or target.get("open_time_ms") != target_time
                 or target.get("confirmed") is not True
-                or decision.get("prediction_horizon_bars") != 1
+                or decision_data.get("prediction_horizon_bars") != 1
             ):
                 raise Challenge01DataError("PRIOR_ROUND_TARGET_EVIDENCE_MISMATCH")
             mode = item.get("decision_mode", "")
             if mode == "BOT_WITH_AI_MENTOR":
-                model_hash = decision.get("model_artifact_sha256")
+                model_hash = decision_data.get("model_artifact_sha256")
                 snapshot_hash = snapshot.get("mentor_model_artifact_sha256")
                 if not isinstance(model_hash, str) or model_hash != snapshot_hash:
                     raise Challenge01DataError("PRIOR_ROUND_MENTOR_MODEL_HASH_MISMATCH")
