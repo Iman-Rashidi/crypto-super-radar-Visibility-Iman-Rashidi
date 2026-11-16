@@ -90,6 +90,10 @@ class Challenge1CandleTests(unittest.TestCase):
         self.assertEqual(result["signal"], "NO_TRADE")
         self.assertFalse(result["orders_submitted"])
         self.assertFalse(result["challenge1_evidence"]["legacy_12_gates_used_for_entry"])
+        self.assertEqual(result["elliott_wave"]["timeframe"], "1H")
+        self.assertEqual(result["elliott_wave"]["source"], "BLOFIN_DEMO_COMPLETED_1H_CANDLES")
+        self.assertEqual(result["elliott_wave"]["completed_candle_count"], 65)
+        self.assertIn("elliott_wave", result["challenge1_evidence"])
 
     def test_conflicting_confirmed_patterns_block_entry(self):
         now = 2_000_000_000_000
