@@ -857,6 +857,37 @@ class LearningExperienceMemory:
             ).fetchall()
         return [self.get_experience(row["experience_id"]) for row in rows]
 
+    def integrity_report(self, limit: int = 2000) -> dict[str, Any]:
+        """Verify recent append-only experience chains without changing their contents."""
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer")
+        bounded = max(1, min(limit, 2000))
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT experience_id FROM learning_experience_events
+                   WHERE experience_sequence=1 ORDER BY sequence DESC LIMIT ?""",
+                (bounded,),
+            ).fetchall()
+            experience_ids = [str(row["experience_id"]) for row in rows]
+            verifications = [
+                self._verify_rows(self._load_rows(experience_id), experience_id)
+                for experience_id in experience_ids
+            ]
+        failures = [
+            {
+                "experience_id": item.get("experience_id"),
+                "errors": list(item.get("errors") or []),
+            }
+            for item in verifications if item.get("status") != "PASS"
+        ]
+        return {
+            "status": "PASS" if not failures else "FAIL",
+            "checked_count": len(verifications),
+            "failed_count": len(failures),
+            "experience_count": len(experience_ids),
+            "failures": failures[:20],
+        }
+
 
 __all__ = [
     "LearningExperienceMemory",
