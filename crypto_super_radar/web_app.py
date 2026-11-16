@@ -46,6 +46,7 @@ from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
+from .notion_event_sync import NotionEventOutbox
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -4721,6 +4722,26 @@ class Handler(BaseHTTPRequestHandler):
             payload = ai_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/notion-sync/status":
+            outbox = None
+            try:
+                outbox = NotionEventOutbox()
+                payload = outbox.status_snapshot()
+                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {
+                    "status": "UNAVAILABLE",
+                    "token_configured": bool(
+                        (os.getenv("NOTION_API_TOKEN") or os.getenv("NOTION_TOKEN") or "").strip()
+                    ),
+                    "error_type": type(exc).__name__,
+                }
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            finally:
+                if outbox is not None:
+                    outbox.close()
         if parsed.path == "/api/blofin/demo/status":
             payload = _blofin_demo_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -7455,6 +7476,189 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
     }
 
 
+def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
+    """Build safe, idempotent Notion events from one completed Challenge 1 symbol job."""
+    current = job if isinstance(job, dict) else {}
+    raw_result = current.get("result")
+    result = raw_result if isinstance(raw_result, dict) else {}
+    summary = _blofin_autopilot_cycle_summary(current)
+    signal = summary.get("signal") or "UNKNOWN"
+    no_entry = bool(summary.get("no_entry"))
+    orders_submitted = bool(summary.get("orders_submitted"))
+    trade_executed = bool(summary.get("trade_executed"))
+    status = "SUCCESS" if str(current.get("status") or "").lower() == "completed" else "FAILED"
+    reason = result.get("reason_fa") or current.get("message_fa") or "No additional reason was supplied."
+    analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else (
+        current.get("analysis") if isinstance(current.get("analysis"), dict) else {}
+    )
+    ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
+        current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+    )
+    ai_status = str(ai_review.get("status") or current.get("ai_status") or "").strip().upper()
+    ai_decision = (
+        "APPROVE" if ai_status == "APPROVED" else
+        "REJECT" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
+        "OBSERVE_ONLY" if ai_review else "NOT_CALLED"
+    )
+    order = result.get("order") if isinstance(result.get("order"), dict) else {}
+    order_id = (
+        result.get("exchange_order_id") or result.get("order_id")
+        or order.get("exchange_order_id") or order.get("order_id") or ""
+    )
+    positions = result.get("positions") if isinstance(result.get("positions"), list) else []
+    first_position = positions[0] if positions and isinstance(positions[0], dict) else {}
+    position_id = (
+        result.get("position_id") or first_position.get("positionId")
+        or first_position.get("position_id") or ""
+    )
+    experience_id = (
+        result.get("learning_experience_id")
+        or current.get("learning_experience_id")
+        or analysis.get("learning_experience_id")
+        or ""
+    )
+    details = {
+        "job_id": str(job_id),
+        "stage": current.get("stage"),
+        "job_status": current.get("status"),
+        "signal": signal,
+        "orders_submitted": orders_submitted,
+        "trade_executed": trade_executed,
+        "gate_pass_count": analysis.get("gate_pass_count"),
+        "gate_fail_count": analysis.get("gate_fail_count"),
+        "gate_unknown_count": analysis.get("gate_unknown_count"),
+        "result_status": result.get("status"),
+        "reason": str(reason)[:1200],
+    }
+    common = {
+        "cycle_id": str(job_id),
+        "occurred_at_utc": (
+            current.get("completed_at_utc") or current.get("updated_at_utc")
+            or datetime.now(timezone.utc).isoformat()
+        ),
+        "market": "Futures",
+        "symbol": str(instrument_id).upper(),
+        "timeframe": "15m",
+        "signal": signal if signal in {"LONG", "SHORT", "NO_TRADE"} else "UNKNOWN",
+        "experience_id": experience_id,
+        "order_id": order_id,
+        "position_id": position_id,
+        "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
+    }
+    main_type = "NO_TRADE" if no_entry else "ANALYSIS_COMPLETED"
+    events = [{
+        **common,
+        "event_id": f"{job_id}:ROBOT:{main_type}",
+        "event_type": main_type,
+        "actor": "Robot",
+        "status": status,
+        "reason": str(reason)[:1600],
+        "details": json.dumps(details, ensure_ascii=False, sort_keys=True),
+        "ai_decision": ai_decision,
+    }]
+    if orders_submitted:
+        events.append({
+            **common, "event_id": f"{job_id}:ROBOT:ORDER_SUBMITTED",
+            "event_type": "ORDER_SUBMITTED", "actor": "Robot", "status": "SUCCESS",
+            "reason": "BloFin Demo accepted an order submission; exchange fill must be verified separately.",
+            "details": json.dumps({"job_id": job_id, "order_id": order_id}, ensure_ascii=False),
+            "ai_decision": ai_decision,
+        })
+    if trade_executed:
+        events.append({
+            **common, "event_id": f"{job_id}:BLOFIN:ORDER_FILLED",
+            "event_type": "ORDER_FILLED", "actor": "BloFin Demo", "status": "SUCCESS",
+            "reason": "A Demo fill was confirmed by the execution worker.",
+            "details": json.dumps({
+                "job_id": job_id,
+                "average_fill_price": result.get("average_fill_price"),
+                "filled_size": result.get("filled_size"),
+            }, ensure_ascii=False),
+            "ai_decision": ai_decision,
+        })
+    if ai_review:
+        ai_event_type = (
+            "AI_APPROVAL" if ai_status == "APPROVED" else
+            "AI_VETO" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
+            "AI_RECOMMENDATION"
+        )
+        events.append({
+            **common, "event_id": f"{job_id}:AI:{ai_event_type}",
+            "event_type": ai_event_type, "actor": "AI Supervisor",
+            "status": "SUCCESS" if ai_status in {"APPROVED", "VETO", "REJECT"} else "WARNING",
+            "ai_decision": ai_decision,
+            "ai_model": ai_review.get("model") or ai_review.get("returned_model") or "",
+            "ai_analysis": ai_review.get("rationale_fa") or ai_review.get("reason") or "",
+            "ai_suggestion": ai_review.get("final_rating") or ai_review.get("status_fa") or ai_status,
+            "reason": ai_review.get("reason") or reason,
+            "details": json.dumps({
+                "job_id": job_id,
+                "ai_status": ai_status,
+                "response_validated": ai_review.get("response_validated"),
+                "model_verified": ai_review.get("model_verified"),
+                "latency_ms": ai_review.get("latency_ms"),
+                "paper_entry_eligible": ai_review.get("paper_entry_eligible"),
+            }, ensure_ascii=False, sort_keys=True),
+        })
+    return events
+
+
+def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> dict:
+    """Persist the event/outbox before attempting any non-critical Notion network I/O."""
+    outbox = None
+    queued = 0
+    try:
+        outbox = NotionEventOutbox()
+        for event in _blofin_job_notion_events(job_id, instrument_id, job):
+            queued += int(outbox.enqueue(event))
+        return {"status": "QUEUED", "queued": queued}
+    except Exception as exc:
+        # Notion observability is intentionally fail-open for the trading engine.
+        return {"status": "UNAVAILABLE", "queued": queued, "error_type": type(exc).__name__}
+    finally:
+        if outbox is not None:
+            outbox.close()
+
+
+NOTION_SYNC_THREAD = None
+NOTION_SYNC_START_LOCK = threading.Lock()
+
+
+def _notion_sync_worker() -> None:
+    """Flush pending outbox events while the Demo web process is awake."""
+    try:
+        interval = int(os.getenv("NOTION_SYNC_INTERVAL_SECONDS", "30"))
+    except (TypeError, ValueError):
+        interval = 30
+    interval = max(15, min(interval, 300))
+    while True:
+        outbox = None
+        try:
+            outbox = NotionEventOutbox()
+            outbox.flush_pending(limit=10)
+        except Exception:
+            # Keep a temporary Notion/Turso outage from stopping the Demo worker.
+            pass
+        finally:
+            if outbox is not None:
+                outbox.close()
+        time.sleep(interval)
+
+
+def _start_notion_sync_worker() -> None:
+    """Start a single best-effort outbox flusher for this web process."""
+    global NOTION_SYNC_THREAD
+    with NOTION_SYNC_START_LOCK:
+        if NOTION_SYNC_THREAD is not None and NOTION_SYNC_THREAD.is_alive():
+            return
+        NOTION_SYNC_THREAD = threading.Thread(
+            target=_notion_sync_worker,
+            daemon=True,
+            name="notion-event-outbox-sync",
+        )
+        NOTION_SYNC_THREAD.start()
+
+
 def _blofin_demo_autopilot_worker() -> None:
     """Run only Challenge 1 pattern-driven cycles on BloFin Demo while awake."""
     try:
@@ -7552,6 +7756,13 @@ def _blofin_demo_autopilot_worker() -> None:
                     ),
                 })
                 batch_jobs.append((job_id, instrument_id))
+                # Persist a durable, idempotent event before the best-effort Notion sync.
+                notion_queue_result = _queue_blofin_job_notion_events(
+                    job_id, instrument_id, finished_job
+                )
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE["notion_last_queue_status"] = notion_queue_result.get("status")
+                    BLOFIN_AUTOPILOT_STATE["notion_last_queued_count"] = notion_queue_result.get("queued", 0)
             job_id, instrument_id = batch_jobs[-1]
             exchange_monitor = {}
             monitor_store = None
@@ -7754,6 +7965,7 @@ def main():
     port = int(os.getenv("PORT", "10000"))
     host = os.getenv("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), Handler)
+    _start_notion_sync_worker()
     _start_blofin_demo_autopilot()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
