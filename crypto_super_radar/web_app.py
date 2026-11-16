@@ -3805,6 +3805,31 @@ def _run_blofin_demo_execution_job(
             return
 
         store = BloFinDemoEventStore()
+        # Reconcile previously filled positions before evaluating or entering a new market.
+        # This prevents a fresh order from overtaking an exchange-close event that has not
+        # yet reached the durable learning journal.
+        pending_learning_orders = store.orders_pending_learning_outcome(limit=50)
+        if pending_learning_orders:
+            outcome_client = BloFinDemoReadOnly(timeout=8.0)
+            for pending_order in pending_learning_orders:
+                outcome_instrument = str(pending_order.get("instrument_id") or "").upper()
+                if not outcome_instrument:
+                    continue
+                try:
+                    closed_history = outcome_client.get_positions_history(
+                        inst_id=outcome_instrument, state="closed", limit=100,
+                    )
+                    partial_history = outcome_client.get_positions_history(
+                        inst_id=outcome_instrument, state="partially_closed", limit=100,
+                    )
+                    store.record_closed_position_outcome(
+                        instrument_id=outcome_instrument,
+                        history_rows=closed_history if isinstance(closed_history, list) else [],
+                        partial_rows=partial_history if isinstance(partial_history, list) else [],
+                    )
+                except Exception:
+                    # Keep the experience pending; the entry guard prevents new exposure.
+                    pass
         prior_budget = store.trade_budget_status()
         if prior_budget.get("unresolved_orders", 0) > 0:
             latest = store.latest_order()
