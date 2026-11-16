@@ -136,7 +136,7 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
             self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["context_window"]))
             self.assertEqual(snapshot["pattern_context"]["history_bars"], CONTEXT_WINDOW_LENGTH)
             self.assertIn("price_action_structure", snapshot["pattern_context"])
-            self.assertEqual(snapshot["pattern_context"]["order_block"]["status"], "UNKNOWN")
+            self.assertEqual(snapshot["pattern_context"]["price_action_structure"]["order_block"]["status"], "UNKNOWN")
             self.assertEqual(snapshot["pattern_context"]["support_resistance_scope"], "CONFIRMED_SWING_PIVOTS_FROM_50_COMPLETED_BARS")
             self.assertEqual(
                 evidence["feature_window_open_times_ms"],
