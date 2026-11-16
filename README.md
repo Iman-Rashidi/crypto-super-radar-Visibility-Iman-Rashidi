@@ -465,3 +465,22 @@ Existing open paper positions continue to be managed and can be closed using the
 Only a compact allowlist of public market evidence and gate statuses is sent to the model. Wallet addresses, balances, holdings, exchange credentials, API keys and private user data are not sent. **Provider data-use notice:** the free NVIDIA endpoint page says requests may be logged for security and used to improve NVIDIA products. Do not send confidential information to this free endpoint. The bot's request contains public market statistics, but users should review the provider's current terms.
 
 The optional Gemini headline-enrichment section elsewhere in this README is a separate feature; it is not required by this Paper Trading AI integration.
+
+
+## Independent multi-provider AI Supervisor (Challenge 1 Demo)
+
+Challenge 1 Demo entries now require **at least two independent, model-verified AI approvals** in addition to the deterministic strategy and risk gates. A valid veto from any responding provider blocks the entry. One provider alone, missing providers, rate limits, invalid JSON, unverified model identity, or fewer than two approvals all fail closed. This is an AI approval gate, not a promise of trading profitability.
+
+Supported providers are configured with server-side environment variables only:
+
+| Provider | Secret environment variable | Fixed model / endpoint |
+|---|---|---|
+| NVIDIA Nemotron through OpenRouter | `OPENROUTER_API_KEY` (or existing `CSR_OPENROUTER_API_KEY`) | `nvidia/nemotron-3-ultra-550b-a55b:free` |
+| Google Gemini | `GEMINI_API_KEY` | `gemini-3.8-flash` via Google's OpenAI-compatible endpoint |
+| Groq | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
+
+**Zero-cost requirements:** keep OpenRouter on the `:free` model; use Google AI Studio Free tier with no billing account linked; keep Groq on its Free plan and do not upgrade to Developer. The application never switches to a paid model automatically. Provider quotas can still return 429/availability errors, in which case new entries are blocked. Google AI Studio Free tier may use submitted content to improve Google products, and OpenRouter free inference may be logged by the upstream provider; only sanitized public market metrics and gate evidence are sent. Never send exchange secrets, account balances, wallet/private-key data, or user-identifying information.
+
+For the unattended GitHub Actions worker, add at least two provider keys as **GitHub repository Actions secrets**: `OPENROUTER_API_KEY` (or `CSR_OPENROUTER_API_KEY`), `GEMINI_API_KEY`, and/or `GROQ_API_KEY`. PR #36 adds those secret references to the scheduled workflow on the default `main` branch; the values themselves must be created by the repository owner in Settings → Secrets and variables → Actions. For the Staging dashboard and its synthetic dry-run, also add the same chosen keys to the **Render Staging service** environment variables. Do not paste secrets into GitHub source files, Notion, or chat. After the keys are added and the Staging code is approved, verify `GET /api/ai/status` and run the synthetic AI dry-run. The dashboard must show at least two configured providers and two independently validated approvals before any Demo entry can pass the AI gate.
+
+The Challenge 1 local-rules-only bypass is removed for Demo entries: deterministic analysis still runs, but a new entry cannot proceed without the multi-provider supervisor quorum. Live trading, transfers, withdrawals, and Production changes remain out of scope.

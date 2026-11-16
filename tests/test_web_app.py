@@ -376,13 +376,15 @@ class WebAppHttpTests(unittest.TestCase):
 
     def test_ai_status_endpoint_reports_configuration_without_exposing_secret(self):
         payload = {
-            "provider": "OpenRouter",
-            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
-            "status": "CONFIGURED",
+            "provider": "Independent Multi-Provider AI Supervisor",
+            "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 120B",
+            "status": "READY",
             "configured": True,
+            "configured_provider_count": 2,
+            "required_independent_approvals": 2,
             "secret_sent_to_model": False,
         }
-        with patch.object(web_app, "ai_connection_status", return_value=payload):
+        with patch.object(web_app, "ai_supervisor_status", return_value=payload):
             status, _, body = self.request("GET", "/api/ai/status")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), payload)
