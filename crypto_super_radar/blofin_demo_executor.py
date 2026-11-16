@@ -968,45 +968,49 @@ class BloFinDemoEventStore:
         # The final close record alone may represent only the last partial fill.
         # Sum partial-close and full-close history for the same exchange positionId.
         combined_rows = []
-        for row in list(partial_rows or []) + list(history_rows or []):
-            if not isinstance(row, Mapping):
-                continue
-            if (
-                str(row.get("positionId") or "") != position_id
-                or str(row.get("instId") or "").upper() != instrument
-                or str(row.get("side") or "").lower() != expected_side
-            ):
-                continue
-            try:
-                opened_ms = int(row.get("createTime") or 0)
-                open_price = float(row.get("openAveragePrice"))
-                close_quantity = float(row.get("closePositions"))
-                total_quantity = float(row.get("maxPositions"))
-                pnl = float(row.get("realizedPnl"))
-                fee = float(row.get("fee") or 0.0)
-                history_id = str(row.get("historyId") or "")
-                values = (open_price, close_quantity, total_quantity, pnl, fee)
-                if not all(math.isfinite(value) for value in values):
+        for state, source_rows in (
+            ("PARTIALLY_CLOSED", partial_rows or []),
+            ("CLOSED", history_rows or []),
+        ):
+            for row in source_rows:
+                if not isinstance(row, Mapping):
                     continue
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if (
-                opened_ms < order_created_ms - 60_000
-                or open_price <= 0
-                or abs(open_price - reference_entry) / reference_entry > 0.005
-                or close_quantity <= 0
-                or total_quantity + 1e-9 < close_quantity
-                or not history_id
-            ):
-                continue
-            combined_rows.append({
-                "history_id": history_id,
-                "state": "CLOSED" if row in (history_rows or []) else "PARTIALLY_CLOSED",
-                "close_quantity": close_quantity,
-                "realized_pnl": pnl,
-                "trading_fee": fee,
-                "position_row": dict(row),
-            })
+                if (
+                    str(row.get("positionId") or "") != position_id
+                    or str(row.get("instId") or "").upper() != instrument
+                    or str(row.get("side") or "").lower() != expected_side
+                ):
+                    continue
+                try:
+                    opened_ms = int(row.get("createTime") or 0)
+                    open_price = float(row.get("openAveragePrice"))
+                    close_quantity = float(row.get("closePositions"))
+                    total_quantity = float(row.get("maxPositions"))
+                    pnl = float(row.get("realizedPnl"))
+                    fee = float(row.get("fee") or 0.0)
+                    history_id = str(row.get("historyId") or "")
+                    values = (open_price, close_quantity, total_quantity, pnl, fee)
+                    if not all(math.isfinite(value) for value in values):
+                        continue
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (
+                    opened_ms < order_created_ms - 60_000
+                    or open_price <= 0
+                    or abs(open_price - reference_entry) / reference_entry > 0.005
+                    or close_quantity <= 0
+                    or total_quantity + 1e-9 < close_quantity
+                    or not history_id
+                ):
+                    continue
+                combined_rows.append({
+                    "history_id": history_id,
+                    "state": state,
+                    "close_quantity": close_quantity,
+                    "realized_pnl": pnl,
+                    "trading_fee": fee,
+                    "position_row": dict(row),
+                })
         if not any(item["state"] == "CLOSED" for item in combined_rows):
             return {
                 "status": "WAITING_FOR_FINAL_CLOSED_POSITION",
