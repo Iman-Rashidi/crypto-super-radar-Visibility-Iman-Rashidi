@@ -192,6 +192,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             )
             assisted = next(item for item in round_two if item["decision_mode"] == "BOT_WITH_AI_MENTOR")
             decision_event = next(e for e in assisted["events"] if e["event_type"] == "DECISION_RECORDED")
+            outcome_event = next(e for e in assisted["events"] if e["event_type"] == "OUTCOME_LABELLED")
             snapshot = decision_event["payload"]["input_snapshot"]
             self.assertFalse(snapshot["target_candle_in_input"])
             self.assertNotIn("target_candle", snapshot)
@@ -199,6 +200,20 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
                 snapshot["mentor_model_artifact_sha256"],
                 candidate["model_candidate"]["artifact_sha256"],
             )
+            self.assertEqual(
+                outcome_event["payload"]["evidence"]["feature_window_open_times_ms"],
+                snapshot["feature_window_open_times_ms"],
+            )
+
+            # Round 3 must be able to consume round 2's paired, independently
+            # verified outcomes and the candidate retrained after round 2.
+            next_seed, prior_target_time, anchor_id, prior_model_hash = runner._previous_round_seed(
+                memory, 2,
+            )
+            self.assertEqual(len(next_seed), 3)
+            self.assertEqual(prior_target_time, self.future_candles[99]["open_time_ms"])
+            self.assertTrue(anchor_id)
+            self.assertEqual(prior_model_hash, result["next_model_candidate"]["artifact_sha256"])
         finally:
             db.close()
 
