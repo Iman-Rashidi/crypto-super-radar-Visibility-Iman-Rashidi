@@ -302,12 +302,14 @@ class Challenge01AssistedRunner:
             context_window = list(previous_seed)
             model_predictions_hash = hashlib.sha256()
             with connection:
-                for target in targets:
+                for target_index in range(len(targets)):
                     feature_window = context_window[-FEATURE_WINDOW_LENGTH:]
                     feature = feature_window[-1]
                     feature_time = feature["open_time_ms"]
-                    target_time = target["open_time_ms"]
-                    if target_time - feature_time != BAR_MILLISECONDS:
+                    # Compute the expected next-bar timestamp from known feature data.
+                    # Do not inspect target OHLC until both predictions are immutable.
+                    target_time = feature_time + BAR_MILLISECONDS
+                    if target_time != before_time + (target_index + 1) * BAR_MILLISECONDS:
                         raise Challenge01DataError("FEATURE_TARGET_NOT_ONE_BAR_APART")
                     cycle_id = f"CH01-R{round_number:02d}:{SYMBOL}:{TIMEFRAME}:{target_time}"
                     suffix = f"ch01-r{round_number:02d}-btc-usdt-1h-{target_time}"
@@ -315,10 +317,8 @@ class Challenge01AssistedRunner:
                     assisted_id = suffix + "-mentor"
                     bot_prediction, bot_action = _classify_bot(feature)
                     mentor_prediction, probabilities = predict_candidate(feature_window, artifact)
-                    actual = _reference_label(target)
                     bot_predictions.append(bot_prediction)
                     mentor_predictions.append(mentor_prediction)
-                    references.append(actual)
 
                     base_decision = memory.record_decision(
                         experience_id=baseline_id,
@@ -363,32 +363,6 @@ class Challenge01AssistedRunner:
                             "target_candle_in_input": False,
                         },
                     )
-                    memory.record_outcome(
-                        experience_id=baseline_id,
-                        event_id=f"{baseline_id}:outcome",
-                        decision_correctness="CORRECT" if bot_prediction == actual else "INCORRECT",
-                        realized_result="NOT_EXECUTED",
-                        realized_net_pnl=None,
-                        final=True,
-                        evidence={
-                            "source": "blofin_demo_spot_next_completed_candle",
-                            "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
-                            "feature_candle_open_time_ms": feature_time,
-                            "feature_window_open_times_ms": [
-                                candle["open_time_ms"] for candle in feature_window
-                            ],
-                            "context_window_open_times_ms": [
-                                candle["open_time_ms"] for candle in context_window
-                            ],
-                            "target_candle_open_time_ms": target_time,
-                            "target_candle": target,
-                            "reference_classification": actual,
-                            "prediction_horizon_bars": 1,
-                            "no_future_data_used_in_input": True,
-                            "orders_submitted": False,
-                        },
-                    )
-                    review_baseline(memory, baseline_id)
                     assisted_decision = memory.record_decision(
                         experience_id=assisted_id,
                         event_id=f"{assisted_id}:decision",
@@ -400,7 +374,9 @@ class Challenge01AssistedRunner:
                         market="SPOT",
                         symbol=SYMBOL,
                         timeframe=TIMEFRAME,
-                        baseline_experience_id=baseline_id,
+                        # Link to the already-reviewed prior-round experience that
+                        # produced this frozen candidate, never to this sample's outcome.
+                        baseline_experience_id=model_anchor,
                         model_version=artifact["model_version"],
                         dataset_version=f"CH01-R{round_number:02d}-FORWARD-HOLDOUT",
                         decision={
@@ -440,6 +416,38 @@ class Challenge01AssistedRunner:
                             "mentor_model_artifact_sha256": artifact["artifact_sha256"],
                         },
                     )
+                    # Both baseline and candidate predictions are now locked.
+                    # Only now reveal the next candle's OHLC and append final outcomes.
+                    target = targets[target_index]
+                    if target.get("open_time_ms") != target_time or target.get("confirmed") is not True:
+                        raise Challenge01DataError("HOLDOUT_TARGET_NOT_COMPLETED_OR_TIME_MISMATCH")
+                    actual = _reference_label(target)
+                    references.append(actual)
+                    memory.record_outcome(
+                        experience_id=baseline_id,
+                        event_id=f"{baseline_id}:outcome",
+                        decision_correctness="CORRECT" if bot_prediction == actual else "INCORRECT",
+                        realized_result="NOT_EXECUTED",
+                        realized_net_pnl=None,
+                        final=True,
+                        evidence={
+                            "source": "blofin_demo_spot_next_completed_candle",
+                            "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
+                            "feature_candle_open_time_ms": feature_time,
+                            "feature_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in feature_window
+                            ],
+                            "context_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in context_window
+                            ],
+                            "target_candle_open_time_ms": target_time,
+                            "target_candle": target,
+                            "reference_classification": actual,
+                            "prediction_horizon_bars": 1,
+                            "no_future_data_used_in_input": True,
+                            "orders_submitted": False,
+                        },
+                    )
                     memory.record_outcome(
                         experience_id=assisted_id,
                         event_id=f"{assisted_id}:outcome",
@@ -467,6 +475,9 @@ class Challenge01AssistedRunner:
                             "orders_submitted": False,
                         },
                     )
+                    # Mentor feedback is appended only after the paired outcome is final,
+                    # so it can inform the next model, never this sample's prediction.
+                    review_baseline(memory, baseline_id)
                     baseline_ids.append(baseline_id)
                     assisted_ids.append(assisted_id)
                     inserted_count += int(bool(base_decision.get("inserted")))
