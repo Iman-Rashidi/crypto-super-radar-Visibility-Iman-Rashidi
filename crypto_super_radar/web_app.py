@@ -3866,6 +3866,19 @@ def _run_blofin_demo_execution_job(
                 )
                 learning_signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
                 challenge_record["learning_experience_id"] = learning_experience_id
+                if store.has_final_experience(learning_experience_id):
+                    _set_blofin_execution_job(
+                        job_id, "completed", stage="DUPLICATE_CANDLE_FINALIZED",
+                        message_fa="برای این کندل نتیجهٔ نهایی قبلاً ثبت شده؛ از ورود تکراری جلوگیری شد.",
+                        result={
+                            "status": "SKIPPED_DUPLICATE_EXPERIENCE",
+                            "environment": "BLOFIN_DEMO",
+                            "learning_experience_id": learning_experience_id,
+                            "orders_submitted": False,
+                            "trade_executed": False,
+                        },
+                    )
+                    return
             except ValueError as exc:
                 reason_fa = (
                     f"تحلیل Challenge 1 برای {instrument_id} به‌دلیل دادهٔ کندل نامعتبر یا ناکافی متوقف شد: "
@@ -4463,7 +4476,7 @@ def _run_blofin_demo_execution_job(
             },
         )
     except BloFinDemoExecutionBlocked as exc:
-        if store is not None and learning_experience_id and not submission_started:
+        if store is not None and learning_experience_id:
             try:
                 prior_order = store.get_order_for_experience(learning_experience_id)
                 if prior_order is None or prior_order.get("status") == "REJECTED":
@@ -4486,6 +4499,19 @@ def _run_blofin_demo_execution_job(
             },
         )
     except Exception as exc:
+        if store is not None and learning_experience_id and not submission_started:
+            try:
+                prior_order = store.get_order_for_experience(learning_experience_id)
+                if prior_order is None or prior_order.get("status") == "REJECTED":
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="EXECUTION_ERROR",
+                        reason=type(exc).__name__,
+                    )
+            except Exception:
+                pass
         _set_blofin_execution_job(
             job_id, "failed", stage="EXECUTION_ERROR",
             message_fa="اجرای آزمایشی با خطای کنترل‌شده متوقف شد؛ قبل از تلاش مجدد باید وضعیت سفارش در BloFin بررسی شود.",
@@ -7470,8 +7496,15 @@ def _blofin_demo_autopilot_worker() -> None:
                 batch_jobs.append((job_id, instrument_id))
             job_id, instrument_id = batch_jobs[-1]
             exchange_monitor = {}
+            monitor_store = None
             try:
-                snapshot = _blofin_demo_live_monitor_snapshot(instrument_id)
+                monitor_store = BloFinDemoEventStore()
+                latest_local_order = monitor_store.latest_order()
+                monitor_instrument_id = (
+                    str(latest_local_order.get("instrument_id") or instrument_id).upper()
+                    if isinstance(latest_local_order, dict) else instrument_id
+                )
+                snapshot = _blofin_demo_live_monitor_snapshot(monitor_instrument_id)
                 live_positions = [
                     row for row in snapshot.get("positions", [])
                     if isinstance(row, dict) and abs(float(row.get("positions") or 0)) > 0
@@ -7497,9 +7530,15 @@ def _blofin_demo_autopilot_worker() -> None:
                         latest_realized_pnl = None
                 except (TypeError, ValueError, OverflowError):
                     latest_realized_pnl = None
+                learning_outcome_update = monitor_store.record_closed_position_outcome(
+                    instrument_id=monitor_instrument_id,
+                    history_rows=closed_rows,
+                )
+                learning_integrity = monitor_store.learning_memory.integrity_report()
                 exchange_monitor = {
                     "exchange_monitor_status": snapshot.get("status"),
                     "exchange_data_completeness": snapshot.get("data_completeness"),
+                    "monitored_order_instrument": monitor_instrument_id,
                     "exchange_open_position_count": len(live_positions),
                     "exchange_open_positions": [
                         {
@@ -7528,6 +7567,7 @@ def _blofin_demo_autopilot_worker() -> None:
                     ],
                     "latest_closed_position": (
                         {
+                            "historyId": latest_closed.get("historyId"),
                             "instId": latest_closed.get("instId"),
                             "side": latest_closed.get("side"),
                             "openAveragePrice": latest_closed.get("openAveragePrice"),
@@ -7544,6 +7584,8 @@ def _blofin_demo_autopilot_worker() -> None:
                     "latest_closed_profitable": (
                         latest_realized_pnl > 0 if latest_realized_pnl is not None else None
                     ),
+                    "learning_outcome_update": learning_outcome_update,
+                    "learning_memory_integrity": learning_integrity,
                     "exchange_read_errors": snapshot.get("read_errors", []),
                 }
             except Exception as monitor_exc:
@@ -7551,6 +7593,12 @@ def _blofin_demo_autopilot_worker() -> None:
                     "exchange_monitor_status": "UNKNOWN",
                     "exchange_monitor_error_type": type(monitor_exc).__name__,
                 }
+            finally:
+                if monitor_store is not None:
+                    try:
+                        monitor_store.close()
+                    except Exception:
+                        pass
             with LOCK:
                 job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 result = job.get("result") if isinstance(job.get("result"), dict) else {}
