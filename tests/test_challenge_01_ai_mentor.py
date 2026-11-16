@@ -14,6 +14,7 @@ from crypto_super_radar.challenge_01_ai_mentor import (
     MODEL_FEATURES,
     _feature_vector,
     build_pattern_context,
+    CONTEXT_WINDOW_LENGTH,
     MARKET_CONTEXT_VERSION,
     review_baseline,
     review_locked_baseline,
@@ -74,6 +75,15 @@ class Challenge01AIMentorTests(unittest.TestCase):
         ]
         for candle_item in feature_window:
             candle_item["volume"] = "10"
+        context_prefix = [
+            {
+                "open_time_ms": feature_ts - (CONTEXT_WINDOW_LENGTH - index) * 3_600_000,
+                "open": "100", "high": "103", "low": "98", "close": "100",
+                "volume": "10", "confirmed": True,
+            }
+            for index in range(CONTEXT_WINDOW_LENGTH - FEATURE_WINDOW_LENGTH)
+        ]
+        context_window = context_prefix + feature_window
         feature = feature_window[-1]
         target = {
             "open_time_ms": target_ts,
@@ -88,8 +98,10 @@ class Challenge01AIMentorTests(unittest.TestCase):
             "feature_candle": feature,
             "feature_window": feature_window,
             "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
+            "context_window": context_window,
+            "context_window_open_times_ms": [candle["open_time_ms"] for candle in context_window],
             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
-            "pattern_context": build_pattern_context(feature_window),
+            "pattern_context": build_pattern_context(context_window),
             "prediction_horizon_bars": 1,
             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
             "target_candle_in_input": False,
@@ -126,6 +138,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
                     "reference_classification": "BULLISH_CANDLE",
                     "feature_candle_open_time_ms": feature_ts,
                     "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
+                    "context_window_open_times_ms": [candle["open_time_ms"] for candle in context_window],
                     "target_candle_open_time_ms": target_ts,
                     "target_candle": target,
                     "prediction_horizon_bars": 1,
@@ -241,16 +254,17 @@ class Challenge01AIMentorTests(unittest.TestCase):
                 "low": str(99 + index), "close": str(102 + index),
                 "confirmed": True,
             }
-            for index in range(5)
+            for index in range(CONTEXT_WINDOW_LENGTH)
         ]
         context = build_pattern_context(candles)
         self.assertEqual(context["version"], MARKET_CONTEXT_VERSION)
-        self.assertEqual(context["window_trend"], "UP")
-        self.assertEqual(context["volume_data_quality"], "UNAVAILABLE")
-        self.assertEqual(context["volume_confirmation"], "UNKNOWN")
-        self.assertEqual(context["support_resistance_scope"], "LOCAL_FIVE_BAR_REFERENCE_NOT_STRUCTURAL_LEVEL")
+        self.assertEqual(context["history_bars"], CONTEXT_WINDOW_LENGTH)
+        self.assertEqual(context["trend"], "BULLISH")
+        self.assertIsNone(context["volume_ratio"])
+        self.assertEqual(context["price_action_structure"]["order_block"]["status"], "UNKNOWN")
+        self.assertEqual(context["support_resistance_scope"], "CONFIRMED_SWING_PIVOTS_FROM_50_COMPLETED_BARS")
         changed = [dict(item) for item in candles]
-        changed[-1].update({"open": "101", "high": "103", "low": "99", "close": "100"})
+        changed[-1].update({"open": "150", "high": "152", "low": "149", "close": "150"})
         self.assertNotEqual(build_pattern_context(changed), context)
         with self.assertRaises(ValueError):
             build_pattern_context(candles[:-1])
@@ -386,7 +400,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         )
         self.assertEqual(stored_model["training"]["samples"], 80)
         self.assertEqual(stored_model["temporal_validation"]["samples"], 20)
-        self.assertEqual(stored_model["schema"], "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3")
+        self.assertEqual(stored_model["schema"], "CSR_CH01_CANDLE_PATTERN_PA_SOFTMAX_V4")
         self.assertEqual(stored_model["feature_window_length"], 5)
         self.assertIn("bullish_engulfing_2bar", stored_model["features"])
         self.assertIn("morning_star_3bar", stored_model["features"])
@@ -397,6 +411,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertEqual(stored_model["pattern_catalog_version"], "CSR_CANDLE_HEURISTICS_5BAR_V2")
         self.assertEqual(stored_model["market_context_version"], MARKET_CONTEXT_VERSION)
         self.assertEqual(stored_model["market_context_scope"], "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES")
+        self.assertEqual(stored_model["context_window_length"], CONTEXT_WINDOW_LENGTH)
         self.assertIn("MORNING_STAR", stored_model["pattern_catalog"])
         loaded_artifact, loaded_anchor = load_candidate_artifact(self.memory)
         self.assertEqual(loaded_artifact["artifact_sha256"], candidate["artifact_sha256"])
