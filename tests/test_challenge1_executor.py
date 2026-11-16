@@ -60,6 +60,16 @@ class Challenge1OrderPlanTests(unittest.TestCase):
                 leverage=1, policy=BloFinDemoRiskPolicy(max_leverage=1),
             )
 
+    def test_legacy_execution_profiles_are_rejected(self):
+        for legacy_profile in ("EASY", "STANDARD", "STRICT"):
+            bad = record()
+            bad["execution_profile"] = legacy_profile
+            with self.subTest(profile=legacy_profile), self.assertRaises(BloFinDemoExecutionBlocked):
+                build_demo_order_plan(
+                    bad, instrument(), inst_id="BTC-USDT", equity_usdt=1000,
+                    leverage=1, policy=BloFinDemoRiskPolicy(max_leverage=1),
+                )
+
     def test_pattern_profile_rejects_pattern_direction_mismatch(self):
         bad = record()
         bad["challenge1_evidence"]["chosen_pattern"]["direction"] = "BEARISH"

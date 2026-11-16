@@ -153,7 +153,7 @@ def build_demo_order_plan(
     leverage: int = 1,
     policy: BloFinDemoRiskPolicy | None = None,
 ) -> dict[str, Any]:
-    """Validate a 12-gate signal and size USDT-linear contracts from stop risk."""
+    """Validate Challenge 1 evidence and size Demo contracts from stop risk."""
     policy = policy or BloFinDemoRiskPolicy()
     record = _analysis_record(signal)
     side = str(record.get("signal", "")).upper()
@@ -165,7 +165,9 @@ def build_demo_order_plan(
     if not signal_id:
         raise BloFinDemoExecutionBlocked("A stable signal_id or signal_bar is required for idempotency.")
 
-    execution_profile = str(record.get("execution_profile") or "STRICT").strip().upper()
+    execution_profile = str(record.get("execution_profile") or "").strip().upper()
+    if execution_profile != "CHALLENGE_1":
+        raise BloFinDemoExecutionBlocked("Only Challenge 1 strategy evidence is allowed for BloFin Demo orders.")
     if execution_profile == "CHALLENGE_1":
         evidence = record.get("challenge1_evidence")
         if not isinstance(evidence, Mapping):

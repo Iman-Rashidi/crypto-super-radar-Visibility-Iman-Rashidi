@@ -75,7 +75,7 @@ BLOFIN_AUTOPILOT_STATE = {
     "environment": "BLOFIN_DEMO",
     "market": "BTC-USDT",
     "instrument_id": "BTC-USDT",
-    "execution_profile": "EASY",
+    "execution_profile": "CHALLENGE_1",
     "interval_seconds": 300,
     "last_cycle_started_at_utc": None,
     "last_cycle_finished_at_utc": None,
@@ -3202,7 +3202,7 @@ def _blofin_execution_report_fa(job: dict) -> dict:
     stage = str(current.get("stage") or status).upper()
     direction = str(analysis.get("signal") or result.get("signal") or order.get("side") or "NO_TRADE").upper()
     instrument_id = str(context.get("instrument_id") or result.get("instrument_id") or order.get("instrument_id") or "—")
-    execution_profile = str(context.get("execution_profile") or result.get("execution_profile") or analysis.get("execution_profile") or "EASY")
+    execution_profile = str(context.get("execution_profile") or result.get("execution_profile") or analysis.get("execution_profile") or "CHALLENGE_1")
 
     status_labels = {
         "QUEUED": "در صف اجرا",
@@ -3758,7 +3758,7 @@ def _blofin_demo_instrument_options(*, force: bool = False) -> dict:
 
 
 def _run_blofin_demo_execution_job(
-    job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "EASY",
+    job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "CHALLENGE_1",
 ) -> None:
     """Analyze a selected BloFin linear USDT perpetual with the selected robot profile."""
     store = None
@@ -3768,7 +3768,7 @@ def _run_blofin_demo_execution_job(
         execution_profile = str(execution_profile or "").strip().upper()
         if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
             raise BloFinDemoExecutionBlocked("Invalid BloFin USDT perpetual instrument.")
-        if execution_profile not in {"CHALLENGE_1", "EASY", "STANDARD", "STRICT"}:
+        if execution_profile != "CHALLENGE_1":
             raise BloFinDemoExecutionBlocked("Invalid execution profile.")
         _set_blofin_execution_job(
             job_id, "running", stage="READINESS_CHECK",
@@ -7050,11 +7050,11 @@ async function loadBlofinInstruments(){
                 if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
                     return self._send(401, json.dumps({"status":"UNAUTHORIZED","message_fa":"توکن پنل معتبر نیست."}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 instrument_id = str(form.get("instrument", [""])[0] or "").strip().upper()
-                execution_profile = str(form.get("profile", ["CHALLENGE_1"])[0] or "EASY").strip().upper()
+                execution_profile = str(form.get("profile", ["CHALLENGE_1"])[0] or "CHALLENGE_1").strip().upper()
                 if (
                     form.get("confirm", [""])[0] != "1"
                     or not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id)
-                    or execution_profile not in {"CHALLENGE_1", "EASY", "STANDARD", "STRICT"}
+                    or execution_profile != "CHALLENGE_1"
                 ):
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
                 readiness = _blofin_demo_execution_readiness()
@@ -7092,7 +7092,7 @@ async function loadBlofinInstruments(){
                         return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
                 return self._send(202, json.dumps({
                     "status": "QUEUED", "job_id": job_id,
-                    "message_fa": "اسکن زنده ۱۲ گیت، تحلیل Nemotron و کنترل سفارش Demo آغاز شد.",
+                    "message_fa": "تحلیل Strategy 1 با الگوهای کندلی و نموداری در BloFin Demo آغاز شد.",
                 }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             if route == "/api/ai/dry-run":
                 if (
@@ -7304,7 +7304,7 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
 
 
 def _blofin_demo_autopilot_worker() -> None:
-    """Run guarded, profile-configurable BloFin Demo cycles while the process is awake."""
+    """Run only Challenge 1 pattern-driven cycles on BloFin Demo while awake."""
     try:
         configured_interval = int(os.getenv("BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS", "300"))
     except (TypeError, ValueError):
