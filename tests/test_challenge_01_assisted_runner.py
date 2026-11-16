@@ -4,6 +4,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import crypto_super_radar.challenge_01_assisted_runner as assisted_runner_module
 
 from crypto_super_radar.challenge_01_ai_mentor import CONTEXT_WINDOW_LENGTH, FEATURE_WINDOW_LENGTH, build_pattern_context, detect_candlestick_patterns, review_locked_baseline
 from crypto_super_radar.challenge_01_assisted_runner import Challenge01AssistedRunner
@@ -356,6 +359,75 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
         self.assertEqual(final_status["mastery_status"], "NOT_EARNED")
         self.assertTrue(final_status["later_rounds_blocked"])
     
+    def test_assisted_round_locks_both_predictions_before_target_and_mentor_after_outcomes(self):
+        self.seed_locked_baseline()
+        events_by_target = {}
+        original_decision = LearningExperienceMemory.record_decision
+        original_outcome = LearningExperienceMemory.record_outcome
+        original_label = assisted_runner_module._reference_label
+        original_review = assisted_runner_module.review_baseline
+
+        def events(target_time):
+            return events_by_target.setdefault(int(target_time), [])
+
+        def tracked_decision(memory, *args, **kwargs):
+            result = original_decision(memory, *args, **kwargs)
+            snapshot = kwargs["input_snapshot"]
+            if snapshot.get("round_number") == 2:
+                events(snapshot["target_candle_open_time_ms"]).append(
+                    ("DECISION", kwargs["decision_mode"])
+                )
+            return result
+
+        def tracked_label(target):
+            target_time = int(target["open_time_ms"])
+            if target_time > self.last_target_time:
+                events(target_time).append(("TARGET_READ", None))
+            return original_label(target)
+
+        def tracked_outcome(memory, *args, **kwargs):
+            result = original_outcome(memory, *args, **kwargs)
+            evidence = kwargs["evidence"]
+            target_time = int(evidence["target_candle_open_time_ms"])
+            if target_time > self.last_target_time:
+                events(target_time).append(("OUTCOME", kwargs["experience_id"].endswith("-mentor")))
+            return result
+
+        def tracked_review(memory, experience_id):
+            result = original_review(memory, experience_id)
+            target_time = int(experience_id.rsplit("-", 1)[1])
+            if target_time > self.last_target_time:
+                events(target_time).append(("MENTOR_REVIEW", None))
+            return result
+
+        runner = Challenge01AssistedRunner(
+            client=self.client,
+            connection_factory=self.connection_factory,
+            backend_factory=lambda: "TEST_SQLITE_FILE",
+            allow_non_durable_for_tests=True,
+        )
+        with (
+            patch.object(LearningExperienceMemory, "record_decision", tracked_decision),
+            patch.object(LearningExperienceMemory, "record_outcome", tracked_outcome),
+            patch.object(assisted_runner_module, "_reference_label", tracked_label),
+            patch.object(assisted_runner_module, "review_baseline", tracked_review),
+        ):
+            result = runner.run_round(round_number=2, sample_count=100)
+
+        self.assertEqual(result["status"], "ROUND_RECORDED_NOT_MASTERY", msg=repr(result))
+        self.assertEqual(len(events_by_target), 100)
+        expected = [
+            ("DECISION", "BOT_ONLY"),
+            ("DECISION", "BOT_WITH_AI_MENTOR"),
+            ("TARGET_READ", None),
+            ("OUTCOME", False),
+            ("OUTCOME", True),
+            ("MENTOR_REVIEW", None),
+        ]
+        for target_time, observed in events_by_target.items():
+            with self.subTest(target_time=target_time):
+                self.assertEqual(observed, expected)
+
     def test_round_two_blocks_without_100_verified_prior_round_targets(self):
         runner = Challenge01AssistedRunner(
             client=self.client,
