@@ -930,99 +930,167 @@ class BloFinDemoEventStore:
         return any(event.get("event_type") == "OUTCOME_LABELLED" for event in experience["events"])
 
     def record_closed_position_outcome(
-        self, *, instrument_id: str, history_rows: Any,
+        self,
+        *,
+        instrument_id: str,
+        history_rows: Any,
+        partial_history_rows: Any = None,
     ) -> dict[str, Any] | None:
-        """Append one final outcome only when exchange history unambiguously matches our Demo order."""
-        candidates = [
+        """Record a final outcome only from unambiguous exchange position history."""
+        instrument = str(instrument_id or "").strip().upper()
+        closed = [
             row for row in history_rows
             if isinstance(row, Mapping)
-            and str(row.get("instId") or "").upper() == str(instrument_id).upper()
+            and str(row.get("instId") or "").upper() == instrument
         ] if isinstance(history_rows, list) else []
+        partial = [
+            row for row in partial_history_rows
+            if isinstance(row, Mapping)
+            and str(row.get("instId") or "").upper() == instrument
+        ] if isinstance(partial_history_rows, list) else []
         with self._lock:
             order_row = self._db.execute(
                 "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
                 "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED') "
-                "ORDER BY created_at DESC LIMIT 1",
-                (str(instrument_id).upper(),),
+                "AND outcome_recorded_at IS NULL ORDER BY created_at DESC LIMIT 1",
+                (instrument,),
             ).fetchone()
             if order_row is None:
                 return None
             order = dict(order_row)
-            if order.get("outcome_recorded_at") is not None:
-                return {"status": "ALREADY_RECORDED", "experience_id": order.get("experience_id")}
-        expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
-        try:
-            order_created_ms = int(order.get("created_at") or 0) * 1000
-            reference_entry = float(order.get("entry_price"))
-            expected_quantity = float(order.get("quantity"))
-        except (TypeError, ValueError, OverflowError):
-            return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
-        matches = []
+
         linked_position_id = str(order.get("position_id") or "")
-        for row in candidates:
-            try:
-                row_position_id = str(row.get("positionId") or "")
-                if linked_position_id and row_position_id != linked_position_id:
-                    continue
-                side = str(row.get("side") or "").lower()
-                opened_ms = int(row.get("createTime") or 0)
-                open_price = float(row.get("openAveragePrice"))
-                closed_quantity = float(row.get("closePositions"))
-                total_quantity = float(row.get("maxPositions"))
-                pnl = float(row.get("realizedPnl"))
-                fee = float(row.get("fee") or 0.0)
+        if linked_position_id:
+            final_matches = [
+                row for row in closed
+                if str(row.get("positionId") or "") == linked_position_id
+            ]
+            partial_matches = [
+                row for row in partial
+                if str(row.get("positionId") or "") == linked_position_id
+            ]
+            if len(final_matches) != 1:
+                return {
+                    "status": "WAITING_FOR_EXACT_CLOSED_POSITION",
+                    "candidate_count": len(final_matches),
+                    "experience_id": order.get("experience_id"),
+                }
+            all_rows = partial_matches + final_matches
+            unique_rows = {}
+            for row in all_rows:
                 history_id = str(row.get("historyId") or "")
-                if not all(math.isfinite(value) for value in (
-                    open_price, closed_quantity, total_quantity, pnl, fee
-                )):
-                    continue
+                if history_id:
+                    unique_rows[history_id] = dict(row)
+            all_rows = list(unique_rows.values())
+            if not all_rows:
+                return {"status": "WAITING_FOR_HISTORY_IDS", "experience_id": order.get("experience_id")}
+            try:
+                total_closed = sum(_finite(row.get("closePositions"), "history.closePositions", minimum=0) for row in all_rows)
+                total_size = _finite(final_matches[0].get("maxPositions"), "history.maxPositions", minimum=0)
+                tolerance = max(1e-9, total_size * 1e-6)
+                if abs(total_closed - total_size) > tolerance:
+                    return {
+                        "status": "WAITING_FOR_FULL_POSITION_CLOSE",
+                        "closed_quantity": total_closed,
+                        "expected_quantity": total_size,
+                        "experience_id": order.get("experience_id"),
+                    }
+                realized_pnl = sum(_finite(row.get("realizedPnl"), "history.realizedPnl") for row in all_rows)
+                trading_fees = sum(_finite(row.get("fee", 0), "history.fee") for row in all_rows)
             except (TypeError, ValueError, OverflowError):
-                continue
-            price_deviation = abs(open_price - reference_entry) / reference_entry
-            quantity_tolerance = max(1e-9, abs(expected_quantity) * 1e-6)
-            if (
-                side == expected_side
-                and opened_ms >= order_created_ms - 60_000
-                and price_deviation <= 0.005
-                and abs(closed_quantity - total_quantity) <= quantity_tolerance
-                and abs(total_quantity - expected_quantity) <= max(quantity_tolerance, 1e-6)
-                and history_id
-            ):
-                matches.append({
-                    "row": dict(row), "history_id": history_id,
-                    "realized_pnl": pnl, "trading_fee": fee,
-                    "realized_after_reported_fee": pnl - fee,
-                })
-        if len(matches) != 1:
-            return {
-                "status": "WAITING_FOR_UNAMBIGUOUS_EXCHANGE_HISTORY",
-                "candidate_count": len(matches),
-                "experience_id": order.get("experience_id"),
+                return {"status": "WAITING_FOR_VALID_CLOSED_HISTORY", "experience_id": order.get("experience_id")}
+            history_ids = sorted(unique_rows)
+            evidence = {
+                "source": "BLOFIN_DEMO_POSITIONS_HISTORY",
+                "instrument_id": instrument,
+                "position_id": linked_position_id,
+                "closed_history_ids": sorted(str(row.get("historyId") or "") for row in final_matches),
+                "partial_history_ids": sorted(str(row.get("historyId") or "") for row in partial_matches if row.get("historyId")),
+                "all_history_ids": history_ids,
+                "closed_quantity": total_closed,
+                "expected_position_quantity": total_size,
+                "realized_pnl_before_trading_fees": realized_pnl,
+                "trading_fees": trading_fees,
+                "net_pnl_method": "sum(realizedPnl) - sum(fee)",
+                "funding_fee_included": False,
+                "funding_fee_attribution": "NOT_YET_RECONCILED",
+                "mark_to_market_pnl_used": False,
             }
-        match = matches[0]
-        net_before_funding = match["realized_after_reported_fee"]
+        else:
+            # Legacy fallback for historical orders created before positionId linking.
+            expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
+            try:
+                order_created_ms = int(order.get("created_at") or 0) * 1000
+                reference_entry = float(order.get("entry_price"))
+                expected_quantity = float(order.get("quantity"))
+            except (TypeError, ValueError, OverflowError):
+                return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
+            matches = []
+            for row in closed:
+                try:
+                    side = str(row.get("side") or "").lower()
+                    opened_ms = int(row.get("createTime") or 0)
+                    open_price = float(row.get("openAveragePrice"))
+                    closed_quantity = float(row.get("closePositions"))
+                    total_quantity = float(row.get("maxPositions"))
+                    pnl = float(row.get("realizedPnl"))
+                    fee = float(row.get("fee") or 0.0)
+                    history_id = str(row.get("historyId") or "")
+                    if not all(math.isfinite(value) for value in (
+                        open_price, closed_quantity, total_quantity, pnl, fee
+                    )):
+                        continue
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                price_deviation = abs(open_price - reference_entry) / reference_entry
+                quantity_tolerance = max(1e-9, abs(expected_quantity) * 1e-6)
+                if (
+                    side == expected_side
+                    and opened_ms >= order_created_ms - 60_000
+                    and price_deviation <= 0.005
+                    and abs(closed_quantity - total_quantity) <= quantity_tolerance
+                    and abs(total_quantity - expected_quantity) <= max(quantity_tolerance, 1e-6)
+                    and history_id
+                ):
+                    matches.append(dict(row))
+            if len(matches) != 1:
+                return {
+                    "status": "WAITING_FOR_UNAMBIGUOUS_EXCHANGE_HISTORY",
+                    "candidate_count": len(matches),
+                    "experience_id": order.get("experience_id"),
+                }
+            match = matches[0]
+            realized_pnl = _finite(match.get("realizedPnl"), "history.realizedPnl")
+            trading_fees = _finite(match.get("fee", 0), "history.fee")
+            evidence = {
+                "source": "BLOFIN_DEMO_CLOSED_POSITION_HISTORY",
+                "exchange_history_id": str(match.get("historyId")),
+                "instrument_id": instrument,
+                "position_side": str(match.get("positionSide") or ""),
+                "open_average_price": match.get("openAveragePrice"),
+                "close_average_price": match.get("closeAveragePrice"),
+                "closed_quantity": match.get("closePositions"),
+                "exchange_realized_pnl": match.get("realizedPnl"),
+                "exchange_trading_fee": match.get("fee"),
+                "funding_fee_included": False,
+                "funding_fee_attribution": "NOT_YET_RECONCILED",
+            }
+            history_ids = [str(match.get("historyId"))]
+
+        net_before_funding = realized_pnl - trading_fees
+        if not math.isfinite(net_before_funding):
+            return {"status": "WAITING_FOR_FINITE_NET_PNL", "experience_id": order.get("experience_id")}
         result = (
             "PROFIT" if net_before_funding > 1e-8
             else "LOSS" if net_before_funding < -1e-8
             else "BREAKEVEN"
         )
-        evidence = {
-            "source": "BLOFIN_DEMO_CLOSED_POSITION_HISTORY",
-            "exchange_history_id": match["history_id"],
-            "instrument_id": str(instrument_id).upper(),
-            "position_side": str(match["row"].get("positionSide") or ""),
-            "open_average_price": match["row"].get("openAveragePrice"),
-            "close_average_price": match["row"].get("closeAveragePrice"),
-            "closed_quantity": match["row"].get("closePositions"),
-            "exchange_realized_pnl": match["row"].get("realizedPnl"),
-            "exchange_trading_fee": match["row"].get("fee"),
+        evidence.update({
             "realized_pnl_after_reported_trading_fee": net_before_funding,
-            "funding_fees_included": False,
-            "funding_fee_attribution": "NOT_YET_RECONCILED",
-            "decision_correctness": "UNKNOWN_PENDING_INDEPENDENT_REVIEW",
+            "decision_correctness": "UNKNOWN_PENDING_FUNDING_FEE_RECONCILIATION",
             "orders_submitted": True,
             "trade_executed": True,
-        }
+        })
         experience_id = str(order["experience_id"])
         with self._lock, self._db:
             latest = self._db.execute(
@@ -1045,11 +1113,11 @@ class BloFinDemoEventStore:
             self._db.execute(
                 "UPDATE blofin_demo_orders SET outcome_recorded_at=?, position_history_id=?, updated_at=? "
                 "WHERE client_order_id=?",
-                (now, match["history_id"], now, order["client_order_id"]),
+                (now, ",".join(history_ids), now, order["client_order_id"]),
             )
             self._append_event(order["client_order_id"], "OUTCOME_RECORDED", {
                 "experience_id": experience_id,
-                "exchange_history_id": match["history_id"],
+                "exchange_history_ids": history_ids,
                 "realized_result": result,
                 "realized_pnl_after_reported_trading_fee": net_before_funding,
                 "funding_fee_attribution": "NOT_YET_RECONCILED",
@@ -1057,7 +1125,7 @@ class BloFinDemoEventStore:
         return {
             "status": "RECORDED",
             "experience_id": experience_id,
-            "exchange_history_id": match["history_id"],
+            "exchange_history_ids": history_ids,
             "realized_result": result,
             "realized_pnl_after_reported_trading_fee": net_before_funding,
             "funding_fee_attribution": "NOT_YET_RECONCILED",
