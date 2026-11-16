@@ -200,6 +200,12 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             decision_event = next(e for e in assisted["events"] if e["event_type"] == "DECISION_RECORDED")
             outcome_event = next(e for e in assisted["events"] if e["event_type"] == "OUTCOME_LABELLED")
             snapshot = decision_event["payload"]["input_snapshot"]
+            # A Mentor prediction must reference only the previously reviewed
+            # round's baseline anchor, never the paired current sample outcome.
+            self.assertEqual(
+                decision_event["payload"]["baseline_experience_id"],
+                candidate["model_candidate"]["anchor_experience_id"],
+            )
             self.assertFalse(snapshot["target_candle_in_input"])
             self.assertEqual(len(snapshot["context_window"]), CONTEXT_WINDOW_LENGTH)
             self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["context_window"]))
