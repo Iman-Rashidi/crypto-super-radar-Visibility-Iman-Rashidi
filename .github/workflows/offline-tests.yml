@@ -65,6 +65,7 @@ jobs:
           python -m crypto_super_radar.order_flow_service --help
           python scripts/paper_trading_bot.py --help
       - name: Publish refreshed Render source archive
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail

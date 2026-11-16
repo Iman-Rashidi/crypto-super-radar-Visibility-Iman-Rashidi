@@ -211,9 +211,10 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
             }]
         })
         result = self.client.get_tradable_instrument("BTC-USDT")
-        self.assertEqual(result["contractValue"], 0.001)
-        self.assertEqual(result["minSize"], 0.1)
-        self.assertEqual(result["lotSize"], 0.1)
+        self.assertEqual(result["contractValue"], "0.001")
+        self.assertEqual(result["minSize"], "0.1")
+        self.assertEqual(result["lotSize"], "0.1")
+        self.assertEqual(result["tickSize"], "0.5")
         self.assertEqual(result["apiPermission"], "full")
         args, _ = self.session.get.call_args
         self.assertIn("apiPermission=full", args[0])
