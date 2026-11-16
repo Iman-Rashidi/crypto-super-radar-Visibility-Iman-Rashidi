@@ -36,18 +36,37 @@ def signal_record(**overrides):
         "signal": "LONG",
         "signal_id": "candle-2026-11-13T18:00:00Z",
         "inst_id": "BTC-USDT",
-        "execution_profile": "STRICT",
-        "confirmation_score": 90,
-        "estimated_risk_score": 20,
-        "gate_pass_count": 12,
-        "gate_fail_count": 0,
-        "gate_unknown_count": 0,
+        "execution_profile": "CHALLENGE_1",
+        "confirmation_score": None,
+        "estimated_risk_score": None,
+        "gate_pass_count": pass_count,
+        "gate_fail_count": fail_count,
+        "gate_unknown_count": unknown_count,
         "gates": [{"gate_id": gate_id, "status": statuses[gate_id - 1]} for gate_id in range(1, 13)],
         "entry_price_usd": 100.0,
         "stop_loss_usd": 98.0,
         "take_profit_usd": 104.0,
     }
     record.update(overrides)
+    side = str(record["signal"]).upper()
+    pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
+    pattern_name = "Bullish Engulfing" if side == "LONG" else "Bearish Engulfing"
+    record["challenge1_evidence"] = {
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
+        "setup_timeframe": "15m",
+        "context_timeframe": "1H",
+        "completed_candles_only": True,
+        "legacy_12_gates_used_for_entry": False,
+        "external_ai_required": False,
+        "tinyfish_required": False,
+        "decision": side,
+        "detected_patterns": [{"name_en": pattern_name, "direction": pattern_direction}],
+        "chosen_pattern": {"name_en": pattern_name, "direction": pattern_direction},
+        "confirmation_candle": {
+            "open_time_utc": "2026-11-13T18:00:00+00:00",
+            "volume_confirmation": {"confirmed": True, "volume_ratio": 1.4},
+        },
+    }
     return record
 
 
@@ -98,94 +117,26 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
         self.assertEqual(plan["leverage"], 3)
         self.assertEqual(plan["client_order_id"], "205ccdbb36207dcd1acb9eba0a30ec04")
 
-    def test_rejects_failed_or_unknown_confirmation_gate(self):
+    def test_legacy_gate_rows_are_observational_not_entry_requirements(self):
         for overrides in (
-            {"gate_fail_count": 1, "gate_pass_count": 11},
-            {"gate_unknown_count": 1, "gate_pass_count": 11},
-            {"gate_pass_count": 11},
+            {"gate_fail_count": 12, "gate_pass_count": 0, "gate_unknown_count": 0},
+            {"gate_unknown_count": 12, "gate_pass_count": 0, "gate_fail_count": 0},
         ):
             with self.subTest(overrides=overrides):
-                with self.assertRaises(BloFinDemoExecutionBlocked):
-                    build_demo_order_plan(
-                        signal_record(**overrides), instrument_record(),
-                        inst_id="BTC-USDT", equity_usdt=1000,
-                    )
+                plan = build_demo_order_plan(
+                    signal_record(**overrides), instrument_record(),
+                    inst_id="BTC-USDT", equity_usdt=1000, leverage=1,
+                    policy=BloFinDemoRiskPolicy(max_leverage=1),
+                )
+                self.assertEqual(plan["side"], "LONG")
 
-    def test_easy_profile_allows_seven_required_passes_and_advisory_unknowns(self):
-        required = {1, 2, 3, 4, 5, 6, 9}
-        gates = [
-            {"gate_id": gate_id, "status": "PASS" if gate_id in required else "UNKNOWN"}
-            for gate_id in range(1, 13)
-        ]
-        record = signal_record(
-            execution_profile="EASY",
-            confirmation_score=65,
-            gate_pass_count=7,
-            gate_fail_count=0,
-            gate_unknown_count=5,
-            gates=gates,
-        )
-        plan = build_demo_order_plan(
-            record, instrument_record(), inst_id="BTC-USDT",
-            equity_usdt=1000, leverage=1,
-            policy=BloFinDemoRiskPolicy(max_leverage=1, min_confirmation_score=55),
-        )
-        self.assertEqual(plan["leverage"], 1)
-        self.assertEqual(plan["risk_budget_usdt"], 2.5)
-
-    def test_easy_profile_keeps_non_required_research_failures_advisory(self):
-        required = {1, 2, 3, 4, 5, 6, 9}
-        gates = [
-            {"gate_id": gate_id,
-             "status": "PASS" if gate_id in required else ("FAIL" if gate_id == 7 else "UNKNOWN")}
-            for gate_id in range(1, 13)
-        ]
-        record = signal_record(
-            execution_profile="EASY", confirmation_score=65,
-            gate_pass_count=7, gate_fail_count=1, gate_unknown_count=4,
-            gates=gates,
-        )
-        plan = build_demo_order_plan(
-            record, instrument_record(), inst_id="BTC-USDT",
-            equity_usdt=1000, leverage=1,
-            policy=BloFinDemoRiskPolicy(max_leverage=1, min_confirmation_score=55),
-        )
-        self.assertEqual(plan["leverage"], 1)
-
-    def test_strict_profile_rejects_the_same_advisory_unknowns(self):
-        required = {1, 2, 3, 4, 5, 6, 9}
-        gates = [
-            {"gate_id": gate_id, "status": "PASS" if gate_id in required else "UNKNOWN"}
-            for gate_id in range(1, 13)
-        ]
-        record = signal_record(
-            execution_profile="STRICT", confirmation_score=90,
-            gate_pass_count=7, gate_fail_count=0, gate_unknown_count=5,
-            gates=gates,
-        )
-        with self.assertRaises(BloFinDemoExecutionBlocked):
-            build_demo_order_plan(
-                record, instrument_record(), inst_id="BTC-USDT",
-                equity_usdt=1000, leverage=1,
-            )
-
-    def test_standard_profile_requires_its_nine_gate_set(self):
-        required = {1, 2, 3, 4, 5, 6, 8, 9, 10}
-        gates = [
-            {"gate_id": gate_id, "status": "PASS" if gate_id in required else "UNKNOWN"}
-            for gate_id in range(1, 13)
-        ]
-        record = signal_record(
-            execution_profile="STANDARD", confirmation_score=70,
-            gate_pass_count=9, gate_fail_count=0, gate_unknown_count=3,
-            gates=gates,
-        )
-        plan = build_demo_order_plan(
-            record, instrument_record(), inst_id="BTC-USDT",
-            equity_usdt=1000, leverage=1,
-            policy=BloFinDemoRiskPolicy(max_leverage=1, min_confirmation_score=65),
-        )
-        self.assertEqual(plan["leverage"], 1)
+    def test_legacy_execution_profiles_are_rejected(self):
+        for profile in ("EASY", "STANDARD", "STRICT"):
+            with self.subTest(profile=profile), self.assertRaises(BloFinDemoExecutionBlocked):
+                build_demo_order_plan(
+                    signal_record(execution_profile=profile), instrument_record(),
+                    inst_id="BTC-USDT", equity_usdt=1000, leverage=1,
+                )
 
     def test_rejects_reduced_only_or_non_linear_contract(self):
         for overrides in (

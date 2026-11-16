@@ -307,6 +307,7 @@ def analyze_blofin_challenge1(
     entry = stop = target = None
     signal_id = None
 
+    decision_code = "CONFLICTING_PATTERNS" if bullish and bearish else "NO_TRADE"
     if bullish and bearish:
         reason_fa = "الگوهای صعودی و نزولی هم‌زمان دیده شدند؛ به‌دلیل تعارض، هیچ سفارشی صادر نمی‌شود."
     elif not patterns_15m:
@@ -377,7 +378,7 @@ def analyze_blofin_challenge1(
         "legacy_12_gates_used_for_entry": False,
         "external_ai_required": False,
         "tinyfish_required": False,
-        "decision": signal,
+        "decision": decision_code if decision_code == "CONFLICTING_PATTERNS" else signal,
         "detected_patterns": all_detected,
         "chosen_pattern": chosen,
         "confirmation_candle": confirmation_candle,

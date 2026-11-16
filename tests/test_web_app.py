@@ -973,7 +973,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn(b"Cross-origin", payload)
 
 
-    def test_blofin_market_and_robot_are_human_selectable_and_contract_catalog_is_live(self):
+    def test_blofin_market_and_challenge1_is_the_only_demo_strategy_and_contract_catalog_is_live(self):
         status, _, home = self.request("GET", "/")
         page = home.decode("utf-8")
         self.assertEqual(status, 200)
@@ -981,7 +981,15 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('id="blofin-instrument"', page)
         self.assertIn('id="blofin-engine-profile"', page)
         self.assertIn("USDT Perpetual · Linear SWAP", page)
-        self.assertIn("EASY TRADER", page)
+        profile_match = re.search(
+            r'<select[^>]*id="blofin-engine-profile"[^>]*>(.*?)</select>',
+            page,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(profile_match)
+        profile_options = profile_match.group(1)
+        self.assertIn('value="CHALLENGE_1"', profile_options)
+        self.assertNotRegex(profile_options, r'value="(?:EASY|STANDARD|STRICT)"')
         self.assertIn("جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود", page)
 
         payload = {
@@ -1002,33 +1010,33 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(catalog_body), payload)
         options.assert_called_once_with(force=True)
 
-    def test_blofin_farsi_execution_report_identifies_selected_contract_and_robot(self):
+    def test_blofin_farsi_execution_report_identifies_selected_contract_and_strategy(self):
         report = web_app._blofin_execution_report_fa({
             "status": "completed",
             "stage": "PROFILE_GATE_REVIEW",
             "message_fa": "شرایط ورود هنوز کامل نیست.",
             "trade_context": {
                 "instrument_id": "ETH-USDT",
-                "execution_profile": "EASY",
+                "execution_profile": "CHALLENGE_1",
                 "analysis_time_utc": "2026-11-15T05:00:00+00:00",
             },
             "analysis": {
                 "signal": "NO_TRADE",
-                "gate_pass_count": 6,
+                "gate_pass_count": 0,
                 "gate_fail_count": 0,
-                "gate_unknown_count": 6,
+                "gate_unknown_count": 12,
             },
             "result": {
                 "status": "NO_TRADE",
                 "orders_submitted": False,
                 "trade_executed": False,
-                "reason_fa": "گیت ضروری حساب تأیید نشد.",
+                "reason_fa": "الگوی معتبر پیدا نشد.",
             },
         })
         self.assertIn("ETH-USDT", report["title_fa"])
         self.assertEqual(report["instrument_id"], "ETH-USDT")
-        self.assertEqual(report["execution_profile"], "EASY")
-        self.assertIn("ربات آسان", report["stage_fa"])
+        self.assertEqual(report["execution_profile"], "CHALLENGE_1")
+        self.assertIn("Challenge 1", report["stage_fa"])
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
@@ -1046,8 +1054,12 @@ class WebAppHttpTests(unittest.TestCase):
                 job = web_app.BLOFIN_EXECUTION_JOBS.setdefault(job_id, {})
                 job.update({"status": status, **values})
 
+        observed_profiles = []
+
         def complete_no_trade_cycle(job_id, instrument_id, execution_profile):
             cycle_ids.append(job_id)
+            observed_profiles.append(execution_profile)
+            self.assertEqual(execution_profile, "CHALLENGE_1")
             record_job(
                 job_id,
                 "completed",
@@ -1082,8 +1094,7 @@ class WebAppHttpTests(unittest.TestCase):
                 patch.dict(os.environ, {
                     "BLOFIN_DEMO_AUTOPILOT_ENABLED": "true",
                     "BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS": "300",
-                    "BLOFIN_DEMO_AUTOPILOT_INSTRUMENT": "BTC-USDT",
-                    "BLOFIN_DEMO_AUTOPILOT_PROFILE": "EASY",
+                    "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS": "BTC-USDT",
                 }),
                 patch.object(web_app, "SCAN_RUNNING", False),
                 patch.object(web_app, "_set_blofin_execution_job", side_effect=record_job),
@@ -1102,6 +1113,7 @@ class WebAppHttpTests(unittest.TestCase):
                     web_app._blofin_demo_autopilot_worker()
 
             self.assertEqual(len(cycle_ids), 2)
+            self.assertEqual(observed_profiles, ["CHALLENGE_1", "CHALLENGE_1"])
             self.assertEqual(sleep_calls, [300, 300])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SEARCHING_FOR_SIGNAL")
