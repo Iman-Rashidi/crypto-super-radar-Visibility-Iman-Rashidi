@@ -1,0 +1,51 @@
+name: gate-a-eventstore-integrity
+
+on:
+  push:
+    branches:
+      - gate/gate-a-eventstore-integrity
+  pull_request:
+    branches:
+      - main
+    paths:
+      - crypto_super_radar/event_store_*.py
+      - crypto_super_radar/persistent_event_store.py
+      - crypto_super_radar/order_state_machine.py
+      - tests/test_gate_a_integrity.py
+      - scripts/verify_evaluation_protocol.py
+      - docs/evaluation_protocol.yaml
+      - docs/evaluation_protocol.sha256
+      - .github/workflows/gate-a-eventstore-integrity.yml
+
+permissions:
+  contents: read
+
+jobs:
+  gate-a-offline-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test runner
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+      - name: Compile Gate-A source and tests
+        run: python -m compileall -q crypto_super_radar scripts tests
+      - name: Run Gate-A isolated SQLite tests
+        run: python -m pytest -q tests/test_gate_a_integrity.py
+      - name: Verify evaluation protocol integrity
+        run: python scripts/verify_evaluation_protocol.py
+      - name: Confirm evaluation remains blocked until thresholds are registered
+        run: |
+          set +e
+          python scripts/verify_evaluation_protocol.py --require-ready
+          status=$?
+          set -e
+          if [ "$status" -ne 2 ]; then
+            echo "Expected evaluation readiness to remain blocked with exit code 2; got $status"
+            exit 1
+          fi
