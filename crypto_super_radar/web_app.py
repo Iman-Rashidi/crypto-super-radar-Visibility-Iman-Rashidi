@@ -2927,6 +2927,13 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             ),
             [],
         )
+        partially_closed_positions = read(
+            "partially_closed_positions_history",
+            lambda: client.get_positions_history(
+                inst_id=inst_id, state="partially_closed", limit=100,
+            ),
+            [],
+        )
 
         order_detail = None
         latest_matches_instrument = (
@@ -3075,6 +3082,7 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             "fills": rows(fills, fill_fields),
             "completed_orders": rows(completed_orders, order_fields),
             "closed_positions": rows(closed_positions, closed_fields),
+            "partially_closed_positions": rows(partially_closed_positions, closed_fields),
             "open_tpsl_orders": rows(open_tpsl, tpsl_fields),
             "tpsl_orders_history": rows(tpsl_history, tpsl_fields),
             "execution_events": execution_events,
@@ -7551,6 +7559,7 @@ def _blofin_demo_autopilot_worker() -> None:
                 learning_outcome_update = monitor_store.record_closed_position_outcome(
                     instrument_id=monitor_instrument_id,
                     history_rows=closed_rows,
+                    partial_history_rows=snapshot.get("partially_closed_positions", []),
                 )
                 learning_integrity = monitor_store.learning_memory.integrity_report()
                 exchange_monitor = {
