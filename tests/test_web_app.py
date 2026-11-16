@@ -65,6 +65,21 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_send_silently_handles_disconnected_client(self):
+        class BrokenPipeStream:
+            def write(self, _content):
+                raise BrokenPipeError("client disconnected")
+
+        handler = object.__new__(Handler)
+        handler.close_connection = False
+        handler.send_response = lambda _status: None
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+        handler.wfile = BrokenPipeStream()
+
+        self.assertFalse(handler._send(200, b"response"))
+        self.assertTrue(handler.close_connection)
+
     def test_home_page_is_persian_and_lists_twelve_gates(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
