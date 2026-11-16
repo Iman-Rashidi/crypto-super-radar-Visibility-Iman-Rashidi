@@ -704,6 +704,27 @@ class LearningExperienceMemory:
             rows = self._load_rows(experience_key)
             return self._verify_rows(rows, experience_key)
 
+    def integrity_report(self) -> dict[str, Any]:
+        """Verify every persisted experience, not only the most recent sample."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT experience_id FROM learning_experience_events ORDER BY experience_id"
+            ).fetchall()
+            experience_ids = [str(row["experience_id"]) for row in rows]
+            failures = []
+            for experience_id in experience_ids:
+                verification = self._verify_rows(self._load_rows(experience_id), experience_id)
+                if verification["status"] != "PASS":
+                    failures.append({
+                        "experience_id": experience_id,
+                        "errors": verification["errors"],
+                    })
+        return {
+            "status": "NO_DATA" if not experience_ids else "FAIL" if failures else "PASS",
+            "experiences_checked": len(experience_ids),
+            "failed_experiences": failures,
+        }
+
     def _verify_rows(
         self, rows: list[dict[str, Any]], experience_id: str | None = None
     ) -> dict[str, Any]:
