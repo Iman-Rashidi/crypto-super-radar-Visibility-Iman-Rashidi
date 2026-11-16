@@ -407,9 +407,10 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "realizedPnl": "99",
             "fee": "0",
         }]
-        self.assertIsNone(self.store.record_closed_position_outcome(
+        mismatch_result = self.store.record_closed_position_outcome(
             instrument_id="BTC-USDT", history_rows=mismatched,
-        ))
+        )
+        self.assertEqual(mismatch_result["status"], "WAITING_FOR_FINAL_CLOSED_POSITION")
 
         partial = [{
             "historyId": "h-partial",
@@ -432,16 +433,18 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         saved = self.store.record_closed_position_outcome(
             instrument_id="BTC-USDT",
             history_rows=closed,
-            partial_history_rows=partial,
+            partial_rows=partial,
         )
-        self.assertEqual(saved["learning_status"], "OUTCOME_RECORDED")
-        outcome = saved["events"][-1]["payload"]
+        self.assertEqual(saved["status"], "RECORDED")
+        experience = self.store.learning_memory.get_experience(experience_id)
+        self.assertEqual(experience["learning_status"], "OUTCOME_RECORDED")
+        outcome = experience["events"][-1]["payload"]
         self.assertEqual(outcome["realized_result"], "PROFIT")
         self.assertAlmostEqual(outcome["realized_net_pnl"], 1.3)
-        self.assertFalse(outcome["evidence"]["funding_fee_included"])
-        self.assertEqual(
-            outcome["evidence"]["net_pnl_method"],
-            "sum(realizedPnl) - sum(fee)",
+        self.assertFalse(outcome["evidence"]["funding_fees_included"])
+        self.assertAlmostEqual(
+            outcome["evidence"]["realized_pnl_after_reported_trading_fees"],
+            1.3,
         )
         self.assertEqual(self.store.orders_pending_learning_outcome(), [])
 
