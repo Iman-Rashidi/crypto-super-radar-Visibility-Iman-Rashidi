@@ -554,7 +554,7 @@ class Challenge01Runner:
                 "live_trading": False,
                 "first_experience_id": first_experience_id,
                 "example_experience_ids": [
-                    f"ch01-r{round_number:02d}-btc-usdt-1h-{item['target']['open_time_ms']}"
+                    f"ch01-r{round_number:02d}-btc-usdt-1h-{item['target_open_time_ms']}"
                     for item in samples[:3]
                 ],
             }
