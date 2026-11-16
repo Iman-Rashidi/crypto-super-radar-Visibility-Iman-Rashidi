@@ -2893,15 +2893,16 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             lambda: client.get_futures_balance(product_type="USDT-FUTURES"),
             {},
         )
+        # Concurrency limits are account-wide; the dashboard must observe the same scope.
         positions = read(
-            "positions", lambda: client.get_positions(inst_id=inst_id), []
+            "positions", lambda: client.get_positions(), []
         )
         open_orders = read(
-            "open_orders", lambda: client.get_open_orders(inst_id=inst_id), []
+            "open_orders", lambda: client.get_open_orders(), []
         )
         open_tpsl = read(
             "open_tpsl_orders",
-            lambda: client.get_open_tpsl_orders(inst_id=inst_id, limit=100),
+            lambda: client.get_open_tpsl_orders(limit=100),
             [],
         )
         tpsl_history = read(
@@ -3039,6 +3040,8 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
         )
         return {
             "instrument_id": inst_id,
+            "position_scope": "ACCOUNT_WIDE",
+            "open_order_scope": "ACCOUNT_WIDE",
             "status": (
                 "AUTH_FAILED"
                 if any(item.get("error_type") == "BloFinDemoAuthError" for item in read_errors)
@@ -3851,7 +3854,34 @@ def _run_blofin_demo_execution_job(
                 message_fa=f"موتور Challenge 1 در حال بررسی کندل‌های بسته‌شده و الگوهای {instrument_id} است؛ بدون TinyFish و بدون مدل پولی.",
                 trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
             )
-            challenge_record = analyze_blofin_challenge1(read_client, instrument_id)
+            try:
+                challenge_record = analyze_blofin_challenge1(read_client, instrument_id)
+            except ValueError as exc:
+                reason_fa = (
+                    f"تحلیل Challenge 1 برای {instrument_id} به‌دلیل دادهٔ کندل نامعتبر یا ناکافی متوقف شد: "
+                    + str(exc)[:160]
+                )
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="NO_TRADE",
+                    message_fa=reason_fa,
+                    analysis={
+                        "instrument_id": instrument_id,
+                        "execution_profile": "CHALLENGE_1",
+                        "signal": "NO_TRADE",
+                        "error_type": "ValueError",
+                    },
+                    trade_context={
+                        "instrument_id": instrument_id,
+                        "execution_profile": "CHALLENGE_1",
+                    },
+                    result={
+                        "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                        "signal": "NO_TRADE", "reason_fa": reason_fa,
+                        "error_type": "ValueError",
+                        "orders_submitted": False, "trade_executed": False,
+                    },
+                )
+                return
             mtf_signal = challenge_record.get("execution") if isinstance(challenge_record.get("execution"), dict) else {}
             last_candle_time = challenge_record.get("signal_bar_open_utc")
             last_candle_close = challenge_record.get("entry_price_usd")
