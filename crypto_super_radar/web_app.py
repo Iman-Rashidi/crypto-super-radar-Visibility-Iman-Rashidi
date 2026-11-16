@@ -3272,7 +3272,9 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         })
 
     stage_fa = stage_labels.get(stage, "مرحلهٔ پردازش")
-    if execution_profile == "EASY":
+    if execution_profile == "CHALLENGE_1":
+        stage_fa = "Challenge 1 · " + stage_fa
+    elif execution_profile == "EASY":
         stage_fa = "موتور Challenge 1 · " + stage_fa
     elif execution_profile == "STANDARD":
         stage_fa = "ربات استاندارد · " + stage_fa
