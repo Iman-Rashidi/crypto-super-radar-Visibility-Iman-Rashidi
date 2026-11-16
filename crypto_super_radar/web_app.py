@@ -3770,6 +3770,8 @@ def _run_blofin_demo_execution_job(
     """Analyze a selected BloFin linear USDT perpetual with the selected robot profile."""
     store = None
     submission_started = False
+    learning_experience_id = None
+    learning_signal = "NO_TRADE"
     try:
         instrument_id = str(instrument_id or "").strip().upper()
         execution_profile = str(execution_profile or "").strip().upper()
@@ -3856,6 +3858,14 @@ def _run_blofin_demo_execution_job(
             )
             try:
                 challenge_record = analyze_blofin_challenge1(read_client, instrument_id)
+                # Persist every closed-candle decision before any execution branch.
+                # The stable candle identity deduplicates repeated five-minute polls.
+                learning_experience_id = store.record_challenge1_decision(
+                    instrument_id=instrument_id,
+                    challenge_record=challenge_record,
+                )
+                learning_signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
+                challenge_record["learning_experience_id"] = learning_experience_id
             except ValueError as exc:
                 reason_fa = (
                     f"تحلیل Challenge 1 برای {instrument_id} به‌دلیل دادهٔ کندل نامعتبر یا ناکافی متوقف شد: "
@@ -3924,6 +3934,13 @@ def _run_blofin_demo_execution_job(
                 or mtf_signal.get("status") != "PASS"
             ):
                 reason_fa = str(challenge_record.get("reason_fa") or "الگوی معتبر Challenge 1 پیدا نشد؛ تصمیم صحیح عدم معامله است.")
+                store.record_experience_not_executed(
+                    experience_id=learning_experience_id,
+                    instrument_id=instrument_id,
+                    signal=learning_signal,
+                    stage="CHALLENGE_1_SIGNAL_REJECTED",
+                    reason=reason_fa,
+                )
                 _set_blofin_execution_job(
                     job_id, "completed", stage="NO_TRADE",
                     message_fa=reason_fa,
@@ -4446,6 +4463,19 @@ def _run_blofin_demo_execution_job(
             },
         )
     except BloFinDemoExecutionBlocked as exc:
+        if store is not None and learning_experience_id and not submission_started:
+            try:
+                prior_order = store.get_order_for_experience(learning_experience_id)
+                if prior_order is None or prior_order.get("status") == "REJECTED":
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="EXECUTION_BLOCKED",
+                        reason=str(exc),
+                    )
+            except Exception:
+                pass
         _set_blofin_execution_job(
             job_id, "completed", stage="BLOCKED",
             message_fa=str(exc),
