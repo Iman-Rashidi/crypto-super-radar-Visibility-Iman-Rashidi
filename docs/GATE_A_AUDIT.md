@@ -81,6 +81,15 @@ python scripts/verify_evaluation_protocol.py --require-ready
 - No Render service, environment variable, database secret, or Production setting is changed.
 - No deployment approval is implied by a passing local or GitHub Actions test run.
 
+## Execution evidence
+
+- GitHub Actions workflow: `gate-a-eventstore-integrity`
+- First CI run: `43778888103`
+- Tested commit: `0c96b4ad68dde9c33a5bdffd2175e4d63e905ef3`
+- Result: **10 pytest tests passed in 0.23s**
+- Protocol SHA-256 verification: **PASS** (`0d4546b158436d139dc39b80683ab03dc130b6410ccc45be671b079adc19a468`)
+- Evaluation readiness check: **BLOCKED as expected** because the protocol is still `DRAFT_BLOCKED` and numeric thresholds are unset.
+
 ## Gate status
 
-**Gate-A remains OPEN / NOT ACCEPTED** until the tests are evidenced on the target commit and the Prediction lineage question is resolved. Local SQLite integrity tests do not prove persistence on Render or connection to the running trading bot.
+**Gate-A remains OPEN / NOT ACCEPTED.** The ten local SQLite integrity tests pass, but the Prediction lineage requirement is not represented in the current schema. Local CI also does not prove persistence on Render or connection to the running trading bot. No test result is being promoted into a claim of end-to-end memory integration.
