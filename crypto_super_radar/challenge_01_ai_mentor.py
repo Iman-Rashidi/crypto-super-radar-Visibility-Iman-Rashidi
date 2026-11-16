@@ -95,12 +95,31 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
         issues.append("This exercise must contain a final non-executed label, not a trade/PnL outcome.")
 
     context_window = snapshot.get("context_window")
-    if isinstance(context_window, list) and len(context_window) == CONTEXT_WINDOW_LENGTH:
+    if (
+        not isinstance(context_window, list)
+        or len(context_window) != CONTEXT_WINDOW_LENGTH
+        or any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in context_window)
+        or not isinstance(feature_window, list)
+        or len(feature_window) != FEATURE_WINDOW_LENGTH
+        or context_window[-FEATURE_WINDOW_LENGTH:] != feature_window
+        or snapshot.get("context_window_open_times_ms")
+        != [candle.get("open_time_ms") for candle in context_window]
+        or any(
+            not isinstance(candle.get("open_time_ms"), int)
+            for candle in context_window
+        )
+        or any(
+            right["open_time_ms"] - left["open_time_ms"] != BAR_MILLISECONDS
+            for left, right in zip(context_window, context_window[1:])
+        )
+    ):
+        issues.append("The 50-bar context history is missing, incomplete, non-contiguous, or inconsistent with the five-bar pattern window.")
+    else:
         try:
             expected_context = build_pattern_context(context_window)
         except (TypeError, ValueError, KeyError):
             expected_context = None
-        if snapshot.get("pattern_context") != expected_context:
+        if expected_context is None or snapshot.get("pattern_context") != expected_context:
             issues.append("The stored 50-bar trend, volatility, structure and Price Action context is missing or inconsistent.")
     finding_text = " ".join(issues) if issues else "Feature/target chronology and input isolation checks passed."
     detected_patterns = snapshot.get("detected_candlestick_patterns") or []
