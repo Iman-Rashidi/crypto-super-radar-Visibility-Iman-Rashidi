@@ -304,10 +304,24 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             self.assertEqual(next_result["sample_count"], 100)
             self.assertEqual(next_result["memory_records_verified"], 200)
             self.assertEqual(next_result["memory_integrity"], "PASS")
-            self.assertEqual(
-                next_result["next_model_candidate"]["trained_through_round"],
-                next_round,
-            )
+            if next_round < 5:
+                self.assertEqual(
+                    next_result["next_model_candidate"]["trained_through_round"],
+                    next_round,
+                )
+                self.assertEqual(
+                    next_result["next_model_candidate_status"],
+                    "CANDIDATE_STORED_FOR_NEXT_ROUND",
+                )
+            else:
+                self.assertIsNone(next_result["next_model_candidate"])
+                self.assertEqual(
+                    next_result["next_model_candidate_status"],
+                    "NOT_REQUIRED_FINAL_ROUND",
+                )
+                self.assertEqual(
+                    next_result["next_stage"], "CHALLENGE_REVIEW_REQUIRED",
+                )
             self.assertFalse(next_result["mastery_awarded"])
             self.assertFalse(next_result["orders_submitted"])
             self.assertEqual(
@@ -321,7 +335,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             allow_non_durable_for_tests=True,
         )
         self.assertEqual(final_status["highest_completed_round"], 5)
-        self.assertEqual(final_status["candidate_model_through_round"], 5)
+        self.assertEqual(final_status["candidate_model_through_round"], 4)
         self.assertTrue(final_status["candidate_model_ready"])
         self.assertIsNone(final_status["next_round"])
         self.assertEqual(final_status["next_stage"], "CHALLENGE_REVIEW_REQUIRED")
