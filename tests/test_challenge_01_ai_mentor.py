@@ -45,6 +45,16 @@ class Challenge01AIMentorTests(unittest.TestCase):
         target_ts = feature_ts + 3_600_000
         feature_window = [
             {
+                "open_time_ms": feature_ts - 4 * 3_600_000,
+                "open": "100", "high": "103", "low": "98", "close": "100",
+                "confirmed": True,
+            },
+            {
+                "open_time_ms": feature_ts - 3 * 3_600_000,
+                "open": "100", "high": "103", "low": "98", "close": "99",
+                "confirmed": True,
+            },
+            {
                 "open_time_ms": feature_ts - 2 * 3_600_000,
                 "open": "100", "high": "103", "low": "98", "close": "99",
                 "confirmed": True,
@@ -136,7 +146,11 @@ class Challenge01AIMentorTests(unittest.TestCase):
             {"open_time_ms": 7_200_000, "open": "99", "high": "106", "low": "98", "close": "105", "confirmed": True},
         ]
         self.assertIn("BULLISH_ENGULFING", detect_candlestick_patterns(engulfing_window))
-        engulfing_vector = dict(zip(MODEL_FEATURES, _feature_vector(engulfing_window)))
+        neutral_prefix = [
+            {"open_time_ms": -2 * 3_600_000, "open": "100", "high": "101", "low": "99", "close": "100", "confirmed": True},
+            {"open_time_ms": -1 * 3_600_000, "open": "100", "high": "101", "low": "99", "close": "100", "confirmed": True},
+        ]
+        engulfing_vector = dict(zip(MODEL_FEATURES, _feature_vector(neutral_prefix + engulfing_window)))
         self.assertEqual(engulfing_vector["bullish_engulfing_2bar"], 1.0)
 
         morning_star_window = [
@@ -145,7 +159,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
             {"open_time_ms": 7_200_000, "open": "100.5", "high": "109", "low": "100", "close": "108", "confirmed": True},
         ]
         self.assertIn("MORNING_STAR", detect_candlestick_patterns(morning_star_window))
-        morning_vector = dict(zip(MODEL_FEATURES, _feature_vector(morning_star_window)))
+        morning_vector = dict(zip(MODEL_FEATURES, _feature_vector(neutral_prefix + morning_star_window)))
         self.assertEqual(morning_vector["morning_star_3bar"], 1.0)
 
         weak_first_morning_window = [
@@ -154,6 +168,54 @@ class Challenge01AIMentorTests(unittest.TestCase):
             {"open_time_ms": 7_200_000, "open": "105.5", "high": "109", "low": "105", "close": "108", "confirmed": True},
         ]
         self.assertNotIn("MORNING_STAR", detect_candlestick_patterns(weak_first_morning_window))
+
+
+    def test_extended_candle_pattern_catalog_and_five_bar_continuations(self):
+        def bars(values):
+            return [
+                {
+                    "open_time_ms": index * 3_600_000,
+                    "open": str(opening), "high": str(high),
+                    "low": str(low), "close": str(closing),
+                    "confirmed": True,
+                }
+                for index, (opening, high, low, closing) in enumerate(values)
+            ]
+
+        neutral = (100, 101, 99, 100)
+        self.assertIn("DRAGONFLY_DOJI", detect_candlestick_patterns(
+            bars([neutral, neutral, neutral, neutral, (100, 101, 90, 100)])))
+        self.assertIn("GRAVESTONE_DOJI", detect_candlestick_patterns(
+            bars([neutral, neutral, neutral, neutral, (100, 110, 99, 100)])))
+        self.assertIn("LONG_LEGGED_DOJI", detect_candlestick_patterns(
+            bars([neutral, neutral, neutral, neutral, (100, 110, 90, 100)])))
+        self.assertIn("BULLISH_KICKER", detect_candlestick_patterns(bars([
+            neutral, neutral, neutral, (100, 101, 90, 92), (101, 110, 100.5, 110)])))
+        self.assertIn("BEARISH_KICKER", detect_candlestick_patterns(bars([
+            neutral, neutral, neutral, (100, 110, 99, 108), (99, 99.5, 90, 90)])))
+        self.assertIn("THREE_INSIDE_UP", detect_candlestick_patterns(bars([
+            neutral, neutral, (110, 111, 99, 100), (101, 107, 100.5, 106), (106, 113, 105, 112)])))
+        self.assertIn("THREE_INSIDE_DOWN", detect_candlestick_patterns(bars([
+            neutral, neutral, (100, 111, 99, 110), (109, 109.5, 103, 104), (104, 105, 97, 98)])))
+        self.assertIn("THREE_OUTSIDE_UP", detect_candlestick_patterns(bars([
+            neutral, neutral, (105, 106, 99, 100), (99, 108, 98, 107), (107, 111, 106, 110)])))
+        self.assertIn("THREE_OUTSIDE_DOWN", detect_candlestick_patterns(bars([
+            neutral, neutral, (100, 106, 99, 105), (106, 107, 98, 98), (98, 99, 94, 95)])))
+        rising = bars([
+            (100, 112, 99, 110), (110, 111, 102, 108),
+            (108, 109, 101, 106), (106, 107, 100, 104),
+            (105, 114, 104, 113),
+        ])
+        falling = bars([
+            (110, 111, 98, 100), (100, 108, 99, 102),
+            (102, 109, 101, 104), (104, 110, 103, 106),
+            (105, 106, 94, 95),
+        ])
+        self.assertIn("RISING_THREE_METHODS", detect_candlestick_patterns(rising))
+        self.assertIn("FALLING_THREE_METHODS", detect_candlestick_patterns(falling))
+        features = dict(zip(MODEL_FEATURES, _feature_vector(rising)))
+        self.assertEqual(features["rising_three_methods_5bar"], 1.0)
+        self.assertIn("falling_three_methods_5bar", MODEL_FEATURES)
 
     def test_pattern_detector_rejects_incomplete_or_wrong_length_windows(self):
         with self.assertRaises(ValueError):

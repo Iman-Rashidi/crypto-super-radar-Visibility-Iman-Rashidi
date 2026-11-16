@@ -93,7 +93,7 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
     pattern_text = ", ".join(detected_patterns) if detected_patterns else "NO_PATTERN_MATCH"
     feedback = (
         "Baseline audit: " + finding_text
-        + " Three-candle experience patterns detected: " + pattern_text + "."
+        + " Five-candle experience context; detected patterns: " + pattern_text + "."
         + " Pattern names are transparent heuristic labels, not guaranteed signals."
         + " The current BOT_ONLY baseline is a "
         "naive one-bar momentum rule: it copies the prior completed candle's body "
@@ -148,7 +148,7 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
 
 MODEL_CLASSES = ("BEARISH_CANDLE", "NEUTRAL_CANDLE", "BULLISH_CANDLE")
 BAR_MILLISECONDS = 60 * 60 * 1000
-FEATURE_WINDOW_LENGTH = 3
+FEATURE_WINDOW_LENGTH = 5
 CANDLE_CONTINUOUS_FEATURES = (
     "body_return", "range_return", "close_location",
     "upper_wick_return", "lower_wick_return",
@@ -174,6 +174,17 @@ PATTERN_FEATURES = (
     "three_black_crows_3bar",
     "tweezer_bottom_2bar",
     "tweezer_top_2bar",
+    "dragonfly_doji_last",
+    "gravestone_doji_last",
+    "long_legged_doji_last",
+    "bullish_kicker_2bar",
+    "bearish_kicker_2bar",
+    "three_inside_up_3bar",
+    "three_inside_down_3bar",
+    "three_outside_up_3bar",
+    "three_outside_down_3bar",
+    "rising_three_methods_5bar",
+    "falling_three_methods_5bar",
 )
 PATTERN_FEATURE_TO_LABEL = {
     "doji_last": "DOJI",
@@ -196,6 +207,17 @@ PATTERN_FEATURE_TO_LABEL = {
     "three_black_crows_3bar": "THREE_BLACK_CROWS",
     "tweezer_bottom_2bar": "TWEEZER_BOTTOM",
     "tweezer_top_2bar": "TWEEZER_TOP",
+    "dragonfly_doji_last": "DRAGONFLY_DOJI",
+    "gravestone_doji_last": "GRAVESTONE_DOJI",
+    "long_legged_doji_last": "LONG_LEGGED_DOJI",
+    "bullish_kicker_2bar": "BULLISH_KICKER",
+    "bearish_kicker_2bar": "BEARISH_KICKER",
+    "three_inside_up_3bar": "THREE_INSIDE_UP",
+    "three_inside_down_3bar": "THREE_INSIDE_DOWN",
+    "three_outside_up_3bar": "THREE_OUTSIDE_UP",
+    "three_outside_down_3bar": "THREE_OUTSIDE_DOWN",
+    "rising_three_methods_5bar": "RISING_THREE_METHODS",
+    "falling_three_methods_5bar": "FALLING_THREE_METHODS",
 }
 MODEL_FEATURES = tuple(
     f"c{position}_{feature}"
@@ -223,8 +245,19 @@ PATTERN_DEFINITIONS = {
     "THREE_BLACK_CROWS": "Three bearish bodies with successively lower closes and opens inside the preceding real body.",
     "TWEEZER_BOTTOM": "Bearish then bullish candles with lows within 0.1% tolerance.",
     "TWEEZER_TOP": "Bullish then bearish candles with highs within 0.1% tolerance.",
+    "DRAGONFLY_DOJI": "Doji body near the high, lower shadow at least 60% of range and upper shadow at most 10%; reversal context must be assessed separately.",
+    "GRAVESTONE_DOJI": "Doji body near the low, upper shadow at least 60% of range and lower shadow at most 10%; reversal context must be assessed separately.",
+    "LONG_LEGGED_DOJI": "Doji body at most 10% of range with both shadows at least 30% of range.",
+    "BULLISH_KICKER": "A bearish candle followed by a strong bullish candle opening above the prior bearish body top; continuous-market heuristic, not an overnight-gap claim.",
+    "BEARISH_KICKER": "A bullish candle followed by a strong bearish candle opening below the prior bullish body bottom; continuous-market heuristic, not an overnight-gap claim.",
+    "THREE_INSIDE_UP": "A strong bearish candle, a smaller bullish body contained inside it, then a bullish close above the first candle open.",
+    "THREE_INSIDE_DOWN": "A strong bullish candle, a smaller bearish body contained inside it, then a bearish close below the first candle open.",
+    "THREE_OUTSIDE_UP": "A bearish candle engulfed by a bullish candle, followed by another bullish close above the engulfing candle close.",
+    "THREE_OUTSIDE_DOWN": "A bullish candle engulfed by a bearish candle, followed by another bearish close below the engulfing candle close.",
+    "RISING_THREE_METHODS": "Five-bar continuation setup: strong bullish first bar, three small countertrend bars inside its range, then a strong bullish close above its close.",
+    "FALLING_THREE_METHODS": "Five-bar continuation setup: strong bearish first bar, three small countertrend bars inside its range, then a strong bearish close below its close.",
 }
-PATTERN_CATALOG_VERSION = "CSR_CANDLE_HEURISTICS_3BAR_V1"
+PATTERN_CATALOG_VERSION = "CSR_CANDLE_HEURISTICS_5BAR_V2"
 
 
 def _target_label(candle: dict[str, Any]) -> str:
@@ -255,13 +288,13 @@ def _candle_shape(candle: dict[str, Any]) -> dict[str, float]:
 
 
 def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
-    """Detect transparent heuristic 1-3 candle patterns on completed bars only.
+    """Detect transparent heuristic 1-5 candle patterns on completed bars only.
 
     Thresholds are engineering heuristics, not universal textbook definitions.
     The detector never reads a target candle outside the supplied feature window.
     """
-    if not isinstance(candles, list) or len(candles) != FEATURE_WINDOW_LENGTH:
-        raise ValueError("PATTERN_DETECTOR_REQUIRES_THREE_CANDLES")
+    if not isinstance(candles, list) or len(candles) not in {3, FEATURE_WINDOW_LENGTH}:
+        raise ValueError("PATTERN_DETECTOR_REQUIRES_THREE_OR_FIVE_CANDLES")
     if any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in candles):
         raise ValueError("PATTERN_DETECTOR_REQUIRES_COMPLETED_CANDLES")
     timestamps = [candle.get("open_time_ms") for candle in candles]
@@ -274,13 +307,21 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
     ):
         raise ValueError("PATTERN_DETECTOR_REQUIRES_CONTIGUOUS_CHRONOLOGICAL_CANDLES")
     shapes = [_candle_shape(candle) for candle in candles]
-    a, b, c = shapes
+    # Three-bar formations use the latest three completed candles. Five-bar
+    # continuation formations use the complete feature window.
+    a, b, c = shapes[-3:]
     patterns: list[str] = []
     eps = 1e-12
 
     # Most recent candle: single-candle patterns.
     if c["range"] > 0 and c["body_ratio"] <= 0.10:
         patterns.append("DOJI")
+        if c["lower_wick"] >= 0.60 * c["range"] and c["upper_wick"] <= 0.10 * c["range"]:
+            patterns.append("DRAGONFLY_DOJI")
+        elif c["upper_wick"] >= 0.60 * c["range"] and c["lower_wick"] <= 0.10 * c["range"]:
+            patterns.append("GRAVESTONE_DOJI")
+        elif c["upper_wick"] >= 0.30 * c["range"] and c["lower_wick"] >= 0.30 * c["range"]:
+            patterns.append("LONG_LEGGED_DOJI")
     lower_wick_reversal_shape = (
         c["body"] > eps
         and c["lower_wick"] >= 2.0 * c["body"]
@@ -336,6 +377,13 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
     if prev["direction"] > 0 > last["direction"] and abs(prev["high"] - last["high"]) <= tweezer_tolerance:
         patterns.append("TWEEZER_TOP")
 
+    # Kicker-like reversals require decisive body displacement. Crypto trades
+    # continuously, so this does not assume a traditional overnight gap.
+    if prev["direction"] < 0 < last["direction"] and last["open"] > prev["open"] and last["body_ratio"] >= 0.75 and last["close"] > prev["open"]:
+        patterns.append("BULLISH_KICKER")
+    if prev["direction"] > 0 > last["direction"] and last["open"] < prev["open"] and last["body_ratio"] >= 0.75 and last["close"] < prev["open"]:
+        patterns.append("BEARISH_KICKER")
+
     # Three-candle reversals/continuations. Crypto is a 24/7 market, so these
     # heuristic definitions do not require overnight price gaps.
     middle_small = b["range"] > 0 and b["body_ratio"] <= 0.30
@@ -354,8 +402,63 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
         and c["close"] < first_body_midpoint
     ):
         patterns.append("EVENING_STAR")
+    # Three Inside Up/Down: the second body is contained by the first and
+    # the third bar closes through the first candle's open.
     if (
-        all(shape["direction"] > 0 for shape in shapes)
+        a["direction"] < 0 and a["body_ratio"] >= 0.45
+        and b["direction"] > 0
+        and min(b["open"], b["close"]) >= min(a["open"], a["close"])
+        and max(b["open"], b["close"]) <= max(a["open"], a["close"])
+        and c["direction"] > 0 and c["close"] > a["open"]
+    ):
+        patterns.append("THREE_INSIDE_UP")
+    if (
+        a["direction"] > 0 and a["body_ratio"] >= 0.45
+        and b["direction"] < 0
+        and min(b["open"], b["close"]) >= min(a["open"], a["close"])
+        and max(b["open"], b["close"]) <= max(a["open"], a["close"])
+        and c["direction"] < 0 and c["close"] < a["open"]
+    ):
+        patterns.append("THREE_INSIDE_DOWN")
+
+    # Three Outside Up/Down: engulfing on bar two plus confirmation on bar three.
+    if (
+        a["direction"] < 0 < b["direction"]
+        and min(b["open"], b["close"]) <= min(a["open"], a["close"])
+        and max(b["open"], b["close"]) >= max(a["open"], a["close"])
+        and c["direction"] > 0 and c["close"] > b["close"]
+    ):
+        patterns.append("THREE_OUTSIDE_UP")
+    if (
+        a["direction"] > 0 > b["direction"]
+        and min(b["open"], b["close"]) <= min(a["open"], a["close"])
+        and max(b["open"], b["close"]) >= max(a["open"], a["close"])
+        and c["direction"] < 0 and c["close"] < b["close"]
+    ):
+        patterns.append("THREE_OUTSIDE_DOWN")
+
+    # Five-bar continuation formations.
+    if len(shapes) == FEATURE_WINDOW_LENGTH:
+        first, middle_three, final = shapes[0], shapes[1:4], shapes[4]
+        if (
+            first["direction"] > 0 and first["body_ratio"] >= 0.50
+            and all(item["direction"] <= 0 and item["body_ratio"] <= 0.35 for item in middle_three)
+            and all(item["low"] >= first["low"] and item["high"] <= first["high"] for item in middle_three)
+            and final["direction"] > 0 and final["body_ratio"] >= 0.45
+            and final["close"] > first["close"]
+        ):
+            patterns.append("RISING_THREE_METHODS")
+        if (
+            first["direction"] < 0 and first["body_ratio"] >= 0.50
+            and all(item["direction"] >= 0 and item["body_ratio"] <= 0.35 for item in middle_three)
+            and all(item["low"] >= first["low"] and item["high"] <= first["high"] for item in middle_three)
+            and final["direction"] < 0 and final["body_ratio"] >= 0.45
+            and final["close"] < first["close"]
+        ):
+            patterns.append("FALLING_THREE_METHODS")
+
+    if (
+        all(shape["direction"] > 0 for shape in shapes[-3:])
         and a["close"] < b["close"] < c["close"]
         and a["open"] <= b["open"] <= a["close"]
         and b["open"] <= c["open"] <= b["close"]

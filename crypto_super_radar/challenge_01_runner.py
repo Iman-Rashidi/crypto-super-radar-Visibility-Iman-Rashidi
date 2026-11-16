@@ -16,7 +16,7 @@ from typing import Any, Callable
 from .blofin_demo_spot_readonly import BloFinDemoSpotReadOnly
 from .database import connect_database, storage_backend
 from .learning_experience_memory import LearningExperienceMemory
-from .challenge_01_ai_mentor import detect_candlestick_patterns
+from .challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, detect_candlestick_patterns
 
 
 CHALLENGE_ID = "CHALLENGE-01"
@@ -329,11 +329,11 @@ class Challenge01Runner:
                 completed = [item for item in parsed if item["confirmed"]]
                 # A one-bar-ahead sample needs one completed feature candle and
                 # one later completed target candle for every prediction.
-                if len(completed) < sample_count + 3:
+                if len(completed) < sample_count + FEATURE_WINDOW_LENGTH:
                     raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES_FOR_THREE_BAR_FEATURE_WINDOW")
                 # Three completed feature candles plus one later target are
                 # needed per prediction; adjacent windows may overlap safely.
-                selected_desc = completed[-(sample_count + 3):]
+                selected_desc = completed[-(sample_count + FEATURE_WINDOW_LENGTH):]
                 selected = list(reversed(selected_desc))
                 for index in range(len(selected) - 1):
                     if selected[index + 1]["open_time_ms"] - selected[index]["open_time_ms"] != BAR_MILLISECONDS:
@@ -365,9 +365,9 @@ class Challenge01Runner:
 
             samples = [
                 {
-                    "feature_window": selected[index:index + 3],
-                    "feature": selected[index + 2],
-                    "target": selected[index + 3],
+                    "feature_window": selected[index:index + FEATURE_WINDOW_LENGTH],
+                    "feature": selected[index + FEATURE_WINDOW_LENGTH - 1],
+                    "target": selected[index + FEATURE_WINDOW_LENGTH],
                 }
                 for index in range(sample_count)
             ]
@@ -648,7 +648,7 @@ def get_challenge_01_status(
                     if (
                         saved_hash == calculated_hash
                         and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_SOFTMAX_V2"
-                        and artifact.get("feature_window_length") == 3
+                        and artifact.get("feature_window_length") == FEATURE_WINDOW_LENGTH
                         and isinstance(artifact.get("pattern_features"), list)
                         and len(artifact.get("pattern_features")) >= 15
                         and isinstance(artifact.get("pattern_catalog"), dict)

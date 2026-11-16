@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crypto_super_radar.challenge_01_ai_mentor import detect_candlestick_patterns, review_locked_baseline
+from crypto_super_radar.challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, detect_candlestick_patterns, review_locked_baseline
 from crypto_super_radar.challenge_01_assisted_runner import Challenge01AssistedRunner
 from crypto_super_radar.challenge_01_runner import BAR_MILLISECONDS, get_challenge_01_status
 from crypto_super_radar.learning_experience_memory import LearningExperienceMemory
@@ -80,9 +80,9 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             memory = LearningExperienceMemory(db)
             with db:
                 for index in range(100):
-                    feature_window = self.candles[index:index + 3]
+                    feature_window = self.candles[index:index + FEATURE_WINDOW_LENGTH]
                     feature = feature_window[-1]
-                    target = self.candles[index + 3]
+                    target = self.candles[index + FEATURE_WINDOW_LENGTH]
                     feature_ts = feature["open_time_ms"]
                     target_ts = target["open_time_ms"]
                     label = "BULLISH_CANDLE" if float(target["close"]) > 100 else (

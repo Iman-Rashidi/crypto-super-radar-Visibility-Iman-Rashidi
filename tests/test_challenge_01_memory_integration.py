@@ -115,7 +115,7 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
                 snapshot["feature_candle"]["open_time_ms"],
                 snapshot["feature_candle_open_time_ms"],
             )
-            self.assertEqual(len(snapshot["feature_window"]), 3)
+            self.assertEqual(len(snapshot["feature_window"]), 5)
             self.assertEqual(
                 snapshot["feature_window"][-1],
                 snapshot["feature_candle"],

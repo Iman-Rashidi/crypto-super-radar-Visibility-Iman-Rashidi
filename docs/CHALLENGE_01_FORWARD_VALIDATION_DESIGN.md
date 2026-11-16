@@ -22,19 +22,19 @@ The next implementation should convert the skill to:
 
 **At the close of candle t, use only information available through candle t to classify the direction of candle t+1.**
 
-The target label must be derived from the next candle only after the prediction snapshot is frozen.
+The target label must be derived from the next candle only after the five-candle prediction snapshot is frozen. Five-bar continuation formations use the full feature window; three-bar formations use its latest three candles.
 
 ## 3. Proposed data protocol
 
 For every sample:
 
-1. Select one fully completed feature candle t.
+1. Select five fully completed, contiguous feature candles ending at time t.
 2. Freeze the feature snapshot and decision timestamp at or after t closes.
 3. Predict the next candle's direction using no fields from candle t+1.
 4. Once t+1 is complete, append the final outcome and its evidence.
 5. Keep the target candle's OHLC out of the decision input snapshot. It may appear only in the later outcome evidence.
 
-The first round needs 101 consecutive completed candles to produce 100 feature/target pairs. Each later round uses the last completed target candle of the prior round as the first feature candle, plus 100 strictly newer completed target candles.
+The first round needs 105 consecutive completed candles to produce 100 five-candle-feature/next-target pairs. Each later round uses the last completed target candle of the prior round as the first feature candle, plus 100 strictly newer completed target candles.
 
 Required data guards:
 - strict 1H interval adjacency for the first version;
@@ -91,3 +91,10 @@ Do not weaken the memory check to merely accept any baseline ID. Add positive an
 7. Verify on a separate approved staging environment with Turso; do not change the active Render Demo service until separately authorized.
 
 **Do not treat this design document as implementation evidence or permission to deploy.**
+
+
+## 8. Five-candle pattern catalogue extension
+
+The Challenge 1 feature contract now uses five contiguous completed candles before the next-candle target. This enables Rising Three Methods and Falling Three Methods to enter the Mentor feature vector without exposing the future target. The catalogue adds Dragonfly Doji, Gravestone Doji, Long-Legged Doji, Bullish/Bearish Kicker, Three Inside Up/Down, Three Outside Up/Down, and both five-bar continuation formations.
+
+Kicker labels use an explicitly documented continuous-market body-displacement heuristic; they must not be described as proof of a traditional overnight gap. All candle-pattern definitions remain deterministic heuristics. Their predictive value, context sensitivity, and regime-specific reliability remain unproven until independent market-data validation. The five-candle schema and catalogue version are included in candidate-artifact integrity checks.

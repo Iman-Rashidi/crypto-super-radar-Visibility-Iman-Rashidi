@@ -17,6 +17,7 @@ from .challenge_01_ai_mentor import (
     review_baseline,
     train_candidate_from_completed_rounds,
     detect_candlestick_patterns,
+    FEATURE_WINDOW_LENGTH,
 )
 from .challenge_01_runner import (
     BAR_MILLISECONDS,
@@ -95,7 +96,7 @@ class Challenge01AssistedRunner:
                 or feature.get("open_time_ms") != feature_time
                 or feature.get("confirmed") is not True
                 or not isinstance(feature_window, list)
-                or len(feature_window) != 3
+                or len(feature_window) != FEATURE_WINDOW_LENGTH
                 or any(not isinstance(candle, dict) or candle.get("confirmed") is not True for candle in feature_window)
                 or feature_window[-1] != feature
                 or any(
@@ -171,12 +172,12 @@ class Challenge01AssistedRunner:
 
         ordered_times = sorted(by_target)
         last_target_time = ordered_times[-1]
-        last_window_times = ordered_times[-3:]
-        if len(last_window_times) != 3 or any(
+        last_window_times = ordered_times[-FEATURE_WINDOW_LENGTH:]
+        if len(last_window_times) != FEATURE_WINDOW_LENGTH or any(
             right - left != BAR_MILLISECONDS
             for left, right in zip(last_window_times, last_window_times[1:])
         ):
-            raise Challenge01DataError("PRIOR_ROUND_MISSING_THREE_BAR_SEED_WINDOW")
+            raise Challenge01DataError("PRIOR_ROUND_MISSING_FEATURE_WINDOW_SEED")
         last_window = [by_target[timestamp] for timestamp in last_window_times]
         if any(
             next_time - current_time != BAR_MILLISECONDS
