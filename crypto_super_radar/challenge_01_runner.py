@@ -375,17 +375,20 @@ class Challenge01Runner:
                     "context_window": context_window,
                     "feature_window": feature_window,
                     "feature": feature_window[-1],
-                    "target": selected[index + CONTEXT_WINDOW_LENGTH],
+                    # Store only the expected target time/index. Do not read target OHLC
+                    # until this sample's immutable BOT_ONLY decision has been appended.
+                    "target_index": index + CONTEXT_WINDOW_LENGTH,
+                    "target_open_time_ms": context_window[-1]["open_time_ms"] + BAR_MILLISECONDS,
                 })
+            # The dataset version is derived only from information available at
+            # prediction time. Future target OHLC must not influence even its hash.
             dataset_canonical = json.dumps(
                 [
                     [
                         [candle["open_time_ms"] for candle in sample["context_window"]],
                         [[candle["open"], candle["high"], candle["low"], candle["close"], candle.get("volume", 0)]
                          for candle in sample["context_window"]],
-                        sample["target"]["open_time_ms"],
-                        sample["target"]["open"], sample["target"]["high"],
-                        sample["target"]["low"], sample["target"]["close"],
+                        sample["target_open_time_ms"],
                     ]
                     for sample in samples
                 ],
@@ -401,15 +404,13 @@ class Challenge01Runner:
             with connection:
                 for sample in samples:
                     feature_candle = sample["feature"]
-                    target_candle = sample["target"]
                     feature_ts = feature_candle["open_time_ms"]
-                    target_ts = target_candle["open_time_ms"]
+                    target_ts = sample["target_open_time_ms"]
+                    if target_ts != feature_ts + BAR_MILLISECONDS:
+                        raise Challenge01DataError("FEATURE_TARGET_NOT_ONE_BAR_APART")
                     experience_id = f"ch01-r{round_number:02d}-btc-usdt-1h-{target_ts}"
                     first_experience_id = first_experience_id or experience_id
                     prediction, action = _classify_bot(feature_candle)
-                    reference = _reference_label(target_candle)
-                    predictions.append(prediction)
-                    references.append(reference)
                     decision_event = memory.record_decision(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:decision",
@@ -459,6 +460,18 @@ class Challenge01Runner:
                         },
                     )
                     inserted_decisions += int(bool(decision_event.get("inserted")))
+
+                    # The BOT_ONLY prediction is now immutable in the journal.
+                    # Only at this point inspect the future candle's OHLC and label it.
+                    target_candle = selected[sample["target_index"]]
+                    if (
+                        target_candle.get("open_time_ms") != target_ts
+                        or target_candle.get("confirmed") is not True
+                    ):
+                        raise Challenge01DataError("TARGET_CANDLE_NOT_COMPLETED_OR_TIME_MISMATCH")
+                    reference = _reference_label(target_candle)
+                    predictions.append(prediction)
+                    references.append(reference)
                     outcome_event = memory.record_outcome(
                         experience_id=experience_id,
                         event_id=f"{experience_id}:outcome",
