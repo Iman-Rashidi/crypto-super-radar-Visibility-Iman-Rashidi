@@ -16,7 +16,7 @@ from typing import Any, Callable
 from .blofin_demo_spot_readonly import BloFinDemoSpotReadOnly
 from .database import connect_database, storage_backend
 from .learning_experience_memory import LearningExperienceMemory
-from .challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, MARKET_CONTEXT_VERSION, build_pattern_context, detect_candlestick_patterns
+from .challenge_01_ai_mentor import CONTEXT_WINDOW_LENGTH, FEATURE_WINDOW_LENGTH, MARKET_CONTEXT_VERSION, build_pattern_context, detect_candlestick_patterns
 
 
 CHALLENGE_ID = "CHALLENGE-01"
@@ -320,7 +320,7 @@ class Challenge01Runner:
 
             try:
                 rows = self.client.get_candles(
-                    SYMBOL, bar=TIMEFRAME, limit=min(sample_count + 5, 1440), after=after,
+                    SYMBOL, bar=TIMEFRAME, limit=min(sample_count + CONTEXT_WINDOW_LENGTH, 1440), after=after,
                 )
                 if not isinstance(rows, list) or not rows:
                     raise Challenge01DataError("EMPTY_CANDLE_RESPONSE")
@@ -333,11 +333,11 @@ class Challenge01Runner:
                 completed = [item for item in parsed if item["confirmed"]]
                 # A one-bar-ahead sample needs one completed feature candle and
                 # one later completed target candle for every prediction.
-                if len(completed) < sample_count + FEATURE_WINDOW_LENGTH:
-                    raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES_FOR_THREE_BAR_FEATURE_WINDOW")
+                if len(completed) < sample_count + CONTEXT_WINDOW_LENGTH:
+                    raise Challenge01DataError("INSUFFICIENT_COMPLETED_CANDLES_FOR_50_BAR_CONTEXT_WINDOW")
                 # Three completed feature candles plus one later target are
                 # needed per prediction; adjacent windows may overlap safely.
-                selected_desc = completed[-(sample_count + FEATURE_WINDOW_LENGTH):]
+                selected_desc = completed[-(sample_count + CONTEXT_WINDOW_LENGTH):]
                 selected = list(reversed(selected_desc))
                 for index in range(len(selected) - 1):
                     if selected[index + 1]["open_time_ms"] - selected[index]["open_time_ms"] != BAR_MILLISECONDS:
@@ -367,20 +367,22 @@ class Challenge01Runner:
                 result["memory_backend"] = self.backend_factory()
                 return result
 
-            samples = [
-                {
-                    "feature_window": selected[index:index + FEATURE_WINDOW_LENGTH],
-                    "feature": selected[index + FEATURE_WINDOW_LENGTH - 1],
-                    "target": selected[index + FEATURE_WINDOW_LENGTH],
-                }
-                for index in range(sample_count)
-            ]
+            samples = []
+            for index in range(sample_count):
+                context_window = selected[index:index + CONTEXT_WINDOW_LENGTH]
+                feature_window = context_window[-FEATURE_WINDOW_LENGTH:]
+                samples.append({
+                    "context_window": context_window,
+                    "feature_window": feature_window,
+                    "feature": feature_window[-1],
+                    "target": selected[index + CONTEXT_WINDOW_LENGTH],
+                })
             dataset_canonical = json.dumps(
                 [
                     [
-                        [candle["open_time_ms"] for candle in sample["feature_window"]],
+                        [candle["open_time_ms"] for candle in sample["context_window"]],
                         [[candle["open"], candle["high"], candle["low"], candle["close"], candle.get("volume", 0)]
-                         for candle in sample["feature_window"]],
+                         for candle in sample["context_window"]],
                         sample["target"]["open_time_ms"],
                         sample["target"]["open"], sample["target"]["high"],
                         sample["target"]["low"], sample["target"]["close"],
@@ -440,13 +442,17 @@ class Challenge01Runner:
                             "target_candle_open_time_ms": target_ts,
                             "feature_candle": feature_candle,
                             "feature_window": sample["feature_window"],
+                            "context_window": sample["context_window"],
+                            "context_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in sample["context_window"]
+                            ],
                             "feature_window_open_times_ms": [
                                 candle["open_time_ms"] for candle in sample["feature_window"]
                             ],
                             "detected_candlestick_patterns": detect_candlestick_patterns(
                                 sample["feature_window"]
                             ),
-                            "pattern_context": build_pattern_context(sample["feature_window"]),
+                            "pattern_context": build_pattern_context(sample["context_window"]),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -467,6 +473,9 @@ class Challenge01Runner:
                             "feature_candle_open_time_ms": feature_ts,
                             "feature_window_open_times_ms": [
                                 candle["open_time_ms"] for candle in sample["feature_window"]
+                            ],
+                            "context_window_open_times_ms": [
+                                candle["open_time_ms"] for candle in sample["context_window"]
                             ],
                             "target_candle_open_time_ms": target_ts,
                             "target_candle": target_candle,
@@ -652,7 +661,7 @@ def get_challenge_01_status(
                     total_samples = artifact.get("training", {}).get("total_samples")
                     if (
                         saved_hash == calculated_hash
-                        and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3"
+                        and artifact.get("schema") == "CSR_CH01_CANDLE_PATTERN_PA_SOFTMAX_V4"
                         and artifact.get("feature_window_length") == FEATURE_WINDOW_LENGTH
                         and isinstance(artifact.get("pattern_features"), list)
                         and len(artifact.get("pattern_features")) >= 15
@@ -661,6 +670,7 @@ def get_challenge_01_status(
                         and artifact.get("pattern_catalog_version") == "CSR_CANDLE_HEURISTICS_5BAR_V2"
                         and artifact.get("market_context_version") == MARKET_CONTEXT_VERSION
                         and artifact.get("market_context_scope") == "AUDIT_AND_REGIME_STRATIFICATION_ONLY_NOT_MODEL_FEATURES"
+                        and artifact.get("context_window_length") == CONTEXT_WINDOW_LENGTH
                         and isinstance(artifact.get("pattern_feature_mapping"), dict)
                         and len(artifact.get("pattern_feature_mapping")) == len(artifact.get("pattern_features", []))
                         and artifact.get("promotion_status") == "CANDIDATE_NOT_PROMOTED"
