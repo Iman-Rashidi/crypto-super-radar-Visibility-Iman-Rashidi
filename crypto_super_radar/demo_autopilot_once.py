@@ -71,7 +71,8 @@ def _write_step_summary(payload: dict) -> None:
         "",
         "This run used the BloFin Demo environment only. No credentials are included in this summary.",
     ]
-    Path(summary_path).write_text("\n".join(safe_lines) + "\n", encoding="utf-8", errors="replace") if not Path(summary_path).exists() else Path(summary_path).open("a", encoding="utf-8").write("\n".join(safe_lines) + "\n")
+    with Path(summary_path).open("a", encoding="utf-8") as stream:
+        stream.write("\n".join(safe_lines) + "\n")
 
 
 def main() -> int:
