@@ -349,6 +349,45 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertTrue(budget["daily_capacity_available"])
         self.assertEqual(budget["unresolved_orders"], 1)
 
+    def test_challenge1_decision_and_not_executed_outcome_are_durable_and_idempotent(self):
+        challenge = signal_record(signal="NO_TRADE")
+        challenge["reason_fa"] = "No completed pattern confirmation."
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        duplicate_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        self.assertEqual(experience_id, duplicate_id)
+
+        first = self.store.record_experience_not_executed(
+            experience_id=experience_id,
+            instrument_id="BTC-USDT",
+            signal="NO_TRADE",
+            stage="CHALLENGE_1_SIGNAL_REJECTED",
+            reason="No completed pattern confirmation.",
+        )
+        second = self.store.record_experience_not_executed(
+            experience_id=experience_id,
+            instrument_id="BTC-USDT",
+            signal="NO_TRADE",
+            stage="CHALLENGE_1_SIGNAL_REJECTED",
+            reason="No completed pattern confirmation.",
+        )
+        self.assertEqual(first["event_id"], second["event_id"])
+        verified = self.store.learning_memory.verify_experience(experience_id)
+        self.assertEqual(verified["status"], "PASS")
+        experience = self.store.learning_memory.get_experience(experience_id)
+        self.assertEqual(
+            [event["event_type"] for event in experience["events"]],
+            ["DECISION_RECORDED", "OUTCOME_LABELLED"],
+        )
+        outcome = experience["events"][-1]["payload"]
+        self.assertEqual(outcome["realized_result"], "NOT_EXECUTED")
+        self.assertIsNone(outcome["realized_net_pnl"])
+
     def test_event_journal_is_append_only(self):
         plan = self._plan()
         self.store.reserve_order(plan)
