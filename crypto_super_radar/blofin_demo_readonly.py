@@ -99,9 +99,27 @@ class BloFinDemoReadOnly:
     ) -> None:
         # Render dashboard pastes can accidentally retain leading/trailing whitespace.
         # Normalize only the outside; never alter characters inside a credential.
-        self.api_key = str(api_key if api_key is not None else os.getenv("BLOFIN_DEMO_API_KEY", "")).strip()
-        self.api_secret = str(api_secret if api_secret is not None else os.getenv("BLOFIN_DEMO_API_SECRET", "")).strip()
-        self.passphrase = str(passphrase if passphrase is not None else os.getenv("BLOFIN_DEMO_PASSPHRASE", "")).strip()
+        # The read-only account panel may safely reuse the same Demo key that
+        # was configured under the dedicated Trade names. Every operation in
+        # this client remains GET-only; permission scope is not elevated here.
+        self.api_key = str(
+            api_key if api_key is not None else (
+                os.getenv("BLOFIN_DEMO_API_KEY")
+                or os.getenv("BLOFIN_DEMO_TRADE_API_KEY", "")
+            )
+        ).strip()
+        self.api_secret = str(
+            api_secret if api_secret is not None else (
+                os.getenv("BLOFIN_DEMO_API_SECRET")
+                or os.getenv("BLOFIN_DEMO_TRADE_API_SECRET", "")
+            )
+        ).strip()
+        self.passphrase = str(
+            passphrase if passphrase is not None else (
+                os.getenv("BLOFIN_DEMO_PASSPHRASE")
+                or os.getenv("BLOFIN_DEMO_TRADE_PASSPHRASE", "")
+            )
+        ).strip()
         for env_name, credential in (
             ("BLOFIN_DEMO_API_KEY", self.api_key),
             ("BLOFIN_DEMO_API_SECRET", self.api_secret),
