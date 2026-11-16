@@ -1,7 +1,7 @@
 # Challenge 1 — Forward Validation Design
 
-**Status:** Engineering design proposal, not yet implemented or approved as a mastery rule.  
-**Updated:** 2026-11-15  
+**Status:** Partially implemented on the Challenge 1 feature branch. Mastery rules remain unapproved; no Challenge 1 pass is claimed.  
+**Updated:** 2026-11-16  
 **Scope:** BloFin Demo Spot public candles only; no orders, no Live trading.
 
 ## 1. Current verified state
@@ -28,13 +28,14 @@ The target label must be derived from the next candle only after the five-candle
 
 For every sample:
 
-1. Select five fully completed, contiguous feature candles ending at time t.
-2. Freeze the feature snapshot and decision timestamp at or after t closes.
-3. Predict the next candle's direction using no fields from candle t+1.
-4. Once t+1 is complete, append the final outcome and its evidence.
-5. Keep the target candle's OHLC out of the decision input snapshot. It may appear only in the later outcome evidence.
+1. Select 50 fully completed, contiguous context candles ending at time t.
+2. Use only the last five candles of that context as the candlestick-pattern feature window.
+3. Freeze the complete 50-bar context, its derived Price Action evidence, the five-bar pattern window, and decision timestamp at or after t closes.
+4. Predict the next candle's direction using no fields from candle t+1.
+5. Once t+1 is complete, append the final outcome and its evidence.
+6. Keep the target candle and all later candles out of the decision snapshot and its derived context. The target OHLC may appear only in later outcome evidence.
 
-The first round needs 105 consecutive completed candles to produce 100 five-candle-feature/next-target pairs. Each later round uses the last completed target candle of the prior round as the first feature candle, plus 100 strictly newer completed target candles.
+The first round needs 150 consecutive completed candles to produce 100 samples: each prediction uses a 50-candle completed context window, the last five candles of that context form the candlestick-pattern feature window, and the next candle is the target. Each later round seeds its first sample with the prior round's final 50 completed target candles, then consumes 100 strictly newer completed target candles. The 50-candle context and five-candle pattern window must be contiguous, and the five-candle window must exactly equal the final five candles of the context window.
 
 Required data guards:
 - strict 1H interval adjacency for the first version;
@@ -100,8 +101,10 @@ The Challenge 1 feature contract now uses five contiguous completed candles befo
 Kicker labels use an explicitly documented continuous-market body-displacement heuristic; they must not be described as proof of a traditional overnight gap. All candle-pattern definitions remain deterministic heuristics. Their predictive value, context sensitivity, and regime-specific reliability remain unproven until independent market-data validation. The five-candle schema and catalogue version are included in candidate-artifact integrity checks.
 
 
-## 9. Five-bar market context and evidence boundaries
+## 9. Fifty-bar Price Action context and evidence boundaries
 
-Each five-candle feature snapshot stores a reproducible context object derived only from those five completed candles: short-window trend and return, five-bar ATR percentage, range variability and expansion/contraction, last-volume relative to the preceding four-bar median, local prior-window support/resistance references, proximity flags, and local high/low sweep flags. Missing volume is explicitly UNKNOWN. These five-bar price references are not structural support/resistance and cannot establish BOS, CHoCH, order blocks, Fair Value Gaps, or higher-timeframe supply/demand.
+The 50-candle context is recomputed from completed OHLCV bars using existing repository engines: non-repainting confirmed pivots, market regime and trend (EMA20/50/200, RSI14, ADX14, MACD and ATR), relative volume, divergences, Fibonacci retracement setup, geometric chart patterns, Elliott-wave hypothesis, and candlestick/geometric pattern evidence. A separate conservative structure summary records HH/HL and LH/LL, candidate BOS/CHoCH, local liquidity sweeps, retest candidates, and three-bar FVG candidates. Pivot confirmation delay is preserved: a pivot is not known until its right-side confirmation bars have closed.
 
-The Mentor recomputes this object before accepting an experience or training a candidate. It is included in the immutable input snapshot and the candidate dataset hash. For now, these context fields are audit and regime-stratification evidence only, not additional model features: 100 samples yield only 80 training rows, which is too small to justify expanding the feature dimension and claiming stable learned context effects. The candidate artifact records this restriction and uses schema CSR_CH01_CANDLE_PATTERN_CONTEXT_SOFTMAX_V3. It remains unpromoted. Existing baseline decisions and outcomes stay immutable.
+Local five-bar highs/lows are not called structural support/resistance. The 50-bar context uses confirmed swing pivots and is explicitly timestamped at the final feature candle. Order Blocks are recorded as UNKNOWN because this branch has no independently validated Order Block detector; no zone is fabricated. FVG, BOS/CHoCH, retest, and Elliott outputs are descriptive hypotheses, not trade entries or probabilities.
+
+The Mentor recomputes the complete context before accepting or training from an experience. The 50-bar OHLCV context and exact timestamps are retained in the append-only decision snapshot and included in the candidate dataset hash. The candidate model still uses only its five-bar continuous features and 31 candlestick-pattern flags. The richer 50-bar context remains audit and regime-stratification evidence, not added model features: 100 samples provide only 80 training rows, too few to justify enlarging the model feature set and claiming stable learned effects. The candidate schema is CSR_CH01_CANDLE_PATTERN_PA_SOFTMAX_V4 and remains CANDIDATE_NOT_PROMOTED. Existing BOT_ONLY decisions and outcomes are immutable.
