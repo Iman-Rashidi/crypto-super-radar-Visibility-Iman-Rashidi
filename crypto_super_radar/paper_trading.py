@@ -10,6 +10,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,7 +20,7 @@ from .signal_performance import summarize_closed_trades
 from .execution_costs import calculate_fill_costs
 from .paper_execution import PaperExecutionEventLedger, make_paper_client_order_id
 from .ai_second_opinion import ai_connection_status, run_free_ai_second_opinion
-from .learning_experience_memory import LearningExperienceMemory
+from .learning_experience_memory import LearningExperienceMemory, ExperienceNotFoundError
 
 
 def _paper_experience_id(asset: str, signal_bar: str) -> str:
@@ -498,6 +499,45 @@ class PaperLedger:
                 reason=f"PAPER_EXIT:{reason}", occurred_at=closed_at,
             )
             experience_id = _paper_experience_id(p["asset"], p["signal_bar"])
+            # Positions opened before this bridge was deployed have no decision
+            # event. Backfill only the immutable facts available in the ledger,
+            # label the missing feature snapshot explicitly, and timestamp the
+            # decision at its original open time. Never invent candle features.
+            try:
+                self.learning_memory.get_experience(experience_id)
+            except ExperienceNotFoundError:
+                opened_at_utc = datetime.fromtimestamp(
+                    int(p["opened_at"]), tz=timezone.utc
+                ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                self.learning_memory.record_decision(
+                    experience_id=experience_id,
+                    event_id=experience_id + "-decision",
+                    engine_id="PAPER_TRADING_BOT",
+                    challenge_id="PAPER_TRADING_EXPERIENCE",
+                    cycle_id=experience_id,
+                    decision_mode="BOT_ONLY",
+                    environment="PAPER",
+                    decision={
+                        "signal": "LONG", "side": "LONG",
+                        "entry_price": float(p["entry_price"]),
+                        "stop_loss": float(p["initial_stop_loss"] or p["stop_loss"]),
+                        "take_profit": float(p["take_profit"]),
+                        "quantity": float(p["quantity"]),
+                        "confirmation_score": float(p["confirmation_score"]),
+                        "risk_budget_usd": float(p["risk_budget"]),
+                    },
+                    input_snapshot={
+                        "signal_bar": str(p["signal_bar"]),
+                        "feature_snapshot_status": "LEGACY_NOT_CAPTURED",
+                        "legacy_backfill": True,
+                        "future_data_in_input": False,
+                    },
+                    market="CEX_SPOT",
+                    symbol=str(p["asset"]).split(":")[-1],
+                    model_version="LEGACY_BACKFILL_UNKNOWN",
+                    dataset_version="LEGACY_PAPER_LEDGER",
+                    timestamp_utc=opened_at_utc,
+                )
             realized_result = "PROFIT" if net > 1e-8 else "LOSS" if net < -1e-8 else "BREAKEVEN"
             self.learning_memory.record_outcome(
                 experience_id=experience_id,
