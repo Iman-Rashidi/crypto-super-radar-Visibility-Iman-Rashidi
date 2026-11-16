@@ -54,7 +54,7 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
             and snapshot.get("detected_candlestick_patterns") != detect_candlestick_patterns(feature_window)
         )
     ):
-        issues.append("The three-candle feature window or its pattern evidence is missing or inconsistent.")
+        issues.append("The five-candle feature window or its pattern evidence is missing or inconsistent.")
     if evidence.get("comparison") != EXPECTED_COMPARISON:
         issues.append("The outcome label is not a verified next-candle target.")
     if decision.get("rule") != "previous_candle_body_direction":
@@ -465,7 +465,7 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
     ):
         patterns.append("THREE_WHITE_SOLDIERS")
     if (
-        all(shape["direction"] < 0 for shape in shapes)
+        all(shape["direction"] < 0 for shape in shapes[-3:])
         and a["close"] > b["close"] > c["close"]
         and a["close"] <= b["open"] <= a["open"]
         and b["close"] <= c["open"] <= b["open"]
@@ -475,9 +475,9 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
 
 
 def _feature_vector(candles: list[dict[str, Any]]) -> list[float]:
-    """Encode three completed candles plus explicit pattern flags, no target data."""
+    """Encode five completed candles plus explicit pattern flags, no target data."""
     if not isinstance(candles, list) or len(candles) != FEATURE_WINDOW_LENGTH:
-        raise ValueError("FEATURE_WINDOW_REQUIRES_THREE_COMPLETED_CANDLES")
+        raise ValueError("FEATURE_WINDOW_REQUIRES_FIVE_COMPLETED_CANDLES")
     values: list[float] = []
     for candle in candles:
         shape = _candle_shape(candle)
