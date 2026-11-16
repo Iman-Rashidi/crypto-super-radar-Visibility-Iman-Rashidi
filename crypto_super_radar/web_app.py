@@ -320,12 +320,17 @@ def _blofin_demo_connection_status() -> dict:
             "BLOFIN_DEMO_API_SECRET",
             "BLOFIN_DEMO_PASSPHRASE",
         )
-        # Resolve credentials through the same safe fallback as the read-only client:
-        # the existing dedicated Demo Trade key may be reused for GET-only account reads.
-        client = BloFinDemoReadOnly(timeout=8.0)
-        configured = all(bool(value) for value in (
-            client.api_key, client.api_secret, client.passphrase
-        ))
+        # The read-only panel can use the same existing dedicated Demo Trade
+        # credentials, but it never inherits the Trade client's write methods.
+        fallback_names = (
+            "BLOFIN_DEMO_TRADE_API_KEY",
+            "BLOFIN_DEMO_TRADE_API_SECRET",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE",
+        )
+        configured = all(
+            bool(os.getenv(primary, "").strip() or os.getenv(fallback, "").strip())
+            for primary, fallback in zip(credential_names, fallback_names)
+        )
         stage = "ENVIRONMENT_CHECK"
         market_data = "NOT_CHECKED"
         private_api = "NOT_CHECKED"
@@ -342,6 +347,7 @@ def _blofin_demo_connection_status() -> dict:
             cache_seconds = 15
         else:
             try:
+                client = BloFinDemoReadOnly(timeout=8.0)
                 stage = "PUBLIC_MARKET_TICKER"
                 tickers = client.get_tickers(inst_id="BTC-USDT")
                 if not isinstance(tickers, list) or not tickers or not isinstance(tickers[0], dict):
