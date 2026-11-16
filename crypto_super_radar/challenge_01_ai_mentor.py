@@ -67,10 +67,26 @@ def review_baseline(memory: LearningExperienceMemory, experience_id: str) -> dic
         issues.append("Future target data appears in, or is not explicitly excluded from, the decision input.")
     if evidence.get("no_future_data_used_in_input") is not True:
         issues.append("The outcome evidence does not certify feature/target isolation.")
-    if not isinstance(target_candle, dict) or target_candle.get("open_time_ms") != target_ts:
+    if (
+        not isinstance(target_candle, dict)
+        or target_candle.get("open_time_ms") != target_ts
+        or target_candle.get("confirmed") is not True
+    ):
         issues.append("The outcome does not contain the completed target candle matching its timestamp.")
-    if outcome_payload.get("realized_result") != "NOT_EXECUTED":
-        issues.append("This exercise must not be interpreted as a trade result.")
+    else:
+        actual_label = _target_label(target_candle)
+        predicted_label = decision.get("candle_classification")
+        expected_correctness = "CORRECT" if predicted_label == actual_label else "INCORRECT"
+        if evidence.get("reference_classification") != actual_label:
+            issues.append("The stored reference classification does not match the target candle.")
+        if outcome_payload.get("decision_correctness") != expected_correctness:
+            issues.append("The stored correctness label does not match the prediction and target.")
+    if (
+        outcome_payload.get("final") is not True
+        or outcome_payload.get("realized_result") != "NOT_EXECUTED"
+        or outcome_payload.get("realized_net_pnl") is not None
+    ):
+        issues.append("This exercise must contain a final non-executed label, not a trade/PnL outcome.")
 
     finding_text = " ".join(issues) if issues else "Feature/target chronology and input isolation checks passed."
     detected_patterns = snapshot.get("detected_candlestick_patterns") or []
@@ -526,12 +542,18 @@ def _train_and_store_candidate(
             raise ValueError("BASELINE_OUTCOME_OR_MENTOR_REVIEW_NOT_FINAL")
         snapshot = decision_event.get("payload", {}).get("input_snapshot") or {}
         decision = decision_event.get("payload", {}).get("decision") or {}
-        evidence = outcome_event.get("payload", {}).get("evidence") or {}
+        outcome_payload = outcome_event.get("payload") or {}
+        evidence = outcome_payload.get("evidence") or {}
         round_number = snapshot.get("round_number")
         feature = snapshot.get("feature_candle")
         feature_window = snapshot.get("feature_window")
         target = evidence.get("target_candle")
         feature_ts, target_ts = snapshot.get("feature_candle_open_time_ms"), snapshot.get("target_candle_open_time_ms")
+        actual_label = _target_label(target) if isinstance(target, dict) else None
+        predicted_label = decision.get("candle_classification")
+        expected_correctness = (
+            "CORRECT" if predicted_label == actual_label else "INCORRECT"
+        ) if actual_label is not None else None
         if (
             not isinstance(round_number, int)
             or not 1 <= round_number <= trained_through_round
@@ -559,9 +581,14 @@ def _train_and_store_candidate(
             or snapshot.get("feature_window_open_times_ms") != [candle["open_time_ms"] for candle in feature_window]
             or snapshot.get("detected_candlestick_patterns") != detect_candlestick_patterns(feature_window)
             or evidence.get("feature_window_open_times_ms") != [candle["open_time_ms"] for candle in feature_window]
+            or evidence.get("reference_classification") != actual_label
+            or outcome_payload.get("final") is not True
+            or outcome_payload.get("decision_correctness") != expected_correctness
+            or outcome_payload.get("realized_result") != "NOT_EXECUTED"
+            or outcome_payload.get("realized_net_pnl") is not None
         ):
-            raise ValueError("FORWARD_CANDLE_PATTERN_WINDOW_CONTRACT_FAILED")
-        label = _target_label(target)
+            raise ValueError("FORWARD_CANDLE_PATTERN_WINDOW_OR_OUTCOME_CONTRACT_FAILED")
+        label = actual_label
         rows.append({
             "experience_id": experience_id,
             "round_number": round_number,
