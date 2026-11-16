@@ -388,6 +388,56 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(outcome["realized_result"], "NOT_EXECUTED")
         self.assertIsNone(outcome["realized_net_pnl"])
 
+    def test_closed_position_outcome_uses_exact_position_id_and_deducts_trading_fees(self):
+        challenge = signal_record()
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=challenge,
+        )
+        plan = self._plan()
+        plan["experience_id"] = experience_id
+        self.assertTrue(self.store.reserve_order(plan))
+        self.assertTrue(self.store.attach_position_id(experience_id, "demo-position-77"))
+
+        mismatched = [{
+            "historyId": "h-wrong",
+            "positionId": "another-position",
+            "instId": "BTC-USDT",
+            "realizedPnl": "99",
+            "fee": "0",
+        }]
+        self.assertIsNone(self.store.record_closed_position_outcome(
+            experience_id, closed_rows=mismatched,
+        ))
+
+        partial = [{
+            "historyId": "h-partial",
+            "positionId": "demo-position-77",
+            "instId": "BTC-USDT",
+            "realizedPnl": "0.5",
+            "fee": "0.1",
+        }]
+        closed = [{
+            "historyId": "h-closed",
+            "positionId": "demo-position-77",
+            "instId": "BTC-USDT",
+            "realizedPnl": "1.0",
+            "fee": "0.1",
+        }]
+        saved = self.store.record_closed_position_outcome(
+            experience_id, closed_rows=closed, partial_rows=partial,
+        )
+        self.assertEqual(saved["learning_status"], "OUTCOME_RECORDED")
+        outcome = saved["events"][-1]["payload"]
+        self.assertEqual(outcome["realized_result"], "PROFIT")
+        self.assertAlmostEqual(outcome["realized_net_pnl"], 1.3)
+        self.assertFalse(outcome["evidence"]["funding_fee_included"])
+        self.assertEqual(
+            outcome["evidence"]["net_pnl_method"],
+            "sum(realizedPnl) - sum(fee)",
+        )
+        self.assertEqual(self.store.orders_pending_learning_outcome(), [])
+
     def test_event_journal_is_append_only(self):
         plan = self._plan()
         self.store.reserve_order(plan)
