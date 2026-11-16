@@ -460,6 +460,8 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.store.update_order(
             plan["client_order_id"], "FILLED", exchange_order_id="demo-open-order-1"
         )
+        self.assertEqual(self.store.pending_learning_outcome_count(), 1)
+        self.assertTrue(self.store.attach_position_id(experience_id, "demo-position-77"))
 
         history = {
             "historyId": "closed-history-1",
@@ -488,12 +490,12 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             "PENDING_OUTCOME",
         )
 
-        self.assertTrue(self.store.attach_position_id(experience_id, "demo-position-77"))
         recorded = self.store.record_closed_position_outcome(
             instrument_id="BTC-USDT",
             history_rows=[history],
         )
         self.assertEqual(recorded["status"], "RECORDED")
+        self.assertEqual(self.store.pending_learning_outcome_count(), 0)
         self.assertEqual(recorded["realized_result"], "PROFIT")
         self.assertAlmostEqual(recorded["realized_pnl_after_reported_trading_fees"], 2.40)
 
