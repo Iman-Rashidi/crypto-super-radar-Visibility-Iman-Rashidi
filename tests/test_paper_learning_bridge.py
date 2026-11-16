@@ -89,6 +89,7 @@ class PaperLearningBridgeTests(unittest.TestCase):
 
     def test_legacy_open_position_is_backfilled_without_fabricating_features(self):
         position = _position("legacy-signal-bar")
+        position["opened_at"] = 1_700_000_000
         original = self.ledger.learning_memory.record_decision
         self.ledger.learning_memory.record_decision = lambda **kwargs: None
         try:
