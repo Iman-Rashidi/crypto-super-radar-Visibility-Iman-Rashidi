@@ -250,7 +250,7 @@ class Challenge01AIMentorTests(unittest.TestCase):
         self.assertEqual(context["volume_confirmation"], "UNKNOWN")
         self.assertEqual(context["support_resistance_scope"], "LOCAL_FIVE_BAR_REFERENCE_NOT_STRUCTURAL_LEVEL")
         changed = [dict(item) for item in candles]
-        changed[-1]["close"] = "100"
+        changed[-1].update({"open": "101", "high": "103", "low": "99", "close": "100"})
         self.assertNotEqual(build_pattern_context(changed), context)
         with self.assertRaises(ValueError):
             build_pattern_context(candles[:-1])
