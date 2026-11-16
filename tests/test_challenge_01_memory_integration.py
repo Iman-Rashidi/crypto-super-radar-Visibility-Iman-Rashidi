@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crypto_super_radar.challenge_01_ai_mentor import build_pattern_context, detect_candlestick_patterns
+from crypto_super_radar.challenge_01_ai_mentor import CONTEXT_WINDOW_LENGTH, build_pattern_context, detect_candlestick_patterns
 from crypto_super_radar.challenge_01_runner import (
     Challenge01DataError,
     Challenge01Runner,
@@ -42,12 +42,12 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
         self.rows = [
             candle(self.now_ms - 60 * 60 * 1000 - index * 60 * 60 * 1000,
                    "100", "105", "95", "101" if index % 3 == 0 else ("99" if index % 3 == 1 else "100"))
-            for index in range(MIN_SAMPLES_PER_ROUND + 5)
+            for index in range(MIN_SAMPLES_PER_ROUND + CONTEXT_WINDOW_LENGTH)
         ]
         self.older_rows = [
             candle(self.now_ms - (MIN_SAMPLES_PER_ROUND + 1 + index) * 60 * 60 * 1000,
                    "100", "105", "95", "101" if index % 3 == 0 else "99")
-            for index in range(MIN_SAMPLES_PER_ROUND + 5)
+            for index in range(MIN_SAMPLES_PER_ROUND + CONTEXT_WINDOW_LENGTH)
         ]
 
     def tearDown(self):
@@ -116,6 +116,11 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
                 snapshot["feature_candle_open_time_ms"],
             )
             self.assertEqual(len(snapshot["feature_window"]), 5)
+            self.assertEqual(len(snapshot["context_window"]), CONTEXT_WINDOW_LENGTH)
+            self.assertEqual(
+                snapshot["context_window_open_times_ms"],
+                [candle["open_time_ms"] for candle in snapshot["context_window"]],
+            )
             self.assertEqual(
                 snapshot["feature_window"][-1],
                 snapshot["feature_candle"],
@@ -128,13 +133,18 @@ class Challenge01MemoryIntegrationTests(unittest.TestCase):
                 snapshot["detected_candlestick_patterns"],
                 detect_candlestick_patterns(snapshot["feature_window"]),
             )
-            self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["feature_window"]))
-            self.assertIn("atr_5_pct", snapshot["pattern_context"])
-            self.assertIn("volume_data_quality", snapshot["pattern_context"])
-            self.assertEqual(snapshot["pattern_context"]["support_resistance_scope"], "LOCAL_FIVE_BAR_REFERENCE_NOT_STRUCTURAL_LEVEL")
+            self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["context_window"]))
+            self.assertEqual(snapshot["pattern_context"]["history_bars"], CONTEXT_WINDOW_LENGTH)
+            self.assertIn("price_action_structure", snapshot["pattern_context"])
+            self.assertEqual(snapshot["pattern_context"]["order_block"]["status"], "UNKNOWN")
+            self.assertEqual(snapshot["pattern_context"]["support_resistance_scope"], "CONFIRMED_SWING_PIVOTS_FROM_50_COMPLETED_BARS")
             self.assertEqual(
                 evidence["feature_window_open_times_ms"],
                 snapshot["feature_window_open_times_ms"],
+            )
+            self.assertEqual(
+                evidence["context_window_open_times_ms"],
+                snapshot["context_window_open_times_ms"],
             )
             self.assertEqual(
                 evidence["comparison"],
