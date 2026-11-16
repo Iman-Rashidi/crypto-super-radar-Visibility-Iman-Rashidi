@@ -547,6 +547,7 @@ class BloFinDemoEventStore:
                     outcome_recorded_at INTEGER,
                     position_history_id TEXT,
                     position_id TEXT,
+                    position_quantity TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
@@ -560,6 +561,7 @@ class BloFinDemoEventStore:
                 ("outcome_recorded_at", "INTEGER"),
                 ("position_history_id", "TEXT"),
                 ("position_id", "TEXT"),
+                ("position_quantity", "TEXT"),
             ):
                 if column_name not in order_columns:
                     self._db.execute(
@@ -957,7 +959,7 @@ class BloFinDemoEventStore:
         try:
             order_created_ms = int(order.get("created_at") or 0) * 1000
             reference_entry = float(order.get("entry_price"))
-            expected_quantity = float(order.get("quantity"))
+            expected_quantity = float(order.get("position_quantity") or order.get("quantity"))
         except (TypeError, ValueError, OverflowError):
             return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
         if not all(math.isfinite(value) and value > 0 for value in (
@@ -1000,6 +1002,7 @@ class BloFinDemoEventStore:
                     or abs(open_price - reference_entry) / reference_entry > 0.005
                     or close_quantity <= 0
                     or total_quantity + 1e-9 < close_quantity
+                    or abs(total_quantity - expected_quantity) > max(1e-9, abs(expected_quantity) * 1e-6)
                     or not history_id
                 ):
                     continue
@@ -1110,8 +1113,7 @@ class BloFinDemoEventStore:
             rows = self._db.execute(
                 """SELECT * FROM blofin_demo_orders
                    WHERE experience_id IS NOT NULL AND experience_id != ''
-                     AND position_id IS NOT NULL AND position_id != ''
-                     AND outcome_recorded_at IS NULL
+                      AND outcome_recorded_at IS NULL
                      AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED')
                    ORDER BY updated_at ASC LIMIT ?""",
                 (bounded,),
@@ -1130,11 +1132,17 @@ class BloFinDemoEventStore:
             ).fetchone()
         return int(row[0] or 0)
 
-    def attach_position_id(self, experience_id: str, position_id: str) -> bool:
+    def attach_position_id(
+        self, experience_id: str, position_id: str, *, quantity: float | None = None,
+    ) -> bool:
         experience_key = str(experience_id or "").strip()
         position_key = str(position_id or "").strip()
         if not experience_key or not position_key:
             return False
+        quantity_text = None
+        if quantity is not None:
+            size = _finite(quantity, "position_quantity", minimum=0.0000001)
+            quantity_text = _format_decimal(_decimal(size, "position_quantity"))
         with self._lock, self._db:
             order = self.get_order_for_experience(experience_key)
             if order is None:
@@ -1144,15 +1152,135 @@ class BloFinDemoEventStore:
                 raise BloFinDemoExecutionBlocked(
                     "A different exchange position is already linked to this learning experience."
                 )
+            existing_quantity = order.get("position_quantity")
+            if (
+                quantity_text is not None and existing_quantity not in (None, "")
+                and not math.isclose(
+                    float(existing_quantity), float(quantity_text),
+                    rel_tol=1e-6, abs_tol=1e-9,
+                )
+            ):
+                raise BloFinDemoExecutionBlocked(
+                    "A different exchange position size is already linked to this learning experience."
+                )
             self._db.execute(
-                "UPDATE blofin_demo_orders SET position_id=?, updated_at=? WHERE client_order_id=?",
-                (position_key, int(time.time()), order["client_order_id"]),
+                "UPDATE blofin_demo_orders SET position_id=?, "
+                "position_quantity=COALESCE(?, position_quantity), updated_at=? WHERE client_order_id=?",
+                (position_key, quantity_text, int(time.time()), order["client_order_id"]),
             )
             self._append_event(
                 str(order["client_order_id"]), "POSITION_LINKED",
-                {"position_id": position_key},
+                {
+                    "position_id": position_key,
+                    "position_quantity": quantity_text,
+                },
             )
         return True
+
+    def recover_position_link(
+        self, experience_id: str, *,
+        open_positions: Any = None,
+        closed_rows: Any = None,
+        partial_rows: Any = None,
+    ) -> dict[str, Any]:
+        """Recover a missing positionId only from one unambiguous exchange match."""
+        order = self.get_order_for_experience(str(experience_id or "").strip())
+        if order is None:
+            return {"status": "NO_LOCAL_ORDER"}
+        if order.get("position_id"):
+            return {
+                "status": "ALREADY_LINKED",
+                "position_id": order["position_id"],
+                "position_quantity": order.get("position_quantity"),
+            }
+        instrument = str(order.get("instrument_id") or "").upper()
+        expected_side = str(order.get("side") or "").upper()
+        try:
+            order_created_ms = int(order.get("created_at") or 0) * 1000
+            reference_entry = float(order.get("entry_price"))
+            requested_quantity = float(order.get("quantity"))
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
+        if not all(math.isfinite(value) and value > 0 for value in (
+            reference_entry, requested_quantity
+        )):
+            return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
+
+        candidates: dict[str, list[float]] = {}
+        for row in open_positions if isinstance(open_positions, list) else []:
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                if str(row.get("instId") or "").upper() != instrument:
+                    continue
+                position_id = str(row.get("positionId") or "")
+                average = float(row.get("averagePrice"))
+                size = abs(float(row.get("positions", row.get("pos", 0))))
+                created_ms = int(row.get("createTime") or 0)
+                raw_side = str(row.get("positionSide") or "").lower()
+                direction = raw_side
+                if raw_side == "net":
+                    signed_size = float(row.get("positions", row.get("pos", 0)))
+                    direction = "long" if signed_size > 0 else "short" if signed_size < 0 else ""
+                expected_direction = "long" if expected_side == "LONG" else "short"
+                if (
+                    not position_id or not math.isfinite(average) or not math.isfinite(size)
+                    or size <= 0 or size > requested_quantity * 1.000001
+                    or direction != expected_direction
+                    or created_ms < order_created_ms - 60_000
+                    or abs(average - reference_entry) / reference_entry > 0.005
+                ):
+                    continue
+                candidates.setdefault(position_id, []).append(size)
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+        # If the position closed before its initial link could be stored, recover
+        # its ID from a unique close-history match, not from PnL or symbol alone.
+        for row in list(partial_rows or []) + list(closed_rows or []):
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                if (
+                    str(row.get("instId") or "").upper() != instrument
+                    or str(row.get("side") or "").lower()
+                    != ("buy" if expected_side == "LONG" else "sell")
+                ):
+                    continue
+                position_id = str(row.get("positionId") or "")
+                average = float(row.get("openAveragePrice"))
+                max_size = float(row.get("maxPositions"))
+                created_ms = int(row.get("createTime") or 0)
+                if (
+                    not position_id or not math.isfinite(average)
+                    or not math.isfinite(max_size) or max_size <= 0
+                    or max_size > requested_quantity * 1.000001
+                    or created_ms < order_created_ms - 60_000
+                    or abs(average - reference_entry) / reference_entry > 0.005
+                ):
+                    continue
+                candidates.setdefault(position_id, []).append(max_size)
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+        if len(candidates) != 1:
+            return {
+                "status": "WAITING_FOR_UNAMBIGUOUS_POSITION_LINK",
+                "candidate_position_count": len(candidates),
+            }
+        position_id, observed_sizes = next(iter(candidates.items()))
+        quantity = observed_sizes[0]
+        if any(not math.isclose(size, quantity, rel_tol=1e-6, abs_tol=1e-9) for size in observed_sizes[1:]):
+            return {
+                "status": "WAITING_FOR_POSITION_SIZE_CONSISTENCY",
+                "position_id": position_id,
+            }
+        self.attach_position_id(experience_id, position_id, quantity=quantity)
+        return {
+            "status": "LINKED",
+            "position_id": position_id,
+            "position_quantity": quantity,
+        }
 
     def close(self) -> None:
         with self._lock:
