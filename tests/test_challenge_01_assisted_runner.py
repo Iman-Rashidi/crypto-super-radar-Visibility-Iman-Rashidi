@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crypto_super_radar.challenge_01_ai_mentor import FEATURE_WINDOW_LENGTH, build_pattern_context, detect_candlestick_patterns, review_locked_baseline
+from crypto_super_radar.challenge_01_ai_mentor import CONTEXT_WINDOW_LENGTH, FEATURE_WINDOW_LENGTH, build_pattern_context, detect_candlestick_patterns, review_locked_baseline
 from crypto_super_radar.challenge_01_assisted_runner import Challenge01AssistedRunner
 from crypto_super_radar.challenge_01_runner import BAR_MILLISECONDS, get_challenge_01_status
 from crypto_super_radar.learning_experience_memory import LearningExperienceMemory
@@ -58,7 +58,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
         self.base_time = 1_800_000_000_000
         self.candles = [
             _candle(self.base_time + index * BAR_MILLISECONDS, [1, 0, -1][index % 3])
-            for index in range(105)
+            for index in range(100 + CONTEXT_WINDOW_LENGTH)
         ]
         self.last_target_time = self.candles[-1]["open_time_ms"]
         self.future_candles = [
@@ -81,9 +81,10 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             memory = LearningExperienceMemory(db)
             with db:
                 for index in range(100):
-                    feature_window = self.candles[index:index + FEATURE_WINDOW_LENGTH]
+                    context_window = self.candles[index:index + CONTEXT_WINDOW_LENGTH]
+                    feature_window = context_window[-FEATURE_WINDOW_LENGTH:]
                     feature = feature_window[-1]
-                    target = self.candles[index + FEATURE_WINDOW_LENGTH]
+                    target = self.candles[index + CONTEXT_WINDOW_LENGTH]
                     feature_ts = feature["open_time_ms"]
                     target_ts = target["open_time_ms"]
                     label = "BULLISH_CANDLE" if float(target["close"]) > 100 else (
@@ -122,8 +123,10 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
                             "feature_candle": feature,
                             "feature_window": feature_window,
                             "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
+                            "context_window": context_window,
+                            "context_window_open_times_ms": [candle["open_time_ms"] for candle in context_window],
                             "detected_candlestick_patterns": detect_candlestick_patterns(feature_window),
-                            "pattern_context": build_pattern_context(feature_window),
+                            "pattern_context": build_pattern_context(context_window),
                             "prediction_horizon_bars": 1,
                             "data_quality": "VALID_COMPLETED_FEATURE_AND_TARGET",
                             "target_candle_in_input": False,
@@ -141,6 +144,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
                             "comparison": "NEXT_CANDLE_DIRECTION_FROM_NEXT_COMPLETED_BAR",
                             "feature_candle_open_time_ms": feature_ts,
                             "feature_window_open_times_ms": [candle["open_time_ms"] for candle in feature_window],
+                            "context_window_open_times_ms": [candle["open_time_ms"] for candle in context_window],
                             "target_candle_open_time_ms": target_ts,
                             "target_candle": target,
                             "reference_classification": label,
@@ -197,7 +201,8 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             outcome_event = next(e for e in assisted["events"] if e["event_type"] == "OUTCOME_LABELLED")
             snapshot = decision_event["payload"]["input_snapshot"]
             self.assertFalse(snapshot["target_candle_in_input"])
-            self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["feature_window"]))
+            self.assertEqual(len(snapshot["context_window"]), CONTEXT_WINDOW_LENGTH)
+            self.assertEqual(snapshot["pattern_context"], build_pattern_context(snapshot["context_window"]))
             self.assertNotIn("target_candle", snapshot)
             self.assertEqual(
                 snapshot["mentor_model_artifact_sha256"],
@@ -213,7 +218,7 @@ class Challenge01AssistedRunnerTests(unittest.TestCase):
             next_seed, prior_target_time, anchor_id, prior_model_hash = runner._previous_round_seed(
                 memory, 2,
             )
-            self.assertEqual(len(next_seed), FEATURE_WINDOW_LENGTH)
+            self.assertEqual(len(next_seed), CONTEXT_WINDOW_LENGTH)
             self.assertEqual(prior_target_time, self.future_candles[99]["open_time_ms"])
             self.assertTrue(anchor_id)
             self.assertEqual(prior_model_hash, result["next_model_candidate"]["artifact_sha256"])
