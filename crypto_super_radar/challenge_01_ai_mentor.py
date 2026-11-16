@@ -325,9 +325,18 @@ def detect_candlestick_patterns(candles: list[dict[str, Any]]) -> list[str]:
     middle_small = b["range"] > 0 and b["body_ratio"] <= 0.30
     first_strong = a["range"] > 0 and a["body_ratio"] >= 0.50
     last_strong = c["range"] > 0 and c["body_ratio"] >= 0.40
-    if a["direction"] < 0 and middle_small and c["direction"] > 0 and last_strong and c["close"] > a_mid:
+    first_body_midpoint = (a["open"] + a["close"]) / 2.0
+    if (
+        first_strong and a["direction"] < 0 and middle_small
+        and c["direction"] > 0 and last_strong
+        and c["close"] > first_body_midpoint
+    ):
         patterns.append("MORNING_STAR")
-    if a["direction"] > 0 and middle_small and c["direction"] < 0 and last_strong and c["close"] < a_mid:
+    if (
+        first_strong and a["direction"] > 0 and middle_small
+        and c["direction"] < 0 and last_strong
+        and c["close"] < first_body_midpoint
+    ):
         patterns.append("EVENING_STAR")
     if (
         all(shape["direction"] > 0 for shape in shapes)
