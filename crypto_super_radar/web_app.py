@@ -8100,7 +8100,7 @@ let blofinInstrumentRecords=[];
                             reason="Operator enabled BloFin Demo AutoPilot.",
                             details={"execution_profile":"CHALLENGE_1"},
                         )
-                        return self._send(202, json.dumps({}
+                        return self._send(202, json.dumps({
                             "status": "STARTING",
                             "enabled": True,
                             "message_fa": "AutoPilot در BloFin Demo فعال شد؛ چرخه جاری یا بعدی طبق زمان‌بندی اجرا می‌شود.",
