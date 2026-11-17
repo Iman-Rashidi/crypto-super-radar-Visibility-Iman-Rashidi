@@ -8872,6 +8872,155 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
     }
 
 
+def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict) -> dict:
+    """Build one auditable Notion activity row from a real Challenge 1 symbol job."""
+    current = job if isinstance(job, dict) else {}
+    raw_result = current.get("result")
+    result = raw_result if isinstance(raw_result, dict) else {}
+    raw_analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else (
+        current.get("analysis") if isinstance(current.get("analysis"), dict) else {}
+    )
+    evidence = result.get("challenge1_evidence")
+    if not isinstance(evidence, dict):
+        evidence = raw_analysis.get("challenge1_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    experience_id = (
+        result.get("learning_experience_id")
+        or current.get("learning_experience_id")
+        or raw_analysis.get("learning_experience_id")
+    )
+    if not experience_id:
+        # Data-error jobs still get a unique audit row, but are not mislabelled
+        # as a verified LearningExperienceMemory record.
+        experience_id = "job-" + str(job_id)
+    signal = str(
+        result.get("signal")
+        or evidence.get("decision")
+        or raw_analysis.get("signal")
+        or "UNKNOWN"
+    ).upper()
+    if signal not in {"LONG", "SHORT", "NO_TRADE"}:
+        signal = "UNKNOWN"
+    positions = result.get("positions") if isinstance(result.get("positions"), list) else []
+    position = next(
+        (row for row in positions if isinstance(row, dict)
+         and str(row.get("instId") or "").upper() == str(instrument_id).upper()),
+        {},
+    )
+    ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else {}
+    patterns = evidence.get("detected_patterns")
+    return {
+        "experience_id": str(experience_id),
+        "job_id": str(job_id),
+        "symbol": str(instrument_id).upper(),
+        "signal": signal,
+        "status": str(result.get("status") or current.get("stage") or current.get("status") or "UNKNOWN"),
+        "reason_fa": result.get("reason_fa") or current.get("message_fa") or "",
+        "analysis_time_utc": current.get("completed_at_utc") or current.get("updated_at_utc") or datetime.now(timezone.utc).isoformat(),
+        "signal_bar_open_utc": result.get("signal_bar_open_utc") or evidence.get("confirmation_candle", {}).get("open_time_utc"),
+        "engine_version": evidence.get("decision_engine_version") or "CHALLENGE_1_UNKNOWN",
+        "patterns": patterns if isinstance(patterns, list) else [],
+        "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
+        "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
+        "evidence": evidence,
+        "candles_15m": evidence.get("candles_15m") if isinstance(evidence.get("candles_15m"), list) else [],
+        "candles_1h": evidence.get("candles_1h") if isinstance(evidence.get("candles_1h"), list) else [],
+        "entry_price": result.get("entry_price_usd") or result.get("entry_price") or evidence.get("entry_price"),
+        "stop_loss": result.get("stop_loss_usd") or result.get("stop_loss"),
+        "take_profit": result.get("take_profit_usd") or result.get("take_profit"),
+        "actual_entry_price": result.get("average_fill_price") if result.get("trade_executed") is True else None,
+        "actual_entry_time_utc": result.get("filled_at_utc") if result.get("trade_executed") is True else None,
+        "actual_exit_price": None,
+        "actual_exit_time_utc": None,
+        "realized_net_pnl_usdt": None,
+        "reported_trading_fees_usdt": None,
+        "order_id": result.get("exchange_order_id") or result.get("order_id") or "",
+        "position_id": result.get("position_id") or position.get("positionId") or "",
+        "trade_executed": result.get("trade_executed") is True,
+        "orders_submitted": result.get("orders_submitted") is True,
+        "closed_confirmed": False,
+        "ai_status": ai_review.get("status") or "NOT_CALLED",
+        "ai_model": ai_review.get("model") or ai_review.get("returned_model") or "",
+        "ai_reason": ai_review.get("rationale_fa") or ai_review.get("reason") or "",
+        "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
+    }
+
+
+def _queue_blofin_activity_journal(job_id: str, instrument_id: str, job: dict) -> dict:
+    """Persist the activity/market snapshot to Turso before Notion network sync."""
+    journal = None
+    try:
+        journal = NotionActivityJournal()
+        snapshot = _blofin_activity_journal_snapshot(job_id, instrument_id, job)
+        queued = journal.enqueue(snapshot)
+        return {"status": "QUEUED" if queued else "UNCHANGED", "experience_id": snapshot["experience_id"]}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if journal is not None:
+            journal.close()
+
+
+def _update_blofin_activity_after_close(
+    outcome: dict, instrument_id: str, position_id: str,
+    closed_rows: list, partial_rows: list,
+) -> dict:
+    """Update the same activity row only after full-size exchange history is reconciled."""
+    if not isinstance(outcome, dict) or outcome.get("status") != "RECORDED":
+        return {"status": "NOT_FINAL"}
+    experience_id = str(outcome.get("experience_id") or "")
+    journal = None
+    try:
+        journal = NotionActivityJournal()
+        snapshot = journal.get_snapshot(experience_id)
+        if not isinstance(snapshot, dict):
+            return {"status": "ACTIVITY_ROW_NOT_FOUND"}
+        matching = []
+        for row in list(partial_rows or []) + list(closed_rows or []):
+            if not isinstance(row, dict):
+                continue
+            if (
+                str(row.get("positionId") or "") != str(position_id)
+                or str(row.get("instId") or "").upper() != str(instrument_id).upper()
+            ):
+                continue
+            quantity = _blofin_safe_float(row.get("closePositions"))
+            price = _blofin_safe_float(row.get("closeAveragePrice"))
+            if quantity is None or quantity <= 0 or price is None or price <= 0:
+                continue
+            matching.append((row, quantity, price))
+        total_quantity = sum(item[1] for item in matching)
+        if not matching or total_quantity <= 0:
+            return {"status": "EXIT_PRICE_UNAVAILABLE"}
+        weighted_exit = sum(quantity * price for _, quantity, price in matching) / total_quantity
+        exit_ms = max(
+            (int(row.get("updateTime") or row.get("createTime") or 0) for row, _, _ in matching),
+            default=0,
+        )
+        fee_total = 0.0
+        fee_values = [_blofin_safe_float(row.get("fee")) for row, _, _ in matching]
+        if fee_values and all(value is not None for value in fee_values):
+            fee_total = sum(value for value in fee_values if value is not None)
+        snapshot.update({
+            "actual_exit_price": weighted_exit,
+            "actual_exit_time_utc": (
+                datetime.fromtimestamp(exit_ms / 1000, tz=timezone.utc).isoformat()
+                if exit_ms > 0 else None
+            ),
+            "realized_net_pnl_usdt": outcome.get("realized_pnl_after_reported_trading_fees"),
+            "reported_trading_fees_usdt": fee_total,
+            "closed_confirmed": True,
+            "status": "CLOSED_RECONCILED",
+        })
+        journal.enqueue(snapshot)
+        return {"status": "QUEUED", "experience_id": experience_id}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if journal is not None:
+            journal.close()
+
+
 def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
     """Build safe, idempotent Notion events from one completed Challenge 1 symbol job."""
     current = job if isinstance(job, dict) else {}
