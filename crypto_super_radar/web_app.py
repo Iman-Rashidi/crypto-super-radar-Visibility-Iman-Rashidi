@@ -69,6 +69,8 @@ BLOFIN_EXECUTION_GUARD = threading.Lock()
 BLOFIN_EXECUTION_JOBS: dict[str, dict] = {}
 BLOFIN_AUTOPILOT_LOCK = threading.Lock()
 BLOFIN_AUTOPILOT_START_LOCK = threading.Lock()
+BLOFIN_STARTUP_RECONCILE_LOCK = threading.Lock()
+BLOFIN_STARTUP_RECONCILE_DONE = False
 BLOFIN_AUTOPILOT_THREAD = None
 BLOFIN_AUTOPILOT_STATE = {
     "enabled": False,
@@ -7896,6 +7898,70 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
         time.sleep(interval_seconds)
 
 
+def _reconcile_blofin_demo_orders_on_startup() -> dict:
+    """Probe durable Turso and reconcile all unresolved Demo orders using READ only."""
+    global BLOFIN_STARTUP_RECONCILE_DONE
+    with BLOFIN_STARTUP_RECONCILE_LOCK:
+        if BLOFIN_STARTUP_RECONCILE_DONE:
+            with LOCK:
+                previous = copy.deepcopy(BLOFIN_AUTOPILOT_STATE.get("startup_reconciliation") or {})
+            return previous
+        BLOFIN_STARTUP_RECONCILE_DONE = True
+
+    store = None
+    result: dict[str, Any] = {
+        "status": "SKIPPED",
+        "reason": "DURABLE_TURSO_NOT_CONFIGURED",
+        "orders_submitted": False,
+        "trigger": "PROCESS_STARTUP",
+    }
+    try:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise RuntimeError("DURABLE_TURSO_NOT_CONFIGURED")
+        store = BloFinDemoEventStore()
+        storage_probe = store.verify_durable_round_trip(connections=4)
+        result["storage_probe"] = storage_probe
+        if not storage_probe.get("verified"):
+            result.update({
+                "status": "BLOCKED",
+                "reason": "TURSO_MULTI_CONNECTION_PROBE_FAILED",
+            })
+        else:
+            reconciler = BloFinDemoExecutor(
+                client=BloFinDemoTradeClient(timeout=10.0),
+                store=store,
+                policy=BloFinDemoRiskPolicy(max_leverage=1),
+                trading_enabled=False,
+            )
+            sweep = reconciler.reconcile_unresolved_orders(limit=100)
+            result.update(sweep)
+            result["trigger"] = "PROCESS_STARTUP"
+            result["storage_probe"] = storage_probe
+            if result.get("orders_submitted") is not False:
+                result["status"] = "BLOCKED"
+                result["orders_submitted"] = False
+    except Exception as exc:
+        result.update({
+            "status": "UNAVAILABLE",
+            "reason": "STARTUP_RECONCILIATION_UNAVAILABLE",
+            "error_type": type(exc).__name__,
+            "orders_submitted": False,
+        })
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+    with LOCK:
+        BLOFIN_AUTOPILOT_STATE["startup_reconciliation"] = copy.deepcopy(result)
+        BLOFIN_AUTOPILOT_STATE["startup_reconciliation_at_utc"] = datetime.now(timezone.utc).isoformat()
+        BLOFIN_AUTOPILOT_STATE["startup_reconciliation_orders_submitted"] = False
+    _persist_blofin_autopilot_state()
+    return result
+
+
 def _start_blofin_demo_autopilot() -> None:
     """Start the in-web worker only in WEB role; API and WORKER roles stay separate."""
     global BLOFIN_AUTOPILOT_THREAD
@@ -7921,6 +7987,9 @@ def _start_blofin_demo_autopilot() -> None:
             })
         return
     _restore_blofin_autopilot_state()
+    # Recovery is independent of the trading scheduler and remains READ-only.
+    # It must run even when BLOFIN_DEMO_AUTOPILOT_ENABLED is false.
+    _reconcile_blofin_demo_orders_on_startup()
     if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({

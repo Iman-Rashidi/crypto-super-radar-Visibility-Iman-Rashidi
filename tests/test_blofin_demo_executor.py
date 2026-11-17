@@ -400,6 +400,78 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.trade_budget_status()["unresolved_orders"], 2)
 
+    def test_reservation_records_exact_aggregate_risk_and_margin(self):
+        plan = build_demo_order_plan(
+            signal_record(), instrument_record(), inst_id="BTC-USDT",
+            equity_usdt=1000, leverage=3,
+        )
+        self.assertGreater(float(plan["reserved_risk_usdt"]), 0)
+        self.assertGreater(float(plan["reserved_margin_usdt"]), 0)
+        self.assertEqual(plan["aggregate_risk_limit_usdt"], "5")
+        self.assertEqual(plan["aggregate_margin_limit_usdt"], "100")
+        self.assertTrue(self.store.reserve_order(plan))
+        budget = self.store.trade_budget_status()
+        self.assertTrue(budget["aggregate_exposure_complete"])
+        self.assertEqual(
+            budget["aggregate_reserved_risk_usdt"], plan["reserved_risk_usdt"]
+        )
+        self.assertEqual(
+            budget["aggregate_reserved_margin_usdt"], plan["reserved_margin_usdt"]
+        )
+
+    def test_aggregate_exposure_budget_blocks_third_risk_reservation_atomically(self):
+        plans = [
+            build_demo_order_plan(
+                signal_record(signal_id=f"aggregate-risk-{index}"),
+                instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
+            )
+            for index in range(3)
+        ]
+        self.assertTrue(self.store.reserve_order(plans[0], max_concurrent_positions=3))
+        self.assertTrue(self.store.reserve_order(plans[1], max_concurrent_positions=3))
+        self.assertFalse(self.store.reserve_order(plans[2], max_concurrent_positions=3))
+        budget = self.store.trade_budget_status()
+        self.assertEqual(budget["active_reservations"], 2)
+        self.assertLessEqual(float(budget["aggregate_reserved_risk_usdt"]), 5.0)
+        self.assertLessEqual(float(budget["aggregate_reserved_margin_usdt"]), 100.0)
+
+    def test_aggregate_margin_budget_blocks_second_full_margin_reservation(self):
+        first = build_demo_order_plan(
+            signal_record(signal_id="aggregate-margin-first"),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=1,
+        )
+        second = build_demo_order_plan(
+            signal_record(signal_id="aggregate-margin-second"),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=1,
+        )
+        self.assertTrue(self.store.reserve_order(first, max_concurrent_positions=3))
+        self.assertFalse(self.store.reserve_order(second, max_concurrent_positions=3))
+        self.assertEqual(self.store.trade_budget_status()["active_reservations"], 1)
+
+    def test_legacy_active_reservation_without_exposure_snapshot_fails_closed(self):
+        first = build_demo_order_plan(
+            signal_record(signal_id="legacy-reservation"),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
+        )
+        second = build_demo_order_plan(
+            signal_record(signal_id="new-after-legacy"),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
+        )
+        self.assertTrue(self.store.reserve_order(first, max_concurrent_positions=3))
+        self.store._db.execute(
+            "UPDATE blofin_demo_orders SET reserved_margin_usdt=NULL WHERE client_order_id=?",
+            (first["client_order_id"],),
+        )
+        self.store._db.commit()
+        self.assertFalse(self.store.reserve_order(second, max_concurrent_positions=3))
+        self.assertFalse(self.store.trade_budget_status()["aggregate_exposure_complete"])
+
+    def test_external_positions_or_pending_orders_fail_closed_without_exposure_metadata(self):
+        plan = self._plan()
+        self.assertFalse(self.store.reserve_order(plan, external_open_positions=1))
+        self.assertFalse(self.store.reserve_order(plan, external_pending_orders=1))
+        self.assertFalse(self.store.has_any_orders())
+
     def test_capacity_reservation_is_atomic_across_independent_connections(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = os.path.join(directory, "shared-demo.sqlite3")
