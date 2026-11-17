@@ -27,7 +27,7 @@ DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v4-pattern-only-challenge1"
+PROMPT_VERSION = "free-second-opinion-v5-dual-5m-15m-pattern-challenge1"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
@@ -263,7 +263,7 @@ def _clean_pattern_item(item: Any) -> dict[str, Any] | None:
     row: dict[str, Any] = {"name_en": name, "direction": direction}
     if category in {"CANDLESTICK", "CHART_STRUCTURE"}:
         row["category"] = category
-    if timeframe in {"15m", "1H", "1h"}:
+    if timeframe in {"5m", "15m", "1H", "1h"}:
         row["timeframe"] = timeframe
     score = _safe_float(item.get("score"))
     if score is not None:
@@ -299,10 +299,16 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
             for item in (raw_evidence.get("detected_patterns") or [])
         ) if clean
     ][:30]
-    context = [
+    context_15m = [
         clean for clean in (
             _clean_pattern_item(item)
-            for item in (raw_evidence.get("context_patterns") or [])
+            for item in (raw_evidence.get("context_patterns_15m") or [])
+        ) if clean
+    ][:30]
+    context_1h = [
+        clean for clean in (
+            _clean_pattern_item(item)
+            for item in (raw_evidence.get("context_patterns_1h") or raw_evidence.get("context_patterns") or [])
         ) if clean
     ][:30]
     confirmation_raw = raw_evidence.get("confirmation_candle")
@@ -313,9 +319,9 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
             confirmation_raw.get("open_time_utc") or confirmation_raw.get("time_utc")
         )
         if confirmation_payload.get("volume") in (None, ""):
-            raw_15m = raw_evidence.get("candles_15m")
-            if isinstance(raw_15m, list) and raw_15m:
-                last_row = raw_15m[-1]
+            raw_5m = raw_evidence.get("candles_5m")
+            if isinstance(raw_5m, list) and raw_5m:
+                last_row = raw_5m[-1]
                 if isinstance(last_row, Mapping):
                     confirmation_payload["volume"] = last_row.get("volume")
     confirmation_rows = _clean_ohlcv_rows(
@@ -359,13 +365,17 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
         "review_mode": "CANDLE_PATTERN_ONLY",
         "pattern_evidence": {
             "completed_candles_only": raw_evidence.get("completed_candles_only") is True,
-            "setup_timeframe": str(raw_evidence.get("setup_timeframe") or "15m")[:8],
-            "context_timeframe": str(raw_evidence.get("context_timeframe") or "1H")[:8],
+            "setup_timeframe": str(raw_evidence.get("setup_timeframe") or "5m")[:8],
+            "context_timeframe": str(raw_evidence.get("context_timeframe") or "15m")[:8],
+            "secondary_context_timeframe": str(raw_evidence.get("secondary_context_timeframe") or "1H")[:8],
             "decision_engine_version": str(raw_evidence.get("decision_engine_version") or "")[:80],
             "chosen_pattern": chosen,
             "detected_patterns": detected,
-            "context_patterns_1h": context,
+            "context_alignment_15m": str(raw_evidence.get("context_alignment_15m") or "UNKNOWN")[:20],
+            "context_patterns_15m": context_15m,
+            "context_patterns_1h": context_1h,
             "confirmation_candle": confirmation_rows[0] if confirmation_rows else None,
+            "candles_5m": _clean_ohlcv_rows(raw_evidence.get("candles_5m")),
             "candles_15m": _clean_ohlcv_rows(raw_evidence.get("candles_15m")),
             "candles_1h": _clean_ohlcv_rows(raw_evidence.get("candles_1h")),
             "chart_structure": structure,
@@ -395,13 +405,15 @@ def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "This is the CHALLENGE_1 pattern-only path. Do not execute, request, count, score, or evaluate "
         "the general Radar protocols or twelve-gate framework. Do not use news, sentiment, whale, on-chain, "
         "RSI, EMA, funding, open-interest, or any other general Radar filter. "
-        "Base technical judgment only on the supplied completed 15m and 1H OHLCV candles, the selected "
-        "candle/chart pattern, detected patterns, 1H context patterns, and volume confirmation. "
-        "Never use an unclosed/future candle. Confirm that the selected pattern is visible in the supplied "
-        "15m pattern list and its direction matches the expected side. Volume and 1H context are ADVISORY ONLY: "
-        "low or missing volume confirmation, an opposing 1H pattern, or unavailable 1H candles must never by "
-        "themselves veto or block an otherwise valid 15m setup. Describe these items as observations only. "
-        "If the selected 15m pattern, its candle evidence, or the protective price plan is missing or invalid, abstain. "
+        "Base the entry trigger only on the supplied completed 5m OHLCV candles and selected 5m candle/chart pattern. "
+        "Use completed 15m OHLCV and 15m context patterns as mandatory structural context: an explicit opposing "
+        "15m pattern or context_alignment_15m=CONFLICT means abstain; neutral context may be recorded without delaying "
+        "a valid 5m setup. 1H context is secondary and advisory only. Volume is advisory only. "
+        "Never use an unclosed/future candle. Confirm the selected pattern is visible in the supplied 5m pattern list "
+        "and its direction matches the expected side. Do not treat 15m as the entry trigger or wait for a new 15m candle "
+        "when a valid 5m candle has just closed. "
+        "If the selected 5m pattern, its candle evidence, 15m structural context, or protective price plan is missing "
+        "or invalid, abstain. "
         "The risk_plan is permitted only for protective validation: check positive entry/stop/target, "
         "correct side geometry and reward_risk >= 1.8. Never relax account risk limits. "
         "Expected side is " + expected_side + ". The selected pattern name must match exactly: " + chosen_name + ". "
@@ -416,10 +428,10 @@ def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         '"risk_flags":["..."],"rationale_fa":"..."'
         "}. "
         "APPROVE is permitted only when pattern_analyst and price_action_analyst SUPPORT, "
-        "pattern_analyst.pattern_name matches the selected pattern exactly, trader proposal matches expected side, "
-        "both risk and portfolio managers APPROVE, and risk_flags is empty. timeframe_analyst is informational "
-        "only: its SUPPORT/OPPOSE/UNCERTAIN observation must be recorded but cannot alone veto entry. "
-        "Volume and 1H context are advisory and cannot be converted into mandatory gates. "
+        "pattern_analyst.pattern_name matches the selected 5m pattern exactly, trader proposal matches expected side, "
+        "both risk and portfolio managers APPROVE, and risk_flags is empty. timeframe_analyst must acknowledge the "
+        "15m structural context; an explicit opposing 15m pattern is a veto, while neutral 15m context is not. "
+        "1H context and volume are advisory and cannot be converted into mandatory gates. "
         "Keep all explanations concise and in Persian."
     )
     user = "Review only this sanitized Challenge 1 evidence:\n" + json.dumps(
