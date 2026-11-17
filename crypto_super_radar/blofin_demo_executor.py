@@ -1306,10 +1306,11 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
-        if self.store.pending_learning_outcome_count() > 0:
-            raise BloFinDemoExecutionBlocked(
-                "A previous Demo position is still awaiting exchange-finalized learning outcome reconciliation."
-            )
+        # A pending realized-outcome label is an audit/learning task, not proof of
+        # current exchange exposure. Do not let an incomplete history record freeze
+        # every market indefinitely. The fresh account-wide positions and open-orders
+        # checks below remain the hard entry blockers; unresolved order submissions
+        # are still blocked above and must be reconciled before another entry.
         latest_age = budget.get("latest_order_age_seconds")
         if (
             self.policy.min_seconds_between_orders > 0
