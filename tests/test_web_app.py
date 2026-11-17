@@ -1429,6 +1429,24 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(delay_seconds, 391)
         self.assertEqual(next_at, "2026-11-17T16:30:03+00:00")
 
+    def test_autopilot_catches_candle_close_that_occurs_during_scan(self):
+        started = datetime(2026, 11, 17, 17, 14, 22, tzinfo=timezone.utc)
+        finished = datetime(2026, 11, 17, 17, 15, 43, tzinfo=timezone.utc)
+        delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
+            started, now_utc=finished,
+        )
+        self.assertEqual(delay, 5)
+        self.assertEqual(next_at, "2026-11-17T17:15:48+00:00")
+
+    def test_autopilot_keeps_next_boundary_when_scan_finishes_before_it(self):
+        started = datetime(2026, 11, 17, 17, 15, 5, tzinfo=timezone.utc)
+        finished = datetime(2026, 11, 17, 17, 16, 20, tzinfo=timezone.utc)
+        delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
+            started, now_utc=finished,
+        )
+        self.assertEqual(delay, 823)
+        self.assertEqual(next_at, "2026-11-17T17:30:03+00:00")
+
     def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
         class StopAfterTwoCycles(Exception):
             pass
