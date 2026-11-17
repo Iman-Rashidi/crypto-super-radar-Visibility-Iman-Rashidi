@@ -68,6 +68,11 @@ def valid_document(rating="Buy", risk_verdict="APPROVE", portfolio_verdict="APPR
 
 
 def challenge1_result(*, pattern_confirmed=True):
+    candle_rows_5m = [
+        {"open_time_utc": "2026-11-17T09:50:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 80.0},
+        {"open_time_utc": "2026-11-17T09:55:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 90.0},
+        {"open_time_utc": "2026-11-17T10:00:00+00:00", "open": 99.0, "high": 102.0, "low": 98.7, "close": 101.0, "volume": 160.0},
+    ]
     candle_rows_15m = [
         {"open_time_utc": "2026-11-17T09:15:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 100.0},
         {"open_time_utc": "2026-11-17T09:30:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 105.0},
@@ -83,25 +88,30 @@ def challenge1_result(*, pattern_confirmed=True):
         "direction": "BULLISH" if pattern_confirmed else "BEARISH",
         "score": 13,
         "category": "CANDLESTICK",
-        "timeframe": "15m",
+        "timeframe": "5m",
     }
     evidence = {
-        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V3_DUAL_5M_15M",
         "completed_candles_only": True,
-        "setup_timeframe": "15m",
-        "context_timeframe": "1H",
+        "setup_timeframe": "5m",
+        "context_timeframe": "15m",
+        "secondary_context_timeframe": "1H",
+        "context_alignment_15m": "ALIGNED",
         "chosen_pattern": {
             "name_en": "Bullish Engulfing",
             "direction": "BULLISH",
             "score": 13,
             "category": "CANDLESTICK",
-            "timeframe": "15m",
+            "timeframe": "5m",
         },
         "detected_patterns": [pattern if pattern_confirmed else {
             **pattern, "direction": "BEARISH"
         }],
         "context_patterns": [],
-        "confirmation_candle": dict(candle_rows_15m[-1]),
+        "context_patterns_15m": [],
+        "context_patterns_1h": [],
+        "confirmation_candle": dict(candle_rows_5m[-1]),
+        "candles_5m": candle_rows_5m,
         "candles_15m": candle_rows_15m,
         "candles_1h": candle_rows_1h,
         "chart_structure": {},
@@ -711,8 +721,11 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(review["review_mode"], "CANDLE_PATTERN_ONLY")
         self.assertEqual(review["pattern_name"], "Bullish Engulfing")
         self.assertEqual(evidence["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(len(evidence["pattern_evidence"]["candles_5m"]), 3)
         self.assertEqual(len(evidence["pattern_evidence"]["candles_15m"]), 3)
         self.assertEqual(len(evidence["pattern_evidence"]["candles_1h"]), 3)
+        self.assertEqual(evidence["pattern_evidence"]["setup_timeframe"], "5m")
+        self.assertEqual(evidence["pattern_evidence"]["context_timeframe"], "15m")
         self.assertEqual(evidence["pattern_evidence"]["chosen_pattern"]["name_en"], "Bullish Engulfing")
         self.assertIn("Do not execute, request, count, score, or evaluate", system_prompt)
         self.assertNotIn("mandatory_gates", evidence)
