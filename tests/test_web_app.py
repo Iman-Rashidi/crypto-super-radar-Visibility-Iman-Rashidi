@@ -247,6 +247,38 @@ class WebAppHttpTests(unittest.TestCase):
             )
         )
 
+    def test_automatic_close_rechecks_profit_before_any_close_write(self):
+        close_calls = []
+        class FakeManualClient:
+            def get_positions(self, *, inst_id=None):
+                return [{
+                    "instId": "BTC-USDT",
+                    "positionId": "position-789",
+                    "positionSide": "net",
+                    "marginMode": "isolated",
+                    "positions": "0.1",
+                    "unrealizedPnl": "0.10",
+                }]
+            def close_futures_position(self, **kwargs):
+                close_calls.append(kwargs)
+                return {"code": "0", "data": [{"code": "0", "orderId": "close-789"}]}
+
+        with (
+            patch.dict(os.environ, {"BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT": "0.50"}),
+            patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
+            patch.object(web_app, "BloFinDemoEventStore") as store_factory,
+            self.assertRaises(BloFinDemoExecutionBlocked),
+        ):
+            web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT",
+                position_id="position-789",
+                action_source="AUTOPILOT",
+                audit_id="robot-order-789",
+                exit_reason="TAKE_PROFIT_LEVEL_REACHED",
+            )
+        self.assertEqual(close_calls, [])
+        store_factory.assert_not_called()
+
     def test_profit_time_exit_requires_minimum_positive_profit(self):
         order = {
             "instrument_id": "ETH-USDT",
