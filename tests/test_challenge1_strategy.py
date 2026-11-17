@@ -17,7 +17,9 @@ class FakeBloFin:
 
     def get_candles(self, inst_id, *, bar, limit):
         self.calls.append(bar)
-        return self.rows_by_bar[bar]
+        if bar != "5m":
+            raise AssertionError(f"Challenge 1 must not request {bar} candles")
+        return self.rows_by_bar["5m"]
 
 
 def candle_rows(now_ms, interval_ms, count=65, unclosed_last=False):
@@ -35,35 +37,37 @@ def candle_rows(now_ms, interval_ms, count=65, unclosed_last=False):
     return rows
 
 
-def market_data(now):
-    return {
-        "5m": candle_rows(now, 5 * 60 * 1000),
-        "15m": candle_rows(now, 15 * 60 * 1000),
-        "1H": candle_rows(now, 60 * 60 * 1000),
-    }
-
-
 def bullish_pattern():
     return {
-        "name_en": "Bullish Engulfing", "direction": "BULLISH",
-        "score": 13, "category": "CANDLESTICK",
+        "name_en": "Bullish Engulfing",
+        "direction": "BULLISH",
+        "score": 13,
+        "category": "CANDLESTICK",
     }
 
 
 def bearish_pattern():
     return {
-        "name_en": "Bearish Engulfing", "direction": "BEARISH",
-        "score": -13, "category": "CANDLESTICK",
+        "name_en": "Bearish Engulfing",
+        "direction": "BEARISH",
+        "score": -13,
+        "category": "CANDLESTICK",
     }
 
 
-class Challenge1CandleTests(unittest.TestCase):
+class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
+    def client(self, now):
+        return FakeBloFin({"5m": candle_rows(now, 5 * 60 * 1000)})
+
     def test_completed_frame_discards_unclosed_5m_bars_and_preserves_volume(self):
         now = 2_000_000_000_000
         rows = candle_rows(now, 5 * 60 * 1000, count=65, unclosed_last=True)
         frame = _completed_frame(
-            FakeBloFin({"5m": rows}), inst_id="BTC-USDT",
-            bar="5m", now_ms=now, minimum_rows=60,
+            FakeBloFin({"5m": rows}),
+            inst_id="BTC-USDT",
+            bar="5m",
+            now_ms=now,
+            minimum_rows=60,
         )
         self.assertEqual(len(frame), 64)
         self.assertEqual(float(frame["volume"].iloc[-1]), 1000.0)
@@ -71,103 +75,97 @@ class Challenge1CandleTests(unittest.TestCase):
 
     def test_no_trade_is_valid_when_no_confirmed_5m_pattern_exists(self):
         now = 2_000_000_000_000
-        client = FakeBloFin(market_data(now))
-        with patch("crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates", return_value=[]):
+        client = self.client(now)
+        with patch(
+            "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+            return_value=[],
+        ):
             result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
         self.assertEqual(result["signal"], "NO_TRADE")
         self.assertFalse(result["orders_submitted"])
-        self.assertEqual(client.calls, ["5m", "15m", "1H"])
+        self.assertEqual(client.calls, ["5m"])
         evidence = result["challenge1_evidence"]
         self.assertEqual(evidence["setup_timeframe"], "5m")
-        self.assertEqual(evidence["context_timeframe"], "15m")
+        self.assertFalse(evidence["higher_timeframes_used"])
+        self.assertEqual(set(k for k in evidence if k.startswith("candles_")), {"candles_5m"})
         self.assertGreaterEqual(len(evidence["candles_5m"]), 30)
-        self.assertGreaterEqual(len(evidence["candles_15m"]), 30)
         self.assertFalse(evidence["legacy_12_gates_used_for_entry"])
 
     def test_conflicting_confirmed_5m_patterns_block_entry(self):
         now = 2_000_000_000_000
-        client = FakeBloFin(market_data(now))
+        client = self.client(now)
         with patch(
             "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
-            side_effect=[[bullish_pattern(), bearish_pattern()], [], []],
-        ):
-            result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
-        self.assertEqual(result["signal"], "NO_TRADE")
-        self.assertEqual(result["challenge1_evidence"]["decision"], "CONFLICTING_5M_PATTERNS")
-
-    def test_5m_trigger_is_blocked_by_opposing_15m_context(self):
-        now = 2_000_000_000_000
-        client = FakeBloFin(market_data(now))
-        with patch(
-            "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
-            side_effect=[[bullish_pattern()], [bearish_pattern()], []],
+            return_value=[bullish_pattern(), bearish_pattern()],
         ):
             result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
         self.assertEqual(result["signal"], "NO_TRADE")
         self.assertEqual(
-            result["challenge1_evidence"]["context_alignment_15m"], "CONFLICT"
+            result["challenge1_evidence"]["decision"], "CONFLICTING_5M_PATTERNS"
         )
-        self.assertEqual(
-            result["challenge1_evidence"]["decision"], "CONFLICTING_5M_15M_CONTEXT"
-        )
+        self.assertEqual(client.calls, ["5m"])
 
-    def test_5m_trigger_and_aligned_15m_context_are_eligible(self):
+    def test_one_valid_5m_pattern_is_eligible_without_any_higher_timeframe_feed(self):
         now = 2_000_000_000_000
-        client = FakeBloFin(market_data(now))
+        client = self.client(now)
         with (
             patch(
                 "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
-                side_effect=[[bullish_pattern()], [bullish_pattern()], [bearish_pattern()]],
+                return_value=[bullish_pattern()],
             ),
             patch(
                 "crypto_super_radar.challenge1_strategy._volume_confirmation",
-                return_value={"confirmed": False, "volume_ratio": 0.7, "reason": "low volume"},
+                return_value={
+                    "confirmed": False, "volume_ratio": 0.7,
+                    "reason": "weak volume is advisory only",
+                },
             ),
             patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
-            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+            patch(
+                "crypto_super_radar.challenge1_strategy.monitor_chart_patterns",
+                return_value={},
+            ),
         ):
             result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
+
+        self.assertEqual(client.calls, ["5m"])
         self.assertEqual(result["signal"], "LONG")
         self.assertEqual(result["execution"]["status"], "PASS")
-        evidence = result["challenge1_evidence"]
-        self.assertEqual(evidence["context_alignment_15m"], "ALIGNED")
-        self.assertTrue(evidence["volume_is_advisory"])
-        self.assertTrue(evidence["context_conflict_1h"])
         self.assertIn(":5m:", result["signal_id"])
+        evidence = result["challenge1_evidence"]
+        self.assertEqual(evidence["decision_engine_version"], "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY")
+        self.assertEqual(evidence["setup_timeframe"], "5m")
+        self.assertTrue(evidence["volume_is_advisory"])
+        self.assertFalse(evidence["higher_timeframes_used"])
+        self.assertEqual(set(k for k in evidence if k.startswith("candles_")), {"candles_5m"})
+        self.assertEqual(evidence["chosen_pattern"]["timeframe"], "5m")
         self.assertGreaterEqual(len(evidence["candles_5m"]), 30)
-        self.assertGreaterEqual(len(evidence["candles_15m"]), 30)
         eligible, reason = challenge1_entry_evidence_ready(result)
         self.assertTrue(eligible, reason)
 
-    def test_neutral_15m_and_unavailable_1h_do_not_block_valid_5m_entry(self):
+    def test_valid_5m_pattern_does_not_wait_for_15m_or_1h_data(self):
         now = 2_000_000_000_000
-
-        class NoHourlyFeed(FakeBloFin):
-            def get_candles(self, inst_id, *, bar, limit):
-                self.calls.append(bar)
-                if bar == "1H":
-                    raise RuntimeError("1H feed unavailable")
-                return self.rows_by_bar[bar]
-
-        client = NoHourlyFeed(market_data(now))
+        client = self.client(now)
         with (
             patch(
                 "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
-                side_effect=[[bullish_pattern()], [], []],
+                return_value=[bearish_pattern()],
             ),
             patch(
                 "crypto_super_radar.challenge1_strategy._volume_confirmation",
-                return_value={"confirmed": False, "volume_ratio": 0.8, "reason": "low volume"},
+                return_value={"confirmed": False, "volume_ratio": 0.5},
             ),
             patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
-            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+            patch(
+                "crypto_super_radar.challenge1_strategy.monitor_chart_patterns",
+                return_value={},
+            ),
         ):
             result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
-        evidence = result["challenge1_evidence"]
-        self.assertEqual(result["signal"], "LONG")
-        self.assertEqual(evidence["context_alignment_15m"], "NEUTRAL")
-        self.assertEqual(evidence["context_1h_data_status"], "UNAVAILABLE")
-        self.assertEqual(evidence["candles_1h"], [])
+        self.assertEqual(result["signal"], "SHORT")
+        self.assertEqual(client.calls, ["5m"])
+        self.assertNotIn("candles_15m", result["challenge1_evidence"])
+        self.assertNotIn("candles_1h", result["challenge1_evidence"])
         eligible, reason = challenge1_entry_evidence_ready(result)
         self.assertTrue(eligible, reason)
 
