@@ -221,7 +221,7 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertEqual(len(upload_calls), 2)
         chart_upload = next(item for item in upload_calls if item["content_type"] == "image/png")
         csv_upload = next(item for item in upload_calls if item["content_type"] == "text/csv")
-        self.assertTrue(chart_upload["payload"].startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
+        self.assertEqual(chart_upload["payload"][:8], bytes([137, 80, 78, 71, 13, 10, 26, 10]))
         self.assertIn(b"15m,", csv_upload["payload"])
         self.assertIn(b"1H,", csv_upload["payload"])
         page_request = next(
