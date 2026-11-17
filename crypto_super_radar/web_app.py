@@ -8557,10 +8557,9 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
 
 
 def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
-    """Build truthful, safe, idempotent Notion events from one Challenge 1 job."""
+    """Build one robot record and one independently attributable record per AI reviewer."""
     current = job if isinstance(job, dict) else {}
-    raw_result = current.get("result")
-    result = raw_result if isinstance(raw_result, dict) else {}
+    result = current.get("result") if isinstance(current.get("result"), dict) else {}
     summary = _blofin_autopilot_cycle_summary(current)
     signal = summary.get("signal") or "UNKNOWN"
     no_entry = bool(summary.get("no_entry"))
@@ -8571,23 +8570,58 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
     analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else (
         current.get("analysis") if isinstance(current.get("analysis"), dict) else {}
     )
-    ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
-        current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+    reviews = result.get("ai_reviews") if isinstance(result.get("ai_reviews"), list) else (
+        current.get("ai_reviews") if isinstance(current.get("ai_reviews"), list) else []
     )
-    ai_status = str(ai_review.get("status") or current.get("ai_status") or "").strip().upper()
-    request_attempted_value = ai_review.get("request_attempted")
-    request_attempted = request_attempted_value is True
-    request_confirmed_not_called = request_attempted_value is False
-    response_source = str(ai_review.get("response_source") or "UNKNOWN").upper()
-    response_validated = ai_review.get("response_validated") is True
-    model_verified = ai_review.get("model_verified") is True
-    cached_verified = response_source == "CACHE" and response_validated and model_verified
-    verified_ai_response = (request_attempted or cached_verified) and response_validated and model_verified
-    if verified_ai_response and ai_status == "APPROVED":
+    if not reviews:
+        single = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
+            current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+        )
+        if single:
+            reviews = [{"reviewer_id": single.get("reviewer_id") or "nemotron",
+                        "actor": "Nemotron Supervisor", "review": single}]
+
+    consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
+        current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
+    )
+    consensus_status = str(consensus.get("status") or "NOT_COMPARABLE").upper()
+    if not consensus:
+        verified = [
+            item.get("review", {}) for item in reviews
+            if isinstance(item, dict) and isinstance(item.get("review"), dict)
+            and item["review"].get("request_attempted") is True
+            and item["review"].get("response_validated") is True
+            and item["review"].get("model_verified") is True
+        ]
+        consensus_status = "AGREEMENT" if len(verified) >= 2 and len({
+            str(item.get("status") or "").upper() for item in verified
+        }) == 1 else "SINGLE_REVIEWER" if len(verified) == 1 else "NOT_COMPARABLE"
+
+    reviewer_decisions = []
+    for item in reviews:
+        review = item.get("review") if isinstance(item, dict) and isinstance(item.get("review"), dict) else {}
+        verified = (
+            review.get("request_attempted") is True
+            and review.get("response_source") == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and bool(str(review.get("returned_model") or "").strip())
+        )
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        if verified and review_status == "APPROVED" and review.get("paper_entry_eligible") is True:
+            reviewer_decisions.append("APPROVE")
+        elif verified and review_status in {"VETO", "REJECT"}:
+            reviewer_decisions.append("REJECT")
+        elif review.get("request_attempted") is False:
+            reviewer_decisions.append("NOT_CALLED")
+        else:
+            reviewer_decisions.append("OBSERVE_ONLY")
+
+    if len(reviewer_decisions) >= 2 and all(x == "APPROVE" for x in reviewer_decisions):
         ai_decision = "APPROVE"
-    elif verified_ai_response and ai_status in {"VETO", "REJECT"}:
+    elif "REJECT" in reviewer_decisions:
         ai_decision = "REJECT"
-    elif request_confirmed_not_called and not cached_verified:
+    elif reviewer_decisions and all(x == "NOT_CALLED" for x in reviewer_decisions):
         ai_decision = "NOT_CALLED"
     else:
         ai_decision = "OBSERVE_ONLY"
@@ -8620,6 +8654,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         "gate_fail_count": analysis.get("gate_fail_count"),
         "gate_unknown_count": analysis.get("gate_unknown_count"),
         "result_status": result.get("status"),
+        "input_data_type": "LIVE_MARKET",
         "reason": str(reason)[:1200],
     }
     common = {
@@ -8636,6 +8671,8 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         "order_id": order_id,
         "position_id": position_id,
         "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
+        "input_data_type": "LIVE_MARKET",
+        "reviewer_consensus": consensus_status,
     }
     main_type = "NO_TRADE" if no_entry else "ANALYSIS_COMPLETED"
     events = [{
@@ -8668,55 +8705,115 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             }, ensure_ascii=False),
             "ai_decision": ai_decision,
         })
-    if ai_review:
-        if request_confirmed_not_called and not cached_verified:
-            ai_event_type = "AI_REVIEW_REQUESTED"
-            ai_event_reason = (
-                "بازبینی چرخه ثبت شد، اما درخواست به مدل بیرونی ارسال نشد؛ "
-                "علت و وضعیت واقعی در جزئیات آمده است."
-            )
-        elif cached_verified and ai_status == "APPROVED":
-            ai_event_type = "AI_APPROVAL"
-            ai_event_reason = "از پاسخ معتبر و قبلاً تأییدشدهٔ مدل در Cache استفاده شد؛ فراخوانی تازه‌ای انجام نشد."
-        elif verified_ai_response and ai_status == "APPROVED":
-            ai_event_type = "AI_APPROVAL"
-            ai_event_reason = "پاسخ واقعی مدل دریافت، شناسه مدل تأیید و محتوای پاسخ اعتبارسنجی شد."
-        elif verified_ai_response and ai_status in {"VETO", "REJECT"}:
-            ai_event_type = "AI_VETO"
-            ai_event_reason = "پاسخ واقعی و اعتبارسنجی‌شدهٔ مدل، ورود را رد کرد."
+
+    for index, item in enumerate(reviews):
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else {}
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or f"reviewer_{index + 1}")
+        actor = str(item.get("actor") or (
+            "Nemotron Supervisor" if reviewer_id.lower() == "nemotron" else
+            "Second AI Supervisor" if reviewer_id.lower() in {"second_ai", "second"} else
+            "AI Supervisor"
+        ))
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        request_attempted = review.get("request_attempted")
+        response_source = str(review.get("response_source") or "NONE").upper()
+        response_validated = review.get("response_validated") is True
+        model_verified = review.get("model_verified") is True
+        verified_response = (
+            request_attempted is True and response_source == "LIVE_API"
+            and response_validated and model_verified
+            and bool(str(review.get("returned_model") or "").strip())
+        )
+        if verified_response and review_status == "APPROVED" and review.get("paper_entry_eligible") is True:
+            reviewer_decision = "APPROVE"
+            event_type = "AI_APPROVAL"
+        elif verified_response and review_status in {"VETO", "REJECT"}:
+            reviewer_decision = "REJECT"
+            event_type = "AI_VETO"
+        elif request_attempted is False:
+            reviewer_decision = "NOT_CALLED"
+            event_type = "AI_REVIEW_REQUESTED"
         else:
-            ai_event_type = "AI_RECOMMENDATION"
-            ai_event_reason = "وضعیت فراخوانی/پاسخ AI کامل یا قابل‌تأیید نیست؛ این رویداد مجوز ورود محسوب نمی‌شود."
-        ai_event_status = "SUCCESS" if verified_ai_response else "WARNING"
-        actual_model = (
-            ai_review.get("returned_model") or ai_review.get("model") or ""
-        ) if model_verified else ""
+            reviewer_decision = "OBSERVE_ONLY"
+            event_type = "AI_RECOMMENDATION"
+
+        call_status = (
+            "CALLED" if request_attempted is True else
+            "NOT_CONFIGURED" if review_status == "NOT_CONFIGURED" else
+            "NOT_CALLED" if request_attempted is False else
+            "ERROR" if review_status == "ERROR" else "UNKNOWN"
+        )
+        validation_status = (
+            "VALID" if verified_response else
+            "INVALID" if request_attempted is True and response_source == "LIVE_API" else
+            "NOT_RUN" if request_attempted is False else "UNKNOWN"
+        )
+        actual_model = str(review.get("returned_model") or "") if verified_response else ""
+        review_reason = review.get("reason") or review.get("status_fa") or reason
+        event_details = {
+            "job_id": str(job_id),
+            "reviewer_id": reviewer_id,
+            "reviewer_status": review_status,
+            "configured_model": review.get("model") or review.get("configured_model"),
+            "returned_model": review.get("returned_model"),
+            "request_attempted": request_attempted,
+            "skip_reason_code": review.get("skip_reason_code"),
+            "response_source": response_source,
+            "response_validated": response_validated,
+            "model_verified": model_verified,
+            "http_status": review.get("http_status"),
+            "latency_ms": review.get("latency_ms"),
+            "total_tokens": review.get("total_tokens"),
+            "paper_entry_eligible": review.get("paper_entry_eligible"),
+            "native_council": review.get("native_council"),
+            "error_type": review.get("error_type"),
+            "consensus": consensus,
+        }
         events.append({
-            **common, "event_id": f"{job_id}:AI:{ai_event_type}",
-            "event_type": ai_event_type, "actor": "AI Supervisor",
-            "status": ai_event_status,
-            "ai_decision": ai_decision,
+            **common,
+            "event_id": f"{job_id}:AI:{reviewer_id}:{event_type}",
+            "event_type": event_type,
+            "actor": actor,
+            "status": "SUCCESS" if verified_response else "WARNING",
+            "ai_decision": reviewer_decision,
             "ai_model": actual_model,
-            "ai_analysis": ai_review.get("rationale_fa") or ai_review.get("reason") or "",
-            "ai_suggestion": ai_review.get("final_rating") or ai_review.get("status_fa") or ai_status,
-            "reason": ai_review.get("reason") or ai_event_reason or reason,
+            "reviewer_id": reviewer_id,
+            "ai_provider": review.get("provider") or "",
+            "ai_prompt_version": review.get("prompt_version") or "",
+            "ai_requested_at_utc": review.get("requested_at_utc") or review.get("request_started_at_utc"),
+            "ai_completed_at_utc": review.get("completed_at_utc"),
+            "ai_call_status": call_status,
+            "ai_validation": validation_status,
+            "ai_analysis": review.get("rationale_fa") or review.get("reason") or "",
+            "ai_suggestion": review.get("final_rating") or review.get("status_fa") or review_status,
+            "reason": str(review_reason)[:1600],
+            "details": json.dumps(event_details, ensure_ascii=False, sort_keys=True, default=str),
+        })
+
+    if consensus_status == "DISAGREEMENT":
+        events.append({
+            **common,
+            "event_id": f"{job_id}:AI:COUNCIL:AI_DISAGREEMENT",
+            "event_type": "AI_DISAGREEMENT",
+            "actor": "AI Supervisor",
+            "status": "WARNING",
+            "ai_decision": "OBSERVE_ONLY",
+            "reviewer_id": "COUNCIL",
+            "reviewer_consensus": "DISAGREEMENT",
+            "ai_call_status": "CALLED",
+            "ai_validation": "VALID",
+            "input_data_type": "LIVE_MARKET",
+            "reason": "دو ناظر مستقل تصمیم یکسانی صادر نکردند؛ ورود جدید مسدود ماند.",
             "details": json.dumps({
-                "job_id": job_id,
-                "ai_status": ai_status,
-                "configured_model": ai_review.get("model"),
-                "returned_model": ai_review.get("returned_model"),
-                "request_attempted": ai_review.get("request_attempted"),
-                "skip_reason_code": ai_review.get("skip_reason_code"),
-                "response_source": response_source,
-                "response_validated": response_validated,
-                "model_verified": model_verified,
-                "http_status": ai_review.get("http_status"),
-                "latency_ms": ai_review.get("latency_ms"),
-                "total_tokens": ai_review.get("total_tokens"),
-                "paper_entry_eligible": ai_review.get("paper_entry_eligible"),
-                "native_council": ai_review.get("native_council"),
-                "error_type": ai_review.get("error_type"),
-            }, ensure_ascii=False, sort_keys=True, default=str),
+                "job_id": str(job_id),
+                "nemotron_status": consensus.get("primary_status"),
+                "second_ai_status": consensus.get("second_status"),
+                "decision": "OBSERVE_ONLY",
+                "orders_submitted": False,
+                "trade_executed": False,
+            }, ensure_ascii=False, sort_keys=True),
         })
     return events
 
