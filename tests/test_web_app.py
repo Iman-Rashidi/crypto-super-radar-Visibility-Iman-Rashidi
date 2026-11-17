@@ -94,8 +94,28 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(web_app._demo_ai_review_approved({
             "status": "APPROVED", "paper_entry_eligible": True
         }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": True, "model": "configured-only"
+        }))
         self.assertTrue(web_app._demo_ai_review_approved({
-            "status": "APPROVED", "paper_entry_eligible": True, "model": "free-model"
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "model": "free-model",
+            "returned_model": "free-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
+        }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "model": "free-model",
+            "returned_model": "free-model",
+            "request_attempted": False,
+            "response_source": "NONE",
+            "response_validated": False,
+            "model_verified": False,
         }))
 
     def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
@@ -123,11 +143,24 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(robot_event["signal"], "NO_TRADE")
         self.assertEqual(robot_event["cycle_id"], "cycle-no-trade")
         self.assertIn("orders_submitted", robot_event["details"])
+        reviewer_events = [item for item in events if item["actor"] in {
+            "Nemotron Supervisor", "Second AI Supervisor"
+        }]
+        self.assertEqual(len(reviewer_events), 2)
+        self.assertEqual({item["event_type"] for item in reviewer_events}, {"AI_REVIEW_REQUESTED"})
+        self.assertEqual({item["ai_decision"] for item in reviewer_events}, {"NOT_CALLED"})
+        self.assertEqual({item["ai_model"] for item in reviewer_events}, {""})
+        self.assertEqual({item["reviewer_consensus"] for item in reviewer_events}, {"NOT_CALLED"})
 
     def test_ai_veto_is_recorded_separately_from_robot_analysis(self):
         ai_review = {
             "status": "VETO",
             "model": "free-test-model",
+            "returned_model": "free-test-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
             "rationale_fa": "ریسک نامتقارن است.",
             "paper_entry_eligible": False,
         }
@@ -144,11 +177,43 @@ class WebAppHttpTests(unittest.TestCase):
             },
         }
         events = web_app._blofin_job_notion_events("cycle-ai-veto", "BTC-USDT", job)
-        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        ai_event = next(item for item in events if item["actor"] == "Nemotron Supervisor")
         self.assertEqual(ai_event["event_type"], "AI_VETO")
         self.assertEqual(ai_event["ai_decision"], "REJECT")
         self.assertEqual(ai_event["ai_model"], "free-test-model")
         self.assertFalse(any(item["event_type"] == "ORDER_SUBMITTED" for item in events))
+
+    def test_unattempted_ai_review_is_logged_as_not_called_without_claiming_a_model(self):
+        job = {
+            "status": "completed",
+            "stage": "AI_BLOCKED",
+            "ai_review": {
+                "status": "UNKNOWN",
+                "model": "configured-but-not-called",
+                "request_attempted": False,
+                "skip_reason_code": "NATIVE_COUNCIL_NOT_APPROVED",
+                "response_source": "NONE",
+                "response_validated": False,
+                "model_verified": False,
+                "paper_entry_eligible": False,
+            },
+            "result": {
+                "status": "AI_BLOCKED",
+                "signal": "LONG",
+                "reason_fa": "بازبینی بیرونی به دلیل عبور نکردن از شورای بومی اجرا نشد.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-ai-not-called", "BTC-USDT", job)
+        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        self.assertEqual(ai_event["event_type"], "AI_REVIEW_REQUESTED")
+        self.assertEqual(ai_event["ai_decision"], "NOT_CALLED")
+        self.assertEqual(ai_event["status"], "WARNING")
+        self.assertEqual(ai_event["ai_model"], "")
+        details = json.loads(ai_event["details"])
+        self.assertFalse(details["request_attempted"])
+        self.assertEqual(details["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
 
     def test_verified_demo_fill_creates_order_and_ai_approval_events(self):
         job = {
@@ -157,6 +222,11 @@ class WebAppHttpTests(unittest.TestCase):
             "ai_review": {
                 "status": "APPROVED",
                 "model": "free-test-model",
+                "returned_model": "free-test-model",
+                "request_attempted": True,
+                "response_source": "LIVE_API",
+                "response_validated": True,
+                "model_verified": True,
                 "rationale_fa": "ریسک قابل قبول است.",
                 "paper_entry_eligible": True,
             },
@@ -432,6 +502,7 @@ class WebAppHttpTests(unittest.TestCase):
             },
             "elliott_wave": wave,
             "trade_context": {
+                "execution_profile": "STRICT",
                 "analysis_time_utc": "2026-11-14T15:36:43+00:00",
                 "last_completed_candle_time_utc": "2026-11-14T00:00:00+00:00",
                 "last_candle_close": 66100.0,
@@ -522,10 +593,21 @@ class WebAppHttpTests(unittest.TestCase):
             "configured": True,
             "secret_sent_to_model": False,
         }
-        with patch.object(web_app, "ai_connection_status", return_value=payload):
+        second = {
+            "reviewer_id": "second_ai", "provider": None, "model": None,
+            "status": "NOT_CONFIGURED", "configured": False,
+            "configuration_issues": ["CSR_SECOND_AI_API_KEY_MISSING"],
+            "secret_sent_to_model": False, "paper_entry_eligible": False,
+        }
+        with patch.object(web_app, "ai_connection_status", return_value=payload), patch.object(
+            web_app, "second_ai_connection_status", return_value=second
+        ):
             status, _, body = self.request("GET", "/api/ai/status")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), payload)
+        response = json.loads(body)
+        self.assertEqual(response["provider"], payload["provider"])
+        self.assertEqual(response["second_supervisor"], second)
+        self.assertEqual(response["two_reviewer_gate"], "REQUIRES_BOTH_VERIFIED_APPROVALS")
         self.assertNotIn("api_key", body.decode().lower())
 
     def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
@@ -1227,9 +1309,11 @@ class WebAppHttpTests(unittest.TestCase):
             },
             "analysis": {
                 "signal": "NO_TRADE",
-                "gate_pass_count": 0,
-                "gate_fail_count": 0,
-                "gate_unknown_count": 12,
+                "gate_report_status": "NOT_RUN",
+                "gate_pass_count": None,
+                "gate_fail_count": None,
+                "gate_unknown_count": None,
+                "gates_fa": [],
             },
             "result": {
                 "status": "NO_TRADE",
@@ -1242,6 +1326,12 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(report["instrument_id"], "ETH-USDT")
         self.assertEqual(report["execution_profile"], "CHALLENGE_1")
         self.assertIn("Challenge 1", report["stage_fa"])
+        self.assertEqual(report["gate_report_status"], "NOT_RUN")
+        self.assertEqual(report["gate_pass_count"], None)
+        self.assertEqual(report["gate_fail_count"], None)
+        self.assertEqual(report["gate_unknown_count"], None)
+        self.assertIn("۱۲ پروتکل عمومی", report["gate_summary_fa"])
+        self.assertEqual(report["gates_fa"], [])
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 

@@ -47,8 +47,15 @@ from .blofin_demo_executor import (
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
 from .database import storage_backend
-from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
+from .ai_second_opinion import (
+    ai_connection_status, second_ai_connection_status,
+    run_openrouter_connection_diagnostic, run_free_ai_second_opinion,
+    run_independent_ai_supervisor,
+)
 from .notion_event_sync import NotionEventOutbox
+from .demo_observability import (
+    demo_history_monitor_status, queue_manual_action, start_demo_history_monitor,
+)
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -3273,6 +3280,7 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "LIVE_12_GATE_ANALYSIS": "تحلیل زندهٔ ۱۲ فیلتر",
         "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده موتور Challenge 1 · روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
         "PROFILE_GATE_REVIEW": "بررسی گیت‌های الزامی پروفایل انتخابی",
+        "PATTERN_EVIDENCE_REVIEW": "بررسی اختصاصی کندل و الگوی معاملاتی",
         "MTF_TRIGGER_BLOCKED": "عدم تطبیق روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
         "ELLIOTT_WAVE_ANALYSIS": "تحلیل و انتخاب سناریوی موج الیوت",
         "NO_TRADE": "عدم ورود؛ شرایط کامل نیست",
@@ -3295,11 +3303,13 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         or current.get("message_fa")
         or "هنوز نتیجهٔ نهایی چرخه ثبت نشده است."
     )
-    pass_count = analysis.get("gate_pass_count", result.get("gate_pass_count"))
-    fail_count = analysis.get("gate_fail_count", result.get("gate_fail_count"))
-    unknown_count = analysis.get("gate_unknown_count", result.get("gate_unknown_count"))
-    gates_fa = analysis.get("gates_fa")
-    if not isinstance(gates_fa, list):
+    pattern_only = execution_profile == "CHALLENGE_1"
+    gate_report_status = str(analysis.get("gate_report_status") or result.get("gate_report_status") or ("NOT_RUN" if pattern_only else "REPORTED")).upper()
+    pass_count = None if pattern_only else analysis.get("gate_pass_count", result.get("gate_pass_count"))
+    fail_count = None if pattern_only else analysis.get("gate_fail_count", result.get("gate_fail_count"))
+    unknown_count = None if pattern_only else analysis.get("gate_unknown_count", result.get("gate_unknown_count"))
+    gates_fa = [] if pattern_only else analysis.get("gates_fa")
+    if not pattern_only and not isinstance(gates_fa, list):
         gates_fa = _blofin_gate_rows_fa(analysis.get("gates", []))
 
     events_fa = []
@@ -3333,10 +3343,13 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "stage_fa": stage_fa,
         "signal_fa": signal_fa,
         "reason_fa": reason_fa,
+        "gate_report_status": gate_report_status,
         "gate_pass_count": pass_count,
         "gate_fail_count": fail_count,
         "gate_unknown_count": unknown_count,
         "gate_summary_fa": (
+            "۱۲ پروتکل عمومی در مسیر ترید Challenge 1 اجرا نشده‌اند."
+            if pattern_only else
             f"{count_fa(pass_count)} فیلتر تأیید، "
             f"{count_fa(fail_count)} فیلتر رد و "
             f"{count_fa(unknown_count)} فیلتر نامشخص."
@@ -3803,13 +3816,21 @@ def _blofin_demo_instrument_options(*, force: bool = False) -> dict:
 
 
 def _demo_ai_review_approved(review: Any) -> bool:
-    """Fail closed unless a real AI review explicitly approves Demo entry."""
+    """Fail closed unless a live response from the verified model explicitly approves."""
     if not isinstance(review, dict):
         return False
+    configured_model = str(review.get("configured_model") or review.get("model") or "").strip()
+    returned_model = str(review.get("returned_model") or "").strip()
     return (
         str(review.get("status") or "").strip().upper() == "APPROVED"
         and review.get("paper_entry_eligible") is True
-        and bool(str(review.get("model") or "").strip())
+        and review.get("request_attempted") is True
+        and str(review.get("response_source") or "").upper() == "LIVE_API"
+        and review.get("response_validated") is True
+        and review.get("model_verified") is True
+        and bool(configured_model)
+        and bool(returned_model)
+        and returned_model.split(":", 1)[0] == configured_model.split(":", 1)[0]
     )
 
 
@@ -3982,16 +4003,9 @@ def _run_blofin_demo_execution_job(
             mtf_signal = challenge_record.get("execution") if isinstance(challenge_record.get("execution"), dict) else {}
             last_candle_time = challenge_record.get("signal_bar_open_utc")
             last_candle_close = challenge_record.get("entry_price_usd")
-            gates = [
-                {
-                    "gate_id": gate_id,
-                    "status": "UNKNOWN",
-                    "name_fa": f"فیلتر عمومی {gate_id}",
-                    "reason_fa": "در موتور Challenge 1 برای صدور سیگنال استفاده نمی‌شود؛ فقط در لایه نظارت جداگانه می‌ماند.",
-                    "execution_role": "OBSERVATION_ONLY",
-                }
-                for gate_id in range(1, 13)
-            ]
+            # No generic Radar gate calculations or placeholder rows are created
+            # for the candle-pattern-only Demo trading path.
+            gates = []
             challenge_record["gates"] = gates
             challenge_record["elliott_wave"] = {}
             metrics = {
@@ -4122,24 +4136,34 @@ def _run_blofin_demo_execution_job(
             if isinstance(item, dict) and str(item.get("status", "")).upper() == "UNKNOWN"
         ) if isinstance(gates, list) else 12
         direction = str(record.get("signal") or "").upper()
+        pattern_only = execution_profile == "CHALLENGE_1"
         gate_summary = {
             "instrument_id": instrument_id, "execution_profile": execution_profile,
+            "gate_enforcement": "OBSERVATION_ONLY" if pattern_only else "PROFILE_POLICY",
+            "trading_supervisor_input": "CLOSED_CANDLE_OHLCV_AND_PATTERNS_ONLY" if pattern_only else "GENERAL_RADAR_EVIDENCE",
             "signal": direction or "UNKNOWN",
-            "gate_pass_count": pass_count, "gate_fail_count": fail_count,
-            "gate_unknown_count": unknown_count,
-            "required_gate_ids": sorted(profile_rule["required"]),
-            "min_pass_count": profile_rule["min_pass"],
-            "confirmation_score": record.get("confirmation_score"),
+            "gate_report_status": "NOT_RUN" if pattern_only else "REPORTED",
+            "gate_pass_count": None if pattern_only else pass_count,
+            "gate_fail_count": None if pattern_only else fail_count,
+            "gate_unknown_count": None if pattern_only else unknown_count,
+            "required_gate_ids": [] if pattern_only else sorted(profile_rule["required"]),
+            "min_pass_count": None if pattern_only else profile_rule["min_pass"],
+            "confirmation_score": None if pattern_only else record.get("confirmation_score"),
             "estimated_risk_score": record.get("estimated_risk_score"),
             "entry_reference_price": record.get("entry_price_usd"),
             "stop_loss": record.get("stop_loss_usd"),
             "take_profit": record.get("take_profit_usd"),
             "signal_fa": {"LONG": "خرید (LONG)", "SHORT": "فروش استقراضی (SHORT)"}.get(direction, "بدون معامله"),
-            "gates_fa": _blofin_gate_rows_fa(gates),
+            "gates_fa": [] if pattern_only else _blofin_gate_rows_fa(gates),
         }
         _set_blofin_execution_job(
-            job_id, "running", stage="PROFILE_GATE_REVIEW",
-            message_fa=(f"ربات Challenge 1 · {instrument_id} · تأیید الگوی کندلی/نموداری؛ ۱۲ فیلتر عمومی فقط نظارتی‌اند." if execution_profile == "CHALLENGE_1" else f"ربات {execution_profile} · {instrument_id} · {pass_count}/12 گیت PASS؛ الگوی کندلی شاخص شرط اجباری نیست."),
+            job_id, "running",
+            stage="PATTERN_EVIDENCE_REVIEW" if pattern_only else "PROFILE_GATE_REVIEW",
+            message_fa=(
+                f"ربات Challenge 1 · {instrument_id} · ناظرها فقط OHLCV کندل‌های بسته‌شده و الگوهای کندلی/نموداری را بررسی می‌کنند؛ ۱۲ پروتکل عمومی در داوری این معامله اجرا نمی‌شوند."
+                if pattern_only else
+                f"ربات {execution_profile} · {instrument_id} · {pass_count}/12 گیت PASS؛ الگوی کندلی شاخص شرط اجباری نیست."
+            ),
             analysis=gate_summary, elliott_wave=wave_report, trade_context=trade_context,
         )
         statuses_by_id = {
@@ -4150,20 +4174,26 @@ def _run_blofin_demo_execution_job(
             gate_id for gate_id in profile_rule["required"]
             if statuses_by_id.get(gate_id) != "PASS"
         )
-        if (
+        gate_report_invalid = (
             not isinstance(gates, list) or len(gates) != 12
             or set(statuses_by_id) != set(range(1, 13))
-            or required_blockers or pass_count < profile_rule["min_pass"]
+        )
+        profile_gate_blocked = bool(
+            gate_report_invalid or required_blockers
+            or pass_count < profile_rule["min_pass"]
+        )
+        if (
+            (not pattern_only and profile_gate_blocked)
             or direction not in {"LONG", "SHORT"}
         ):
             reasons = []
             if direction not in {"LONG", "SHORT"}:
                 reasons.append((mtf_signal or {}).get("reason_fa") or "سیگنال جهت‌دار LONG/SHORT ساخته نشد.")
-            if required_blockers:
+            if not pattern_only and required_blockers:
                 reasons.append("گیت‌های ضروری این پروفایل PASS نیستند: " + ", ".join(map(str, required_blockers)))
-            if pass_count < profile_rule["min_pass"]:
+            if not pattern_only and pass_count < profile_rule["min_pass"]:
                 reasons.append(f"حداقل {profile_rule['min_pass']} گیت PASS لازم است؛ {pass_count} مورد PASS شد.")
-            if len(gates) != 12 or set(statuses_by_id) != set(range(1, 13)):
+            if not pattern_only and gate_report_invalid:
                 reasons.append("گزارش ۱۲ گیت کامل و یکتا نیست.")
             reason_fa = "؛ ".join(reasons) or "شرایط ورود تکمیل نشد."
             _set_blofin_execution_job(
@@ -4286,8 +4316,8 @@ def _run_blofin_demo_execution_job(
             return
 
         _set_blofin_execution_job(
-            job_id, "running", stage="NEMOTRON_SECOND_OPINION",
-            message_fa="تحلیل زنده برای بازبینی واقعی ناظر هوش مصنوعی رایگان ارسال می‌شود؛ هنوز هیچ سفارشی ارسال نشده است.",
+            job_id, "running", stage="AI_SUPERVISOR_COUNCIL",
+            message_fa="هر دو ناظر مستقل باید همین شواهد بازار را جداگانه بررسی کنند؛ هنوز هیچ سفارشی مجاز نیست.",
             analysis=gate_summary,
             elliott_wave=wave_report,
             trade_context=trade_context,
@@ -4296,25 +4326,116 @@ def _run_blofin_demo_execution_job(
             ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
         except Exception as exc:
             ai_review = {
-                "status": "UNKNOWN", "paper_entry_eligible": False,
+                "reviewer_id": "nemotron",
+                "provider": "OpenRouter",
+                "status": "ERROR",
+                "paper_entry_eligible": False,
+                "request_attempted": None,
+                "skip_reason_code": "UNHANDLED_PRIMARY_REVIEW_EXCEPTION",
+                "response_source": "UNKNOWN",
+                "response_validated": False,
+                "model_verified": False,
                 "error_type": type(exc).__name__,
             }
 
-        ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
-        if not _demo_ai_review_approved(ai_review):
+        try:
+            second_ai_review = run_independent_ai_supervisor(analysis, asset)
+        except Exception as exc:
+            second_ai_review = {
+                "reviewer_id": "second_ai",
+                "status": "ERROR",
+                "paper_entry_eligible": False,
+                "request_attempted": None,
+                "skip_reason_code": "UNHANDLED_SECOND_REVIEW_EXCEPTION",
+                "response_source": "UNKNOWN",
+                "response_validated": False,
+                "model_verified": False,
+                "error_type": type(exc).__name__,
+            }
+
+        primary_approved = _demo_ai_review_approved(ai_review)
+        second_approved = _demo_ai_review_approved(second_ai_review)
+        primary_status = str(ai_review.get("status") or "UNKNOWN").upper()
+        second_status = str(second_ai_review.get("status") or "UNKNOWN").upper()
+        primary_called_valid = (
+            ai_review.get("request_attempted") is True
+            and ai_review.get("response_source") == "LIVE_API"
+            and ai_review.get("response_validated") is True
+            and ai_review.get("model_verified") is True
+        )
+        second_called_valid = (
+            second_ai_review.get("request_attempted") is True
+            and second_ai_review.get("response_source") == "LIVE_API"
+            and second_ai_review.get("response_validated") is True
+            and second_ai_review.get("model_verified") is True
+        )
+        if primary_called_valid and second_called_valid:
+            if primary_status == second_status and primary_approved == second_approved:
+                consensus_status = "AGREEMENT"
+            else:
+                consensus_status = "DISAGREEMENT"
+        elif primary_called_valid or second_called_valid:
+            consensus_status = "SINGLE_REVIEWER"
+        elif (
+            ai_review.get("request_attempted") is False
+            and second_ai_review.get("request_attempted") is False
+        ):
+            consensus_status = "NOT_CALLED"
+        else:
+            consensus_status = "NOT_COMPARABLE"
+
+        ai_consensus = {
+            "status": consensus_status,
+            "primary_status": primary_status,
+            "second_status": second_status,
+            "primary_verified": primary_called_valid,
+            "second_verified": second_called_valid,
+            "primary_approved": primary_approved,
+            "second_approved": second_approved,
+            "two_reviewer_approval": primary_approved and second_approved,
+            "decision": (
+                "APPROVE" if primary_approved and second_approved else
+                "REJECT" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
+                "NOT_CALLED" if consensus_status == "NOT_CALLED" else
+                "OBSERVE_ONLY"
+            ),
+        }
+        ai_reviews = [
+            {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": ai_review},
+            {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second_ai_review},
+        ]
+        ai_status = (
+            "APPROVED" if primary_approved and second_approved else
+            "DISAGREEMENT" if consensus_status == "DISAGREEMENT" else
+            "NOT_CONFIGURED" if "NOT_CONFIGURED" in {primary_status, second_status} else
+            "VETO" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
+            "UNKNOWN"
+        )
+        if not (primary_approved and second_approved):
+            if consensus_status == "DISAGREEMENT":
+                reason_fa = "دو ناظر مستقل به نتیجه یکسان نرسیدند؛ اختلاف ثبت شد و ورود مسدود ماند."
+            elif "NOT_CONFIGURED" in {primary_status, second_status}:
+                reason_fa = "ناظر مستقل دوم هنوز پیکربندی نشده است؛ تا دریافت دو تأیید مستقل هیچ ورودی جدیدی مجاز نیست."
+            elif consensus_status == "NOT_CALLED":
+                reason_fa = "گیت‌های شواهد بومی کامل نیستند؛ هیچ ناظر بیرونی فراخوانی نشد و ورود مسدود ماند."
+            elif primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"}:
+                reason_fa = "حداقل یکی از ناظران مستقل ورود را رد کرد؛ ورود مسدود ماند."
+            else:
+                reason_fa = "دو تأیید مستقل، پاسخ معتبر و شناسه مدل تأییدشده دریافت نشد؛ ورود مسدود ماند."
             _set_blofin_execution_job(
-                job_id, "completed", stage="AI_BLOCKED",
-                message_fa="ناظر هوش مصنوعی تأیید معتبر صادر نکرد؛ ورود مسدود شد و هیچ سفارشی ارسال نشد.",
-                ai_review={
-                    "status": ai_status,
-                    "model": ai_review.get("model") if isinstance(ai_review, dict) else None,
-                    "latency_ms": ai_review.get("latency_ms") if isinstance(ai_review, dict) else None,
-                },
+                job_id, "completed", stage="AI_COUNCIL_BLOCKED",
+                message_fa=reason_fa,
+                ai_review=ai_review,
+                ai_reviews=ai_reviews,
+                ai_consensus=ai_consensus,
                 result={
                     "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
                     **gate_summary, "ai_status": ai_status,
-                    "elliott_wave": wave_report, "trade_context": trade_context,
-                    "reason_fa": "Nemotron نظر تأییدکننده و مجوز ورود صادر نکرد؛ هیچ سفارشی ارسال نشد.",
+                    "ai_reviews": ai_reviews,
+                    "ai_consensus": ai_consensus,
+                    "elliott_wave": wave_report,
+                    "trade_context": trade_context,
+                    "reason_fa": reason_fa,
                     "orders_submitted": False, "trade_executed": False,
                 },
             )
@@ -4322,12 +4443,10 @@ def _run_blofin_demo_execution_job(
 
         _set_blofin_execution_job(
             job_id, "running", stage="DEMO_ORDER_GUARDS",
-            message_fa="کنترل حساب Demo، مارجین، قیمت، حجم حداقل قرارداد و حد ضرر/حد سود.",
-            ai_review={
-                "status": ai_status, "model": ai_review.get("model"),
-                "returned_model": ai_review.get("returned_model"),
-                "latency_ms": ai_review.get("latency_ms"),
-            },
+            message_fa="هر دو ناظر مستقل با پاسخ معتبر و شناسه مدل تأییدشده موافق‌اند؛ کنترل نهایی Demo آغاز می‌شود.",
+            ai_review=ai_review,
+            ai_reviews=ai_reviews,
+            ai_consensus=ai_consensus,
             analysis=gate_summary,
             elliott_wave=wave_report,
             trade_context=trade_context,
@@ -4526,11 +4645,22 @@ def _run_blofin_demo_execution_job(
             "filled_at_utc": filled_at,
             "trade_executed": trade_executed,
             "orders_submitted": True,
+            "ai_reviews": ai_reviews,
+            "ai_consensus": ai_consensus,
             "ai_review": {
                 "status": ai_status, "model": ai_review.get("model"),
                 "returned_model": ai_review.get("returned_model"),
                 "final_rating": ai_review.get("final_rating"),
                 "latency_ms": ai_review.get("latency_ms"),
+                "request_attempted": ai_review.get("request_attempted"),
+                "skip_reason_code": ai_review.get("skip_reason_code"),
+                "response_source": ai_review.get("response_source"),
+                "response_validated": ai_review.get("response_validated"),
+                "model_verified": ai_review.get("model_verified"),
+                "http_status": ai_review.get("http_status"),
+                "total_tokens": ai_review.get("total_tokens"),
+                "reason": ai_review.get("reason"),
+                "status_fa": ai_review.get("status_fa"),
             },
             "positions": positions,
             "closed_positions": position_history,
@@ -5143,6 +5273,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
         if parsed.path == "/api/ai/status":
             payload = ai_connection_status()
+            payload["second_supervisor"] = second_ai_connection_status()
+            payload["two_reviewer_gate"] = "REQUIRES_BOTH_VERIFIED_APPROVALS"
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/notion-sync/status":
@@ -5150,6 +5282,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 outbox = NotionEventOutbox()
                 payload = outbox.status_snapshot()
+                payload["demo_history_monitor"] = demo_history_monitor_status()
                 return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
             except Exception as exc:
@@ -5456,7 +5589,7 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </section>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
-            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
+            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ پروتکل عمومی رادار در مسیر معامله Challenge 1 اجرا یا ارزیابی نمی‌شوند و فقط در تحلیل عمومی رادار باقی می‌مانند. موتور معامله به TinyFish یا فیلترهای عمومی رادار وابسته نیست. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <div id="blofin-robot-cycle-controls">
               <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
               <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک چرخه با ربات (دستی و یک‌باره)</button>
@@ -8066,30 +8199,51 @@ let blofinInstrumentRecords=[];
                                 position_side_hint=form.get("position_side", [""])[0],
                             )
                     except BloFinDemoExecutionUnknown as exc:
+                        queue_manual_action(route, {
+                            "status": "UNKNOWN", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": "نتیجه درخواست مبهم است: " + type(exc).__name__,
+                        })
                         return self._send(409, json.dumps({
                             "status": "UNKNOWN",
                             "message_fa": "نتیجه درخواست به‌طور قطعی مشخص نیست؛ پیش از هر تلاش مجدد حساب Demo را تازه‌سازی کن. " + str(exc),
                             "retry_allowed": False,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoExecutionBlocked as exc:
+                        queue_manual_action(route, {
+                            "status": "BLOCKED", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": str(exc),
+                        })
                         return self._send(409, json.dumps({
                             "status": "BLOCKED", "message_fa": str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except (ValueError, InvalidOperation) as exc:
+                        queue_manual_action(route, {
+                            "status": "INVALID_REQUEST", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": str(exc),
+                        })
                         return self._send(400, json.dumps({
                             "status": "INVALID_REQUEST", "message_fa": "پارامترهای دستی معتبر نیستند: " + str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoError as exc:
+                        queue_manual_action(route, {
+                            "status": "EXCHANGE_ERROR", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": type(exc).__name__,
+                        })
                         return self._send(502, json.dumps({
                             "status": "EXCHANGE_ERROR", "message_fa": "BloFin Demo درخواست را کامل نکرد؛ وضعیت سفارش یا پوزیشن را دوباره بخوان.",
                             "error_type": type(exc).__name__,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except Exception as exc:
+                        queue_manual_action(route, {
+                            "status": "MANUAL_ACTION_FAILED", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": type(exc).__name__,
+                        })
                         return self._send(500, json.dumps({
                             "status": "MANUAL_ACTION_FAILED",
                             "message_fa": "عملیات دستی با خطای کنترل‌شده متوقف شد؛ وضعیت حساب را دوباره بخوان.",
                             "error_type": type(exc).__name__,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                payload["notion_event_queue"] = queue_manual_action(route, payload)
                 status_code = 202 if payload.get("status") in {"ACCEPTED", "FILLED", "PARTIALLY_FILLED", "CLOSE_ACCEPTED", "CANCELED"} else 409
                 return self._send(status_code, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                                   "application/json; charset=utf-8")
@@ -8418,10 +8572,9 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
 
 
 def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
-    """Build safe, idempotent Notion events from one completed Challenge 1 symbol job."""
+    """Build one robot record and one independently attributable record per AI reviewer."""
     current = job if isinstance(job, dict) else {}
-    raw_result = current.get("result")
-    result = raw_result if isinstance(raw_result, dict) else {}
+    result = current.get("result") if isinstance(current.get("result"), dict) else {}
     summary = _blofin_autopilot_cycle_summary(current)
     signal = summary.get("signal") or "UNKNOWN"
     no_entry = bool(summary.get("no_entry"))
@@ -8432,15 +8585,103 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
     analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else (
         current.get("analysis") if isinstance(current.get("analysis"), dict) else {}
     )
-    ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
-        current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+    reviews = result.get("ai_reviews") if isinstance(result.get("ai_reviews"), list) else (
+        current.get("ai_reviews") if isinstance(current.get("ai_reviews"), list) else []
     )
-    ai_status = str(ai_review.get("status") or current.get("ai_status") or "").strip().upper()
-    ai_decision = (
-        "APPROVE" if ai_status == "APPROVED" else
-        "REJECT" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
-        "OBSERVE_ONLY" if ai_review else "NOT_CALLED"
+    if not reviews:
+        single = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
+            current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+        )
+        if single:
+            reviews = [{"reviewer_id": single.get("reviewer_id") or "nemotron",
+                        "actor": "Nemotron Supervisor", "review": single}]
+    if not reviews:
+        blocked_stage = str(current.get("stage") or result.get("status") or "UNKNOWN")
+        blocked_reason = (
+            "هیچ فراخوانی خارجی برای این چرخه انجام نشد؛ ربات پیش از مرحله بازبینی AI "
+            f"در مرحله {blocked_stage} متوقف شد."
+        )
+        reviews = [
+            {
+                "reviewer_id": "nemotron",
+                "actor": "Nemotron Supervisor",
+                "review": {
+                    "reviewer_id": "nemotron", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": blocked_reason,
+                },
+            },
+            {
+                "reviewer_id": "second_ai",
+                "actor": "Second AI Supervisor",
+                "review": {
+                    "reviewer_id": "second_ai", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": blocked_reason,
+                },
+            },
+        ]
+
+    consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
+        current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
     )
+    consensus_status = str(consensus.get("status") or "NOT_COMPARABLE").upper()
+    if not consensus:
+        verified = [
+            item.get("review", {}) for item in reviews
+            if isinstance(item, dict) and isinstance(item.get("review"), dict)
+            and item["review"].get("request_attempted") is True
+            and item["review"].get("response_validated") is True
+            and item["review"].get("model_verified") is True
+        ]
+        all_not_called = bool(reviews) and all(
+            isinstance(item, dict)
+            and isinstance(item.get("review"), dict)
+            and item["review"].get("request_attempted") is False
+            for item in reviews
+        )
+        consensus_status = (
+            "AGREEMENT" if len(verified) >= 2 and len({
+                str(item.get("status") or "").upper() for item in verified
+            }) == 1 else
+            "SINGLE_REVIEWER" if len(verified) == 1 else
+            "NOT_CALLED" if all_not_called else
+            "NOT_COMPARABLE"
+        )
+
+    reviewer_decisions = []
+    for item in reviews:
+        review = item.get("review") if isinstance(item, dict) and isinstance(item.get("review"), dict) else {}
+        verified = (
+            review.get("request_attempted") is True
+            and review.get("response_source") == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and bool(str(review.get("returned_model") or "").strip())
+        )
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        if verified and review_status == "APPROVED" and review.get("paper_entry_eligible") is True:
+            reviewer_decisions.append("APPROVE")
+        elif verified and review_status in {"VETO", "REJECT"}:
+            reviewer_decisions.append("REJECT")
+        elif review.get("request_attempted") is False:
+            reviewer_decisions.append("NOT_CALLED")
+        else:
+            reviewer_decisions.append("OBSERVE_ONLY")
+
+    if len(reviewer_decisions) >= 2 and all(x == "APPROVE" for x in reviewer_decisions):
+        ai_decision = "APPROVE"
+    elif "REJECT" in reviewer_decisions:
+        ai_decision = "REJECT"
+    elif reviewer_decisions and all(x == "NOT_CALLED" for x in reviewer_decisions):
+        ai_decision = "NOT_CALLED"
+    else:
+        ai_decision = "OBSERVE_ONLY"
+
     order = result.get("order") if isinstance(result.get("order"), dict) else {}
     order_id = (
         result.get("exchange_order_id") or result.get("order_id")
@@ -8469,6 +8710,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         "gate_fail_count": analysis.get("gate_fail_count"),
         "gate_unknown_count": analysis.get("gate_unknown_count"),
         "result_status": result.get("status"),
+        "input_data_type": "LIVE_MARKET",
         "reason": str(reason)[:1200],
     }
     common = {
@@ -8485,6 +8727,8 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         "order_id": order_id,
         "position_id": position_id,
         "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
+        "input_data_type": "LIVE_MARKET",
+        "reviewer_consensus": consensus_status,
     }
     main_type = "NO_TRADE" if no_entry else "ANALYSIS_COMPLETED"
     events = [{
@@ -8517,32 +8761,117 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             }, ensure_ascii=False),
             "ai_decision": ai_decision,
         })
-    if ai_review:
-        ai_event_type = (
-            "AI_APPROVAL" if ai_status == "APPROVED" else
-            "AI_VETO" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
-            "AI_RECOMMENDATION"
+
+    for index, item in enumerate(reviews):
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else {}
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or f"reviewer_{index + 1}")
+        actor = str(item.get("actor") or (
+            "Nemotron Supervisor" if reviewer_id.lower() == "nemotron" else
+            "Second AI Supervisor" if reviewer_id.lower() in {"second_ai", "second"} else
+            "AI Supervisor"
+        ))
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        request_attempted = review.get("request_attempted")
+        response_source = str(review.get("response_source") or "NONE").upper()
+        response_validated = review.get("response_validated") is True
+        model_verified = review.get("model_verified") is True
+        verified_response = (
+            request_attempted is True and response_source == "LIVE_API"
+            and response_validated and model_verified
+            and bool(str(review.get("returned_model") or "").strip())
         )
+        if verified_response and review_status == "APPROVED" and review.get("paper_entry_eligible") is True:
+            reviewer_decision = "APPROVE"
+            event_type = "AI_APPROVAL"
+        elif verified_response and review_status in {"VETO", "REJECT"}:
+            reviewer_decision = "REJECT"
+            event_type = "AI_VETO"
+        elif request_attempted is False:
+            reviewer_decision = "NOT_CALLED"
+            event_type = "AI_REVIEW_REQUESTED"
+        else:
+            reviewer_decision = "OBSERVE_ONLY"
+            event_type = "AI_RECOMMENDATION"
+
+        call_status = (
+            "CALLED" if request_attempted is True else
+            "NOT_CONFIGURED" if review_status == "NOT_CONFIGURED" else
+            "NOT_CALLED" if request_attempted is False else
+            "ERROR" if review_status == "ERROR" else "UNKNOWN"
+        )
+        validation_status = (
+            "VALID" if verified_response else
+            "INVALID" if request_attempted is True and response_source == "LIVE_API" else
+            "NOT_RUN" if request_attempted is False else "UNKNOWN"
+        )
+        actual_model = str(review.get("returned_model") or "") if verified_response else ""
+        review_reason = review.get("reason") or review.get("status_fa") or reason
+        event_details = {
+            "job_id": str(job_id),
+            "reviewer_id": reviewer_id,
+            "reviewer_status": review_status,
+            "configured_model": review.get("model") or review.get("configured_model"),
+            "returned_model": review.get("returned_model"),
+            "request_attempted": request_attempted,
+            "skip_reason_code": review.get("skip_reason_code"),
+            "response_source": response_source,
+            "response_validated": response_validated,
+            "model_verified": model_verified,
+            "http_status": review.get("http_status"),
+            "latency_ms": review.get("latency_ms"),
+            "total_tokens": review.get("total_tokens"),
+            "paper_entry_eligible": review.get("paper_entry_eligible"),
+            "native_council": review.get("native_council"),
+            "error_type": review.get("error_type"),
+            "consensus": consensus,
+        }
         events.append({
-            **common, "event_id": f"{job_id}:AI:{ai_event_type}",
-            "event_type": ai_event_type, "actor": "AI Supervisor",
-            "status": "SUCCESS" if ai_status in {"APPROVED", "VETO", "REJECT"} else "WARNING",
-            "ai_decision": ai_decision,
-            "ai_model": ai_review.get("model") or ai_review.get("returned_model") or "",
-            "ai_analysis": ai_review.get("rationale_fa") or ai_review.get("reason") or "",
-            "ai_suggestion": ai_review.get("final_rating") or ai_review.get("status_fa") or ai_status,
-            "reason": ai_review.get("reason") or reason,
+            **common,
+            "event_id": f"{job_id}:AI:{reviewer_id}:{event_type}",
+            "event_type": event_type,
+            "actor": actor,
+            "status": "SUCCESS" if verified_response else "WARNING",
+            "ai_decision": reviewer_decision,
+            "ai_model": actual_model,
+            "reviewer_id": reviewer_id,
+            "ai_provider": review.get("provider") or "",
+            "ai_prompt_version": review.get("prompt_version") or "",
+            "ai_requested_at_utc": review.get("requested_at_utc") or review.get("request_started_at_utc"),
+            "ai_completed_at_utc": review.get("completed_at_utc"),
+            "ai_call_status": call_status,
+            "ai_validation": validation_status,
+            "ai_analysis": review.get("rationale_fa") or review.get("reason") or "",
+            "ai_suggestion": review.get("final_rating") or review.get("status_fa") or review_status,
+            "reason": str(review_reason)[:1600],
+            "details": json.dumps(event_details, ensure_ascii=False, sort_keys=True, default=str),
+        })
+
+    if consensus_status == "DISAGREEMENT":
+        events.append({
+            **common,
+            "event_id": f"{job_id}:AI:COUNCIL:AI_DISAGREEMENT",
+            "event_type": "AI_DISAGREEMENT",
+            "actor": "AI Supervisor",
+            "status": "WARNING",
+            "ai_decision": "OBSERVE_ONLY",
+            "reviewer_id": "COUNCIL",
+            "reviewer_consensus": "DISAGREEMENT",
+            "ai_call_status": "CALLED",
+            "ai_validation": "VALID",
+            "input_data_type": "LIVE_MARKET",
+            "reason": "دو ناظر مستقل تصمیم یکسانی صادر نکردند؛ ورود جدید مسدود ماند.",
             "details": json.dumps({
-                "job_id": job_id,
-                "ai_status": ai_status,
-                "response_validated": ai_review.get("response_validated"),
-                "model_verified": ai_review.get("model_verified"),
-                "latency_ms": ai_review.get("latency_ms"),
-                "paper_entry_eligible": ai_review.get("paper_entry_eligible"),
+                "job_id": str(job_id),
+                "nemotron_status": consensus.get("primary_status"),
+                "second_ai_status": consensus.get("second_status"),
+                "decision": "OBSERVE_ONLY",
+                "orders_submitted": False,
+                "trade_executed": False,
             }, ensure_ascii=False, sort_keys=True),
         })
     return events
-
 
 def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> dict:
     """Persist the event/outbox before attempting any non-critical Notion network I/O."""
@@ -8925,6 +9254,7 @@ def main():
     host = os.getenv("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), Handler)
     _start_notion_sync_worker()
+    start_demo_history_monitor()
     _start_blofin_demo_autopilot()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
