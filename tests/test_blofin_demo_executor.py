@@ -378,11 +378,11 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
     def test_list_unresolved_orders_returns_every_supported_state(self):
         first = build_demo_order_plan(
             signal_record(signal_id="unresolved-oldest"),
-            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
         )
         second = build_demo_order_plan(
             signal_record(signal_id="unresolved-next"),
-            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
         )
         self.assertTrue(self.store.reserve_order(first, max_concurrent_positions=3))
         self.assertTrue(self.store.reserve_order(second, max_concurrent_positions=3))
@@ -1106,7 +1106,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         plans = [
             build_demo_order_plan(
                 signal_record(signal_id=f"multi-unresolved-{index}"),
-                instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+                instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
             )
             for index in range(2)
         ]
