@@ -103,7 +103,7 @@ def _normalise_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "reason_fa": _text(snapshot.get("reason_fa"), 1800),
         "analysis_time_utc": _iso(snapshot.get("analysis_time_utc") or snapshot.get("occurred_at_utc")),
         "signal_bar_open_utc": _iso(snapshot.get("signal_bar_open_utc")),
-        "engine_version": _text(snapshot.get("engine_version") or "CHALLENGE_1_LOCAL_RULES_V1", 100),
+        "engine_version": _text(snapshot.get("engine_version") or "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY", 100),
         "patterns": list(snapshot.get("patterns") or [])[:20] if isinstance(snapshot.get("patterns"), list) else [],
         "chart_structure": _text(snapshot.get("chart_structure"), 120),
         "volume_confirmation": dict(snapshot.get("volume_confirmation") or {}) if isinstance(snapshot.get("volume_confirmation"), Mapping) else {},
