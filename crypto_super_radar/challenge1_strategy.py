@@ -265,6 +265,23 @@ def _time_label(frame: pd.DataFrame) -> str:
     return frame.index[-1].isoformat()
 
 
+def _candles_for_report(frame: pd.DataFrame, *, limit: int) -> list[dict[str, Any]]:
+    """Serialize only validated, exchange-confirmed candles for reproducible reports."""
+    rows: list[dict[str, Any]] = []
+    for stamp, row in frame.tail(max(1, min(int(limit), 200))).iterrows():
+        quote_volume = _number(row.get("quote_volume"))
+        rows.append({
+            "time_utc": stamp.isoformat(),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+            "quote_volume": quote_volume,
+        })
+    return rows
+
+
 def analyze_blofin_challenge1(
     client: Any,
     inst_id: str,
@@ -386,6 +403,10 @@ def analyze_blofin_challenge1(
         "context_patterns": patterns_1h,
         "volume_confirmation": volume,
         "decision_reason_fa": reason_fa,
+        # These are the exact validated completed candles used by this decision.
+        # Future candles are never added to the decision-time snapshot.
+        "candles_15m": _candles_for_report(frame_15m, limit=120),
+        "candles_1h": _candles_for_report(frame_1h, limit=60),
     }
     return {
         "signal": signal,
