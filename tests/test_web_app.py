@@ -94,8 +94,28 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(web_app._demo_ai_review_approved({
             "status": "APPROVED", "paper_entry_eligible": True
         }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": True, "model": "configured-only"
+        }))
         self.assertTrue(web_app._demo_ai_review_approved({
-            "status": "APPROVED", "paper_entry_eligible": True, "model": "free-model"
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "model": "free-model",
+            "returned_model": "free-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
+        }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "model": "free-model",
+            "returned_model": "free-model",
+            "request_attempted": False,
+            "response_source": "NONE",
+            "response_validated": False,
+            "model_verified": False,
         }))
 
     def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
@@ -149,7 +169,7 @@ class WebAppHttpTests(unittest.TestCase):
             },
         }
         events = web_app._blofin_job_notion_events("cycle-ai-veto", "BTC-USDT", job)
-        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        ai_event = next(item for item in events if item["actor"] == "Nemotron Supervisor")
         self.assertEqual(ai_event["event_type"], "AI_VETO")
         self.assertEqual(ai_event["ai_decision"], "REJECT")
         self.assertEqual(ai_event["ai_model"], "free-test-model")
@@ -564,10 +584,21 @@ class WebAppHttpTests(unittest.TestCase):
             "configured": True,
             "secret_sent_to_model": False,
         }
-        with patch.object(web_app, "ai_connection_status", return_value=payload):
+        second = {
+            "reviewer_id": "second_ai", "provider": None, "model": None,
+            "status": "NOT_CONFIGURED", "configured": False,
+            "configuration_issues": ["CSR_SECOND_AI_API_KEY_MISSING"],
+            "secret_sent_to_model": False, "paper_entry_eligible": False,
+        }
+        with patch.object(web_app, "ai_connection_status", return_value=payload), patch.object(
+            web_app, "second_ai_connection_status", return_value=second
+        ):
             status, _, body = self.request("GET", "/api/ai/status")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), payload)
+        response = json.loads(body)
+        self.assertEqual(response["provider"], payload["provider"])
+        self.assertEqual(response["second_supervisor"], second)
+        self.assertEqual(response["two_reviewer_gate"], "REQUIRES_BOTH_VERIFIED_APPROVALS")
         self.assertNotIn("api_key", body.decode().lower())
 
     def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
