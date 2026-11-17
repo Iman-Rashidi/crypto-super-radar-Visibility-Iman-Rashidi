@@ -1,6 +1,6 @@
 """Deterministic, closed-candle Challenge 1 strategy for BloFin Demo.
 
-Only completed 5m candles create setups. The 1H frame is a conflict veto,
+Only completed 5m candles create setups. The 1H frame is advisory context only,
 not a legacy indicator-score gate. All decisions are local and reproducible.
 """
 from __future__ import annotations
