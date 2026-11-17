@@ -74,6 +74,14 @@ BLOFIN_EXECUTION_JOBS: dict[str, dict] = {}
 BLOFIN_AUTOPILOT_LOCK = threading.Lock()
 BLOFIN_AUTOPILOT_START_LOCK = threading.Lock()
 BLOFIN_AUTOPILOT_THREAD = None
+BLOFIN_POSITION_MANAGER_START_LOCK = threading.Lock()
+BLOFIN_POSITION_MANAGER_THREAD = None
+BLOFIN_POSITION_MANAGER_STATE = {
+    "status": "STARTING",
+    "last_check_at_utc": None,
+    "last_action": None,
+    "last_message_fa": "مدیر مستقل خروج سود در حال آماده‌سازی است.",
+}
 BLOFIN_AUTOPILOT_STATE = {
     "enabled": False,
     "status": "DISABLED",
@@ -5135,6 +5143,275 @@ def _blofin_manual_close_position(
             "منفی بودن PnL مانع بستن نبود؛ قیمت اجرای واقعی و PnL نهایی پس از Fill مشخص می‌شود."
         ),
     }
+
+
+def _blofin_demo_profit_exit_decision(
+    order: dict[str, Any], position: dict[str, Any], mark_price: Any,
+    *, now: int | None = None, minimum_profit_usdt: float = 0.50,
+    maximum_hold_seconds: int = 86_400,
+) -> str | None:
+    """Return a profit-only exit reason for one exact robot-linked Demo position."""
+    if not isinstance(order, dict) or not isinstance(position, dict):
+        return None
+    instrument = str(order.get("instrument_id") or "").strip().upper()
+    if instrument != str(position.get("instId") or "").strip().upper():
+        return None
+    linked_id = str(order.get("position_id") or "").strip()
+    active_id = str(position.get("positionId") or "").strip()
+    if not linked_id or linked_id != active_id:
+        return None
+    try:
+        quantity = float(position.get("positions") or 0)
+        pnl = float(position.get("unrealizedPnl"))
+        current_mark = float(mark_price)
+        target = float(order.get("take_profit"))
+        opened_at = int(order.get("created_at") or 0)
+        current_time = int(time.time()) if now is None else int(now)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in (quantity, pnl, current_mark, target)):
+        return None
+    if abs(quantity) <= 0 or current_mark <= 0 or target <= 0:
+        return None
+    # Never call a losing or fee-fragile position a profitable exit.
+    if pnl < max(0.01, float(minimum_profit_usdt)):
+        return None
+    side = str(order.get("side") or "").strip().upper()
+    if side not in {"LONG", "SHORT"}:
+        return None
+    target_reached = (
+        current_mark >= target if side == "LONG" else current_mark <= target
+    )
+    if target_reached:
+        return "TAKE_PROFIT_LEVEL_REACHED"
+    age_seconds = max(0, current_time - opened_at) if opened_at > 0 else 0
+    if opened_at > 0 and age_seconds >= max(900, int(maximum_hold_seconds)):
+        return "MAX_HOLD_PROFIT_ONLY"
+    return None
+
+
+def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
+    """Manage only exchange positions linked by exact ID to the robot's Demo orders."""
+    store = None
+    try:
+        readiness = _blofin_demo_execution_readiness()
+        if readiness.get("status") != "READY":
+            return {
+                "status": "TRADE_PERMISSION_UNAVAILABLE",
+                "message_fa": "مدیر خروج برای اقدام خودکار به کلید Trade اختصاصی Demo نیاز دارد؛ هیچ پوزیشنی تغییر نکرد.",
+            }
+        raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")
+        raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
+        try:
+            minimum_profit = max(0.01, min(float(raw_min_profit), 100_000.0))
+        except (TypeError, ValueError):
+            minimum_profit = 0.50
+        try:
+            maximum_hold = max(900, min(int(raw_max_hold), 604_800))
+        except (TypeError, ValueError):
+            maximum_hold = 86_400
+
+        store = BloFinDemoEventStore()
+        pending_orders = store.orders_pending_learning_outcome(limit=50)
+        if not pending_orders:
+            return {
+                "status": "IDLE",
+                "managed_positions": 0,
+                "message_fa": "پوزیشن رباتیِ لینک‌شده‌ای برای مدیریت خروج وجود ندارد.",
+            }
+
+        reader = BloFinDemoReadOnly(timeout=8.0)
+        positions = reader.get_positions()
+        if not isinstance(positions, list):
+            raise BloFinDemoResponseError("BloFin positions response is not a list.")
+
+        active_rows = []
+        for row in positions:
+            if not isinstance(row, dict):
+                raise BloFinDemoResponseError("BloFin returned an unreadable position row.")
+            try:
+                size = float(row.get("positions") or 0)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise BloFinDemoResponseError("BloFin position size is invalid.") from exc
+            if math.isfinite(size) and abs(size) > 0:
+                active_rows.append(row)
+
+        actions: list[dict[str, Any]] = []
+        managed = 0
+        for order in pending_orders:
+            instrument_id = str(order.get("instrument_id") or "").strip().upper()
+            position_id = str(order.get("position_id") or "").strip()
+            client_order_id = str(order.get("client_order_id") or "").strip()
+            if not instrument_id or not position_id or not client_order_id:
+                actions.append({"status": "UNLINKED_POSITION_ID", "instrument_id": instrument_id})
+                continue
+
+            # Exchange finalization is reconciled against exact positionId, not
+            # the newest history row or the dashboard's selected symbol.
+            matching_active = [
+                row for row in active_rows
+                if str(row.get("instId") or "").strip().upper() == instrument_id
+                and str(row.get("positionId") or "").strip() == position_id
+            ]
+            if len(matching_active) > 1:
+                actions.append({
+                    "status": "AMBIGUOUS_POSITION_ID",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                })
+                continue
+            if not matching_active:
+                try:
+                    closed_rows = reader.get_positions_history(
+                        inst_id=instrument_id, state="closed", limit=100,
+                    )
+                    partial_rows = reader.get_positions_history(
+                        inst_id=instrument_id, state="partially_closed", limit=100,
+                    )
+                    outcome = store.record_closed_position_outcome(
+                        instrument_id=instrument_id,
+                        history_rows=closed_rows if isinstance(closed_rows, list) else [],
+                        partial_rows=partial_rows if isinstance(partial_rows, list) else [],
+                    )
+                    if outcome:
+                        actions.append({
+                            "status": outcome.get("status"),
+                            "instrument_id": instrument_id,
+                            "position_id": position_id,
+                            "realized_result": outcome.get("realized_result"),
+                            "realized_pnl_after_reported_trading_fees": outcome.get(
+                                "realized_pnl_after_reported_trading_fees"
+                            ),
+                        })
+                except Exception as exc:
+                    actions.append({
+                        "status": "CLOSE_RECONCILIATION_UNKNOWN",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "error_type": type(exc).__name__,
+                    })
+                continue
+
+            position = matching_active[0]
+            managed += 1
+            # A previously accepted/unknown close is not resent blindly.
+            prior_events = store.recent_events(client_order_id, limit=100)
+            prior_close = [
+                event for event in prior_events
+                if str(event.get("event_type") or "").upper() in {
+                    "AUTO_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_UNKNOWN",
+                }
+            ]
+            if prior_close:
+                actions.append({
+                    "status": "CLOSE_AWAITING_EXCHANGE_RECONCILIATION",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                })
+                continue
+
+            mark_rows = reader.get_mark_price(inst_id=instrument_id)
+            mark_row = (
+                mark_rows[0] if isinstance(mark_rows, list) and mark_rows
+                and isinstance(mark_rows[0], dict)
+                else mark_rows if isinstance(mark_rows, dict) else None
+            )
+            if not isinstance(mark_row, dict):
+                actions.append({
+                    "status": "MARK_PRICE_UNKNOWN",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                })
+                continue
+            reason = _blofin_demo_profit_exit_decision(
+                order, position, mark_row.get("markPrice"),
+                minimum_profit_usdt=minimum_profit,
+                maximum_hold_seconds=maximum_hold,
+            )
+            if not reason:
+                actions.append({
+                    "status": "HOLD_UNTIL_PROFIT_EXIT",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "unrealized_pnl_usdt": position.get("unrealizedPnl"),
+                    "minimum_profit_usdt": minimum_profit,
+                })
+                continue
+
+            close_result = _blofin_manual_close_position(
+                instrument_id=instrument_id,
+                position_id=position_id,
+                action_source="AUTOPILOT",
+                audit_id=client_order_id,
+                exit_reason=reason,
+            )
+            actions.append({
+                "status": close_result.get("status"),
+                "instrument_id": instrument_id,
+                "position_id": position_id,
+                "exit_reason": reason,
+                "unrealized_pnl_usdt_at_request": close_result.get(
+                    "unrealized_pnl_usdt_at_confirmation"
+                ),
+                "exchange_response": close_result.get("exchange_response"),
+            })
+
+        return {
+            "status": "PASS",
+            "managed_positions": managed,
+            "actions": actions,
+            "minimum_profit_usdt": minimum_profit,
+            "maximum_hold_seconds": maximum_hold,
+            "message_fa": (
+                "مدیر خروج فقط پوزیشن‌های دقیقاً لینک‌شده به سفارش ربات را بررسی می‌کند؛ "
+                "خروج خودکار فقط با رسیدن به حد سود یا پایان زمان نگهداری و سود شناور کافی انجام می‌شود."
+            ),
+        }
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
+def _blofin_demo_position_manager_worker() -> None:
+    """Persistent Demo-only profit manager; independent from the new-entry AutoPilot switch."""
+    while True:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        try:
+            result = _blofin_demo_position_manager_cycle()
+            with LOCK:
+                BLOFIN_POSITION_MANAGER_STATE.update({
+                    "status": result.get("status", "UNKNOWN"),
+                    "last_check_at_utc": checked_at,
+                    "last_action": result.get("actions", []),
+                    "last_message_fa": result.get("message_fa", "مدیر خروج بررسی را انجام داد."),
+                })
+        except Exception as exc:
+            with LOCK:
+                BLOFIN_POSITION_MANAGER_STATE.update({
+                    "status": "ERROR",
+                    "last_check_at_utc": checked_at,
+                    "last_error_type": type(exc).__name__,
+                    "last_message_fa": "مدیر خروج با خطای کنترل‌شده روبه‌رو شد؛ هیچ خروج تأییدنشده‌ای فرض نمی‌شود.",
+                })
+        time.sleep(15)
+
+
+def _start_blofin_demo_position_manager() -> None:
+    """Start at most one position manager loop in this Render process."""
+    global BLOFIN_POSITION_MANAGER_THREAD
+    with BLOFIN_POSITION_MANAGER_START_LOCK:
+        if BLOFIN_POSITION_MANAGER_THREAD is not None and BLOFIN_POSITION_MANAGER_THREAD.is_alive():
+            return
+        BLOFIN_POSITION_MANAGER_THREAD = threading.Thread(
+            target=_blofin_demo_position_manager_worker,
+            daemon=True,
+            name="blofin-demo-profit-manager",
+        )
+        BLOFIN_POSITION_MANAGER_THREAD.start()
+
 
 
 class Handler(BaseHTTPRequestHandler):
