@@ -6442,7 +6442,7 @@ let blofinInstrumentRecords=[];
                 let liveMessage=result.last_message_fa||'وضعیت AutoPilot دریافت شد.';
                 if(state==='RUNNING'){
                   liveMessage='موتور در حال جست‌وجوی بازار و تحلیل کندل‌ها و الگوهای Challenge 1 است. '+liveMessage;
-                }else if(state==='WAITING_FOR_NEXT_15M_CANDLE'&&result.next_cycle_at_utc){
+                }else if(state==='WAITING_FOR_NEXT_5M_CANDLE'&&result.next_cycle_at_utc){
                   const remaining=Math.max(0,Math.ceil((Date.parse(result.next_cycle_at_utc)-Date.now())/1000));
                   const minutes=Math.floor(remaining/60);
                   const seconds=remaining%60;
@@ -9165,6 +9165,7 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
         "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
         "evidence": evidence,
+        "candles_5m": evidence.get("candles_5m") if isinstance(evidence.get("candles_5m"), list) else [],
         "candles_15m": evidence.get("candles_15m") if isinstance(evidence.get("candles_15m"), list) else [],
         "candles_1h": evidence.get("candles_1h") if isinstance(evidence.get("candles_1h"), list) else [],
         "entry_price": result.get("entry_price_usd") or result.get("entry_price") or evidence.get("entry_price"),
@@ -9708,11 +9709,23 @@ def _blofin_demo_next_15m_scan_window(now_utc: datetime | None = None) -> tuple[
     return delay_seconds, next_at.isoformat()
 
 
+
+def _blofin_demo_next_5m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
+    """Return the delay just after the next completed 5-minute entry candle."""
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    next_boundary_epoch = (int(current.timestamp()) // 300 + 1) * 300 + 3
+    next_at = datetime.fromtimestamp(next_boundary_epoch, timezone.utc)
+    delay_seconds = max(5, int(math.ceil((next_at - current).total_seconds())))
+    return delay_seconds, next_at.isoformat()
+
+
 def _blofin_demo_next_scan_after_cycle(
     cycle_started_at_utc: datetime, *, now_utc: datetime | None = None,
 ) -> tuple[int, str]:
     """Schedule from cycle start so a scan overlapping a candle close catches it."""
-    _, boundary_iso = _blofin_demo_next_15m_scan_window(cycle_started_at_utc)
+    _, boundary_iso = _blofin_demo_next_5m_scan_window(cycle_started_at_utc)
     target = datetime.fromisoformat(boundary_iso)
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -9726,8 +9739,8 @@ def _blofin_demo_next_scan_after_cycle(
 
 
 def _blofin_demo_autopilot_worker() -> None:
-    """Run Challenge 1 scans immediately after each completed 15-minute candle."""
-    interval_seconds = 900
+    """Run Challenge 1 scans after each completed 5m trigger candle."""
+    interval_seconds = 300
     raw_symbols = os.getenv(
         "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS",
         ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS),
@@ -9985,19 +9998,19 @@ def _blofin_demo_autopilot_worker() -> None:
                     for item in batch_results
                 )
                 autopilot_status = (
-                    "WAITING_FOR_NEXT_15M_CANDLE" if continue_search else "DISABLED"
+                    "WAITING_FOR_NEXT_5M_CANDLE" if continue_search else "DISABLED"
                 )
                 if not continue_search:
                     autopilot_message = "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
                 elif duplicates_only:
                     autopilot_message = (
                         "هر ۵ نماد به کندلی رسیدند که قبلاً پردازش شده است؛ از تحلیل و ورود تکراری جلوگیری شد. "
-                        f"اسکن بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
+                        f"اسکن بعدی پس از بسته‌شدن کندل ۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
                     )
                 else:
                     autopilot_message = (
                         f"چرخهٔ {job_id} پایان یافت؛ {len(batch_results)} بازار بررسی شد. "
-                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
+                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
                     )
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": bool(autopilot_enabled),
