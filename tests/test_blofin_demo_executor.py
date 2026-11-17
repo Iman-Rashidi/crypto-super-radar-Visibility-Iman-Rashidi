@@ -139,12 +139,10 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["side"], "LONG")
 
-    def test_challenge1_v2_does_not_require_volume_confirmation_or_legacy_engine_version(self):
+    def test_challenge1_5m_only_does_not_require_volume_confirmation(self):
         record = signal_record()
         evidence = record["challenge1_evidence"]
-        evidence["decision_engine_version"] = "CHALLENGE_1_LOCAL_RULES_V2"
         evidence["volume_is_advisory"] = True
-        evidence["context_is_advisory"] = True
         evidence["confirmation_candle"]["volume_confirmation"] = {
             "confirmed": False,
             "volume_ratio": 0.82,
