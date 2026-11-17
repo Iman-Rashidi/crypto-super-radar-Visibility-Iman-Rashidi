@@ -497,6 +497,9 @@ def run_free_ai_second_opinion(
             "status": "UNKNOWN",
             "status_fa": "کلید API هوش مصنوعی رایگان ثبت نشده است؛ ورود جدید متوقف شد.",
             "reason": "OPENROUTER_API_KEY is not configured.",
+            "request_attempted": False,
+            "skip_reason_code": "OPENROUTER_KEY_MISSING",
+            "response_source": "NONE",
             "paper_entry_eligible": False,
             "cost_usd": 0.0,
         }
@@ -506,7 +509,9 @@ def run_free_ai_second_opinion(
     expected_side = str(getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "LONG"))).upper().replace(" ", "_")
     if expected_side not in {"LONG", "SHORT"}:
         return {"provider": "OpenRouter", "model": _model(), "status": "VETO",
-                "paper_entry_eligible": False, "reason": "No directional signal to review."}
+                "request_attempted": False, "skip_reason_code": "NO_DIRECTIONAL_SIGNAL",
+                "response_source": "NONE", "paper_entry_eligible": False,
+                "reason": "No directional signal to review."}
     native_review = build_native_agent_council_review(result)
     if native_review.get("status") != "APPROVED":
         return {
@@ -515,6 +520,9 @@ def run_free_ai_second_opinion(
             "status": "VETO" if native_review.get("status") == "VETO" else "UNKNOWN",
             "status_fa": "شورای تخصصی بومی رادار تأیید کامل نداده است؛ درخواست AI برای ورود اجرا نشد.",
             "reason": "Native evidence council did not approve all mandatory checks.",
+            "request_attempted": False,
+            "skip_reason_code": "NATIVE_COUNCIL_NOT_APPROVED",
+            "response_source": "NONE",
             "native_council": native_review,
             "paper_entry_eligible": False,
             "cost_usd": 0.0,
@@ -536,7 +544,10 @@ def run_free_ai_second_opinion(
     with _LOCK:
         cached = None if bypass_cache else _CACHE.get(cache_key)
         if cached and cached[0] > now:
-            return copy.deepcopy(cached[1])
+            cached_result = copy.deepcopy(cached[1])
+            cached_result["request_attempted"] = False
+            cached_result["response_source"] = "CACHE"
+            return cached_result
         _MINUTE_REQUEST_TIMESTAMPS[:] = [
             stamp for stamp in _MINUTE_REQUEST_TIMESTAMPS if stamp > now - 60.0
         ]
@@ -545,6 +556,8 @@ def run_free_ai_second_opinion(
                 "provider": "OpenRouter", "model": model, "status": "RATE_LIMITED",
                 "status_fa": "سقف محافظه‌کارانهٔ دقیقه‌ای برنامه برای API رایگان پر شده است.",
                 "reason": "Local per-minute free-request safety cap reached.",
+                "request_attempted": False, "skip_reason_code": "LOCAL_MINUTE_LIMIT",
+                "response_source": "NONE",
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
         if _REQUEST_COUNTS.get(day, 0) >= MAX_REQUESTS_PER_UTC_DAY:
@@ -552,6 +565,8 @@ def run_free_ai_second_opinion(
                 "provider": "OpenRouter", "model": model, "status": "UNKNOWN",
                 "status_fa": "سقف محافظه‌کارانهٔ روزانهٔ برنامه برای API رایگان پر شده است.",
                 "reason": "Local daily free-request safety cap reached.",
+                "request_attempted": False, "skip_reason_code": "LOCAL_DAILY_LIMIT",
+                "response_source": "NONE",
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
         _REQUEST_COUNTS[day] = _REQUEST_COUNTS.get(day, 0) + 1
@@ -593,7 +608,8 @@ def run_free_ai_second_opinion(
                 "provider": "OpenRouter", "model": model, "status": status,
                 "status_fa": "سرویس هوش مصنوعی رایگان در دسترس نیست؛ ورود جدید متوقف شد.",
                 "reason": detail, "http_status": http_status,
-                "latency_ms": latency_ms, "response_validated": False,
+                "request_attempted": True, "response_source": "LIVE_API",
+                "response_validated": False,
                 "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
@@ -621,6 +637,7 @@ def run_free_ai_second_opinion(
                 "provider": "OpenRouter", "model": model, "status": "MODEL_UNCONFIRMED",
                 "status_fa": "پاسخ تحلیل دریافت شد، اما شناسه مدل اجراشده تأیید نشد.",
                 "http_status": http_status, "latency_ms": latency_ms,
+                "request_attempted": True, "response_source": "LIVE_API",
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
@@ -630,6 +647,7 @@ def run_free_ai_second_opinion(
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
                 "status_fa": "پاسخ تحلیل از مدلی غیر از Nemotron انتخاب‌شده دریافت شد.",
                 "http_status": http_status, "latency_ms": latency_ms,
+                "request_attempted": True, "response_source": "LIVE_API",
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
@@ -643,6 +661,8 @@ def run_free_ai_second_opinion(
         review.update({
             "http_status": http_status,
             "returned_model": returned_model[:160],
+            "request_attempted": True,
+            "response_source": "LIVE_API",
             "model_verified": True,
             "response_validated": True,
             "latency_ms": latency_ms,
@@ -664,7 +684,8 @@ def run_free_ai_second_opinion(
             "status_fa": "پاسخ معتبر از هوش مصنوعی دریافت نشد؛ ورود جدید متوقف شد.",
             "reason": "Free AI request or response validation failed.",
             "error_type": type(exc).__name__, "http_status": http_status,
-            "latency_ms": latency_ms, "response_validated": False,
+            "request_attempted": True, "response_source": "LIVE_API",
+            "response_validated": False,
             "model_verified": False,
             "paper_entry_eligible": False, "cost_usd": 0.0,
         }
