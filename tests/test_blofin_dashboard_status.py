@@ -12,6 +12,10 @@ class FakeBloFinClient:
         self.kwargs = kwargs
         self.calls = []
 
+    def get_api_key_info(self):
+        self.calls.append(("api_key_info", None))
+        return {"readOnly": 1, "trade_permission": False}
+
     def get_tickers(self, *, inst_id=None):
         self.calls.append(("tickers", inst_id))
         return [{"instId": inst_id, "last": "50000"}]
@@ -125,10 +129,13 @@ class BloFinDashboardStatusTests(unittest.TestCase):
         self.assertEqual(result["status"], "CONNECTED_READ_ONLY")
         self.assertEqual(result["market_data"], "PASS")
         self.assertEqual(result["private_api"], "PASS")
+        self.assertEqual(result["api_key_permission"], "READ_ONLY")
+        self.assertEqual(result["permission_mode"], "READ_ONLY_REQUESTS")
+        self.assertEqual(result["request_scope"], "READ_ONLY_GET_REQUESTS")
         self.assertFalse(result["orders_enabled"])
         self.assertEqual(
             [call[0] for call in fake.calls],
-            ["tickers", "balance", "positions", "orders"],
+            ["api_key_info", "tickers", "balance", "positions", "orders"],
         )
         self.assertEqual(client.call_args.kwargs, {"timeout": 8.0})
         serialized = str(result)
