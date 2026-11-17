@@ -8623,9 +8623,20 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             and item["review"].get("response_validated") is True
             and item["review"].get("model_verified") is True
         ]
-        consensus_status = "AGREEMENT" if len(verified) >= 2 and len({
-            str(item.get("status") or "").upper() for item in verified
-        }) == 1 else "SINGLE_REVIEWER" if len(verified) == 1 else "NOT_COMPARABLE"
+        all_not_called = bool(reviews) and all(
+            isinstance(item, dict)
+            and isinstance(item.get("review"), dict)
+            and item["review"].get("request_attempted") is False
+            for item in reviews
+        )
+        consensus_status = (
+            "AGREEMENT" if len(verified) >= 2 and len({
+                str(item.get("status") or "").upper() for item in verified
+            }) == 1 else
+            "SINGLE_REVIEWER" if len(verified) == 1 else
+            "NOT_CALLED" if all_not_called else
+            "NOT_COMPARABLE"
+        )
 
     reviewer_decisions = []
     for item in reviews:
