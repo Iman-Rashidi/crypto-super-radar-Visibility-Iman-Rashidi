@@ -67,6 +67,101 @@ def valid_document(rating="Buy", risk_verdict="APPROVE", portfolio_verdict="APPR
     }
 
 
+def challenge1_result(*, pattern_confirmed=True):
+    candle_rows_15m = [
+        {"open_time_utc": "2026-11-17T09:15:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 100.0},
+        {"open_time_utc": "2026-11-17T09:30:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 105.0},
+        {"open_time_utc": "2026-11-17T09:45:00+00:00", "open": 99.0, "high": 102.0, "low": 98.7, "close": 101.0, "volume": 160.0},
+    ]
+    candle_rows_1h = [
+        {"open_time_utc": "2026-11-17T07:00:00+00:00", "open": 98.0, "high": 100.0, "low": 97.0, "close": 99.0, "volume": 500.0},
+        {"open_time_utc": "2026-11-17T08:00:00+00:00", "open": 99.0, "high": 101.0, "low": 98.5, "close": 100.0, "volume": 520.0},
+        {"open_time_utc": "2026-11-17T09:00:00+00:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 540.0},
+    ]
+    pattern = {
+        "name_en": "Bullish Engulfing",
+        "direction": "BULLISH" if pattern_confirmed else "BEARISH",
+        "score": 13,
+        "category": "CANDLESTICK",
+        "timeframe": "15m",
+    }
+    evidence = {
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
+        "completed_candles_only": True,
+        "setup_timeframe": "15m",
+        "context_timeframe": "1H",
+        "chosen_pattern": {
+            "name_en": "Bullish Engulfing",
+            "direction": "BULLISH",
+            "score": 13,
+            "category": "CANDLESTICK",
+            "timeframe": "15m",
+        },
+        "detected_patterns": [pattern if pattern_confirmed else {
+            **pattern, "direction": "BEARISH"
+        }],
+        "context_patterns": [],
+        "confirmation_candle": dict(candle_rows_15m[-1]),
+        "candles_15m": candle_rows_15m,
+        "candles_1h": candle_rows_1h,
+        "chart_structure": {},
+        "volume_confirmation": {
+            "confirmed": True, "volume_ratio": 1.5,
+            "close_location": 0.8, "minimum_volume_ratio": 1.2,
+        },
+    }
+    record = {
+        "asset": "perp:BTCUSDT",
+        "signal": "LONG",
+        "execution_profile": "CHALLENGE_1",
+        "entry_price_usd": 101.0,
+        "stop_loss_usd": 99.0,
+        "take_profit_usd": 105.0,
+        "execution": {"status": "PASS", "direction": "LONG"},
+        "challenge1_evidence": evidence,
+    }
+    return SimpleNamespace(
+        asset="perp:BTCUSDT",
+        signal=Signal.LONG,
+        entry_price=101.0,
+        stop_loss=99.0,
+        take_profit=105.0,
+        metrics={
+            "execution_profile": "CHALLENGE_1",
+            "challenge1_evidence": evidence,
+        },
+        gates=[
+            SimpleNamespace(
+                gate_id=gate_id, name_en=f"General gate {gate_id}",
+                status="UNKNOWN", evidence={"must_not_be_sent": True},
+            )
+            for gate_id in range(1, 13)
+        ],
+        to_record=lambda: record,
+    )
+
+
+def valid_pattern_document():
+    return {
+        "pattern_analyst": {
+            "verdict": "SUPPORT", "pattern_name": "Bullish Engulfing",
+            "reason_fa": "الگوی انگلفینگ صعودی در کندل بسته‌شده دیده می‌شود.",
+        },
+        "price_action_analyst": {
+            "verdict": "SUPPORT", "reason_fa": "ساختار قیمت با جهت خرید هم‌سو است.",
+        },
+        "timeframe_analyst": {
+            "verdict": "SUPPORT", "reason_fa": "زمینه یک‌ساعته با ستاپ پانزده‌دقیقه‌ای تعارض ندارد.",
+        },
+        "trader": {"proposal": "LONG", "reason_fa": "ورود فقط بر پایه الگوی تأییدشده پیشنهاد می‌شود."},
+        "risk_manager": {"verdict": "APPROVE", "reason_fa": "حد ضرر و نسبت بازده به ریسک معتبر است."},
+        "portfolio_manager": {"verdict": "APPROVE", "reason_fa": "برنامه محافظتی از سقف ریسک عبور نمی‌کند."},
+        "final_decision": "APPROVE",
+        "risk_flags": [],
+        "rationale_fa": "نظر مستقل فقط براساس کندل‌های بسته‌شده و الگو صادر شد.",
+    }
+
+
 class FakeResponse:
     def __init__(self, status_code=200, document=None, model=DEFAULT_FREE_MODEL):
         self.status_code = status_code
@@ -530,29 +625,88 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertFalse(result["request_attempted"])
         self.assertFalse(result["paper_entry_eligible"])
 
-    def test_challenge1_ai_review_does_not_treat_general_unknown_gates_as_mandatory(self):
-        candidate = valid_result()
-        candidate.metrics["execution_profile"] = "CHALLENGE_1"
-        for gate in candidate.gates:
-            gate.status = "UNKNOWN"
+    def test_challenge1_ai_supervisor_receives_only_closed_candles_and_patterns(self):
+        candidate = challenge1_result()
         captured = {}
 
         def fake_post(url, headers, json, timeout, allow_redirects=False):
             captured.update({"payload": json, "url": url})
-            return FakeResponse(document=valid_document())
+            return FakeResponse(document=valid_pattern_document())
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
             review = run_free_ai_second_opinion(
                 candidate, AssetSpec.parse("perp:BTCUSDT"),
                 http_post=fake_post, bypass_cache=True,
             )
-        prompt = json.dumps(captured["payload"], ensure_ascii=False)
-        self.assertIn("general radar gate IDs are advisory only", prompt)
-        self.assertNotIn("STRICT requires all 12 unique gates to be PASS", prompt)
+
+        payload = captured["payload"]
+        evidence = json.loads(payload["messages"][1]["content"].split("\\n", 1)[1])
+        system_prompt = payload["messages"][0]["content"]
         self.assertEqual(review["status"], "APPROVED")
         self.assertTrue(review["request_attempted"])
         self.assertTrue(review["model_verified"])
         self.assertTrue(review["paper_entry_eligible"])
+        self.assertEqual(review["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(review["pattern_name"], "Bullish Engulfing")
+        self.assertEqual(evidence["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(len(evidence["pattern_evidence"]["candles_15m"]), 3)
+        self.assertEqual(len(evidence["pattern_evidence"]["candles_1h"]), 3)
+        self.assertEqual(evidence["pattern_evidence"]["chosen_pattern"]["name_en"], "Bullish Engulfing")
+        self.assertIn("Do not execute, request, count, score, or evaluate", system_prompt)
+        self.assertNotIn("mandatory_gates", evidence)
+        self.assertNotIn("must_not_be_sent", json.dumps(payload))
+        self.assertNotIn('"id":1', json.dumps(payload))
+
+    def test_challenge1_pattern_conflict_blocks_before_any_ai_request_even_when_gates_pass(self):
+        candidate = challenge1_result(pattern_confirmed=False)
+        for gate in candidate.gates:
+            gate.status = "PASS"
+        calls = {"count": 0}
+
+        def forbidden_post(*args, **kwargs):
+            calls["count"] += 1
+            raise AssertionError("A conflicting selected pattern must never reach the model.")
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"), http_post=forbidden_post,
+            )
+        self.assertEqual(calls["count"], 0)
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertEqual(review["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
+        self.assertFalse(review["paper_entry_eligible"])
+
+    def test_second_challenge1_supervisor_uses_the_same_pattern_only_evidence_independently(self):
+        candidate = challenge1_result()
+        captured = {}
+        second_model = "independent/test-pattern-reviewer:free"
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.update({"url": url, "headers": headers, "payload": json})
+            return FakeResponse(document=valid_pattern_document(), model=second_model)
+
+        env = {
+            "CSR_SECOND_AI_API_KEY": "separate-independent-key",
+            "CSR_SECOND_AI_MODEL": second_model,
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            review = run_independent_ai_supervisor(
+                candidate, AssetSpec.parse("perp:BTCUSDT"), http_post=fake_post,
+            )
+        payload = captured["payload"]
+        prompt_evidence = json.loads(payload["messages"][1]["content"].split("\\n", 1)[1])
+        self.assertEqual(review["reviewer_id"], "second_ai")
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["request_attempted"])
+        self.assertTrue(review["response_validated"])
+        self.assertTrue(review["model_verified"])
+        self.assertTrue(review["paper_entry_eligible"])
+        self.assertEqual(payload["model"], second_model)
+        self.assertEqual(prompt_evidence["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertNotIn("mandatory_gates", prompt_evidence)
+        self.assertNotIn("must_not_be_sent", json.dumps(payload))
 
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
