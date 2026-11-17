@@ -5527,7 +5527,10 @@ class Handler(BaseHTTPRequestHandler):
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
             payload["execution_profile"] = "CHALLENGE_1"
-            payload["readiness"] = _blofin_demo_execution_readiness()
+            # Status polling is intentionally cheap; full credential/readiness checks
+            # remain on the dedicated readiness endpoint and before every trade cycle.
+            if parse_qs(parsed.query).get("status_only", [""])[0] != "1":
+                payload["readiness"] = _blofin_demo_execution_readiness()
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
@@ -5875,6 +5878,8 @@ class Handler(BaseHTTPRequestHandler):
             const monitorEvents=document.getElementById('blofin-monitor-events');
             let autopilotIsEnabled=false;
             let autopilotIsStopping=false;
+            let autopilotStatusPollTimer=null;
+            let autopilotStatusRefreshInFlight=false;
             let selectedExecutionMode='manual';
             let manualActionBusy=false;
             if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!emergencyStopButton||!emergencyStatus||!positionManagerStatus||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
@@ -6277,13 +6282,25 @@ let blofinInstrumentRecords=[];
               if(auto)refreshExecutionReadiness();
             }
             async function refreshAutoPilotStatus(){
+              if(autopilotStatusRefreshInFlight)return null;
+              autopilotStatusRefreshInFlight=true;
               try{
-                const response=await fetch('/api/blofin/demo/autopilot/status',{cache:'no-store'});
+                const response=await fetch('/api/blofin/demo/autopilot/status?status_only=1',{cache:'no-store'});
                 const result=await response.json();
+                if(!response.ok)throw new Error(result.message_fa||'وضعیت AutoPilot دریافت نشد.');
                 autopilotIsEnabled=result.enabled===true;
                 autopilotIsStopping=String(result.status||'').toUpperCase()==='STOPPING';
                 const state=result.status||'UNKNOWN';
-                autopilotStatus.textContent=(result.last_message_fa||'وضعیت AutoPilot دریافت شد.')
+                let liveMessage=result.last_message_fa||'وضعیت AutoPilot دریافت شد.';
+                if(state==='RUNNING'){
+                  liveMessage='موتور در حال جست‌وجوی بازار و تحلیل کندل‌ها و الگوهای Challenge 1 است. '+liveMessage;
+                }else if(state==='WAITING_FOR_NEXT_15M_CANDLE'&&result.next_cycle_at_utc){
+                  const remaining=Math.max(0,Math.ceil((Date.parse(result.next_cycle_at_utc)-Date.now())/1000));
+                  const minutes=Math.floor(remaining/60);
+                  const seconds=remaining%60;
+                  liveMessage+=' زمان باقی‌مانده تا اسکن بعدی: '+minutes+' دقیقه و '+seconds+' ثانیه.';
+                }
+                autopilotStatus.textContent=liveMessage
                   +' وضعیت: '+state+'. چرخه‌های اجراشده: '+(result.cycles_started??'—');
                 autopilotToggle.textContent=autopilotIsEnabled
                   ?'توقف AutoPilot و بازگشت به حالت دستی'
@@ -6300,7 +6317,8 @@ let blofinInstrumentRecords=[];
                 const manager=result.position_manager||{};
                 positionManagerStatus.textContent='مدیریت خروج: '+(manager.status||'UNKNOWN')
                   +' · '+(manager.last_message_fa||'وضعیت خروج هنوز گزارش نشده است.');
-                applyExecutionMode(autopilotIsEnabled?'autopilot':'manual');
+                const serverMode=(autopilotIsEnabled||autopilotIsStopping)?'autopilot':'manual';
+                if(selectedExecutionMode!==serverMode)applyExecutionMode(serverMode);
                 if(autopilotIsStopping){
                   manualOpenButton.disabled=true;
                   modeStatus.textContent='AutoPilot در حال اتمام چرخه جاری است؛ تا آزادشدن قفل اجرا، عملیات دستی در دسترس نیست.';
@@ -6312,6 +6330,18 @@ let blofinInstrumentRecords=[];
                 autopilotIsStopping=true;
                 manualOpenButton.disabled=true;
                 return null;
+              }finally{
+                autopilotStatusRefreshInFlight=false;
+                if(autopilotIsEnabled||autopilotIsStopping){
+                  if(autopilotStatusPollTimer===null){
+                    autopilotStatusPollTimer=window.setInterval(()=>{
+                      if(autopilotIsEnabled||autopilotIsStopping)refreshAutoPilotStatus();
+                    },5000);
+                  }
+                }else if(autopilotStatusPollTimer!==null){
+                  window.clearInterval(autopilotStatusPollTimer);
+                  autopilotStatusPollTimer=null;
+                }
               }
             }
             async function postBlofinAction(route,values){
@@ -8977,13 +9007,20 @@ def _start_notion_sync_worker() -> None:
         NOTION_SYNC_THREAD.start()
 
 
+def _blofin_demo_next_15m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
+    """Return the delay and timestamp just after the next completed 15-minute candle."""
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    next_boundary_epoch = (int(current.timestamp()) // 900 + 1) * 900 + 3
+    next_at = datetime.fromtimestamp(next_boundary_epoch, timezone.utc)
+    delay_seconds = max(5, int(math.ceil((next_at - current).total_seconds())))
+    return delay_seconds, next_at.isoformat()
+
+
 def _blofin_demo_autopilot_worker() -> None:
-    """Run only Challenge 1 pattern-driven cycles on BloFin Demo while awake."""
-    try:
-        configured_interval = int(os.getenv("BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS", "300"))
-    except (TypeError, ValueError):
-        configured_interval = 900
-    interval_seconds = max(300, min(configured_interval, 900))
+    """Run Challenge 1 scans immediately after each completed 15-minute candle."""
+    interval_seconds = 900
     raw_symbols = os.getenv(
         "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS",
         ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS),
@@ -9008,6 +9045,8 @@ def _blofin_demo_autopilot_worker() -> None:
         })
     _persist_blofin_autopilot_state()
     while True:
+        next_delay_seconds = 60
+        next_cycle_at_utc = None
         if not _blofin_demo_autopilot_enabled():
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
@@ -9045,6 +9084,9 @@ def _blofin_demo_autopilot_worker() -> None:
                     BLOFIN_AUTOPILOT_STATE.update({
                         "enabled": True,
                         "status": "RUNNING",
+                        "next_cycle_scheduled": False,
+                        "next_cycle_at_utc": None,
+                        "next_cycle_in_seconds": None,
                         "last_cycle_started_at_utc": started,
                         "last_stage": "CHALLENGE_1_MULTI_SYMBOL_SCAN",
                         "instrument_id": instrument_id,
@@ -9220,14 +9262,34 @@ def _blofin_demo_autopilot_worker() -> None:
                 # instead of showing a false stopped state for duplicate-candle cycles.
                 autopilot_enabled = _blofin_demo_autopilot_enabled()
                 continue_search = bool(autopilot_enabled)
-                autopilot_status = "SEARCHING_FOR_SIGNAL" if continue_search else "DISABLED"
-                autopilot_message = (
-                    f"چرخهٔ {job_id} پایان یافت؛ پایش خودکار ادامه دارد و چرخهٔ بعدی در صف زمان‌بندی است."
-                    if continue_search else "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
+                if continue_search:
+                    next_delay_seconds, next_cycle_at_utc = _blofin_demo_next_15m_scan_window()
+                else:
+                    next_delay_seconds, next_cycle_at_utc = 60, None
+                duplicates_only = bool(batch_results) and all(
+                    str(item.get("failure_stage") or "").upper() == "DUPLICATE_CANDLE_FINALIZED"
+                    for item in batch_results
                 )
+                autopilot_status = (
+                    "WAITING_FOR_NEXT_15M_CANDLE" if continue_search else "DISABLED"
+                )
+                if not continue_search:
+                    autopilot_message = "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
+                elif duplicates_only:
+                    autopilot_message = (
+                        "هر ۵ نماد به کندلی رسیدند که قبلاً پردازش شده است؛ از تحلیل و ورود تکراری جلوگیری شد. "
+                        f"اسکن بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
+                    )
+                else:
+                    autopilot_message = (
+                        f"چرخهٔ {job_id} پایان یافت؛ {len(batch_results)} بازار بررسی شد. "
+                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
+                    )
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": bool(autopilot_enabled),
                     "status": autopilot_status,
+                    "next_cycle_at_utc": next_cycle_at_utc,
+                    "next_cycle_in_seconds": next_delay_seconds if continue_search else None,
                     "last_cycle_status": job.get("status", "UNKNOWN"),
                     "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
                     "last_stage": job.get("stage"),
@@ -9271,7 +9333,7 @@ def _blofin_demo_autopilot_worker() -> None:
             _persist_blofin_autopilot_state()
         finally:
             BLOFIN_AUTOPILOT_LOCK.release()
-        if BLOFIN_AUTOPILOT_STOP_EVENT.wait(interval_seconds):
+        if BLOFIN_AUTOPILOT_STOP_EVENT.wait(next_delay_seconds):
             continue
 
 
