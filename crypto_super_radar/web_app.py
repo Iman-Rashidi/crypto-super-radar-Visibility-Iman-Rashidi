@@ -6366,7 +6366,8 @@ let blofinInstrumentRecords=[];
                     +' · ناموفق '+(syncState.failed??0);
                   if(syncState.last_http_status||syncState.last_error_type){
                     liveMessage+=' · خطای آخر '+(syncState.last_error_type||'')
-                      +(syncState.last_http_status?'/HTTP '+syncState.last_http_status:'');
+                      +(syncState.last_http_status?'/HTTP '+syncState.last_http_status:'')
+                      +' · مرحله '+(syncState.last_error_stage||'نامشخص');
                   }else if(syncState.last_worker_error_type){
                     liveMessage+=' · خطای Worker '+syncState.last_worker_error_type;
                   }
