@@ -586,6 +586,7 @@ def run_free_ai_second_opinion(
     }
 
     post = http_post or requests.post
+    request_started_at_utc = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()
     latency_ms = 0
     http_status = None
@@ -609,6 +610,9 @@ def run_free_ai_second_opinion(
                 "status_fa": "سرویس هوش مصنوعی رایگان در دسترس نیست؛ ورود جدید متوقف شد.",
                 "reason": detail, "http_status": http_status,
                 "request_attempted": True, "response_source": "LIVE_API",
+                "request_started_at_utc": request_started_at_utc,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "prompt_version": PROMPT_VERSION,
                 "response_validated": False,
                 "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
@@ -638,6 +642,9 @@ def run_free_ai_second_opinion(
                 "status_fa": "پاسخ تحلیل دریافت شد، اما شناسه مدل اجراشده تأیید نشد.",
                 "http_status": http_status, "latency_ms": latency_ms,
                 "request_attempted": True, "response_source": "LIVE_API",
+                "request_started_at_utc": request_started_at_utc,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "prompt_version": PROMPT_VERSION,
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
@@ -648,6 +655,9 @@ def run_free_ai_second_opinion(
                 "status_fa": "پاسخ تحلیل از مدلی غیر از Nemotron انتخاب‌شده دریافت شد.",
                 "http_status": http_status, "latency_ms": latency_ms,
                 "request_attempted": True, "response_source": "LIVE_API",
+                "request_started_at_utc": request_started_at_utc,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "prompt_version": PROMPT_VERSION,
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
@@ -663,6 +673,9 @@ def run_free_ai_second_opinion(
             "returned_model": returned_model[:160],
             "request_attempted": True,
             "response_source": "LIVE_API",
+            "request_started_at_utc": request_started_at_utc,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "prompt_version": PROMPT_VERSION,
             "model_verified": True,
             "response_validated": True,
             "latency_ms": latency_ms,
@@ -685,6 +698,9 @@ def run_free_ai_second_opinion(
             "reason": "Free AI request or response validation failed.",
             "error_type": type(exc).__name__, "http_status": http_status,
             "request_attempted": True, "response_source": "LIVE_API",
+            "request_started_at_utc": request_started_at_utc,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "prompt_version": PROMPT_VERSION,
             "response_validated": False,
             "model_verified": False,
             "paper_entry_eligible": False, "cost_usd": 0.0,
