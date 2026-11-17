@@ -85,7 +85,7 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.journal.enqueue(snapshot)
         self.connection.execute(
             """UPDATE csr_notion_activity_journal
-               SET attempts=2, last_error_type='HTTPError', last_http_status=403
+               SET attempts=2, last_error_type='HTTPError', last_http_status=403, last_error_stage='POST /data_sources/{activity}/query'
                WHERE experience_id=?""",
             (snapshot["experience_id"],),
         )
@@ -103,6 +103,7 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertEqual(state["last_attempts"], 2)
         self.assertEqual(state["last_error_type"], "HTTPError")
         self.assertEqual(state["last_http_status"], 403)
+        self.assertEqual(state["last_error_stage"], "POST /data_sources/{activity}/query")
 
     def test_chart_is_a_png_rendered_from_real_ohlcv_and_exit_levels(self):
         snapshot = sample_snapshot()
