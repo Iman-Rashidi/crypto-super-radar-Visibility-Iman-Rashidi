@@ -8,6 +8,7 @@ import pandas as pd
 from crypto_super_radar.challenge1_strategy import (
     _completed_frame,
     analyze_blofin_challenge1,
+    challenge1_entry_evidence_ready,
 )
 
 
@@ -103,6 +104,8 @@ class Challenge1CandleTests(unittest.TestCase):
         self.assertIn("challenge1-v2:", result["signal_id"])
         self.assertGreaterEqual(len(result["challenge1_evidence"]["candles_15m"]), 30)
         self.assertGreaterEqual(len(result["challenge1_evidence"]["candles_1h"]), 30)
+        eligible, reason = challenge1_entry_evidence_ready(result)
+        self.assertTrue(eligible, reason)
 
     def test_unavailable_one_hour_context_does_not_block_a_valid_pattern(self):
         now = 2_000_000_000_000
@@ -130,6 +133,8 @@ class Challenge1CandleTests(unittest.TestCase):
         self.assertEqual(result["signal"], "LONG")
         self.assertEqual(result["challenge1_evidence"]["context_data_status"], "UNAVAILABLE")
         self.assertEqual(result["challenge1_evidence"]["candles_1h"], [])
+        eligible, reason = challenge1_entry_evidence_ready(result)
+        self.assertTrue(eligible, reason)
 
 
 if __name__ == "__main__":
