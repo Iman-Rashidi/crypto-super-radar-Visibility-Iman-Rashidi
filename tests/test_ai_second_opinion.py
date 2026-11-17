@@ -640,7 +640,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
 
         payload = captured["payload"]
-        evidence = json.loads(payload["messages"][1]["content"].split("\\n", 1)[1])
+        evidence = json.loads(payload["messages"][1]["content"].split("evidence:", 1)[1].strip())
         system_prompt = payload["messages"][0]["content"]
         self.assertEqual(review["status"], "APPROVED")
         self.assertTrue(review["request_attempted"])
@@ -696,7 +696,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
                 candidate, AssetSpec.parse("perp:BTCUSDT"), http_post=fake_post,
             )
         payload = captured["payload"]
-        prompt_evidence = json.loads(payload["messages"][1]["content"].split("\\n", 1)[1])
+        prompt_evidence = json.loads(payload["messages"][1]["content"].split("evidence:", 1)[1].strip())
         self.assertEqual(review["reviewer_id"], "second_ai")
         self.assertEqual(review["status"], "APPROVED")
         self.assertTrue(review["request_attempted"])
