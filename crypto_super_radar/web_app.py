@@ -5352,23 +5352,32 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 })
                 continue
 
-            close_result = _blofin_manual_close_position(
-                instrument_id=instrument_id,
-                position_id=position_id,
-                action_source="AUTOPILOT",
-                audit_id=client_order_id,
-                exit_reason=reason,
-            )
-            actions.append({
-                "status": close_result.get("status"),
-                "instrument_id": instrument_id,
-                "position_id": position_id,
-                "exit_reason": reason,
-                "unrealized_pnl_usdt_at_request": close_result.get(
-                    "unrealized_pnl_usdt_at_confirmation"
-                ),
-                "exchange_response": close_result.get("exchange_response"),
-            })
+            try:
+                close_result = _blofin_manual_close_position(
+                    instrument_id=instrument_id,
+                    position_id=position_id,
+                    action_source="AUTOPILOT",
+                    audit_id=client_order_id,
+                    exit_reason=reason,
+                )
+                actions.append({
+                    "status": close_result.get("status"),
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "unrealized_pnl_usdt_at_request": close_result.get(
+                        "unrealized_pnl_usdt_at_confirmation"
+                    ),
+                    "exchange_response": close_result.get("exchange_response"),
+                })
+            except BloFinDemoExecutionBlocked as exc:
+                actions.append({
+                    "status": "AUTO_EXIT_NOT_SUBMITTED",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "reason_fa": str(exc),
+                })
 
         return {
             "status": "PASS",
@@ -5716,6 +5725,7 @@ class Handler(BaseHTTPRequestHandler):
             <button id="blofin-emergency-stop" type="button" disabled style="background:#b42318;color:#fff">توقف اضطراری ورودهای جدید</button>
             <p id="blofin-emergency-status" class="muted" aria-live="polite">برای فعال‌شدن کنترل، وضعیت AutoPilot از سرور خوانده می‌شود.</p>
             <p id="blofin-position-manager-status" class="muted" aria-live="polite">مدیر خروج خودکار هنوز وضعیت خود را گزارش نکرده است.</p>
+            <p class="muted">قانون خروج: رسیدن Mark Price به TP یا حداکثر ۲۴ ساعت نگهداری، فقط با سود شناور حداقل ۰٫۵۰ USDT. سود نهایی پس از Fill و کارمزدها باید از تاریخچه BloFin تأیید شود؛ این آستانه تضمین سود خالص نیست.</p>
           </section>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
