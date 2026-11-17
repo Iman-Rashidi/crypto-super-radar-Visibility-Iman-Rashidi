@@ -3,9 +3,11 @@ from __future__ import annotations
 import sqlite3
 import unittest
 from unittest.mock import patch
+import requests
 
 from crypto_super_radar.notion_activity_journal import (
     NotionActivityJournal,
+    _notion_http_error_details,
     render_candlestick_chart,
     render_ohlcv_csv,
 )
@@ -86,7 +88,10 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.journal.enqueue(snapshot)
         self.connection.execute(
             """UPDATE csr_notion_activity_journal
-               SET attempts=2, last_error_type='HTTPError', last_http_status=403, last_error_stage='POST /data_sources/{activity}/query'
+               SET attempts=2, last_error_type='HTTPError', last_http_status=404,
+                   last_error_code='object_not_found',
+                   last_error_message='Could not find data source. Check whether the database is shared with this integration.',
+                   last_error_stage='POST /data_sources/{activity}/query'
                WHERE experience_id=?""",
             (snapshot["experience_id"],),
         )
@@ -103,8 +108,29 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertEqual(state["last_failed_experience_id"], snapshot["experience_id"])
         self.assertEqual(state["last_attempts"], 2)
         self.assertEqual(state["last_error_type"], "HTTPError")
-        self.assertEqual(state["last_http_status"], 403)
+        self.assertEqual(state["last_http_status"], 404)
+        self.assertEqual(state["last_error_code"], "object_not_found")
+        self.assertIn("shared with this integration", state["last_error_message"])
         self.assertEqual(state["last_error_stage"], "POST /data_sources/{activity}/query")
+
+    def test_notion_http_error_details_extracts_code_and_message_without_headers(self):
+        class FakeResponse:
+            status_code = 404
+
+            def json(self):
+                return {
+                    "object": "error",
+                    "status": 404,
+                    "code": "object_not_found",
+                    "message": "Could not find database. Please make sure it is shared with your integration.",
+                }
+
+        error = requests.HTTPError("404 Client Error")
+        error.response = FakeResponse()
+        code, message = _notion_http_error_details(error)
+        self.assertEqual(code, "object_not_found")
+        self.assertIn("shared with your integration", message)
+        self.assertNotIn("Authorization", message)
 
     def test_independent_review_status_and_position_id_are_written_to_activity_properties(self):
         snapshot = sample_snapshot()
