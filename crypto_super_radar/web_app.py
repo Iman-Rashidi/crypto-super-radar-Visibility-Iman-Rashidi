@@ -2780,7 +2780,7 @@ def _blofin_demo_execution_readiness() -> dict:
     else:
         message_fa = (
             "پیش‌نیازهای BloFin Demo آماده‌اند؛ مجوز Read/Write کلید واقعی با query-apikey تأیید شد. "
-            "قیمت، ۱۲ گیت، Nemotron و کنترل‌های ریسک در هر چرخه دوباره بررسی می‌شوند."
+            "در پروفایل Challenge 1، کندل‌های بسته‌شده، الگوی کندلی/نموداری، تأیید شکست، روند ۱ ساعته و کنترل‌های ضروری حساب و ریسک بررسی می‌شوند؛ ۱۲ فیلتر عمومی فقط نظارتی‌اند و Nemotron شرط ورود این پروفایل نیست."
         )
     return {
         "status": "READY" if ready else "BLOCKED",
@@ -5146,9 +5146,9 @@ class Handler(BaseHTTPRequestHandler):
           <div class="brand-copy">
             <span class="eyebrow">پایش بازار · دادهٔ عمومی و رایگان</span>
             <h1>CRYPTO SUPER RADAR</h1>
-            <p class="muted">تحلیل کمی و Paper Research؛ بدون اتصال کیف‌پول یا ارسال سفارش</p>
+            <p class="muted">پژوهش بازار با دادهٔ عمومی و Paper Trading؛ هیچ اتصال کیف‌پول یا سفارش Live ندارد. سفارش آزمایشی فقط در ماژول مستقل BloFin Demo و با کلید Trade جداگانه ممکن است.</p>
           </div>
-          <span class="mode-pill"><span class="mode-dot"></span>فقط خواندنی</span>
+          <span class="mode-pill"><span class="mode-dot"></span>Spot Research: فقط خواندنی · BloFin: Demo</span>
         </header>
         <section class="card" id="external-analysis-tools">
           <h2>ابزارهای تحلیل بازار</h2>
@@ -5167,7 +5167,7 @@ class Handler(BaseHTTPRequestHandler):
           </div>
         </section>
         <section class="card" id="blofin-demo-panel">
-          <h2>BloFin Demo Futures · اتصال و حساب فقط‌خواندنی</h2>
+          <h2>BloFin Demo Futures · مانیتور حساب خواندنی و اجرای Demo جداگانه</h2>
           <p class="muted">اتصال حساب با درخواست‌های خواندنی بررسی می‌شود. سطح واقعی مجوز خود API Key جداگانه از BloFin خوانده می‌شود؛ حتی کلید Read/Write نیز در این صفحه فقط برای GET استفاده می‌شود. توکن پنل با API Key صرافی متفاوت است و در مرورگر ذخیره نمی‌شود.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="blofin-demo-check" type="button">بررسی اتصال BloFin Demo</button>
@@ -6702,8 +6702,8 @@ async function loadBlofinInstruments(){
             <section class="easy-trader-robot" id="easy-trader-robot" aria-label="ربات متحرک تحلیل‌گر حالت آسان">
               <div class="easy-robot-stage">
                 <div class="easy-robot-bubble" role="status" aria-live="polite">
-                  <span class="easy-robot-bubble-title">گزارش زنده تحلیل · CHALLENGE 1</span>
-                  <strong class="easy-robot-pattern" id="easy-robot-pattern">در انتظار الگوی تأییدشده Challenge 1...</strong>
+                  <span class="easy-robot-bubble-title">گزارش زنده تحلیل Spot · الگوهای کندلی و نموداری</span>
+                  <strong class="easy-robot-pattern" id="easy-robot-pattern">در انتظار الگوی تأییدشدهٔ بازار Spot...</strong>
                   <div class="easy-robot-chips">
                     <span class="easy-robot-chip" id="easy-robot-direction">جهت الگو: نامشخص</span>
                     <span class="easy-robot-chip" id="easy-robot-signal">سیگنال موتور: در انتظار داده</span>
@@ -7086,7 +7086,7 @@ async function loadBlofinInstruments(){
             window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);});
           })();
           </script>
-          <p class="muted">ربات فقط LONG در بازار Spot را با همان ۱۲ فیلتر ارزیابی می‌کند؛ هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
+          <p class="muted">موتور مستقل Spot Paper فقط LONG را با ۱۲ فیلتر ارزیابی می‌کند؛ این موتور با معاملهٔ BloFin Demo Challenge 1 یکی نیست. هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
           <div class="metric" style="margin:12px 0">
             <strong>اتصال الزامی به هوش مصنوعی رایگان · OpenRouter / NVIDIA Nemotron</strong>
             <p class="muted">برای هر ورود جدید، مدل زبانی واقعی باید نقش تحلیل‌گر بازار، تحلیل‌گر تکنیکال، تحلیل‌گر احساسات، پژوهشگر صعودی/نزولی، معامله‌گر و مدیر ریسک را بررسی و خروجی معتبر بدهد. مدل رایگان <code>nvidia/nemotron-3-ultra-550b-a55b:free</code> با هزینهٔ مدل صفر استفاده می‌شود. سقف برنامه ۳۵ درخواست در روز و حافظهٔ نتیجه ۴ ساعت است؛ در صورت قطعی یا اتمام سهمیه، ورود جدید متوقف می‌شود اما مدیریت و خروج موقعیت باز ادامه دارد.</p>
