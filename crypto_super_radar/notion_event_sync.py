@@ -26,8 +26,14 @@ EVENT_TYPES = {
     "DATA_ERROR", "ORDER_SUBMITTED", "ORDER_FILLED", "POSITION_CLOSED",
     "AI_REVIEW_REQUESTED", "AI_RECOMMENDATION", "AI_VETO", "AI_APPROVAL",
     "NOTION_SYNC_PENDING", "NOTION_SYNCED", "NOTION_SYNC_FAILED", "SYSTEM_ERROR",
+    "AI_DISAGREEMENT", "MANUAL_ORDER_CANCELED",
+    "MANUAL_POSITION_CLOSE_REQUESTED", "MANUAL_ACTION_FAILED",
 }
-ACTORS = {"Robot", "AI Supervisor", "Render Runtime", "BloFin Demo", "Turso Event Store", "Notion Sync", "Scheduler"}
+ACTORS = {
+    "Robot", "AI Supervisor", "Render Runtime", "BloFin Demo",
+    "Turso Event Store", "Notion Sync", "Scheduler",
+    "Nemotron Supervisor", "Second AI Supervisor", "Operator",
+}
 EVENT_STATUSES = {"SUCCESS", "WARNING", "FAILED", "UNKNOWN", "PENDING"}
 SIGNALS = {"LONG", "SHORT", "NO_TRADE", "UNKNOWN"}
 AI_DECISIONS = {"APPROVE", "REJECT", "MODIFY", "OBSERVE_ONLY", "NOT_CALLED"}
@@ -111,6 +117,15 @@ class NotionEventOutbox:
             "signal": signal,
             "ai_decision": decision,
             "ai_model": _text(event.get("ai_model"), 160),
+            "reviewer_id": _text(event.get("reviewer_id"), 80),
+            "ai_provider": _text(event.get("ai_provider"), 100),
+            "ai_prompt_version": _text(event.get("ai_prompt_version"), 120),
+            "ai_requested_at_utc": _utc(event.get("ai_requested_at_utc")) if event.get("ai_requested_at_utc") else "",
+            "ai_completed_at_utc": _utc(event.get("ai_completed_at_utc")) if event.get("ai_completed_at_utc") else "",
+            "ai_call_status": _text(event.get("ai_call_status"), 30).upper(),
+            "ai_validation": _text(event.get("ai_validation"), 30).upper(),
+            "reviewer_consensus": _text(event.get("reviewer_consensus"), 30).upper(),
+            "input_data_type": _text(event.get("input_data_type"), 30).upper(),
             "ai_analysis": _text(event.get("ai_analysis"), 1800),
             "ai_suggestion": _text(event.get("ai_suggestion"), 1800),
             "reason": _text(event.get("reason"), 1800),
@@ -171,6 +186,24 @@ class NotionEventOutbox:
         }
         if event["source_url"]:
             props["منبع شواهد"] = {"url": event["source_url"]}
+        if event["reviewer_id"]:
+            props["شناسه ناظر"] = self._rich_text(event["reviewer_id"])
+        if event["ai_provider"]:
+            props["Provider ناظر AI"] = self._rich_text(event["ai_provider"])
+        if event["ai_prompt_version"]:
+            props["نسخه Prompt ناظر"] = self._rich_text(event["ai_prompt_version"])
+        if event["ai_requested_at_utc"]:
+            props["زمان درخواست AI"] = {"date": {"start": event["ai_requested_at_utc"]}}
+        if event["ai_completed_at_utc"]:
+            props["زمان پاسخ AI"] = {"date": {"start": event["ai_completed_at_utc"]}}
+        if event["ai_call_status"] in {"CALLED", "NOT_CALLED", "NOT_CONFIGURED", "UNKNOWN", "ERROR"}:
+            props["وضعیت فراخوانی AI"] = {"select": {"name": event["ai_call_status"]}}
+        if event["ai_validation"] in {"VALID", "INVALID", "NOT_RUN", "UNKNOWN"}:
+            props["اعتبارسنجی پاسخ AI"] = {"select": {"name": event["ai_validation"]}}
+        if event["reviewer_consensus"] in {"AGREEMENT", "DISAGREEMENT", "SINGLE_REVIEWER", "NOT_COMPARABLE", "NOT_CALLED"}:
+            props["وضعیت توافق ناظران"] = {"select": {"name": event["reviewer_consensus"]}}
+        if event["input_data_type"] in {"LIVE_MARKET", "SYNTHETIC_DRY_RUN", "HISTORICAL_REPLAY", "UNKNOWN"}:
+            props["نوع داده ورودی"] = {"select": {"name": event["input_data_type"]}}
         return props
 
     def _headers(self, token: str) -> dict[str, str]:
