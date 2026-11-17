@@ -401,6 +401,9 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(snapshot["signal"], "NO_TRADE")
         self.assertEqual(len(snapshot["candles_15m"]), 8)
         self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
+        self.assertEqual(snapshot["reviewer_consensus"], "NOT_CALLED")
+        self.assertEqual({item["reviewer_id"] for item in snapshot["ai_reviews"]}, {"nemotron", "second_ai"})
+        self.assertTrue(all(item["request_attempted"] is False for item in snapshot["ai_reviews"]))
         events = web_app._blofin_job_notion_events("journal-job-001", "BTC-USDT", job)
         self.assertEqual(events[0]["ai_decision"], "NOT_CALLED")
         reviewer_events = [
