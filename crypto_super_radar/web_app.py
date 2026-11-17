@@ -9291,6 +9291,23 @@ def _blofin_demo_next_15m_scan_window(now_utc: datetime | None = None) -> tuple[
     return delay_seconds, next_at.isoformat()
 
 
+def _blofin_demo_next_scan_after_cycle(
+    cycle_started_at_utc: datetime, *, now_utc: datetime | None = None,
+) -> tuple[int, str]:
+    """Schedule from cycle start so a scan overlapping a candle close catches it."""
+    _, boundary_iso = _blofin_demo_next_15m_scan_window(cycle_started_at_utc)
+    target = datetime.fromisoformat(boundary_iso)
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    if target <= current:
+        # The scan crossed the candle boundary. Re-check shortly rather than
+        # skipping the just-closed candle and sleeping for another full interval.
+        target = current + timedelta(seconds=5)
+    delay_seconds = max(5, int(math.ceil((target - current).total_seconds())))
+    return delay_seconds, target.isoformat()
+
+
 def _blofin_demo_autopilot_worker() -> None:
     """Run Challenge 1 scans immediately after each completed 15-minute candle."""
     interval_seconds = 900
@@ -9541,7 +9558,9 @@ def _blofin_demo_autopilot_worker() -> None:
                 autopilot_enabled = _blofin_demo_autopilot_enabled()
                 continue_search = bool(autopilot_enabled)
                 if continue_search:
-                    next_delay_seconds, next_cycle_at_utc = _blofin_demo_next_15m_scan_window()
+                    next_delay_seconds, next_cycle_at_utc = _blofin_demo_next_scan_after_cycle(
+                        datetime.fromisoformat(started)
+                    )
                 else:
                     next_delay_seconds, next_cycle_at_utc = 60, None
                 duplicates_only = bool(batch_results) and all(
