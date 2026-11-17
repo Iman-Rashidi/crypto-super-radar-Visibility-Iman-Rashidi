@@ -13,7 +13,7 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from http.server import ThreadingHTTPServer
 from http.client import HTTPConnection
 from urllib.parse import quote
@@ -179,6 +179,96 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(filled["position_id"], "demo-position-456")
         approval = next(item for item in events if item["event_type"] == "AI_APPROVAL")
         self.assertEqual(approval["ai_decision"], "APPROVE")
+
+    def test_blofin_demo_dashboard_exposes_manual_mode_autopilot_and_symbol_search(self):
+        status, headers, payload = self.request("GET", "/")
+        page = payload.decode("utf-8")
+        self.assertEqual(status, 200)
+        for element_id in (
+            "blofin-instrument-search",
+            "blofin-mode-autopilot",
+            "blofin-mode-manual",
+            "blofin-autopilot-toggle",
+            "blofin-manual-order-form",
+            "blofin-manual-direction",
+            "blofin-manual-size",
+            "blofin-manual-stop",
+            "blofin-manual-target",
+            "blofin-manual-open",
+            "blofin-manual-refresh",
+            "blofin-manual-account-view",
+        ):
+            self.assertIn(f'id="{element_id}"', page)
+        self.assertIn("بستن همین پوزیشن", page)
+        self.assertIn("لغو همین سفارش", page)
+        self.assertIn("PnL شناور", page)
+        self.assertIn("اپراتور", page)
+
+    def test_blofin_manual_write_routes_require_dashboard_token(self):
+        routes = (
+            "/api/blofin/demo/autopilot/control",
+            "/api/blofin/demo/manual-open",
+            "/api/blofin/demo/manual-cancel-order",
+            "/api/blofin/demo/manual-close-position",
+        )
+        origin = f"http://{self.host}:{self.port}"
+        with patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "not-a-real-dashboard-token"}):
+            for route in routes:
+                status, _, payload = self.request(
+                    "POST", route, body="confirm=1&enabled=false",
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Origin": origin,
+                        "Sec-Fetch-Site": "same-origin",
+                    },
+                )
+                self.assertEqual(status, 401, route)
+                self.assertEqual(json.loads(payload)["status"], "UNAUTHORIZED")
+
+    def test_manual_close_allows_a_loss_making_position_but_targets_exact_position_id(self):
+        calls = []
+        class FakeManualClient:
+            def get_positions(self, *, inst_id=None):
+                return [{
+                    "instId": "BTC-USDT",
+                    "positionId": "position-123",
+                    "positionSide": "net",
+                    "marginMode": "isolated",
+                    "positions": "0.01",
+                    "unrealizedPnl": "-3.25",
+                }]
+            def close_futures_position(self, **kwargs):
+                calls.append(kwargs)
+                return {"code": "0", "data": [{"code": "0", "orderId": "close-456"}]}
+
+        store = MagicMock()
+        with (
+            patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=store),
+        ):
+            result = web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT", position_id="position-123"
+            )
+
+        self.assertEqual(result["status"], "CLOSE_ACCEPTED")
+        self.assertTrue(result["loss_making_position"])
+        self.assertEqual(result["unrealized_pnl_usdt_at_confirmation"], "-3.25")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["position_id"], "position-123")
+        self.assertEqual(calls[0]["inst_id"], "BTC-USDT")
+        store.record_manual_action.assert_any_call(
+            calls[0]["client_order_id"],
+            "MANUAL_POSITION_CLOSE_REQUESTED",
+            {
+                "instrument_id": "BTC-USDT",
+                "position_id": "position-123",
+                "position_side": "net",
+                "margin_mode": "isolated",
+                "unrealized_pnl_usdt": "-3.25",
+                "loss_making_position": True,
+            },
+        )
+        store.close.assert_called_once()
 
     def test_home_page_is_persian_and_lists_twelve_gates(self):
         status, headers, payload = self.request("GET", "/")
