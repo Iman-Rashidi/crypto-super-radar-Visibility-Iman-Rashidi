@@ -23,7 +23,7 @@ DEFAULT_CHALLENGE1_INSTRUMENTS = (
 )
 
 _INTERVAL_MS = {"15m": 15 * 60 * 1000, "1H": 60 * 60 * 1000, "1h": 60 * 60 * 1000}
-_ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V1"
+_ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V2"
 
 
 def _number(value: Any) -> float | None:
@@ -293,8 +293,16 @@ def analyze_blofin_challenge1(
     if not instrument.endswith("-USDT"):
         raise ValueError("Challenge 1 accepts only USDT linear Demo instrument IDs.")
 
-    frame_15m = _completed_frame(client, inst_id=instrument, bar="15m", now_ms=now_ms, minimum_rows=60)
-    frame_1h = _completed_frame(client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=60)
+    # Thirty completed 15m bars cover the 20-bar breakout and ATR warm-up.
+    # The 1H frame is optional context only; an unavailable context feed must not
+    # suppress a valid, fully completed 15m candle-pattern setup.
+    frame_15m = _completed_frame(client, inst_id=instrument, bar="15m", now_ms=now_ms, minimum_rows=30)
+    context_data_status = "AVAILABLE"
+    try:
+        frame_1h = _completed_frame(client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=30)
+    except (ValueError, BloFinDemoResponseError, TimeoutError, ConnectionError):
+        frame_1h = pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"])
+        context_data_status = "UNAVAILABLE"
 
     patterns_15m = [dict(item, timeframe="15m") for item in _confirmed_pattern_candidates(frame_15m)]
     patterns_1h = [dict(item, timeframe="1H") for item in _confirmed_pattern_candidates(frame_1h)]
@@ -324,59 +332,63 @@ def analyze_blofin_challenge1(
     entry = stop = target = None
     signal_id = None
 
-    decision_code = "CONFLICTING_PATTERNS" if bullish and bearish else "NO_TRADE"
+decision_code = "CONFLICTING_PATTERNS" if bullish and bearish else "NO_TRADE"
+    context_conflict = False
     if bullish and bearish:
-        reason_fa = "الگوهای صعودی و نزولی هم‌زمان دیده شدند؛ به‌دلیل تعارض، هیچ سفارشی صادر نمی‌شود."
+        reason_fa = "الگوهای صعودی و نزولی هم‌زمان در ۱۵ دقیقه دیده شدند؛ به‌دلیل تعارض، معامله انجام نمی‌شود."
     elif not patterns_15m:
         reason_fa = "در تایم‌فریم ۱۵ دقیقه الگوی ورود معتبر پیدا نشد؛ عدم معامله تصمیم معتبر است."
     else:
         chosen = max(patterns_15m, key=lambda item: abs(int(item.get("score") or 0)))
         direction = str(chosen["direction"])
         opposite = "BEARISH" if direction == "BULLISH" else "BULLISH"
-        opposing_context = [item for item in patterns_1h if item.get("direction") == opposite]
-        if opposing_context:
-            reason_fa = "الگوی یک‌ساعته با جهت ستاپ ۱۵ دقیقه مخالف است؛ ورود مسدود شد."
+        context_conflict = any(item.get("direction") == opposite for item in patterns_1h)
+        # Volume and 1H context are reported as advisory evidence, not entry vetoes.
+        volume = _volume_confirmation(frame_15m, direction)
+        atr = _atr(frame_15m)
+        entry_value = float(frame_15m["close"].iloc[-1])
+        if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
+            reason_fa = "داده کافی برای محاسبه حد ضرر ساختاری و ATR وجود ندارد."
         else:
-            volume = _volume_confirmation(frame_15m, direction)
-            if not volume.get("confirmed"):
-                reason_fa = "الگوی قیمتی دیده شد، اما تأیید حجم و محل بسته‌شدن کندل کامل نیست."
+            buffer = atr * 0.10
+            if direction == "BULLISH":
+                structural_low = float(frame_15m["low"].tail(5).min())
+                stop_value = min(structural_low - buffer, entry_value - 1.5 * atr)
+                risk_distance = entry_value - stop_value
+                target_value = entry_value + 2.0 * risk_distance
+                signal = "LONG"
             else:
-                atr = _atr(frame_15m)
-                entry_value = float(frame_15m["close"].iloc[-1])
-                if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
-                    reason_fa = "داده کافی برای محاسبه حد ضرر ساختاری و ATR وجود ندارد."
-                else:
-                    buffer = atr * 0.10
-                    if direction == "BULLISH":
-                        structural_low = float(frame_15m["low"].tail(5).min())
-                        stop_value = min(structural_low - buffer, entry_value - 1.5 * atr)
-                        risk_distance = entry_value - stop_value
-                        target_value = entry_value + 2.0 * risk_distance
-                        signal = "LONG"
-                    else:
-                        structural_high = float(frame_15m["high"].tail(5).max())
-                        stop_value = max(structural_high + buffer, entry_value + 1.5 * atr)
-                        risk_distance = stop_value - entry_value
-                        target_value = entry_value - 2.0 * risk_distance
-                        signal = "SHORT"
-                    if risk_distance <= 0 or target_value <= 0:
-                        signal = "NO_TRADE"
-                        reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
-                    else:
-                        entry, stop, target = entry_value, stop_value, target_value
-                        signal_bar = _time_label(frame_15m)
-                        signal_id = f"challenge1-v1:{instrument}:15m:{signal_bar}:{signal}"
-                        execution = {
-                            "status": "PASS",
-                            "direction": signal,
-                            "signal_id": signal_id,
-                            "signal_bar_open_utc": signal_bar,
-                            "entry_price": entry,
-                            "stop_loss": stop,
-                            "take_profit": target,
-                            "reward_risk": 2.0,
-                        }
-                        reason_fa = f"الگوی {chosen.get('name_en')} با کندل بسته‌شده، حجم و ساختار حد ضرر/هدف تأیید شد."
+                structural_high = float(frame_15m["high"].tail(5).max())
+                stop_value = max(structural_high + buffer, entry_value + 1.5 * atr)
+                risk_distance = stop_value - entry_value
+                target_value = entry_value - 2.0 * risk_distance
+                signal = "SHORT"
+            if risk_distance <= 0 or target_value <= 0:
+                signal = "NO_TRADE"
+                reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
+            else:
+                entry, stop, target = entry_value, stop_value, target_value
+                signal_bar = _time_label(frame_15m)
+                signal_id = f"challenge1-v2:{instrument}:15m:{signal_bar}:{signal}"
+                execution = {
+                    "status": "PASS",
+                    "direction": signal,
+                    "signal_id": signal_id,
+                    "signal_bar_open_utc": signal_bar,
+                    "entry_price": entry,
+                    "stop_loss": stop,
+                    "take_profit": target,
+                    "reward_risk": 2.0,
+                }
+                advisory = []
+                if not volume.get("confirmed"):
+                    advisory.append("تأیید حجم/محل بسته‌شدن کامل نیست")
+                if context_conflict:
+                    advisory.append("الگوی یک‌ساعته خلاف جهت است")
+                if context_data_status != "AVAILABLE":
+                    advisory.append("داده زمینه یک‌ساعته در دسترس نبود")
+                suffix = "؛ موارد نظارتی: " + "، ".join(advisory) if advisory else ""
+                reason_fa = f"الگوی {chosen.get('name_en')} با کندل بسته‌شده ۱۵دقیقه‌ای تأیید شد؛ ورود بر اساس همان الگو انجام‌پذیر است{suffix}."
 
     latest_time = _time_label(frame_15m)
     confirmation_candle = {
@@ -395,6 +407,9 @@ def analyze_blofin_challenge1(
         "legacy_12_gates_used_for_entry": False,
         "external_ai_required": False,
         "tinyfish_required": False,
+        "volume_is_advisory": True,
+        "context_is_advisory": True,
+        "context_data_status": context_data_status,
         "decision": decision_code if decision_code == "CONFLICTING_PATTERNS" else signal,
         "detected_patterns": all_detected,
         "chosen_pattern": chosen,
@@ -402,6 +417,10 @@ def analyze_blofin_challenge1(
         "chart_structure": chart_structure,
         "context_patterns": patterns_1h,
         "volume_confirmation": volume,
+        "volume_is_advisory": True,
+        "context_conflict": context_conflict,
+        "context_data_status": context_data_status,
+        "context_is_advisory": True,
         "decision_reason_fa": reason_fa,
         # These are the exact validated completed candles used by this decision.
         # Future candles are never added to the decision-time snapshot.
