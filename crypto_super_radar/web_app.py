@@ -7710,7 +7710,7 @@ let blofinInstrumentRecords=[];
               <label>تایم‌فریم
                 <select id="live-radar-interval">
                   <option value="1s">۱ ثانیه</option><option value="1m">۱ دقیقه</option><option value="5m" selected>۵ دقیقه</option>
-                  <option value="15m">۵ دقیقه</option><option value="1h">۱ ساعت</option>
+                  <option value="5m">۵ دقیقه</option><option value="1h">۱ ساعت</option>
                   <option value="4h">۴ ساعت</option><option value="1d">۱ روز</option>
                   <option value="1w">۱ هفته</option><option value="1M">۱ ماه</option>
                 </select>
