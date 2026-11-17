@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from crypto_super_radar.notion_activity_journal import (
     NotionActivityJournal,
