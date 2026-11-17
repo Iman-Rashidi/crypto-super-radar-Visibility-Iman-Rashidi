@@ -398,8 +398,7 @@ def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "it must not request or infer 15m/1H data. Keep explanations concise and in Persian. "
         "This is an audit/recommendation report only and must never authorize, veto, delay, or submit an order."
     )
-    user = "Review only this sanitized 5m Challenge 1 evidence:
-" + json.dumps(
+    user = "Review only this sanitized 5m Challenge 1 evidence:\n" + json.dumps(
         evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
