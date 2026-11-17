@@ -370,6 +370,9 @@ class WebAppHttpTests(unittest.TestCase):
                 "margin_mode": "isolated",
                 "unrealized_pnl_usdt": "-3.25",
                 "loss_making_position": True,
+                "action_source": "MANUAL",
+                "exit_reason": None,
+                "exchange_close_client_order_id": calls[0]["client_order_id"],
             },
         )
         store.close.assert_called_once()
