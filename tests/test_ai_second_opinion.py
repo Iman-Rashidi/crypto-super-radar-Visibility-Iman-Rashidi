@@ -141,7 +141,7 @@ def challenge1_result(*, pattern_confirmed=True):
     )
 
 
-def valid_pattern_document():
+def valid_pattern_document(*, timeframe_verdict="SUPPORT"):
     return {
         "pattern_analyst": {
             "verdict": "SUPPORT", "pattern_name": "Bullish Engulfing",
@@ -151,7 +151,8 @@ def valid_pattern_document():
             "verdict": "SUPPORT", "reason_fa": "ساختار قیمت با جهت خرید هم‌سو است.",
         },
         "timeframe_analyst": {
-            "verdict": "SUPPORT", "reason_fa": "زمینه یک‌ساعته با ستاپ پانزده‌دقیقه‌ای تعارض ندارد.",
+            "verdict": timeframe_verdict,
+            "reason_fa": "زمینه یک‌ساعته یک مشاهده مشورتی است و به تنهایی مانع ورود نیست.",
         },
         "trader": {"proposal": "LONG", "reason_fa": "ورود فقط بر پایه الگوی تأییدشده پیشنهاد می‌شود."},
         "risk_manager": {"verdict": "APPROVE", "reason_fa": "حد ضرر و نسبت بازده به ریسک معتبر است."},
@@ -679,6 +680,60 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("mandatory_gates", evidence)
         self.assertNotIn("must_not_be_sent", json.dumps(payload))
         self.assertNotIn('"id":1', json.dumps(payload))
+
+    def test_challenge1_volume_and_opposing_1h_context_are_advisory_to_both_reviewers(self):
+        candidate = challenge1_result()
+        evidence = candidate.metrics["challenge1_evidence"]
+        evidence["volume_confirmation"]["confirmed"] = False
+        evidence["volume_confirmation"]["volume_ratio"] = 0.65
+        evidence["context_patterns"] = [{
+            "name_en": "Bearish Engulfing",
+            "direction": "BEARISH",
+            "category": "CANDLESTICK",
+            "timeframe": "1H",
+        }]
+        document = valid_pattern_document(timeframe_verdict="OPPOSE")
+        primary_captured = {}
+        secondary_captured = {}
+        second_model = "independent/test-pattern-reviewer:free"
+
+        def primary_post(url, headers, json, timeout, allow_redirects=False):
+            primary_captured.update({"payload": json})
+            return FakeResponse(document=document)
+
+        def second_post(url, headers, json, timeout, allow_redirects=False):
+            secondary_captured.update({"payload": json})
+            return FakeResponse(document=document, model=second_model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-test-key",
+            "CSR_SECOND_AI_API_KEY": "separate-independent-key",
+            "CSR_SECOND_AI_MODEL": second_model,
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            primary = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=primary_post, bypass_cache=True,
+            )
+            secondary = run_independent_ai_supervisor(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=second_post,
+            )
+
+        self.assertEqual(primary["status"], "APPROVED")
+        self.assertEqual(secondary["status"], "APPROVED")
+        self.assertTrue(primary["paper_entry_eligible"])
+        self.assertTrue(secondary["paper_entry_eligible"])
+        for captured in (primary_captured, secondary_captured):
+            prompt = captured["payload"]["messages"][0]["content"]
+            body = captured["payload"]["messages"][1]["content"]
+            self.assertIn("ADVISORY ONLY", prompt)
+            self.assertIn('"confirmed":false', body)
+            self.assertIn('"direction":"BEARISH"', body)
+        self.assertEqual(primary["specialist_views"]["timeframe_analyst"]["verdict"], "OPPOSE")
+        self.assertEqual(secondary["specialist_views"]["timeframe_analyst"]["verdict"], "OPPOSE")
 
     def test_challenge1_pattern_conflict_blocks_before_any_ai_request_even_when_gates_pass(self):
         candidate = challenge1_result(pattern_confirmed=False)
