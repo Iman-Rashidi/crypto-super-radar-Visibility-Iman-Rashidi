@@ -300,7 +300,7 @@ def analyze_blofin_challenge1(
     context_data_status = "AVAILABLE"
     try:
         frame_1h = _completed_frame(client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=30)
-    except (ValueError, BloFinDemoResponseError, TimeoutError, ConnectionError):
+    except Exception:
         frame_1h = pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"])
         context_data_status = "UNAVAILABLE"
 
