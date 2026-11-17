@@ -3885,7 +3885,7 @@ def _run_blofin_demo_execution_job(
         prior_budget = store.trade_budget_status()
         if prior_budget.get("unresolved_orders", 0) > 0:
             latest = store.latest_order()
-            if not isinstance(latest, dict) or latest.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
+            if not isinstance(latest, dict) or latest.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET", "PENDING_RECONCILE"}:
                 _set_blofin_execution_job(
                     job_id, "completed", stage="UNRESOLVED_ORDER_BLOCK",
                     message_fa="یک سفارش قبلی تعیین‌تکلیف نشده است؛ هیچ سفارش جدیدی ارسال نمی‌شود.",
