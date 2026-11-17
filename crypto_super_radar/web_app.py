@@ -9093,6 +9093,30 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
             ),
         })
 
+    present_reviewers = {item["reviewer_id"] for item in ai_reviews if item.get("reviewer_id")}
+    for reviewer_id, actor in (
+        ("nemotron", "Nemotron Supervisor"),
+        ("second_ai", "Second AI Supervisor"),
+    ):
+        if reviewer_id not in present_reviewers:
+            ai_reviews.append({
+                "reviewer_id": reviewer_id,
+                "actor": actor,
+                "status": "NOT_CALLED",
+                "provider": "",
+                "model": "",
+                "returned_model": "",
+                "request_attempted": False,
+                "response_source": "NONE",
+                "response_validated": False,
+                "model_verified": False,
+                "paper_entry_eligible": False,
+                "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                "reason": (
+                    "این ناظر در این چرخه فراخوانی نشد؛ ربات پیش از مرحله بازبینی مستقل متوقف شد."
+                ),
+            })
+
     raw_consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
         current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
     )
@@ -9106,12 +9130,16 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         )
         if key in raw_consensus
     }
-    reviewer_consensus = str(consensus.get("status") or "NOT_COMPARABLE").upper()
+    all_not_called = all(item.get("request_attempted") is False for item in ai_reviews)
+    reviewer_consensus = str(
+        consensus.get("status") or ("NOT_CALLED" if all_not_called else "NOT_COMPARABLE")
+    ).upper()
     ai_status = (
         "APPROVED_BY_BOTH"
         if consensus.get("two_reviewer_approval") is True
         and consensus.get("primary_verified") is True
         and consensus.get("second_verified") is True
+        else "NOT_CALLED" if all_not_called
         else reviewer_consensus
     )
     ai_model = " | ".join(
