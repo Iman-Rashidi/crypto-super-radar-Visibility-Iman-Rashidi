@@ -134,7 +134,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(robot_event["cycle_id"], "cycle-no-trade")
         self.assertIn("orders_submitted", robot_event["details"])
 
-    def test_ai_veto_is_recorded_separately_from_robot_analysis(self):
+    def test_ai_veto_is_reported_but_does_not_gate_challenge1_demo_order(self):
         ai_review = {
             "reviewer_id": "nemotron",
             "provider": "OpenRouter",
@@ -150,14 +150,18 @@ class WebAppHttpTests(unittest.TestCase):
         }
         job = {
             "status": "completed",
-            "stage": "AI_BLOCKED",
+            "stage": "MONITORING",
             "ai_review": ai_review,
             "result": {
-                "status": "AI_BLOCKED",
+                "status": "FILLED",
                 "signal": "LONG",
-                "reason_fa": "ناظر ورود را رد کرد.",
-                "orders_submitted": False,
-                "trade_executed": False,
+                "reason_fa": "الگوی ۵ دقیقه‌ای معتبر بود؛ توصیه ناظر فقط ثبت شد.",
+                "orders_submitted": True,
+                "trade_executed": True,
+                "exchange_order_id": "demo-order-after-veto",
+                "average_fill_price": 100.25,
+                "filled_size": "0.01",
+                "positions": [{"positionId": "demo-position-after-veto"}],
             },
         }
         events = web_app._blofin_job_notion_events("cycle-ai-veto", "BTC-USDT", job)
@@ -165,7 +169,128 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(ai_event["event_type"], "AI_VETO")
         self.assertEqual(ai_event["ai_decision"], "REJECT")
         self.assertEqual(ai_event["ai_model"], "free-test-model")
-        self.assertFalse(any(item["event_type"] == "ORDER_SUBMITTED" for item in events))
+        self.assertTrue(any(item["event_type"] == "ORDER_SUBMITTED" for item in events))
+        fill = next(item for item in events if item["event_type"] == "ORDER_FILLED")
+        self.assertEqual(fill["order_id"], "demo-order-after-veto")
+        self.assertEqual(fill["position_id"], "demo-position-after-veto")
+
+    def test_pending_supervisor_placeholders_do_not_create_fake_notion_events(self):
+        job = {
+            "status": "completed",
+            "stage": "MONITORING",
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                    "review": {"status": "PENDING", "request_attempted": None},
+                },
+                {
+                    "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                    "review": {"status": "PENDING", "request_attempted": None},
+                },
+            ],
+            "ai_consensus": {"status": "PENDING"},
+            "result": {
+                "status": "FILLED", "signal": "LONG",
+                "orders_submitted": True, "trade_executed": True,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-review-pending", "BTC-USDT", job)
+        self.assertFalse(any(
+            item["actor"] in {"Nemotron Supervisor", "Second AI Supervisor"}
+            for item in events
+        ))
+        self.assertTrue(any(item["event_type"] == "ORDER_SUBMITTED" for item in events))
+
+    def test_ai_disagreement_event_reports_observer_result_not_trade_block(self):
+        def review(reviewer_id, status, eligible):
+            return {
+                "reviewer_id": reviewer_id,
+                "status": status,
+                "provider": "test-provider",
+                "model": "configured-model",
+                "returned_model": "verified-model",
+                "request_attempted": True,
+                "response_source": "LIVE_API",
+                "response_validated": True,
+                "model_verified": True,
+                "paper_entry_eligible": eligible,
+            }
+        job = {
+            "status": "completed",
+            "stage": "MONITORING",
+            "ai_reviews": [
+                {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                 "review": review("nemotron", "APPROVED", True)},
+                {"reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                 "review": review("second_ai", "VETO", False)},
+            ],
+            "ai_consensus": {
+                "status": "DISAGREEMENT",
+                "primary_status": "APPROVED",
+                "second_status": "VETO",
+            },
+            "result": {
+                "status": "FILLED", "signal": "LONG",
+                "orders_submitted": True, "trade_executed": True,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-disagreement", "BTC-USDT", job)
+        disagreement = next(item for item in events if item["event_type"] == "AI_DISAGREEMENT")
+        details = json.loads(disagreement["details"])
+        self.assertIn("صرفاً نظارتی", disagreement["reason"])
+        self.assertTrue(details["orders_submitted"])
+        self.assertTrue(details["trade_executed"])
+
+    def test_challenge1_supervisor_calls_are_scheduled_on_a_daemon_thread(self):
+        with patch.object(web_app.threading, "Thread") as thread_factory:
+            self.assertTrue(web_app._start_challenge1_supervisor_review(
+                "async-thread-test", "BTC-USDT", SimpleNamespace(), SimpleNamespace(),
+            ))
+        thread_factory.assert_called_once()
+        kwargs = thread_factory.call_args.kwargs
+        self.assertTrue(kwargs["daemon"])
+        self.assertEqual(kwargs["target"], web_app._run_challenge1_supervisor_review_async)
+        thread_factory.return_value.start.assert_called_once()
+
+    def test_async_supervisor_worker_updates_both_reports_and_refreshes_notion(self):
+        job_id = "async-supervisor-worker-test"
+        web_app.BLOFIN_EXECUTION_JOBS[job_id] = {
+            "status": "completed",
+            "stage": "MONITORING",
+            "result": {"status": "FILLED", "orders_submitted": True, "trade_executed": True},
+        }
+        def verified_review(reviewer_id, provider):
+            return {
+                "reviewer_id": reviewer_id, "provider": provider,
+                "status": "APPROVED", "model": "configured-model",
+                "returned_model": "verified-model", "request_attempted": True,
+                "response_source": "LIVE_API", "response_validated": True,
+                "model_verified": True, "paper_entry_eligible": True,
+            }
+        try:
+            with (
+                patch.object(web_app, "run_free_ai_second_opinion",
+                             return_value=verified_review("nemotron", "OpenRouter")),
+                patch.object(web_app, "run_independent_ai_supervisor",
+                             return_value=verified_review("second_ai", "test-provider")),
+                patch.object(web_app, "_queue_blofin_job_notion_events") as event_queue,
+                patch.object(web_app, "_queue_blofin_activity_journal") as activity_queue,
+            ):
+                web_app._run_challenge1_supervisor_review_async(
+                    job_id, "BTC-USDT", SimpleNamespace(), SimpleNamespace(),
+                )
+            saved = web_app.BLOFIN_EXECUTION_JOBS[job_id]
+            self.assertEqual(saved["ai_consensus"]["status"], "AGREEMENT")
+            self.assertFalse(saved["ai_consensus"]["entry_gate_enforced"])
+            self.assertEqual(
+                {item["reviewer_id"] for item in saved["result"]["ai_reviews"]},
+                {"nemotron", "second_ai"},
+            )
+            self.assertEqual(len(event_queue.call_args.args), 3)
+            event_queue.assert_called_once()
+            activity_queue.assert_called_once()
+        finally:
+            web_app.BLOFIN_EXECUTION_JOBS.pop(job_id, None)
 
     def test_verified_demo_fill_creates_order_and_ai_approval_events(self):
         job = {
