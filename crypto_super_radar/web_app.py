@@ -8472,7 +8472,7 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
 
 
 def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
-    """Build safe, idempotent Notion events from one completed Challenge 1 symbol job."""
+    """Build truthful, safe, idempotent Notion events from one Challenge 1 job."""
     current = job if isinstance(job, dict) else {}
     raw_result = current.get("result")
     result = raw_result if isinstance(raw_result, dict) else {}
@@ -8490,11 +8490,21 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
     )
     ai_status = str(ai_review.get("status") or current.get("ai_status") or "").strip().upper()
-    ai_decision = (
-        "APPROVE" if ai_status == "APPROVED" else
-        "REJECT" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
-        "OBSERVE_ONLY" if ai_review else "NOT_CALLED"
-    )
+    request_attempted = ai_review.get("request_attempted") is True
+    response_source = str(ai_review.get("response_source") or "UNKNOWN").upper()
+    response_validated = ai_review.get("response_validated") is True
+    model_verified = ai_review.get("model_verified") is True
+    cached_verified = response_source == "CACHE" and response_validated and model_verified
+    verified_ai_response = (request_attempted or cached_verified) and response_validated and model_verified
+    if verified_ai_response and ai_status == "APPROVED":
+        ai_decision = "APPROVE"
+    elif verified_ai_response and ai_status in {"VETO", "REJECT"}:
+        ai_decision = "REJECT"
+    elif not request_attempted and not cached_verified:
+        ai_decision = "NOT_CALLED"
+    else:
+        ai_decision = "OBSERVE_ONLY"
+
     order = result.get("order") if isinstance(result.get("order"), dict) else {}
     order_id = (
         result.get("exchange_order_id") or result.get("order_id")
@@ -8572,31 +8582,56 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             "ai_decision": ai_decision,
         })
     if ai_review:
-        ai_event_type = (
-            "AI_APPROVAL" if ai_status == "APPROVED" else
-            "AI_VETO" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
-            "AI_RECOMMENDATION"
-        )
+        if not request_attempted and not cached_verified:
+            ai_event_type = "AI_REVIEW_REQUESTED"
+            ai_event_reason = (
+                "بازبینی چرخه ثبت شد، اما درخواست به مدل بیرونی ارسال نشد؛ "
+                "علت و وضعیت واقعی در جزئیات آمده است."
+            )
+        elif cached_verified and ai_status == "APPROVED":
+            ai_event_type = "AI_APPROVAL"
+            ai_event_reason = "از پاسخ معتبر و قبلاً تأییدشدهٔ مدل در Cache استفاده شد؛ فراخوانی تازه‌ای انجام نشد."
+        elif verified_ai_response and ai_status == "APPROVED":
+            ai_event_type = "AI_APPROVAL"
+            ai_event_reason = "پاسخ واقعی مدل دریافت، شناسه مدل تأیید و محتوای پاسخ اعتبارسنجی شد."
+        elif verified_ai_response and ai_status in {"VETO", "REJECT"}:
+            ai_event_type = "AI_VETO"
+            ai_event_reason = "پاسخ واقعی و اعتبارسنجی‌شدهٔ مدل، ورود را رد کرد."
+        else:
+            ai_event_type = "AI_RECOMMENDATION"
+            ai_event_reason = "وضعیت فراخوانی/پاسخ AI کامل یا قابل‌تأیید نیست؛ این رویداد مجوز ورود محسوب نمی‌شود."
+        ai_event_status = "SUCCESS" if verified_ai_response else "WARNING"
+        actual_model = (
+            ai_review.get("returned_model") or ai_review.get("model") or ""
+        ) if model_verified else ""
         events.append({
             **common, "event_id": f"{job_id}:AI:{ai_event_type}",
             "event_type": ai_event_type, "actor": "AI Supervisor",
-            "status": "SUCCESS" if ai_status in {"APPROVED", "VETO", "REJECT"} else "WARNING",
+            "status": ai_event_status,
             "ai_decision": ai_decision,
-            "ai_model": ai_review.get("model") or ai_review.get("returned_model") or "",
+            "ai_model": actual_model,
             "ai_analysis": ai_review.get("rationale_fa") or ai_review.get("reason") or "",
             "ai_suggestion": ai_review.get("final_rating") or ai_review.get("status_fa") or ai_status,
-            "reason": ai_review.get("reason") or reason,
+            "reason": ai_review.get("reason") or ai_event_reason or reason,
             "details": json.dumps({
                 "job_id": job_id,
                 "ai_status": ai_status,
-                "response_validated": ai_review.get("response_validated"),
-                "model_verified": ai_review.get("model_verified"),
+                "configured_model": ai_review.get("model"),
+                "returned_model": ai_review.get("returned_model"),
+                "request_attempted": ai_review.get("request_attempted"),
+                "skip_reason_code": ai_review.get("skip_reason_code"),
+                "response_source": response_source,
+                "response_validated": response_validated,
+                "model_verified": model_verified,
+                "http_status": ai_review.get("http_status"),
                 "latency_ms": ai_review.get("latency_ms"),
+                "total_tokens": ai_review.get("total_tokens"),
                 "paper_entry_eligible": ai_review.get("paper_entry_eligible"),
-            }, ensure_ascii=False, sort_keys=True),
+                "native_council": ai_review.get("native_council"),
+                "error_type": ai_review.get("error_type"),
+            }, ensure_ascii=False, sort_keys=True, default=str),
         })
     return events
-
 
 def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> dict:
     """Persist the event/outbox before attempting any non-critical Notion network I/O."""
