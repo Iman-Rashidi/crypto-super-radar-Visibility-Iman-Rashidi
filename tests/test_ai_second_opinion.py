@@ -530,6 +530,30 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertFalse(result["request_attempted"])
         self.assertFalse(result["paper_entry_eligible"])
 
+    def test_challenge1_ai_review_does_not_treat_general_unknown_gates_as_mandatory(self):
+        candidate = valid_result()
+        candidate.metrics["execution_profile"] = "CHALLENGE_1"
+        for gate in candidate.gates:
+            gate.status = "UNKNOWN"
+        captured = {}
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.update({"payload": json, "url": url})
+            return FakeResponse(document=valid_document())
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+        prompt = json.dumps(captured["payload"], ensure_ascii=False)
+        self.assertIn("general radar gate IDs are advisory only", prompt)
+        self.assertNotIn("STRICT requires all 12 unique gates to be PASS", prompt)
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["request_attempted"])
+        self.assertTrue(review["model_verified"])
+        self.assertTrue(review["paper_entry_eligible"])
+
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
         invalid.gates[0].status = "UNKNOWN"
