@@ -10,7 +10,9 @@ from crypto_super_radar.ai_second_opinion import (
     DEFAULT_FREE_MODEL,
     MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
+    second_ai_connection_status,
     run_free_ai_second_opinion,
+    run_independent_ai_supervisor,
     run_openrouter_connection_diagnostic,
 )
 from crypto_super_radar.models import AssetSpec, Signal
@@ -422,6 +424,111 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertFalse(result["request_attempted"])
         self.assertEqual(result["skip_reason_code"], "OPENROUTER_KEY_MISSING")
         self.assertEqual(result["response_source"], "NONE")
+
+    def test_second_supervisor_is_not_configured_without_its_own_credentials(self):
+        with patch.dict(os.environ, {
+            "OPENROUTER_API_KEY": "primary-key",
+        }, clear=True):
+            status = second_ai_connection_status()
+            result = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT")
+            )
+        self.assertFalse(status["configured"])
+        self.assertEqual(status["status"], "NOT_CONFIGURED")
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
+        self.assertFalse(result["request_attempted"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("primary-key", json.dumps(result))
+
+    def test_second_supervisor_rejects_reused_key_or_model(self):
+        common = {
+            "OPENROUTER_API_KEY": "same-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "same-key",
+            "CSR_SECOND_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_PROVIDER": "OpenRouter",
+            "CSR_SECOND_AI_API_URL": "https://openrouter.ai/api/v1/chat/completions",
+        }
+        with patch.dict(os.environ, common, clear=True):
+            status = second_ai_connection_status()
+            result = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("reused credentials/model must never call a provider")
+                ),
+            )
+        self.assertFalse(status["configured"])
+        self.assertIn("SECOND_AI_KEY_MUST_BE_SEPARATE", status["configuration_issues"])
+        self.assertIn("SECOND_AI_MODEL_MUST_DIFFER", status["configuration_issues"])
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
+        self.assertFalse(result["request_attempted"])
+
+    def test_second_supervisor_uses_separate_free_model_and_verifies_provider_response(self):
+        second_model = "independent/test-model:free"
+        captured = {}
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.update({
+                "url": url, "headers": headers, "payload": json,
+                "timeout": timeout, "allow_redirects": allow_redirects,
+            })
+            return FakeResponse(document=valid_document(), model=second_model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-key",
+            "CSR_SECOND_AI_MODEL": second_model,
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            result = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+        self.assertEqual(captured["url"], env["CSR_SECOND_AI_API_URL"])
+        self.assertEqual(captured["payload"]["model"], second_model)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer independent-key")
+        self.assertFalse(captured["allow_redirects"])
+        self.assertNotIn("primary-key", captured["headers"]["Authorization"])
+        self.assertEqual(result["reviewer_id"], "second_ai")
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertTrue(result["request_attempted"])
+        self.assertTrue(result["response_validated"])
+        self.assertTrue(result["model_verified"])
+        self.assertTrue(result["paper_entry_eligible"])
+        self.assertEqual(result["returned_model"], second_model)
+        self.assertEqual(result["provider"], env["CSR_SECOND_AI_PROVIDER"])
+        self.assertTrue(result["requested_at_utc"])
+        self.assertTrue(result["completed_at_utc"])
+        self.assertIn("second-ai", result["prompt_version"])
+
+    def test_second_supervisor_is_not_called_when_native_evidence_is_unknown(self):
+        invalid = valid_result()
+        invalid.gates[0].status = "UNKNOWN"
+        calls = {"count": 0}
+
+        def forbidden_post(*args, **kwargs):
+            calls["count"] += 1
+            raise AssertionError("second reviewer must not be called with incomplete native evidence")
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-key",
+            "CSR_SECOND_AI_MODEL": "independent/test-model:free",
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            result = run_independent_ai_supervisor(
+                invalid, AssetSpec.parse("cex:BTCUSDT"), http_post=forbidden_post
+            )
+        self.assertEqual(calls["count"], 0)
+        self.assertEqual(result["status"], "NOT_CALLED")
+        self.assertEqual(result["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
+        self.assertFalse(result["request_attempted"])
+        self.assertFalse(result["paper_entry_eligible"])
 
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
