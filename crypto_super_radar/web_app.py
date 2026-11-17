@@ -5078,6 +5078,17 @@ def _blofin_manual_close_position(
     action_source = str(action_source or "MANUAL").strip().upper()
     if action_source not in {"MANUAL", "AUTOPILOT"}:
         raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
+    if action_source == "AUTOPILOT":
+        try:
+            minimum_profit = max(
+                0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")), 100_000.0)
+            )
+        except (TypeError, ValueError):
+            minimum_profit = 0.50
+        if pnl is None or pnl < Decimal(str(minimum_profit)):
+            raise BloFinDemoExecutionBlocked(
+                "سود شناور پوزیشن در بازبینی نهایی به حداقل محافظه‌کارانه نرسید؛ خروج خودکار ارسال نشد."
+            )
     action_id = "CLOSE" + uuid.uuid4().hex[:20]
     audit_event_id = str(audit_id or action_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_event_id):
