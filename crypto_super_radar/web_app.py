@@ -8580,6 +8580,36 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         if single:
             reviews = [{"reviewer_id": single.get("reviewer_id") or "nemotron",
                         "actor": "Nemotron Supervisor", "review": single}]
+    if not reviews:
+        blocked_stage = str(current.get("stage") or result.get("status") or "UNKNOWN")
+        blocked_reason = (
+            "هیچ فراخوانی خارجی برای این چرخه انجام نشد؛ ربات پیش از مرحله بازبینی AI "
+            f"در مرحله {blocked_stage} متوقف شد."
+        )
+        reviews = [
+            {
+                "reviewer_id": "nemotron",
+                "actor": "Nemotron Supervisor",
+                "review": {
+                    "reviewer_id": "nemotron", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": blocked_reason,
+                },
+            },
+            {
+                "reviewer_id": "second_ai",
+                "actor": "Second AI Supervisor",
+                "review": {
+                    "reviewer_id": "second_ai", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": blocked_reason,
+                },
+            },
+        ]
 
     consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
         current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
