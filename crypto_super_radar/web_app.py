@@ -5505,6 +5505,8 @@ class Handler(BaseHTTPRequestHandler):
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
             payload["execution_profile"] = "CHALLENGE_1"
             payload["readiness"] = _blofin_demo_execution_readiness()
+            with LOCK:
+                payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/live-monitor":
@@ -5696,9 +5698,10 @@ class Handler(BaseHTTPRequestHandler):
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <section class="metric" id="blofin-emergency-control" style="margin-top:12px;border:1px solid #b42318">
             <h3>کنترل اضطراری ربات ترید</h3>
-            <p class="muted">این فرمان فقط ورودهای خودکار جدید را متوقف می‌کند. پوزیشن باز را نمی‌بندد و TP/SL صرافی را تغییر نمی‌دهد. وضعیت توقف پس از تأیید سرور نمایش داده می‌شود.</p>
+            <p class="muted">این فرمان ورودهای خودکار جدید را متوقف می‌کند و به‌خودی‌خود پوزیشن باز را نمی‌بندد یا TP/SL صرافی را تغییر نمی‌دهد. مدیر مستقل خروج همچنان پوزیشن‌های ربات را فقط طبق قانون سود محافظت می‌کند.</p>
             <button id="blofin-emergency-stop" type="button" disabled style="background:#b42318;color:#fff">توقف اضطراری ورودهای جدید</button>
             <p id="blofin-emergency-status" class="muted" aria-live="polite">برای فعال‌شدن کنترل، وضعیت AutoPilot از سرور خوانده می‌شود.</p>
+            <p id="blofin-position-manager-status" class="muted" aria-live="polite">مدیر خروج خودکار هنوز وضعیت خود را گزارش نکرده است.</p>
           </section>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
@@ -5820,6 +5823,7 @@ class Handler(BaseHTTPRequestHandler):
             const autopilotToggle=document.getElementById('blofin-autopilot-toggle');
             const emergencyStopButton=document.getElementById('blofin-emergency-stop');
             const emergencyStatus=document.getElementById('blofin-emergency-status');
+            const positionManagerStatus=document.getElementById('blofin-position-manager-status');
             const manualPanel=document.getElementById('blofin-manual-trading-panel');
             const robotCycleControls=document.getElementById('blofin-robot-cycle-controls');
             const manualOrderForm=document.getElementById('blofin-manual-order-form');
@@ -5849,7 +5853,7 @@ class Handler(BaseHTTPRequestHandler):
             let autopilotIsStopping=false;
             let selectedExecutionMode='manual';
             let manualActionBusy=false;
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!emergencyStopButton||!emergencyStatus||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!emergencyStopButton||!emergencyStatus||!positionManagerStatus||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -6269,6 +6273,9 @@ let blofinInstrumentRecords=[];
                   :(autopilotIsEnabled
                     ?'AutoPilot فعال است؛ توقف اضطراری آماده اجراست.'
                     :'AutoPilot متوقف است؛ هیچ چرخه خودکاری برای ورود جدید فعال نیست.');
+                const manager=result.position_manager||{};
+                positionManagerStatus.textContent='مدیریت خروج: '+(manager.status||'UNKNOWN')
+                  +' · '+(manager.last_message_fa||'وضعیت خروج هنوز گزارش نشده است.');
                 applyExecutionMode(autopilotIsEnabled?'autopilot':'manual');
                 if(autopilotIsStopping){
                   manualOpenButton.disabled=true;
@@ -9273,6 +9280,7 @@ def main():
     host = os.getenv("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), Handler)
     _start_notion_sync_worker()
+    _start_blofin_demo_position_manager()
     _start_blofin_demo_autopilot()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
