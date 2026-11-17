@@ -346,7 +346,8 @@ class WebAppHttpTests(unittest.TestCase):
                 "challenge1_evidence": {
                     "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
                     "decision": "LONG", "detected_patterns": [],
-                    "candles_15m": candles, "candles_1h": [],
+                    "setup_timeframe": "5m", "context_timeframe": "15m",
+                    "candles_5m": candles, "candles_15m": candles, "candles_1h": [],
                     "confirmation_candle": {"time_utc": candles[-1]["time_utc"]},
                 },
             },
@@ -387,9 +388,10 @@ class WebAppHttpTests(unittest.TestCase):
                 "challenge1_evidence": {
                     "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
                     "decision": "NO_TRADE",
-                    "setup_timeframe": "15m",
-                    "context_timeframe": "1H",
+                    "setup_timeframe": "5m",
+                    "context_timeframe": "15m",
                     "detected_patterns": [],
+                    "candles_5m": candles,
                     "candles_15m": candles,
                     "candles_1h": [],
                     "confirmation_candle": {"open_time_utc": candles[-1]["time_utc"]},
@@ -399,6 +401,7 @@ class WebAppHttpTests(unittest.TestCase):
         snapshot = web_app._blofin_activity_journal_snapshot("journal-job-001", "BTC-USDT", job)
         self.assertEqual(snapshot["experience_id"], "blofin-ch1-test-journal-001")
         self.assertEqual(snapshot["signal"], "NO_TRADE")
+        self.assertEqual(len(snapshot["candles_5m"]), 8)
         self.assertEqual(len(snapshot["candles_15m"]), 8)
         self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
         self.assertEqual(snapshot["reviewer_consensus"], "NOT_CALLED")
@@ -1574,7 +1577,13 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
-    def test_autopilot_next_scan_aligns_to_next_15m_close(self):
+    def test_autopilot_next_scan_aligns_to_next_5m_close(self):
+        now = datetime(2026, 11, 17, 16, 23, 32, tzinfo=timezone.utc)
+        delay_seconds, next_at = web_app._blofin_demo_next_5m_scan_window(now)
+        self.assertEqual(delay_seconds, 91)
+        self.assertEqual(next_at, "2026-11-17T16:25:03+00:00")
+
+    def test_15m_context_window_remains_available(self):
         now = datetime(2026, 11, 17, 16, 23, 32, tzinfo=timezone.utc)
         delay_seconds, next_at = web_app._blofin_demo_next_15m_scan_window(now)
         self.assertEqual(delay_seconds, 391)
@@ -1595,8 +1604,8 @@ class WebAppHttpTests(unittest.TestCase):
         delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
             started, now_utc=finished,
         )
-        self.assertEqual(delay, 823)
-        self.assertEqual(next_at, "2026-11-17T17:30:03+00:00")
+        self.assertEqual(delay, 223)
+        self.assertEqual(next_at, "2026-11-17T17:20:03+00:00")
 
     def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
         class StopAfterTwoCycles(Exception):
@@ -1643,7 +1652,7 @@ class WebAppHttpTests(unittest.TestCase):
             if len(sleep_calls) == 2:
                 raise StopAfterTwoCycles()
 
-        next_cycle_at = (datetime.now(timezone.utc) + timedelta(seconds=900)).replace(microsecond=0)
+        next_cycle_at = (datetime.now(timezone.utc) + timedelta(seconds=300)).replace(microsecond=0)
 
         web_app.BLOFIN_AUTOPILOT_STATE.update({
             "enabled": False,
@@ -1668,8 +1677,8 @@ class WebAppHttpTests(unittest.TestCase):
                     "read_errors": [],
                 }),
                 patch.object(web_app.BLOFIN_AUTOPILOT_STOP_EVENT, "wait", side_effect=stop_after_second_cycle_sleep),
-                patch.object(web_app, "_blofin_demo_next_15m_scan_window", return_value=(
-                    900, next_cycle_at.isoformat()
+                patch.object(web_app, "_blofin_demo_next_5m_scan_window", return_value=(
+                    300, next_cycle_at.isoformat()
                 )),
                 patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
@@ -1678,9 +1687,9 @@ class WebAppHttpTests(unittest.TestCase):
 
             self.assertEqual(len(cycle_ids), 2)
             self.assertEqual(observed_profiles, ["CHALLENGE_1", "CHALLENGE_1"])
-            self.assertEqual(sleep_calls, [900, 900])
+            self.assertEqual(sleep_calls, [300, 300])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
-            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_15M_CANDLE")
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_5M_CANDLE")
             self.assertEqual(
                 web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"],
                 next_cycle_at.isoformat(),
