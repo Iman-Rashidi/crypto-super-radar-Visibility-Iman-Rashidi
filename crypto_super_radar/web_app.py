@@ -3303,11 +3303,13 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         or current.get("message_fa")
         or "هنوز نتیجهٔ نهایی چرخه ثبت نشده است."
     )
-    pass_count = analysis.get("gate_pass_count", result.get("gate_pass_count"))
-    fail_count = analysis.get("gate_fail_count", result.get("gate_fail_count"))
-    unknown_count = analysis.get("gate_unknown_count", result.get("gate_unknown_count"))
-    gates_fa = analysis.get("gates_fa")
-    if not isinstance(gates_fa, list):
+    pattern_only = execution_profile == "CHALLENGE_1"
+    gate_report_status = str(analysis.get("gate_report_status") or result.get("gate_report_status") or ("NOT_RUN" if pattern_only else "REPORTED")).upper()
+    pass_count = None if pattern_only else analysis.get("gate_pass_count", result.get("gate_pass_count"))
+    fail_count = None if pattern_only else analysis.get("gate_fail_count", result.get("gate_fail_count"))
+    unknown_count = None if pattern_only else analysis.get("gate_unknown_count", result.get("gate_unknown_count"))
+    gates_fa = [] if pattern_only else analysis.get("gates_fa")
+    if not pattern_only and not isinstance(gates_fa, list):
         gates_fa = _blofin_gate_rows_fa(analysis.get("gates", []))
 
     events_fa = []
@@ -3341,10 +3343,13 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "stage_fa": stage_fa,
         "signal_fa": signal_fa,
         "reason_fa": reason_fa,
+        "gate_report_status": gate_report_status,
         "gate_pass_count": pass_count,
         "gate_fail_count": fail_count,
         "gate_unknown_count": unknown_count,
         "gate_summary_fa": (
+            "۱۲ پروتکل عمومی در مسیر ترید Challenge 1 اجرا نشده‌اند."
+            if pattern_only else
             f"{count_fa(pass_count)} فیلتر تأیید، "
             f"{count_fa(fail_count)} فیلتر رد و "
             f"{count_fa(unknown_count)} فیلتر نامشخص."
