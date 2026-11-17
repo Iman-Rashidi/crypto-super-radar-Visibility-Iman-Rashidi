@@ -8,7 +8,7 @@ call an LLM, fetch extra data, or change the twelve underlying gates.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Mapping
 
 MANDATORY_GATE_IDS = frozenset(range(1, 13))
 MAX_ESTIMATED_RISK_SCORE = 45.0
@@ -265,5 +265,194 @@ def build_native_agent_council_review(result: Any) -> dict[str, Any]:
             "external_data_fetches": 0,
             "changes_to_radar_gates": False,
             "orders_submitted": False,
+        },
+    }
+
+
+def build_challenge1_observer_report(
+    evidence: Mapping[str, Any],
+    *,
+    signal: str = "UNKNOWN",
+    execution: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create an informational, candle-grounded observer report for Challenge 1.
+
+    This report never authorizes, blocks, sizes, or submits an order. It checks the
+    exact completed-candle evidence and execution reconciliation for audit/reporting.
+    """
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    execution = execution if isinstance(execution, Mapping) else {}
+    direction = str(signal or "UNKNOWN").strip().upper()
+    if direction not in {"LONG", "SHORT", "NO_TRADE"}:
+        direction = "UNKNOWN"
+
+    def number(value: Any) -> float | None:
+        return _finite_number(value)
+
+    def stamp(value: Any) -> str:
+        return str(value or "").strip().replace("Z", "+00:00")
+
+    def candle_ok(row: Any) -> bool:
+        if not isinstance(row, Mapping):
+            return False
+        vals = {key: number(row.get(key)) for key in ("open", "high", "low", "close", "volume")}
+        if any(value is None for value in vals.values()):
+            return False
+        o, h, l, c, v = (vals[key] for key in ("open", "high", "low", "close", "volume"))
+        return (
+            bool(stamp(row.get("time_utc") or row.get("timestamp_utc") or row.get("time")))
+            and min(o, h, l, c) > 0
+            and v >= 0
+            and h >= max(o, c, l)
+            and l <= min(o, c, h)
+        )
+
+    checks: list[dict[str, str]] = []
+
+    def add(check: str, status: str, detail: str) -> None:
+        checks.append({"check": check, "status": status, "detail": detail})
+
+    rows_15m = evidence.get("candles_15m")
+    rows_15m = rows_15m if isinstance(rows_15m, list) else []
+    rows_1h = evidence.get("candles_1h")
+    rows_1h = rows_1h if isinstance(rows_1h, list) else []
+    valid_15m = [row for row in rows_15m if candle_ok(row)]
+    valid_1h = [row for row in rows_1h if candle_ok(row)]
+    candle_times = [
+        stamp(row.get("time_utc") or row.get("timestamp_utc") or row.get("time"))
+        for row in valid_15m
+    ]
+    ordered = candle_times == sorted(candle_times) and len(candle_times) == len(set(candle_times))
+    completed_only = evidence.get("completed_candles_only") is True
+    if completed_only and len(valid_15m) >= 5 and len(valid_15m) == len(rows_15m) and ordered:
+        add(
+            "15m completed-candle integrity", "PASS",
+            f"{len(valid_15m)} valid, unique, ascending 15m candles; evidence marks completed_candles_only=true.",
+        )
+    else:
+        add(
+            "15m completed-candle integrity", "FAIL",
+            f"completed_only={completed_only}; rows={len(rows_15m)}; valid={len(valid_15m)}; ordered_unique={ordered}.",
+        )
+
+    confirmation = evidence.get("confirmation_candle")
+    if not valid_15m or not isinstance(confirmation, Mapping):
+        add("Confirmation candle match", "FAIL", "The final 15m candle or confirmation-candle record is missing.")
+    else:
+        last = valid_15m[-1]
+        time_match = stamp(last.get("time_utc")) == stamp(confirmation.get("open_time_utc"))
+        ohlc_match = all(
+            number(last.get(key)) is not None
+            and number(confirmation.get(key)) is not None
+            and abs(float(last[key]) - float(confirmation[key])) <= max(1e-10, abs(float(last[key])) * 1e-9)
+            for key in ("open", "high", "low", "close")
+        )
+        add(
+            "Confirmation candle match", "PASS" if time_match and ohlc_match else "FAIL",
+            "The final chart candle matches the decision candle." if time_match and ohlc_match
+            else f"time_match={time_match}; ohlc_match={ohlc_match}.",
+        )
+
+    chosen = evidence.get("chosen_pattern")
+    if direction in {"LONG", "SHORT"}:
+        expected = "BULLISH" if direction == "LONG" else "BEARISH"
+        actual = str(chosen.get("direction") or "").upper() if isinstance(chosen, Mapping) else ""
+        if actual == expected:
+            add("Selected candlestick pattern", "PASS", f"{chosen.get('name_en') or chosen.get('name') or 'Pattern'} agrees with {direction}.")
+        else:
+            add("Selected candlestick pattern", "FAIL", f"Expected {expected}; observed {actual or 'missing pattern'}.")
+    elif direction == "NO_TRADE":
+        add("Selected candlestick pattern", "PASS", "NO_TRADE is retained as an explicit decision; no pattern is fabricated.")
+    else:
+        add("Selected candlestick pattern", "UNKNOWN", "No valid directional decision was supplied.")
+
+    chart_structure = evidence.get("chart_structure")
+    if isinstance(chart_structure, Mapping) and chart_structure:
+        structure_status = str(chart_structure.get("status") or "UNKNOWN").upper()
+        detail = str(chart_structure.get("pattern") or chart_structure.get("reason") or structure_status)
+        add(
+            "Chart-structure observer",
+            "PASS" if structure_status not in {"UNKNOWN", "ERROR", "UNAVAILABLE"} else "WARNING",
+            detail[:500],
+        )
+    else:
+        add("Chart-structure observer", "WARNING", "No structured chart-pattern report was attached.")
+
+    patterns = evidence.get("detected_patterns")
+    patterns = patterns if isinstance(patterns, list) else []
+    add(
+        "Detected-pattern evidence",
+        "PASS" if patterns or direction == "NO_TRADE" else "WARNING",
+        f"{len(patterns)} detected pattern/context items are preserved.",
+    )
+    add(
+        "1H context candles",
+        "PASS" if valid_1h and len(valid_1h) == len(rows_1h) else "WARNING",
+        f"{len(valid_1h)} valid 1H context candles; 1H context is advisory and never changes the entry decision.",
+    )
+
+    trade_executed = execution.get("trade_executed") is True
+    closed = execution.get("closed_confirmed") is True
+    order_id = str(execution.get("exchange_order_id") or execution.get("order_id") or "").strip()
+    position_id = str(execution.get("position_id") or "").strip()
+    if trade_executed:
+        if order_id and position_id:
+            add("Order/position linkage", "PASS", "The executed Demo trade has both an exchange order ID and an exact position ID.")
+        else:
+            add("Order/position linkage", "WARNING", f"order_id_present={bool(order_id)}; position_id_present={bool(position_id)}.")
+        realized = number(execution.get("realized_net_pnl_usdt"))
+        if closed and realized is not None:
+            add("Realized outcome evidence", "PASS", "Closed-position exchange history supplied a realized net PnL value.")
+        else:
+            add(
+                "Realized outcome evidence", "WARNING",
+                "Position remains open or the final realized PnL has not yet been reconciled; floating PnL is not used as realized PnL.",
+            )
+    else:
+        add("Order/position linkage", "PASS", "No trade was executed; no order or position ID is invented.")
+
+    failures = sum(item["status"] == "FAIL" for item in checks)
+    warnings = sum(item["status"] in {"WARNING", "UNKNOWN"} for item in checks)
+    status = "INCOMPLETE" if failures else "NEEDS_REVIEW" if warnings else "COMPLETE"
+    recommendations = [
+        item["detail"] for item in checks if item["status"] != "PASS"
+    ]
+    return {
+        "observer_version": "CH1_NATIVE_OBSERVER_COUNCIL_V1",
+        "status": status,
+        "execution_role": "OBSERVE_ONLY",
+        "entry_gate_enforced": False,
+        "trade_gate_impact": False,
+        "signal": direction,
+        "observers": [
+            {"name": "Candle integrity observer", "status": next(x["status"] for x in checks if x["check"] == "15m completed-candle integrity")},
+            {"name": "Candlestick pattern observer", "status": next(x["status"] for x in checks if x["check"] == "Selected candlestick pattern")},
+            {"name": "Chart structure observer", "status": next(x["status"] for x in checks if x["check"] == "Chart-structure observer")},
+            {"name": "Multi-timeframe context observer", "status": next(x["status"] for x in checks if x["check"] == "1H context candles")},
+            {"name": "Execution and outcome observer", "status": next(x["status"] for x in checks if x["check"] == "Order/position linkage")},
+        ],
+        "candle_evidence": {
+            "setup_timeframe": "15m",
+            "context_timeframe": "1H",
+            "completed_candles_only": completed_only,
+            "candles_15m_count": len(valid_15m),
+            "candles_1h_count": len(valid_1h),
+            "confirmation_candle": dict(confirmation) if isinstance(confirmation, Mapping) else None,
+            "chosen_pattern": dict(chosen) if isinstance(chosen, Mapping) else None,
+            "detected_patterns": patterns[:20],
+            "chart_structure": dict(chart_structure) if isinstance(chart_structure, Mapping) else {},
+            "volume_confirmation": dict(evidence.get("volume_confirmation")) if isinstance(evidence.get("volume_confirmation"), Mapping) else {},
+        },
+        "checks": checks,
+        "recommendations": recommendations,
+        "summary_fa": (
+            f"گزارش ناظران Challenge 1: {status}؛ {len(valid_15m)} کندل ۱۵دقیقه‌ای، "
+            f"{len(valid_1h)} کندل یک‌ساعته، {len(patterns)} الگو/شاهد ثبت‌شده."
+        ),
+        "safety": {
+            "orders_submitted": False,
+            "changes_to_trade_signal": False,
+            "changes_to_risk_limits": False,
+            "changes_to_legacy_gates": False,
         },
     }
