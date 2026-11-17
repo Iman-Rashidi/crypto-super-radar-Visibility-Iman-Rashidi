@@ -209,6 +209,52 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("autopilotStatusPollTimer", page)
         self.assertIn("status_only=1", page)
 
+    def test_challenge1_activity_snapshot_keeps_real_ohlcv_and_marks_ai_not_called(self):
+        candles = []
+        for index in range(8):
+            opened = 100.0 + index
+            candles.append({
+                "time_utc": f"2026-11-17T10:{index:02d}:00Z",
+                "open": opened,
+                "high": opened + 1,
+                "low": opened - 1,
+                "close": opened + 0.5,
+                "volume": 1000 + index,
+                "quote_volume": 100000 + index,
+            })
+        job = {
+            "status": "completed",
+            "stage": "NO_TRADE",
+            "message_fa": "No confirmed pattern.",
+            "result": {
+                "status": "NO_TRADE",
+                "signal": "NO_TRADE",
+                "learning_experience_id": "blofin-ch1-test-journal-001",
+                "orders_submitted": False,
+                "trade_executed": False,
+                "reason_fa": "No 15m entry pattern.",
+                "ai_review": {"status": "NOT_CALLED", "execution_role": "ADVISORY_ONLY"},
+                "challenge1_evidence": {
+                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+                    "decision": "NO_TRADE",
+                    "setup_timeframe": "15m",
+                    "context_timeframe": "1H",
+                    "detected_patterns": [],
+                    "candles_15m": candles,
+                    "candles_1h": [],
+                    "confirmation_candle": {"open_time_utc": candles[-1]["time_utc"]},
+                },
+            },
+        }
+        snapshot = web_app._blofin_activity_journal_snapshot("journal-job-001", "BTC-USDT", job)
+        self.assertEqual(snapshot["experience_id"], "blofin-ch1-test-journal-001")
+        self.assertEqual(snapshot["signal"], "NO_TRADE")
+        self.assertEqual(len(snapshot["candles_15m"]), 8)
+        self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
+        events = web_app._blofin_job_notion_events("journal-job-001", "BTC-USDT", job)
+        self.assertEqual(events[0]["ai_decision"], "NOT_CALLED")
+        self.assertFalse(any(event["actor"] == "AI Supervisor" for event in events))
+
     def test_profit_exit_decision_requires_exact_robot_position_and_positive_cushion(self):
         order = {
             "instrument_id": "BTC-USDT",
