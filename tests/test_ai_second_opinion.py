@@ -715,7 +715,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("candles_15m", json.dumps(evidence))
         self.assertNotIn("candles_1h", json.dumps(evidence))
         self.assertEqual(evidence["pattern_evidence"]["chosen_pattern"]["name_en"], "Bullish Engulfing")
-        self.assertIn("Do not execute, request, count, score, or evaluate", system_prompt)
+        self.assertIn("This is an audit/recommendation report only", system_prompt)
         self.assertNotIn("mandatory_gates", evidence)
         self.assertNotIn("must_not_be_sent", json.dumps(payload))
         self.assertNotIn('"id":1', json.dumps(payload))
