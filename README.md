@@ -465,3 +465,14 @@ Existing open paper positions continue to be managed and can be closed using the
 Only a compact allowlist of public market evidence and gate statuses is sent to the model. Wallet addresses, balances, holdings, exchange credentials, API keys and private user data are not sent. **Provider data-use notice:** the free NVIDIA endpoint page says requests may be logged for security and used to improve NVIDIA products. Do not send confidential information to this free endpoint. The bot's request contains public market statistics, but users should review the provider's current terms.
 
 The optional Gemini headline-enrichment section elsewhere in this README is a separate feature; it is not required by this Paper Trading AI integration.
+
+
+## Challenge 1: 5m-only candle-pattern execution
+
+Challenge 1 is a separate BloFin Demo strategy profile. It evaluates only completed 5-minute OHLCV candles and confirmed candlestick or chart-structure patterns. It does not request or use 15m or 1H candles, the legacy 12-gate score, volume confirmation, or AI approval as entry permissions. Volume and the two independent AI supervisors are observational only.
+
+Each instrument and completed 5m candle has one side-independent signal key, so a changed LONG/SHORT label cannot create a second order for the same candle. The decision journal verifies that the final candle's timestamp and OHLCV match the recorded 5m evidence. Demo contract, account, margin, quantity, stop-loss, take-profit, unresolved-order and position-reconciliation checks remain mandatory.
+
+The 5m scan is independent from position management. Reaching the next 5m boundary does not close an open position. Existing positions remain managed through exchange-protected stop-loss/take-profit and the separate risk/exit rules. Nemotron and the Second AI Supervisor produce independently validated audit reports only; missing keys, API errors, slow responses, disagreement or veto are recorded as their actual status and do not authorize or prevent an order.
+
+This profile is restricted to BloFin Demo. Live trading and Production deployment are not part of Challenge 1 acceptance.
