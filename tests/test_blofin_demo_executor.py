@@ -375,6 +375,31 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
         self.assertFalse(self.store.reserve_order(second, max_concurrent_positions=1))
 
+    def test_list_unresolved_orders_returns_every_supported_state(self):
+        first = build_demo_order_plan(
+            signal_record(signal_id="unresolved-oldest"),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        second = build_demo_order_plan(
+            signal_record(signal_id="unresolved-next"),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        self.assertTrue(self.store.reserve_order(first, max_concurrent_positions=3))
+        self.assertTrue(self.store.reserve_order(second, max_concurrent_positions=3))
+        self.store.update_order(first["client_order_id"], "PENDING_RECONCILE")
+        self.store.update_order(second["client_order_id"], "UNKNOWN")
+
+        rows = self.store.list_unresolved_orders(limit=50)
+        self.assertEqual(
+            {row["client_order_id"] for row in rows},
+            {first["client_order_id"], second["client_order_id"]},
+        )
+        self.assertEqual(
+            {row["status"] for row in rows},
+            {"PENDING_RECONCILE", "UNKNOWN"},
+        )
+        self.assertEqual(self.store.trade_budget_status()["unresolved_orders"], 2)
+
     def test_capacity_reservation_is_atomic_across_independent_connections(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = os.path.join(directory, "shared-demo.sqlite3")
@@ -997,6 +1022,59 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             self.assertEqual(
                 store.get_order(plan["client_order_id"])["status"], "ACCEPTED"
             )
+        finally:
+            store.close()
+
+    def test_reconcile_unresolved_orders_sweeps_all_pending_ids_without_any_write(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        plans = [
+            build_demo_order_plan(
+                signal_record(signal_id=f"multi-unresolved-{index}"),
+                instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+            )
+            for index in range(2)
+        ]
+        try:
+            for index, plan in enumerate(plans):
+                self.assertTrue(store.reserve_order(plan, max_concurrent_positions=3))
+                store.update_order(
+                    plan["client_order_id"],
+                    "PENDING_RECONCILE" if index == 0 else "UNKNOWN",
+                )
+
+            client = FakeExecutorClient()
+            checked_ids = []
+
+            def read_order_detail(inst_id, *, client_order_id):
+                checked_ids.append(client_order_id)
+                return {
+                    "clientOrderId": client_order_id,
+                    "orderId": "exchange-" + client_order_id[:8],
+                    "state": "live",
+                }
+
+            client.get_order_detail = read_order_detail
+            executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=False)
+            result = executor.reconcile_unresolved_orders(limit=50)
+
+            self.assertEqual(result["status"], "RECONCILED")
+            self.assertEqual(result["reconciliation"], "READ_ONLY")
+            self.assertEqual(result["attempted"], 2)
+            self.assertEqual(result["remaining_unresolved"], 0)
+            self.assertFalse(result["orders_submitted"])
+            self.assertEqual(set(checked_ids), {p["client_order_id"] for p in plans})
+            self.assertTrue(all(
+                store.get_order(p["client_order_id"])["status"] == "ACCEPTED"
+                for p in plans
+            ))
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
         finally:
             store.close()
 

@@ -1040,6 +1040,26 @@ class BloFinDemoEventStore:
             })
         return events
 
+    def list_unresolved_orders(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List every order whose exchange outcome still requires read-only reconciliation."""
+        if isinstance(limit, bool):
+            raise ValueError("limit must be an integer between 1 and 100.")
+        try:
+            bounded = int(limit)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("limit must be an integer between 1 and 100.") from exc
+        if bounded != limit or not 1 <= bounded <= 100:
+            raise ValueError("limit must be an integer between 1 and 100.")
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT * FROM blofin_demo_orders
+                   WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')
+                   ORDER BY created_at ASC, client_order_id ASC
+                   LIMIT ?""",
+                (bounded,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_order(self, client_order_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(
@@ -1390,6 +1410,48 @@ class BloFinDemoExecutor:
             "client_order_id": client_order_id,
             "exchange_order_id": exchange_order_id,
             "reconciliation": "READ_ONLY",
+        }
+
+    def reconcile_unresolved_orders(self, *, limit: int = 50) -> dict[str, Any]:
+        """Read-only sweep of every locally unresolved order; never creates or retries orders."""
+        unresolved = self.store.list_unresolved_orders(limit=limit)
+        results: list[dict[str, Any]] = []
+        for order in unresolved:
+            client_order_id = str(order.get("client_order_id") or "")
+            inst_id = str(order.get("instrument_id") or "").upper()
+            if not client_order_id or not inst_id:
+                results.append({
+                    "status": "UNKNOWN",
+                    "client_order_id": client_order_id or None,
+                    "reconciliation": "INVALID_LOCAL_ORDER_IDENTITY",
+                })
+                continue
+            try:
+                result = self.reconcile_unknown_order(
+                    inst_id=inst_id,
+                    client_order_id=client_order_id,
+                )
+            except Exception as exc:
+                result = {
+                    "status": "UNKNOWN",
+                    "client_order_id": client_order_id,
+                    "reconciliation": "READ_FAILED",
+                    "error_type": type(exc).__name__,
+                }
+            results.append(result)
+
+        remaining = self.store.trade_budget_status().get("unresolved_orders")
+        try:
+            remaining_count = int(remaining or 0)
+        except (TypeError, ValueError, OverflowError):
+            remaining_count = -1
+        return {
+            "status": "RECONCILED" if remaining_count == 0 else "UNRESOLVED",
+            "reconciliation": "READ_ONLY",
+            "attempted": len(unresolved),
+            "remaining_unresolved": remaining_count,
+            "orders_submitted": False,
+            "results": results,
         }
 
     def execute(
