@@ -756,7 +756,11 @@ class BloFinDemoEventStore:
         """Append one manual account-management action without mutating prior events."""
         if not re.fullmatch(r"[A-Za-z0-9]{1,64}", str(action_id or "")):
             raise ValueError("action_id must be a stable opaque identifier.")
-        if event_type not in {"MANUAL_ORDER_CANCELED", "MANUAL_ORDER_SUBMISSION_UNKNOWN", "MANUAL_POSITION_CLOSE_REQUESTED", "MANUAL_POSITION_CLOSE_ACCEPTED"}:
+        if event_type not in {
+            "MANUAL_ORDER_CANCELED", "MANUAL_ORDER_SUBMISSION_UNKNOWN",
+            "MANUAL_ORDER_REJECTED", "MANUAL_POSITION_CLOSE_REQUESTED",
+            "MANUAL_POSITION_CLOSE_ACCEPTED", "MANUAL_POSITION_CLOSED",
+        }:
             raise ValueError("Unsupported manual action event type.")
         with self._lock, self._db:
             self._append_event(action_id, event_type, details)
