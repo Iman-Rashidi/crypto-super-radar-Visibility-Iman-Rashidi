@@ -105,6 +105,67 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertEqual(state["last_http_status"], 403)
         self.assertEqual(state["last_error_stage"], "POST /data_sources/{activity}/query")
 
+    def test_independent_review_status_and_position_id_are_written_to_activity_properties(self):
+        snapshot = sample_snapshot()
+        snapshot.update({
+            "reviewer_consensus": "AGREEMENT",
+            "ai_status": "APPROVED_BY_BOTH",
+            "ai_consensus": {
+                "status": "AGREEMENT", "primary_verified": True,
+                "second_verified": True, "two_reviewer_approval": True,
+                "decision": "APPROVE",
+            },
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                    "status": "APPROVED", "provider": "OpenRouter",
+                    "model": "model-a", "returned_model": "model-a",
+                    "request_attempted": True, "response_source": "LIVE_API",
+                    "response_validated": True, "model_verified": True,
+                    "paper_entry_eligible": True, "reason": "approved",
+                },
+                {
+                    "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                    "status": "APPROVED", "provider": "Groq",
+                    "model": "openai/gpt-oss-120b", "returned_model": "openai/gpt-oss-120b",
+                    "request_attempted": True, "response_source": "LIVE_API",
+                    "response_validated": True, "model_verified": True,
+                    "paper_entry_eligible": True, "reason": "approved",
+                },
+            ],
+        })
+        saved = __import__(
+            "crypto_super_radar.notion_activity_journal",
+            fromlist=["_normalise_snapshot"],
+        )._normalise_snapshot(snapshot)
+        properties = self.journal._properties(
+            saved, chart_upload_id="chart-upload-id", ohlcv_upload_id="csv-upload-id",
+        )
+        self.assertEqual(properties["بازبینی مستقل"]["select"]["name"], "تأیید")
+        self.assertIn("blofin-position-001", properties["گزارش شواهد"]["rich_text"][0]["text"]["content"])
+        self.assertIn("second_ai", properties["گزارش شواهد"]["rich_text"][0]["text"]["content"])
+        self.assertIn("تصویر چارت", properties)
+        self.assertIn("داده OHLCV", properties)
+
+    def test_rejected_verified_reviewer_sets_rejected_activity_status(self):
+        snapshot = sample_snapshot()
+        snapshot.update({
+            "reviewer_consensus": "DISAGREEMENT",
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron", "status": "VETO",
+                    "request_attempted": True, "response_source": "LIVE_API",
+                    "response_validated": True, "model_verified": True,
+                },
+            ],
+        })
+        saved = __import__(
+            "crypto_super_radar.notion_activity_journal",
+            fromlist=["_normalise_snapshot"],
+        )._normalise_snapshot(snapshot)
+        properties = self.journal._properties(saved, chart_upload_id=None, ohlcv_upload_id=None)
+        self.assertEqual(properties["بازبینی مستقل"]["select"]["name"], "رد")
+
     def test_chart_is_a_png_rendered_from_real_ohlcv_and_exit_levels(self):
         snapshot = sample_snapshot()
         snapshot.update({
