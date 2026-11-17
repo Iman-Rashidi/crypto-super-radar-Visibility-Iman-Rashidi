@@ -2327,13 +2327,6 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
         if isinstance(item, dict) and item.get("status") == "PASS"
     ]
     passed_count = len(passed_items)
-    if complete:
-        status = (
-            "PASS" if passed_count == total and len(observed_times) == total
-            else "PARTIAL" if passed_count else "UNKNOWN"
-        )
-    else:
-        status = "PARTIAL" if passed_count else "LOADING"
     observed_times = []
     for item in passed_items:
         raw = item.get("received_at_utc")
@@ -2347,6 +2340,13 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
                 continue
     # The board's age reflects its oldest successful quote, not the last fetch attempt.
     oldest_observation = min(observed_times) if observed_times else None
+    if complete:
+        status = (
+            "PASS" if passed_count == total and len(observed_times) == total
+            else "PARTIAL" if passed_count else "UNKNOWN"
+        )
+    else:
+        status = "PARTIAL" if passed_count else "LOADING"
     # Report only venues that actually contributed to validated rows. This
     # keeps a successful OKX fallback from being mislabeled as Bybit data.
     sources = list(dict.fromkeys(
@@ -5181,7 +5181,7 @@ class Handler(BaseHTTPRequestHandler):
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
-            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف مادام‌العمر و روزانه وجود ندارد، اما هر کندل کامل ۱۵ دقیقه فقط یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
+            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف تعداد سفارش در روز یا در کل عمر سیستم تعریف نشده است؛ بااین‌حال هم‌زمان فقط یک پوزیشن مجاز است. هر کندل کامل ۱۵ دقیقه حداکثر یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
             <div class="grid" style="margin:10px 0">
               <div>
                 <label for="blofin-market-type">نوع بازار</label>
@@ -5439,7 +5439,7 @@ class Handler(BaseHTTPRequestHandler):
               const latestFill=fills[0]||{},latestClosed=closed[0]||{};
               const summary=document.createElement('div');summary.className='grid';
               const metrics=[
-                ['آخرین قیمت '+(snapshot.instrument_id||'قرارداد انتخابی'),m.last],['Mark Price همان قرارداد',m.markPrice],
+                ['آخرین قیمت '+(snapshot.instrument_id||'قرارداد انتخابی'),m.last],['Mark Price واقعی همان قرارداد',m.markPrice],
                 ['Index Price همان قرارداد',m.indexPrice],
                 ['وضعیت پوزیشن '+(snapshot.instrument_id||''),active.length===1?'پوزیشن باز':(active.length>1?'چند پوزیشن باز؛ جزئیات جداگانه':'بدون پوزیشن باز برای این قرارداد')],
                 ['جهت پوزیشن',active.length===1?position.positionSide:null],
@@ -5512,7 +5512,7 @@ class Handler(BaseHTTPRequestHandler):
                 ['closePositions','حجم بسته‌شده (واحد گزارش‌شده BloFin)'],['realizedPnl','PnL نهایی'],
                 ['realizedPnlRatio','درصد PnL'],['fee','کارمزد'],
                 ['createTime','زمان بازشدن'],['updateTime','زمان بسته‌شدن/آخرین تغییر']
-              ],'در تاریخچهٔ دریافتی، پوزیشن بسته‌شده‌ای برای BTC-USDT گزارش نشد.'));
+              ],'در تاریخچهٔ دریافتی، پوزیشن بسته‌شده‌ای برای '+(snapshot.instrument_id||'قرارداد انتخابی')+' گزارش نشد.'));
               monitorEvents.appendChild(renderEvents('سفارش‌های تکمیل‌شده و تاریخچه سفارش',snapshot.completed_orders||[],[
                 ['orderId','شناسه سفارش'],['orderCategory','دسته سفارش'],['side','سمت'],
                 ['orderType','نوع سفارش'],['state','وضعیت'],['price','قیمت درخواستی'],
@@ -5525,14 +5525,14 @@ class Handler(BaseHTTPRequestHandler):
                 ['orderCategory','دسته'],['price','قیمت'],['size','حجم'],
                 ['filledSize','پرشده'],['state','وضعیت'],['createTime','زمان ثبت'],
                 ['attachAlgoOrders','حد سود/ضرر متصل']
-              ],'در حال حاضر سفارش عادی بازی برای BTC-USDT گزارش نشد.'));
+              ],'در حال حاضر سفارش عادی بازی برای '+(snapshot.instrument_id||'قرارداد انتخابی')+' گزارش نشد.'));
               monitorEvents.appendChild(renderEvents('حد سود و حد ضرر فعال برای '+(snapshot.instrument_id||'قرارداد انتخابی'),instrumentOpenTpsl,[
                 ['tpslId','شناسه TP/SL'],['side','سمت'],['positionSide','جهت پوزیشن'],
                 ['tpTriggerPrice','قیمت فعال‌سازی TP'],['tpOrderPrice','قیمت اجرای TP'],
                 ['tpTriggerPriceType','مبنای TP'],['slTriggerPrice','قیمت فعال‌سازی SL'],
                 ['slOrderPrice','قیمت اجرای SL'],['slTriggerPriceType','مبنای SL'],
                 ['size','حجم'],['actualSize','حجم مؤثر'],['state','وضعیت'],['createTime','زمان ثبت']
-              ],'سفارشی از نوع TP/SL فعال در حساب Demo گزارش نشد.'));
+              ],'سفارشی از نوع TP/SL فعال برای '+(snapshot.instrument_id||'قرارداد انتخابی')+' گزارش نشد.'));
               monitorEvents.appendChild(renderEvents('تاریخچه سفارش‌های حد سود و حد ضرر',snapshot.tpsl_orders_history||[],[
                 ['tpslId','شناسه TP/SL'],['side','سمت'],['tpTriggerPrice','TP'],
                 ['tpOrderPrice','قیمت اجرای TP'],['slTriggerPrice','SL'],
@@ -6425,7 +6425,7 @@ async function loadBlofinInstruments(){
           <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت گزارش معاملات بسته‌شده...</p>
           <div id="paper-performance-metrics" class="grid"></div>
           <button type="button" id="paper-performance-refresh">به‌روزرسانی عملکرد</button>
-          <p class="muted">این گزارش فقط معاملات بسته‌شدهٔ Paper Trading را می‌سنجد. تا ثبت حداقل ۳۰ معامله، نمونه برای ارزیابی کافی نیست؛ حتی پس از آن نیز عملکرد گذشته تضمین سود آینده نیست. لغزش قیمت جداگانه از قیمت اجرای شبیه‌سازی‌شده تفکیک نشده است.</p>
+          <p class="muted">این گزارش فقط معاملات بسته‌شدهٔ Paper داخلی را می‌سنجد و معاملات حساب BloFin Demo را وارد نمی‌کند. تا ثبت حداقل ۳۰ معاملهٔ Paper، نمونه برای ارزیابی کافی نیست؛ حتی پس از آن نیز عملکرد گذشته تضمین سود آینده نیست. لغزش قیمت جداگانه از قیمت اجرای شبیه‌سازی‌شده تفکیک نشده است.</p>
         </section>
         <script>
         (function(){
