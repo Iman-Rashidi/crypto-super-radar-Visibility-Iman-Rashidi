@@ -127,6 +127,7 @@ def _persist_blofin_autopilot_state() -> bool:
         with LOCK:
             BLOFIN_AUTOPILOT_STATE["persistence_status"] = "UNAVAILABLE"
             BLOFIN_AUTOPILOT_STATE["persistence_error_type"] = type(exc).__name__
+        print(json.dumps({"event":"CSR_AUTOPILOT_STATE_PERSISTENCE_FAILED","error_type":type(exc).__name__}, sort_keys=True), flush=True)
         return False
     finally:
         if store is not None:
@@ -169,6 +170,7 @@ def _restore_blofin_autopilot_state() -> bool:
         with LOCK:
             BLOFIN_AUTOPILOT_STATE["persistence_status"] = "UNAVAILABLE"
             BLOFIN_AUTOPILOT_STATE["persistence_error_type"] = type(exc).__name__
+        print(json.dumps({"event":"CSR_AUTOPILOT_STATE_RESTORE_FAILED","error_type":type(exc).__name__}, sort_keys=True), flush=True)
         return False
     finally:
         if store is not None:
@@ -3863,11 +3865,25 @@ def _run_blofin_demo_execution_job(
                     partial_history = outcome_client.get_positions_history(
                         inst_id=outcome_instrument, state="partially_closed", limit=100,
                     )
-                    store.record_closed_position_outcome(
+                    outcome_update = store.record_closed_position_outcome(
                         instrument_id=outcome_instrument,
                         history_rows=closed_history if isinstance(closed_history, list) else [],
                         partial_rows=partial_history if isinstance(partial_history, list) else [],
                     )
+                    if isinstance(outcome_update, dict) and outcome_update.get("status") == "RECORDED":
+                        _queue_blofin_notion_event({
+                            "event_id": f"{outcome_update.get('experience_id')}:POSITION_CLOSED",
+                            "cycle_id": str(outcome_update.get("experience_id") or ""),
+                            "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+                            "event_type": "POSITION_CLOSED", "actor": "BloFin Demo",
+                            "status": "SUCCESS", "market": "Futures",
+                            "symbol": outcome_instrument, "timeframe": "15m",
+                            "signal": "UNKNOWN", "ai_decision": "NOT_CALLED",
+                            "experience_id": str(outcome_update.get("experience_id") or ""),
+                            "position_id": str(outcome_update.get("position_id") or ""),
+                            "reason": "Final position outcome reconciled against exact BloFin closed-position history.",
+                            "details": json.dumps(outcome_update, ensure_ascii=False, sort_keys=True),
+                        })
                 except Exception:
                     # Keep the experience pending; the entry guard prevents new exposure.
                     pass
@@ -4862,15 +4878,31 @@ def _blofin_manual_open_trade(
         except BloFinDemoExecutionUnknown:
             store.update_order(client_order_id, "UNKNOWN")
             store.record_manual_action(client_order_id, "MANUAL_ORDER_SUBMISSION_UNKNOWN", {
-                "instrument_id": instrument_id,
-                "direction": direction,
-                "submission_outcome": "UNKNOWN",
-                "orders_submitted": "UNKNOWN",
+                "instrument_id": instrument_id, "direction": direction,
+                "submission_outcome": "UNKNOWN", "orders_submitted": "UNKNOWN",
                 "retry_allowed": False,
             })
+            _queue_blofin_operator_event(
+                event_id=f"{client_order_id}:MANUAL_ACTION_FAILED:UNKNOWN",
+                event_type="MANUAL_ACTION_FAILED", status="UNKNOWN",
+                symbol=instrument_id, order_id=client_order_id,
+                reason="Manual Demo order submission outcome is unknown; automatic retry is disabled.",
+                details={"manual_action_kind":"MANUAL_ORDER_SUBMISSION_UNKNOWN","retry_allowed":False},
+            )
             raise
-        except Exception:
+        except Exception as exc:
             store.update_order(client_order_id, "REJECTED")
+            store.record_manual_action(client_order_id, "MANUAL_ORDER_REJECTED", {
+                "instrument_id": instrument_id, "direction": direction,
+                "error_type": type(exc).__name__, "retry_allowed": False,
+            })
+            _queue_blofin_operator_event(
+                event_id=f"{client_order_id}:MANUAL_ACTION_FAILED:REJECTED",
+                event_type="MANUAL_ACTION_FAILED", status="FAILED",
+                symbol=instrument_id, order_id=client_order_id,
+                reason="Manual Demo order was rejected before fill confirmation.",
+                details={"manual_action_kind":"MANUAL_ORDER_REJECTED","error_type":type(exc).__name__},
+            )
             raise
 
         data = response.get("data")
@@ -4881,6 +4913,18 @@ def _blofin_manual_open_trade(
         exchange_order_id = str(row.get("orderId") or "") if isinstance(row, dict) else ""
         if not exchange_order_id:
             store.update_order(client_order_id, "UNKNOWN")
+            store.record_manual_action(client_order_id, "MANUAL_ORDER_SUBMISSION_UNKNOWN", {
+                "instrument_id": instrument_id, "direction": direction,
+                "submission_outcome": "UNKNOWN", "exchange_order_id_present": False,
+                "retry_allowed": False,
+            })
+            _queue_blofin_operator_event(
+                event_id=f"{client_order_id}:MANUAL_ACTION_FAILED:NO_ORDER_ID",
+                event_type="MANUAL_ACTION_FAILED", status="UNKNOWN",
+                symbol=instrument_id, order_id=client_order_id,
+                reason="BloFin returned an ambiguous manual-order response without a verifiable exchange order ID.",
+                details={"manual_action_kind":"MANUAL_ORDER_SUBMISSION_UNKNOWN","retry_allowed":False},
+            )
             raise BloFinDemoExecutionUnknown(
                 "BloFin accepted an ambiguous manual-order response; inspect Demo order history before retrying."
             )
@@ -4898,6 +4942,24 @@ def _blofin_manual_open_trade(
         except Exception:
             pass
         store.update_order(client_order_id, state, exchange_order_id=exchange_order_id)
+        _queue_blofin_operator_event(
+            event_id=f"{client_order_id}:MANUAL_ORDER:{state}",
+            event_type="ORDER_FILLED" if state == "FILLED" else "ORDER_SUBMITTED",
+            status="SUCCESS" if state in {"ACCEPTED","FILLED"} else "WARNING",
+            symbol=instrument_id, order_id=exchange_order_id,
+            reason=(
+                "Manual BloFin Demo order fill confirmed by exchange order detail."
+                if state == "FILLED" else
+                "Manual BloFin Demo order accepted; final fill requires exchange history."
+            ),
+            details={
+                "client_order_id":client_order_id, "order_state":state,
+                "quantity":format(quantity.normalize(),"f"),
+                "mark_price":format(mark_price.normalize(),"f"),
+                "stop_loss":format(stop.normalize(),"f"),
+                "take_profit":format(target.normalize(),"f"),
+            },
+        )
         return {
             "status": state,
             "environment": "BLOFIN_DEMO",
@@ -4982,6 +5044,13 @@ def _blofin_manual_cancel_order(*, instrument_id: str, order_id: str) -> dict[st
             "instrument_id": instrument_id, "exchange_order_id": order_id,
             "client_order_id": local_client_id or None,
         })
+        _queue_blofin_operator_event(
+            event_id=f"{action_id}:MANUAL_ORDER_CANCELED",
+            event_type="MANUAL_ORDER_CANCELED", status="SUCCESS",
+            symbol=instrument_id, order_id=order_id,
+            reason="Cancellation of the selected BloFin Demo order was confirmed by the post-cancel order check.",
+            details={"client_order_id":local_client_id or None},
+        )
     finally:
         if store is not None:
             store.close()
@@ -5065,6 +5134,13 @@ def _blofin_manual_close_position(
             "loss_making_position": bool(pnl is not None and pnl < 0),
         }
         store.record_manual_action(action_id, "MANUAL_POSITION_CLOSE_REQUESTED", audit)
+        _queue_blofin_operator_event(
+            event_id=f"{action_id}:MANUAL_POSITION_CLOSE_REQUESTED",
+            event_type="MANUAL_POSITION_CLOSE_REQUESTED", status="PENDING",
+            symbol=instrument_id, position_id=actual_position_id,
+            reason="Operator requested closure of this exact BloFin Demo position.",
+            details={**audit,"operation_stage":"REQUESTED"},
+        )
         try:
             response = client.close_futures_position(
                 inst_id=instrument_id,
@@ -5077,10 +5153,24 @@ def _blofin_manual_close_position(
             store.record_manual_action(action_id + "U", "MANUAL_POSITION_CLOSE_REQUESTED", {
                 **audit, "submission_outcome": "UNKNOWN", "retry_allowed": False,
             })
+            _queue_blofin_operator_event(
+                event_id=f"{action_id}:MANUAL_POSITION_CLOSE_UNKNOWN",
+                event_type="MANUAL_POSITION_CLOSE_REQUESTED", status="UNKNOWN",
+                symbol=instrument_id, position_id=actual_position_id,
+                reason="BloFin Demo close request outcome is unknown; no retry was issued.",
+                details={**audit,"operation_stage":"UNKNOWN","retry_allowed":False},
+            )
             raise
         store.record_manual_action(action_id + "D", "MANUAL_POSITION_CLOSE_ACCEPTED", {
             **audit, "submission_outcome": "ACCEPTED",
         })
+        _queue_blofin_operator_event(
+            event_id=f"{action_id}:MANUAL_POSITION_CLOSE_ACCEPTED",
+            event_type="MANUAL_POSITION_CLOSE_REQUESTED", status="SUCCESS",
+            symbol=instrument_id, position_id=actual_position_id,
+            reason="BloFin accepted the exact position-close request; final closure awaits closed-position history.",
+            details={**audit,"operation_stage":"EXCHANGE_ACCEPTED"},
+        )
     finally:
         if store is not None:
             store.close()
@@ -5099,6 +5189,29 @@ def _blofin_manual_close_position(
             "منفی بودن PnL مانع بستن نبود؛ قیمت اجرای واقعی و PnL نهایی پس از Fill مشخص می‌شود."
         ),
     }
+
+
+def _record_blofin_manual_request_failure(route: str, form: dict[str, list[str]], status: str, error_type: str) -> None:
+    """Record manual endpoint failures, including validation blocks before an order is reserved."""
+    instrument = str((form.get("instrument") or ["BLOFIN-DEMO"])[0] or "BLOFIN-DEMO").upper()
+    order_id = str((form.get("order_id") or [""])[0])
+    position_id = str((form.get("position_id") or [""])[0])
+    _queue_blofin_operator_event(
+        event_id=f"MANUAL_REQUEST:{uuid.uuid4().hex}:FAILED",
+        event_type="MANUAL_ACTION_FAILED",
+        status="UNKNOWN" if status == "UNKNOWN" else "FAILED",
+        symbol=instrument,
+        order_id=order_id,
+        position_id=position_id,
+        reason="Manual BloFin Demo endpoint did not complete successfully.",
+        details={
+            "route": route,
+            "manual_action_kind": route.rsplit("/", 1)[-1],
+            "http_outcome": status,
+            "error_type": error_type,
+            "retry_allowed": False,
+        },
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -8003,6 +8116,13 @@ let blofinInstrumentRecords=[];
                         BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = True
                         BLOFIN_AUTOPILOT_STOP_EVENT.clear()
                         _start_blofin_demo_autopilot()
+                        _queue_blofin_operator_event(
+                            event_id=f"AUTOPILOT:WAKE:{uuid.uuid4().hex}",
+                            event_type="WAKE", status="SUCCESS",
+                            symbol=str(BLOFIN_AUTOPILOT_STATE.get("instrument_id") or "BTC-USDT"),
+                            reason="Operator enabled BloFin Demo AutoPilot.",
+                            details={"execution_profile":"CHALLENGE_1"},
+                        )
                         return self._send(202, json.dumps({
                             "status": "STARTING",
                             "enabled": True,
@@ -8023,6 +8143,13 @@ let blofinInstrumentRecords=[];
                             ),
                         })
                     _persist_blofin_autopilot_state()
+                    _queue_blofin_operator_event(
+                        event_id=f"AUTOPILOT:SLEEP_REQUEST:{uuid.uuid4().hex}",
+                        event_type="SLEEP", status="PENDING" if stopping else "SUCCESS",
+                        symbol=str(BLOFIN_AUTOPILOT_STATE.get("instrument_id") or "BTC-USDT"),
+                        reason="Operator requested AutoPilot stop.",
+                        details={"worker_was_active":bool(stopping),"operation_stage":"STOP_REQUESTED" if stopping else "STOPPED"},
+                    )
                     return self._send(200, json.dumps({
                         "status": "STOPPING" if stopping else "DISABLED",
                         "enabled": False,
@@ -8066,25 +8193,30 @@ let blofinInstrumentRecords=[];
                                 position_side_hint=form.get("position_side", [""])[0],
                             )
                     except BloFinDemoExecutionUnknown as exc:
+                        _record_blofin_manual_request_failure(route, form, "UNKNOWN", type(exc).__name__)
                         return self._send(409, json.dumps({
                             "status": "UNKNOWN",
                             "message_fa": "نتیجه درخواست به‌طور قطعی مشخص نیست؛ پیش از هر تلاش مجدد حساب Demo را تازه‌سازی کن. " + str(exc),
                             "retry_allowed": False,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoExecutionBlocked as exc:
+                        _record_blofin_manual_request_failure(route, form, "BLOCKED", type(exc).__name__)
                         return self._send(409, json.dumps({
                             "status": "BLOCKED", "message_fa": str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except (ValueError, InvalidOperation) as exc:
+                        _record_blofin_manual_request_failure(route, form, "INVALID_REQUEST", type(exc).__name__)
                         return self._send(400, json.dumps({
                             "status": "INVALID_REQUEST", "message_fa": "پارامترهای دستی معتبر نیستند: " + str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoError as exc:
+                        _record_blofin_manual_request_failure(route, form, "EXCHANGE_ERROR", type(exc).__name__)
                         return self._send(502, json.dumps({
                             "status": "EXCHANGE_ERROR", "message_fa": "BloFin Demo درخواست را کامل نکرد؛ وضعیت سفارش یا پوزیشن را دوباره بخوان.",
                             "error_type": type(exc).__name__,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except Exception as exc:
+                        _record_blofin_manual_request_failure(route, form, "FAILED", type(exc).__name__)
                         return self._send(500, json.dumps({
                             "status": "MANUAL_ACTION_FAILED",
                             "message_fa": "عملیات دستی با خطای کنترل‌شده متوقف شد؛ وضعیت حساب را دوباره بخوان.",
@@ -8417,6 +8549,55 @@ def _blofin_autopilot_cycle_summary(job: dict) -> dict:
     }
 
 
+def _queue_blofin_notion_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Append a durable Notion outbox event; the trading path remains fail-open."""
+    outbox = None
+    event_id = str(event.get("event_id") or "")
+    event_type = str(event.get("event_type") or "UNKNOWN")
+    try:
+        outbox = NotionEventOutbox()
+        queued = bool(outbox.enqueue(event))
+        try:
+            backend = storage_backend()
+        except Exception:
+            backend = "UNKNOWN"
+        print(json.dumps({
+            "event": "CSR_NOTION_EVENT_QUEUED" if queued else "CSR_NOTION_EVENT_DUPLICATE",
+            "event_id": event_id, "event_type": event_type, "storage_backend": backend,
+        }, sort_keys=True), flush=True)
+        return {"status": "QUEUED" if queued else "DUPLICATE", "queued": int(queued), "storage_backend": backend}
+    except Exception as exc:
+        print(json.dumps({
+            "event": "CSR_NOTION_EVENT_QUEUE_FAILED", "event_id": event_id,
+            "event_type": event_type, "error_type": type(exc).__name__,
+        }, sort_keys=True), flush=True)
+        return {"status": "UNAVAILABLE", "queued": 0, "error_type": type(exc).__name__}
+    finally:
+        if outbox is not None:
+            try:
+                outbox.close()
+            except Exception:
+                pass
+
+
+def _queue_blofin_operator_event(
+    *, event_id: str, event_type: str, status: str, symbol: str, reason: str,
+    order_id: str = "", position_id: str = "", details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record manual operator operations independently from automated Robot decisions."""
+    event = {
+        "event_id": event_id, "cycle_id": event_id,
+        "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+        "event_type": event_type, "actor": "Operator", "status": status,
+        "market": "Futures", "symbol": str(symbol or "").upper(),
+        "timeframe": "MANUAL", "signal": "UNKNOWN", "ai_decision": "NOT_CALLED",
+        "reason": str(reason or "")[:1600], "order_id": order_id, "position_id": position_id,
+        "details": json.dumps({"environment":"BLOFIN_DEMO","mode":"MANUAL",**dict(details or {})}, ensure_ascii=False, sort_keys=True),
+        "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/live-monitor",
+    }
+    return _queue_blofin_notion_event(event)
+
+
 def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
     """Build safe, idempotent Notion events from one completed Challenge 1 symbol job."""
     current = job if isinstance(job, dict) else {}
@@ -8533,12 +8714,29 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             "ai_suggestion": ai_review.get("final_rating") or ai_review.get("status_fa") or ai_status,
             "reason": ai_review.get("reason") or reason,
             "details": json.dumps({
-                "job_id": job_id,
-                "ai_status": ai_status,
+                "job_id": job_id, "ai_status": ai_status,
                 "response_validated": ai_review.get("response_validated"),
                 "model_verified": ai_review.get("model_verified"),
                 "latency_ms": ai_review.get("latency_ms"),
                 "paper_entry_eligible": ai_review.get("paper_entry_eligible"),
+            }, ensure_ascii=False, sort_keys=True),
+        })
+    events.append({
+        **common, "event_id": f"{job_id}:ROBOT:SCAN_COMPLETED",
+        "event_type": "SCAN_COMPLETED", "actor": "Robot",
+        "status": status, "reason": str(reason)[:1600],
+        "details": json.dumps(details, ensure_ascii=False, sort_keys=True),
+        "ai_decision": ai_decision,
+    })
+    if job.get("error") or str(result.get("status") or "").upper() in {"DATA_ERROR", "MARKET_DATA_ERROR"}:
+        error = job.get("error") if isinstance(job.get("error"), dict) else {}
+        events.append({
+            **common, "event_id": f"{job_id}:RUNTIME:DATA_ERROR",
+            "event_type": "DATA_ERROR", "actor": "Render Runtime", "status": "FAILED",
+            "reason": "A data or execution error was reported by the Demo job.",
+            "details": json.dumps({
+                "job_id": job_id, "error_type": error.get("type") or type(job.get("error")).__name__,
+                "stage": job.get("stage"),
             }, ensure_ascii=False, sort_keys=True),
         })
     return events
@@ -8550,15 +8748,31 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
     queued = 0
     try:
         outbox = NotionEventOutbox()
-        for event in _blofin_job_notion_events(job_id, instrument_id, job):
+        attempted = _blofin_job_notion_events(job_id, instrument_id, job)
+        for event in attempted:
             queued += int(outbox.enqueue(event))
-        return {"status": "QUEUED", "queued": queued}
+        try:
+            backend = storage_backend()
+        except Exception:
+            backend = "UNKNOWN"
+        print(json.dumps({
+            "event": "CSR_NOTION_JOB_EVENTS_QUEUED", "job_id": job_id,
+            "attempted": len(attempted), "queued": queued,
+            "duplicate": len(attempted)-queued, "storage_backend": backend,
+        }, sort_keys=True), flush=True)
+        return {"status": "QUEUED", "queued": queued, "attempted": len(attempted)}
     except Exception as exc:
-        # Notion observability is intentionally fail-open for the trading engine.
+        print(json.dumps({
+            "event": "CSR_NOTION_JOB_EVENTS_QUEUE_FAILED", "job_id": job_id,
+            "queued_before_error": queued, "error_type": type(exc).__name__,
+        }, sort_keys=True), flush=True)
         return {"status": "UNAVAILABLE", "queued": queued, "error_type": type(exc).__name__}
     finally:
         if outbox is not None:
-            outbox.close()
+            try:
+                outbox.close()
+            except Exception:
+                pass
 
 
 NOTION_SYNC_THREAD = None
@@ -8572,17 +8786,32 @@ def _notion_sync_worker() -> None:
     except (TypeError, ValueError):
         interval = 30
     interval = max(15, min(interval, 300))
+    not_configured_logged = False
     while True:
         outbox = None
         try:
             outbox = NotionEventOutbox()
-            outbox.flush_pending(limit=10)
-        except Exception:
-            # Keep a temporary Notion/Turso outage from stopping the Demo worker.
-            pass
+            result = outbox.flush_pending(limit=10)
+            synced = int(result.get("synced_this_run") or 0)
+            failed = int(result.get("failed_this_run") or 0)
+            queued = int(result.get("queued") or 0)
+            if synced or failed:
+                print(json.dumps({
+                    "event": "CSR_NOTION_SYNC_BATCH", "status": result.get("status"),
+                    "synced_this_run": synced, "failed_this_run": failed,
+                    "pending": result.get("pending", queued),
+                }, sort_keys=True), flush=True)
+            elif result.get("status") == "NOT_CONFIGURED" and queued and not not_configured_logged:
+                print(json.dumps({"event":"CSR_NOTION_SYNC_NOT_CONFIGURED","pending":queued}, sort_keys=True), flush=True)
+                not_configured_logged = True
+        except Exception as exc:
+            print(json.dumps({"event":"CSR_NOTION_SYNC_WORKER_FAILED","error_type":type(exc).__name__}, sort_keys=True), flush=True)
         finally:
             if outbox is not None:
-                outbox.close()
+                try:
+                    outbox.close()
+                except Exception:
+                    pass
         time.sleep(interval)
 
 
@@ -8640,6 +8869,12 @@ def _blofin_demo_autopilot_worker() -> None:
                     "last_message_fa": "اتوپایلوت توسط اپراتور متوقف شد؛ حالت دستی در دسترس است.",
                 })
             _persist_blofin_autopilot_state()
+            _queue_blofin_operator_event(
+                event_id=f"AUTOPILOT:SLEEP:{uuid.uuid4().hex}",
+                event_type="SLEEP", status="SUCCESS", symbol=instrument_id,
+                reason="AutoPilot worker stopped; manual mode is available.",
+                details={"operation_stage":"STOPPED"},
+            )
             break
         if not BLOFIN_AUTOPILOT_LOCK.acquire(blocking=False):
             if BLOFIN_AUTOPILOT_STOP_EVENT.wait(10):
@@ -8682,6 +8917,15 @@ def _blofin_demo_autopilot_worker() -> None:
                     message_fa=f"چرخه خودکار Challenge 1 برای {instrument_id} آغاز شد.",
                     trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
                 )
+                _queue_blofin_notion_event({
+                    "event_id": f"{job_id}:ROBOT:SCAN_STARTED", "cycle_id": job_id,
+                    "occurred_at_utc": started, "event_type": "SCAN_STARTED",
+                    "actor": "Robot", "status": "PENDING", "market": "Futures",
+                    "symbol": instrument_id, "timeframe": "15m", "signal": "UNKNOWN",
+                    "ai_decision": "NOT_CALLED",
+                    "reason": "Challenge 1 closed-candle scan started.",
+                    "details": json.dumps({"execution_profile":execution_profile}, sort_keys=True),
+                })
                 _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
                 with LOCK:
                     finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
@@ -8749,6 +8993,53 @@ def _blofin_demo_autopilot_worker() -> None:
                     except (TypeError, ValueError, OverflowError):
                         return 0
                 closed_rows.sort(key=safe_exchange_timestamp, reverse=True)
+                local_execution_events = [
+                    row for row in snapshot.get("execution_events", []) if isinstance(row, dict)
+                ]
+                for close_event in local_execution_events:
+                    if close_event.get("event_type") != "MANUAL_POSITION_CLOSE_ACCEPTED":
+                        continue
+                    close_payload = close_event.get("payload") if isinstance(close_event.get("payload"), dict) else {}
+                    expected_position_id = str(close_payload.get("position_id") or "")
+                    client_action_id = str(close_event.get("client_order_id") or "")
+                    try:
+                        accepted_at_ms = int(close_event.get("occurred_at") or 0) * 1000
+                    except (TypeError, ValueError, OverflowError):
+                        accepted_at_ms = 0
+                    if not expected_position_id or not client_action_id or not accepted_at_ms:
+                        continue
+                    verified_closed = next((
+                        row for row in closed_rows
+                        if str(row.get("positionId") or "") == expected_position_id
+                        and str(row.get("instId") or "").upper() == monitor_instrument_id
+                        and safe_exchange_timestamp(row) >= accepted_at_ms
+                    ), None)
+                    if not verified_closed:
+                        continue
+                    history_id = str(verified_closed.get("historyId") or safe_exchange_timestamp(verified_closed))
+                    close_details = {
+                        "instrument_id": monitor_instrument_id, "position_id": expected_position_id,
+                        "history_id": history_id, "realized_pnl": verified_closed.get("realizedPnl"),
+                        "close_average_price": verified_closed.get("closeAveragePrice"),
+                        "fee": verified_closed.get("fee"), "update_time_ms": safe_exchange_timestamp(verified_closed),
+                        "verified_after_close_acceptance": True,
+                    }
+                    try:
+                        monitor_store.record_manual_action(client_action_id[:63] + "C", "MANUAL_POSITION_CLOSED", close_details)
+                    except Exception:
+                        pass
+                    _queue_blofin_notion_event({
+                        "event_id": f"{client_action_id}:POSITION_CLOSED:{history_id}",
+                        "cycle_id": client_action_id,
+                        "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "event_type": "POSITION_CLOSED", "actor": "BloFin Demo",
+                        "status": "SUCCESS", "market": "Futures",
+                        "symbol": monitor_instrument_id, "timeframe": "MANUAL",
+                        "signal": "UNKNOWN", "ai_decision": "NOT_CALLED",
+                        "position_id": expected_position_id,
+                        "reason": "Manual close confirmed by exact positionId in BloFin closed-position history.",
+                        "details": json.dumps(close_details, ensure_ascii=False, sort_keys=True),
+                    })
                 latest_closed = closed_rows[0] if closed_rows else {}
                 try:
                     latest_realized_pnl = float(latest_closed.get("realizedPnl"))
@@ -8761,6 +9052,20 @@ def _blofin_demo_autopilot_worker() -> None:
                     history_rows=closed_rows,
                     partial_rows=snapshot.get("partially_closed_positions", []),
                 )
+                if isinstance(learning_outcome_update, dict) and learning_outcome_update.get("status") == "RECORDED":
+                    _queue_blofin_notion_event({
+                        "event_id": f"{learning_outcome_update.get('experience_id')}:POSITION_CLOSED",
+                        "cycle_id": str(learning_outcome_update.get("experience_id") or ""),
+                        "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "event_type": "POSITION_CLOSED", "actor": "BloFin Demo",
+                        "status": "SUCCESS", "market": "Futures",
+                        "symbol": monitor_instrument_id, "timeframe": "15m",
+                        "signal": "UNKNOWN", "ai_decision": "NOT_CALLED",
+                        "experience_id": str(learning_outcome_update.get("experience_id") or ""),
+                        "position_id": str(learning_outcome_update.get("position_id") or ""),
+                        "reason": "Robot position outcome reconciled against exact BloFin closed-position history.",
+                        "details": json.dumps(learning_outcome_update, ensure_ascii=False, sort_keys=True),
+                    })
                 learning_integrity = monitor_store.learning_memory.integrity_report()
                 exchange_monitor = {
                     "exchange_monitor_status": snapshot.get("status"),
@@ -8890,6 +9195,17 @@ def _blofin_demo_autopilot_worker() -> None:
                     "last_message_fa": "چرخه خودکار با خطای کنترل‌شده متوقف شد: " + type(exc).__name__,
                 })
             _persist_blofin_autopilot_state()
+            _queue_blofin_notion_event({
+                "event_id": f"AUTOPILOT:{uuid.uuid4().hex}:SYSTEM_ERROR",
+                "cycle_id": str(BLOFIN_AUTOPILOT_STATE.get("last_job_id") or "AUTOPILOT"),
+                "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+                "event_type": "SYSTEM_ERROR", "actor": "Render Runtime",
+                "status": "FAILED", "market": "Futures",
+                "symbol": str(BLOFIN_AUTOPILOT_STATE.get("instrument_id") or "BTC-USDT"),
+                "timeframe": "15m", "signal": "UNKNOWN", "ai_decision": "NOT_CALLED",
+                "reason": "AutoPilot cycle ended with a controlled exception.",
+                "details": json.dumps({"error_type":type(exc).__name__}, sort_keys=True),
+            })
         finally:
             BLOFIN_AUTOPILOT_LOCK.release()
         if BLOFIN_AUTOPILOT_STOP_EVENT.wait(interval_seconds):
@@ -8924,9 +9240,20 @@ def main():
     port = int(os.getenv("PORT", "10000"))
     host = os.getenv("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), Handler)
+    startup_commit = os.getenv("RENDER_GIT_COMMIT") or ""
+    _queue_blofin_notion_event({
+        "event_id": f"RENDER_STARTUP:{startup_commit}:{uuid.uuid4().hex}",
+        "cycle_id": startup_commit or "RENDER_STARTUP",
+        "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+        "event_type": "STARTUP", "actor": "Render Runtime", "status": "SUCCESS",
+        "market": "Futures", "symbol": "BLOFIN-DEMO", "timeframe": "SYSTEM",
+        "signal": "UNKNOWN", "ai_decision": "NOT_CALLED",
+        "reason": "Render BloFin Demo service started.",
+        "details": json.dumps({"commit": startup_commit}, sort_keys=True),
+    })
     _start_notion_sync_worker()
     _start_blofin_demo_autopilot()
-    print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
+    print(f"CRYPTO SUPER RADAR listening on {host}:{port}", flush=True)
     server.serve_forever()
 
 

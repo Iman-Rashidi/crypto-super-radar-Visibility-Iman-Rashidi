@@ -26,8 +26,9 @@ EVENT_TYPES = {
     "DATA_ERROR", "ORDER_SUBMITTED", "ORDER_FILLED", "POSITION_CLOSED",
     "AI_REVIEW_REQUESTED", "AI_RECOMMENDATION", "AI_VETO", "AI_APPROVAL",
     "NOTION_SYNC_PENDING", "NOTION_SYNCED", "NOTION_SYNC_FAILED", "SYSTEM_ERROR",
+    "MANUAL_ORDER_CANCELED", "MANUAL_POSITION_CLOSE_REQUESTED", "MANUAL_ACTION_FAILED",
 }
-ACTORS = {"Robot", "AI Supervisor", "Render Runtime", "BloFin Demo", "Turso Event Store", "Notion Sync", "Scheduler"}
+ACTORS = {"Robot", "AI Supervisor", "Render Runtime", "BloFin Demo", "Turso Event Store", "Notion Sync", "Scheduler", "Operator"}
 EVENT_STATUSES = {"SUCCESS", "WARNING", "FAILED", "UNKNOWN", "PENDING"}
 SIGNALS = {"LONG", "SHORT", "NO_TRADE", "UNKNOWN"}
 AI_DECISIONS = {"APPROVE", "REJECT", "MODIFY", "OBSERVE_ONLY", "NOT_CALLED"}
@@ -284,6 +285,10 @@ class NotionEventOutbox:
                SUM(CASE WHEN sync_status='PENDING' THEN 1 ELSE 0 END) AS pending,
                SUM(CASE WHEN sync_status='SYNCED' THEN 1 ELSE 0 END) AS synced,
                SUM(CASE WHEN sync_status='FAILED' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN sync_status='PENDING' AND attempts > 0 THEN 1 ELSE 0 END) AS retrying,
+               MAX(attempts) AS max_attempts,
+               MAX(last_error_type) AS last_error_type,
+               MAX(last_http_status) AS last_http_status,
                MAX(synced_at_utc) AS last_success_utc
                FROM csr_notion_event_outbox"""
         ).fetchone()
@@ -295,6 +300,10 @@ class NotionEventOutbox:
             "pending": int(row["pending"] or 0),
             "synced": int(row["synced"] or 0),
             "failed": int(row["failed"] or 0),
+            "retrying": int(row["retrying"] or 0),
+            "max_attempts": int(row["max_attempts"] or 0),
+            "last_error_type": row["last_error_type"],
+            "last_http_status": row["last_http_status"],
             "last_success_utc": row["last_success_utc"],
         }
 
