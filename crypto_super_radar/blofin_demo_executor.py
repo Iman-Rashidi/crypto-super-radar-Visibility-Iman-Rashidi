@@ -34,6 +34,7 @@ from .blofin_demo_readonly import (
     _signature,
 )
 from .database import connect_database, storage_backend
+from .challenge1_strategy import challenge1_entry_evidence_ready
 from .learning_experience_memory import LearningExperienceMemory
 
 
@@ -115,8 +116,8 @@ def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str,
     identity = {
         "engine_version": str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
         "instrument_id": str(instrument_id).strip().upper(),
-        "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
-        "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
+        "setup_timeframe": str(evidence.get("setup_timeframe") or "5m"),
+        "context_timeframe": evidence.get("context_timeframe"),
         "signal_bar_open_utc": candle_time,
         "confirmation_candle": dict(candle),
         "detected_patterns": evidence.get("detected_patterns") or [],
@@ -206,31 +207,11 @@ def build_demo_order_plan(
     if execution_profile != "CHALLENGE_1":
         raise BloFinDemoExecutionBlocked("Only Challenge 1 strategy evidence is allowed for BloFin Demo orders.")
     if execution_profile == "CHALLENGE_1":
-        evidence = record.get("challenge1_evidence")
-        if not isinstance(evidence, Mapping):
-            raise BloFinDemoExecutionBlocked("Challenge 1 evidence is missing.")
-        chosen = evidence.get("chosen_pattern")
-        confirmation = evidence.get("confirmation_candle")
-        volume = confirmation.get("volume_confirmation") if isinstance(confirmation, Mapping) else None
-        expected_pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
-        if (
-            evidence.get("decision_engine_version") != "CHALLENGE_1_LOCAL_RULES_V1"
-            or evidence.get("completed_candles_only") is not True
-            or evidence.get("legacy_12_gates_used_for_entry") is not False
-            or evidence.get("external_ai_required") is not False
-            or evidence.get("tinyfish_required") is not False
-            or evidence.get("decision") != side
-            or evidence.get("setup_timeframe") != "15m"
-            or not isinstance(evidence.get("detected_patterns"), list)
-            or not evidence.get("detected_patterns")
-            or not isinstance(chosen, Mapping)
-            or chosen.get("direction") != expected_pattern_direction
-            or not isinstance(confirmation, Mapping)
-            or not str(confirmation.get("open_time_utc") or "").strip()
-            or not isinstance(volume, Mapping)
-            or volume.get("confirmed") is not True
-        ):
-            raise BloFinDemoExecutionBlocked("Challenge 1 pattern/closed-candle confirmation evidence is incomplete or inconsistent.")
+        eligible, reason = challenge1_entry_evidence_ready(record)
+        if not eligible:
+            raise BloFinDemoExecutionBlocked(
+                "Challenge 1 5m-only pattern evidence is incomplete or inconsistent: " + reason
+            )
     else:
         profile_rules = {
             "EASY": {"required": {1, 2, 3, 4, 5, 6, 9}, "minimum_pass": 7, "minimum_score": 55.0},
@@ -367,6 +348,7 @@ def build_demo_order_plan(
         "reward_risk": float(reward_distance / risk_distance),
         "position_side_long_short": side.lower(),
     }
+
 
 
 class BloFinDemoTradeClient(BloFinDemoReadOnly):
@@ -652,8 +634,8 @@ class BloFinDemoEventStore:
         input_snapshot = {
             "instrument_id": str(instrument_id).strip().upper(),
             "signal_bar_open_utc": signal_bar,
-            "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
-            "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
+            "setup_timeframe": str(evidence.get("setup_timeframe") or "5m"),
+            "context_timeframe": evidence.get("context_timeframe"),
             "completed_candles_only": evidence.get("completed_candles_only") is True,
             "future_data_in_input": False,
             "challenge1_evidence": evidence,
@@ -671,8 +653,8 @@ class BloFinDemoEventStore:
                 input_snapshot=input_snapshot,
                 market="CEX_FUTURES",
                 symbol=str(instrument_id).strip().upper(),
-                timeframe="15M",
-                model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
+                timeframe="5M",
+                model_version=str(evidence.get("decision_engine_version") or "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY"),
                 dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
             )
         return experience_id
@@ -704,8 +686,8 @@ class BloFinDemoEventStore:
             "instrument_id": instrument,
             "analysis_attempt_id": cycle_key,
             "analysis_attempted_at_utc": occurred_at,
-            "setup_timeframe": "15m",
-            "context_timeframe": "1H",
+            "setup_timeframe": "5m",
+            "context_timeframe": None,
             "data_quality": "UNKNOWN",
             "analysis_completed": False,
             "failure_stage": stage,
@@ -727,8 +709,8 @@ class BloFinDemoEventStore:
                 input_snapshot=input_snapshot,
                 market="CEX_FUTURES",
                 symbol=instrument,
-                timeframe="15M",
-                model_version="CHALLENGE_1_LOCAL_RULES_V1",
+                timeframe="5M",
+                model_version="CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
                 dataset_version="BLOFIN_DEMO_ANALYSIS_FAILURE",
                 timestamp_utc=occurred_at,
             )
@@ -1681,6 +1663,8 @@ class BloFinDemoExecutor:
         leverage: int = 1,
         allow_demo_orders: bool = False,
         minimum_size_only: bool = False,
+        cancel_check: Any | None = None,
+        submission_lock: Any | None = None,
     ) -> dict[str, Any]:
         if not allow_demo_orders or not self.trading_enabled:
             raise BloFinDemoExecutionBlocked("Demo order execution is disabled by the two-key safety gate.")
@@ -1688,21 +1672,29 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("Only the pinned BloFin Demo host is permitted.")
         if self.store.backend != "TURSO_CLOUD_SQLITE":
             raise BloFinDemoExecutionBlocked("Durable Turso storage is required before Demo trading.")
-        budget = self.store.trade_budget_status(self.policy.max_orders_per_utc_day)
+        record = _analysis_record(signal)
+        is_challenge1 = str(record.get("execution_profile") or "").strip().upper() == "CHALLENGE_1"
+        # Challenge 1 has no daily order-count quota: the completed-5m candle key
+        # is the idempotency boundary. Keep daily loss/drawdown and exposure guards.
+        daily_order_limit = None if is_challenge1 else self.policy.max_orders_per_utc_day
+        budget = self.store.trade_budget_status(daily_order_limit)
         if (
-            self.policy.max_orders_per_utc_day is not None
-            and budget["orders_today"] >= self.policy.max_orders_per_utc_day
+            not is_challenge1
+            and daily_order_limit is not None
+            and budget["orders_today"] >= daily_order_limit
         ):
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
-        if self.store.pending_learning_outcome_count() > 0:
-            raise BloFinDemoExecutionBlocked(
-                "A previous Demo position is still awaiting exchange-finalized learning outcome reconciliation."
-            )
+        # A pending realized-outcome label is an audit/learning task, not proof of
+        # current exchange exposure. Do not let an incomplete history record freeze
+        # every market indefinitely. The fresh account-wide positions and open-orders
+        # checks below remain the hard entry blockers; unresolved order submissions
+        # are still blocked above and must be reconciled before another entry.
         latest_age = budget.get("latest_order_age_seconds")
         if (
-            self.policy.min_seconds_between_orders > 0
+            not is_challenge1
+            and self.policy.min_seconds_between_orders > 0
             and latest_age is not None
             and latest_age < self.policy.min_seconds_between_orders
         ):
@@ -1722,7 +1714,6 @@ class BloFinDemoExecutor:
         if int(leverage) > self.policy.max_leverage or int(leverage) < 1:
             raise BloFinDemoExecutionBlocked("Leverage is outside the 1x-3x Demo test range.")
 
-        record = _analysis_record(signal)
         clock = self.client.check_clock_skew(inst_id=inst_id)
         if abs(int(clock.get("offset_ms", 10**12))) >= 60_000:
             raise BloFinDemoExecutionBlocked("Exchange/local clock skew is 60 seconds or more.")
@@ -1762,7 +1753,18 @@ class BloFinDemoExecutor:
             record, instrument, inst_id=inst_id, equity_usdt=equity,
             leverage=int(leverage), policy=self.policy,
         )
-        plan["experience_id"] = str(record.get("learning_experience_id") or "") or None
+        if is_challenge1:
+            experience_id = str(record.get("learning_experience_id") or "").strip()
+            if not experience_id:
+                # The Executor also owns durable 5m decision linkage when called
+                # directly, not only when invoked through the web worker.
+                experience_id = self.store.record_challenge1_decision(
+                    instrument_id=inst_id, challenge_record=record,
+                )
+                record["learning_experience_id"] = experience_id
+            plan["experience_id"] = experience_id
+        else:
+            plan["experience_id"] = str(record.get("learning_experience_id") or "") or None
         if minimum_size_only:
             lot_size = _decimal(instrument.get("lotSize"), "lotSize")
             min_size = _decimal(instrument.get("minSize"), "minSize")
@@ -1816,34 +1818,38 @@ class BloFinDemoExecutor:
             self.store.update_order(plan["client_order_id"], "REJECTED")
             raise BloFinDemoExecutionBlocked("Leverage setup failed; no entry order was submitted.") from exc
 
-        # Persist the ambiguous state before the network write. If the process
-        # stops or the connection drops after this point, restart recovery knows
-        # that this client_order_id must be queried, never blindly resubmitted.
-        self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
-        try:
-            response = self.client.place_futures_order(
-                inst_id=inst_id,
-                side=exchange_side,
-                position_side=position_side,
-                size=plan["quantity"],
-                client_order_id=plan["client_order_id"],
-                take_profit=plan["take_profit"],
-                stop_loss=plan["stop_loss"],
-                margin_mode="isolated",
-            )
-        except Exception as exc:
+        def submit_reserved_order() -> dict[str, Any]:
+            # The final cancellation check runs after all slow preflight calls and
+            # immediately before the one exchange write. The caller may hold a
+            # shared lock so stop requests can distinguish an in-flight write.
+            if cancel_check is not None and bool(cancel_check()):
+                self.store.update_order(plan["client_order_id"], "REJECTED")
+                raise BloFinDemoExecutionBlocked(
+                    "Automated entry was stopped before the BloFin Demo order was submitted."
+                )
+            self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
             try:
+                return self.client.place_futures_order(
+                    inst_id=inst_id,
+                    side=exchange_side,
+                    position_side=position_side,
+                    size=plan["quantity"],
+                    client_order_id=plan["client_order_id"],
+                    take_profit=plan["take_profit"],
+                    stop_loss=plan["stop_loss"],
+                    margin_mode="isolated",
+                )
+            except Exception as exc:
                 self.store.update_order(plan["client_order_id"], "UNKNOWN")
-            except Exception as state_error:
-                # PENDING_RECONCILE was committed before POST and remains the
-                # durable recovery state when this follow-up write also fails.
                 raise BloFinDemoExecutionUnknown(
-                    "Order outcome is unknown and PENDING_RECONCILE remains the durable state; "
-                    "reconcile with BloFin using clientOrderId before any retry."
-                ) from state_error
-            raise BloFinDemoExecutionUnknown(
-                "Order outcome is unknown. Do not retry; reconcile with BloFin using clientOrderId."
-            ) from exc
+                    "Order outcome is unknown. Do not retry; reconcile with BloFin using clientOrderId."
+                ) from exc
+
+        if submission_lock is None:
+            response = submit_reserved_order()
+        else:
+            with submission_lock:
+                response = submit_reserved_order()
 
         data = response.get("data")
         if isinstance(data, list):
