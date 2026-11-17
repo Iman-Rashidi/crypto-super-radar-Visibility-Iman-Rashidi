@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import copy
 import concurrent.futures
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 import json
 import math
 import os
@@ -36,7 +37,7 @@ from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
-from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError
+from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_REST_URL
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
@@ -4685,6 +4686,383 @@ def _run_blofin_demo_smoke_test_job(job_id: str) -> None:
                 "position_closed": False,
             },
         )
+
+
+def _blofin_manual_decimal(value: Any, field_name: str) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise BloFinDemoExecutionBlocked(f"{field_name} is not a valid decimal value.") from exc
+    if not result.is_finite():
+        raise BloFinDemoExecutionBlocked(f"{field_name} must be finite.")
+    return result
+
+
+def _blofin_manual_write_client() -> BloFinDemoTradeClient:
+    """Resolve and verify the Demo-only Trade key before any manual write."""
+    readiness = _blofin_demo_execution_readiness()
+    if readiness.get("status") != "READY":
+        raise BloFinDemoExecutionBlocked(
+            str(readiness.get("message_fa") or "پیش‌نیازهای امن حساب Demo کامل نیستند.")
+        )
+    client = BloFinDemoTradeClient(timeout=10.0)
+    if client.base_url != DEMO_REST_URL:
+        raise BloFinDemoExecutionBlocked("Manual trading is pinned to the BloFin Demo API host.")
+    client.verify_trade_permission()
+    return client
+
+
+def _blofin_manual_open_trade(
+    *, instrument_id: str, direction: str, size: str,
+    stop_loss: str, take_profit: str,
+) -> dict[str, Any]:
+    """Open one manually requested, capped Demo market position with attached TP/SL."""
+    instrument_id = str(instrument_id or "").strip().upper()
+    direction = str(direction or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+        raise BloFinDemoExecutionBlocked("قرارداد باید یک USDT Linear Perpetual معتبر باشد.")
+    if direction not in {"LONG", "SHORT"}:
+        raise BloFinDemoExecutionBlocked("جهت دستی فقط LONG یا SHORT است.")
+
+    client = _blofin_manual_write_client()
+    store = None
+    client_order_id = "MAN" + uuid.uuid4().hex[:24]
+    signal_id = "MANUAL-" + uuid.uuid4().hex
+    try:
+        instrument = client.get_tradable_instrument(instrument_id)
+        mark_rows = client.get_mark_price(inst_id=instrument_id)
+        mark_row = (
+            mark_rows[0] if isinstance(mark_rows, list) and mark_rows
+            and isinstance(mark_rows[0], dict) else None
+        )
+        if not isinstance(mark_row, dict):
+            raise BloFinDemoExecutionBlocked("Mark Price زنده قرارداد دریافت نشد.")
+        mark_price = _blofin_manual_decimal(mark_row.get("markPrice"), "mark_price")
+        equity = _blofin_manual_decimal(
+            _equity_from_balance(client.get_futures_balance(product_type="USDT-FUTURES")),
+            "futures_equity",
+        )
+        quantity = _blofin_manual_decimal(size, "size")
+        requested_stop = _blofin_manual_decimal(stop_loss, "stop_loss")
+        requested_target = _blofin_manual_decimal(take_profit, "take_profit")
+        contract_value = _blofin_manual_decimal(instrument.get("contractValue"), "contractValue")
+        min_size = _blofin_manual_decimal(instrument.get("minSize"), "minSize")
+        lot_size = _blofin_manual_decimal(instrument.get("lotSize"), "lotSize")
+        tick_size = _blofin_manual_decimal(instrument.get("tickSize"), "tickSize")
+        if min(mark_price, equity, quantity, contract_value, min_size, lot_size, tick_size) <= 0:
+            raise BloFinDemoExecutionBlocked("قیمت، Equity یا مشخصات قرارداد معتبر نیستند.")
+        if quantity < min_size or quantity % lot_size != 0:
+            raise BloFinDemoExecutionBlocked(
+                f"حجم باید حداقل {min_size} و مضرب دقیق Lot Size برابر {lot_size} باشد."
+            )
+        max_market_size = instrument.get("maxMarketSize")
+        if max_market_size not in (None, "") and quantity > _blofin_manual_decimal(max_market_size, "maxMarketSize"):
+            raise BloFinDemoExecutionBlocked("حجم درخواستی از حداکثر حجم Market این قرارداد بیشتر است.")
+
+        if direction == "LONG":
+            stop = (requested_stop / tick_size).to_integral_value(rounding=ROUND_CEILING) * tick_size
+            target = (requested_target / tick_size).to_integral_value(rounding=ROUND_FLOOR) * tick_size
+            if not stop < mark_price < target:
+                raise BloFinDemoExecutionBlocked("برای LONG باید حد ضرر < Mark Price < حد سود باشد.")
+        else:
+            stop = (requested_stop / tick_size).to_integral_value(rounding=ROUND_FLOOR) * tick_size
+            target = (requested_target / tick_size).to_integral_value(rounding=ROUND_CEILING) * tick_size
+            if not target < mark_price < stop:
+                raise BloFinDemoExecutionBlocked("برای SHORT باید حد سود < Mark Price < حد ضرر باشد.")
+
+        notional = quantity * contract_value * mark_price
+        risk_usdt = quantity * contract_value * abs(mark_price - stop)
+        if notional > equity * Decimal("0.10"):
+            raise BloFinDemoExecutionBlocked(
+                "ارزش اسمی این سفارش از سقف ۱۰٪ Equity حساب Demo بیشتر است."
+            )
+        if risk_usdt > equity * Decimal("0.0025"):
+            raise BloFinDemoExecutionBlocked(
+                "زیان تا حد ضرر از سقف ریسک ۰٫۲۵٪ Equity بیشتر است؛ حجم را کاهش بده یا حد ضرر را نزدیک‌تر کن."
+            )
+
+        # Never add to or interfere with an existing position/order on this contract.
+        existing_positions = client.get_positions(inst_id=instrument_id)
+        existing_orders = client.get_open_orders(inst_id=instrument_id)
+        if not isinstance(existing_positions, list) or not isinstance(existing_orders, list):
+            raise BloFinDemoExecutionBlocked("وضعیت پوزیشن یا سفارش این قرارداد قابل تفسیر نیست.")
+        for row in existing_positions:
+            if not isinstance(row, dict):
+                raise BloFinDemoExecutionBlocked("ردیف پوزیشن موجود قابل تفسیر نیست.")
+            row_size = _blofin_manual_decimal(row.get("positions"), "existing_position_size")
+            if abs(row_size) > 0:
+                raise BloFinDemoExecutionBlocked(
+                    "برای این قرارداد پوزیشن بازی وجود دارد؛ ابتدا همان پوزیشن را جداگانه مدیریت کن."
+                )
+        if existing_orders:
+            raise BloFinDemoExecutionBlocked(
+                "برای این قرارداد سفارش معلق وجود دارد؛ ابتدا سفارش مشخص را بررسی یا لغو کن."
+            )
+
+        mode = client.get_position_mode()
+        position_mode = mode.get("positionMode")
+        if position_mode not in {"net_mode", "long_short_mode"}:
+            raise BloFinDemoExecutionBlocked("حالت Position Mode حساب تأیید نشد.")
+        position_side = (
+            "net" if position_mode == "net_mode"
+            else ("long" if direction == "LONG" else "short")
+        )
+        side = "buy" if direction == "LONG" else "sell"
+
+        store = BloFinDemoEventStore()
+        plan = {
+            "signal_id": signal_id,
+            "client_order_id": client_order_id,
+            "inst_id": instrument_id,
+            "side": direction,
+            "quantity": format(quantity.normalize(), "f"),
+            "entry_reference_price": float(mark_price),
+            "stop_loss": format(stop.normalize(), "f"),
+            "take_profit": format(target.normalize(), "f"),
+            "leverage": 1,
+        }
+        if not store.reserve_order(plan):
+            raise BloFinDemoExecutionBlocked("رزرو سفارش دستی تکراری شد؛ سفارش جدید ارسال نشد.")
+
+        try:
+            client.set_futures_leverage(
+                instrument_id, 1, margin_mode="isolated",
+                position_side=position_side if position_mode == "long_short_mode" else None,
+            )
+            store.update_order(client_order_id, "LEVERAGE_SET")
+            response = client.place_futures_order(
+                inst_id=instrument_id,
+                side=side,
+                position_side=position_side,
+                size=format(quantity.normalize(), "f"),
+                client_order_id=client_order_id,
+                take_profit=format(target.normalize(), "f"),
+                stop_loss=format(stop.normalize(), "f"),
+                margin_mode="isolated",
+            )
+        except BloFinDemoExecutionUnknown:
+            store.update_order(client_order_id, "UNKNOWN")
+            store.record_manual_action(client_order_id, "MANUAL_POSITION_CLOSE_REQUESTED", {
+                "instrument_id": instrument_id,
+                "direction": direction,
+                "submission_outcome": "UNKNOWN",
+                "orders_submitted": "UNKNOWN",
+            })
+            raise
+        except Exception:
+            store.update_order(client_order_id, "REJECTED")
+            raise
+
+        data = response.get("data")
+        row = (
+            next((item for item in data if isinstance(item, dict)), None)
+            if isinstance(data, list) else (data if isinstance(data, dict) else None)
+        )
+        exchange_order_id = str(row.get("orderId") or "") if isinstance(row, dict) else ""
+        if not exchange_order_id:
+            store.update_order(client_order_id, "UNKNOWN")
+            raise BloFinDemoExecutionUnknown(
+                "BloFin accepted an ambiguous manual-order response; inspect Demo order history before retrying."
+            )
+        state = "ACCEPTED"
+        try:
+            detail = client.get_order_detail(instrument_id, client_order_id=client_order_id)
+            if isinstance(detail, list):
+                detail = next((item for item in detail if isinstance(item, dict)), None)
+            if isinstance(detail, dict):
+                exchange_state = str(detail.get("state") or "").lower()
+                if exchange_state == "filled":
+                    state = "FILLED"
+                elif exchange_state == "partially_filled":
+                    state = "PARTIALLY_FILLED"
+        except Exception:
+            pass
+        store.update_order(client_order_id, state, exchange_order_id=exchange_order_id)
+        return {
+            "status": state,
+            "environment": "BLOFIN_DEMO",
+            "instrument_id": instrument_id,
+            "direction": direction,
+            "side": side,
+            "quantity": format(quantity.normalize(), "f"),
+            "mark_price": format(mark_price.normalize(), "f"),
+            "notional_usdt": format(notional.normalize(), "f"),
+            "risk_to_stop_usdt": format(risk_usdt.normalize(), "f"),
+            "stop_loss": format(stop.normalize(), "f"),
+            "take_profit": format(target.normalize(), "f"),
+            "leverage": 1,
+            "margin_mode": "isolated",
+            "client_order_id": client_order_id,
+            "exchange_order_id": exchange_order_id,
+            "message_fa": "سفارش دستی Market به BloFin Demo ارسال شد؛ وضعیت Fill از تاریخچه سفارش قابل پیگیری است.",
+        }
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
+def _blofin_manual_cancel_order(*, instrument_id: str, order_id: str) -> dict[str, Any]:
+    """Cancel one exact order only after a fresh pending-order lookup."""
+    instrument_id = str(instrument_id or "").strip().upper()
+    order_id = str(order_id or "").strip()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+        raise BloFinDemoExecutionBlocked("نماد سفارش معتبر نیست.")
+    client = _blofin_manual_write_client()
+    if not re.fullmatch(r"[A-Za-z0-9]{1,64}", order_id):
+        raise BloFinDemoExecutionBlocked("شناسه سفارش معتبر نیست.")
+    pending = client.get_open_orders(inst_id=instrument_id)
+    if not isinstance(pending, list):
+        raise BloFinDemoExecutionBlocked("فهرست سفارش‌های معلق قابل تفسیر نیست.")
+    match = next((
+        row for row in pending
+        if isinstance(row, dict)
+        and str(row.get("instId") or "").strip().upper() == instrument_id
+        and str(row.get("orderId") or "").strip() == order_id
+    ), None)
+    if match is None:
+        raise BloFinDemoExecutionBlocked(
+            "این شناسه در فهرست تازه سفارش‌های معلق این قرارداد نیست؛ ممکن است Fill یا Cancel شده باشد."
+        )
+    state = str(match.get("state") or "live").lower()
+    if state not in {"live", "partially_filled"}:
+        raise BloFinDemoExecutionBlocked("سفارش دیگر در وضعیت قابل‌لغو نیست.")
+    response = client.cancel_futures_order(inst_id=instrument_id, order_id=order_id)
+    action_id = "CANCEL" + uuid.uuid4().hex[:20]
+    store = None
+    try:
+        store = BloFinDemoEventStore()
+        local_client_id = str(match.get("clientOrderId") or "")
+        if local_client_id:
+            local = store.get_order(local_client_id)
+            if isinstance(local, dict) and local.get("status") not in {"CANCELED", "REJECTED"}:
+                try:
+                    store.update_order(local_client_id, "CANCELED", exchange_order_id=order_id)
+                except ValueError:
+                    pass
+        store.record_manual_action(action_id, "MANUAL_ORDER_CANCELED", {
+            "instrument_id": instrument_id, "exchange_order_id": order_id,
+            "client_order_id": local_client_id or None,
+        })
+    finally:
+        if store is not None:
+            store.close()
+    return {
+        "status": "CANCELED",
+        "environment": "BLOFIN_DEMO",
+        "instrument_id": instrument_id,
+        "exchange_order_id": order_id,
+        "exchange_response": response.get("data"),
+        "message_fa": "درخواست لغو همین سفارش مشخص به BloFin Demo ارسال شد.",
+    }
+
+
+def _blofin_manual_close_position(
+    *, instrument_id: str, position_id: str, position_side_hint: str = ""
+) -> dict[str, Any]:
+    """Close one freshly revalidated Demo position; loss-making positions are not blocked."""
+    instrument_id = str(instrument_id or "").strip().upper()
+    position_id = str(position_id or "").strip()
+    position_side_hint = str(position_side_hint or "").strip().lower()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+        raise BloFinDemoExecutionBlocked("نماد پوزیشن معتبر نیست.")
+    if position_id and not re.fullmatch(r"[A-Za-z0-9]{1,64}", position_id):
+        raise BloFinDemoExecutionBlocked("شناسه پوزیشن معتبر نیست.")
+    if position_side_hint and position_side_hint not in {"net", "long", "short"}:
+        raise BloFinDemoExecutionBlocked("جهت پوزیشن معتبر نیست.")
+
+    client = _blofin_manual_write_client()
+    positions = client.get_positions(inst_id=instrument_id)
+    if not isinstance(positions, list):
+        raise BloFinDemoExecutionBlocked("فهرست تازه پوزیشن‌ها قابل تفسیر نیست.")
+    active = []
+    for row in positions:
+        if not isinstance(row, dict):
+            raise BloFinDemoExecutionBlocked("ردیف پوزیشن موجود قابل تفسیر نیست.")
+        if str(row.get("instId") or "").strip().upper() != instrument_id:
+            continue
+        raw_size = row.get("positions")
+        quantity = _blofin_manual_decimal(raw_size, "position_size")
+        if abs(quantity) > 0:
+            active.append(row)
+
+    if position_id:
+        matches = [
+            row for row in active
+            if str(row.get("positionId") or "").strip() == position_id
+        ]
+    else:
+        matches = [
+            row for row in active
+            if str(row.get("positionSide") or "").strip().lower() == position_side_hint
+        ]
+    if len(matches) != 1:
+        raise BloFinDemoExecutionBlocked(
+            "پوزیشن دقیق و یکتا در وضعیت زنده حساب پیدا نشد؛ شناسه Position ID را دوباره از مانیتور تازه انتخاب کن."
+        )
+    row = matches[0]
+    actual_position_id = str(row.get("positionId") or "").strip()
+    if position_id and actual_position_id != position_id:
+        raise BloFinDemoExecutionBlocked("Position ID با پوزیشن زنده مطابقت ندارد.")
+    position_side = str(row.get("positionSide") or "").strip().lower()
+    margin_mode = str(row.get("marginMode") or "").strip().lower()
+    if position_side not in {"net", "long", "short"} or margin_mode not in {"isolated", "cross"}:
+        raise BloFinDemoExecutionBlocked("Margin Mode یا Position Side این پوزیشن کامل نیست.")
+    pnl_value = row.get("unrealizedPnl")
+    try:
+        pnl = _blofin_manual_decimal(pnl_value, "unrealized_pnl") if pnl_value not in (None, "") else None
+    except BloFinDemoExecutionBlocked:
+        pnl = None
+
+    action_id = "CLOSE" + uuid.uuid4().hex[:20]
+    store = None
+    try:
+        store = BloFinDemoEventStore()
+        audit = {
+            "instrument_id": instrument_id,
+            "position_id": actual_position_id or None,
+            "position_side": position_side,
+            "margin_mode": margin_mode,
+            "unrealized_pnl_usdt": str(pnl) if pnl is not None else None,
+            "loss_making_position": bool(pnl is not None and pnl < 0),
+        }
+        store.record_manual_action(action_id, "MANUAL_POSITION_CLOSE_REQUESTED", audit)
+        try:
+            response = client.close_futures_position(
+                inst_id=instrument_id,
+                margin_mode=margin_mode,
+                position_side=position_side,
+                client_order_id=action_id,
+                position_id=actual_position_id or None,
+            )
+        except BloFinDemoExecutionUnknown:
+            store.record_manual_action(action_id + "U", "MANUAL_POSITION_CLOSE_REQUESTED", {
+                **audit, "submission_outcome": "UNKNOWN", "retry_allowed": False,
+            })
+            raise
+        store.record_manual_action(action_id + "D", "MANUAL_POSITION_CLOSED", {
+            **audit, "submission_outcome": "ACCEPTED",
+        })
+    finally:
+        if store is not None:
+            store.close()
+
+    return {
+        "status": "CLOSE_ACCEPTED",
+        "environment": "BLOFIN_DEMO",
+        "instrument_id": instrument_id,
+        "position_id": actual_position_id or None,
+        "position_side": position_side,
+        "unrealized_pnl_usdt_at_confirmation": str(pnl) if pnl is not None else None,
+        "loss_making_position": bool(pnl is not None and pnl < 0),
+        "exchange_response": response.get("data"),
+        "message_fa": (
+            "درخواست بستن همین پوزیشن به قیمت بازار به BloFin Demo ارسال شد. "
+            "منفی بودن PnL مانع بستن نبود؛ قیمت اجرای واقعی و PnL نهایی پس از Fill مشخص می‌شود."
+        ),
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
