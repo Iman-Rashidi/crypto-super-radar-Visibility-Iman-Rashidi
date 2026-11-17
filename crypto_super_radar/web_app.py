@@ -2795,7 +2795,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
         "max_concurrent_positions": 1,
-        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_15M_CANDLE",
+        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_5M_CANDLE",
         "message_fa": message_fa,
     }
 
@@ -9444,7 +9444,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         ),
         "market": "Futures",
         "symbol": str(instrument_id).upper(),
-        "timeframe": "15m",
+        "timeframe": "5m",
         "signal": signal if signal in {"LONG", "SHORT", "NO_TRADE"} else "UNKNOWN",
         "experience_id": experience_id,
         "order_id": order_id,
