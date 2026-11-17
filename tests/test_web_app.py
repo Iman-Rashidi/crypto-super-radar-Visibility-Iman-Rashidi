@@ -180,6 +180,29 @@ class WebAppHttpTests(unittest.TestCase):
         approval = next(item for item in events if item["event_type"] == "AI_APPROVAL")
         self.assertEqual(approval["ai_decision"], "APPROVE")
 
+    def test_notion_sync_status_includes_activity_chart_journal_counters(self):
+        event_outbox = MagicMock()
+        event_outbox.status_snapshot.return_value = {
+            "status": "CONFIGURED", "pending": 1, "synced": 10, "failed": 0,
+        }
+        activity_journal = MagicMock()
+        activity_journal.status_snapshot.return_value = {
+            "status": "CONFIGURED", "pending": 2, "synced": 3, "failed": 1,
+        }
+        with (
+            patch.object(web_app, "NotionEventOutbox", return_value=event_outbox),
+            patch.object(web_app, "NotionActivityJournal", return_value=activity_journal),
+        ):
+            status, headers, payload = self.request("GET", "/api/notion-sync/status")
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertEqual(body["pending"], 1)
+        self.assertEqual(body["activity_journal"]["pending"], 2)
+        self.assertEqual(body["activity_journal"]["synced"], 3)
+        self.assertEqual(body["activity_journal"]["failed"], 1)
+        event_outbox.close.assert_called_once()
+        activity_journal.close.assert_called_once()
+
     def test_blofin_demo_dashboard_exposes_manual_mode_autopilot_and_symbol_search(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
