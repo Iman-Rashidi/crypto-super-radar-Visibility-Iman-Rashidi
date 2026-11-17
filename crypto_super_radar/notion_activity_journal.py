@@ -158,6 +158,22 @@ def _normalise_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _notion_http_error_details(error: requests.HTTPError) -> tuple[str | None, str | None]:
+    """Extract Notion's structured error code/message without storing request headers or secrets."""
+    response = getattr(error, "response", None)
+    payload: Mapping[str, Any] = {}
+    if response is not None:
+        try:
+            parsed = response.json()
+            if isinstance(parsed, Mapping):
+                payload = parsed
+        except Exception:
+            payload = {}
+    code = _text(payload.get("code"), 80) or None
+    message = _text(payload.get("message"), 700) or None
+    return code, message
+
+
 def render_candlestick_chart(snapshot: Mapping[str, Any]) -> bytes:
     """Render a real OHLCV chart. No candle, price level, or exit is fabricated."""
     candles = _normalise_candles(snapshot.get("candles_15m"), limit=120)
@@ -278,6 +294,8 @@ class NotionActivityJournal:
                 notion_page_id TEXT,
                 last_error_type TEXT,
                 last_http_status INTEGER,
+                last_error_code TEXT,
+                last_error_message TEXT,
                 last_error_stage TEXT,
                 synced_at_utc TEXT
             )
@@ -288,6 +306,14 @@ class NotionActivityJournal:
         if "last_error_stage" not in columns:
             self._db.execute(
                 "ALTER TABLE csr_notion_activity_journal ADD COLUMN last_error_stage TEXT"
+            )
+        if "last_error_code" not in columns:
+            self._db.execute(
+                "ALTER TABLE csr_notion_activity_journal ADD COLUMN last_error_code TEXT"
+            )
+        if "last_error_message" not in columns:
+            self._db.execute(
+                "ALTER TABLE csr_notion_activity_journal ADD COLUMN last_error_message TEXT"
             )
         self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_csr_notion_activity_pending
@@ -311,7 +337,9 @@ class NotionActivityJournal:
                      sync_status='PENDING',
                      last_error_type=NULL,
                      last_http_status=NULL,
-                      last_error_stage=NULL""",
+                     last_error_code=NULL,
+                     last_error_message=NULL,
+                     last_error_stage=NULL""",
                 (payload["experience_id"], _canonical(payload), now, now),
             )
         return bool(getattr(cursor, "rowcount", 0))
@@ -600,7 +628,8 @@ class NotionActivityJournal:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET
                            attempts=?, sync_status='SYNCED', notion_page_id=?,
-                           synced_at_utc=?, last_error_type=NULL, last_http_status=NULL
+                           synced_at_utc=?, last_error_type=NULL, last_http_status=NULL,
+                           last_error_code=NULL, last_error_message=NULL
                            WHERE experience_id=?""",
                         (attempts, saved_page_id, datetime.now(timezone.utc).isoformat(), experience_id),
                     )
@@ -608,12 +637,17 @@ class NotionActivityJournal:
             except requests.HTTPError as exc:
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 failed_stage = self._current_operation or "UNKNOWN_OPERATION"
+                notion_error_code, notion_error_message = _notion_http_error_details(exc)
                 delay = min(3600, 5 * (2 ** min(attempts - 1, 9)))
                 with self._db:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET attempts=?, next_attempt_at=?,
-                           last_error_type=?, last_http_status=?, last_error_stage=? WHERE experience_id=?""",
-                        (attempts, current + delay, type(exc).__name__, status_code, failed_stage, experience_id),
+                           last_error_type=?, last_http_status=?, last_error_code=?,
+                           last_error_message=?, last_error_stage=? WHERE experience_id=?""",
+                        (
+                            attempts, current + delay, type(exc).__name__, status_code,
+                            notion_error_code, notion_error_message, failed_stage, experience_id,
+                        ),
                     )
                 failed += 1
             except Exception as exc:
@@ -622,8 +656,12 @@ class NotionActivityJournal:
                 with self._db:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET attempts=?, next_attempt_at=?,
-                           last_error_type=?, last_error_stage=? WHERE experience_id=?""",
-                        (attempts, current + delay, type(exc).__name__, failed_stage, experience_id),
+                           last_error_type=?, last_error_code=NULL, last_error_message=?,
+                           last_error_stage=? WHERE experience_id=?""",
+                        (
+                            attempts, current + delay, type(exc).__name__,
+                            _text(str(exc), 700) or None, failed_stage, experience_id,
+                        ),
                     )
                 failed += 1
         state = self.status_snapshot()
@@ -652,7 +690,7 @@ class NotionActivityJournal:
         ).fetchone()
         last_error = self._db.execute(
             """SELECT experience_id, attempts, last_error_type, last_http_status,
-                      last_error_stage, next_attempt_at
+                      last_error_code, last_error_message, last_error_stage, next_attempt_at
                FROM csr_notion_activity_journal
                WHERE last_error_type IS NOT NULL
                ORDER BY updated_at_utc DESC, rowid DESC, attempts DESC LIMIT 1"""
@@ -675,6 +713,8 @@ class NotionActivityJournal:
             "last_failed_experience_id": last_error["experience_id"] if last_error else None,
             "last_error_type": last_error["last_error_type"] if last_error else None,
             "last_http_status": last_error["last_http_status"] if last_error else None,
+            "last_error_code": last_error["last_error_code"] if last_error else None,
+            "last_error_message": last_error["last_error_message"] if last_error else None,
             "last_error_stage": last_error["last_error_stage"] if last_error else None,
             "last_attempts": int(last_error["attempts"] or 0) if last_error else 0,
             "retry_after_epoch": int(last_error["next_attempt_at"] or 0) if last_error else None,
