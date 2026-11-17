@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 import requests
 
@@ -1155,6 +1156,11 @@ def second_ai_connection_status() -> dict[str, Any]:
         reasons.append("SECOND_AI_KEY_MUST_BE_SEPARATE")
     if model and model == _model():
         reasons.append("SECOND_AI_MODEL_MUST_DIFFER")
+    if provider and provider.casefold() == "openrouter":
+        reasons.append("SECOND_AI_PROVIDER_MUST_DIFFER")
+    endpoint_host = (urlsplit(endpoint).hostname or "").casefold() if endpoint else ""
+    if endpoint_host in {"openrouter.ai", "www.openrouter.ai"}:
+        reasons.append("SECOND_AI_ENDPOINT_MUST_DIFFER")
     configured = not reasons
     return {
         "reviewer_id": "second_ai",
