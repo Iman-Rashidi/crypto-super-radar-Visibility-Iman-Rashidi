@@ -5146,7 +5146,7 @@ class Handler(BaseHTTPRequestHandler):
           <div class="brand-copy">
             <span class="eyebrow">پایش بازار · دادهٔ عمومی و رایگان</span>
             <h1>CRYPTO SUPER RADAR</h1>
-            <p class="muted">پژوهش بازار با دادهٔ عمومی و Paper Trading؛ هیچ اتصال کیف‌پول یا سفارش Live ندارد. سفارش آزمایشی فقط در ماژول مستقل BloFin Demo و با کلید Trade جداگانه ممکن است.</p>
+            <p class="muted">پژوهش بازار با دادهٔ عمومی و Paper Research / Paper Trading؛ هیچ اتصال کیف‌پول یا سفارش Live ندارد. سفارش آزمایشی فقط در ماژول مستقل BloFin Demo و با کلید Trade جداگانه ممکن است.</p>
           </div>
           <span class="mode-pill"><span class="mode-dot"></span>Spot Research: فقط خواندنی · BloFin: Demo</span>
         </header>
