@@ -100,14 +100,19 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
 
 
 def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str, Any]) -> str:
-    """Return a stable identity for one instrument's immutable closed-candle evidence."""
+    """Return an identity for the complete immutable decision-time evidence package."""
     evidence = challenge_record.get("challenge1_evidence")
     if not isinstance(evidence, Mapping):
         raise ValueError("Challenge 1 evidence is required for learning memory.")
     candle = evidence.get("confirmation_candle")
     if not isinstance(candle, Mapping):
         raise ValueError("A completed confirmation candle is required for learning memory.")
-    candle_time = str(candle.get("open_time_utc") or challenge_record.get("signal_bar_open_utc") or "")
+    candle_time = str(
+        candle.get("open_time_utc")
+        or candle.get("time_utc")
+        or challenge_record.get("signal_bar_open_utc")
+        or ""
+    )
     if not candle_time:
         raise ValueError("Completed candle timestamp is required for learning memory.")
     identity = {
@@ -116,19 +121,21 @@ def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str,
         "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
         "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
         "signal_bar_open_utc": candle_time,
-        "confirmation_candle": dict(candle),
-        "detected_patterns": evidence.get("detected_patterns") or [],
-        "chosen_pattern": evidence.get("chosen_pattern"),
-        "chart_structure": evidence.get("chart_structure") or {},
-        "context_patterns": evidence.get("context_patterns") or [],
-        "volume_confirmation": evidence.get("volume_confirmation") or {},
+        "signal": str(challenge_record.get("signal") or "NO_TRADE").strip().upper(),
+        "signal_id": str(challenge_record.get("signal_id") or ""),
+        "entry_price": challenge_record.get("entry_price_usd", challenge_record.get("entry_price")),
+        "stop_loss": challenge_record.get("stop_loss_usd", challenge_record.get("stop_loss")),
+        "take_profit": challenge_record.get("take_profit_usd", challenge_record.get("take_profit")),
+        # Hash the complete decision-time package, including exact OHLCV windows.
+        # A repeated candle with revised/expanded evidence becomes a new immutable
+        # learning record rather than colliding with a previous event_id.
+        "challenge1_evidence": dict(evidence),
     }
     canonical = json.dumps(
         identity, sort_keys=True, separators=(",", ":"),
         ensure_ascii=False, allow_nan=False,
     )
     return "blofin-ch1-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-
 
 @dataclass(frozen=True)
 class BloFinDemoRiskPolicy:
