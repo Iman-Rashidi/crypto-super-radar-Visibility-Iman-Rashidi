@@ -278,7 +278,7 @@ def _clean_ohlcv_rows(value: Any, *, limit: int = 30) -> list[dict[str, Any]]:
     for item in value[-max(3, min(int(limit), 60)):]:
         if not isinstance(item, Mapping):
             continue
-        timestamp = str(item.get("open_time_utc") or "").strip()[:64]
+        timestamp = str(item.get("open_time_utc") or item.get("time_utc") or "").strip()[:64]
         values = {key: _safe_float(item.get(key)) for key in ("open", "high", "low", "close", "volume")}
         if not timestamp or any(number is None for number in values.values()):
             continue
@@ -384,8 +384,10 @@ def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "Base technical judgment only on the supplied completed 15m and 1H OHLCV candles, the selected "
         "candle/chart pattern, detected patterns, 1H context patterns, and volume confirmation. "
         "Never use an unclosed/future candle. Confirm that the selected pattern is visible in the supplied "
-        "15m pattern list, its direction matches the expected side, volume confirmation is true, and 1H "
-        "context does not contradict it. If a fact is missing or cannot be verified, abstain. "
+        "15m pattern list and its direction matches the expected side. Volume and 1H context are ADVISORY ONLY: "
+        "low or missing volume confirmation, an opposing 1H pattern, or unavailable 1H candles must never by "
+        "themselves veto or block an otherwise valid 15m setup. Describe these items as observations only. "
+        "If the selected 15m pattern, its candle evidence, or the protective price plan is missing or invalid, abstain. "
         "The risk_plan is permitted only for protective validation: check positive entry/stop/target, "
         "correct side geometry and reward_risk >= 1.8. Never relax account risk limits. "
         "Expected side is " + expected_side + ". The selected pattern name must match exactly: " + chosen_name + ". "
@@ -399,9 +401,12 @@ def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         '"final_decision":"APPROVE|REJECT|INSUFFICIENT_DATA",'
         '"risk_flags":["..."],"rationale_fa":"..."'
         "}. "
-        "APPROVE is permitted only when all three technical analysts SUPPORT, pattern_analyst.pattern_name "
-        "matches the selected pattern exactly, trader proposal matches expected side, both risk and "
-        "portfolio managers APPROVE, and risk_flags is empty. Keep all explanations concise and in Persian."
+        "APPROVE is permitted only when pattern_analyst and price_action_analyst SUPPORT, "
+        "pattern_analyst.pattern_name matches the selected pattern exactly, trader proposal matches expected side, "
+        "both risk and portfolio managers APPROVE, and risk_flags is empty. timeframe_analyst is informational "
+        "only: its SUPPORT/OPPOSE/UNCERTAIN observation must be recorded but cannot alone veto entry. "
+        "Volume and 1H context are advisory and cannot be converted into mandatory gates. "
+        "Keep all explanations concise and in Persian."
     )
     user = "Review only this sanitized Challenge 1 evidence:\n" + json.dumps(
         evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False
@@ -473,9 +478,8 @@ def _validated_pattern_review(
     approved = (
         final_decision == "APPROVE"
         and pattern_matches
-        and all(cleaned[key]["verdict"] == "SUPPORT" for key in (
-            "pattern_analyst", "price_action_analyst", "timeframe_analyst",
-        ))
+        and cleaned["pattern_analyst"]["verdict"] == "SUPPORT"
+        and cleaned["price_action_analyst"]["verdict"] == "SUPPORT"
         and proposal == expected_side
         and risk_verdict == "APPROVE"
         and portfolio_verdict == "APPROVE"
@@ -483,9 +487,8 @@ def _validated_pattern_review(
     )
     explicit_veto = (
         final_decision == "REJECT" or not pattern_matches
-        or any(cleaned[key]["verdict"] == "OPPOSE" for key in (
-            "pattern_analyst", "price_action_analyst", "timeframe_analyst",
-        ))
+        or cleaned["pattern_analyst"]["verdict"] == "OPPOSE"
+        or cleaned["price_action_analyst"]["verdict"] == "OPPOSE"
         or proposal not in {expected_side}
         or risk_verdict == "REJECT" or portfolio_verdict == "REJECT" or bool(risk_flags)
     )
