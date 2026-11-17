@@ -10,6 +10,9 @@ class FakeBloFinAccountClient:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
+    def get_api_key_info(self):
+        return {"readOnly": 1, "trade_permission": False}
+
     def get_futures_balance(self, *, product_type="USDT-FUTURES"):
         return {
             "ts": "1700000000000",
@@ -60,6 +63,8 @@ class BloFinDashboardAccountTests(unittest.TestCase):
         self.assertEqual(result["status"], "CONNECTED_READ_ONLY")
         self.assertFalse(result["orders_enabled"])
         self.assertEqual(result["balance"]["totalEquity"], "1234.50")
+        self.assertEqual(result["api_key_permission"], "READ_ONLY")
+        self.assertEqual(result["request_scope"], "READ_ONLY_GET_REQUESTS")
         self.assertEqual(result["positions"][0]["instId"], "BTC-USDT")
         self.assertEqual(result["open_orders"][0]["instId"], "ETH-USDT")
         self.assertNotIn("private_marker", str(result))
@@ -76,6 +81,9 @@ class FakeBloFinMonitorClient:
     def get_mark_price(self, *, inst_id):
         return [{"instId": inst_id, "markPrice": "65310.8", "indexPrice": "65305.2", "ts": "1800000000100"}]
 
+    def get_api_key_info(self):
+        return {"readOnly": 0, "trade_permission": True}
+
     def get_futures_balance(self, *, product_type="USDT-FUTURES"):
         return {
             "ts": "1800000000000",
@@ -88,20 +96,36 @@ class FakeBloFinMonitorClient:
         }
 
     def get_positions(self, *, inst_id=None):
-        return [{
-            "instId": "BTC-USDT", "positionSide": "long", "positions": "0.01",
-            "averagePrice": "65000", "markPrice": "65310.8",
-            "unrealizedPnl": "3.1", "leverage": "1", "updateTime": "1800000000000"
-        }]
+        return [
+            {
+                "positionId": "btc-position", "instId": "BTC-USDT", "positionSide": "long",
+                "positions": "0.01", "averagePrice": "65000", "markPrice": "65310.8",
+                "unrealizedPnl": "3.1", "leverage": "1", "updateTime": "1800000000000"
+            },
+            {
+                "positionId": "xrp-position", "instId": "XRP-USDT", "positionSide": "net",
+                "positions": "0.1", "averagePrice": "0.9594", "markPrice": "0.96",
+                "unrealizedPnl": "-0.01", "leverage": "1", "updateTime": "1800000000000"
+            },
+        ]
 
     def get_open_orders(self, *, inst_id=None):
-        return [{"orderId": "open-1", "side": "sell", "orderType": "limit", "state": "live"}]
+        return [
+            {"instId": "BTC-USDT", "orderId": "open-1", "side": "sell", "orderType": "limit", "state": "live"},
+            {"instId": "XRP-USDT", "orderId": "open-2", "side": "sell", "orderType": "limit", "state": "live"},
+        ]
 
     def get_open_tpsl_orders(self, *, inst_id=None, limit=100):
-        return [{
-            "tpslId": "tpsl-1", "side": "sell", "tpTriggerPrice": "67000",
-            "slTriggerPrice": "64000", "state": "live"
-        }]
+        return [
+            {
+                "instId": "BTC-USDT", "tpslId": "tpsl-1", "side": "sell",
+                "tpTriggerPrice": "67000", "slTriggerPrice": "64000", "state": "live"
+            },
+            {
+                "instId": "XRP-USDT", "tpslId": "tpsl-2", "side": "sell",
+                "tpTriggerPrice": "0.9991", "slTriggerPrice": "0.9465", "state": "live"
+            },
+        ]
 
     def get_tpsl_orders_history(self, *, inst_id=None, limit=100):
         return [{"tpslId": "tpsl-old", "state": "effective", "updateTime": "1799999999000"}]
@@ -122,12 +146,16 @@ class FakeBloFinMonitorClient:
 
 
 class FakeBloFinMonitorStore:
-    def latest_order(self):
+    def latest_order_for_instrument(self, instrument_id):
         return None
 
     def recent_all_events(self, *, limit=100):
-        return [{"sequence": 1, "event_type": "FILLED", "client_order_id": "bot-order-1",
-                 "occurred_at": 1800000000, "payload": {"fill_price": "65000"}}]
+        return [
+            {"sequence": 1, "event_type": "FILLED", "client_order_id": "bot-btc",
+             "occurred_at": 1800000000, "payload": {"instrument_id": "BTC-USDT", "fill_price": "65000"}},
+            {"sequence": 2, "event_type": "FILLED", "client_order_id": "bot-xrp",
+             "occurred_at": 1800000001, "payload": {"instrument_id": "XRP-USDT", "fill_price": "0.96"}},
+        ]
 
     def close(self):
         pass
@@ -140,6 +168,8 @@ class BloFinLiveMonitorSnapshotTests(unittest.TestCase):
         self.assertEqual(result["status"], "CONNECTED_READ_ONLY")
         self.assertEqual(result["data_completeness"], "COMPLETE")
         self.assertFalse(result["orders_enabled"])
+        self.assertEqual(result["api_key_permission"], "READ_WRITE")
+        self.assertEqual(result["request_scope"], "READ_ONLY_GET_REQUESTS")
         self.assertEqual(result["market"]["markPrice"], "65310.8")
         self.assertEqual(result["account"]["totalEquity"], "0.000000000000000000")
         self.assertEqual(result["account"]["details"][0]["available"], "0")
@@ -147,7 +177,14 @@ class BloFinLiveMonitorSnapshotTests(unittest.TestCase):
         self.assertEqual(result["completed_orders"][0]["orderId"], "order-1")
         self.assertEqual(result["open_tpsl_orders"][0]["tpTriggerPrice"], "67000")
         self.assertEqual(result["tpsl_orders_history"][0]["tpslId"], "tpsl-old")
-        self.assertEqual(result["execution_events"][0]["client_order_id"], "bot-order-1")
+        self.assertEqual(result["execution_events"][0]["client_order_id"], "bot-btc")
+        self.assertEqual([x["instId"] for x in result["positions_for_instrument"]], ["BTC-USDT"])
+        self.assertEqual([x["instId"] for x in result["open_orders_for_instrument"]], ["BTC-USDT"])
+        self.assertEqual([x["instId"] for x in result["open_tpsl_orders_for_instrument"]], ["BTC-USDT"])
+        self.assertEqual([x["client_order_id"] for x in result["instrument_execution_events"]], ["bot-btc"])
+        self.assertEqual(len(result["positions"]), 2)
+        self.assertEqual(len(result["open_orders"]), 2)
+        self.assertEqual(len(result["open_tpsl_orders"]), 2)
 
 if __name__ == "__main__":
     unittest.main()
