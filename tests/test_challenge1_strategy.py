@@ -131,7 +131,7 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
         self.assertEqual(client.calls, ["5m"])
         self.assertEqual(result["signal"], "LONG")
         self.assertEqual(result["execution"]["status"], "PASS")
-        self.assertIn(":5m:", result["signal_id"])
+        self.assertEqual(result["signal_id"], "challenge1-v4:BTC-USDT:5m:" + result["signal_bar_open_utc"])
         evidence = result["challenge1_evidence"]
         self.assertEqual(evidence["decision_engine_version"], "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY")
         self.assertEqual(evidence["setup_timeframe"], "5m")
@@ -142,6 +142,34 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
         self.assertGreaterEqual(len(evidence["candles_5m"]), 30)
         eligible, reason = challenge1_entry_evidence_ready(result)
         self.assertTrue(eligible, reason)
+
+    def test_same_completed_5m_candle_has_one_signal_key_even_if_pattern_side_changes(self):
+        now = 2_000_000_000_000
+        client = self.client(now)
+        with (
+            patch(
+                "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+                return_value=[bullish_pattern()],
+            ),
+            patch("crypto_super_radar.challenge1_strategy._volume_confirmation", return_value={"confirmed": False}),
+            patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
+            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+        ):
+            long_result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
+        with (
+            patch(
+                "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+                return_value=[bearish_pattern()],
+            ),
+            patch("crypto_super_radar.challenge1_strategy._volume_confirmation", return_value={"confirmed": False}),
+            patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
+            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+        ):
+            short_result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
+
+        self.assertEqual(long_result["signal"], "LONG")
+        self.assertEqual(short_result["signal"], "SHORT")
+        self.assertEqual(long_result["signal_id"], short_result["signal_id"])
 
     def test_valid_5m_pattern_does_not_wait_for_15m_or_1h_data(self):
         now = 2_000_000_000_000

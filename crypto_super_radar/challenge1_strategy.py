@@ -285,7 +285,7 @@ def _candles_for_report(frame: pd.DataFrame, *, limit: int) -> list[dict[str, An
 
 
 def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
-    """Validate a 5m-only entry trigger and its completed OHLCV evidence."""
+    """Validate one immutable, completed 5m-only pattern decision before Demo sizing."""
     if not isinstance(record, Mapping):
         return False, "گزارش اختصاصی کندل و الگو موجود نیست."
     evidence = record.get("challenge1_evidence")
@@ -298,8 +298,20 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         return False, "سیگنال جهت‌دار و تأیید الگوی اختصاصی ساخته نشده است."
     if str(execution.get("direction") or "").upper() != signal:
         return False, "جهت الگوی انتخاب‌شده با سیگنال ربات یکسان نیست."
-    if evidence.get("completed_candles_only") is not True:
-        return False, "بسته‌شدن کندل‌های تأییدشده قابل اثبات نیست."
+    if evidence.get("decision_engine_version") != "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY":
+        return False, "نسخه موتور ورود Challenge 1 معتبر نیست."
+    if (
+        evidence.get("setup_timeframe") != "5m"
+        or evidence.get("higher_timeframes_used") is not False
+        or evidence.get("legacy_12_gates_used_for_entry") is not False
+        or evidence.get("external_ai_required") is not False
+        or evidence.get("tinyfish_required") is not False
+    ):
+        return False, "ورودی Challenge 1 باید فقط بر پایه کندل ۵ دقیقه‌ای باشد."
+    if evidence.get("decision") != signal:
+        return False, "تصمیم ثبت‌شده با جهت سیگنال یکسان نیست."
+    if any(str(key).startswith("candles_") and key != "candles_5m" for key in evidence):
+        return False, "شواهد Challenge 1 نباید کندل تایم‌فریم دیگری داشته باشد."
 
     chosen = evidence.get("chosen_pattern")
     if not isinstance(chosen, Mapping):
@@ -308,10 +320,11 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
     category = str(chosen.get("category") or "").upper()
     if not pattern_name or category not in {"CANDLESTICK", "CHART_STRUCTURE"}:
         return False, "نوع الگوی منتخب معتبر نیست."
-    if str(chosen.get("direction") or "").upper() != expected_direction:
-        return False, "جهت الگوی منتخب با جهت معامله هم‌خوان نیست."
-    if str(chosen.get("timeframe") or "").lower() != "5m":
-        return False, "الگوی ورودی باید متعلق به کندل بسته‌شده ۵ دقیقه‌ای باشد."
+    if (
+        str(chosen.get("direction") or "").upper() != expected_direction
+        or str(chosen.get("timeframe") or "").lower() != "5m"
+    ):
+        return False, "جهت یا تایم‌فریم الگوی منتخب معتبر نیست."
 
     detected = evidence.get("detected_patterns")
     detected = detected if isinstance(detected, list) else []
@@ -320,10 +333,11 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         and str(item.get("name_en") or "").strip() == pattern_name
         and str(item.get("direction") or "").upper() == expected_direction
         and str(item.get("timeframe") or "").lower() == "5m"
+        and str(item.get("category") or "").upper() == category
         for item in detected
     )
     if not matched:
-        return False, "الگوی منتخب در فهرست شواهد ۵ دقیقه‌ای وجود ندارد."
+        return False, "الگوی منتخب در شواهد کندل‌های بسته‌شده ۵ دقیقه‌ای وجود ندارد."
 
     rows = evidence.get("candles_5m")
     if not isinstance(rows, list) or len(rows) < 3:
@@ -357,12 +371,24 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
     ).strip()
     if confirmation_time != last_candle["time"]:
         return False, "زمان کندل تأیید با آخرین کندل بسته‌شده ۵ دقیقه‌ای تطبیق ندارد."
+    signal_bar = str(record.get("signal_bar_open_utc") or "").strip()
+    if signal_bar and signal_bar != confirmation_time:
+        return False, "شناسه کندل سیگنال با کندل تأیید ۵ دقیقه‌ای یکسان نیست."
     for field in ("open", "high", "low", "close", "volume"):
         actual = _number(confirmation.get(field))
         if actual is None or not math.isclose(
             actual, last_candle[field], rel_tol=1e-9, abs_tol=1e-12
         ):
             return False, "OHLCV کندل تأیید با نمونه بازار ۵ دقیقه‌ای تطبیق ندارد."
+
+    instrument = str(record.get("inst_id") or record.get("instrument_id") or "").strip().upper()
+    expected_signal_id = f"challenge1-v4:{instrument}:5m:{confirmation_time}"
+    if (
+        not instrument
+        or str(record.get("signal_id") or "") != expected_signal_id
+        or str(execution.get("signal_id") or "") != expected_signal_id
+    ):
+        return False, "کلید یکتای سیگنال باید فقط به نماد و کندل بسته‌شده ۵ دقیقه‌ای وابسته باشد."
 
     if category == "CHART_STRUCTURE":
         structure = evidence.get("chart_structure")
@@ -374,7 +400,7 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         ):
             return False, "شکست ساختار نموداری برای الگوی منتخب تأیید نشده است."
 
-    return True, "کندل بسته‌شده ۵ دقیقه‌ای و الگوی منتخب با جهت معامله سازگارند؛ زمینه ۱H فقط مشورتی است."
+    return True, "شواهد OHLCV و الگوی کندل بسته‌شده ۵ دقیقه‌ای معتبر است؛ هیچ تایم‌فریم بالاتری در تصمیم ورود استفاده نمی‌شود."
 
 
 def analyze_blofin_challenge1(
@@ -456,7 +482,7 @@ def analyze_blofin_challenge1(
             else:
                 entry, stop, target = entry_value, stop_value, target_value
                 signal_bar = _time_label(frame_5m)
-                signal_id = f"challenge1-v4:{instrument}:5m:{signal_bar}:{signal}"
+                signal_id = f"challenge1-v4:{instrument}:5m:{signal_bar}"
                 execution = {
                     "status": "PASS",
                     "direction": signal,
