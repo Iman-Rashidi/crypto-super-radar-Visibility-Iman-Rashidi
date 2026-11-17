@@ -169,16 +169,25 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     expected_side = str(evidence.get("expected_side") or "LONG").upper()
     execution_profile = str(evidence.get("execution_profile") or "STRICT").upper()
     required_gate_ids = {
+        "CHALLENGE_1": [],
         "EASY": [1, 2, 3, 4, 5, 6, 9],
         "STANDARD": [1, 2, 3, 4, 5, 6, 8, 9],
         "STRICT": list(range(1, 13)),
     }.get(execution_profile, list(range(1, 13)))
-    gate_rule = (
-        f"For {execution_profile}, required gate IDs are {required_gate_ids}. "
-        "Every required gate must be PASS. Other gate IDs are advisory evidence only; keep their actual status visible and never relabel UNKNOWN or FAIL as PASS. "
-        if execution_profile in {"EASY", "STANDARD"} else
-        "STRICT requires all 12 unique gates to be PASS. "
-    )
+    if execution_profile == "CHALLENGE_1":
+        gate_rule = (
+            "CHALLENGE_1 is driven by the dedicated closed-candle and candle/chart-pattern strategy. "
+            "The twelve general radar gate IDs are advisory only for this execution profile; none is a mandatory entry gate here. "
+            "Keep every gate's actual PASS/FAIL/UNKNOWN status visible, never relabel evidence, and do not veto solely because an advisory gate is UNKNOWN. "
+            "The dedicated pattern evidence, trade direction, risk checks, and valid entry/stop/target plan remain mandatory. "
+        )
+    elif execution_profile in {"EASY", "STANDARD"}:
+        gate_rule = (
+            f"For {execution_profile}, required gate IDs are {required_gate_ids}. "
+            "Every required gate must be PASS. Other gate IDs are advisory evidence only; keep their actual status visible and never relabel UNKNOWN or FAIL as PASS. "
+        )
+    else:
+        gate_rule = "STRICT requires all 12 unique gates to be PASS. "
     if perpetual and expected_side == "SHORT":
         direction_rule = (
             "This is a USDT-M perpetual SHORT review. The trader must propose SHORT; "
