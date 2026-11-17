@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import queue
 import re
@@ -94,8 +94,18 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(web_app._demo_ai_review_approved({
             "status": "APPROVED", "paper_entry_eligible": True
         }))
-        self.assertTrue(web_app._demo_ai_review_approved({
+        self.assertFalse(web_app._demo_ai_review_approved({
             "status": "APPROVED", "paper_entry_eligible": True, "model": "free-model"
+        }))
+        self.assertTrue(web_app._demo_ai_review_approved({
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "model": "free-model",
+            "returned_model": "free-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
         }))
 
     def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
@@ -1563,6 +1573,8 @@ class WebAppHttpTests(unittest.TestCase):
             if len(sleep_calls) == 2:
                 raise StopAfterTwoCycles()
 
+        next_cycle_at = (datetime.now(timezone.utc) + timedelta(seconds=900)).replace(microsecond=0)
+
         web_app.BLOFIN_AUTOPILOT_STATE.update({
             "enabled": False,
             "status": "DISABLED",
@@ -1587,7 +1599,7 @@ class WebAppHttpTests(unittest.TestCase):
                 }),
                 patch.object(web_app.BLOFIN_AUTOPILOT_STOP_EVENT, "wait", side_effect=stop_after_second_cycle_sleep),
                 patch.object(web_app, "_blofin_demo_next_15m_scan_window", return_value=(
-                    900, "2026-11-17T16:30:03+00:00"
+                    900, next_cycle_at.isoformat()
                 )),
                 patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
@@ -1601,7 +1613,7 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_15M_CANDLE")
             self.assertEqual(
                 web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"],
-                "2026-11-17T16:30:03+00:00",
+                next_cycle_at.isoformat(),
             )
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])
