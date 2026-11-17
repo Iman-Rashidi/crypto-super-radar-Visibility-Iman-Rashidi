@@ -15,7 +15,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 import requests
 
@@ -26,7 +26,7 @@ DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v3-directional"
+PROMPT_VERSION = "free-second-opinion-v4-pattern-only-challenge1"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
@@ -119,6 +119,406 @@ def _public_evidence(value: Any, depth: int = 0) -> Any:
     return result
 
 
+
+
+def _challenge1_result_record(result: Any) -> dict[str, Any]:
+    """Normalize Challenge 1 strategy output without importing general Radar gates."""
+    record: dict[str, Any] = {}
+    if isinstance(result, Mapping):
+        record = dict(result)
+    else:
+        to_record = getattr(result, "to_record", None)
+        if callable(to_record):
+            try:
+                candidate = to_record()
+                if isinstance(candidate, Mapping):
+                    record = dict(candidate)
+            except Exception:
+                record = {}
+    metrics = getattr(result, "metrics", {})
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    evidence = record.get("challenge1_evidence")
+    if not isinstance(evidence, Mapping):
+        evidence = metrics.get("challenge1_evidence")
+    if isinstance(evidence, Mapping):
+        record["challenge1_evidence"] = dict(evidence)
+    if not record.get("signal"):
+        signal = getattr(result, "signal", "")
+        record["signal"] = str(getattr(signal, "value", signal) or "").upper()
+    record.setdefault("execution_profile", str(metrics.get("execution_profile") or "").upper())
+    record.setdefault("entry_price_usd", getattr(result, "entry_price", None))
+    record.setdefault("stop_loss_usd", getattr(result, "stop_loss", None))
+    record.setdefault("take_profit_usd", getattr(result, "take_profit", None))
+    return record
+
+
+def _is_challenge1_result(result: Any) -> bool:
+    metrics = getattr(result, "metrics", {})
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    record = _challenge1_result_record(result)
+    profile = str(record.get("execution_profile") or metrics.get("execution_profile") or "").upper()
+    return profile == "CHALLENGE_1"
+
+
+def _challenge1_native_review(result: Any) -> dict[str, Any]:
+    """Validate only closed-candle patterns plus an independent protective trade plan."""
+    from .challenge1_strategy import challenge1_entry_evidence_ready
+
+    record = _challenge1_result_record(result)
+    signal = str(record.get("signal") or "").upper()
+    asset = str(record.get("asset") or getattr(result, "asset", "") or "")
+    evidence = record.get("challenge1_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    checks: list[dict[str, str]] = []
+
+    def add_check(label: str, status: str, detail: str) -> None:
+        checks.append({"check": label, "status": status, "detail": detail})
+
+    valid_evidence, evidence_reason = challenge1_entry_evidence_ready(record)
+    add_check(
+        "Closed-candle and selected-pattern evidence",
+        "PASS" if valid_evidence else "UNKNOWN",
+        evidence_reason,
+    )
+
+    entry = _safe_float(record.get("entry_price_usd", record.get("entry_price")))
+    stop = _safe_float(record.get("stop_loss_usd", record.get("stop_loss")))
+    target = _safe_float(record.get("take_profit_usd", record.get("take_profit")))
+    if entry is None or stop is None or target is None or min(entry, stop, target) <= 0:
+        add_check("Entry, stop-loss and take-profit geometry", "UNKNOWN",
+                  "Finite positive entry, stop-loss and take-profit prices are required.")
+        reward_risk = None
+    elif signal == "LONG" and 0 < stop < entry < target:
+        reward_risk = (target - entry) / (entry - stop)
+        add_check("Entry, stop-loss and take-profit geometry", "PASS",
+                  "LONG price geometry is valid: stop-loss < entry < take-profit.")
+    elif signal == "SHORT" and 0 < target < entry < stop:
+        reward_risk = (entry - target) / (stop - entry)
+        add_check("Entry, stop-loss and take-profit geometry", "PASS",
+                  "SHORT price geometry is valid: take-profit < entry < stop-loss.")
+    else:
+        reward_risk = None
+        add_check("Entry, stop-loss and take-profit geometry", "FAIL",
+                  "The protective price order does not match the selected trade direction.")
+
+    if reward_risk is None:
+        add_check("Minimum reward-to-risk", "UNKNOWN",
+                  "Reward-to-risk cannot be calculated from the supplied protective prices.")
+    elif reward_risk >= 1.8:
+        add_check("Minimum reward-to-risk", "PASS",
+                  f"Planned reward-to-risk is {reward_risk:.2f}, meeting the 1.80 minimum.")
+    else:
+        add_check("Minimum reward-to-risk", "FAIL",
+                  f"Planned reward-to-risk {reward_risk:.2f} is below the 1.80 minimum.")
+
+    statuses = [item["status"] for item in checks]
+    status = "VETO" if "FAIL" in statuses else "UNKNOWN" if "UNKNOWN" in statuses else "APPROVED"
+    blockers = [item["detail"] for item in checks if item["status"] != "PASS"]
+    chosen = evidence.get("chosen_pattern")
+    chosen = chosen if isinstance(chosen, Mapping) else {}
+    return {
+        "version": "challenge1-closed-candle-native-review-v1",
+        "mode": "CLOSED_CANDLE_PATTERN_AND_RISK_ONLY",
+        "execution_profile": "CHALLENGE_1",
+        "review_basis": "CLOSED_OHLCV_CANDLES_AND_SELECTED_PATTERN",
+        "required_gate_ids": [],
+        "general_radar_gates_applied": False,
+        "status": status,
+        "status_fa": (
+            "شواهد کندل بسته و برنامه حفاظتی ورود معتبر است."
+            if status == "APPROVED" else
+            "بررسی اختصاصی کندل/الگو یا برنامه حفاظتی کامل نیست؛ ورود متوقف شد."
+        ),
+        "paper_entry_eligible": status == "APPROVED",
+        "proposed_signal": signal or "UNKNOWN",
+        "selected_pattern": str(chosen.get("name_en") or ""),
+        "risk_manager": {"status": status, "checks": checks, "blockers": blockers},
+        "reason_fa": "؛ ".join(blockers) if blockers else "الگوی کندلی و برنامه حدضرر/هدف تأیید شدند.",
+        "safety": {
+            "general_twelve_gate_evaluation": False,
+            "other_radar_profiles_unchanged": True,
+            "llm_calls": 0,
+            "orders_submitted": False,
+        },
+    }
+
+
+def _native_review_for_result(result: Any) -> dict[str, Any]:
+    """Use the isolated pattern review only for BloFin Demo Challenge 1."""
+    if _is_challenge1_result(result):
+        return _challenge1_native_review(result)
+    return build_native_agent_council_review(result)
+
+
+def _clean_pattern_item(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, Mapping):
+        return None
+    name = str(item.get("name_en") or "").strip()[:100]
+    direction = str(item.get("direction") or "").strip().upper()
+    category = str(item.get("category") or "").strip().upper()
+    timeframe = str(item.get("timeframe") or "").strip()[:8]
+    if not name or direction not in {"BULLISH", "BEARISH"}:
+        return None
+    row: dict[str, Any] = {"name_en": name, "direction": direction}
+    if category in {"CANDLESTICK", "CHART_STRUCTURE"}:
+        row["category"] = category
+    if timeframe in {"15m", "1H", "1h"}:
+        row["timeframe"] = timeframe
+    score = _safe_float(item.get("score"))
+    if score is not None:
+        row["score"] = score
+    return row
+
+
+def _clean_ohlcv_rows(value: Any, *, limit: int = 30) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[-max(3, min(int(limit), 60)):]:
+        if not isinstance(item, Mapping):
+            continue
+        timestamp = str(item.get("open_time_utc") or "").strip()[:64]
+        values = {key: _safe_float(item.get(key)) for key in ("open", "high", "low", "close", "volume")}
+        if not timestamp or any(number is None for number in values.values()):
+            continue
+        if min(values["open"], values["high"], values["low"], values["close"]) <= 0 or values["volume"] < 0:
+            continue
+        rows.append({"open_time_utc": timestamp, **values})
+    return rows
+
+
+def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, Any]) -> dict[str, Any]:
+    record = _challenge1_result_record(result)
+    raw_evidence = record.get("challenge1_evidence")
+    raw_evidence = raw_evidence if isinstance(raw_evidence, Mapping) else {}
+    chosen = _clean_pattern_item(raw_evidence.get("chosen_pattern"))
+    detected = [
+        clean for clean in (
+            _clean_pattern_item(item)
+            for item in (raw_evidence.get("detected_patterns") or [])
+        ) if clean
+    ][:30]
+    context = [
+        clean for clean in (
+            _clean_pattern_item(item)
+            for item in (raw_evidence.get("context_patterns") or [])
+        ) if clean
+    ][:30]
+    confirmation_raw = raw_evidence.get("confirmation_candle")
+    confirmation_rows = _clean_ohlcv_rows([confirmation_raw] if isinstance(confirmation_raw, Mapping) else [], limit=1)
+    volume_raw = raw_evidence.get("volume_confirmation")
+    volume_raw = volume_raw if isinstance(volume_raw, Mapping) else {}
+    volume = {
+        "confirmed": volume_raw.get("confirmed") is True,
+        "volume_ratio": _safe_float(volume_raw.get("volume_ratio")),
+        "close_location": _safe_float(volume_raw.get("close_location")),
+        "minimum_volume_ratio": _safe_float(volume_raw.get("minimum_volume_ratio")),
+    }
+    structure_raw = raw_evidence.get("chart_structure")
+    structure_raw = structure_raw if isinstance(structure_raw, Mapping) else {}
+    structure: dict[str, Any] = {}
+    for key in ("status", "breakout", "breakout_confirmation", "pattern"):
+        value = structure_raw.get(key)
+        if isinstance(value, str) and len(value) <= 120:
+            structure[key] = value
+    for key in ("range_high", "range_low", "support", "resistance", "upper_boundary", "lower_boundary"):
+        value = _safe_float(structure_raw.get(key))
+        if value is not None:
+            structure[key] = value
+    entry = _safe_float(record.get("entry_price_usd", record.get("entry_price")))
+    stop = _safe_float(record.get("stop_loss_usd", record.get("stop_loss")))
+    target = _safe_float(record.get("take_profit_usd", record.get("take_profit")))
+    reward_risk = None
+    side = str(record.get("signal") or "").upper()
+    if entry and stop and target:
+        if side == "LONG" and stop < entry < target:
+            reward_risk = (target - entry) / (entry - stop)
+        elif side == "SHORT" and target < entry < stop:
+            reward_risk = (entry - target) / (stop - entry)
+    asset_name = str(getattr(asset, "raw", asset) or getattr(result, "asset", "unknown"))
+    return {
+        "asset": asset_name[:40],
+        "market_type": "perpetual",
+        "expected_side": side,
+        "execution_profile": "CHALLENGE_1",
+        "review_mode": "CANDLE_PATTERN_ONLY",
+        "pattern_evidence": {
+            "completed_candles_only": raw_evidence.get("completed_candles_only") is True,
+            "setup_timeframe": str(raw_evidence.get("setup_timeframe") or "15m")[:8],
+            "context_timeframe": str(raw_evidence.get("context_timeframe") or "1H")[:8],
+            "decision_engine_version": str(raw_evidence.get("decision_engine_version") or "")[:80],
+            "chosen_pattern": chosen,
+            "detected_patterns": detected,
+            "context_patterns_1h": context,
+            "confirmation_candle": confirmation_rows[0] if confirmation_rows else None,
+            "candles_15m": _clean_ohlcv_rows(raw_evidence.get("candles_15m")),
+            "candles_1h": _clean_ohlcv_rows(raw_evidence.get("candles_1h")),
+            "chart_structure": structure,
+            "volume_confirmation": volume,
+        },
+        "risk_plan": {
+            "entry": entry,
+            "stop_loss": stop,
+            "take_profit": target,
+            "reward_risk": _safe_float(reward_risk),
+            "minimum_reward_risk": 1.8,
+        },
+        "policy": {
+            "general_radar_protocols": "NOT_APPLIED_TO_CHALLENGE_1",
+            "technical_decision_evidence": "CLOSED_OHLCV_CANDLES_AND_PATTERNS_ONLY",
+            "account_risk_limits_remain_active": True,
+        },
+    }
+
+
+def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
+    expected_side = str(evidence.get("expected_side") or "NO_TRADE").upper()
+    pattern = (evidence.get("pattern_evidence") or {}).get("chosen_pattern") or {}
+    chosen_name = str(pattern.get("name_en") or "UNKNOWN")
+    system = (
+        "You are an independent candle-and-chart-pattern supervisor for a BloFin Demo trading robot. "
+        "This is the CHALLENGE_1 pattern-only path. Do not execute, request, count, score, or evaluate "
+        "the general Radar protocols or twelve-gate framework. Do not use news, sentiment, whale, on-chain, "
+        "RSI, EMA, funding, open-interest, or any other general Radar filter. "
+        "Base technical judgment only on the supplied completed 15m and 1H OHLCV candles, the selected "
+        "candle/chart pattern, detected patterns, 1H context patterns, and volume confirmation. "
+        "Never use an unclosed/future candle. Confirm that the selected pattern is visible in the supplied "
+        "15m pattern list, its direction matches the expected side, volume confirmation is true, and 1H "
+        "context does not contradict it. If a fact is missing or cannot be verified, abstain. "
+        "The risk_plan is permitted only for protective validation: check positive entry/stop/target, "
+        "correct side geometry and reward_risk >= 1.8. Never relax account risk limits. "
+        "Expected side is " + expected_side + ". The selected pattern name must match exactly: " + chosen_name + ". "
+        "Return exactly one JSON object, no markdown, using this schema: "
+        "{"
+        "\\"pattern_analyst\\":{\\"verdict\\":\\"SUPPORT|OPPOSE|UNCERTAIN\\",\\"pattern_name\\":\\"exact selected name or NONE\\",\\"reason_fa\\":\\"...\\"},"
+        "\\"price_action_analyst\\":{\\"verdict\\":\\"SUPPORT|OPPOSE|UNCERTAIN\\",\\"reason_fa\\":\\"...\\"},"
+        "\\"timeframe_analyst\\":{\\"verdict\\":\\"SUPPORT|OPPOSE|UNCERTAIN\\",\\"reason_fa\\":\\"...\\"},"
+        "\\"trader\\":{\\"proposal\\":\\"LONG|SHORT|NO_TRADE\\",\\"reason_fa\\":\\"...\\"},"
+        "\\"risk_manager\\":{\\"verdict\\":\\"APPROVE|REJECT|INSUFFICIENT_DATA\\",\\"reason_fa\\":\\"...\\"},"
+        "\\"portfolio_manager\\":{\\"verdict\\":\\"APPROVE|REJECT|INSUFFICIENT_DATA\\",\\"reason_fa\\":\\"...\\"},"
+        "\\"final_decision\\":\\"APPROVE|REJECT|INSUFFICIENT_DATA\\","
+        "\\"risk_flags\\":[\\"...\\"],\\"rationale_fa\\":\\"...\\""
+        "}. "
+        "APPROVE is permitted only when all three technical analysts SUPPORT, pattern_analyst.pattern_name "
+        "matches the selected pattern exactly, trader proposal matches expected side, both risk and "
+        "portfolio managers APPROVE, and risk_flags is empty. Keep all explanations concise and in Persian."
+    )
+    user = "Review only this sanitized Challenge 1 evidence:\n" + json.dumps(
+        evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _validated_pattern_review(
+    document: dict[str, Any], model: str, asset: str, *, evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_side = str(evidence.get("expected_side") or "").upper()
+    pattern_evidence = evidence.get("pattern_evidence")
+    pattern_evidence = pattern_evidence if isinstance(pattern_evidence, Mapping) else {}
+    chosen = pattern_evidence.get("chosen_pattern")
+    chosen = chosen if isinstance(chosen, Mapping) else {}
+    chosen_name = str(chosen.get("name_en") or "")
+    required = {
+        "pattern_analyst", "price_action_analyst", "timeframe_analyst",
+        "trader", "risk_manager", "portfolio_manager",
+    }
+    if expected_side not in {"LONG", "SHORT"} or not chosen_name:
+        raise ValueError("Challenge 1 review input is incomplete")
+    if not isinstance(document, dict) or not required.issubset(document):
+        raise ValueError("Challenge 1 specialist reviews are missing")
+    risk_flags = document.get("risk_flags")
+    if not isinstance(risk_flags, list) or len(risk_flags) > 8 or any(not isinstance(v, str) for v in risk_flags):
+        raise ValueError("Challenge 1 risk flags have an invalid format")
+    risk_flags = [v.strip()[:180] for v in risk_flags if v.strip()]
+    cleaned: dict[str, dict[str, str]] = {}
+    for key in ("pattern_analyst", "price_action_analyst", "timeframe_analyst"):
+        view = document.get(key)
+        if not isinstance(view, Mapping):
+            raise ValueError("Challenge 1 technical analyst response is invalid")
+        verdict = str(view.get("verdict") or "").upper()
+        reason = str(view.get("reason_fa") or "").strip()
+        if verdict not in {"SUPPORT", "OPPOSE", "UNCERTAIN"} or not reason:
+            raise ValueError("Challenge 1 technical analyst verdict is invalid")
+        cleaned[key] = {"verdict": verdict, "reason_fa": reason[:360]}
+        if key == "pattern_analyst":
+            pattern_name = str(view.get("pattern_name") or "").strip()
+            cleaned[key]["pattern_name"] = pattern_name[:120]
+    trader = document.get("trader")
+    risk = document.get("risk_manager")
+    portfolio = document.get("portfolio_manager")
+    if not all(isinstance(v, Mapping) for v in (trader, risk, portfolio)):
+        raise ValueError("Challenge 1 trading/risk specialist response is invalid")
+    proposal = str(trader.get("proposal") or "").upper()
+    risk_verdict = str(risk.get("verdict") or "").upper()
+    portfolio_verdict = str(portfolio.get("verdict") or "").upper()
+    for verdict, allowed in (
+        (proposal, {"LONG", "SHORT", "NO_TRADE"}),
+        (risk_verdict, {"APPROVE", "REJECT", "INSUFFICIENT_DATA"}),
+        (portfolio_verdict, {"APPROVE", "REJECT", "INSUFFICIENT_DATA"}),
+    ):
+        if verdict not in allowed:
+            raise ValueError("Challenge 1 trading/risk verdict is invalid")
+    for key, item in (("trader", trader), ("risk_manager", risk), ("portfolio_manager", portfolio)):
+        reason = str(item.get("reason_fa") or "").strip()
+        if not reason:
+            raise ValueError("Challenge 1 specialist explanation is missing")
+        cleaned[key] = {
+            "view": proposal if key == "trader" else (risk_verdict if key == "risk_manager" else portfolio_verdict),
+            "reason_fa": reason[:360],
+        }
+    pattern_matches = cleaned["pattern_analyst"]["pattern_name"] == chosen_name
+    final_decision = str(document.get("final_decision") or "INSUFFICIENT_DATA").upper()
+    if final_decision not in {"APPROVE", "REJECT", "INSUFFICIENT_DATA"}:
+        raise ValueError("Challenge 1 final decision is invalid")
+    approved = (
+        final_decision == "APPROVE"
+        and pattern_matches
+        and all(cleaned[key]["verdict"] == "SUPPORT" for key in (
+            "pattern_analyst", "price_action_analyst", "timeframe_analyst",
+        ))
+        and proposal == expected_side
+        and risk_verdict == "APPROVE"
+        and portfolio_verdict == "APPROVE"
+        and not risk_flags
+    )
+    explicit_veto = (
+        final_decision == "REJECT" or not pattern_matches
+        or any(cleaned[key]["verdict"] == "OPPOSE" for key in (
+            "pattern_analyst", "price_action_analyst", "timeframe_analyst",
+        ))
+        or proposal not in {expected_side}
+        or risk_verdict == "REJECT" or portfolio_verdict == "REJECT" or bool(risk_flags)
+    )
+    status = "APPROVED" if approved else "VETO" if explicit_veto else "UNKNOWN"
+    for key, item in (("risk_manager", risk), ("portfolio_manager", portfolio)):
+        cleaned[key]["view"] = str(item.get("verdict") or "").upper()
+    return {
+        "provider": "OpenRouter",
+        "model": model,
+        "asset": asset,
+        "market_type": "perpetual",
+        "expected_side": expected_side,
+        "execution_profile": "CHALLENGE_1",
+        "review_mode": "CANDLE_PATTERN_ONLY",
+        "status": status,
+        "status_fa": "ناظر الگوی کندلی ورود Demo را تأیید کرد." if approved else
+            "ناظر الگوی کندلی ورود را رد یا نامشخص اعلام کرد.",
+        "final_rating": "Buy" if expected_side == "LONG" and approved else
+            "Sell" if expected_side == "SHORT" and approved else "REVIEW",
+        "specialist_views": cleaned,
+        "risk_flags": risk_flags,
+        "rationale_fa": str(document.get("rationale_fa") or "")[:1_000],
+        "risk_manager_verdict": risk_verdict,
+        "portfolio_manager_verdict": portfolio_verdict,
+        "trader_proposal": proposal,
+        "pattern_name": chosen_name,
+        "pattern_name_verified": pattern_matches,
+        "paper_entry_eligible": approved,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "cost_usd": 0.0,
+    }
+
+
 def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     asset_name = getattr(asset, "raw", asset)
     market_type = (
@@ -130,6 +530,8 @@ def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     ).upper().replace(" ", "_")
     metrics = getattr(result, "metrics", {})
     metrics = metrics if isinstance(metrics, dict) else {}
+    if str(metrics.get("execution_profile") or "").upper() == "CHALLENGE_1":
+        return _build_pattern_review_input(result, asset, metrics)
     gates = []
     for gate in getattr(result, "gates", []) or []:
         evidence = _public_evidence(getattr(gate, "evidence", {}) or {})
@@ -168,6 +570,8 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     perpetual = evidence.get("market_type") == "perpetual"
     expected_side = str(evidence.get("expected_side") or "LONG").upper()
     execution_profile = str(evidence.get("execution_profile") or "STRICT").upper()
+    if execution_profile == "CHALLENGE_1" and evidence.get("review_mode") == "CANDLE_PATTERN_ONLY":
+        return _pattern_prompt_messages(evidence)
     required_gate_ids = {
         "CHALLENGE_1": [],
         "EASY": [1, 2, 3, 4, 5, 6, 9],
@@ -408,6 +812,8 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
 
 
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
+    if document.get("review_mode") == "CANDLE_PATTERN_ONLY":
+        return _validated_pattern_review(document, model, asset, evidence=evidence or {})
     rating = str(document.get("final_rating") or "REVIEW").strip()
     if rating.casefold() not in ALLOWED_RATINGS:
         raise ValueError("Unknown final rating")
@@ -521,7 +927,7 @@ def run_free_ai_second_opinion(
                 "request_attempted": False, "skip_reason_code": "NO_DIRECTIONAL_SIGNAL",
                 "response_source": "NONE", "paper_entry_eligible": False,
                 "reason": "No directional signal to review."}
-    native_review = build_native_agent_council_review(result)
+    native_review = _native_review_for_result(result)
     if native_review.get("status") != "APPROVED":
         return {
             "provider": "OpenRouter",
@@ -670,8 +1076,12 @@ def run_free_ai_second_opinion(
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
-        review = _validated_review(
-            parsed, model, asset_name, expected_side=expected_side, market_type=market_type
+        review = (
+            _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
+            if evidence.get("review_mode") == "CANDLE_PATTERN_ONLY"
+            else _validated_review(
+                parsed, model, asset_name, expected_side=expected_side, market_type=market_type
+            )
         )
         usage = body.get("usage") if isinstance(body, dict) else None
         total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
@@ -808,7 +1218,7 @@ def run_independent_ai_supervisor(
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "prompt_version": PROMPT_VERSION + "-second-ai",
         }
-    native_review = build_native_agent_council_review(result)
+    native_review = _native_review_for_result(result)
     if native_review.get("status") != "APPROVED":
         return {
             "reviewer_id": "second_ai", "provider": provider, "model": model,
@@ -915,8 +1325,12 @@ def run_independent_ai_supervisor(
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "prompt_version": PROMPT_VERSION + "-second-ai",
             }
-        review = _validated_review(
-            parsed, model, asset_name, expected_side=expected_side, market_type=market_type,
+        review = (
+            _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
+            if evidence.get("review_mode") == "CANDLE_PATTERN_ONLY"
+            else _validated_review(
+                parsed, model, asset_name, expected_side=expected_side, market_type=market_type,
+            )
         )
         usage = body.get("usage") if isinstance(body, dict) else None
         tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
