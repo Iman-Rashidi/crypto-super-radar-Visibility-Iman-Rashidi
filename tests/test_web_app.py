@@ -1376,5 +1376,53 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("LIVE_MONITOR_INCOMPLETE", result["smoke_test_blockers"])
         self.assertIsNone(result["smoke_test_open_position_count"])
 
+    def test_blofin_smoke_manual_account_check_runs_read_only_when_test_is_disabled(self):
+        with (
+            patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "false"}),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={
+                "status": "BLOCKED", "message_fa": "مجوز Trade هنوز آماده نیست."
+            }),
+            patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                "status": "CONNECTED_READ_ONLY",
+                "data_completeness": "COMPLETE",
+                "read_errors": [],
+                "positions": [],
+                "open_orders": [],
+                "positions_for_instrument": [],
+                "open_orders_for_instrument": [],
+            }) as read_snapshot,
+        ):
+            result = web_app._blofin_demo_smoke_test_readiness(check_account_state=True)
+
+        read_snapshot.assert_called_once_with("BTC-USDT")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertFalse(result["smoke_test_enabled"])
+        self.assertTrue(result["read_only_account_check_performed"])
+        self.assertEqual(result["read_only_account_status"], "CONNECTED_READ_ONLY")
+        self.assertEqual(result["read_only_account_data_completeness"], "COMPLETE")
+        self.assertEqual(result["smoke_test_open_position_count"], 0)
+        self.assertEqual(result["smoke_test_open_order_count"], 0)
+        self.assertFalse(result["read_only_account_orders_submitted"])
+
+    def test_blofin_smoke_readiness_checks_btc_usdt_only(self):
+        with (
+            patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}),
+            patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                "status": "CONNECTED_READ_ONLY",
+                "data_completeness": "COMPLETE",
+                "read_errors": [],
+                "positions": [{"instId": "ETH-USDT", "positions": "0.5"}],
+                "open_orders": [{"instId": "ETH-USDT", "orderId": "other-symbol-order"}],
+                "positions_for_instrument": [],
+                "open_orders_for_instrument": [],
+            }),
+        ):
+            result = web_app._blofin_demo_smoke_test_readiness()
+
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["smoke_test_open_position_count"], 0)
+        self.assertEqual(result["smoke_test_open_order_count"], 0)
+
 if __name__ == "__main__":
     unittest.main()
