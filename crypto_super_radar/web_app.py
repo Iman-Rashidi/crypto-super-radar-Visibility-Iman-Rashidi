@@ -68,6 +68,8 @@ BLOFIN_STATUS_CACHE = {"expires_at": 0.0, "payload": None}
 BLOFIN_INSTRUMENT_CACHE = {"expires_at": 0.0, "payload": None}
 BLOFIN_STATUS_LOCK = threading.Lock()
 BLOFIN_EXECUTION_GUARD = threading.Lock()
+# Serializes the final Demo order-write with emergency stop requests.
+BLOFIN_ORDER_SUBMISSION_LOCK = threading.Lock()
 BLOFIN_EXECUTION_JOBS: dict[str, dict] = {}
 BLOFIN_AUTOPILOT_LOCK = threading.Lock()
 BLOFIN_AUTOPILOT_START_LOCK = threading.Lock()
@@ -3815,6 +3817,7 @@ def _demo_ai_review_approved(review: Any) -> bool:
 
 def _run_blofin_demo_execution_job(
     job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "CHALLENGE_1",
+    *, autopilot_cycle: bool = False,
 ) -> None:
     """Analyze a selected BloFin linear USDT perpetual with the selected robot profile."""
     store = None
@@ -4343,6 +4346,16 @@ def _run_blofin_demo_execution_job(
         execution = trader.execute(
             record, inst_id=instrument_id, leverage=1,
             allow_demo_orders=True, minimum_size_only=True,
+            cancel_check=(
+                lambda: bool(
+                    autopilot_cycle
+                    and (
+                        BLOFIN_AUTOPILOT_STOP_EVENT.is_set()
+                        or not _blofin_demo_autopilot_enabled()
+                    )
+                )
+            ),
+            submission_lock=BLOFIN_ORDER_SUBMISSION_LOCK,
         )
         _set_blofin_execution_job(
             job_id, "running", stage="ORDER_SUBMITTED",
@@ -5381,6 +5394,12 @@ class Handler(BaseHTTPRequestHandler):
           <p class="muted" id="blofin-demo-account-status" aria-live="polite">اطلاعات خصوصی حساب تا زمان تأیید توکن نمایش داده نمی‌شود.</p>
           <div id="blofin-demo-account-view" style="overflow-x:auto"></div>
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
+          <section class="metric" id="blofin-emergency-control" style="margin-top:12px;border:1px solid #b42318">
+            <h3>کنترل اضطراری ربات ترید</h3>
+            <p class="muted">این فرمان فقط ورودهای خودکار جدید را متوقف می‌کند. پوزیشن باز را نمی‌بندد و TP/SL صرافی را تغییر نمی‌دهد. وضعیت توقف پس از تأیید سرور نمایش داده می‌شود.</p>
+            <button id="blofin-emergency-stop" type="button" disabled style="background:#b42318;color:#fff">توقف اضطراری ورودهای جدید</button>
+            <p id="blofin-emergency-status" class="muted" aria-live="polite">برای فعال‌شدن کنترل، وضعیت AutoPilot از سرور خوانده می‌شود.</p>
+          </section>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
             <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف مادام‌العمر و روزانه وجود ندارد، اما هر کندل کامل ۱۵ دقیقه فقط یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
@@ -5499,6 +5518,8 @@ class Handler(BaseHTTPRequestHandler):
             const autopilotControls=document.getElementById('blofin-autopilot-controls');
             const autopilotStatus=document.getElementById('blofin-autopilot-status');
             const autopilotToggle=document.getElementById('blofin-autopilot-toggle');
+            const emergencyStopButton=document.getElementById('blofin-emergency-stop');
+            const emergencyStatus=document.getElementById('blofin-emergency-status');
             const manualPanel=document.getElementById('blofin-manual-trading-panel');
             const robotCycleControls=document.getElementById('blofin-robot-cycle-controls');
             const manualOrderForm=document.getElementById('blofin-manual-order-form');
@@ -5528,7 +5549,7 @@ class Handler(BaseHTTPRequestHandler):
             let autopilotIsStopping=false;
             let selectedExecutionMode='manual';
             let manualActionBusy=false;
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!emergencyStopButton||!emergencyStatus||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -5939,6 +5960,15 @@ let blofinInstrumentRecords=[];
                 autopilotToggle.textContent=autopilotIsEnabled
                   ?'توقف AutoPilot و بازگشت به حالت دستی'
                   :'فعال‌سازی AutoPilot در BloFin Demo';
+                emergencyStopButton.disabled=!(autopilotIsEnabled||autopilotIsStopping);
+                emergencyStopButton.textContent=autopilotIsStopping
+                  ?'درخواست توقف ثبت شده است'
+                  :'توقف اضطراری ورودهای جدید';
+                emergencyStatus.textContent=autopilotIsStopping
+                  ?'سرور در حال تکمیل مرحله فعلی است؛ سفارش ورود تازه باید پیش از ارسال مسدود شود.'
+                  :(autopilotIsEnabled
+                    ?'AutoPilot فعال است؛ توقف اضطراری آماده اجراست.'
+                    :'AutoPilot متوقف است؛ هیچ چرخه خودکاری برای ورود جدید فعال نیست.');
                 applyExecutionMode(autopilotIsEnabled?'autopilot':'manual');
                 if(autopilotIsStopping){
                   manualOpenButton.disabled=true;
@@ -5992,6 +6022,18 @@ let blofinInstrumentRecords=[];
             }
             autopilotToggle.addEventListener('click',function(){
               setAutoPilot(!autopilotIsEnabled);
+            });
+            emergencyStopButton.addEventListener('click',async function(){
+              if(!(autopilotIsEnabled||autopilotIsStopping))return;
+              emergencyStopButton.disabled=true;
+              emergencyStatus.textContent='درخواست توقف اضطراری در حال ارسال به سرور است...';
+              const stopped=await setAutoPilot(false);
+              if(!stopped){
+                emergencyStopButton.disabled=false;
+                emergencyStatus.textContent='سرور توقف را تأیید نکرد؛ وضعیت را دوباره بررسی کن.';
+              }else{
+                await refreshAutoPilotStatus();
+              }
             });
             modeManualButton.addEventListener('click',async function(){
               if(autopilotIsEnabled){
@@ -8000,16 +8042,20 @@ let blofinInstrumentRecords=[];
                                 "message_fa": readiness.get("message_fa"),
                                 "readiness": readiness,
                             }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-                        BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = True
-                        BLOFIN_AUTOPILOT_STOP_EVENT.clear()
+                        with BLOFIN_ORDER_SUBMISSION_LOCK:
+                            BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = True
+                            BLOFIN_AUTOPILOT_STOP_EVENT.clear()
                         _start_blofin_demo_autopilot()
                         return self._send(202, json.dumps({
                             "status": "STARTING",
                             "enabled": True,
                             "message_fa": "AutoPilot در BloFin Demo فعال شد؛ چرخه جاری یا بعدی طبق زمان‌بندی اجرا می‌شود.",
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-                    BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = False
-                    BLOFIN_AUTOPILOT_STOP_EVENT.set()
+                    # Wait for any exchange order POST already inside the critical
+                    # section, then latch stop before another POST can begin.
+                    with BLOFIN_ORDER_SUBMISSION_LOCK:
+                        BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = False
+                        BLOFIN_AUTOPILOT_STOP_EVENT.set()
                     stopping = BLOFIN_AUTOPILOT_LOCK.locked()
                     with LOCK:
                         BLOFIN_AUTOPILOT_STATE.update({
@@ -8682,7 +8728,9 @@ def _blofin_demo_autopilot_worker() -> None:
                     message_fa=f"چرخه خودکار Challenge 1 برای {instrument_id} آغاز شد.",
                     trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
                 )
-                _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
+                _run_blofin_demo_execution_job(
+                    job_id, instrument_id, execution_profile, autopilot_cycle=True,
+                )
                 with LOCK:
                     finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 summary = _blofin_autopilot_cycle_summary(finished_job)
