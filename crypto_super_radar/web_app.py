@@ -5191,6 +5191,29 @@ def _blofin_manual_close_position(
     }
 
 
+def _record_blofin_manual_request_failure(route: str, form: dict[str, list[str]], status: str, error_type: str) -> None:
+    """Record manual endpoint failures, including validation blocks before an order is reserved."""
+    instrument = str((form.get("instrument") or ["BLOFIN-DEMO"])[0] or "BLOFIN-DEMO").upper()
+    order_id = str((form.get("order_id") or [""])[0])
+    position_id = str((form.get("position_id") or [""])[0])
+    _queue_blofin_operator_event(
+        event_id=f"MANUAL_REQUEST:{uuid.uuid4().hex}:FAILED",
+        event_type="MANUAL_ACTION_FAILED",
+        status="UNKNOWN" if status == "UNKNOWN" else "FAILED",
+        symbol=instrument,
+        order_id=order_id,
+        position_id=position_id,
+        reason="Manual BloFin Demo endpoint did not complete successfully.",
+        details={
+            "route": route,
+            "manual_action_kind": route.rsplit("/", 1)[-1],
+            "http_outcome": status,
+            "error_type": error_type,
+            "retry_allowed": False,
+        },
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
@@ -8170,25 +8193,30 @@ let blofinInstrumentRecords=[];
                                 position_side_hint=form.get("position_side", [""])[0],
                             )
                     except BloFinDemoExecutionUnknown as exc:
+                        _record_blofin_manual_request_failure(route, form, "UNKNOWN", type(exc).__name__)
                         return self._send(409, json.dumps({
                             "status": "UNKNOWN",
                             "message_fa": "نتیجه درخواست به‌طور قطعی مشخص نیست؛ پیش از هر تلاش مجدد حساب Demo را تازه‌سازی کن. " + str(exc),
                             "retry_allowed": False,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoExecutionBlocked as exc:
+                        _record_blofin_manual_request_failure(route, form, "BLOCKED", type(exc).__name__)
                         return self._send(409, json.dumps({
                             "status": "BLOCKED", "message_fa": str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except (ValueError, InvalidOperation) as exc:
+                        _record_blofin_manual_request_failure(route, form, "INVALID_REQUEST", type(exc).__name__)
                         return self._send(400, json.dumps({
                             "status": "INVALID_REQUEST", "message_fa": "پارامترهای دستی معتبر نیستند: " + str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoError as exc:
+                        _record_blofin_manual_request_failure(route, form, "EXCHANGE_ERROR", type(exc).__name__)
                         return self._send(502, json.dumps({
                             "status": "EXCHANGE_ERROR", "message_fa": "BloFin Demo درخواست را کامل نکرد؛ وضعیت سفارش یا پوزیشن را دوباره بخوان.",
                             "error_type": type(exc).__name__,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except Exception as exc:
+                        _record_blofin_manual_request_failure(route, form, "FAILED", type(exc).__name__)
                         return self._send(500, json.dumps({
                             "status": "MANUAL_ACTION_FAILED",
                             "message_fa": "عملیات دستی با خطای کنترل‌شده متوقف شد؛ وضعیت حساب را دوباره بخوان.",
@@ -8723,10 +8751,14 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
         attempted = _blofin_job_notion_events(job_id, instrument_id, job)
         for event in attempted:
             queued += int(outbox.enqueue(event))
+        try:
+            backend = storage_backend()
+        except Exception:
+            backend = "UNKNOWN"
         print(json.dumps({
             "event": "CSR_NOTION_JOB_EVENTS_QUEUED", "job_id": job_id,
             "attempted": len(attempted), "queued": queued,
-            "duplicate": len(attempted)-queued,
+            "duplicate": len(attempted)-queued, "storage_backend": backend,
         }, sort_keys=True), flush=True)
         return {"status": "QUEUED", "queued": queued, "attempted": len(attempted)}
     except Exception as exc:
