@@ -3897,35 +3897,37 @@ def _run_blofin_demo_execution_job(
                     pass
         prior_budget = store.trade_budget_status()
         if prior_budget.get("unresolved_orders", 0) > 0:
-            latest = store.latest_order()
-            if not isinstance(latest, dict) or latest.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
-                pending_entry_block_reason = "یک سفارش یا پوزیشن قبلی هنوز به‌صورت قطعی تطبیق نشده است."
-            else:
-                _set_blofin_execution_job(
-                    job_id, "running", stage="READ_ONLY_ORDER_RECONCILIATION",
-                    message_fa="نتیجه سفارش قبلی فقط با درخواست READ بررسی می‌شود؛ تحلیل بازار مستقل ادامه دارد و سفارش جدید مجاز نیست.",
+            _set_blofin_execution_job(
+                job_id, "running", stage="READ_ONLY_ORDER_RECONCILIATION",
+                message_fa=(
+                    "تمام سفارش‌های unresolved به‌ترتیب قدیمی‌ترین، فقط با درخواست READ بررسی می‌شوند؛ "
+                    "هیچ سفارش تازه یا retry ارسال نمی‌شود."
+                ),
+            )
+            reconciler = BloFinDemoExecutor(
+                client=BloFinDemoTradeClient(timeout=10.0),
+                store=store,
+                policy=BloFinDemoRiskPolicy(max_leverage=1),
+                trading_enabled=False,
+            )
+            try:
+                reconciliation = reconciler.reconcile_unresolved_orders(limit=50)
+            except Exception as exc:
+                reconciliation = {
+                    "status": "UNRESOLVED",
+                    "reconciliation": "READ_ONLY",
+                    "error_type": type(exc).__name__,
+                    "orders_submitted": False,
+                }
+            refreshed_budget = store.trade_budget_status()
+            if (
+                reconciliation.get("status") != "RECONCILED"
+                or refreshed_budget.get("unresolved_orders", 0) > 0
+            ):
+                pending_entry_block_reason = (
+                    "حداقل یک سفارش یا پوزیشن قبلی هنوز به‌طور کامل و مستقل در BloFin Demo تطبیق نشده است؛ "
+                    "ورود جدید همچنان مسدود است."
                 )
-                reconciler = BloFinDemoExecutor(
-                    client=BloFinDemoTradeClient(timeout=10.0),
-                    store=store,
-                    policy=BloFinDemoRiskPolicy(max_leverage=1),
-                    trading_enabled=False,
-                )
-                try:
-                    reconciliation = reconciler.reconcile_unknown_order(
-                        inst_id=str(latest.get("instrument_id") or instrument_id),
-                        client_order_id=str(latest.get("client_order_id") or ""),
-                    )
-                except Exception as exc:
-                    reconciliation = {"status": "UNKNOWN", "error_type": type(exc).__name__}
-                refreshed_budget = store.trade_budget_status()
-                if (
-                    reconciliation.get("status") == "UNKNOWN"
-                    or refreshed_budget.get("unresolved_orders", 0) > 0
-                ):
-                    pending_entry_block_reason = (
-                        "نتیجه سفارش یا پوزیشن قبلی هنوز به‌طور کامل و مستقل در BloFin Demo تطبیق نشده است."
-                    )
 
         profile_rules = {
             "CHALLENGE_1": {"required": set(), "min_pass": 0, "min_score": 0.0},
