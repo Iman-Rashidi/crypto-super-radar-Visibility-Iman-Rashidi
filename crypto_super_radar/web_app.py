@@ -4062,8 +4062,8 @@ def _run_blofin_demo_execution_job(
                     trade_context={
                         "asset": asset.raw, "instrument_id": instrument_id,
                         "execution_profile": "CHALLENGE_1",
-                        "execution_timeframe": "15m",
-                        "trend_confirmation_timeframe": "1H",
+                        "execution_timeframe": "5m",
+                        "higher_timeframes_used": False,
                         "completed_candles_only": True,
                     },
                     result={
@@ -4127,8 +4127,11 @@ def _run_blofin_demo_execution_job(
             "analysis_time_utc": analysis_time_utc,
             "last_completed_candle_time_utc": last_candle_time,
             "last_candle_close": last_candle_close,
-            "execution_timeframe": "15m",
-            "trend_confirmation_timeframe": "1H",
+            **(
+                {"execution_timeframe": "5m", "higher_timeframes_used": False}
+                if execution_profile == "CHALLENGE_1"
+                else {"execution_timeframe": "15m", "trend_confirmation_timeframe": "1H"}
+            ),
         }
         pass_count = sum(
             1 for item in gates
@@ -4274,9 +4277,15 @@ def _run_blofin_demo_execution_job(
         }
         trade_context.update({
             "last_completed_candle_time_utc": signal_bar,
-            "mtf_confirmation": mtf_signal,
-            "execution_timeframe": "15m",
-            "trend_confirmation_timeframe": "1H",
+            **(
+                {"execution_timeframe": "5m", "higher_timeframes_used": False}
+                if execution_profile == "CHALLENGE_1"
+                else {
+                    "mtf_confirmation": mtf_signal,
+                    "execution_timeframe": "15m",
+                    "trend_confirmation_timeframe": "1H",
+                }
+            ),
         })
         gate_summary.update({
             "entry_reference_price": mtf_signal["entry_price"],
@@ -4404,36 +4413,16 @@ def _run_blofin_demo_execution_job(
                 "VETO" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
                 "UNKNOWN"
             )
-            if not (primary_approved and second_approved):
-                if consensus_status == "DISAGREEMENT":
-                    reason_fa = "دو ناظر مستقل دربارهٔ همان شواهد کندلی هم‌نظر نیستند؛ ورود جدید مسدود شد."
-                elif "NOT_CONFIGURED" in {primary_status, second_status}:
-                    reason_fa = "هر دو ناظر مستقل با کلید، مدل و ارائه‌دهنده جداگانه آماده نیستند؛ ورود جدید مسدود شد."
-                else:
-                    reason_fa = "هر دو ناظر مستقل تأیید زنده و معتبر صادر نکردند؛ ورود جدید مسدود شد."
-                _set_blofin_execution_job(
-                    job_id, "completed", stage="AI_BLOCKED",
-                    message_fa=reason_fa,
-                    ai_review=ai_review,
-                    ai_reviews=ai_reviews,
-                    ai_consensus=ai_consensus,
-                    result={
-                        "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
-                        **gate_summary,
-                        "challenge1_evidence": challenge_record.get("challenge1_evidence", {}),
-                        "ai_status": ai_status,
-                        "ai_reviews": ai_reviews,
-                        "ai_consensus": ai_consensus,
-                        "elliott_wave": wave_report, "trade_context": trade_context,
-                        "reason_fa": reason_fa,
-                        "orders_submitted": False, "trade_executed": False,
-                    },
-                )
-                return
-            ai_review["execution_role"] = "ENTRY_REVIEW"
-            second_ai_review["execution_role"] = "ENTRY_REVIEW"
-            ai_review["entry_gate_enforced"] = True
-            second_ai_review["entry_gate_enforced"] = True
+            # The two supervisors are independent audit/reporting services only.
+            # Their missing credentials, latency, disagreement, or veto must never
+            # delay or block a Challenge 1 entry: signal eligibility is determined
+            # solely by the closed 5m candle/pattern strategy and Demo risk controls.
+            ai_review["execution_role"] = "REPORT_ONLY"
+            second_ai_review["execution_role"] = "REPORT_ONLY"
+            ai_review["entry_gate_enforced"] = False
+            second_ai_review["entry_gate_enforced"] = False
+            ai_consensus["decision"] = "OBSERVE_ONLY"
+            ai_consensus["entry_gate_enforced"] = False
         else:
             raise BloFinDemoExecutionBlocked("Only the Challenge 1 execution profile is supported.")
 
