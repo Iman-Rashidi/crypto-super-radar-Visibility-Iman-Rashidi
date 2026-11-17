@@ -926,12 +926,21 @@ def run_free_ai_second_opinion(
                 "reason": "No directional signal to review."}
     native_review = _native_review_for_result(result)
     if native_review.get("status") != "APPROVED":
+        pattern_mode = native_review.get("execution_profile") == "CHALLENGE_1"
         return {
             "provider": "OpenRouter",
             "model": _model(),
             "status": "VETO" if native_review.get("status") == "VETO" else "UNKNOWN",
-            "status_fa": "شورای تخصصی بومی رادار تأیید کامل نداده است؛ درخواست AI برای ورود اجرا نشد.",
-            "reason": "Native evidence council did not approve all mandatory checks.",
+            "status_fa": (
+                "شواهد کندل‌های بسته‌شده، الگوی منتخب یا برنامه حد ضرر/هدف کامل نیست؛ درخواست AI اجرا نشد."
+                if pattern_mode else
+                "شورای تخصصی بومی رادار تأیید کامل نداده است؛ درخواست AI برای ورود اجرا نشد."
+            ),
+            "reason": (
+                "Challenge 1 closed-candle pattern evidence or protective trade plan was not approved."
+                if pattern_mode else
+                "Native evidence council did not approve all mandatory checks."
+            ),
             "request_attempted": False,
             "skip_reason_code": "NATIVE_COUNCIL_NOT_APPROVED",
             "response_source": "NONE",
@@ -1217,11 +1226,20 @@ def run_independent_ai_supervisor(
         }
     native_review = _native_review_for_result(result)
     if native_review.get("status") != "APPROVED":
+        pattern_mode = native_review.get("execution_profile") == "CHALLENGE_1"
         return {
             "reviewer_id": "second_ai", "provider": provider, "model": model,
             "status": "NOT_CALLED",
-            "status_fa": "گیت‌های شواهد بومی کامل نیستند؛ برای جلوگیری از تأیید بی‌پایه، ناظر دوم فراخوانی نشد.",
-            "reason": "Native evidence council did not approve all mandatory checks.",
+            "status_fa": (
+                "شواهد کندل بسته‌شده، الگوی منتخب یا برنامه حد ضرر/هدف تأیید نشد؛ ناظر دوم فراخوانی نشد."
+                if pattern_mode else
+                "گیت‌های شواهد بومی کامل نیستند؛ برای جلوگیری از تأیید بی‌پایه، ناظر دوم فراخوانی نشد."
+            ),
+            "reason": (
+                "Challenge 1 closed-candle pattern evidence or protective trade plan was not approved."
+                if pattern_mode else
+                "Native evidence council did not approve all mandatory checks."
+            ),
             "native_council": native_review,
             "request_attempted": False,
             "skip_reason_code": "NATIVE_COUNCIL_NOT_APPROVED",
