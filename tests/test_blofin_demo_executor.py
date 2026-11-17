@@ -898,6 +898,36 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_challenge1_ignores_even_a_configured_daily_order_count_limit(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        policy = BloFinDemoRiskPolicy(max_leverage=1, max_orders_per_utc_day=1)
+        executor = BloFinDemoExecutor(
+            client=client, store=store, policy=policy, trading_enabled=True,
+        )
+        try:
+            first = executor.execute(
+                signal_record(bar_offset_minutes=20),
+                inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
+            )
+            second = executor.execute(
+                signal_record(bar_offset_minutes=25),
+                inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
+            )
+            self.assertEqual(first["status"], "ACCEPTED")
+            self.assertEqual(second["status"], "ACCEPTED")
+            budget = store.trade_budget_status()
+            self.assertEqual(budget["orders_today"], 2)
+            self.assertIsNone(budget["max_orders_per_utc_day"])
+            self.assertEqual(store.pending_learning_outcome_count(), 2)
+        finally:
+            store.close()
+
     def test_executor_allows_unlimited_orders_without_daily_quota_or_cooldown(self):
         with patch.dict(os.environ, {
             "TURSO_DATABASE_URL": "",

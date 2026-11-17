@@ -1403,10 +1403,16 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("Only the pinned BloFin Demo host is permitted.")
         if self.store.backend != "TURSO_CLOUD_SQLITE":
             raise BloFinDemoExecutionBlocked("Durable Turso storage is required before Demo trading.")
-        budget = self.store.trade_budget_status(self.policy.max_orders_per_utc_day)
+        record = _analysis_record(signal)
+        is_challenge1 = str(record.get("execution_profile") or "").strip().upper() == "CHALLENGE_1"
+        # Challenge 1 has no daily order-count quota: the completed-5m candle key
+        # is the idempotency boundary. Keep daily loss/drawdown and exposure guards.
+        daily_order_limit = None if is_challenge1 else self.policy.max_orders_per_utc_day
+        budget = self.store.trade_budget_status(daily_order_limit)
         if (
-            self.policy.max_orders_per_utc_day is not None
-            and budget["orders_today"] >= self.policy.max_orders_per_utc_day
+            not is_challenge1
+            and daily_order_limit is not None
+            and budget["orders_today"] >= daily_order_limit
         ):
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
@@ -1418,7 +1424,8 @@ class BloFinDemoExecutor:
         # are still blocked above and must be reconciled before another entry.
         latest_age = budget.get("latest_order_age_seconds")
         if (
-            self.policy.min_seconds_between_orders > 0
+            not is_challenge1
+            and self.policy.min_seconds_between_orders > 0
             and latest_age is not None
             and latest_age < self.policy.min_seconds_between_orders
         ):
@@ -1438,7 +1445,6 @@ class BloFinDemoExecutor:
         if int(leverage) > self.policy.max_leverage or int(leverage) < 1:
             raise BloFinDemoExecutionBlocked("Leverage is outside the 1x-3x Demo test range.")
 
-        record = _analysis_record(signal)
         clock = self.client.check_clock_skew(inst_id=inst_id)
         if abs(int(clock.get("offset_ms", 10**12))) >= 60_000:
             raise BloFinDemoExecutionBlocked("Exchange/local clock skew is 60 seconds or more.")
@@ -1478,7 +1484,18 @@ class BloFinDemoExecutor:
             record, instrument, inst_id=inst_id, equity_usdt=equity,
             leverage=int(leverage), policy=self.policy,
         )
-        plan["experience_id"] = str(record.get("learning_experience_id") or "") or None
+        if is_challenge1:
+            experience_id = str(record.get("learning_experience_id") or "").strip()
+            if not experience_id:
+                # The Executor also owns durable 5m decision linkage when called
+                # directly, not only when invoked through the web worker.
+                experience_id = self.store.record_challenge1_decision(
+                    instrument_id=inst_id, challenge_record=record,
+                )
+                record["learning_experience_id"] = experience_id
+            plan["experience_id"] = experience_id
+        else:
+            plan["experience_id"] = str(record.get("learning_experience_id") or "") or None
         if minimum_size_only:
             lot_size = _decimal(instrument.get("lotSize"), "lotSize")
             min_size = _decimal(instrument.get("minSize"), "minSize")
