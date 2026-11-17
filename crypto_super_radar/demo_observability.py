@@ -194,7 +194,7 @@ def build_heartbeat_event(
 
 
 def build_manual_action_event(route: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Create an auditable event for a user-confirmed manual account action."""
+    """Create an auditable Operator event for an explicitly requested account action."""
     body = dict(payload)
     status_value = str(body.get("status") or "UNKNOWN").upper()
     instrument = str(body.get("instrument_id") or body.get("instrument") or "").upper()
@@ -202,21 +202,25 @@ def build_manual_action_event(route: str, payload: Mapping[str, Any]) -> dict[st
     position_id = str(body.get("position_id") or "")
     if route.endswith("/manual-open"):
         event_type = "ORDER_FILLED" if status_value == "FILLED" else (
-            "ORDER_SUBMITTED" if status_value in {"ACCEPTED", "PARTIALLY_FILLED"} else "SYSTEM_ERROR"
+            "ORDER_SUBMITTED" if status_value in {"ACCEPTED", "PARTIALLY_FILLED"} else "MANUAL_ACTION_FAILED"
         )
         event_status = "SUCCESS" if status_value in {"FILLED", "ACCEPTED"} else "WARNING"
-        reason = f"عملیات ورود دستی تأییدشده در Demo؛ وضعیت صرافی: {status_value}."
+        reason = f"عملیات ورود دستی توسط اپراتور؛ وضعیت گزارش‌شده از BloFin Demo: {status_value}."
     elif route.endswith("/manual-cancel-order"):
-        event_type = "HEARTBEAT" if status_value == "CANCELED" else "SYSTEM_ERROR"
+        event_type = "MANUAL_ORDER_CANCELED" if status_value == "CANCELED" else "MANUAL_ACTION_FAILED"
         event_status = "SUCCESS" if status_value == "CANCELED" else "WARNING"
-        reason = f"درخواست لغو دستی سفارش مشخص؛ وضعیت صرافی: {status_value}."
+        reason = f"درخواست لغو دستی سفارش مشخص؛ نتیجهٔ تأییدشده: {status_value}."
     else:
-        event_type = "HEARTBEAT" if status_value == "CLOSE_ACCEPTED" else "SYSTEM_ERROR"
+        event_type = (
+            "MANUAL_POSITION_CLOSE_REQUESTED"
+            if status_value == "CLOSE_ACCEPTED" else "MANUAL_ACTION_FAILED"
+        )
         event_status = "PENDING" if status_value == "CLOSE_ACCEPTED" else "WARNING"
         reason = (
-            "درخواست بستن دستی پوزیشن پذیرفته شد؛ بسته‌شدن نهایی و PnL فقط پس از تطبیق history ثبت می‌شود."
+            "درخواست بستن دستی پوزیشن پذیرفته شد؛ هنوز بسته‌شدن نهایی یا PnL تحقق‌یافته ثابت نشده است. "
+            "فقط پس از تطبیق Position History صرافی رویداد POSITION_CLOSED ثبت می‌شود."
             if status_value == "CLOSE_ACCEPTED" else
-            f"درخواست بستن دستی پوزیشن؛ وضعیت صرافی: {status_value}."
+            f"درخواست بستن دستی پوزیشن با وضعیت {status_value}؛ بسته‌شدن نهایی تأیید نشده است."
         )
     identity = order_id or position_id or str(body.get("client_order_id") or uuid.uuid4().hex)
     event_id = f"manual:{route.rsplit('/', 1)[-1]}:{instrument}:{identity}"[:180]
@@ -234,7 +238,7 @@ def build_manual_action_event(route: str, payload: Mapping[str, Any]) -> dict[st
         "cycle_id": event_id,
         "occurred_at_utc": _utc_now(),
         "event_type": event_type,
-        "actor": "Robot" if event_type == "SYSTEM_ERROR" else "BloFin Demo",
+        "actor": "Operator",
         "status": event_status,
         "market": "Futures",
         "symbol": instrument,
@@ -250,7 +254,6 @@ def build_manual_action_event(route: str, payload: Mapping[str, Any]) -> dict[st
         ),
         "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/",
     }
-
 
 def queue_manual_action(route: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     """Best-effort append of an already-confirmed manual action to the durable outbox."""
