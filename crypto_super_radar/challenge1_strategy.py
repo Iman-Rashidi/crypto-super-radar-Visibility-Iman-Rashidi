@@ -23,7 +23,7 @@ DEFAULT_CHALLENGE1_INSTRUMENTS = (
 )
 
 _INTERVAL_MS = {"5m": 5 * 60 * 1000, "1H": 60 * 60 * 1000, "1h": 60 * 60 * 1000}
-_ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V3_DUAL_5M_15M"
+_ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY"
 
 
 def _number(value: Any) -> float | None:
@@ -376,33 +376,27 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
 
     return True, "کندل بسته‌شده ۵ دقیقه‌ای و الگوی منتخب با جهت معامله سازگارند؛ زمینه ۱H فقط مشورتی است."
 
+
 def analyze_blofin_challenge1(
     client: Any,
     inst_id: str,
     *,
     now_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Build a 5m-only entry decision; optional 1H context never delays or vetoes it."""
+    """Build a 5m-only candle-pattern entry decision for Challenge 1."""
     instrument = str(inst_id or "").strip().upper()
     if not instrument.endswith("-USDT"):
         raise ValueError("Challenge 1 accepts only USDT linear Demo instrument IDs.")
 
-    # Entry, pattern, ATR, signal identity and deduplication all use 5m only.
-    # 1H is a best-effort advisory observation, never a mandatory dependency.
+    # This Challenge 1 engine fetches, evaluates and deduplicates 5m candles only.
+    # No 15m or 1H data is requested, required, or used as an entry condition.
     frame_5m = _completed_frame(
         client, inst_id=instrument, bar="5m", now_ms=now_ms, minimum_rows=30,
     )
-    context_1h_status = "AVAILABLE"
-    try:
-        frame_1h = _completed_frame(
-            client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=30,
-        )
-    except Exception:
-        frame_1h = pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"])
-        context_1h_status = "UNAVAILABLE"
-
-    patterns_5m = [dict(item, timeframe="5m") for item in _confirmed_pattern_candidates(frame_5m)]
-    patterns_1h = [dict(item, timeframe="1H") for item in _confirmed_pattern_candidates(frame_1h)]
+    patterns_5m = [
+        dict(item, timeframe="5m")
+        for item in _confirmed_pattern_candidates(frame_5m)
+    ]
     chart_structure = monitor_chart_patterns(frame_5m)
     if (
         chart_structure.get("status") in {"BREAKOUT_UP", "BREAKOUT_DOWN"}
@@ -418,33 +412,31 @@ def analyze_blofin_challenge1(
             "timeframe": "5m",
         })
 
-    bullish_5m = [item for item in patterns_5m if item.get("direction") == "BULLISH"]
-    bearish_5m = [item for item in patterns_5m if item.get("direction") == "BEARISH"]
+    bullish = [item for item in patterns_5m if item.get("direction") == "BULLISH"]
+    bearish = [item for item in patterns_5m if item.get("direction") == "BEARISH"]
     signal = "NO_TRADE"
     chosen: dict[str, Any] | None = None
-    volume: dict[str, Any] = {"confirmed": False, "volume_ratio": None, "close_location": None}
+    volume = _volume_confirmation(frame_5m, "BULLISH" if bullish and not bearish else "BEARISH") if (bullish or bearish) else {
+        "confirmed": False, "volume_ratio": None, "close_location": None,
+    }
     reason_fa = "الگوی معتبر و تأییدشده‌ای در کندل‌های بسته‌شده ۵ دقیقه‌ای پیدا نشد."
     execution: dict[str, Any] = {"status": "NO_TRADE", "direction": None, "reason_fa": reason_fa}
     entry = stop = target = None
     signal_id = None
-    decision_code = "CONFLICTING_5M_PATTERNS" if bullish_5m and bearish_5m else "NO_TRADE"
+    decision_code = "CONFLICTING_5M_PATTERNS" if bullish and bearish else "NO_TRADE"
 
-    if bullish_5m and bearish_5m:
-        reason_fa = "الگوهای صعودی و نزولی هم‌زمان در کندل‌های ۵ دقیقه‌ای دیده شدند؛ معامله انجام نمی‌شود."
+    if bullish and bearish:
+        reason_fa = "الگوهای صعودی و نزولی هم‌زمان در کندل‌های بسته‌شده ۵ دقیقه‌ای دیده شدند؛ معامله انجام نمی‌شود."
     elif not patterns_5m:
-        reason_fa = "در تایم‌فریم ۵ دقیقه الگوی ورود معتبر پیدا نشد؛ عدم معامله تصمیم معتبر است."
+        reason_fa = "در کندل‌های بسته‌شده ۵ دقیقه‌ای الگوی ورود معتبر پیدا نشد؛ عدم معامله تصمیم معتبر است."
     else:
         chosen = max(patterns_5m, key=lambda item: abs(int(item.get("score") or 0)))
         direction = str(chosen["direction"])
-        opposite = "BEARISH" if direction == "BULLISH" else "BULLISH"
-        context_conflict_1h = any(item.get("direction") == opposite for item in patterns_1h)
-        # 1H is reported for the reviewers but remains advisory. It cannot
-        # add another candle wait or veto a valid completed 5m pattern.
         volume = _volume_confirmation(frame_5m, direction)
         atr = _atr(frame_5m)
         entry_value = float(frame_5m["close"].iloc[-1])
         if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
-            reason_fa = "داده کافی برای محاسبه حد ضرر ساختاری و ATR پنج‌دقیقه‌ای وجود ندارد."
+            reason_fa = "دادهٔ کندل‌های ۵ دقیقه‌ای برای محاسبهٔ حد ضرر ساختاری کافی نیست."
         else:
             buffer = atr * 0.10
             if direction == "BULLISH":
@@ -459,6 +451,7 @@ def analyze_blofin_challenge1(
                 risk_distance = stop_value - entry_value
                 target_value = entry_value - 2.0 * risk_distance
                 signal = "SHORT"
+
             if risk_distance <= 0 or target_value <= 0:
                 signal = "NO_TRADE"
                 reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
@@ -478,15 +471,11 @@ def analyze_blofin_challenge1(
                 }
                 advisory = []
                 if not volume.get("confirmed"):
-                    advisory.append("تأیید حجم/محل بسته‌شدن کامل نیست")
-                if context_conflict_1h:
-                    advisory.append("الگوی یک‌ساعته خلاف جهت است")
-                if context_1h_status != "AVAILABLE":
-                    advisory.append("داده زمینه یک‌ساعته در دسترس نبود")
-                suffix = "؛ موارد نظارتی: " + "، ".join(advisory) if advisory else ""
+                    advisory.append("حجم نسبی فقط به‌عنوان دادهٔ توصیفی ثبت شد و شرط ورود نیست")
                 reason_fa = (
-                    f"الگوی {chosen.get('name_en')} روی کندل بسته‌شده ۵ دقیقه‌ای فعال شد؛ "
-                    f"ورود بر اساس همان کندل انجام‌پذیر است{suffix}."
+                    f"الگوی {chosen.get('name_en')} روی کندل بسته‌شدهٔ ۵ دقیقه‌ای تأیید شد؛ "
+                    "تصمیم ورود فقط بر پایهٔ الگوی کندلی/ساختار نمودار و شواهد همان کندل‌هاست."
+                    + (" " + "؛ ".join(advisory) + "." if advisory else "")
                 )
 
     latest_time = _time_label(frame_5m)
@@ -502,26 +491,20 @@ def analyze_blofin_challenge1(
     evidence = {
         "decision_engine_version": _ENGINE_VERSION,
         "setup_timeframe": "5m",
-        "context_timeframe": "1H",
         "completed_candles_only": True,
         "legacy_12_gates_used_for_entry": False,
         "external_ai_required": False,
         "tinyfish_required": False,
         "volume_is_advisory": True,
-        "context_is_advisory": True,
-        "context_conflict_1h": context_conflict_1h if chosen else False,
-        "context_1h_data_status": context_1h_status,
+        "higher_timeframes_used": False,
         "decision": decision_code if decision_code != "NO_TRADE" else signal,
-        "detected_patterns": patterns_5m + patterns_1h,
+        "detected_patterns": patterns_5m,
         "chosen_pattern": chosen,
         "confirmation_candle": confirmation_candle,
         "chart_structure": chart_structure,
-        "context_patterns_1h": patterns_1h,
-        "context_patterns": patterns_1h,
         "volume_confirmation": volume,
         "decision_reason_fa": reason_fa,
         "candles_5m": _candles_for_report(frame_5m, limit=160),
-        "candles_1h": _candles_for_report(frame_1h, limit=60),
     }
     return {
         "signal": signal,
