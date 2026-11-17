@@ -4861,11 +4861,12 @@ def _blofin_manual_open_trade(
             )
         except BloFinDemoExecutionUnknown:
             store.update_order(client_order_id, "UNKNOWN")
-            store.record_manual_action(client_order_id, "MANUAL_POSITION_CLOSE_REQUESTED", {
+            store.record_manual_action(client_order_id, "MANUAL_ORDER_SUBMISSION_UNKNOWN", {
                 "instrument_id": instrument_id,
                 "direction": direction,
                 "submission_outcome": "UNKNOWN",
                 "orders_submitted": "UNKNOWN",
+                "retry_allowed": False,
             })
             raise
         except Exception:
@@ -4949,6 +4950,22 @@ def _blofin_manual_cancel_order(*, instrument_id: str, order_id: str) -> dict[st
     if state not in {"live", "partially_filled"}:
         raise BloFinDemoExecutionBlocked("سفارش دیگر در وضعیت قابل‌لغو نیست.")
     response = client.cancel_futures_order(inst_id=instrument_id, order_id=order_id)
+    # Read again before reporting success; do not retry an ambiguous cancellation.
+    after_cancel = client.get_open_orders(inst_id=instrument_id)
+    if not isinstance(after_cancel, list):
+        raise BloFinDemoExecutionUnknown(
+            "Cancellation was submitted but the post-cancel order state could not be verified."
+        )
+    still_pending = any(
+        isinstance(row, dict)
+        and str(row.get("instId") or "").strip().upper() == instrument_id
+        and str(row.get("orderId") or "").strip() == order_id
+        for row in after_cancel
+    )
+    if still_pending:
+        raise BloFinDemoExecutionUnknown(
+            "Cancellation was accepted but the order still appears pending; inspect BloFin before retrying."
+        )
     action_id = "CANCEL" + uuid.uuid4().hex[:20]
     store = None
     try:
@@ -5820,7 +5837,7 @@ let blofinInstrumentRecords=[];
               manualSize.min=String(item.min_size);
               manualSize.step=String(item.lot_size);
               manualSize.placeholder='حداقل '+item.min_size+' · گام '+item.lot_size;
-              manualOpenButton.disabled=autopilotIsEnabled||!instrumentSelect.value;
+              manualOpenButton.disabled=autopilotIsEnabled||autopilotIsStopping||manualActionBusy||!instrumentSelect.value;
             }
             async function loadBlofinInstruments(){
               instrumentSelect.disabled=true;
@@ -5858,7 +5875,7 @@ let blofinInstrumentRecords=[];
                     executeButton.disabled=false;
                     executionReadiness.textContent+=' آماده اجرای یک چرخه ربات است.';
                   }
-                  if(selectedExecutionMode==='manual'&&!autopilotIsEnabled&&!manualActionBusy){
+                  if(selectedExecutionMode==='manual'&&!autopilotIsEnabled&&!autopilotIsStopping&&!manualActionBusy){
                     manualOpenButton.disabled=false;
                   }
                   updateManualInstrumentFields();
@@ -8692,6 +8709,17 @@ def _blofin_demo_autopilot_worker() -> None:
                 with LOCK:
                     BLOFIN_AUTOPILOT_STATE["notion_last_queue_status"] = notion_queue_result.get("status")
                     BLOFIN_AUTOPILOT_STATE["notion_last_queued_count"] = notion_queue_result.get("queued", 0)
+            if not batch_jobs:
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE.update({
+                        "enabled": False,
+                        "status": "DISABLED",
+                        "search_continues": False,
+                        "next_cycle_scheduled": False,
+                        "last_message_fa": "اتوپایلوت پیش از شروع نماد بعدی متوقف شد؛ حالت دستی در دسترس است.",
+                    })
+                _persist_blofin_autopilot_state()
+                continue
             job_id, instrument_id = batch_jobs[-1]
             exchange_monitor = {}
             monitor_store = None
