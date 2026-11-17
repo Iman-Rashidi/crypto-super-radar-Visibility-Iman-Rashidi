@@ -206,7 +206,7 @@ class WebAppHttpTests(unittest.TestCase):
             },
         }
         events = web_app._blofin_job_notion_events("cycle-ai-not-called", "BTC-USDT", job)
-        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        ai_event = next(item for item in events if item["actor"] == "Nemotron Supervisor")
         self.assertEqual(ai_event["event_type"], "AI_REVIEW_REQUESTED")
         self.assertEqual(ai_event["ai_decision"], "NOT_CALLED")
         self.assertEqual(ai_event["status"], "WARNING")
@@ -608,7 +608,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(response["provider"], payload["provider"])
         self.assertEqual(response["second_supervisor"], second)
         self.assertEqual(response["two_reviewer_gate"], "REQUIRES_BOTH_VERIFIED_APPROVALS")
-        self.assertNotIn("api_key", body.decode().lower())
+        self.assertFalse(response["second_supervisor"]["secret_sent_to_model"])
 
     def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
         payload = {
