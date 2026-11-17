@@ -112,7 +112,7 @@ class WebAppHttpTests(unittest.TestCase):
             "result": {
                 "status": "NO_TRADE",
                 "signal": "NO_TRADE",
-                "reason_fa": "هیچ الگوی ۱۵ دقیقه‌ای معتبر نبود.",
+                "reason_fa": "هیچ الگوی ۵ دقیقه‌ای معتبر نبود.",
                 "orders_submitted": False,
                 "trade_executed": False,
             },
@@ -232,15 +232,15 @@ class WebAppHttpTests(unittest.TestCase):
                 "learning_experience_id": "blofin-ch1-test-journal-001",
                 "orders_submitted": False,
                 "trade_executed": False,
-                "reason_fa": "No 15m entry pattern.",
+                "reason_fa": "No 5m entry pattern.",
                 "ai_review": {"status": "NOT_CALLED", "execution_role": "ADVISORY_ONLY"},
                 "challenge1_evidence": {
-                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V3_5M",
                     "decision": "NO_TRADE",
-                    "setup_timeframe": "15m",
+                    "setup_timeframe": "5m",
                     "context_timeframe": "1H",
                     "detected_patterns": [],
-                    "candles_15m": candles,
+                    "candles_5m": candles,
                     "candles_1h": [],
                     "confirmation_candle": {"open_time_utc": candles[-1]["time_utc"]},
                 },
@@ -249,7 +249,7 @@ class WebAppHttpTests(unittest.TestCase):
         snapshot = web_app._blofin_activity_journal_snapshot("journal-job-001", "BTC-USDT", job)
         self.assertEqual(snapshot["experience_id"], "blofin-ch1-test-journal-001")
         self.assertEqual(snapshot["signal"], "NO_TRADE")
-        self.assertEqual(len(snapshot["candles_15m"]), 8)
+        self.assertEqual(len(snapshot["candles_5m"]), 8)
         self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
         events = web_app._blofin_job_notion_events("journal-job-001", "BTC-USDT", job)
         self.assertEqual(events[0]["ai_decision"], "NOT_CALLED")
@@ -1400,11 +1400,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
-    def test_autopilot_next_scan_aligns_to_next_15m_close(self):
+    def test_autopilot_next_scan_aligns_to_next_5m_close(self):
         now = datetime(2026, 11, 17, 16, 23, 32, tzinfo=timezone.utc)
-        delay_seconds, next_at = web_app._blofin_demo_next_15m_scan_window(now)
-        self.assertEqual(delay_seconds, 391)
-        self.assertEqual(next_at, "2026-11-17T16:30:03+00:00")
+        delay_seconds, next_at = web_app._blofin_demo_next_5m_scan_window(now)
+        self.assertEqual(delay_seconds, 91)
+        self.assertEqual(next_at, "2026-11-17T16:25:03+00:00")
 
     def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
         class StopAfterTwoCycles(Exception):
@@ -1474,8 +1474,8 @@ class WebAppHttpTests(unittest.TestCase):
                     "read_errors": [],
                 }),
                 patch.object(web_app.BLOFIN_AUTOPILOT_STOP_EVENT, "wait", side_effect=stop_after_second_cycle_sleep),
-                patch.object(web_app, "_blofin_demo_next_15m_scan_window", return_value=(
-                    900, "2026-11-17T16:30:03+00:00"
+                patch.object(web_app, "_blofin_demo_next_5m_scan_window", return_value=(
+                    300, "2026-11-17T16:25:03+00:00"
                 )),
                 patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
@@ -1484,7 +1484,7 @@ class WebAppHttpTests(unittest.TestCase):
 
             self.assertEqual(len(cycle_ids), 2)
             self.assertEqual(observed_profiles, ["CHALLENGE_1", "CHALLENGE_1"])
-            self.assertEqual(sleep_calls, [900, 900])
+            self.assertEqual(sleep_calls, [300, 300])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_15M_CANDLE")
             self.assertEqual(

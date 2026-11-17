@@ -1,6 +1,6 @@
 """Deterministic, closed-candle Challenge 1 strategy for BloFin Demo.
 
-Only completed 15m candles create setups. The 1H frame is a conflict veto,
+Only completed 5m candles create setups. The 1H frame is optional context and advisory only,
 not a legacy indicator-score gate. All decisions are local and reproducible.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ DEFAULT_CHALLENGE1_INSTRUMENTS = (
     "LINK-USDT",
 )
 
-_INTERVAL_MS = {"15m": 15 * 60 * 1000, "1H": 60 * 60 * 1000, "1h": 60 * 60 * 1000}
+_INTERVAL_MS = {"5m": 5 * 60 * 1000, "1H": 60 * 60 * 1000, "1h": 60 * 60 * 1000}
 _ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V2"
 
 
@@ -293,10 +293,10 @@ def analyze_blofin_challenge1(
     if not instrument.endswith("-USDT"):
         raise ValueError("Challenge 1 accepts only USDT linear Demo instrument IDs.")
 
-    # Thirty completed 15m bars cover the 20-bar breakout and ATR warm-up.
+    # Thirty completed 5m bars cover the 20-bar breakout and ATR warm-up.
     # The 1H frame is optional context only; an unavailable context feed must not
-    # suppress a valid, fully completed 15m candle-pattern setup.
-    frame_15m = _completed_frame(client, inst_id=instrument, bar="15m", now_ms=now_ms, minimum_rows=30)
+    # suppress a valid, fully completed 5m candle-pattern setup.
+    frame_5m = _completed_frame(client, inst_id=instrument, bar="5m", now_ms=now_ms, minimum_rows=30)
     context_data_status = "AVAILABLE"
     try:
         frame_1h = _completed_frame(client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=30)
@@ -304,26 +304,26 @@ def analyze_blofin_challenge1(
         frame_1h = pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"])
         context_data_status = "UNAVAILABLE"
 
-    patterns_15m = [dict(item, timeframe="15m") for item in _confirmed_pattern_candidates(frame_15m)]
+    patterns_5m = [dict(item, timeframe="5m") for item in _confirmed_pattern_candidates(frame_5m)]
     patterns_1h = [dict(item, timeframe="1H") for item in _confirmed_pattern_candidates(frame_1h)]
-    chart_structure = monitor_chart_patterns(frame_15m)
+    chart_structure = monitor_chart_patterns(frame_5m)
     if (
         chart_structure.get("status") in {"BREAKOUT_UP", "BREAKOUT_DOWN"}
         and chart_structure.get("breakout_confirmation") == "CONFIRMED"
     ):
         direction = "BULLISH" if chart_structure.get("breakout") == "UP" else "BEARISH"
-        patterns_15m.append({
+        patterns_5m.append({
             "name_en": str(chart_structure.get("pattern") or "Confirmed Triangle Breakout"),
             "direction": direction,
             "score": 12 if direction == "BULLISH" else -12,
             "category": "CHART_STRUCTURE",
             "detail": str(chart_structure.get("reason") or ""),
-            "timeframe": "15m",
+            "timeframe": "5m",
         })
 
-    all_detected = patterns_15m + patterns_1h
-    bullish = [item for item in patterns_15m if item.get("direction") == "BULLISH"]
-    bearish = [item for item in patterns_15m if item.get("direction") == "BEARISH"]
+    all_detected = patterns_5m + patterns_1h
+    bullish = [item for item in patterns_5m if item.get("direction") == "BULLISH"]
+    bearish = [item for item in patterns_5m if item.get("direction") == "BEARISH"]
     signal = "NO_TRADE"
     chosen: dict[str, Any] | None = None
     volume: dict[str, Any] = {"confirmed": False, "volume_ratio": None, "close_location": None}
@@ -335,30 +335,30 @@ def analyze_blofin_challenge1(
     decision_code = "CONFLICTING_PATTERNS" if bullish and bearish else "NO_TRADE"
     context_conflict = False
     if bullish and bearish:
-        reason_fa = "الگوهای صعودی و نزولی هم‌زمان در ۱۵ دقیقه دیده شدند؛ به‌دلیل تعارض، معامله انجام نمی‌شود."
-    elif not patterns_15m:
-        reason_fa = "در تایم‌فریم ۱۵ دقیقه الگوی ورود معتبر پیدا نشد؛ عدم معامله تصمیم معتبر است."
+        reason_fa = "الگوهای صعودی و نزولی هم‌زمان در ۵ دقیقه دیده شدند؛ به‌دلیل تعارض، معامله انجام نمی‌شود."
+    elif not patterns_5m:
+        reason_fa = "در تایم‌فریم ۵ دقیقه الگوی ورود معتبر پیدا نشد؛ عدم معامله تصمیم معتبر است."
     else:
-        chosen = max(patterns_15m, key=lambda item: abs(int(item.get("score") or 0)))
+        chosen = max(patterns_5m, key=lambda item: abs(int(item.get("score") or 0)))
         direction = str(chosen["direction"])
         opposite = "BEARISH" if direction == "BULLISH" else "BULLISH"
         context_conflict = any(item.get("direction") == opposite for item in patterns_1h)
         # Volume and 1H context are reported as advisory evidence, not entry vetoes.
-        volume = _volume_confirmation(frame_15m, direction)
-        atr = _atr(frame_15m)
-        entry_value = float(frame_15m["close"].iloc[-1])
+        volume = _volume_confirmation(frame_5m, direction)
+        atr = _atr(frame_5m)
+        entry_value = float(frame_5m["close"].iloc[-1])
         if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
             reason_fa = "داده کافی برای محاسبه حد ضرر ساختاری و ATR وجود ندارد."
         else:
             buffer = atr * 0.10
             if direction == "BULLISH":
-                structural_low = float(frame_15m["low"].tail(5).min())
+                structural_low = float(frame_5m["low"].tail(5).min())
                 stop_value = min(structural_low - buffer, entry_value - 1.5 * atr)
                 risk_distance = entry_value - stop_value
                 target_value = entry_value + 2.0 * risk_distance
                 signal = "LONG"
             else:
-                structural_high = float(frame_15m["high"].tail(5).max())
+                structural_high = float(frame_5m["high"].tail(5).max())
                 stop_value = max(structural_high + buffer, entry_value + 1.5 * atr)
                 risk_distance = stop_value - entry_value
                 target_value = entry_value - 2.0 * risk_distance
@@ -368,8 +368,8 @@ def analyze_blofin_challenge1(
                 reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
             else:
                 entry, stop, target = entry_value, stop_value, target_value
-                signal_bar = _time_label(frame_15m)
-                signal_id = f"challenge1-v2:{instrument}:15m:{signal_bar}:{signal}"
+                signal_bar = _time_label(frame_5m)
+                signal_id = f"challenge1-v3:{instrument}:5m:{signal_bar}:{signal}"
                 execution = {
                     "status": "PASS",
                     "direction": signal,
@@ -388,20 +388,20 @@ def analyze_blofin_challenge1(
                 if context_data_status != "AVAILABLE":
                     advisory.append("داده زمینه یک‌ساعته در دسترس نبود")
                 suffix = "؛ موارد نظارتی: " + "، ".join(advisory) if advisory else ""
-                reason_fa = f"الگوی {chosen.get('name_en')} با کندل بسته‌شده ۱۵دقیقه‌ای تأیید شد؛ ورود بر اساس همان الگو انجام‌پذیر است{suffix}."
+                reason_fa = f"الگوی {chosen.get('name_en')} با کندل بسته‌شده ۵دقیقه‌ای تأیید شد؛ ورود بر اساس همان الگو انجام‌پذیر است{suffix}."
 
-    latest_time = _time_label(frame_15m)
+    latest_time = _time_label(frame_5m)
     confirmation_candle = {
         "open_time_utc": latest_time,
-        "open": float(frame_15m["open"].iloc[-1]),
-        "high": float(frame_15m["high"].iloc[-1]),
-        "low": float(frame_15m["low"].iloc[-1]),
-        "close": float(frame_15m["close"].iloc[-1]),
+        "open": float(frame_5m["open"].iloc[-1]),
+        "high": float(frame_5m["high"].iloc[-1]),
+        "low": float(frame_5m["low"].iloc[-1]),
+        "close": float(frame_5m["close"].iloc[-1]),
         "volume_confirmation": volume,
     }
     evidence = {
         "decision_engine_version": _ENGINE_VERSION,
-        "setup_timeframe": "15m",
+        "setup_timeframe": "5m",
         "context_timeframe": "1H",
         "completed_candles_only": True,
         "legacy_12_gates_used_for_entry": False,
@@ -424,7 +424,7 @@ def analyze_blofin_challenge1(
         "decision_reason_fa": reason_fa,
         # These are the exact validated completed candles used by this decision.
         # Future candles are never added to the decision-time snapshot.
-        "candles_15m": _candles_for_report(frame_15m, limit=120),
+        "candles_5m": _candles_for_report(frame_5m, limit=120),
         "candles_1h": _candles_for_report(frame_1h, limit=60),
     }
     return {
