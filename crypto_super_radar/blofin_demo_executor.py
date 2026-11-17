@@ -736,8 +736,8 @@ class BloFinDemoEventStore:
 
     def update_order(self, client_order_id: str, status: str, *, exchange_order_id: str | None = None) -> None:
         allowed = {
-            "LEVERAGE_SET", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
-            "CANCELED", "REJECTED", "UNKNOWN",
+            "LEVERAGE_SET", "PENDING_RECONCILE", "ACCEPTED",
+            "PARTIALLY_FILLED", "FILLED", "CANCELED", "REJECTED", "UNKNOWN",
         }
         if status not in allowed:
             raise ValueError("Unsupported order status update.")
@@ -855,7 +855,7 @@ class BloFinDemoEventStore:
                 "SELECT created_at, status FROM blofin_demo_orders ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
             unresolved_row = self._db.execute(
-                "SELECT COUNT(*) FROM blofin_demo_orders WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET')"
+                "SELECT COUNT(*) FROM blofin_demo_orders WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')"
             ).fetchone()
         orders_today = int(today_row[0] or 0)
         orders_total = int(total_row[0] or 0)
@@ -1239,7 +1239,7 @@ class BloFinDemoExecutor:
         order = self.store.get_order(client_order_id)
         if order is None or order.get("instrument_id") != inst_id:
             raise BloFinDemoExecutionBlocked("No matching locally reserved order exists.")
-        if order.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET"}:
+        if order.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET", "PENDING_RECONCILE"}:
             return {"status": order["status"], "client_order_id": client_order_id}
         detail = self.client.get_order_detail(inst_id, client_order_id=client_order_id)
         if isinstance(detail, list):
