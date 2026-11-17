@@ -5009,7 +5009,9 @@ def _blofin_manual_cancel_order(*, instrument_id: str, order_id: str) -> dict[st
 
 
 def _blofin_manual_close_position(
-    *, instrument_id: str, position_id: str, position_side_hint: str = ""
+    *, instrument_id: str, position_id: str, position_side_hint: str = "",
+    action_source: str = "MANUAL", audit_id: str | None = None,
+    exit_reason: str | None = None,
 ) -> dict[str, Any]:
     """Close one freshly revalidated Demo position; loss-making positions are not blocked."""
     instrument_id = str(instrument_id or "").strip().upper()
@@ -5065,7 +5067,25 @@ def _blofin_manual_close_position(
     except BloFinDemoExecutionBlocked:
         pnl = None
 
+    action_source = str(action_source or "MANUAL").strip().upper()
+    if action_source not in {"MANUAL", "AUTOPILOT"}:
+        raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
     action_id = "CLOSE" + uuid.uuid4().hex[:20]
+    audit_event_id = str(audit_id or action_id).strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_event_id):
+        raise BloFinDemoExecutionBlocked("شناسه ثبت گزارش بستن پوزیشن معتبر نیست.")
+    requested_event = (
+        "AUTO_POSITION_CLOSE_REQUESTED" if action_source == "AUTOPILOT"
+        else "MANUAL_POSITION_CLOSE_REQUESTED"
+    )
+    accepted_event = (
+        "AUTO_POSITION_CLOSE_ACCEPTED" if action_source == "AUTOPILOT"
+        else "MANUAL_POSITION_CLOSE_ACCEPTED"
+    )
+    unknown_event = (
+        "AUTO_POSITION_CLOSE_UNKNOWN" if action_source == "AUTOPILOT"
+        else "MANUAL_POSITION_CLOSE_REQUESTED"
+    )
     store = None
     try:
         store = BloFinDemoEventStore()
@@ -5076,8 +5096,11 @@ def _blofin_manual_close_position(
             "margin_mode": margin_mode,
             "unrealized_pnl_usdt": str(pnl) if pnl is not None else None,
             "loss_making_position": bool(pnl is not None and pnl < 0),
+            "action_source": action_source,
+            "exit_reason": exit_reason,
+            "exchange_close_client_order_id": action_id,
         }
-        store.record_manual_action(action_id, "MANUAL_POSITION_CLOSE_REQUESTED", audit)
+        store.record_manual_action(audit_event_id, requested_event, audit)
         try:
             response = client.close_futures_position(
                 inst_id=instrument_id,
@@ -5087,11 +5110,11 @@ def _blofin_manual_close_position(
                 position_id=actual_position_id or None,
             )
         except BloFinDemoExecutionUnknown:
-            store.record_manual_action(action_id + "U", "MANUAL_POSITION_CLOSE_REQUESTED", {
+            store.record_manual_action(audit_event_id, unknown_event, {
                 **audit, "submission_outcome": "UNKNOWN", "retry_allowed": False,
             })
             raise
-        store.record_manual_action(action_id + "D", "MANUAL_POSITION_CLOSE_ACCEPTED", {
+        store.record_manual_action(audit_event_id, accepted_event, {
             **audit, "submission_outcome": "ACCEPTED",
         })
     finally:
