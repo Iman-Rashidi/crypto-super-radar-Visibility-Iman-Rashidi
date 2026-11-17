@@ -1198,6 +1198,95 @@ class WebAppHttpTests(unittest.TestCase):
                 for job_id in set(web_app.BLOFIN_EXECUTION_JOBS) - old_job_ids:
                     web_app.BLOFIN_EXECUTION_JOBS.pop(job_id, None)
 
+    def test_startup_reconciliation_runs_even_when_scheduler_is_disabled(self):
+        old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        old_done = web_app.BLOFIN_STARTUP_RECONCILE_DONE
+        try:
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = False
+            with (
+                patch.dict(os.environ, {
+                    "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+                    "BLOFIN_DEMO_AUTOPILOT_ROLE": "WEB",
+                }, clear=False),
+                patch.object(web_app, "_restore_blofin_autopilot_state"),
+                patch.object(
+                    web_app, "_reconcile_blofin_demo_orders_on_startup",
+                    return_value={"status": "RECONCILED", "orders_submitted": False},
+                ) as startup_reconcile,
+                patch.object(web_app, "_persist_blofin_autopilot_state"),
+            ):
+                web_app._start_blofin_demo_autopilot()
+            startup_reconcile.assert_called_once_with()
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "DISABLED")
+        finally:
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = old_done
+            web_app.BLOFIN_AUTOPILOT_STATE.clear()
+            web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
+
+    def test_startup_reconciliation_fails_closed_without_durable_turso(self):
+        old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        old_done = web_app.BLOFIN_STARTUP_RECONCILE_DONE
+        try:
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = False
+            with (
+                patch.object(web_app, "storage_backend", return_value="LOCAL_SQLITE"),
+                patch.object(web_app, "_persist_blofin_autopilot_state"),
+            ):
+                result = web_app._reconcile_blofin_demo_orders_on_startup()
+            self.assertEqual(result["status"], "UNAVAILABLE")
+            self.assertFalse(result["orders_submitted"])
+            self.assertEqual(result["error_type"], "RuntimeError")
+            self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["startup_reconciliation_orders_submitted"])
+        finally:
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = old_done
+            web_app.BLOFIN_AUTOPILOT_STATE.clear()
+            web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
+
+    def test_startup_reconciliation_runs_durable_probe_then_read_only_sweep(self):
+        old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        old_done = web_app.BLOFIN_STARTUP_RECONCILE_DONE
+        class FakeStore:
+            def __init__(self):
+                self.closed = False
+            def verify_durable_round_trip(self, *, connections):
+                self.connections = connections
+                return {
+                    "verified": True, "connections": connections,
+                    "writers_won": 1, "read_back": True, "cleanup": True,
+                    "orders_submitted": False,
+                }
+            def close(self):
+                self.closed = True
+        class FakeExecutor:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+            def reconcile_unresolved_orders(self, *, limit):
+                return {
+                    "status": "RECONCILED", "attempted": 2,
+                    "remaining_unresolved": 0, "orders_submitted": False,
+                    "reconciliation": "READ_ONLY",
+                }
+        fake_store = FakeStore()
+        try:
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = False
+            with (
+                patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
+                patch.object(web_app, "BloFinDemoEventStore", return_value=fake_store),
+                patch.object(web_app, "BloFinDemoExecutor", FakeExecutor),
+                patch.object(web_app, "_persist_blofin_autopilot_state"),
+            ):
+                result = web_app._reconcile_blofin_demo_orders_on_startup()
+            self.assertEqual(result["status"], "RECONCILED")
+            self.assertEqual(result["attempted"], 2)
+            self.assertEqual(result["storage_probe"]["connections"], 4)
+            self.assertFalse(result["orders_submitted"])
+            self.assertTrue(fake_store.closed)
+            self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["startup_reconciliation_orders_submitted"])
+        finally:
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = old_done
+            web_app.BLOFIN_AUTOPILOT_STATE.clear()
+            web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
+
     def test_blofin_smoke_readiness_blocks_existing_open_position(self):
         with (
             patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}),

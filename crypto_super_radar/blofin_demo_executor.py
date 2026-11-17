@@ -13,6 +13,7 @@ import math
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
 from collections import deque
@@ -137,6 +138,7 @@ class BloFinDemoRiskPolicy:
     daily_loss_limit_pct: float = 0.01
     max_drawdown_pct: float = 0.05
     max_margin_usage_pct: float = 0.10
+    max_aggregate_risk_pct: float = 0.005
     max_leverage: int = 3
     max_concurrent_positions: int = 1
     max_orders_per_utc_day: int | None = None
@@ -149,7 +151,7 @@ class BloFinDemoRiskPolicy:
     def __post_init__(self) -> None:
         values = (
             self.risk_per_trade_pct, self.daily_loss_limit_pct, self.max_drawdown_pct,
-            self.max_margin_usage_pct, self.min_confirmation_score, self.max_risk_score,
+            self.max_margin_usage_pct, self.max_aggregate_risk_pct, self.min_confirmation_score, self.max_risk_score,
             self.min_reward_risk, self.max_entry_deviation_pct,
         )
         if not all(math.isfinite(float(v)) for v in values):
@@ -162,6 +164,8 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Maximum drawdown must be in (0, 15%]")
         if not 0 < self.max_margin_usage_pct <= 0.25:
             raise ValueError("Margin usage must be in (0, 25%]")
+        if not 0 < self.max_aggregate_risk_pct <= 0.01:
+            raise ValueError("Aggregate risk must be in (0, 1%]")
         if self.max_orders_per_utc_day is not None and (
             isinstance(self.max_orders_per_utc_day, bool)
             or not 1 <= int(self.max_orders_per_utc_day) <= 5
@@ -335,6 +339,13 @@ def build_demo_order_plan(
 
     digest = hashlib.sha256(f"{signal_id}|{inst_id}|{side}".encode("utf-8")).hexdigest()
     client_order_id = digest[:32]
+    reserved_risk = quantity * risk_per_contract
+    reserved_margin = quantity * notional_per_contract / Decimal(int(leverage))
+    aggregate_risk_limit = equity * min(
+        Decimal(str(policy.max_aggregate_risk_pct)),
+        Decimal(str(policy.daily_loss_limit_pct)) / Decimal("2"),
+    )
+    aggregate_margin_limit = equity * Decimal(str(policy.max_margin_usage_pct))
     return {
         "signal_id": signal_id,
         "client_order_id": client_order_id,
@@ -347,7 +358,11 @@ def build_demo_order_plan(
         "risk_budget_usdt": float(risk_budget),
         "risk_per_contract_usdt": float(risk_per_contract),
         "notional_usdt": float(quantity * notional_per_contract),
-        "estimated_initial_margin_usdt": float(quantity * notional_per_contract / Decimal(int(leverage))),
+        "estimated_initial_margin_usdt": float(reserved_margin),
+        "reserved_risk_usdt": _format_decimal(reserved_risk),
+        "reserved_margin_usdt": _format_decimal(reserved_margin),
+        "aggregate_risk_limit_usdt": _format_decimal(aggregate_risk_limit),
+        "aggregate_margin_limit_usdt": _format_decimal(aggregate_margin_limit),
         "leverage": int(leverage),
         "reward_risk": float(reward_distance / risk_distance),
         "position_side_long_short": side.lower(),
@@ -548,6 +563,8 @@ class BloFinDemoEventStore:
                     outcome_recorded_at INTEGER,
                     position_history_id TEXT,
                     position_id TEXT,
+                    reserved_risk_usdt TEXT,
+                    reserved_margin_usdt TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
@@ -561,6 +578,8 @@ class BloFinDemoEventStore:
                 ("outcome_recorded_at", "INTEGER"),
                 ("position_history_id", "TEXT"),
                 ("position_id", "TEXT"),
+                ("reserved_risk_usdt", "TEXT"),
+                ("reserved_margin_usdt", "TEXT"),
             ):
                 if column_name not in order_columns:
                     self._db.execute(
@@ -800,6 +819,27 @@ class BloFinDemoEventStore:
 
         now = int(time.time())
         order_id = str(plan["client_order_id"])
+        try:
+            new_risk = _decimal(plan.get("reserved_risk_usdt"), "reserved_risk_usdt")
+            new_margin = _decimal(plan.get("reserved_margin_usdt"), "reserved_margin_usdt")
+            risk_cap = _decimal(plan.get("aggregate_risk_limit_usdt"), "aggregate_risk_limit_usdt")
+            margin_cap = _decimal(plan.get("aggregate_margin_limit_usdt"), "aggregate_margin_limit_usdt")
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked(
+                "Validated aggregate risk and margin reservations are required."
+            ) from exc
+        if min(new_risk, new_margin, risk_cap, margin_cap) <= 0:
+            raise BloFinDemoExecutionBlocked("Aggregate risk and margin reservations must be positive.")
+
+        # External positions/orders have no trusted local stop-risk and margin ledger.
+        # Fail closed rather than undercounting exposure when those are present.
+        if external_open_positions > 0 or external_pending_orders > 0:
+            return False
+
+        active_statuses = (
+            "'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',"
+            "'ACCEPTED','PARTIALLY_FILLED','FILLED'"
+        )
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -812,36 +852,60 @@ class BloFinDemoEventStore:
                     self._db.rollback()
                     return False
 
-                active_row = self._db.execute(
-                    """SELECT COUNT(*) FROM blofin_demo_orders
-                       WHERE status IN (
-                           'RESERVED', 'LEVERAGE_SET', 'PENDING_RECONCILE', 'UNKNOWN',
-                           'ACCEPTED', 'PARTIALLY_FILLED', 'FILLED'
-                       )"""
-                ).fetchone()
-                local_active = int(active_row[0] or 0)
-                observed_total = (
-                    local_active + external_open_positions + external_pending_orders
-                )
+                active_rows = self._db.execute(
+                    f"""SELECT client_order_id, reserved_risk_usdt, reserved_margin_usdt
+                        FROM blofin_demo_orders WHERE status IN ({active_statuses})"""
+                ).fetchall()
+                local_active = len(active_rows)
+                observed_total = local_active + external_open_positions + external_pending_orders
                 if observed_total >= max_concurrent_positions:
+                    self._db.rollback()
+                    return False
+
+                reserved_risk = Decimal("0")
+                reserved_margin = Decimal("0")
+                for row in active_rows:
+                    try:
+                        row_risk = _decimal(row["reserved_risk_usdt"], "existing_reserved_risk")
+                        row_margin = _decimal(row["reserved_margin_usdt"], "existing_reserved_margin")
+                    except Exception:
+                        # Legacy active orders without exposure snapshots cannot be
+                        # safely added to the aggregate budget. Preserve them and block.
+                        self._db.rollback()
+                        return False
+                    if row_risk <= 0 or row_margin <= 0:
+                        self._db.rollback()
+                        return False
+                    reserved_risk += row_risk
+                    reserved_margin += row_margin
+
+                if reserved_risk + new_risk > risk_cap or reserved_margin + new_margin > margin_cap:
                     self._db.rollback()
                     return False
 
                 self._db.execute(
                     """INSERT INTO blofin_demo_orders
                     (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
-                     stop_loss, take_profit, leverage, status, exchange_order_id, experience_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?)""",
+                     stop_loss, take_profit, leverage, status, exchange_order_id, experience_id,
+                     reserved_risk_usdt, reserved_margin_usdt, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?, ?, ?)""",
                     (
                         order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
                         str(plan["quantity"]), float(plan["entry_reference_price"]),
                         float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
-                        str(plan.get("experience_id") or "") or None, now, now,
+                        str(plan.get("experience_id") or "") or None,
+                        _format_decimal(new_risk), _format_decimal(new_margin), now, now,
                     ),
                 )
                 self._append_event(order_id, "RESERVED", {
                     "instrument_id": plan["inst_id"], "side": plan["side"],
                     "quantity": plan["quantity"], "leverage": plan["leverage"],
+                    "reserved_risk_usdt": _format_decimal(new_risk),
+                    "reserved_margin_usdt": _format_decimal(new_margin),
+                    "aggregate_reserved_risk_usdt_after": _format_decimal(reserved_risk + new_risk),
+                    "aggregate_reserved_margin_usdt_after": _format_decimal(reserved_margin + new_margin),
+                    "aggregate_risk_limit_usdt": _format_decimal(risk_cap),
+                    "aggregate_margin_limit_usdt": _format_decimal(margin_cap),
                     "learning_experience_id_present": bool(plan.get("experience_id")),
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,
@@ -906,6 +970,122 @@ class BloFinDemoEventStore:
             ).fetchone()
         return row is not None
 
+    def verify_durable_round_trip(self, *, connections: int = 4) -> dict[str, Any]:
+        """Verify Turso write/read visibility and serialized writes across independent connections."""
+        if self.backend != "TURSO_CLOUD_SQLITE":
+            return {
+                "verified": False,
+                "reason": "DURABLE_TURSO_NOT_CONFIGURED",
+                "orders_submitted": False,
+            }
+        if isinstance(connections, bool) or not isinstance(connections, int) or not 2 <= connections <= 8:
+            raise ValueError("connections must be between 2 and 8.")
+
+        probe_id = "runtime-probe-" + uuid.uuid4().hex
+        payload = uuid.uuid4().hex
+        created_at = int(time.time())
+        setup = None
+        try:
+            setup = connect_database()
+            setup.execute("""
+                CREATE TABLE IF NOT EXISTS blofin_demo_storage_probes (
+                    probe_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                )
+            """)
+            setup.commit()
+        finally:
+            if setup is not None:
+                setup.close()
+
+        barrier = threading.Barrier(connections)
+
+        def write_once(_: int) -> str:
+            connection = connect_database()
+            try:
+                barrier.wait(timeout=15)
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT payload FROM blofin_demo_storage_probes WHERE probe_id=?",
+                    (probe_id,),
+                ).fetchone()
+                if row is None:
+                    connection.execute(
+                        "INSERT INTO blofin_demo_storage_probes(probe_id,payload,created_at) VALUES (?,?,?)",
+                        (probe_id, payload, created_at),
+                    )
+                    connection.commit()
+                    return "inserted"
+                connection.commit()
+                return "observed"
+            except Exception:
+                try:
+                    connection.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                connection.close()
+
+        inserted = 0
+        try:
+            with ThreadPoolExecutor(max_workers=connections) as pool:
+                outcomes = list(pool.map(write_once, range(connections)))
+            inserted = outcomes.count("inserted")
+            verifier = connect_database()
+            try:
+                rows = verifier.execute(
+                    "SELECT payload FROM blofin_demo_storage_probes WHERE probe_id=?",
+                    (probe_id,),
+                ).fetchall()
+                read_back = len(rows) == 1 and str(rows[0]["payload"]) == payload
+                if inserted != 1 or not read_back:
+                    raise RuntimeError("Turso multi-connection probe did not produce one durable row.")
+                verifier.execute("BEGIN IMMEDIATE")
+                verifier.execute(
+                    "DELETE FROM blofin_demo_storage_probes WHERE probe_id=?",
+                    (probe_id,),
+                )
+                verifier.commit()
+            finally:
+                verifier.close()
+            return {
+                "verified": True,
+                "connections": connections,
+                "writers_won": inserted,
+                "read_back": True,
+                "cleanup": True,
+                "orders_submitted": False,
+            }
+        except Exception as exc:
+            cleanup = None
+            try:
+                cleanup = connect_database()
+                cleanup.execute("BEGIN IMMEDIATE")
+                cleanup.execute(
+                    "DELETE FROM blofin_demo_storage_probes WHERE probe_id=?",
+                    (probe_id,),
+                )
+                cleanup.commit()
+            except Exception:
+                try:
+                    if cleanup is not None:
+                        cleanup.rollback()
+                except Exception:
+                    pass
+            finally:
+                if cleanup is not None:
+                    cleanup.close()
+            return {
+                "verified": False,
+                "connections": connections,
+                "writers_won": inserted,
+                "error_type": type(exc).__name__,
+                "cleanup": False,
+                "orders_submitted": False,
+            }
+
     def save_autopilot_state(self, state: Mapping[str, Any]) -> None:
         """Persist the latest operational AutoPilot snapshot in the configured durable store."""
         if not isinstance(state, Mapping):
@@ -969,12 +1149,34 @@ class BloFinDemoEventStore:
                 "SELECT COUNT(*) FROM blofin_demo_orders "
                 "WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')"
             ).fetchone()
+            active_exposure_rows = self._db.execute(
+                """SELECT reserved_risk_usdt, reserved_margin_usdt
+                   FROM blofin_demo_orders
+                   WHERE status IN (
+                       'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',
+                       'ACCEPTED','PARTIALLY_FILLED','FILLED'
+                   )"""
+            ).fetchall()
         orders_today = int(today_row[0] or 0)
         orders_total = int(total_row[0] or 0)
         daily_limit = None if max_orders_per_utc_day is None else int(max_orders_per_utc_day)
         latest_created_at = int(latest_row["created_at"]) if latest_row is not None else None
         latest_status = str(latest_row["status"]) if latest_row is not None else None
         age = max(0, sampled_at - latest_created_at) if latest_created_at is not None else None
+        aggregate_risk = Decimal("0")
+        aggregate_margin = Decimal("0")
+        aggregate_exposure_complete = True
+        for row in active_exposure_rows:
+            try:
+                row_risk = _decimal(row["reserved_risk_usdt"], "reserved_risk")
+                row_margin = _decimal(row["reserved_margin_usdt"], "reserved_margin")
+                if row_risk <= 0 or row_margin <= 0:
+                    raise ValueError("Non-positive reservation.")
+                aggregate_risk += row_risk
+                aggregate_margin += row_margin
+            except Exception:
+                aggregate_exposure_complete = False
+                break
         return {
             "orders_today": orders_today,
             "orders_total": orders_total,
@@ -983,6 +1185,10 @@ class BloFinDemoEventStore:
             "latest_order_age_seconds": age,
             "latest_order_status": latest_status,
             "unresolved_orders": int(unresolved_row[0] or 0),
+            "aggregate_reserved_risk_usdt": _format_decimal(aggregate_risk) if aggregate_exposure_complete else None,
+            "aggregate_reserved_margin_usdt": _format_decimal(aggregate_margin) if aggregate_exposure_complete else None,
+            "aggregate_exposure_complete": aggregate_exposure_complete,
+            "active_reservations": len(active_exposure_rows),
             "utc_day_start": utc_day_start,
         }
 
@@ -1565,6 +1771,15 @@ class BloFinDemoExecutor:
             plan["risk_per_contract_usdt"] = float(abs(entry - stop) * contract_value)
             plan["notional_usdt"] = float(quantity_notional)
             plan["estimated_initial_margin_usdt"] = float(quantity_margin)
+            plan["reserved_risk_usdt"] = _format_decimal(quantity_risk)
+            plan["reserved_margin_usdt"] = _format_decimal(quantity_margin)
+            if (
+                quantity_risk > _decimal(plan["aggregate_risk_limit_usdt"], "aggregate_risk_limit_usdt")
+                or quantity_margin > _decimal(plan["aggregate_margin_limit_usdt"], "aggregate_margin_limit_usdt")
+            ):
+                raise BloFinDemoExecutionBlocked(
+                    "Minimum-size exposure exceeds the aggregate risk or margin budget."
+                )
             plan["minimum_size_only"] = True
         if not self.store.reserve_order(
             plan,
@@ -1573,7 +1788,7 @@ class BloFinDemoExecutor:
             external_pending_orders=_active_order_count(pending),
         ):
             raise BloFinDemoExecutionBlocked(
-                "Duplicate signal or account-wide Demo capacity is already reserved; entry blocked."
+                "Duplicate signal, unresolved legacy exposure, external exposure, or aggregate risk/margin budget is already reserved; entry blocked."
             )
 
         position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
