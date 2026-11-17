@@ -7545,7 +7545,15 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test"}:
+        if route not in {
+            "/scan", "/paper-bot/tick", "/futures-paper-bot/tick",
+            "/api/ai/diagnostic", "/api/ai/dry-run",
+            "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test",
+            "/api/blofin/demo/autopilot/control",
+            "/api/blofin/demo/manual-open",
+            "/api/blofin/demo/manual-cancel-order",
+            "/api/blofin/demo/manual-close-position",
+        }:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -7559,6 +7567,134 @@ async function loadBlofinInstruments(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route in {
+                "/api/blofin/demo/autopilot/control",
+                "/api/blofin/demo/manual-open",
+                "/api/blofin/demo/manual-cancel-order",
+                "/api/blofin/demo/manual-close-position",
+            }:
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({
+                        "status": "UNAUTHORIZED", "message_fa": "توکن پنل معتبر نیست."
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+
+                if route == "/api/blofin/demo/autopilot/control":
+                    global BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE
+                    requested = str(form.get("enabled", [""])[0]).strip().lower()
+                    if requested not in {"true", "false", "1", "0"}:
+                        return self._send(400, b'{"status":"INVALID_ENABLED_VALUE"}', "application/json; charset=utf-8")
+                    enable = requested in {"true", "1"}
+                    if enable:
+                        readiness = _blofin_demo_execution_readiness()
+                        if readiness.get("status") != "READY":
+                            return self._send(409, json.dumps({
+                                "status": "BLOCKED",
+                                "message_fa": readiness.get("message_fa"),
+                                "readiness": readiness,
+                            }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                        BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = True
+                        BLOFIN_AUTOPILOT_STOP_EVENT.clear()
+                        _start_blofin_demo_autopilot()
+                        return self._send(202, json.dumps({
+                            "status": "STARTING",
+                            "enabled": True,
+                            "message_fa": "AutoPilot در BloFin Demo فعال شد؛ چرخه جاری یا بعدی طبق زمان‌بندی اجرا می‌شود.",
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = False
+                    BLOFIN_AUTOPILOT_STOP_EVENT.set()
+                    stopping = BLOFIN_AUTOPILOT_LOCK.locked()
+                    with LOCK:
+                        BLOFIN_AUTOPILOT_STATE.update({
+                            "enabled": False,
+                            "status": "STOPPING" if stopping else "DISABLED",
+                            "search_continues": False,
+                            "next_cycle_scheduled": False,
+                            "last_message_fa": (
+                                "درخواست توقف ثبت شد؛ چرخهٔ در حال اجرا بدون قطع ناگهانی پایان می‌یابد."
+                                if stopping else "AutoPilot متوقف شد؛ حالت دستی در دسترس است."
+                            ),
+                        })
+                    _persist_blofin_autopilot_state()
+                    return self._send(200, json.dumps({
+                        "status": "STOPPING" if stopping else "DISABLED",
+                        "enabled": False,
+                        "message_fa": BLOFIN_AUTOPILOT_STATE.get("last_message_fa"),
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+                if not _blofin_manual_mode_available():
+                    return self._send(409, json.dumps({
+                        "status": "AUTOPILOT_ACTIVE",
+                        "message_fa": "ابتدا AutoPilot را متوقف کن و تا پایان چرخهٔ جاری صبر کن؛ سپس کنترل دستی فعال می‌شود.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with BLOFIN_EXECUTION_GUARD:
+                    with LOCK:
+                        active = any(
+                            item.get("status") in {"queued", "running"}
+                            for item in BLOFIN_EXECUTION_JOBS.values()
+                        )
+                    if active:
+                        return self._send(409, json.dumps({
+                            "status": "EXECUTION_BUSY",
+                            "message_fa": "یک چرخه اجرای ربات در حال اجراست؛ پس از پایان آن دوباره تلاش کن.",
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    try:
+                        if route == "/api/blofin/demo/manual-open":
+                            payload = _blofin_manual_open_trade(
+                                instrument_id=form.get("instrument", [""])[0],
+                                direction=form.get("direction", [""])[0],
+                                size=form.get("size", [""])[0],
+                                stop_loss=form.get("stop_loss", [""])[0],
+                                take_profit=form.get("take_profit", [""])[0],
+                            )
+                        elif route == "/api/blofin/demo/manual-cancel-order":
+                            payload = _blofin_manual_cancel_order(
+                                instrument_id=form.get("instrument", [""])[0],
+                                order_id=form.get("order_id", [""])[0],
+                            )
+                        else:
+                            payload = _blofin_manual_close_position(
+                                instrument_id=form.get("instrument", [""])[0],
+                                position_id=form.get("position_id", [""])[0],
+                                position_side_hint=form.get("position_side", [""])[0],
+                            )
+                    except BloFinDemoExecutionUnknown as exc:
+                        return self._send(409, json.dumps({
+                            "status": "UNKNOWN",
+                            "message_fa": "نتیجه درخواست به‌طور قطعی مشخص نیست؛ پیش از هر تلاش مجدد حساب Demo را تازه‌سازی کن. " + str(exc),
+                            "retry_allowed": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    except BloFinDemoExecutionBlocked as exc:
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED", "message_fa": str(exc),
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    except (ValueError, InvalidOperation) as exc:
+                        return self._send(400, json.dumps({
+                            "status": "INVALID_REQUEST", "message_fa": "پارامترهای دستی معتبر نیستند: " + str(exc),
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    except BloFinDemoError as exc:
+                        return self._send(502, json.dumps({
+                            "status": "EXCHANGE_ERROR", "message_fa": "BloFin Demo درخواست را کامل نکرد؛ وضعیت سفارش یا پوزیشن را دوباره بخوان.",
+                            "error_type": type(exc).__name__,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    except Exception as exc:
+                        return self._send(500, json.dumps({
+                            "status": "MANUAL_ACTION_FAILED",
+                            "message_fa": "عملیات دستی با خطای کنترل‌شده متوقف شد؛ وضعیت حساب را دوباره بخوان.",
+                            "error_type": type(exc).__name__,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                status_code = 202 if payload.get("status") in {"ACCEPTED", "FILLED", "PARTIALLY_FILLED", "CLOSE_ACCEPTED", "CANCELED"} else 409
+                return self._send(status_code, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                                  "application/json; charset=utf-8")
+
             if route == "/api/blofin/demo/smoke-test":
                 if (
                     not origin
