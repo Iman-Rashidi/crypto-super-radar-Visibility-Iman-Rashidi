@@ -126,8 +126,34 @@ def _normalise_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "orders_submitted": snapshot.get("orders_submitted") is True,
         "closed_confirmed": snapshot.get("closed_confirmed") is True,
         "ai_status": _text(snapshot.get("ai_status"), 40),
-        "ai_model": _text(snapshot.get("ai_model"), 160),
+        "ai_model": _text(snapshot.get("ai_model"), 300),
         "ai_reason": _text(snapshot.get("ai_reason"), 1600),
+        "reviewer_consensus": _text(snapshot.get("reviewer_consensus"), 40).upper(),
+        "ai_consensus": {
+            key: snapshot.get("ai_consensus", {}).get(key)
+            for key in (
+                "status", "primary_status", "second_status",
+                "primary_verified", "second_verified",
+                "primary_approved", "second_approved",
+                "two_reviewer_approval", "decision",
+            )
+            if isinstance(snapshot.get("ai_consensus"), Mapping)
+            and key in snapshot.get("ai_consensus", {})
+        },
+        "ai_reviews": [
+            {
+                key: item.get(key)
+                for key in (
+                    "reviewer_id", "actor", "status", "provider", "model",
+                    "returned_model", "request_attempted", "response_source",
+                    "response_validated", "model_verified", "paper_entry_eligible",
+                    "skip_reason_code", "http_status", "latency_ms", "reason",
+                )
+                if key in item
+            }
+            for item in snapshot.get("ai_reviews", [])
+            if isinstance(item, Mapping)
+        ][:2] if isinstance(snapshot.get("ai_reviews"), list) else [],
         "source_url": _text(snapshot.get("source_url"), 1000),
     }
 
@@ -422,14 +448,19 @@ class NotionActivityJournal:
                 "ai_status": snapshot.get("ai_status"),
                 "ai_model": snapshot.get("ai_model"),
                 "ai_reason": snapshot.get("ai_reason"),
+                "reviewer_consensus": snapshot.get("reviewer_consensus"),
+                "ai_consensus": snapshot.get("ai_consensus"),
+                "ai_reviews": snapshot.get("ai_reviews"),
                 "order_id": snapshot.get("order_id"),
                 "position_id": snapshot.get("position_id"),
                 "closed_confirmed": closed,
                 "realized_net_pnl_usdt": snapshot.get("realized_net_pnl_usdt"),
                 "evidence": snapshot.get("evidence"),
             }, ensure_ascii=False, sort_keys=True), 1800),
-            "بازبینی مستقل": {"select": {"name": "در انتظار"}},
+            "بازبینی مستقل": {"select": {"name": self._independent_review_status(snapshot)}},
         }
+        if signal == "NO_TRADE":
+            properties["دلیل عدم معامله"] = self._rich_text(snapshot.get("reason_fa"), 1800)
         if snapshot.get("signal_bar_open_utc"):
             properties["زمان ورود فرضی"] = self._date(snapshot.get("signal_bar_open_utc"))
         if snapshot.get("ai_status"):
@@ -450,6 +481,40 @@ class NotionActivityJournal:
                 "file_upload": {"id": ohlcv_upload_id},
             }]}
         return properties
+
+    @staticmethod
+    def _independent_review_status(snapshot: Mapping[str, Any]) -> str:
+        """Map reviewer evidence to the Notion select without implying approval."""
+        consensus = snapshot.get("ai_consensus")
+        consensus = consensus if isinstance(consensus, Mapping) else {}
+        reviewers = snapshot.get("ai_reviews")
+        reviewers = reviewers if isinstance(reviewers, list) else []
+        consensus_status = str(
+            snapshot.get("reviewer_consensus") or consensus.get("status") or ""
+        ).upper()
+        two_approved = (
+            consensus.get("two_reviewer_approval") is True
+            and consensus.get("primary_verified") is True
+            and consensus.get("second_verified") is True
+        )
+        if consensus_status == "AGREEMENT" and two_approved:
+            return "تأیید"
+        has_verified_rejection = any(
+            isinstance(item, Mapping)
+            and item.get("request_attempted") is True
+            and item.get("response_source") == "LIVE_API"
+            and item.get("response_validated") is True
+            and item.get("model_verified") is True
+            and str(item.get("status") or "").upper() in {"VETO", "REJECT"}
+            for item in reviewers
+        )
+        if has_verified_rejection:
+            return "رد"
+        if consensus_status == "DISAGREEMENT":
+            return "نیازمند بازبینی"
+        if consensus_status in {"NOT_CALLED", "NOT_COMPARABLE", "SINGLE_REVIEWER"}:
+            return "نیازمند بازبینی"
+        return "در انتظار"
 
     def _find_page(self, token: str, experience_id: str) -> str | None:
         response = self._request_json(
