@@ -457,6 +457,43 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(outcome["realized_result"], "NOT_EXECUTED")
         self.assertIsNone(outcome["realized_net_pnl"])
 
+    def test_changed_closed_candle_snapshot_gets_a_new_immutable_experience_id(self):
+        first_record = signal_record(signal="NO_TRADE")
+        first_record["challenge1_evidence"]["candles_15m"] = [{
+            "time_utc": "2026-11-17T18:00:00Z",
+            "open": 100.0, "high": 101.0, "low": 99.0,
+            "close": 100.5, "volume": 1000.0,
+        }]
+        first_record["challenge1_evidence"]["candles_1h"] = []
+        first_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=first_record,
+        )
+
+        # Same confirmation candle and signal ID, but a revised OHLCV snapshot
+        # and risk plan must not reuse the immutable event_id from the first input.
+        revised_record = dict(first_record)
+        revised_record["challenge1_evidence"] = dict(first_record["challenge1_evidence"])
+        revised_record["challenge1_evidence"]["candles_15m"] = [{
+            "time_utc": "2026-11-17T18:00:00Z",
+            "open": 100.0, "high": 101.2, "low": 99.0,
+            "close": 100.5, "volume": 1200.0,
+        }]
+        revised_record["stop_loss_usd"] = 98.5
+        second_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=revised_record,
+        )
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(
+            self.store.learning_memory.verify_experience(first_id)["status"],
+            "PASS",
+        )
+        self.assertEqual(
+            self.store.learning_memory.verify_experience(second_id)["status"],
+            "PASS",
+        )
+
     def test_closed_position_outcome_uses_exact_position_id_and_deducts_trading_fees(self):
         challenge = signal_record()
         experience_id = self.store.record_challenge1_decision(
