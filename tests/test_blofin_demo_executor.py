@@ -760,6 +760,31 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_emergency_cancel_check_blocks_final_demo_order_write(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT", leverage=1,
+                    allow_demo_orders=True,
+                    cancel_check=lambda: True,
+                )
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] == "place_order"
+                for call in client.calls
+            ))
+            latest = store.latest_order()
+            self.assertEqual(latest["status"], "REJECTED")
+        finally:
+            store.close()
+
     def test_minimum_size_only_uses_exchange_contract_minimum(self):
         with patch.dict(os.environ, {
             "TURSO_DATABASE_URL": "",
