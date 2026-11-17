@@ -81,8 +81,8 @@ class Challenge1CandleTests(unittest.TestCase):
             "15m": candle_rows(now, 15 * 60 * 1000),
             "1H": candle_rows(now, 60 * 60 * 1000),
         })
-        bullish = {"name_en": "Bullish Engulfing", "direction": "BULLISH", "score": 13}
-        bearish = {"name_en": "Bearish Engulfing", "direction": "BEARISH", "score": -13}
+        bullish = {"name_en": "Bullish Engulfing", "direction": "BULLISH", "score": 13, "category": "CANDLESTICK"}
+        bearish = {"name_en": "Bearish Engulfing", "direction": "BEARISH", "score": -13, "category": "CANDLESTICK"}
         with (
             patch(
                 "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
@@ -116,7 +116,7 @@ class Challenge1CandleTests(unittest.TestCase):
                 return super().get_candles(inst_id, bar=bar, limit=limit)
 
         client = ContextUnavailable({"15m": candle_rows(now, 15 * 60 * 1000)})
-        bullish = {"name_en": "Hammer", "direction": "BULLISH", "score": 10}
+        bullish = {"name_en": "Hammer", "direction": "BULLISH", "score": 10, "category": "CANDLESTICK"}
         with (
             patch(
                 "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
