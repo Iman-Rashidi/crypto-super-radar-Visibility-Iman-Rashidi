@@ -3995,6 +3995,17 @@ def _demo_ai_review_approved(review: Any) -> bool:
     )
 
 
+def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict[str, Any]:
+    """Queue the final Demo event and activity projections for manual and AutoPilot jobs."""
+    with LOCK:
+        job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+    if str(job.get("status") or "").lower() not in {"completed", "failed"}:
+        return {"status": "NOT_FINAL"}
+    notion = _queue_blofin_job_notion_events(job_id, instrument_id, job)
+    activity = _queue_blofin_activity_journal(job_id, instrument_id, job)
+    return {"status": "QUEUED", "notion": notion, "activity": activity}
+
+
 def _run_blofin_demo_execution_job(
     job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "CHALLENGE_1",
     *, autopilot_cycle: bool = False,
@@ -4825,6 +4836,10 @@ def _run_blofin_demo_execution_job(
                 store.close()
             except Exception:
                 pass
+        # Manual runs do not pass through the AutoPilot queue. Persist their final
+        # event/activity projections here as well; async reviewers can safely upsert
+        # the same experience again when their genuine API results arrive.
+        _queue_blofin_completed_job_reports(job_id, instrument_id)
 
 
 def _run_blofin_demo_smoke_test_job(job_id: str) -> None:

@@ -134,6 +134,56 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(robot_event["cycle_id"], "cycle-no-trade")
         self.assertIn("orders_submitted", robot_event["details"])
 
+    def test_completed_manual_job_queues_both_notion_projections(self):
+        job_id = "manual-final-notion-queue-test"
+        web_app.BLOFIN_EXECUTION_JOBS[job_id] = {
+            "status": "completed",
+            "stage": "MONITORING",
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                    "review": {
+                        "status": "APPROVED", "request_attempted": True,
+                        "response_source": "LIVE_API", "response_validated": True,
+                        "model_verified": True, "returned_model": "verified-model",
+                    },
+                },
+                {
+                    "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                    "review": {
+                        "status": "NOT_CONFIGURED", "request_attempted": False,
+                        "response_source": "NONE", "response_validated": False,
+                        "model_verified": False, "returned_model": "",
+                    },
+                },
+            ],
+            "ai_consensus": {"status": "SINGLE_REVIEWER"},
+            "result": {
+                "status": "FILLED", "signal": "LONG",
+                "learning_experience_id": "manual-final-notion-experience",
+                "orders_submitted": True, "trade_executed": True,
+                "challenge1_evidence": {"setup_timeframe": "5m"},
+            },
+        }
+        try:
+            with (
+                patch.object(web_app, "_queue_blofin_job_notion_events",
+                             return_value={"status": "QUEUED", "queued": 2}) as events,
+                patch.object(web_app, "_queue_blofin_activity_journal",
+                             return_value={"status": "QUEUED", "experience_id": "manual-final-notion-experience"}) as activity,
+            ):
+                queued = web_app._queue_blofin_completed_job_reports(job_id, "BTC-USDT")
+            events.assert_called_once()
+            activity.assert_called_once()
+            self.assertEqual(queued["status"], "QUEUED")
+            self.assertEqual(queued["notion"]["queued"], 2)
+            self.assertEqual(
+                queued["activity"]["experience_id"],
+                "manual-final-notion-experience",
+            )
+        finally:
+            web_app.BLOFIN_EXECUTION_JOBS.pop(job_id, None)
+
     def test_ai_veto_is_reported_but_does_not_gate_challenge1_demo_order(self):
         ai_review = {
             "reviewer_id": "nemotron",
