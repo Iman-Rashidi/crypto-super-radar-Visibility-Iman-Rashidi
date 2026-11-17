@@ -314,7 +314,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("checkButton.click();", page)
         self.assertIn("انتخاب ساختار موج الیوت در لحظه تحلیل", page)
         self.assertIn("خط زمانی رویدادهای چرخه", page)
-        self.assertIn("Mark Price واقعی", page)
+        self.assertIn("Mark Price واقعی همان قرارداد", page)
         self.assertIn("حد سود و حد ضرر فعال در BloFin", page)
         self.assertIn("سفارش‌های تکمیل‌شده و تاریخچه سفارش", page)
         self.assertIn("تمام رویدادهای ثبت‌شده در ربات (همه سفارش‌ها)", page)
@@ -501,7 +501,10 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(json.loads(body)["orders_submitted"])
 
     def test_crypto_market_endpoint_uses_free_cross_validated_spot_data_and_cache(self):
-        web_app.CRYPTO_MARKET_CACHE.update(expires_at=0.0, payload=None)
+        with web_app.CRYPTO_MARKET_CACHE_LOCK:
+            web_app.CRYPTO_MARKET_CACHE.update(
+                expires_at=0.0, payload=None, refreshing=False, last_error=None
+            )
 
         def snapshot(asset):
             return SimpleNamespace(
@@ -537,7 +540,10 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, len(web_app.CRYPTO_MARKET_UNIVERSE))
 
     def test_crypto_market_endpoint_keeps_failed_symbols_unknown(self):
-        web_app.CRYPTO_MARKET_CACHE.update(expires_at=0.0, payload=None)
+        with web_app.CRYPTO_MARKET_CACHE_LOCK:
+            web_app.CRYPTO_MARKET_CACHE.update(
+                expires_at=0.0, payload=None, refreshing=False, last_error=None
+            )
 
         def snapshot(asset):
             if asset.symbol == "ETHUSDT":
