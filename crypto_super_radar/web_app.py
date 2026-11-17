@@ -5589,7 +5589,7 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </section>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
-            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
+            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ پروتکل عمومی رادار در مسیر معامله Challenge 1 اجرا یا ارزیابی نمی‌شوند و فقط در تحلیل عمومی رادار باقی می‌مانند. موتور معامله به TinyFish یا فیلترهای عمومی رادار وابسته نیست. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <div id="blofin-robot-cycle-controls">
               <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
               <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک چرخه با ربات (دستی و یک‌باره)</button>
