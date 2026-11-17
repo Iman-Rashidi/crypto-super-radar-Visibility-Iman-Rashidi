@@ -344,7 +344,7 @@ class WebAppHttpTests(unittest.TestCase):
                 "filled_at_utc": "2026-11-17T10:15:00Z",
                 "ai_review": {"status": "APPROVED", "model": "configured-primary"},
                 "challenge1_evidence": {
-                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
                     "decision": "LONG", "detected_patterns": [],
                     "setup_timeframe": "5m", "higher_timeframes_used": False,
                     "candles_5m": candles,
@@ -386,7 +386,7 @@ class WebAppHttpTests(unittest.TestCase):
                 "reason_fa": "No confirmed 5m entry pattern.",
                 "ai_review": {"status": "NOT_CALLED", "execution_role": "ADVISORY_ONLY"},
                 "challenge1_evidence": {
-                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
                     "decision": "NO_TRADE",
                     "setup_timeframe": "5m",
                     "higher_timeframes_used": False,
