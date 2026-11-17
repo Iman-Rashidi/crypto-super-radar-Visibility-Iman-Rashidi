@@ -10,7 +10,9 @@ from crypto_super_radar.ai_second_opinion import (
     DEFAULT_FREE_MODEL,
     MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
+    second_ai_connection_status,
     run_free_ai_second_opinion,
+    run_independent_ai_supervisor,
     run_openrouter_connection_diagnostic,
 )
 from crypto_super_radar.models import AssetSpec, Signal
@@ -62,6 +64,95 @@ def valid_document(rating="Buy", risk_verdict="APPROVE", portfolio_verdict="APPR
         "final_rating": rating,
         "risk_flags": [],
         "rationale_fa": "این نظر دوم مستقل است و جایگزین فیلترهای رادار نیست.",
+    }
+
+
+def challenge1_result(*, pattern_confirmed=True):
+    candle_rows_5m = [
+        {"open_time_utc": "2026-11-17T09:50:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 80.0},
+        {"open_time_utc": "2026-11-17T09:55:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 90.0},
+        {"open_time_utc": "2026-11-17T10:00:00+00:00", "open": 99.0, "high": 102.0, "low": 98.7, "close": 101.0, "volume": 160.0},
+    ]
+    pattern = {
+        "name_en": "Bullish Engulfing",
+        "direction": "BULLISH" if pattern_confirmed else "BEARISH",
+        "score": 13,
+        "category": "CANDLESTICK",
+        "timeframe": "5m",
+    }
+    evidence = {
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+        "completed_candles_only": True,
+        "setup_timeframe": "5m",
+        "higher_timeframes_used": False,
+        "chosen_pattern": {
+            "name_en": "Bullish Engulfing",
+            "direction": "BULLISH",
+            "score": 13,
+            "category": "CANDLESTICK",
+            "timeframe": "5m",
+        },
+        "detected_patterns": [pattern if pattern_confirmed else {
+            **pattern, "direction": "BEARISH"
+        }],
+        "confirmation_candle": dict(candle_rows_5m[-1]),
+        "candles_5m": candle_rows_5m,
+        "chart_structure": {},
+        "volume_confirmation": {
+            "confirmed": True, "volume_ratio": 1.5,
+            "close_location": 0.8, "minimum_volume_ratio": 1.2,
+        },
+    }
+    record = {
+        "asset": "perp:BTCUSDT",
+        "signal": "LONG",
+        "execution_profile": "CHALLENGE_1",
+        "entry_price_usd": 101.0,
+        "stop_loss_usd": 99.0,
+        "take_profit_usd": 105.0,
+        "execution": {"status": "PASS", "direction": "LONG"},
+        "challenge1_evidence": evidence,
+    }
+    return SimpleNamespace(
+        asset="perp:BTCUSDT",
+        signal=Signal.LONG,
+        entry_price=101.0,
+        stop_loss=99.0,
+        take_profit=105.0,
+        metrics={
+            "execution_profile": "CHALLENGE_1",
+            "challenge1_evidence": evidence,
+        },
+        gates=[
+            SimpleNamespace(
+                gate_id=gate_id, name_en=f"General gate {gate_id}",
+                status="UNKNOWN", evidence={"must_not_be_sent": True},
+            )
+            for gate_id in range(1, 13)
+        ],
+        to_record=lambda: record,
+    )
+
+
+def valid_pattern_document(*, timeframe_verdict="SUPPORT"):
+    return {
+        "pattern_analyst": {
+            "verdict": "SUPPORT", "pattern_name": "Bullish Engulfing",
+            "reason_fa": "الگوی انگلفینگ صعودی در کندل بسته‌شده دیده می‌شود.",
+        },
+        "price_action_analyst": {
+            "verdict": "SUPPORT", "reason_fa": "ساختار قیمت با جهت خرید هم‌سو است.",
+        },
+        "timeframe_analyst": {
+            "verdict": timeframe_verdict,
+            "reason_fa": "زمینه یک‌ساعته یک مشاهده مشورتی است و به تنهایی مانع ورود نیست.",
+        },
+        "trader": {"proposal": "LONG", "reason_fa": "ورود فقط بر پایه الگوی تأییدشده پیشنهاد می‌شود."},
+        "risk_manager": {"verdict": "APPROVE", "reason_fa": "حد ضرر و نسبت بازده به ریسک معتبر است."},
+        "portfolio_manager": {"verdict": "APPROVE", "reason_fa": "برنامه محافظتی از سقف ریسک عبور نمی‌کند."},
+        "final_decision": "APPROVE",
+        "risk_flags": [],
+        "rationale_fa": "نظر مستقل فقط براساس کندل‌های بسته‌شده و الگو صادر شد.",
     }
 
 
@@ -267,6 +358,8 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         self.assertTrue(second["model_verified"])
         self.assertTrue(second["response_validated"])
+        self.assertTrue(second["request_attempted"])
+        self.assertEqual(second["response_source"], "LIVE_API")
         self.assertEqual(second["returned_model"], DEFAULT_FREE_MODEL)
         self.assertEqual(second["http_status"], 200)
         self.assertEqual(second["total_tokens"], 99)
@@ -287,6 +380,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "MODEL_MISMATCH")
         self.assertFalse(result["model_verified"])
+        self.assertTrue(result["request_attempted"])
         self.assertFalse(result["paper_entry_eligible"])
 
     def test_more_than_eight_risk_flags_cannot_be_ignored(self):
@@ -410,6 +504,321 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(blocked["status"], "RATE_LIMITED")
         self.assertFalse(blocked["paper_entry_eligible"])
 
+    def test_missing_api_key_records_that_no_external_request_was_sent(self):
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT")
+            )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertFalse(result["request_attempted"])
+        self.assertEqual(result["skip_reason_code"], "OPENROUTER_KEY_MISSING")
+        self.assertEqual(result["response_source"], "NONE")
+
+    def test_second_supervisor_is_not_configured_without_its_own_credentials(self):
+        with patch.dict(os.environ, {
+            "OPENROUTER_API_KEY": "primary-key",
+        }, clear=True):
+            status = second_ai_connection_status()
+            result = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT")
+            )
+        self.assertFalse(status["configured"])
+        self.assertEqual(status["status"], "NOT_CONFIGURED")
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
+        self.assertFalse(result["request_attempted"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("primary-key", json.dumps(result))
+
+    def test_second_supervisor_rejects_reused_key_or_model(self):
+        common = {
+            "OPENROUTER_API_KEY": "same-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "same-key",
+            "CSR_SECOND_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_PROVIDER": "OpenRouter",
+            "CSR_SECOND_AI_API_URL": "https://openrouter.ai/api/v1/chat/completions",
+        }
+        with patch.dict(os.environ, common, clear=True):
+            status = second_ai_connection_status()
+            result = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("reused credentials/model must never call a provider")
+                ),
+            )
+        self.assertFalse(status["configured"])
+        self.assertIn("SECOND_AI_KEY_MUST_BE_SEPARATE", status["configuration_issues"])
+        self.assertIn("SECOND_AI_MODEL_MUST_DIFFER", status["configuration_issues"])
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
+        self.assertFalse(result["request_attempted"])
+
+    def test_groq_free_plan_models_are_accepted_without_openrouter_suffix(self):
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "separate-groq-key",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_PROVIDER": "GroqCloud",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+        self.assertTrue(status["configured"], status["configuration_issues"])
+        self.assertEqual(status["model"], "openai/gpt-oss-120b")
+
+    def test_groq_rejects_paid_or_unlisted_models_and_nonofficial_endpoint(self):
+        base = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "separate-groq-key",
+            "CSR_SECOND_AI_PROVIDER": "Groq",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, {**base, "CSR_SECOND_AI_MODEL": "unlisted/model"}, clear=True):
+            status = second_ai_connection_status()
+        self.assertFalse(status["configured"])
+        self.assertIn("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST", status["configuration_issues"])
+        with patch.dict(os.environ, {
+            **base,
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_API_URL": "https://other.example/v1/chat/completions",
+        }, clear=True):
+            status = second_ai_connection_status()
+        self.assertFalse(status["configured"])
+        self.assertIn(
+            "GROQ_ENDPOINT_MUST_MATCH_OFFICIAL_OPENAI_COMPATIBLE_ENDPOINT",
+            status["configuration_issues"],
+        )
+
+    def test_second_ai_rejects_reuse_of_primary_provider_and_endpoint(self):
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "separate-key",
+            "CSR_SECOND_AI_MODEL": "different/model:free",
+            "CSR_SECOND_AI_PROVIDER": "OpenRouter",
+            "CSR_SECOND_AI_API_URL": "https://openrouter.ai/api/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+            result = run_independent_ai_supervisor(
+                challenge1_result(), AssetSpec.parse("perp:BTCUSDT"),
+                http_post=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("the second supervisor must not reuse the primary provider")
+                ),
+            )
+        self.assertFalse(status["configured"])
+        self.assertIn("SECOND_AI_PROVIDER_MUST_DIFFER", status["configuration_issues"])
+        self.assertIn("SECOND_AI_ENDPOINT_MUST_DIFFER", status["configuration_issues"])
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
+        self.assertFalse(result["request_attempted"])
+
+    def test_second_supervisor_uses_separate_free_model_and_verifies_provider_response(self):
+        second_model = "independent/test-model:free"
+        captured = {}
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.update({
+                "url": url, "headers": headers, "payload": json,
+                "timeout": timeout, "allow_redirects": allow_redirects,
+            })
+            return FakeResponse(document=valid_document(), model=second_model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-key",
+            "CSR_SECOND_AI_MODEL": second_model,
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            result = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+        self.assertEqual(captured["url"], env["CSR_SECOND_AI_API_URL"])
+        self.assertEqual(captured["payload"]["model"], second_model)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer independent-key")
+        self.assertFalse(captured["allow_redirects"])
+        self.assertNotIn("primary-key", captured["headers"]["Authorization"])
+        self.assertEqual(result["reviewer_id"], "second_ai")
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertTrue(result["request_attempted"])
+        self.assertTrue(result["response_validated"])
+        self.assertTrue(result["model_verified"])
+        self.assertTrue(result["paper_entry_eligible"])
+        self.assertEqual(result["returned_model"], second_model)
+        self.assertEqual(result["provider"], env["CSR_SECOND_AI_PROVIDER"])
+        self.assertTrue(result["requested_at_utc"])
+        self.assertTrue(result["completed_at_utc"])
+        self.assertIn("second-ai", result["prompt_version"])
+
+    def test_second_supervisor_is_not_called_when_native_evidence_is_unknown(self):
+        invalid = valid_result()
+        invalid.gates[0].status = "UNKNOWN"
+        calls = {"count": 0}
+
+        def forbidden_post(*args, **kwargs):
+            calls["count"] += 1
+            raise AssertionError("second reviewer must not be called with incomplete native evidence")
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-key",
+            "CSR_SECOND_AI_MODEL": "independent/test-model:free",
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            result = run_independent_ai_supervisor(
+                invalid, AssetSpec.parse("cex:BTCUSDT"), http_post=forbidden_post
+            )
+        self.assertEqual(calls["count"], 0)
+        self.assertEqual(result["status"], "NOT_CALLED")
+        self.assertEqual(result["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
+        self.assertFalse(result["request_attempted"])
+        self.assertFalse(result["paper_entry_eligible"])
+
+    def test_challenge1_ai_supervisor_receives_only_closed_candles_and_patterns(self):
+        candidate = challenge1_result()
+        captured = {}
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.update({"payload": json, "url": url})
+            return FakeResponse(document=valid_pattern_document())
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+
+        payload = captured["payload"]
+        evidence = json.loads(payload["messages"][1]["content"].split("evidence:", 1)[1].strip())
+        system_prompt = payload["messages"][0]["content"]
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["request_attempted"])
+        self.assertTrue(review["model_verified"])
+        self.assertTrue(review["paper_entry_eligible"])
+        self.assertEqual(review["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(review["pattern_name"], "Bullish Engulfing")
+        self.assertEqual(evidence["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(len(evidence["pattern_evidence"]["candles_5m"]), 3)
+        self.assertEqual(evidence["pattern_evidence"]["setup_timeframe"], "5m")
+        self.assertFalse(evidence["pattern_evidence"]["higher_timeframes_used"])
+        self.assertEqual(
+            set(key for key in evidence["pattern_evidence"] if key.startswith("candles_")),
+            {"candles_5m"},
+        )
+        self.assertNotIn("context_timeframe", evidence["pattern_evidence"])
+        self.assertNotIn("candles_15m", json.dumps(evidence))
+        self.assertNotIn("candles_1h", json.dumps(evidence))
+        self.assertEqual(evidence["pattern_evidence"]["chosen_pattern"]["name_en"], "Bullish Engulfing")
+        self.assertIn("This is an audit/recommendation report only", system_prompt)
+        self.assertNotIn("mandatory_gates", evidence)
+        self.assertNotIn("must_not_be_sent", json.dumps(payload))
+        self.assertNotIn('"id":1', json.dumps(payload))
+
+    def test_challenge1_supervisors_receive_only_5m_patterns_and_cannot_add_higher_timeframe_gates(self):
+        candidate = challenge1_result()
+        evidence = candidate.metrics["challenge1_evidence"]
+        document = valid_pattern_document(timeframe_verdict="OPPOSE")
+        primary_captured = {}
+        secondary_captured = {}
+        second_model = "independent/test-pattern-reviewer:free"
+
+        def primary_post(url, headers, json, timeout, allow_redirects=False):
+            primary_captured.update({"payload": json})
+            return FakeResponse(document=document)
+
+        def second_post(url, headers, json, timeout, allow_redirects=False):
+            secondary_captured.update({"payload": json})
+            return FakeResponse(document=document, model=second_model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-test-key",
+            "CSR_SECOND_AI_API_KEY": "separate-independent-key",
+            "CSR_SECOND_AI_MODEL": second_model,
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            primary = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=primary_post, bypass_cache=True,
+            )
+            secondary = run_independent_ai_supervisor(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=second_post,
+            )
+
+        self.assertEqual(primary["status"], "APPROVED")
+        self.assertEqual(secondary["status"], "APPROVED")
+        self.assertTrue(primary["paper_entry_eligible"])
+        self.assertTrue(secondary["paper_entry_eligible"])
+        for captured in (primary_captured, secondary_captured):
+            prompt = captured["payload"]["messages"][0]["content"]
+            body = captured["payload"]["messages"][1]["content"]
+            self.assertIn("must not request or infer 15m/1H data", prompt)
+            self.assertIn('"setup_timeframe":"5m"', body)
+            self.assertIn('"timeframe":"5m"', body)
+            self.assertNotIn("15m", body)
+            self.assertNotIn('"1H"', body)
+        self.assertEqual(primary["specialist_views"]["timeframe_analyst"]["verdict"], "OPPOSE")
+        self.assertEqual(secondary["specialist_views"]["timeframe_analyst"]["verdict"], "OPPOSE")
+
+    def test_challenge1_pattern_conflict_blocks_before_any_ai_request_even_when_gates_pass(self):
+        candidate = challenge1_result(pattern_confirmed=False)
+        for gate in candidate.gates:
+            gate.status = "PASS"
+        calls = {"count": 0}
+
+        def forbidden_post(*args, **kwargs):
+            calls["count"] += 1
+            raise AssertionError("A conflicting selected pattern must never reach the model.")
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"), http_post=forbidden_post,
+            )
+        self.assertEqual(calls["count"], 0)
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertEqual(review["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
+        self.assertFalse(review["paper_entry_eligible"])
+
+    def test_second_challenge1_supervisor_uses_the_same_pattern_only_evidence_independently(self):
+        candidate = challenge1_result()
+        captured = {}
+        second_model = "independent/test-pattern-reviewer:free"
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.update({"url": url, "headers": headers, "payload": json})
+            return FakeResponse(document=valid_pattern_document(), model=second_model)
+
+        env = {
+            "CSR_SECOND_AI_API_KEY": "separate-independent-key",
+            "CSR_SECOND_AI_MODEL": second_model,
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            review = run_independent_ai_supervisor(
+                candidate, AssetSpec.parse("perp:BTCUSDT"), http_post=fake_post,
+            )
+        payload = captured["payload"]
+        prompt_evidence = json.loads(payload["messages"][1]["content"].split("evidence:", 1)[1].strip())
+        self.assertEqual(review["reviewer_id"], "second_ai")
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["request_attempted"])
+        self.assertTrue(review["response_validated"])
+        self.assertTrue(review["model_verified"])
+        self.assertTrue(review["paper_entry_eligible"])
+        self.assertEqual(payload["model"], second_model)
+        self.assertEqual(prompt_evidence["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertNotIn("mandatory_gates", prompt_evidence)
+        self.assertNotIn("must_not_be_sent", json.dumps(payload))
+
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
         invalid.gates[0].status = "UNKNOWN"
@@ -425,3 +834,5 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(calls["count"], 0)
+        self.assertFalse(result["request_attempted"])
+        self.assertEqual(result["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
