@@ -6340,6 +6340,10 @@ let blofinInstrumentRecords=[];
                   const seconds=remaining%60;
                   liveMessage+=' زمان باقی‌مانده تا اسکن بعدی: '+minutes+' دقیقه و '+seconds+' ثانیه.';
                 }
+                const activityQueueState=result.notion_activity_last_queue_status;
+                if(activityQueueState){
+                  liveMessage+=' · ثبت ژورنال بازار در Notion: '+activityQueueState;
+                }
                 autopilotStatus.textContent=liveMessage
                   +' وضعیت: '+state+'. چرخه‌های اجراشده: '+(result.cycles_started??'—');
                 autopilotToggle.textContent=autopilotIsEnabled
@@ -9056,7 +9060,8 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
     ai_decision = (
         "APPROVE" if ai_status == "APPROVED" else
         "REJECT" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
-        "OBSERVE_ONLY" if ai_review else "NOT_CALLED"
+        "OBSERVE_ONLY" if ai_review and ai_status not in {"", "NOT_CALLED"} else
+        "NOT_CALLED"
     )
     order = result.get("order") if isinstance(result.get("order"), dict) else {}
     order_id = (
