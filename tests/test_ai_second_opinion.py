@@ -558,6 +558,29 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(result["status"], "NOT_CONFIGURED")
         self.assertFalse(result["request_attempted"])
 
+    def test_second_ai_rejects_reuse_of_primary_provider_and_endpoint(self):
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "separate-key",
+            "CSR_SECOND_AI_MODEL": "different/model:free",
+            "CSR_SECOND_AI_PROVIDER": "OpenRouter",
+            "CSR_SECOND_AI_API_URL": "https://openrouter.ai/api/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+            result = run_independent_ai_supervisor(
+                challenge1_result(), AssetSpec.parse("perp:BTCUSDT"),
+                http_post=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("the second supervisor must not reuse the primary provider")
+                ),
+            )
+        self.assertFalse(status["configured"])
+        self.assertIn("SECOND_AI_PROVIDER_MUST_DIFFER", status["configuration_issues"])
+        self.assertIn("SECOND_AI_ENDPOINT_MUST_DIFFER", status["configuration_issues"])
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
+        self.assertFalse(result["request_attempted"])
+
     def test_second_supervisor_uses_separate_free_model_and_verifies_provider_response(self):
         second_model = "independent/test-model:free"
         captured = {}
