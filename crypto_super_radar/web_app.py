@@ -5508,6 +5508,7 @@ class Handler(BaseHTTPRequestHandler):
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
             let autopilotIsEnabled=false;
+            let autopilotIsStopping=false;
             let selectedExecutionMode='manual';
             let manualActionBusy=false;
             if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
@@ -5906,7 +5907,7 @@ let blofinInstrumentRecords=[];
                 ?'حالت AutoPilot انتخاب شده است؛ پایش خودکار فقط در BloFin Demo انجام می‌شود.'
                 :'حالت دستی انتخاب شده است؛ بازکردن، لغو سفارش مشخص و بستن پوزیشن مشخص با تأیید تو انجام می‌شود.';
               executeButton.disabled=!auto;
-              manualOpenButton.disabled=auto||autopilotIsEnabled||manualActionBusy;
+              manualOpenButton.disabled=auto||autopilotIsEnabled||autopilotIsStopping||manualActionBusy;
               if(auto)refreshExecutionReadiness();
             }
             async function refreshAutoPilotStatus(){
@@ -5914,6 +5915,7 @@ let blofinInstrumentRecords=[];
                 const response=await fetch('/api/blofin/demo/autopilot/status',{cache:'no-store'});
                 const result=await response.json();
                 autopilotIsEnabled=result.enabled===true;
+                autopilotIsStopping=String(result.status||'').toUpperCase()==='STOPPING';
                 const state=result.status||'UNKNOWN';
                 autopilotStatus.textContent=(result.last_message_fa||'وضعیت AutoPilot دریافت شد.')
                   +' وضعیت: '+state+'. چرخه‌های اجراشده: '+(result.cycles_started??'—');
@@ -5921,10 +5923,15 @@ let blofinInstrumentRecords=[];
                   ?'توقف AutoPilot و بازگشت به حالت دستی'
                   :'فعال‌سازی AutoPilot در BloFin Demo';
                 applyExecutionMode(autopilotIsEnabled?'autopilot':'manual');
+                if(autopilotIsStopping){
+                  manualOpenButton.disabled=true;
+                  modeStatus.textContent='AutoPilot در حال اتمام چرخه جاری است؛ تا آزادشدن قفل اجرا، عملیات دستی در دسترس نیست.';
+                }
                 return result;
               }catch(error){
                 autopilotStatus.textContent='خواندن وضعیت AutoPilot ممکن نشد؛ حالت دستی و خودکار تا بررسی وضعیت سرور قفل می‌مانند.';
                 autopilotIsEnabled=true;
+                autopilotIsStopping=true;
                 manualOpenButton.disabled=true;
                 return null;
               }
@@ -5987,7 +5994,6 @@ let blofinInstrumentRecords=[];
               if(!autopilotIsEnabled)await setAutoPilot(true);
             });
             async function refreshManualAccount(){
-              if(manualActionBusy)return;
               const token=tokenInput.value.trim();
               if(!token){manualAccountStatus.textContent='ابتدا توکن پنل را وارد کن.';return;}
               manualRefreshButton.disabled=true;
@@ -6120,7 +6126,7 @@ let blofinInstrumentRecords=[];
             manualRefreshButton.addEventListener('click',refreshManualAccount);
             manualOrderForm.addEventListener('submit',async function(event){
               event.preventDefault();
-              if(autopilotIsEnabled||selectedExecutionMode!=='manual'){
+              if(autopilotIsEnabled||autopilotIsStopping||selectedExecutionMode!=='manual'){
                 manualOrderStatus.textContent='برای سفارش دستی ابتدا AutoPilot را متوقف کن و حالت دستی را انتخاب کن.';
                 return;
               }
@@ -6141,57 +6147,6 @@ let blofinInstrumentRecords=[];
                 instrument,direction,size,stop_loss:stop,take_profit:target
               },'سفارش دستی ثبت شد.');
             });
-            async function setExecutionMode(mode){
-              if(mode==='manual'&&autopilotIsEnabled){
-                const stopped=await setAutoPilot(false);
-                if(!stopped)return;
-                const result=await refreshAutoPilotStatus();
-                if(result&&result.status==='STOPPING'){
-                  modeStatus.textContent='AutoPilot در حال پایان چرخه جاری است؛ پس از پایان آن حالت دستی را فعال کن.';
-                  return;
-                }
-              }
-              applyExecutionMode(mode);
-              if(mode==='manual')refreshExecutionReadiness();
-              if(mode==='autopilot'&&!autopilotIsEnabled)await setAutoPilot(true);
-            }
-            modeManualButton.addEventListener('click',()=>setExecutionMode('manual'));
-            modeAutopilotButton.addEventListener('click',()=>setExecutionMode('autopilot'));
-            autopilotToggle.addEventListener('click',()=>setAutoPilot(!autopilotIsEnabled));
-            modeManualButton.setAttribute('aria-pressed','true');
-            modeAutopilotButton.setAttribute('aria-pressed','false');
-            async function refreshAutoPilotStatus(){
-              try{
-                const response=await fetch('/api/blofin/demo/autopilot/status',{cache:'no-store'});
-                const result=await response.json();
-                autopilotIsEnabled=result.enabled===true;
-                autopilotStatus.textContent=(result.last_message_fa||'وضعیت AutoPilot دریافت شد.')
-                  +' وضعیت: '+(result.status||'UNKNOWN')
-                  +' · چرخه‌های اجراشده: '+(result.cycles_started??'—');
-                autopilotToggle.textContent=autopilotIsEnabled
-                  ?'توقف AutoPilot و بازگشت به حالت دستی'
-                  :'فعال‌سازی AutoPilot در BloFin Demo';
-                if(autopilotIsEnabled){
-                  applyExecutionMode('autopilot');
-                }else{
-                  applyExecutionMode('manual');
-                  if(result.status==='STOPPING'){
-                    modeStatus.textContent='درخواست توقف AutoPilot ثبت شده؛ تا پایان چرخه جاری کنترل دستی مسدود است.';
-                    manualOpenButton.disabled=true;
-                  }
-                }
-                return result;
-              }catch(error){
-                autopilotStatus.textContent='خواندن وضعیت AutoPilot ناموفق بود؛ برای جلوگیری از تداخل، عملیات دستی مسدود ماند.';
-                autopilotIsEnabled=true;
-                manualOpenButton.disabled=true;
-                return null;
-              }
-            }
-            autopilotToggle.addEventListener('click',()=>{
-              setAutoPilot(!autopilotIsEnabled);
-            });
-
             async function refreshSmokeTestReadiness(){
                smokeButton.disabled=true;
                try{
@@ -6446,7 +6401,8 @@ let blofinInstrumentRecords=[];
             });
             loadBlofinInstruments().then(refreshExecutionReadiness);
             refreshExecutionReadiness();
-             refreshSmokeTestReadiness();
+            refreshAutoPilotStatus();
+            refreshSmokeTestReadiness();
             clearButton.addEventListener('click',function(){
               tokenInput.value='';
               accountView.replaceChildren();
