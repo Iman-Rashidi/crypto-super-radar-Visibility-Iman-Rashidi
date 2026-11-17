@@ -49,6 +49,9 @@ from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_I
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 from .notion_event_sync import NotionEventOutbox
+from .demo_observability import (
+    demo_history_monitor_status, queue_manual_action, start_demo_history_monitor,
+)
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -4297,6 +4300,9 @@ def _run_blofin_demo_execution_job(
         except Exception as exc:
             ai_review = {
                 "status": "UNKNOWN", "paper_entry_eligible": False,
+                "request_attempted": None,
+                "skip_reason_code": "UNHANDLED_AI_REVIEW_EXCEPTION",
+                "response_source": "UNKNOWN",
                 "error_type": type(exc).__name__,
             }
 
@@ -4308,7 +4314,15 @@ def _run_blofin_demo_execution_job(
                 ai_review={
                     "status": ai_status,
                     "model": ai_review.get("model") if isinstance(ai_review, dict) else None,
+                    "returned_model": ai_review.get("returned_model") if isinstance(ai_review, dict) else None,
                     "latency_ms": ai_review.get("latency_ms") if isinstance(ai_review, dict) else None,
+                    "request_attempted": ai_review.get("request_attempted") if isinstance(ai_review, dict) else None,
+                    "skip_reason_code": ai_review.get("skip_reason_code") if isinstance(ai_review, dict) else "AI_REVIEW_RESULT_MISSING",
+                    "response_source": ai_review.get("response_source") if isinstance(ai_review, dict) else "UNKNOWN",
+                    "response_validated": ai_review.get("response_validated") if isinstance(ai_review, dict) else False,
+                    "model_verified": ai_review.get("model_verified") if isinstance(ai_review, dict) else False,
+                    "reason": ai_review.get("reason") if isinstance(ai_review, dict) else None,
+                    "status_fa": ai_review.get("status_fa") if isinstance(ai_review, dict) else None,
                 },
                 result={
                     "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
@@ -4327,6 +4341,15 @@ def _run_blofin_demo_execution_job(
                 "status": ai_status, "model": ai_review.get("model"),
                 "returned_model": ai_review.get("returned_model"),
                 "latency_ms": ai_review.get("latency_ms"),
+                "request_attempted": ai_review.get("request_attempted"),
+                "skip_reason_code": ai_review.get("skip_reason_code"),
+                "response_source": ai_review.get("response_source"),
+                "response_validated": ai_review.get("response_validated"),
+                "model_verified": ai_review.get("model_verified"),
+                "http_status": ai_review.get("http_status"),
+                "total_tokens": ai_review.get("total_tokens"),
+                "reason": ai_review.get("reason"),
+                "status_fa": ai_review.get("status_fa"),
             },
             analysis=gate_summary,
             elliott_wave=wave_report,
@@ -4531,6 +4554,15 @@ def _run_blofin_demo_execution_job(
                 "returned_model": ai_review.get("returned_model"),
                 "final_rating": ai_review.get("final_rating"),
                 "latency_ms": ai_review.get("latency_ms"),
+                "request_attempted": ai_review.get("request_attempted"),
+                "skip_reason_code": ai_review.get("skip_reason_code"),
+                "response_source": ai_review.get("response_source"),
+                "response_validated": ai_review.get("response_validated"),
+                "model_verified": ai_review.get("model_verified"),
+                "http_status": ai_review.get("http_status"),
+                "total_tokens": ai_review.get("total_tokens"),
+                "reason": ai_review.get("reason"),
+                "status_fa": ai_review.get("status_fa"),
             },
             "positions": positions,
             "closed_positions": position_history,
@@ -5150,6 +5182,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 outbox = NotionEventOutbox()
                 payload = outbox.status_snapshot()
+                payload["demo_history_monitor"] = demo_history_monitor_status()
                 return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
             except Exception as exc:
@@ -8066,30 +8099,51 @@ let blofinInstrumentRecords=[];
                                 position_side_hint=form.get("position_side", [""])[0],
                             )
                     except BloFinDemoExecutionUnknown as exc:
+                        queue_manual_action(route, {
+                            "status": "UNKNOWN", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": "نتیجه درخواست مبهم است: " + type(exc).__name__,
+                        })
                         return self._send(409, json.dumps({
                             "status": "UNKNOWN",
                             "message_fa": "نتیجه درخواست به‌طور قطعی مشخص نیست؛ پیش از هر تلاش مجدد حساب Demo را تازه‌سازی کن. " + str(exc),
                             "retry_allowed": False,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoExecutionBlocked as exc:
+                        queue_manual_action(route, {
+                            "status": "BLOCKED", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": str(exc),
+                        })
                         return self._send(409, json.dumps({
                             "status": "BLOCKED", "message_fa": str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except (ValueError, InvalidOperation) as exc:
+                        queue_manual_action(route, {
+                            "status": "INVALID_REQUEST", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": str(exc),
+                        })
                         return self._send(400, json.dumps({
                             "status": "INVALID_REQUEST", "message_fa": "پارامترهای دستی معتبر نیستند: " + str(exc),
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except BloFinDemoError as exc:
+                        queue_manual_action(route, {
+                            "status": "EXCHANGE_ERROR", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": type(exc).__name__,
+                        })
                         return self._send(502, json.dumps({
                             "status": "EXCHANGE_ERROR", "message_fa": "BloFin Demo درخواست را کامل نکرد؛ وضعیت سفارش یا پوزیشن را دوباره بخوان.",
                             "error_type": type(exc).__name__,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                     except Exception as exc:
+                        queue_manual_action(route, {
+                            "status": "MANUAL_ACTION_FAILED", "instrument_id": form.get("instrument", [""])[0],
+                            "message_fa": type(exc).__name__,
+                        })
                         return self._send(500, json.dumps({
                             "status": "MANUAL_ACTION_FAILED",
                             "message_fa": "عملیات دستی با خطای کنترل‌شده متوقف شد؛ وضعیت حساب را دوباره بخوان.",
                             "error_type": type(exc).__name__,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                payload["notion_event_queue"] = queue_manual_action(route, payload)
                 status_code = 202 if payload.get("status") in {"ACCEPTED", "FILLED", "PARTIALLY_FILLED", "CLOSE_ACCEPTED", "CANCELED"} else 409
                 return self._send(status_code, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                                   "application/json; charset=utf-8")
@@ -8925,6 +8979,7 @@ def main():
     host = os.getenv("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), Handler)
     _start_notion_sync_worker()
+    start_demo_history_monitor()
     _start_blofin_demo_autopilot()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
