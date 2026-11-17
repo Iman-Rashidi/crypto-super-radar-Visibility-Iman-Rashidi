@@ -2791,7 +2791,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
         "max_concurrent_positions": 1,
-        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_15M_CANDLE",
+        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_5M_CANDLE",
         "message_fa": message_fa,
     }
 
@@ -3282,9 +3282,9 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "READ_ONLY_ORDER_RECONCILIATION": "تطبیق فقط‌خواندنی سفارش قبلی",
         "ORDER_REMAINS_UNKNOWN": "نتیجه سفارش قبلی هنوز مشخص نیست",
         "LIVE_12_GATE_ANALYSIS": "تحلیل زندهٔ ۱۲ فیلتر",
-        "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده موتور Challenge 1 · روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
+        "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده موتور Challenge 1 · روند ۱ ساعته و تریگر ۵ دقیقه‌ای",
         "PROFILE_GATE_REVIEW": "بررسی گیت‌های الزامی پروفایل انتخابی",
-        "MTF_TRIGGER_BLOCKED": "عدم تطبیق روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
+        "MTF_TRIGGER_BLOCKED": "عدم تطبیق روند ۱ ساعته و تریگر ۵ دقیقه‌ای",
         "ELLIOTT_WAVE_ANALYSIS": "تحلیل و انتخاب سناریوی موج الیوت",
         "NO_TRADE": "عدم ورود؛ شرایط کامل نیست",
         "DUPLICATE_CANDLE_SKIPPED": "جلوگیری از معامله تکراری",
@@ -3444,11 +3444,11 @@ def _blofin_mtf_execution_signal(
         )
     except (BloFinDemoError, BloFinDemoExecutionBlocked, ValueError) as exc:
         return {"status": "BLOCKED",
-                "reason_fa": "تاریخچه معتبر کندل ۱۵ دقیقه‌ای یا یک‌ساعته موجود نیست.",
+                "reason_fa": "تاریخچه معتبر کندل ۵ دقیقه‌ای یا یک‌ساعته موجود نیست.",
                 "error_type": type(exc).__name__}
     last15, prev15, last1h = c15[-1], c15[-2], c1h[-1]
     if last15["age_ms"] > 2 * ms15:
-        return {"status": "BLOCKED", "reason_fa": "کندل ۱۵ دقیقه‌ای قدیمی است."}
+        return {"status": "BLOCKED", "reason_fa": "کندل ۵ دقیقه‌ای قدیمی است."}
     if last1h["age_ms"] > 2 * ms1h:
         return {"status": "BLOCKED", "reason_fa": "کندل یک‌ساعته قدیمی است."}
     close15 = [x["close"] for x in c15]
@@ -3465,7 +3465,7 @@ def _blofin_mtf_execution_signal(
         direction = trend if trend == trigger and trend in {"LONG", "SHORT"} else ""
     if not direction or trend != direction or trigger != direction:
         return {"status": "BLOCKED",
-                "reason_fa": "روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای جهت مشترک ندارند.",
+                "reason_fa": "روند ۱ ساعته و تریگر ۵ دقیقه‌ای جهت مشترک ندارند.",
                 "requested_direction": requested_direction or "AUTO",
                 "candidate_direction": trend if trend == trigger else "NO_TRADE",
                 "hourly_direction": trend, "trigger_15m_direction": trigger}
@@ -3623,13 +3623,13 @@ def _blofin_easy_trader_analysis(
     if data_status != "PASS":
         data_reason = mtf.get("reason_fa") or "کندل تکمیل‌شده و تیکر تازه تأیید نشدند."
     else:
-        data_reason = "کندل‌های ۱۵ دقیقه و یک‌ساعت تکمیل‌شده و تازه از BloFin دریافت شدند."
+        data_reason = "کندل‌های ۵ دقیقه و یک‌ساعت تکمیل‌شده و تازه از BloFin دریافت شدند."
     if not mtf_ok:
         trend_reason = mtf.get("reason_fa") or "تطبیق روند و تریگر تایم‌فریمی تأیید نشد."
         momentum_reason = trend_reason
     else:
-        trend_reason = "جهت روند ۱ ساعته با سیگنال ۱۵ دقیقه‌ای هم‌جهت است."
-        momentum_reason = "EMA9/EMA21 و بسته‌شدن کندل ۱۵ دقیقه‌ای مومنتوم هم‌جهت را تأیید می‌کنند."
+        trend_reason = "جهت روند ۱ ساعته با سیگنال ۵ دقیقه‌ای هم‌جهت است."
+        momentum_reason = "EMA9/EMA21 و بسته‌شدن کندل ۵ دقیقه‌ای مومنتوم هم‌جهت را تأیید می‌کنند."
 
     gates = [
         GateResult(1, "Data integrity and freshness", "اعتبار و تازگی داده", GateStatus(data_status), data_reason,
@@ -3640,7 +3640,7 @@ def _blofin_easy_trader_analysis(
                    "رژیم خنثی به‌تنهایی سیگنال ورود نیست.",
                    {"hourly_direction": mtf.get("hourly_direction")}),
         GateResult(3, "Trend alignment", "هم‌جهتی روند", GateStatus(trend_status), trend_reason,
-                   "تأیید جهت با روند ۱ ساعته و کندل ۱۵ دقیقه‌ای؛ الگوی کندلی شاخص شرط اجباری نیست.",
+                   "تأیید جهت با روند ۱ ساعته و کندل ۵ دقیقه‌ای؛ الگوی کندلی شاخص شرط اجباری نیست.",
                    {"direction": direction or "NO_TRADE", "ema20_1h": mtf.get("ema20_1h"),
                     "ema50_1h": mtf.get("ema50_1h")}),
         GateResult(4, "Momentum confirmation", "تأیید مومنتوم", GateStatus(momentum_status), momentum_reason,
@@ -3713,7 +3713,7 @@ def _blofin_easy_trader_analysis(
             risk_budget_usd=None, gates=gates,
             summary_en="EASY profile: completed BloFin 1H trend and 15m trigger aligned; no candle-pattern label is required.",
             summary_fa=(
-                "موتور Challenge 1: روند یک‌ساعته و تریگر ۱۵ دقیقه‌ای BloFin هم‌جهت‌اند؛ الگوی کندلی خاص شرط ورود نیست."
+                "موتور Challenge 1: روند یک‌ساعته و تریگر ۵ دقیقه‌ای BloFin هم‌جهت‌اند؛ الگوی کندلی خاص شرط ورود نیست."
                 if allowed else
                 "موتور Challenge 1: سیگنال یا یکی از کنترل‌های ضروری BloFin تأیید نشد؛ علت در گیت‌ها مشخص است."
             ),
@@ -4053,7 +4053,7 @@ def _run_blofin_demo_execution_job(
                     trade_context={
                         "asset": asset.raw, "instrument_id": instrument_id,
                         "execution_profile": "CHALLENGE_1",
-                        "execution_timeframe": "15m",
+                        "execution_timeframe": "5m",
                         "trend_confirmation_timeframe": "1H",
                         "completed_candles_only": True,
                     },
@@ -4069,7 +4069,7 @@ def _run_blofin_demo_execution_job(
         elif execution_profile == "EASY":
             _set_blofin_execution_job(
                 job_id, "running", stage="LIVE_EASY_MTF_ANALYSIS",
-                message_fa=f"موتور Challenge 1 در حال بررسی {instrument_id} با روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای BloFin است.",
+                message_fa=f"موتور Challenge 1 در حال بررسی {instrument_id} با روند ۱ ساعته و تریگر ۵ دقیقه‌ای BloFin است.",
                 trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
             )
             analysis = _blofin_easy_trader_analysis(read_client, store, asset, instrument_id)
@@ -4118,7 +4118,7 @@ def _run_blofin_demo_execution_job(
             "analysis_time_utc": analysis_time_utc,
             "last_completed_candle_time_utc": last_candle_time,
             "last_candle_close": last_candle_close,
-            "execution_timeframe": "15m",
+            "execution_timeframe": "5m" if execution_profile == "CHALLENGE_1" else "15m",
             "trend_confirmation_timeframe": "1H",
         }
         pass_count = sum(
@@ -4193,7 +4193,7 @@ def _run_blofin_demo_execution_job(
 
         if execution_profile == "EASY":
             if mtf_signal.get("status") != "PASS" or mtf_signal.get("direction") != direction:
-                reason_fa = mtf_signal.get("reason_fa") or "روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای تأیید نشدند."
+                reason_fa = mtf_signal.get("reason_fa") or "روند ۱ ساعته و تریگر ۵ دقیقه‌ای تأیید نشدند."
                 _set_blofin_execution_job(
                     job_id, "completed", stage="MTF_TRIGGER_BLOCKED",
                     message_fa=reason_fa, analysis=gate_summary, trade_context=trade_context,
@@ -4266,7 +4266,7 @@ def _run_blofin_demo_execution_job(
         trade_context.update({
             "last_completed_candle_time_utc": signal_bar,
             "mtf_confirmation": mtf_signal,
-            "execution_timeframe": "15m",
+            "execution_timeframe": "5m" if execution_profile == "CHALLENGE_1" else "15m",
             "trend_confirmation_timeframe": "1H",
         })
         gate_summary.update({
@@ -5782,7 +5782,7 @@ class Handler(BaseHTTPRequestHandler):
           </section>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
-            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف مادام‌العمر و روزانه وجود ندارد، اما هر کندل کامل ۱۵ دقیقه فقط یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
+            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف مادام‌العمر و روزانه وجود ندارد، اما هر کندل کامل ۵ دقیقه فقط یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
             <div class="grid" style="margin:10px 0">
               <div>
                 <label for="blofin-market-type">نوع بازار</label>
@@ -5855,7 +5855,7 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </section>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
-            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
+            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <div id="blofin-robot-cycle-controls">
               <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
               <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک چرخه با ربات (دستی و یک‌باره)</button>
@@ -6348,7 +6348,7 @@ let blofinInstrumentRecords=[];
                 let liveMessage=result.last_message_fa||'وضعیت AutoPilot دریافت شد.';
                 if(state==='RUNNING'){
                   liveMessage='موتور در حال جست‌وجوی بازار و تحلیل کندل‌ها و الگوهای Challenge 1 است. '+liveMessage;
-                }else if(state==='WAITING_FOR_NEXT_15M_CANDLE'&&result.next_cycle_at_utc){
+                }else if(state==='WAITING_FOR_NEXT_5M_CANDLE'&&result.next_cycle_at_utc){
                   const remaining=Math.max(0,Math.ceil((Date.parse(result.next_cycle_at_utc)-Date.now())/1000));
                   const minutes=Math.floor(remaining/60);
                   const seconds=remaining%60;
@@ -6876,7 +6876,7 @@ let blofinInstrumentRecords=[];
               executionReport.replaceChildren();
               const runningMessage=document.createElement('p');
               runningMessage.className='muted';
-              runningMessage.textContent='در حال تحلیل زنده '+selectedInstrument+' با ربات '+selectedProfile+' و تأیید ۱۵ دقیقه/۱ ساعت؛ هنوز سفارشی ارسال نشده است.';
+              runningMessage.textContent='در حال تحلیل زنده '+selectedInstrument+' با ربات '+selectedProfile+' و تأیید ۵ دقیقه/۱ ساعت؛ هنوز سفارشی ارسال نشده است.';
               executionReport.appendChild(runningMessage);
               try{
                 const response=await fetch('/api/blofin/demo/execute-once',{
@@ -7724,7 +7724,7 @@ let blofinInstrumentRecords=[];
               <label>تایم‌فریم
                 <select id="live-radar-interval">
                   <option value="1s">۱ ثانیه</option><option value="1m">۱ دقیقه</option><option value="5m" selected>۵ دقیقه</option>
-                  <option value="15m">۱۵ دقیقه</option><option value="1h">۱ ساعت</option>
+                  <option value="15m">۵ دقیقه</option><option value="1h">۱ ساعت</option>
                   <option value="4h">۴ ساعت</option><option value="1d">۱ روز</option>
                   <option value="1w">۱ هفته</option><option value="1M">۱ ماه</option>
                 </select>
@@ -8960,7 +8960,7 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
         "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
         "evidence": evidence,
-        "candles_15m": evidence.get("candles_15m") if isinstance(evidence.get("candles_15m"), list) else [],
+        "candles_5m": evidence.get("candles_5m") if isinstance(evidence.get("candles_5m"), list) else [],
         "candles_1h": evidence.get("candles_1h") if isinstance(evidence.get("candles_1h"), list) else [],
         "entry_price": result.get("entry_price_usd") or result.get("entry_price") or evidence.get("entry_price"),
         "stop_loss": result.get("stop_loss_usd") or result.get("stop_loss"),
@@ -9128,7 +9128,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         ),
         "market": "Futures",
         "symbol": str(instrument_id).upper(),
-        "timeframe": "15m",
+        "timeframe": "5m",
         "signal": signal if signal in {"LONG", "SHORT", "NO_TRADE"} else "UNKNOWN",
         "experience_id": experience_id,
         "order_id": order_id,
@@ -9280,12 +9280,12 @@ def _start_notion_sync_worker() -> None:
         NOTION_SYNC_THREAD.start()
 
 
-def _blofin_demo_next_15m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
+def _blofin_demo_next_5m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
     """Return the delay and timestamp just after the next completed 15-minute candle."""
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    next_boundary_epoch = (int(current.timestamp()) // 900 + 1) * 900 + 3
+    next_boundary_epoch = (int(current.timestamp()) // 300 + 1) * 300 + 3
     next_at = datetime.fromtimestamp(next_boundary_epoch, timezone.utc)
     delay_seconds = max(5, int(math.ceil((next_at - current).total_seconds())))
     return delay_seconds, next_at.isoformat()
@@ -9295,7 +9295,7 @@ def _blofin_demo_next_scan_after_cycle(
     cycle_started_at_utc: datetime, *, now_utc: datetime | None = None,
 ) -> tuple[int, str]:
     """Schedule from cycle start so a scan overlapping a candle close catches it."""
-    _, boundary_iso = _blofin_demo_next_15m_scan_window(cycle_started_at_utc)
+    _, boundary_iso = _blofin_demo_next_5m_scan_window(cycle_started_at_utc)
     target = datetime.fromisoformat(boundary_iso)
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -9309,8 +9309,8 @@ def _blofin_demo_next_scan_after_cycle(
 
 
 def _blofin_demo_autopilot_worker() -> None:
-    """Run Challenge 1 scans immediately after each completed 15-minute candle."""
-    interval_seconds = 900
+    """Run Challenge 1 scans immediately after each completed 5-minute candle."""
+    interval_seconds = 300
     raw_symbols = os.getenv(
         "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS",
         ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS),
@@ -9568,19 +9568,19 @@ def _blofin_demo_autopilot_worker() -> None:
                     for item in batch_results
                 )
                 autopilot_status = (
-                    "WAITING_FOR_NEXT_15M_CANDLE" if continue_search else "DISABLED"
+                    "WAITING_FOR_NEXT_5M_CANDLE" if continue_search else "DISABLED"
                 )
                 if not continue_search:
                     autopilot_message = "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
                 elif duplicates_only:
                     autopilot_message = (
                         "هر ۵ نماد به کندلی رسیدند که قبلاً پردازش شده است؛ از تحلیل و ورود تکراری جلوگیری شد. "
-                        f"اسکن بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
+                        f"اسکن بعدی پس از بسته‌شدن کندل ۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
                     )
                 else:
                     autopilot_message = (
                         f"چرخهٔ {job_id} پایان یافت؛ {len(batch_results)} بازار بررسی شد. "
-                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
+                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
                     )
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": bool(autopilot_enabled),
