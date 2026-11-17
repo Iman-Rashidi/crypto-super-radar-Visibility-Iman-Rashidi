@@ -5582,6 +5582,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload["readiness"] = _blofin_demo_execution_readiness()
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
+                payload["notion_activity_sync"] = copy.deepcopy(NOTION_ACTIVITY_SYNC_STATE)
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/live-monitor":
@@ -9198,6 +9199,17 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
 
 NOTION_SYNC_THREAD = None
 NOTION_SYNC_START_LOCK = threading.Lock()
+NOTION_ACTIVITY_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "synced": 0,
+    "failed": 0,
+    "last_success_utc": None,
+    "latest_experience_id": None,
+    "last_error_type": None,
+    "last_http_status": None,
+    "last_checked_at_utc": None,
+}
 
 
 def _notion_sync_worker() -> None:
@@ -9219,15 +9231,25 @@ def _notion_sync_worker() -> None:
         finally:
             if outbox is not None:
                 outbox.close()
+        activity_sync_result = None
+        activity_sync_error = None
         try:
             activity_journal = NotionActivityJournal()
-            activity_journal.flush_pending(limit=3)
-        except Exception:
+            activity_sync_result = activity_journal.flush_pending(limit=3)
+        except Exception as exc:
             # Chart/file sync is retryable and must never interrupt market analysis.
-            pass
+            activity_sync_error = type(exc).__name__
         finally:
             if activity_journal is not None:
                 activity_journal.close()
+        with LOCK:
+            NOTION_ACTIVITY_SYNC_STATE["last_checked_at_utc"] = datetime.now(timezone.utc).isoformat()
+            if isinstance(activity_sync_result, dict):
+                NOTION_ACTIVITY_SYNC_STATE.update(activity_sync_result)
+                NOTION_ACTIVITY_SYNC_STATE["last_worker_error_type"] = None
+            elif activity_sync_error:
+                NOTION_ACTIVITY_SYNC_STATE["status"] = "WORKER_ERROR"
+                NOTION_ACTIVITY_SYNC_STATE["last_worker_error_type"] = activity_sync_error
         time.sleep(interval)
 
 
