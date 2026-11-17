@@ -2894,6 +2894,168 @@ def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
         BLOFIN_EXECUTION_JOBS[job_id] = current
 
 
+def _run_challenge1_supervisor_review_async(
+    job_id: str, instrument_id: str, analysis: Any, asset: AssetSpec,
+) -> None:
+    """Run both report-only AI reviewers outside the time-critical trading cycle."""
+    try:
+        primary = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
+    except Exception as exc:
+        primary = {
+            "reviewer_id": "nemotron", "provider": "OpenRouter", "status": "ERROR",
+            "request_attempted": None, "skip_reason_code": "UNHANDLED_PRIMARY_REVIEW_EXCEPTION",
+            "response_source": "UNKNOWN", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "error_type": type(exc).__name__,
+        }
+    if not isinstance(primary, dict):
+        primary = {
+            "reviewer_id": "nemotron", "provider": "OpenRouter", "status": "ERROR",
+            "request_attempted": None, "skip_reason_code": "INVALID_PRIMARY_REVIEW_RESULT",
+            "response_source": "UNKNOWN", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "error_type": "InvalidReviewPayload",
+        }
+    try:
+        second = run_independent_ai_supervisor(analysis, asset)
+    except Exception as exc:
+        second = {
+            "reviewer_id": "second_ai", "status": "ERROR",
+            "request_attempted": None, "skip_reason_code": "UNHANDLED_SECOND_REVIEW_EXCEPTION",
+            "response_source": "UNKNOWN", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "error_type": type(exc).__name__,
+        }
+    if not isinstance(second, dict):
+        second = {
+            "reviewer_id": "second_ai", "status": "ERROR",
+            "request_attempted": None, "skip_reason_code": "INVALID_SECOND_REVIEW_RESULT",
+            "response_source": "UNKNOWN", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "error_type": "InvalidReviewPayload",
+        }
+
+    primary_approved = _demo_ai_review_approved(primary)
+    second_approved = _demo_ai_review_approved(second)
+    primary_status = str(primary.get("status") or "UNKNOWN").upper()
+    second_status = str(second.get("status") or "UNKNOWN").upper()
+    primary_verified = (
+        primary.get("request_attempted") is True
+        and primary.get("response_source") == "LIVE_API"
+        and primary.get("response_validated") is True
+        and primary.get("model_verified") is True
+        and bool(str(primary.get("returned_model") or "").strip())
+    )
+    second_verified = (
+        second.get("request_attempted") is True
+        and second.get("response_source") == "LIVE_API"
+        and second.get("response_validated") is True
+        and second.get("model_verified") is True
+        and bool(str(second.get("returned_model") or "").strip())
+    )
+    if primary_verified and second_verified:
+        consensus_status = (
+            "AGREEMENT"
+            if primary_status == second_status and primary_approved == second_approved
+            else "DISAGREEMENT"
+        )
+    elif primary_verified or second_verified:
+        consensus_status = "SINGLE_REVIEWER"
+    elif primary.get("request_attempted") is False and second.get("request_attempted") is False:
+        consensus_status = "NOT_CALLED"
+    else:
+        consensus_status = "NOT_COMPARABLE"
+
+    consensus = {
+        "status": consensus_status, "primary_status": primary_status,
+        "second_status": second_status, "primary_verified": primary_verified,
+        "second_verified": second_verified, "primary_approved": primary_approved,
+        "second_approved": second_approved,
+        "two_reviewer_approval": primary_approved and second_approved,
+        "decision": "OBSERVE_ONLY", "entry_gate_enforced": False,
+    }
+    primary.update({"execution_role": "REPORT_ONLY", "entry_gate_enforced": False})
+    second.update({"execution_role": "REPORT_ONLY", "entry_gate_enforced": False})
+    reviews = [
+        {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": primary},
+        {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second},
+    ]
+    ai_status = (
+        "APPROVED_BY_BOTH" if primary_approved and second_approved else
+        "DISAGREEMENT" if consensus_status == "DISAGREEMENT" else
+        "NOT_CALLED" if consensus_status == "NOT_CALLED" else
+        "NOT_CONFIGURED" if "NOT_CONFIGURED" in {primary_status, second_status} else
+        "VETO" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
+        "UNKNOWN"
+    )
+
+    with LOCK:
+        current = BLOFIN_EXECUTION_JOBS.get(job_id, {})
+        current_status = str(current.get("status") or "running")
+        existing_result = current.get("result")
+        if isinstance(existing_result, dict):
+            existing_result["ai_reviews"] = reviews
+            existing_result["ai_consensus"] = consensus
+            existing_result["ai_status"] = ai_status
+            current["result"] = existing_result
+    _set_blofin_execution_job(
+        job_id, current_status, ai_review=primary, ai_reviews=reviews,
+        ai_consensus=consensus, ai_status=ai_status,
+        ai_review_completed_at_utc=datetime.now(timezone.utc).isoformat(),
+    )
+    with LOCK:
+        completed_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+    if (
+        str(completed_job.get("status") or "").lower() == "completed"
+        and isinstance(completed_job.get("result"), dict)
+    ):
+        _queue_blofin_job_notion_events(job_id, instrument_id, completed_job)
+        _queue_blofin_activity_journal(job_id, instrument_id, completed_job)
+
+
+def _start_challenge1_supervisor_review(
+    job_id: str, instrument_id: str, analysis: Any, asset: AssetSpec,
+) -> bool:
+    """Schedule reviewer APIs without waiting for provider latency."""
+    try:
+        worker = threading.Thread(
+            target=_run_challenge1_supervisor_review_async,
+            args=(job_id, instrument_id, analysis, asset),
+            daemon=True, name=f"challenge1-supervisor-{str(job_id)[:12]}",
+        )
+        worker.start()
+        return True
+    except Exception as exc:
+        primary = {
+            "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+            "provider": "OpenRouter", "status": "NOT_CALLED",
+            "request_attempted": False, "skip_reason_code": "SUPERVISOR_THREAD_START_FAILED",
+            "response_source": "NONE", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "execution_role": "REPORT_ONLY", "entry_gate_enforced": False,
+            "error_type": type(exc).__name__,
+        }
+        second = {**primary, "reviewer_id": "second_ai", "actor": "Second AI Supervisor", "provider": ""}
+        consensus = {
+            "status": "NOT_CALLED", "primary_status": "NOT_CALLED",
+            "second_status": "NOT_CALLED", "primary_verified": False,
+            "second_verified": False, "primary_approved": False,
+            "second_approved": False, "two_reviewer_approval": False,
+            "decision": "OBSERVE_ONLY", "entry_gate_enforced": False,
+        }
+        with LOCK:
+            status = str((BLOFIN_EXECUTION_JOBS.get(job_id) or {}).get("status") or "running")
+        _set_blofin_execution_job(
+            job_id, status, ai_review=primary,
+            ai_reviews=[
+                {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": primary},
+                {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second},
+            ],
+            ai_consensus=consensus, ai_status="NOT_CALLED",
+        )
+        return False
+
+
 def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
     """Build a complete, read-only Demo monitor snapshot with partial-source disclosure."""
     inst_id = str(inst_id or "BTC-USDT").strip().upper()
@@ -4316,113 +4478,34 @@ def _run_blofin_demo_execution_job(
             return
 
         if execution_profile == "CHALLENGE_1":
-            _set_blofin_execution_job(
-                job_id, "running", stage="AI_SUPERVISOR_COUNCIL",
-                message_fa="دو ناظر مستقل، فقط شواهد کندل بسته‌شده و الگوی منتخب Challenge 1 را بررسی می‌کنند؛ هنوز سفارشی ارسال نشده است.",
-                analysis=gate_summary,
-                elliott_wave=wave_report,
-                trade_context=trade_context,
-            )
-            try:
-                ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
-            except Exception as exc:
-                ai_review = {
-                    "reviewer_id": "nemotron",
-                    "provider": "OpenRouter",
-                    "status": "ERROR",
-                    "paper_entry_eligible": False,
-                    "request_attempted": None,
-                    "skip_reason_code": "UNHANDLED_PRIMARY_REVIEW_EXCEPTION",
-                    "response_source": "UNKNOWN",
-                    "response_validated": False,
-                    "model_verified": False,
-                    "error_type": type(exc).__name__,
-                }
-            try:
-                second_ai_review = run_independent_ai_supervisor(analysis, asset)
-            except Exception as exc:
-                second_ai_review = {
-                    "reviewer_id": "second_ai",
-                    "status": "ERROR",
-                    "paper_entry_eligible": False,
-                    "request_attempted": None,
-                    "skip_reason_code": "UNHANDLED_SECOND_REVIEW_EXCEPTION",
-                    "response_source": "UNKNOWN",
-                    "response_validated": False,
-                    "model_verified": False,
-                    "error_type": type(exc).__name__,
-                }
-
-            primary_approved = _demo_ai_review_approved(ai_review)
-            second_approved = _demo_ai_review_approved(second_ai_review)
-            primary_status = str(ai_review.get("status") or "UNKNOWN").upper()
-            second_status = str(second_ai_review.get("status") or "UNKNOWN").upper()
-            primary_called_valid = (
-                ai_review.get("request_attempted") is True
-                and ai_review.get("response_source") == "LIVE_API"
-                and ai_review.get("response_validated") is True
-                and ai_review.get("model_verified") is True
-                and bool(str(ai_review.get("returned_model") or "").strip())
-            )
-            second_called_valid = (
-                second_ai_review.get("request_attempted") is True
-                and second_ai_review.get("response_source") == "LIVE_API"
-                and second_ai_review.get("response_validated") is True
-                and second_ai_review.get("model_verified") is True
-                and bool(str(second_ai_review.get("returned_model") or "").strip())
-            )
-            if primary_called_valid and second_called_valid:
-                if primary_status == second_status and primary_approved == second_approved:
-                    consensus_status = "AGREEMENT"
-                else:
-                    consensus_status = "DISAGREEMENT"
-            elif primary_called_valid or second_called_valid:
-                consensus_status = "SINGLE_REVIEWER"
-            elif (
-                ai_review.get("request_attempted") is False
-                and second_ai_review.get("request_attempted") is False
-            ):
-                consensus_status = "NOT_CALLED"
-            else:
-                consensus_status = "NOT_COMPARABLE"
-
+            # PENDING is truthful; external reviews run after the order path continues.
+            ai_review = {
+                "reviewer_id": "nemotron", "provider": "OpenRouter",
+                "status": "PENDING", "request_attempted": None,
+                "skip_reason_code": "ASYNC_REVIEW_SCHEDULED",
+                "response_source": "NONE", "response_validated": False,
+                "model_verified": False, "paper_entry_eligible": False,
+                "execution_role": "REPORT_ONLY", "entry_gate_enforced": False,
+            }
+            second_ai_review = {
+                "reviewer_id": "second_ai", "status": "PENDING",
+                "request_attempted": None, "skip_reason_code": "ASYNC_REVIEW_SCHEDULED",
+                "response_source": "NONE", "response_validated": False,
+                "model_verified": False, "paper_entry_eligible": False,
+                "execution_role": "REPORT_ONLY", "entry_gate_enforced": False,
+            }
             ai_consensus = {
-                "status": consensus_status,
-                "primary_status": primary_status,
-                "second_status": second_status,
-                "primary_verified": primary_called_valid,
-                "second_verified": second_called_valid,
-                "primary_approved": primary_approved,
-                "second_approved": second_approved,
-                "two_reviewer_approval": primary_approved and second_approved,
-                "decision": (
-                    "APPROVE" if primary_approved and second_approved else
-                    "REJECT" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
-                    "NOT_CALLED" if consensus_status == "NOT_CALLED" else
-                    "OBSERVE_ONLY"
-                ),
+                "status": "PENDING", "primary_status": "PENDING",
+                "second_status": "PENDING", "primary_verified": False,
+                "second_verified": False, "primary_approved": False,
+                "second_approved": False, "two_reviewer_approval": False,
+                "decision": "OBSERVE_ONLY", "entry_gate_enforced": False,
             }
             ai_reviews = [
                 {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": ai_review},
                 {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second_ai_review},
             ]
-            ai_status = (
-                "APPROVED" if primary_approved and second_approved else
-                "DISAGREEMENT" if consensus_status == "DISAGREEMENT" else
-                "NOT_CONFIGURED" if "NOT_CONFIGURED" in {primary_status, second_status} else
-                "VETO" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
-                "UNKNOWN"
-            )
-            # The two supervisors are independent audit/reporting services only.
-            # Their missing credentials, latency, disagreement, or veto must never
-            # delay or block a Challenge 1 entry: signal eligibility is determined
-            # solely by the closed 5m candle/pattern strategy and Demo risk controls.
-            ai_review["execution_role"] = "REPORT_ONLY"
-            second_ai_review["execution_role"] = "REPORT_ONLY"
-            ai_review["entry_gate_enforced"] = False
-            second_ai_review["entry_gate_enforced"] = False
-            ai_consensus["decision"] = "OBSERVE_ONLY"
-            ai_consensus["entry_gate_enforced"] = False
+            ai_status = "PENDING"
         else:
             raise BloFinDemoExecutionBlocked("Only the Challenge 1 execution profile is supported.")
 
@@ -4442,6 +4525,9 @@ def _run_blofin_demo_execution_job(
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
+        if execution_profile == "CHALLENGE_1":
+            # The trading worker never waits for AI provider latency or API failures.
+            _start_challenge1_supervisor_review(job_id, instrument_id, analysis, asset)
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
             max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),
@@ -9497,6 +9583,9 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         ))
         review_status = str(review.get("status") or "UNKNOWN").upper()
         request_attempted = review.get("request_attempted")
+        if review_status == "PENDING" and request_attempted is None:
+            # Scheduled async review is not an actual NOT_CALLED response.
+            continue
         if request_attempted is None and review_status in {"NOT_CALLED", "NOT_CONFIGURED"}:
             request_attempted = False
         response_source = str(review.get("response_source") or "NONE").upper()
@@ -9586,14 +9675,14 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             "ai_call_status": "CALLED",
             "ai_validation": "VALID",
             "input_data_type": "LIVE_MARKET",
-            "reason": "دو ناظر مستقل تصمیم یکسانی صادر نکردند؛ ورود جدید مسدود ماند.",
+            "reason": "دو ناظر مستقل به نتیجه یکسان نرسیدند؛ این گزارش صرفاً نظارتی است و مانع ورود یا مدیریت پوزیشن Challenge 1 نمی‌شود.",
             "details": json.dumps({
                 "job_id": str(job_id),
                 "nemotron_status": consensus.get("primary_status"),
                 "second_ai_status": consensus.get("second_status"),
                 "decision": "OBSERVE_ONLY",
-                "orders_submitted": False,
-                "trade_executed": False,
+                "orders_submitted": orders_submitted,
+                "trade_executed": trade_executed,
             }, ensure_ascii=False, sort_keys=True),
         })
     return events
