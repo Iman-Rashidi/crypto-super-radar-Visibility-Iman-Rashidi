@@ -9284,11 +9284,14 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             and bool(str(review.get("returned_model") or "").strip())
         )
         review_status = str(review.get("status") or "UNKNOWN").upper()
+        request_attempted = review.get("request_attempted")
+        if request_attempted is None and review_status in {"NOT_CALLED", "NOT_CONFIGURED"}:
+            request_attempted = False
         if verified and review_status == "APPROVED" and review.get("paper_entry_eligible") is True:
             reviewer_decisions.append("APPROVE")
         elif verified and review_status in {"VETO", "REJECT"}:
             reviewer_decisions.append("REJECT")
-        elif review.get("request_attempted") is False:
+        elif request_attempted is False:
             reviewer_decisions.append("NOT_CALLED")
         else:
             reviewer_decisions.append("OBSERVE_ONLY")
@@ -9394,6 +9397,8 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         ))
         review_status = str(review.get("status") or "UNKNOWN").upper()
         request_attempted = review.get("request_attempted")
+        if request_attempted is None and review_status in {"NOT_CALLED", "NOT_CONFIGURED"}:
+            request_attempted = False
         response_source = str(review.get("response_source") or "NONE").upper()
         response_validated = review.get("response_validated") is True
         model_verified = review.get("model_verified") is True
