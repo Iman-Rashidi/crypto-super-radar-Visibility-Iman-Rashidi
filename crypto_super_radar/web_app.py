@@ -3824,7 +3824,12 @@ def _demo_ai_review_approved(review: Any) -> bool:
     return (
         str(review.get("status") or "").strip().upper() == "APPROVED"
         and review.get("paper_entry_eligible") is True
+        and review.get("request_attempted") is True
+        and str(review.get("response_source") or "").upper() == "LIVE_API"
+        and review.get("response_validated") is True
+        and review.get("model_verified") is True
         and bool(str(review.get("model") or "").strip())
+        and bool(str(review.get("returned_model") or "").strip())
     )
 
 
@@ -9179,6 +9184,37 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         if single:
             reviews = [{"reviewer_id": single.get("reviewer_id") or "nemotron",
                         "actor": "Nemotron Supervisor", "review": single}]
+    if reviews:
+        present_reviewers = {
+            str(item.get("reviewer_id") or (item.get("review") or {}).get("reviewer_id") or "").lower()
+            for item in reviews if isinstance(item, dict)
+        }
+        not_called_reason = (
+            "این ناظر در این چرخه فراخوانی نشد؛ نتیجهٔ عدم فراخوانی صریحاً ثبت شده است."
+        )
+        if "nemotron" not in present_reviewers:
+            reviews.append({
+                "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                "review": {
+                    "reviewer_id": "nemotron", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "REVIEWER_NOT_PRESENT",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": not_called_reason,
+                },
+            })
+        if not ({"second_ai", "second"} & present_reviewers):
+            reviews.append({
+                "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                "review": {
+                    "reviewer_id": "second_ai", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "REVIEWER_NOT_PRESENT",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": not_called_reason,
+                },
+            })
+
     if not reviews:
         blocked_stage = str(current.get("stage") or result.get("status") or "UNKNOWN")
         blocked_reason = (
