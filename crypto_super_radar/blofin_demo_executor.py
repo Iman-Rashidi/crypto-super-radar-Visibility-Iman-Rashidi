@@ -110,18 +110,13 @@ def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str,
     candle_time = str(candle.get("open_time_utc") or challenge_record.get("signal_bar_open_utc") or "")
     if not candle_time:
         raise ValueError("Completed candle timestamp is required for learning memory.")
+    # One immutable identity per instrument and completed setup candle.
+    # Advisory 1H context and mutable rationale must not create a second experience.
     identity = {
         "engine_version": str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
         "instrument_id": str(instrument_id).strip().upper(),
         "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
-        "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
         "signal_bar_open_utc": candle_time,
-        "confirmation_candle": dict(candle),
-        "detected_patterns": evidence.get("detected_patterns") or [],
-        "chosen_pattern": evidence.get("chosen_pattern"),
-        "chart_structure": evidence.get("chart_structure") or {},
-        "context_patterns": evidence.get("context_patterns") or [],
-        "volume_confirmation": evidence.get("volume_confirmation") or {},
     }
     canonical = json.dumps(
         identity, sort_keys=True, separators=(",", ":"),
@@ -624,17 +619,123 @@ class BloFinDemoEventStore:
         # making a decision and its order reservation one transaction.
         self.learning_memory = LearningExperienceMemory(self._db, lock=self._lock)
 
+    @staticmethod
+    def _same_confirmation_candle(saved: Any, current: Any) -> bool:
+        if not isinstance(saved, Mapping) or not isinstance(current, Mapping):
+            return False
+        saved_time = str(saved.get("open_time_utc") or "").strip().replace("Z", "+00:00")
+        current_time = str(current.get("open_time_utc") or "").strip().replace("Z", "+00:00")
+        if not saved_time or saved_time != current_time:
+            return False
+        for field in ("open", "high", "low", "close"):
+            try:
+                left = float(saved.get(field))
+                right = float(current.get(field))
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not math.isfinite(left) or not math.isfinite(right):
+                return False
+            if abs(left - right) > max(1e-10, abs(left) * 1e-9):
+                return False
+        return True
+
+    def _find_challenge1_decision_for_candle(
+        self, instrument_id: str, candle_time: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Find a previously saved decision for this exact instrument/candle."""
+        rows = self._db.execute(
+            """SELECT experience_id, payload_json
+               FROM learning_experience_events
+               WHERE engine_id='BLOFIN_DEMO_CHALLENGE1'
+                 AND challenge_id='CHALLENGE_1_BLOFIN_DEMO'
+                 AND environment='BLOFIN_DEMO'
+                 AND event_type='DECISION_RECORDED'
+                 AND symbol=? AND timeframe='15M'
+               ORDER BY sequence ASC LIMIT 2000""",
+            (str(instrument_id).strip().upper(),),
+        ).fetchall()
+        expected = str(candle_time or "").strip().replace("Z", "+00:00")
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError):
+                continue
+            input_snapshot = payload.get("input_snapshot") if isinstance(payload, dict) else {}
+            if not isinstance(input_snapshot, Mapping):
+                continue
+            saved_time = str(input_snapshot.get("signal_bar_open_utc") or "").strip().replace("Z", "+00:00")
+            if saved_time == expected:
+                return str(row["experience_id"]), payload
+        return None
+
+    def get_challenge1_record(self, experience_id: str) -> dict[str, Any] | None:
+        """Rebuild the immutable strategy decision saved for one completed candle."""
+        experience = self.learning_memory.get_experience(str(experience_id))
+        decision_event = next(
+            (item for item in experience.get("events", []) if item.get("event_type") == "DECISION_RECORDED"),
+            None,
+        )
+        if not isinstance(decision_event, Mapping):
+            return None
+        payload = decision_event.get("payload")
+        if not isinstance(payload, Mapping):
+            return None
+        decision = payload.get("decision") if isinstance(payload.get("decision"), Mapping) else {}
+        input_snapshot = payload.get("input_snapshot") if isinstance(payload.get("input_snapshot"), Mapping) else {}
+        evidence = input_snapshot.get("challenge1_evidence")
+        if not isinstance(evidence, Mapping):
+            return None
+        return {
+            "signal": str(decision.get("signal") or "NO_TRADE").upper(),
+            "signal_id": decision.get("signal_id"),
+            "instrument_id": input_snapshot.get("instrument_id"),
+            "inst_id": input_snapshot.get("instrument_id"),
+            "execution_profile": "CHALLENGE_1",
+            "signal_bar_open_utc": input_snapshot.get("signal_bar_open_utc"),
+            "entry_price_usd": decision.get("entry_price"),
+            "stop_loss_usd": decision.get("stop_loss"),
+            "take_profit_usd": decision.get("take_profit"),
+            "reason_fa": decision.get("reason") or "",
+            "execution": {"status": "PASS" if decision.get("signal") in {"LONG", "SHORT"} else "NO_TRADE"},
+            "challenge1_evidence": dict(evidence),
+            "learning_experience_id": str(experience_id),
+            "orders_submitted": False,
+            "trade_executed": False,
+        }
+
     def record_challenge1_decision(
         self, *, instrument_id: str, challenge_record: Mapping[str, Any],
     ) -> str:
-        """Persist one closed-candle Challenge 1 decision as an immutable event."""
+        """Persist one immutable decision per completed 15m candle, idempotently."""
         if not isinstance(challenge_record, Mapping):
             raise TypeError("challenge_record must be a mapping")
-        experience_id = _challenge1_experience_id(instrument_id, challenge_record)
         evidence = challenge_record.get("challenge1_evidence")
         evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
+        candle = evidence.get("confirmation_candle")
+        candle_time = (
+            str(candle.get("open_time_utc") or challenge_record.get("signal_bar_open_utc") or "")
+            if isinstance(candle, Mapping) else str(challenge_record.get("signal_bar_open_utc") or "")
+        )
+        if not candle_time:
+            raise ValueError("A completed confirmation candle timestamp is required.")
+        instrument = str(instrument_id).strip().upper()
+        existing = self._find_challenge1_decision_for_candle(instrument, candle_time)
+        if existing is not None:
+            experience_id, payload = existing
+            input_snapshot = payload.get("input_snapshot") if isinstance(payload, Mapping) else {}
+            saved_evidence = input_snapshot.get("challenge1_evidence") if isinstance(input_snapshot, Mapping) else {}
+            saved_candle = saved_evidence.get("confirmation_candle") if isinstance(saved_evidence, Mapping) else None
+            if not self._same_confirmation_candle(saved_candle, candle):
+                raise BloFinDemoExecutionBlocked(
+                    "The same completed candle timestamp has conflicting immutable OHLC data; no order was submitted."
+                )
+            # The original 15m candle decision remains authoritative. Do not append
+            # a second event when optional 1H context, sentiment, or rationale changes.
+            return experience_id
+
+        experience_id = _challenge1_experience_id(instrument, challenge_record)
         signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
-        signal_bar = str(challenge_record.get("signal_bar_open_utc") or "")
+        signal_bar = str(challenge_record.get("signal_bar_open_utc") or candle_time)
         decision = {
             "signal": signal,
             "side": signal if signal in {"LONG", "SHORT"} else None,
@@ -645,7 +746,7 @@ class BloFinDemoEventStore:
             "reason": str(challenge_record.get("reason_fa") or ""),
         }
         input_snapshot = {
-            "instrument_id": str(instrument_id).strip().upper(),
+            "instrument_id": instrument,
             "signal_bar_open_utc": signal_bar,
             "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
             "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
@@ -665,7 +766,7 @@ class BloFinDemoEventStore:
                 decision=decision,
                 input_snapshot=input_snapshot,
                 market="CEX_FUTURES",
-                symbol=str(instrument_id).strip().upper(),
+                symbol=instrument,
                 timeframe="15M",
                 model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
                 dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
@@ -957,23 +1058,47 @@ class BloFinDemoEventStore:
 
     def record_closed_position_outcome(
         self, *, instrument_id: str, history_rows: Any,
-        partial_rows: Any = None,
+        partial_rows: Any = None, client_order_id: str | None = None,
+        position_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Record one final Demo outcome only after exact positionId and full-size reconciliation."""
+        """Record a final outcome for the exact Demo order/position, never the latest same-symbol order."""
         instrument = str(instrument_id or "").strip().upper()
+        order_key = str(client_order_id or "").strip()
+        position_key = str(position_id or "").strip()
         with self._lock:
-            order_row = self._db.execute(
-                "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
-                "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED') "
-                "ORDER BY created_at DESC LIMIT 1",
-                (instrument,),
-            ).fetchone()
+            if order_key:
+                order_row = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE client_order_id=? AND instrument_id=? "
+                    "AND experience_id IS NOT NULL AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED')",
+                    (order_key, instrument),
+                ).fetchone()
+            elif position_key:
+                order_row = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE position_id=? AND instrument_id=? "
+                    "AND experience_id IS NOT NULL AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED') "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (position_key, instrument),
+                ).fetchone()
+            else:
+                # Backwards-compatible path for existing offline callers/tests.
+                order_row = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
+                    "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED') "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (instrument,),
+                ).fetchone()
             if order_row is None:
                 return None
             order = dict(order_row)
             if order.get("outcome_recorded_at") is not None:
                 return {"status": "ALREADY_RECORDED", "experience_id": order.get("experience_id")}
-        position_id = str(order.get("position_id") or "")
+        saved_position_id = str(order.get("position_id") or "")
+        if position_key and saved_position_id != position_key:
+            return {
+                "status": "POSITION_ID_MISMATCH",
+                "experience_id": order.get("experience_id"),
+            }
+        position_id = saved_position_id
         if not position_id:
             return {
                 "status": "WAITING_FOR_EXCHANGE_POSITION_LINK",
