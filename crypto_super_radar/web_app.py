@@ -4137,8 +4137,11 @@ def _run_blofin_demo_execution_job(
             if isinstance(item, dict) and str(item.get("status", "")).upper() == "UNKNOWN"
         ) if isinstance(gates, list) else 12
         direction = str(record.get("signal") or "").upper()
+        pattern_only = execution_profile == "CHALLENGE_1"
         gate_summary = {
             "instrument_id": instrument_id, "execution_profile": execution_profile,
+            "gate_enforcement": "OBSERVATION_ONLY" if pattern_only else "PROFILE_POLICY",
+            "trading_supervisor_input": "CLOSED_CANDLE_OHLCV_AND_PATTERNS_ONLY" if pattern_only else "GENERAL_RADAR_EVIDENCE",
             "signal": direction or "UNKNOWN",
             "gate_pass_count": pass_count, "gate_fail_count": fail_count,
             "gate_unknown_count": unknown_count,
@@ -4153,8 +4156,13 @@ def _run_blofin_demo_execution_job(
             "gates_fa": _blofin_gate_rows_fa(gates),
         }
         _set_blofin_execution_job(
-            job_id, "running", stage="PROFILE_GATE_REVIEW",
-            message_fa=(f"ربات Challenge 1 · {instrument_id} · تأیید الگوی کندلی/نموداری؛ ۱۲ فیلتر عمومی فقط نظارتی‌اند." if execution_profile == "CHALLENGE_1" else f"ربات {execution_profile} · {instrument_id} · {pass_count}/12 گیت PASS؛ الگوی کندلی شاخص شرط اجباری نیست."),
+            job_id, "running",
+            stage="PATTERN_EVIDENCE_REVIEW" if pattern_only else "PROFILE_GATE_REVIEW",
+            message_fa=(
+                f"ربات Challenge 1 · {instrument_id} · ناظرها فقط OHLCV کندل‌های بسته‌شده و الگوهای کندلی/نموداری را بررسی می‌کنند؛ ۱۲ پروتکل عمومی در داوری این معامله اجرا نمی‌شوند."
+                if pattern_only else
+                f"ربات {execution_profile} · {instrument_id} · {pass_count}/12 گیت PASS؛ الگوی کندلی شاخص شرط اجباری نیست."
+            ),
             analysis=gate_summary, elliott_wave=wave_report, trade_context=trade_context,
         )
         statuses_by_id = {
@@ -4165,20 +4173,26 @@ def _run_blofin_demo_execution_job(
             gate_id for gate_id in profile_rule["required"]
             if statuses_by_id.get(gate_id) != "PASS"
         )
-        if (
+        gate_report_invalid = (
             not isinstance(gates, list) or len(gates) != 12
             or set(statuses_by_id) != set(range(1, 13))
-            or required_blockers or pass_count < profile_rule["min_pass"]
+        )
+        profile_gate_blocked = bool(
+            gate_report_invalid or required_blockers
+            or pass_count < profile_rule["min_pass"]
+        )
+        if (
+            (not pattern_only and profile_gate_blocked)
             or direction not in {"LONG", "SHORT"}
         ):
             reasons = []
             if direction not in {"LONG", "SHORT"}:
                 reasons.append((mtf_signal or {}).get("reason_fa") or "سیگنال جهت‌دار LONG/SHORT ساخته نشد.")
-            if required_blockers:
+            if not pattern_only and required_blockers:
                 reasons.append("گیت‌های ضروری این پروفایل PASS نیستند: " + ", ".join(map(str, required_blockers)))
-            if pass_count < profile_rule["min_pass"]:
+            if not pattern_only and pass_count < profile_rule["min_pass"]:
                 reasons.append(f"حداقل {profile_rule['min_pass']} گیت PASS لازم است؛ {pass_count} مورد PASS شد.")
-            if len(gates) != 12 or set(statuses_by_id) != set(range(1, 13)):
+            if not pattern_only and gate_report_invalid:
                 reasons.append("گزارش ۱۲ گیت کامل و یکتا نیست.")
             reason_fa = "؛ ".join(reasons) or "شرایط ورود تکمیل نشد."
             _set_blofin_execution_job(
