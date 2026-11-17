@@ -1458,3 +1458,93 @@ class WebAppHttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class Challenge1PositionManagerTests(unittest.TestCase):
+    @staticmethod
+    def order_and_position(*, pnl=0.75, mark_price=105.0, position_id="pos-1"):
+        order = {
+            "instrument_id": "BTC-USDT",
+            "position_id": "pos-1",
+            "client_order_id": "client-1",
+            "side": "LONG",
+            "take_profit": "110",
+            "created_at": 1_000,
+        }
+        position = {
+            "instId": "BTC-USDT",
+            "positionId": position_id,
+            "positions": "1",
+            "unrealizedPnl": str(pnl),
+        }
+        return order, position, mark_price
+
+    def test_profitable_position_continues_after_five_minutes_without_exit_trigger(self):
+        order, position, mark_price = self.order_and_position(
+            pnl=0.75, mark_price=105.0,
+        )
+        reason = web_app._blofin_demo_profit_exit_decision(
+            order, position, mark_price, now=1_300,
+            minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+        )
+        self.assertIsNone(reason)
+
+    def test_position_manager_exits_when_exact_linked_position_reaches_take_profit(self):
+        order, position, mark_price = self.order_and_position(
+            pnl=1.25, mark_price=110.0,
+        )
+        reason = web_app._blofin_demo_profit_exit_decision(
+            order, position, mark_price, now=1_300,
+            minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+        )
+        self.assertEqual(reason, "TAKE_PROFIT_LEVEL_REACHED")
+
+    def test_maximum_hold_exit_requires_profit_and_never_closes_a_loss(self):
+        order, position, mark_price = self.order_and_position(
+            pnl=0.75, mark_price=105.0,
+        )
+        reason = web_app._blofin_demo_profit_exit_decision(
+            order, position, mark_price, now=87_400,
+            minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+        )
+        self.assertEqual(reason, "MAX_HOLD_PROFIT_ONLY")
+
+        losing_order, losing_position, losing_mark = self.order_and_position(
+            pnl=-0.25, mark_price=95.0,
+        )
+        losing_reason = web_app._blofin_demo_profit_exit_decision(
+            losing_order, losing_position, losing_mark, now=87_400,
+            minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+        )
+        self.assertIsNone(losing_reason)
+
+    def test_position_manager_requires_exact_position_id(self):
+        order, position, mark_price = self.order_and_position(
+            pnl=1.25, mark_price=115.0, position_id="different-position",
+        )
+        reason = web_app._blofin_demo_profit_exit_decision(
+            order, position, mark_price, now=87_400,
+            minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+        )
+        self.assertIsNone(reason)
+
+    def test_position_manager_thread_starts_independently_of_entry_autopilot(self):
+        previous_thread = web_app.BLOFIN_POSITION_MANAGER_THREAD
+        try:
+            web_app.BLOFIN_POSITION_MANAGER_THREAD = None
+            with (
+                patch.dict(os.environ, {"BLOFIN_DEMO_AUTOPILOT_ENABLED": "false"}),
+                patch.object(web_app.threading, "Thread") as thread_factory,
+            ):
+                worker = thread_factory.return_value
+                worker.is_alive.return_value = False
+                web_app._start_blofin_demo_position_manager()
+                thread_factory.assert_called_once()
+                self.assertIs(
+                    thread_factory.call_args.kwargs["target"],
+                    web_app._blofin_demo_position_manager_worker,
+                )
+                self.assertTrue(thread_factory.call_args.kwargs["daemon"])
+                worker.start.assert_called_once()
+        finally:
+            web_app.BLOFIN_POSITION_MANAGER_THREAD = previous_thread
+
