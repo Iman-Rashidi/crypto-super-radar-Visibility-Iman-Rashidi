@@ -2328,7 +2328,10 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
     ]
     passed_count = len(passed_items)
     if complete:
-        status = "PASS" if passed_count == total else "PARTIAL" if passed_count else "UNKNOWN"
+        status = (
+            "PASS" if passed_count == total and len(observed_times) == total
+            else "PARTIAL" if passed_count else "UNKNOWN"
+        )
     else:
         status = "PARTIAL" if passed_count else "LOADING"
     observed_times = []
@@ -2358,7 +2361,7 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
     return {
         "status": status,
         "freshness": (
-            "FRESH" if complete and passed_count == total
+            "FRESH" if status == "PASS"
             else "PARTIAL" if passed_count else "UNKNOWN"
         ),
         "updated_at_utc": oldest_observation.isoformat() if oldest_observation else None,
