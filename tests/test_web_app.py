@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import queue
 import re
@@ -94,8 +94,18 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(web_app._demo_ai_review_approved({
             "status": "APPROVED", "paper_entry_eligible": True
         }))
-        self.assertTrue(web_app._demo_ai_review_approved({
+        self.assertFalse(web_app._demo_ai_review_approved({
             "status": "APPROVED", "paper_entry_eligible": True, "model": "free-model"
+        }))
+        self.assertTrue(web_app._demo_ai_review_approved({
+            "status": "APPROVED",
+            "paper_entry_eligible": True,
+            "model": "free-model",
+            "returned_model": "free-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
         }))
 
     def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
@@ -126,8 +136,15 @@ class WebAppHttpTests(unittest.TestCase):
 
     def test_ai_veto_is_recorded_separately_from_robot_analysis(self):
         ai_review = {
+            "reviewer_id": "nemotron",
+            "provider": "OpenRouter",
             "status": "VETO",
             "model": "free-test-model",
+            "returned_model": "free-test-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
             "rationale_fa": "ریسک نامتقارن است.",
             "paper_entry_eligible": False,
         }
@@ -144,7 +161,7 @@ class WebAppHttpTests(unittest.TestCase):
             },
         }
         events = web_app._blofin_job_notion_events("cycle-ai-veto", "BTC-USDT", job)
-        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        ai_event = next(item for item in events if item["actor"] == "Nemotron Supervisor")
         self.assertEqual(ai_event["event_type"], "AI_VETO")
         self.assertEqual(ai_event["ai_decision"], "REJECT")
         self.assertEqual(ai_event["ai_model"], "free-test-model")
@@ -154,11 +171,52 @@ class WebAppHttpTests(unittest.TestCase):
         job = {
             "status": "completed",
             "stage": "MONITORING",
-            "ai_review": {
-                "status": "APPROVED",
-                "model": "free-test-model",
-                "rationale_fa": "ریسک قابل قبول است.",
-                "paper_entry_eligible": True,
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron",
+                    "actor": "Nemotron Supervisor",
+                    "review": {
+                        "reviewer_id": "nemotron",
+                        "status": "APPROVED",
+                        "provider": "OpenRouter",
+                        "model": "free-test-model",
+                        "returned_model": "free-test-model",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": True,
+                        "model_verified": True,
+                        "paper_entry_eligible": True,
+                        "rationale_fa": "نظر اول الگوی کندلی را تأیید کرد.",
+                    },
+                },
+                {
+                    "reviewer_id": "second_ai",
+                    "actor": "Second AI Supervisor",
+                    "review": {
+                        "reviewer_id": "second_ai",
+                        "status": "APPROVED",
+                        "provider": "Independent Provider",
+                        "model": "independent-model:free",
+                        "returned_model": "independent-model:free",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": True,
+                        "model_verified": True,
+                        "paper_entry_eligible": True,
+                        "rationale_fa": "نظر دوم مستقل الگوی کندلی را تأیید کرد.",
+                    },
+                },
+            ],
+            "ai_consensus": {
+                "status": "AGREEMENT",
+                "primary_status": "APPROVED",
+                "second_status": "APPROVED",
+                "primary_verified": True,
+                "second_verified": True,
+                "primary_approved": True,
+                "second_approved": True,
+                "two_reviewer_approval": True,
+                "decision": "APPROVE",
             },
             "result": {
                 "status": "FILLED",
@@ -177,8 +235,10 @@ class WebAppHttpTests(unittest.TestCase):
         filled = next(item for item in events if item["event_type"] == "ORDER_FILLED")
         self.assertEqual(filled["order_id"], "demo-order-123")
         self.assertEqual(filled["position_id"], "demo-position-456")
-        approval = next(item for item in events if item["event_type"] == "AI_APPROVAL")
-        self.assertEqual(approval["ai_decision"], "APPROVE")
+        approvals = [item for item in events if item["event_type"] == "AI_APPROVAL"]
+        self.assertEqual({item["reviewer_id"] for item in approvals}, {"nemotron", "second_ai"})
+        self.assertEqual({item["ai_provider"] for item in approvals}, {"OpenRouter", "Independent Provider"})
+        self.assertTrue(all(item["ai_decision"] == "APPROVE" for item in approvals))
 
     def test_notion_sync_status_includes_activity_chart_journal_counters(self):
         event_outbox = MagicMock()
@@ -232,6 +292,73 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("autopilotStatusPollTimer", page)
         self.assertIn("status_only=1", page)
 
+    def test_challenge1_activity_snapshot_keeps_both_real_supervisor_reviews_and_position_id(self):
+        candles = []
+        for index in range(8):
+            opened = 100.0 + index
+            candles.append({
+                "time_utc": f"2026-11-17T10:{index:02d}:00Z",
+                "open": opened, "high": opened + 1, "low": opened - 1,
+                "close": opened + 0.5, "volume": 1000 + index,
+            })
+        reviews = [
+            {
+                "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                "review": {
+                    "status": "APPROVED", "provider": "OpenRouter",
+                    "model": "configured-primary", "returned_model": "verified-primary",
+                    "request_attempted": True, "response_source": "LIVE_API",
+                    "response_validated": True, "model_verified": True,
+                    "paper_entry_eligible": True, "rationale_fa": "الگوی صعودی تأیید شد.",
+                },
+            },
+            {
+                "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                "review": {
+                    "status": "APPROVED", "provider": "Groq",
+                    "model": "openai/gpt-oss-120b", "returned_model": "openai/gpt-oss-120b",
+                    "request_attempted": True, "response_source": "LIVE_API",
+                    "response_validated": True, "model_verified": True,
+                    "paper_entry_eligible": True, "rationale_fa": "نظر دوم مستقل موافق است.",
+                },
+            },
+        ]
+        consensus = {
+            "status": "AGREEMENT", "primary_status": "APPROVED",
+            "second_status": "APPROVED", "primary_verified": True,
+            "second_verified": True, "primary_approved": True,
+            "second_approved": True, "two_reviewer_approval": True,
+            "decision": "APPROVE",
+        }
+        job = {
+            "status": "completed", "stage": "MONITORING",
+            "ai_reviews": reviews, "ai_consensus": consensus,
+            "result": {
+                "status": "FILLED", "signal": "LONG",
+                "learning_experience_id": "blofin-ch1-dual-review-001",
+                "orders_submitted": True, "trade_executed": True,
+                "exchange_order_id": "demo-order-dual-001",
+                "position_id": "demo-position-dual-001",
+                "positions": [{"instId": "BTC-USDT", "positionId": "demo-position-dual-001"}],
+                "average_fill_price": 101.0,
+                "filled_at_utc": "2026-11-17T10:15:00Z",
+                "ai_review": {"status": "APPROVED", "model": "configured-primary"},
+                "challenge1_evidence": {
+                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+                    "decision": "LONG", "detected_patterns": [],
+                    "candles_15m": candles, "candles_1h": [],
+                    "confirmation_candle": {"time_utc": candles[-1]["time_utc"]},
+                },
+            },
+        }
+        snapshot = web_app._blofin_activity_journal_snapshot("dual-review-job", "BTC-USDT", job)
+        self.assertEqual(snapshot["ai_status"], "APPROVED_BY_BOTH")
+        self.assertEqual(snapshot["reviewer_consensus"], "AGREEMENT")
+        self.assertEqual({item["reviewer_id"] for item in snapshot["ai_reviews"]}, {"nemotron", "second_ai"})
+        self.assertEqual(snapshot["ai_reviews"][1]["provider"], "Groq")
+        self.assertEqual(snapshot["position_id"], "demo-position-dual-001")
+        self.assertEqual(snapshot["order_id"], "demo-order-dual-001")
+
     def test_challenge1_activity_snapshot_keeps_real_ohlcv_and_marks_ai_not_called(self):
         candles = []
         for index in range(8):
@@ -274,9 +401,18 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(snapshot["signal"], "NO_TRADE")
         self.assertEqual(len(snapshot["candles_15m"]), 8)
         self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
+        self.assertEqual(snapshot["reviewer_consensus"], "NOT_CALLED")
+        self.assertEqual({item["reviewer_id"] for item in snapshot["ai_reviews"]}, {"nemotron", "second_ai"})
+        self.assertTrue(all(item["request_attempted"] is False for item in snapshot["ai_reviews"]))
         events = web_app._blofin_job_notion_events("journal-job-001", "BTC-USDT", job)
         self.assertEqual(events[0]["ai_decision"], "NOT_CALLED")
-        self.assertFalse(any(event["actor"] == "AI Supervisor" for event in events))
+        reviewer_events = [
+            event for event in events
+            if event["actor"] in {"Nemotron Supervisor", "Second AI Supervisor"}
+        ]
+        self.assertEqual({event["reviewer_id"] for event in reviewer_events}, {"nemotron", "second_ai"})
+        self.assertTrue(all(event["ai_decision"] == "NOT_CALLED" for event in reviewer_events))
+        self.assertTrue(all(event["ai_call_status"] == "NOT_CALLED" for event in reviewer_events))
 
     def test_profit_exit_decision_requires_exact_robot_position_and_positive_cushion(self):
         order = {
@@ -700,11 +836,26 @@ class WebAppHttpTests(unittest.TestCase):
             "configured": True,
             "secret_sent_to_model": False,
         }
-        with patch.object(web_app, "ai_connection_status", return_value=payload):
+        second = {
+            "reviewer_id": "second_ai",
+            "provider": None,
+            "model": None,
+            "status": "NOT_CONFIGURED",
+            "configured": False,
+            "configuration_issues": ["CSR_SECOND_AI_API_KEY_MISSING"],
+            "secret_sent_to_model": False,
+            "paper_entry_eligible": False,
+        }
+        with patch.object(web_app, "ai_connection_status", return_value=payload), patch.object(
+            web_app, "second_ai_connection_status", return_value=second
+        ):
             status, _, body = self.request("GET", "/api/ai/status")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), payload)
-        self.assertNotIn("api_key", body.decode().lower())
+        response = json.loads(body)
+        self.assertEqual(response["provider"], payload["provider"])
+        self.assertEqual(response["second_supervisor"], second)
+        self.assertEqual(response["two_reviewer_gate"], "REQUIRES_BOTH_VERIFIED_APPROVALS")
+        self.assertFalse(response["second_supervisor"]["secret_sent_to_model"])
 
     def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
         payload = {
@@ -1492,6 +1643,8 @@ class WebAppHttpTests(unittest.TestCase):
             if len(sleep_calls) == 2:
                 raise StopAfterTwoCycles()
 
+        next_cycle_at = (datetime.now(timezone.utc) + timedelta(seconds=900)).replace(microsecond=0)
+
         web_app.BLOFIN_AUTOPILOT_STATE.update({
             "enabled": False,
             "status": "DISABLED",
@@ -1516,7 +1669,7 @@ class WebAppHttpTests(unittest.TestCase):
                 }),
                 patch.object(web_app.BLOFIN_AUTOPILOT_STOP_EVENT, "wait", side_effect=stop_after_second_cycle_sleep),
                 patch.object(web_app, "_blofin_demo_next_15m_scan_window", return_value=(
-                    900, "2026-11-17T16:30:03+00:00"
+                    900, next_cycle_at.isoformat()
                 )),
                 patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
@@ -1530,7 +1683,7 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_15M_CANDLE")
             self.assertEqual(
                 web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"],
-                "2026-11-17T16:30:03+00:00",
+                next_cycle_at.isoformat(),
             )
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])

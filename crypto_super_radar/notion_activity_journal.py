@@ -126,10 +126,52 @@ def _normalise_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "orders_submitted": snapshot.get("orders_submitted") is True,
         "closed_confirmed": snapshot.get("closed_confirmed") is True,
         "ai_status": _text(snapshot.get("ai_status"), 40),
-        "ai_model": _text(snapshot.get("ai_model"), 160),
+        "ai_model": _text(snapshot.get("ai_model"), 300),
         "ai_reason": _text(snapshot.get("ai_reason"), 1600),
+        "reviewer_consensus": _text(snapshot.get("reviewer_consensus"), 40).upper(),
+        "ai_consensus": {
+            key: snapshot.get("ai_consensus", {}).get(key)
+            for key in (
+                "status", "primary_status", "second_status",
+                "primary_verified", "second_verified",
+                "primary_approved", "second_approved",
+                "two_reviewer_approval", "decision",
+            )
+            if isinstance(snapshot.get("ai_consensus"), Mapping)
+            and key in snapshot.get("ai_consensus", {})
+        },
+        "ai_reviews": [
+            {
+                key: item.get(key)
+                for key in (
+                    "reviewer_id", "actor", "status", "provider", "model",
+                    "returned_model", "request_attempted", "response_source",
+                    "response_validated", "model_verified", "paper_entry_eligible",
+                    "skip_reason_code", "http_status", "latency_ms", "reason",
+                )
+                if key in item
+            }
+            for item in snapshot.get("ai_reviews", [])
+            if isinstance(item, Mapping)
+        ][:2] if isinstance(snapshot.get("ai_reviews"), list) else [],
         "source_url": _text(snapshot.get("source_url"), 1000),
     }
+
+
+def _notion_http_error_details(error: requests.HTTPError) -> tuple[str | None, str | None]:
+    """Extract Notion's structured error code/message without storing request headers or secrets."""
+    response = getattr(error, "response", None)
+    payload: Mapping[str, Any] = {}
+    if response is not None:
+        try:
+            parsed = response.json()
+            if isinstance(parsed, Mapping):
+                payload = parsed
+        except Exception:
+            payload = {}
+    code = _text(payload.get("code"), 80) or None
+    message = _text(payload.get("message"), 700) or None
+    return code, message
 
 
 def render_candlestick_chart(snapshot: Mapping[str, Any]) -> bytes:
@@ -252,6 +294,8 @@ class NotionActivityJournal:
                 notion_page_id TEXT,
                 last_error_type TEXT,
                 last_http_status INTEGER,
+                last_error_code TEXT,
+                last_error_message TEXT,
                 last_error_stage TEXT,
                 synced_at_utc TEXT
             )
@@ -262,6 +306,14 @@ class NotionActivityJournal:
         if "last_error_stage" not in columns:
             self._db.execute(
                 "ALTER TABLE csr_notion_activity_journal ADD COLUMN last_error_stage TEXT"
+            )
+        if "last_error_code" not in columns:
+            self._db.execute(
+                "ALTER TABLE csr_notion_activity_journal ADD COLUMN last_error_code TEXT"
+            )
+        if "last_error_message" not in columns:
+            self._db.execute(
+                "ALTER TABLE csr_notion_activity_journal ADD COLUMN last_error_message TEXT"
             )
         self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_csr_notion_activity_pending
@@ -285,7 +337,9 @@ class NotionActivityJournal:
                      sync_status='PENDING',
                      last_error_type=NULL,
                      last_http_status=NULL,
-                      last_error_stage=NULL""",
+                     last_error_code=NULL,
+                     last_error_message=NULL,
+                     last_error_stage=NULL""",
                 (payload["experience_id"], _canonical(payload), now, now),
             )
         return bool(getattr(cursor, "rowcount", 0))
@@ -422,14 +476,19 @@ class NotionActivityJournal:
                 "ai_status": snapshot.get("ai_status"),
                 "ai_model": snapshot.get("ai_model"),
                 "ai_reason": snapshot.get("ai_reason"),
+                "reviewer_consensus": snapshot.get("reviewer_consensus"),
+                "ai_consensus": snapshot.get("ai_consensus"),
+                "ai_reviews": snapshot.get("ai_reviews"),
                 "order_id": snapshot.get("order_id"),
                 "position_id": snapshot.get("position_id"),
                 "closed_confirmed": closed,
                 "realized_net_pnl_usdt": snapshot.get("realized_net_pnl_usdt"),
                 "evidence": snapshot.get("evidence"),
             }, ensure_ascii=False, sort_keys=True), 1800),
-            "بازبینی مستقل": {"select": {"name": "در انتظار"}},
+            "بازبینی مستقل": {"select": {"name": self._independent_review_status(snapshot)}},
         }
+        if signal == "NO_TRADE":
+            properties["دلیل عدم معامله"] = self._rich_text(snapshot.get("reason_fa"), 1800)
         if snapshot.get("signal_bar_open_utc"):
             properties["زمان ورود فرضی"] = self._date(snapshot.get("signal_bar_open_utc"))
         if snapshot.get("ai_status"):
@@ -450,6 +509,40 @@ class NotionActivityJournal:
                 "file_upload": {"id": ohlcv_upload_id},
             }]}
         return properties
+
+    @staticmethod
+    def _independent_review_status(snapshot: Mapping[str, Any]) -> str:
+        """Map reviewer evidence to the Notion select without implying approval."""
+        consensus = snapshot.get("ai_consensus")
+        consensus = consensus if isinstance(consensus, Mapping) else {}
+        reviewers = snapshot.get("ai_reviews")
+        reviewers = reviewers if isinstance(reviewers, list) else []
+        consensus_status = str(
+            snapshot.get("reviewer_consensus") or consensus.get("status") or ""
+        ).upper()
+        two_approved = (
+            consensus.get("two_reviewer_approval") is True
+            and consensus.get("primary_verified") is True
+            and consensus.get("second_verified") is True
+        )
+        if consensus_status == "AGREEMENT" and two_approved:
+            return "تأیید"
+        has_verified_rejection = any(
+            isinstance(item, Mapping)
+            and item.get("request_attempted") is True
+            and item.get("response_source") == "LIVE_API"
+            and item.get("response_validated") is True
+            and item.get("model_verified") is True
+            and str(item.get("status") or "").upper() in {"VETO", "REJECT"}
+            for item in reviewers
+        )
+        if has_verified_rejection:
+            return "رد"
+        if consensus_status == "DISAGREEMENT":
+            return "نیازمند بازبینی"
+        if consensus_status in {"NOT_CALLED", "NOT_COMPARABLE", "SINGLE_REVIEWER"}:
+            return "نیازمند بازبینی"
+        return "در انتظار"
 
     def _find_page(self, token: str, experience_id: str) -> str | None:
         response = self._request_json(
@@ -535,7 +628,8 @@ class NotionActivityJournal:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET
                            attempts=?, sync_status='SYNCED', notion_page_id=?,
-                           synced_at_utc=?, last_error_type=NULL, last_http_status=NULL
+                           synced_at_utc=?, last_error_type=NULL, last_http_status=NULL,
+                           last_error_code=NULL, last_error_message=NULL
                            WHERE experience_id=?""",
                         (attempts, saved_page_id, datetime.now(timezone.utc).isoformat(), experience_id),
                     )
@@ -543,12 +637,17 @@ class NotionActivityJournal:
             except requests.HTTPError as exc:
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 failed_stage = self._current_operation or "UNKNOWN_OPERATION"
+                notion_error_code, notion_error_message = _notion_http_error_details(exc)
                 delay = min(3600, 5 * (2 ** min(attempts - 1, 9)))
                 with self._db:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET attempts=?, next_attempt_at=?,
-                           last_error_type=?, last_http_status=?, last_error_stage=? WHERE experience_id=?""",
-                        (attempts, current + delay, type(exc).__name__, status_code, failed_stage, experience_id),
+                           last_error_type=?, last_http_status=?, last_error_code=?,
+                           last_error_message=?, last_error_stage=? WHERE experience_id=?""",
+                        (
+                            attempts, current + delay, type(exc).__name__, status_code,
+                            notion_error_code, notion_error_message, failed_stage, experience_id,
+                        ),
                     )
                 failed += 1
             except Exception as exc:
@@ -557,8 +656,12 @@ class NotionActivityJournal:
                 with self._db:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET attempts=?, next_attempt_at=?,
-                           last_error_type=?, last_error_stage=? WHERE experience_id=?""",
-                        (attempts, current + delay, type(exc).__name__, failed_stage, experience_id),
+                           last_error_type=?, last_error_code=NULL, last_error_message=?,
+                           last_error_stage=? WHERE experience_id=?""",
+                        (
+                            attempts, current + delay, type(exc).__name__,
+                            _text(str(exc), 700) or None, failed_stage, experience_id,
+                        ),
                     )
                 failed += 1
         state = self.status_snapshot()
@@ -583,14 +686,14 @@ class NotionActivityJournal:
         latest = self._db.execute(
             """SELECT experience_id, sync_status, attempts, updated_at_utc
                FROM csr_notion_activity_journal
-               ORDER BY updated_at_utc DESC LIMIT 1"""
+               ORDER BY updated_at_utc DESC, rowid DESC LIMIT 1"""
         ).fetchone()
         last_error = self._db.execute(
             """SELECT experience_id, attempts, last_error_type, last_http_status,
-                      last_error_stage, next_attempt_at
+                      last_error_code, last_error_message, last_error_stage, next_attempt_at
                FROM csr_notion_activity_journal
                WHERE last_error_type IS NOT NULL
-               ORDER BY updated_at_utc DESC, attempts DESC LIMIT 1"""
+               ORDER BY updated_at_utc DESC, rowid DESC, attempts DESC LIMIT 1"""
         ).fetchone()
         pending_with_error = self._db.execute(
             """SELECT COUNT(*) FROM csr_notion_activity_journal
@@ -610,6 +713,8 @@ class NotionActivityJournal:
             "last_failed_experience_id": last_error["experience_id"] if last_error else None,
             "last_error_type": last_error["last_error_type"] if last_error else None,
             "last_http_status": last_error["last_http_status"] if last_error else None,
+            "last_error_code": last_error["last_error_code"] if last_error else None,
+            "last_error_message": last_error["last_error_message"] if last_error else None,
             "last_error_stage": last_error["last_error_stage"] if last_error else None,
             "last_attempts": int(last_error["attempts"] or 0) if last_error else 0,
             "retry_after_epoch": int(last_error["next_attempt_at"] or 0) if last_error else None,
