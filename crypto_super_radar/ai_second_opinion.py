@@ -306,7 +306,21 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
         ) if clean
     ][:30]
     confirmation_raw = raw_evidence.get("confirmation_candle")
-    confirmation_rows = _clean_ohlcv_rows([confirmation_raw] if isinstance(confirmation_raw, Mapping) else [], limit=1)
+    confirmation_payload = None
+    if isinstance(confirmation_raw, Mapping):
+        confirmation_payload = dict(confirmation_raw)
+        confirmation_payload["open_time_utc"] = (
+            confirmation_raw.get("open_time_utc") or confirmation_raw.get("time_utc")
+        )
+        if confirmation_payload.get("volume") in (None, ""):
+            raw_15m = raw_evidence.get("candles_15m")
+            if isinstance(raw_15m, list) and raw_15m:
+                last_row = raw_15m[-1]
+                if isinstance(last_row, Mapping):
+                    confirmation_payload["volume"] = last_row.get("volume")
+    confirmation_rows = _clean_ohlcv_rows(
+        [confirmation_payload] if isinstance(confirmation_payload, Mapping) else [], limit=1
+    )
     volume_raw = raw_evidence.get("volume_confirmation")
     volume_raw = volume_raw if isinstance(volume_raw, Mapping) else {}
     volume = {
