@@ -2476,7 +2476,9 @@ def _crypto_market_board() -> dict:
         }
 
     cached["refreshing"] = refreshing
-    if refreshing and cached.get("completed_items", 0) < cached.get("total_items", len(CRYPTO_MARKET_UNIVERSE)):
+    if refreshing:
+        # The last item may be published just before the worker commits the final
+        # cache expiry. Keep the board in LOADING until refreshing is cleared.
         cached["status"] = "LOADING"
         cached["freshness"] = "PARTIAL" if cached.get("items") else "LOADING"
         return cached
