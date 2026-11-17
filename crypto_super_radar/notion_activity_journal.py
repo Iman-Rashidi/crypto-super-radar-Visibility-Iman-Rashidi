@@ -700,7 +700,7 @@ class NotionActivityJournal:
         latest = self._db.execute(
             """SELECT experience_id, sync_status, attempts, updated_at_utc
                FROM csr_notion_activity_journal
-               ORDER BY updated_at_utc DESC LIMIT 1"""
+               ORDER BY updated_at_utc DESC, rowid DESC LIMIT 1"""
         ).fetchone()
         last_error = self._db.execute(
             """SELECT experience_id, attempts, last_error_type, last_http_status,
