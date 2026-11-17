@@ -689,3 +689,239 @@ def run_free_ai_second_opinion(
             "model_verified": False,
             "paper_entry_eligible": False, "cost_usd": 0.0,
         }
+
+
+def second_ai_connection_status() -> dict[str, Any]:
+    """Expose only non-secret configuration facts for the independent second reviewer."""
+    key = (os.getenv("CSR_SECOND_AI_API_KEY") or "").strip()
+    model = (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()
+    provider = (os.getenv("CSR_SECOND_AI_PROVIDER") or "").strip()
+    endpoint = (os.getenv("CSR_SECOND_AI_API_URL") or "").strip()
+    reasons = []
+    if not key:
+        reasons.append("CSR_SECOND_AI_API_KEY_MISSING")
+    if not model:
+        reasons.append("CSR_SECOND_AI_MODEL_MISSING")
+    elif not model.endswith(":free"):
+        reasons.append("SECOND_AI_MODEL_NOT_FREE")
+    if not provider:
+        reasons.append("CSR_SECOND_AI_PROVIDER_MISSING")
+    if not endpoint:
+        reasons.append("CSR_SECOND_AI_API_URL_MISSING")
+    elif not endpoint.startswith("https://"):
+        reasons.append("SECOND_AI_ENDPOINT_MUST_USE_HTTPS")
+    if key and key == _api_key():
+        reasons.append("SECOND_AI_KEY_MUST_BE_SEPARATE")
+    if model and model == _model():
+        reasons.append("SECOND_AI_MODEL_MUST_DIFFER")
+    configured = not reasons
+    return {
+        "reviewer_id": "second_ai",
+        "provider": provider or None,
+        "model": model or None,
+        "status": "CONFIGURED" if configured else "NOT_CONFIGURED",
+        "configured": configured,
+        "configuration_issues": reasons,
+        "secret_sent_to_model": False,
+        "paper_entry_eligible": False,
+    }
+
+
+def run_independent_ai_supervisor(
+    result: Any, asset: Any = None, http_post=None,
+) -> dict[str, Any]:
+    """Run a separately credentialed, free, OpenAI-compatible reviewer.
+
+    This reviewer receives the same sanitized market evidence independently.
+    It never sees Nemotron's output and has no exchange/order tools.
+    Missing configuration, non-free models, native-gate UNKNOWN, endpoint errors,
+    schema failures or model mismatches all fail closed.
+    """
+    requested_at = datetime.now(timezone.utc).isoformat()
+    config = second_ai_connection_status()
+    provider = config.get("provider") or ""
+    model = config.get("model") or ""
+    endpoint = (os.getenv("CSR_SECOND_AI_API_URL") or "").strip()
+    key = (os.getenv("CSR_SECOND_AI_API_KEY") or "").strip()
+    if not config["configured"]:
+        return {
+            "reviewer_id": "second_ai",
+            "provider": provider or None,
+            "model": None,
+            "status": "NOT_CONFIGURED",
+            "status_fa": "ناظر مستقل دوم هنوز با کلید، مدل رایگان و Endpoint جداگانه پیکربندی نشده است.",
+            "reason": "Independent second reviewer configuration is incomplete or not independent.",
+            "configuration_issues": config["configuration_issues"],
+            "request_attempted": False,
+            "skip_reason_code": config["configuration_issues"][0] if config["configuration_issues"] else "SECOND_AI_NOT_CONFIGURED",
+            "response_source": "NONE",
+            "response_validated": False,
+            "model_verified": False,
+            "paper_entry_eligible": False,
+            "requested_at_utc": requested_at,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "prompt_version": PROMPT_VERSION + "-second-ai",
+            "cost_usd": 0.0,
+        }
+
+    asset_name = str(getattr(asset, "raw", asset) or getattr(result, "asset", "unknown"))
+    market_type = (
+        "perpetual" if getattr(asset, "market_type", None) == "perp"
+        or asset_name.lower().startswith("perp:") else "spot"
+    )
+    expected_side = str(
+        getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "UNKNOWN"))
+    ).upper().replace(" ", "_")
+    if expected_side not in {"LONG", "SHORT"}:
+        return {
+            "reviewer_id": "second_ai", "provider": provider, "model": model,
+            "status": "NOT_CALLED", "request_attempted": False,
+            "skip_reason_code": "NO_DIRECTIONAL_SIGNAL",
+            "response_source": "NONE", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "requested_at_utc": requested_at,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "prompt_version": PROMPT_VERSION + "-second-ai",
+        }
+    native_review = build_native_agent_council_review(result)
+    if native_review.get("status") != "APPROVED":
+        return {
+            "reviewer_id": "second_ai", "provider": provider, "model": model,
+            "status": "NOT_CALLED",
+            "status_fa": "گیت‌های شواهد بومی کامل نیستند؛ برای جلوگیری از تأیید بی‌پایه، ناظر دوم فراخوانی نشد.",
+            "reason": "Native evidence council did not approve all mandatory checks.",
+            "native_council": native_review,
+            "request_attempted": False,
+            "skip_reason_code": "NATIVE_COUNCIL_NOT_APPROVED",
+            "response_source": "NONE", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "requested_at_utc": requested_at,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "prompt_version": PROMPT_VERSION + "-second-ai",
+        }
+
+    evidence = _build_review_input(result, asset)
+    messages = _prompt_messages(evidence)
+    messages[0]["content"] = (
+        "You are the SECOND, INDEPENDENT AI SUPERVISOR. Review only the supplied "
+        "market evidence. Do not rely on or imitate another model's answer. "
+        "Do not claim to have inspected an exchange account or executed an order. "
+        "The first reviewer output is intentionally not provided. "
+        + messages[0]["content"]
+    )
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": 1800,
+    }
+    post = http_post or requests.post
+    latency_ms = 0
+    http_status = None
+    started = time.monotonic()
+    response_started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        response = post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "X-Title": "CRYPTO SUPER RADAR Independent Second Supervisor",
+            },
+            json=payload,
+            timeout=(8, 35),
+            allow_redirects=False,
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        http_status = int(getattr(response, "status_code", 0) or 0)
+        if http_status != 200:
+            return {
+                "reviewer_id": "second_ai", "provider": provider, "model": model,
+                "status": "ERROR" if http_status != 429 else "UNKNOWN",
+                "status_fa": "ناظر مستقل دوم پاسخ موفق و قابل بررسی برنگرداند.",
+                "reason": "Independent second reviewer endpoint returned a non-200 status.",
+                "http_status": http_status, "latency_ms": latency_ms,
+                "request_attempted": True, "response_source": "LIVE_API",
+                "response_validated": False, "model_verified": False,
+                "paper_entry_eligible": False,
+                "requested_at_utc": requested_at,
+                "response_started_at_utc": response_started_at,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "prompt_version": PROMPT_VERSION + "-second-ai",
+            }
+        body = response.json()
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ValueError("Missing second AI response choices")
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise ValueError("Missing second AI response message")
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        if not isinstance(content, str) or len(content) > MAX_RESPONSE_CHARS:
+            raise ValueError("Second AI response content is missing or too large")
+        parsed = _extract_json(content)
+        returned_model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(returned_model, str) or not returned_model.strip():
+            return {
+                "reviewer_id": "second_ai", "provider": provider, "model": model,
+                "status": "MODEL_UNCONFIRMED", "request_attempted": True,
+                "response_source": "LIVE_API", "response_validated": False,
+                "model_verified": False, "paper_entry_eligible": False,
+                "http_status": http_status, "latency_ms": latency_ms,
+                "requested_at_utc": requested_at,
+                "response_started_at_utc": response_started_at,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "prompt_version": PROMPT_VERSION + "-second-ai",
+            }
+        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+            return {
+                "reviewer_id": "second_ai", "provider": provider, "model": model,
+                "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
+                "request_attempted": True, "response_source": "LIVE_API",
+                "response_validated": False, "model_verified": False,
+                "paper_entry_eligible": False, "http_status": http_status,
+                "latency_ms": latency_ms, "requested_at_utc": requested_at,
+                "response_started_at_utc": response_started_at,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "prompt_version": PROMPT_VERSION + "-second-ai",
+            }
+        review = _validated_review(
+            parsed, model, asset_name, expected_side=expected_side, market_type=market_type,
+        )
+        usage = body.get("usage") if isinstance(body, dict) else None
+        tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+            tokens = None
+        review.update({
+            "reviewer_id": "second_ai", "provider": provider,
+            "configured_model": model, "returned_model": returned_model[:160],
+            "request_attempted": True, "response_source": "LIVE_API",
+            "model_verified": True, "response_validated": True,
+            "http_status": http_status, "latency_ms": latency_ms,
+            "total_tokens": tokens,
+            "requested_at_utc": requested_at,
+            "response_started_at_utc": response_started_at,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "prompt_version": PROMPT_VERSION + "-second-ai",
+        })
+        return review
+    except Exception as exc:
+        return {
+            "reviewer_id": "second_ai", "provider": provider, "model": model,
+            "status": "ERROR",
+            "status_fa": "پاسخ ناظر مستقل دوم قابل اعتبارسنجی نبود؛ ورود جدید متوقف می‌ماند.",
+            "reason": "Independent second reviewer request or validation failed.",
+            "error_type": type(exc).__name__, "http_status": http_status,
+            "latency_ms": latency_ms, "request_attempted": True,
+            "response_source": "LIVE_API", "response_validated": False,
+            "model_verified": False, "paper_entry_eligible": False,
+            "requested_at_utc": requested_at,
+            "response_started_at_utc": response_started_at,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "prompt_version": PROMPT_VERSION + "-second-ai",
+        }
