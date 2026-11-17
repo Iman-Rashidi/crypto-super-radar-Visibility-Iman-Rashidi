@@ -416,9 +416,7 @@ def analyze_blofin_challenge1(
     bearish = [item for item in patterns_5m if item.get("direction") == "BEARISH"]
     signal = "NO_TRADE"
     chosen: dict[str, Any] | None = None
-    volume = _volume_confirmation(frame_5m, "BULLISH" if bullish and not bearish else "BEARISH") if (bullish or bearish) else {
-        "confirmed": False, "volume_ratio": None, "close_location": None,
-    }
+    volume = {"confirmed": False, "volume_ratio": None, "close_location": None}
     reason_fa = "الگوی معتبر و تأییدشده‌ای در کندل‌های بسته‌شده ۵ دقیقه‌ای پیدا نشد."
     execution: dict[str, Any] = {"status": "NO_TRADE", "direction": None, "reason_fa": reason_fa}
     entry = stop = target = None
