@@ -4630,6 +4630,8 @@ def _run_blofin_demo_execution_job(
             "filled_at_utc": filled_at,
             "trade_executed": trade_executed,
             "orders_submitted": True,
+            "ai_reviews": ai_reviews,
+            "ai_consensus": ai_consensus,
             "ai_review": {
                 "status": ai_status, "model": ai_review.get("model"),
                 "returned_model": ai_review.get("returned_model"),
@@ -5255,11 +5257,9 @@ class Handler(BaseHTTPRequestHandler):
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
         if parsed.path == "/api/ai/status":
-            payload = {
-                "primary": ai_connection_status(),
-                "second_supervisor": second_ai_connection_status(),
-                "two_reviewer_gate": "REQUIRES_BOTH_VERIFIED_APPROVALS",
-            }
+            payload = ai_connection_status()
+            payload["second_supervisor"] = second_ai_connection_status()
+            payload["two_reviewer_gate"] = "REQUIRES_BOTH_VERIFIED_APPROVALS"
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/notion-sync/status":
