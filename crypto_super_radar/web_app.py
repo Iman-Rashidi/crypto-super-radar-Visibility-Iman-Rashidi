@@ -5078,7 +5078,7 @@ def _blofin_manual_close_position(
                 **audit, "submission_outcome": "UNKNOWN", "retry_allowed": False,
             })
             raise
-        store.record_manual_action(action_id + "D", "MANUAL_POSITION_CLOSED", {
+        store.record_manual_action(action_id + "D", "MANUAL_POSITION_CLOSE_ACCEPTED", {
             **audit, "submission_outcome": "ACCEPTED",
         })
     finally:
