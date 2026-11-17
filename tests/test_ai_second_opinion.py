@@ -110,12 +110,26 @@ def challenge1_result(*, pattern_confirmed=True):
         "entry_price_usd": 101.0,
         "stop_loss_usd": 99.0,
         "take_profit_usd": 105.0,
-        "execution": {"status": "PASS", "direction": "LONG"},
-        "challenge1_evidence": evidence,
+        "inst_id": "BTC-USDT",
+        "instrument_id": "BTC-USDT",
+        "signal_bar_open_utc": candle_rows_5m[-1]["open_time_utc"],
+        "signal_id": "challenge1-v4:BTC-USDT:5m:" + candle_rows_5m[-1]["open_time_utc"],
+        "execution": {
+            "status": "PASS", "direction": "LONG",
+            "signal_id": "challenge1-v4:BTC-USDT:5m:" + candle_rows_5m[-1]["open_time_utc"],
+        },
+        "challenge1_evidence": {
+            **evidence,
+            "decision": "LONG",
+            "legacy_12_gates_used_for_entry": False,
+            "external_ai_required": False,
+            "tinyfish_required": False,
+        },
     }
     return SimpleNamespace(
         asset="perp:BTCUSDT",
         signal=Signal.LONG,
+        to_record=lambda: record,
         entry_price=101.0,
         stop_loss=99.0,
         take_profit=105.0,

@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_executor import (
@@ -58,14 +59,20 @@ def signal_record(**overrides):
     side = str(record["signal"]).upper()
     pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
     pattern_name = "Bullish Engulfing" if side == "LONG" else "Bearish Engulfing"
-    signal_bar = "2026-11-13T18:00:00+00:00"
+    base_bar = datetime.fromisoformat("2026-11-13T18:00:00+00:00")
+    bar_offset = int(overrides.get("bar_offset_minutes", 0))
+    signal_bar = str(
+        overrides.get("signal_bar_open_utc")
+        or (base_bar + timedelta(minutes=bar_offset)).isoformat()
+    )
+    last_time = datetime.fromisoformat(signal_bar)
     candles_5m = [
         {
-            "open_time_utc": "2026-11-13T17:50:00+00:00",
+            "open_time_utc": (last_time - timedelta(minutes=10)).isoformat(),
             "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.4, "volume": 900.0,
         },
         {
-            "open_time_utc": "2026-11-13T17:55:00+00:00",
+            "open_time_utc": (last_time - timedelta(minutes=5)).isoformat(),
             "open": 99.4, "high": 100.5, "low": 99.0, "close": 100.0, "volume": 950.0,
         },
         {
@@ -909,7 +916,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             results = []
             for index in range(7):
                 results.append(executor.execute(
-                    signal_record(signal_id=f"new-completed-candle-{index}"),
+                    signal_record(bar_offset_minutes=index * 5),
                     inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
                 ))
             self.assertTrue(all(row["status"] == "ACCEPTED" for row in results))
@@ -928,7 +935,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         }):
             store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
-        old_signal = signal_record(signal_id="old-filled-position")
+        old_signal = signal_record(bar_offset_minutes=5)
         experience_id = store.record_challenge1_decision(
             instrument_id="BTC-USDT",
             challenge_record=old_signal,
@@ -950,7 +957,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
         try:
             fresh = executor.execute(
-                signal_record(signal_id="fresh-completed-candle"),
+                signal_record(bar_offset_minutes=10),
                 inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
             )
             self.assertEqual(fresh["status"], "ACCEPTED")

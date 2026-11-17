@@ -302,6 +302,7 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         return False, "نسخه موتور ورود Challenge 1 معتبر نیست."
     if (
         evidence.get("setup_timeframe") != "5m"
+        or evidence.get("completed_candles_only") is not True
         or evidence.get("higher_timeframes_used") is not False
         or evidence.get("legacy_12_gates_used_for_entry") is not False
         or evidence.get("external_ai_required") is not False

@@ -625,9 +625,7 @@ class BloFinDemoEventStore:
                  AND challenge_id='CHALLENGE_1_BLOFIN_DEMO'
                  AND environment='BLOFIN_DEMO'
                  AND event_type='DECISION_RECORDED'
-                 AND symbol=? AND timeframe='5M'
-               ORDER BY sequence ASC LIMIT 2000""",
-            (str(instrument_id).strip().upper(),),
+               ORDER BY sequence ASC"""
         ).fetchall()
         expected = str(candle_time or "").strip().replace("Z", "+00:00")
         for row in rows:
@@ -638,8 +636,14 @@ class BloFinDemoEventStore:
             input_snapshot = payload.get("input_snapshot") if isinstance(payload, dict) else {}
             if not isinstance(input_snapshot, Mapping):
                 continue
+            saved_instrument = str(input_snapshot.get("instrument_id") or "").strip().upper()
+            saved_timeframe = str(input_snapshot.get("setup_timeframe") or "").strip().lower()
             saved_time = str(input_snapshot.get("signal_bar_open_utc") or "").strip().replace("Z", "+00:00")
-            if saved_time == expected:
+            if (
+                saved_instrument == str(instrument_id).strip().upper()
+                and saved_timeframe == "5m"
+                and saved_time == expected
+            ):
                 return str(row["experience_id"]), payload
         return None
 
