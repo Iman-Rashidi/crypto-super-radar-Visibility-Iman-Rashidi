@@ -71,6 +71,7 @@ BLOFIN_AUTOPILOT_LOCK = threading.Lock()
 BLOFIN_AUTOPILOT_START_LOCK = threading.Lock()
 BLOFIN_STARTUP_RECONCILE_LOCK = threading.Lock()
 BLOFIN_STARTUP_RECONCILE_DONE = False
+BLOFIN_STARTUP_RECONCILE_THREAD = None
 BLOFIN_AUTOPILOT_THREAD = None
 BLOFIN_AUTOPILOT_STATE = {
     "enabled": False,
@@ -7958,8 +7959,43 @@ def _reconcile_blofin_demo_orders_on_startup() -> dict:
         BLOFIN_AUTOPILOT_STATE["startup_reconciliation"] = copy.deepcopy(result)
         BLOFIN_AUTOPILOT_STATE["startup_reconciliation_at_utc"] = datetime.now(timezone.utc).isoformat()
         BLOFIN_AUTOPILOT_STATE["startup_reconciliation_orders_submitted"] = False
+    safe_log = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "attempted": result.get("attempted"),
+        "remaining_unresolved": result.get("remaining_unresolved"),
+        "orders_submitted": False,
+        "storage_probe_verified": bool(
+            isinstance(result.get("storage_probe"), dict)
+            and result["storage_probe"].get("verified") is True
+        ),
+        "storage_probe_connections": (
+            result.get("storage_probe", {}).get("connections")
+            if isinstance(result.get("storage_probe"), dict) else None
+        ),
+        "error_type": result.get("error_type"),
+    }
+    print("BLOFIN_DEMO_STARTUP_RECOVERY " + json.dumps(
+        safe_log, sort_keys=True, separators=(",", ":")
+    ))
     _persist_blofin_autopilot_state()
     return result
+
+
+def _schedule_blofin_demo_startup_recovery() -> None:
+    """Run startup Turso probing/recovery off the HTTP listener thread."""
+    global BLOFIN_STARTUP_RECONCILE_THREAD
+    with BLOFIN_STARTUP_RECONCILE_LOCK:
+        if BLOFIN_STARTUP_RECONCILE_DONE:
+            return
+        if BLOFIN_STARTUP_RECONCILE_THREAD is not None and BLOFIN_STARTUP_RECONCILE_THREAD.is_alive():
+            return
+        BLOFIN_STARTUP_RECONCILE_THREAD = threading.Thread(
+            target=_reconcile_blofin_demo_orders_on_startup,
+            daemon=True,
+            name="blofin-demo-startup-recovery",
+        )
+        BLOFIN_STARTUP_RECONCILE_THREAD.start()
 
 
 def _start_blofin_demo_autopilot() -> None:
@@ -7988,8 +8024,9 @@ def _start_blofin_demo_autopilot() -> None:
         return
     _restore_blofin_autopilot_state()
     # Recovery is independent of the trading scheduler and remains READ-only.
-    # It must run even when BLOFIN_DEMO_AUTOPILOT_ENABLED is false.
-    _reconcile_blofin_demo_orders_on_startup()
+    # Schedule it off the HTTP listener thread so a slow Turso network never
+    # prevents the dashboard from binding and serving /health.
+    _schedule_blofin_demo_startup_recovery()
     if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
