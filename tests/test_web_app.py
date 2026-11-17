@@ -502,6 +502,7 @@ class WebAppHttpTests(unittest.TestCase):
             },
             "elliott_wave": wave,
             "trade_context": {
+                "execution_profile": "STRICT",
                 "analysis_time_utc": "2026-11-14T15:36:43+00:00",
                 "last_completed_candle_time_utc": "2026-11-14T00:00:00+00:00",
                 "last_candle_close": 66100.0,
@@ -1308,9 +1309,11 @@ class WebAppHttpTests(unittest.TestCase):
             },
             "analysis": {
                 "signal": "NO_TRADE",
-                "gate_pass_count": 0,
-                "gate_fail_count": 0,
-                "gate_unknown_count": 12,
+                "gate_report_status": "NOT_RUN",
+                "gate_pass_count": None,
+                "gate_fail_count": None,
+                "gate_unknown_count": None,
+                "gates_fa": [],
             },
             "result": {
                 "status": "NO_TRADE",
@@ -1323,6 +1326,12 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(report["instrument_id"], "ETH-USDT")
         self.assertEqual(report["execution_profile"], "CHALLENGE_1")
         self.assertIn("Challenge 1", report["stage_fa"])
+        self.assertEqual(report["gate_report_status"], "NOT_RUN")
+        self.assertEqual(report["gate_pass_count"], None)
+        self.assertEqual(report["gate_fail_count"], None)
+        self.assertEqual(report["gate_unknown_count"], None)
+        self.assertIn("۱۲ پروتکل عمومی", report["gate_summary_fa"])
+        self.assertEqual(report["gates_fa"], [])
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
