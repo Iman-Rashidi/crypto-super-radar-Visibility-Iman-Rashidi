@@ -5507,6 +5507,9 @@ class Handler(BaseHTTPRequestHandler):
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
+            let autopilotIsEnabled=false;
+            let selectedExecutionMode='manual';
+            let manualActionBusy=false;
             if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
@@ -5843,18 +5846,31 @@ let blofinInstrumentRecords=[];
             }
             async function refreshExecutionReadiness(){
               executeButton.disabled=true;
+              manualOpenButton.disabled=true;
               try{
                 const response=await fetch('/api/blofin/demo/execution-readiness',{cache:'no-store'});
                 const result=await response.json();
                 executionReadiness.textContent=result.message_fa||'وضعیت پیش‌نیازهای Demo مشخص نیست.';
-                if(result.status==='READY'&&result.order_quota_unlimited===true&&instrumentSelect.value){
-                  executeButton.disabled=false;
-                  executionReadiness.textContent+=' آماده اجرای چرخه جدید است؛ سهمیه تعداد سفارش وجود ندارد.';
+                const ready=result.status==='READY'&&instrumentSelect.value;
+                if(ready){
+                  if(selectedExecutionMode==='autopilot'&&result.order_quota_unlimited===true){
+                    executeButton.disabled=false;
+                    executionReadiness.textContent+=' آماده اجرای یک چرخه ربات است.';
+                  }
+                  if(selectedExecutionMode==='manual'&&!autopilotIsEnabled&&!manualActionBusy){
+                    manualOpenButton.disabled=false;
+                  }
+                  updateManualInstrumentFields();
                 }
-              }catch(error){executionReadiness.textContent='بررسی پیش‌نیازهای سفارش Demo ممکن نشد.';}
+              }catch(error){
+                executionReadiness.textContent='بررسی پیش‌نیازهای سفارش Demo ممکن نشد؛ ورود دستی و خودکار مسدود می‌ماند.';
+              }
             }
+            instrumentSearch.addEventListener('input',applyBlofinInstrumentSearch);
             instrumentSelect.addEventListener('change',()=>{
-              instrumentStatus.textContent='قرارداد انتخابی: '+instrumentSelect.value+' · جهت خرید/فروش از سیگنال زنده می‌آید.';
+              instrumentStatus.textContent='قرارداد انتخابی: '+instrumentSelect.value+' · جهت معامله دستی را خودت انتخاب می‌کنی.';
+              updateManualInstrumentFields();
+              refreshExecutionReadiness();
             });
             profileSelect.addEventListener('change',()=>{
               executionReadiness.textContent='استراتژی معامله Demo: '+profileSelect.options[profileSelect.selectedIndex].text+' · کنترل‌های ضروری پیش از سفارش بررسی می‌شوند.';
@@ -5878,6 +5894,304 @@ let blofinInstrumentRecords=[];
               if(monitorActive){monitorToggle.textContent='توقف مانیتور زنده';fetchLiveMonitor();}
               else{clearTimeout(monitorTimer);monitorStatus.textContent='مانیتور زنده متوقف شد.';monitorToggle.textContent='شروع مانیتور زنده هر ۵ ثانیه';}
             });
+            function applyExecutionMode(mode){
+              selectedExecutionMode=mode==='autopilot'?'autopilot':'manual';
+              const auto=selectedExecutionMode==='autopilot';
+              autopilotControls.style.display=auto?'block':'none';
+              manualPanel.style.display=auto?'none':'block';
+              robotCycleControls.style.display=auto?'block':'none';
+              modeAutopilotButton.setAttribute('aria-pressed',auto?'true':'false');
+              modeManualButton.setAttribute('aria-pressed',auto?'false':'true');
+              modeStatus.textContent=auto
+                ?'حالت AutoPilot انتخاب شده است؛ پایش خودکار فقط در BloFin Demo انجام می‌شود.'
+                :'حالت دستی انتخاب شده است؛ بازکردن، لغو سفارش مشخص و بستن پوزیشن مشخص با تأیید تو انجام می‌شود.';
+              executeButton.disabled=!auto;
+              manualOpenButton.disabled=auto||autopilotIsEnabled||manualActionBusy;
+              if(auto)refreshExecutionReadiness();
+            }
+            async function refreshAutoPilotStatus(){
+              try{
+                const response=await fetch('/api/blofin/demo/autopilot/status',{cache:'no-store'});
+                const result=await response.json();
+                autopilotIsEnabled=result.enabled===true;
+                const state=result.status||'UNKNOWN';
+                autopilotStatus.textContent=(result.last_message_fa||'وضعیت AutoPilot دریافت شد.')
+                  +' وضعیت: '+state+'. چرخه‌های اجراشده: '+(result.cycles_started??'—');
+                autopilotToggle.textContent=autopilotIsEnabled
+                  ?'توقف AutoPilot و بازگشت به حالت دستی'
+                  :'فعال‌سازی AutoPilot در BloFin Demo';
+                applyExecutionMode(autopilotIsEnabled?'autopilot':'manual');
+                return result;
+              }catch(error){
+                autopilotStatus.textContent='خواندن وضعیت AutoPilot ممکن نشد؛ حالت دستی و خودکار تا بررسی وضعیت سرور قفل می‌مانند.';
+                autopilotIsEnabled=true;
+                manualOpenButton.disabled=true;
+                return null;
+              }
+            }
+            async function postBlofinAction(route,values){
+              const token=tokenInput.value.trim();
+              if(!token)throw new Error('ابتدا توکن پنل را وارد کن.');
+              const response=await fetch(route,{
+                method:'POST',cache:'no-store',
+                headers:{'Authorization':'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
+                body:new URLSearchParams({confirm:'1',...values})
+              });
+              const payload=await response.json();
+              if(!response.ok)throw new Error(payload.message_fa||payload.status||'درخواست رد شد.');
+              return payload;
+            }
+            async function setAutoPilot(enabled){
+              if(!tokenInput.value.trim()){
+                autopilotStatus.textContent='برای تغییر AutoPilot ابتدا توکن پنل را در کادر بالاتر وارد کن.';
+                return false;
+              }
+              const promptText=enabled
+                ?'AutoPilot در BloFin DEMO فعال می‌شود و طبق زمان‌بندی بازارهای منتخب را پایش می‌کند. آیا ادامه می‌دهی؟'
+                :'AutoPilot متوقف می‌شود. چرخه‌ای که همین حالا در حال اجراست بدون قطع ناگهانی تمام خواهد شد. پس از پایان آن حالت دستی فعال می‌شود. ادامه؟';
+              if(!window.confirm(promptText))return false;
+              autopilotToggle.disabled=true;
+              try{
+                const result=await postBlofinAction('/api/blofin/demo/autopilot/control',{enabled:enabled?'true':'false'});
+                autopilotStatus.textContent=result.message_fa||'درخواست تغییر AutoPilot ثبت شد.';
+                await refreshAutoPilotStatus();
+                if(!enabled&&result.status==='STOPPING'){
+                  autopilotStatus.textContent+=' پس از پایان چرخه جاری دوباره وضعیت را تازه کن.';
+                }
+                return true;
+              }catch(error){
+                autopilotStatus.textContent=String(error.message||error);
+                return false;
+              }finally{
+                autopilotToggle.disabled=false;
+              }
+            }
+            autopilotToggle.addEventListener('click',function(){
+              setAutoPilot(!autopilotIsEnabled);
+            });
+            modeManualButton.addEventListener('click',async function(){
+              if(autopilotIsEnabled){
+                const stopped=await setAutoPilot(false);
+                if(!stopped)return;
+                const state=await refreshAutoPilotStatus();
+                if(state&&state.status==='STOPPING'){
+                  modeStatus.textContent='درخواست توقف رسید؛ برای جلوگیری از تداخل تا پایان چرخه جاری باید صبر کنی.';
+                  return;
+                }
+              }
+              applyExecutionMode('manual');
+              refreshExecutionReadiness();
+            });
+            modeAutopilotButton.addEventListener('click',async function(){
+              applyExecutionMode('autopilot');
+              if(!autopilotIsEnabled)await setAutoPilot(true);
+            });
+            async function refreshManualAccount(){
+              if(manualActionBusy)return;
+              const token=tokenInput.value.trim();
+              if(!token){manualAccountStatus.textContent='ابتدا توکن پنل را وارد کن.';return;}
+              manualRefreshButton.disabled=true;
+              manualAccountStatus.textContent='در حال خواندن پوزیشن‌ها و سفارش‌های زنده از BloFin Demo...';
+              manualAccountView.replaceChildren();
+              try{
+                const response=await fetch('/api/blofin/demo/live-monitor?instrument='+encodeURIComponent(instrumentSelect.value||'BTC-USDT'),{
+                  cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                });
+                const snapshot=await response.json();
+                if(!response.ok||snapshot.status!=='CONNECTED_READ_ONLY'||snapshot.data_completeness!=='COMPLETE')
+                  throw new Error(snapshot.message_fa||'داده کامل و قابل اتکای حساب دریافت نشد.');
+                renderManualAccount(snapshot);
+                manualAccountStatus.textContent='آخرین بررسی فقط‌خواندنی: '+formatTime(snapshot.updated_at_utc)
+                  +' · پوزیشن‌ها و سفارش‌ها با داده تازه تأیید شدند.';
+              }catch(error){
+                manualAccountStatus.textContent=String(error.message||'خواندن حساب ناموفق بود.')+' هیچ عملیات تغییردهنده‌ای ارسال نشد.';
+              }finally{
+                manualRefreshButton.disabled=false;
+              }
+            }
+            function renderManualAccount(snapshot){
+              manualAccountView.replaceChildren();
+              function node(parent,tag,value){
+                const element=document.createElement(tag);
+                element.textContent=value===null||value===undefined||value===''?'—':String(value);
+                parent.appendChild(element);
+                return element;
+              }
+              function table(title,rows,fields){
+                const section=document.createElement('section');
+                section.style.marginTop='12px';
+                node(section,'h4',title);
+                if(!Array.isArray(rows)||!rows.length){
+                  node(section,'p','مورد بازی گزارش نشد.');
+                  manualAccountView.appendChild(section);
+                  return;
+                }
+                const wrap=document.createElement('div');wrap.style.overflowX='auto';
+                const tbl=document.createElement('table'),head=document.createElement('tr');
+                fields.forEach(([key,label])=>node(head,'th',label));
+                tbl.appendChild(head);
+                rows.forEach(row=>{
+                  const tr=document.createElement('tr');
+                  fields.forEach(([key])=>node(tr,'td',row[key]));
+                  tbl.appendChild(tr);
+                });
+                wrap.appendChild(tbl);section.appendChild(wrap);manualAccountView.appendChild(section);
+              }
+              const positions=(Array.isArray(snapshot.positions)?snapshot.positions:[]).filter(row=>{
+                const size=Number(row&&row.positions);
+                return row&&Number.isFinite(size)&&Math.abs(size)>0;
+              });
+              const orders=Array.isArray(snapshot.open_orders)?snapshot.open_orders:[];
+              node(manualAccountView,'p','محیط BLOFIN_DEMO · مجوز خواندن مانیتور: READ · تغییرات فقط با تأیید جداگانه');
+              table('پوزیشن‌های باز و PnL شناور',positions,[
+                ['instId','نماد'],['positionId','Position ID'],['positionSide','جهت'],
+                ['marginMode','نوع مارجین'],['positions','حجم'],['averagePrice','قیمت ورود'],
+                ['markPrice','Mark Price'],['unrealizedPnl','سود/زیان شناور USDT'],['leverage','اهرم']
+              ]);
+              positions.forEach(row=>{
+                const card=document.createElement('section');card.className='metric';card.style.marginTop='8px';
+                const pnl=Number(row.unrealizedPnl);
+                const pnlText=Number.isFinite(pnl)?pnl.toFixed(4)+' USDT':'نامشخص';
+                node(card,'strong',(row.instId||'قرارداد')+' · '+(row.positionSide||'جهت نامشخص')+' · PnL: '+pnlText);
+                node(card,'p',Number.isFinite(pnl)&&pnl<0
+                  ?'این پوزیشن در ضرر شناور است. بستن دستی آن زیان را در قیمت اجرای واقعی محقق می‌کند.'
+                  :'بستن دستی در قیمت بازار انجام می‌شود؛ قیمت Fill و PnL نهایی ممکن است متفاوت باشد.');
+                const close=document.createElement('button');
+                close.type='button';close.textContent='بستن همین پوزیشن';
+                close.addEventListener('click',async()=>{
+                  const positionId=String(row.positionId||'');
+                  const loss=Number.isFinite(pnl)&&pnl<0;
+                  const confirmText='فقط همین پوزیشن '+row.instId+' / '+(positionId||row.positionSide)+' بسته شود؟\\n'
+                    +'PnL شناور فعلی: '+pnlText+'. '+(loss?'پوزیشن در ضرر است و بستن آن می‌تواند زیان را قطعی کند. ':'')
+                    +'سفارش خروج Market به BloFin Demo فرستاده می‌شود.';
+                  if(!window.confirm(confirmText))return;
+                  await runManualAction('/api/blofin/demo/manual-close-position',{
+                    instrument:row.instId,position_id:positionId,position_side:row.positionSide||''
+                  },'درخواست بستن همین پوزیشن ثبت شد.');
+                });
+                card.appendChild(close);manualAccountView.appendChild(card);
+              });
+              table('سفارش‌های باز قابل لغو',orders,[
+                ['instId','نماد'],['orderId','Order ID'],['clientOrderId','Client Order ID'],
+                ['side','سمت'],['orderType','نوع'],['price','قیمت'],['size','حجم'],
+                ['filledSize','حجم پرشده'],['state','وضعیت']
+              ]);
+              orders.forEach(row=>{
+                const card=document.createElement('section');card.className='metric';card.style.marginTop='8px';
+                node(card,'strong',(row.instId||'قرارداد')+' · Order ID: '+(row.orderId||'نامشخص'));
+                node(card,'p','این دکمه فقط همین سفارش معلق را لغو می‌کند؛ پوزیشن پرشده بسته نمی‌شود.');
+                const cancel=document.createElement('button');
+                cancel.type='button';cancel.textContent='لغو همین سفارش';
+                cancel.addEventListener('click',async()=>{
+                  if(!window.confirm('فقط سفارش '+row.orderId+' روی '+row.instId+' لغو شود؟ اگر بخشی پر شده باشد، پوزیشنِ ایجادشده باقی می‌ماند.'))return;
+                  await runManualAction('/api/blofin/demo/manual-cancel-order',{
+                    instrument:row.instId,order_id:row.orderId||''
+                  },'درخواست لغو همین سفارش ارسال شد.');
+                });
+                card.appendChild(cancel);manualAccountView.appendChild(card);
+              });
+              const tpsl=Array.isArray(snapshot.open_tpsl_orders)?snapshot.open_tpsl_orders:[];
+              table('سفارش‌های حفاظتی TP/SL فعال (نمایش فقط‌خواندنی)',tpsl,[
+                ['instId','نماد'],['tpslId','TP/SL ID'],['positionSide','جهت'],
+                ['tpTriggerPrice','حد سود'],['slTriggerPrice','حد ضرر'],['size','حجم'],['state','وضعیت']
+              ]);
+            }
+            async function runManualAction(route,values,successMessage){
+              if(manualActionBusy)return;
+              manualActionBusy=true;manualOpenButton.disabled=true;manualRefreshButton.disabled=true;
+              manualOrderStatus.textContent='درخواست به BloFin Demo ارسال می‌شود...';
+              try{
+                const result=await postBlofinAction(route,values);
+                manualOrderStatus.textContent=(result.message_fa||successMessage)
+                  +' وضعیت: '+(result.status||'ثبت شد')
+                  +(result.unrealized_pnl_usdt_at_confirmation!==undefined
+                    ?' · PnL شناور هنگام تأیید: '+result.unrealized_pnl_usdt_at_confirmation+' USDT':'');
+                if(route.indexOf('manual-open')>=0)manualOrderForm.reset();
+                await refreshManualAccount();
+              }catch(error){
+                manualOrderStatus.textContent=String(error.message||'عملیات دستی انجام نشد.')
+                  +' در صورت نامشخص بودن نتیجه، قبل از تلاش مجدد حساب را تازه‌سازی کن.';
+                await refreshManualAccount();
+              }finally{
+                manualActionBusy=false;
+                await refreshExecutionReadiness();
+              }
+            }
+            manualRefreshButton.addEventListener('click',refreshManualAccount);
+            manualOrderForm.addEventListener('submit',async function(event){
+              event.preventDefault();
+              if(autopilotIsEnabled||selectedExecutionMode!=='manual'){
+                manualOrderStatus.textContent='برای سفارش دستی ابتدا AutoPilot را متوقف کن و حالت دستی را انتخاب کن.';
+                return;
+              }
+              const instrument=instrumentSelect.value;
+              const direction=manualDirection.value;
+              const size=manualSize.value.trim();
+              const stop=manualStop.value.trim();
+              const target=manualTarget.value.trim();
+              if(!instrument||!size||!stop||!target){
+                manualOrderStatus.textContent='نماد، حجم، حد ضرر و حد سود همگی الزامی‌اند.';
+                return;
+              }
+              const preview='سفارش '+direction+' Market برای '+instrument+' در BloFin DEMO ارسال شود؟\\n'
+                +'حجم: '+size+' · SL: '+stop+' · TP: '+target+' · اهرم: ایزوله 1x.\\n'
+                +'اگر روی همین نماد پوزیشن/سفارش باز وجود داشته باشد، ورود متوقف می‌شود.';
+              if(!window.confirm(preview))return;
+              await runManualAction('/api/blofin/demo/manual-open',{
+                instrument,direction,size,stop_loss:stop,take_profit:target
+              },'سفارش دستی ثبت شد.');
+            });
+            async function setExecutionMode(mode){
+              if(mode==='manual'&&autopilotIsEnabled){
+                const stopped=await setAutoPilot(false);
+                if(!stopped)return;
+                const result=await refreshAutoPilotStatus();
+                if(result&&result.status==='STOPPING'){
+                  modeStatus.textContent='AutoPilot در حال پایان چرخه جاری است؛ پس از پایان آن حالت دستی را فعال کن.';
+                  return;
+                }
+              }
+              applyExecutionMode(mode);
+              if(mode==='manual')refreshExecutionReadiness();
+              if(mode==='autopilot'&&!autopilotIsEnabled)await setAutoPilot(true);
+            }
+            modeManualButton.addEventListener('click',()=>setExecutionMode('manual'));
+            modeAutopilotButton.addEventListener('click',()=>setExecutionMode('autopilot'));
+            autopilotToggle.addEventListener('click',()=>setAutoPilot(!autopilotIsEnabled));
+            modeManualButton.setAttribute('aria-pressed','true');
+            modeAutopilotButton.setAttribute('aria-pressed','false');
+            async function refreshAutoPilotStatus(){
+              try{
+                const response=await fetch('/api/blofin/demo/autopilot/status',{cache:'no-store'});
+                const result=await response.json();
+                autopilotIsEnabled=result.enabled===true;
+                autopilotStatus.textContent=(result.last_message_fa||'وضعیت AutoPilot دریافت شد.')
+                  +' وضعیت: '+(result.status||'UNKNOWN')
+                  +' · چرخه‌های اجراشده: '+(result.cycles_started??'—');
+                autopilotToggle.textContent=autopilotIsEnabled
+                  ?'توقف AutoPilot و بازگشت به حالت دستی'
+                  :'فعال‌سازی AutoPilot در BloFin Demo';
+                if(autopilotIsEnabled){
+                  applyExecutionMode('autopilot');
+                }else{
+                  applyExecutionMode('manual');
+                  if(result.status==='STOPPING'){
+                    modeStatus.textContent='درخواست توقف AutoPilot ثبت شده؛ تا پایان چرخه جاری کنترل دستی مسدود است.';
+                    manualOpenButton.disabled=true;
+                  }
+                }
+                return result;
+              }catch(error){
+                autopilotStatus.textContent='خواندن وضعیت AutoPilot ناموفق بود؛ برای جلوگیری از تداخل، عملیات دستی مسدود ماند.';
+                autopilotIsEnabled=true;
+                manualOpenButton.disabled=true;
+                return null;
+              }
+            }
+            autopilotToggle.addEventListener('click',()=>{
+              setAutoPilot(!autopilotIsEnabled);
+            });
+
             async function refreshSmokeTestReadiness(){
                smokeButton.disabled=true;
                try{
