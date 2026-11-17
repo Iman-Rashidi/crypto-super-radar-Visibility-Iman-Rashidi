@@ -8490,7 +8490,9 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
     )
     ai_status = str(ai_review.get("status") or current.get("ai_status") or "").strip().upper()
-    request_attempted = ai_review.get("request_attempted") is True
+    request_attempted_value = ai_review.get("request_attempted")
+    request_attempted = request_attempted_value is True
+    request_confirmed_not_called = request_attempted_value is False
     response_source = str(ai_review.get("response_source") or "UNKNOWN").upper()
     response_validated = ai_review.get("response_validated") is True
     model_verified = ai_review.get("model_verified") is True
@@ -8500,7 +8502,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         ai_decision = "APPROVE"
     elif verified_ai_response and ai_status in {"VETO", "REJECT"}:
         ai_decision = "REJECT"
-    elif not request_attempted and not cached_verified:
+    elif request_confirmed_not_called and not cached_verified:
         ai_decision = "NOT_CALLED"
     else:
         ai_decision = "OBSERVE_ONLY"
@@ -8582,7 +8584,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             "ai_decision": ai_decision,
         })
     if ai_review:
-        if not request_attempted and not cached_verified:
+        if request_confirmed_not_called and not cached_verified:
             ai_event_type = "AI_REVIEW_REQUESTED"
             ai_event_reason = (
                 "بازبینی چرخه ثبت شد، اما درخواست به مدل بیرونی ارسال نشد؛ "
