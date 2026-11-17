@@ -1200,6 +1200,19 @@ class BloFinDemoEventStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def latest_order_for_instrument(self, instrument_id: str) -> dict[str, Any] | None:
+        """Return the newest local order for one exact contract, never another symbol."""
+        normalized = str(instrument_id or "").strip().upper()
+        if not normalized:
+            raise ValueError("instrument_id is required.")
+        with self._lock:
+            row = self._db.execute(
+                """SELECT * FROM blofin_demo_orders
+                   WHERE UPPER(instrument_id)=? ORDER BY created_at DESC LIMIT 1""",
+                (normalized,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def recent_events(self, client_order_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """Return append-only lifecycle events for the selected Demo order."""
         bounded = max(1, min(int(limit), 100))

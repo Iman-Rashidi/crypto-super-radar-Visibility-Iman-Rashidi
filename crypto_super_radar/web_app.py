@@ -313,6 +313,20 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
     return payload
 
 
+def _blofin_api_key_permission(info: dict | None) -> str:
+    """Translate BloFin's readOnly flag independently from this route's GET-only scope."""
+    if not isinstance(info, dict):
+        return "UNKNOWN"
+    value = info.get("readOnly")
+    if isinstance(value, bool):
+        return "UNKNOWN"
+    if value in (1, "1"):
+        return "READ_ONLY"
+    if value in (0, "0"):
+        return "READ_WRITE"
+    return "UNKNOWN"
+
+
 def _blofin_demo_connection_status() -> dict:
     """Return a rate-limited, non-sensitive read-only BloFin Demo connectivity result."""
     with BLOFIN_STATUS_LOCK:
@@ -330,11 +344,12 @@ def _blofin_demo_connection_status() -> dict:
         stage = "ENVIRONMENT_CHECK"
         market_data = "NOT_CHECKED"
         private_api = "NOT_CHECKED"
+        api_key_permission = "UNKNOWN"
         if not configured:
             payload = {
                 "status": "NOT_CONFIGURED",
                 "environment": "BLOFIN_DEMO",
-                "permission_mode": "READ_ONLY",
+                "permission_mode": "READ_ONLY_REQUESTS",
                 "market_data": market_data,
                 "private_api": private_api,
                 "orders_enabled": False,
@@ -344,6 +359,9 @@ def _blofin_demo_connection_status() -> dict:
         else:
             try:
                 client = BloFinDemoReadOnly(timeout=8.0)
+
+                stage = "PRIVATE_API_KEY_PERMISSION"
+                api_key_permission = _blofin_api_key_permission(client.get_api_key_info())
 
                 stage = "PUBLIC_MARKET_TICKER"
                 tickers = client.get_tickers(inst_id="BTC-USDT")
@@ -371,11 +389,12 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "CONNECTED_READ_ONLY",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
+                    "api_key_permission": api_key_permission,
                     "market_data": market_data,
                     "private_api": private_api,
                     "orders_enabled": False,
-                    "message_fa": "اتصال Demo و احراز هویت API موفق است. ربات هنوز فقط اطلاعات را می‌خواند و هیچ سفارشی ارسال نمی‌کند.",
+                    "message_fa": "اتصال Demo برقرار است. این مسیر فقط درخواست GET می‌فرستد؛ مجوز واقعی کلید در api_key_permission گزارش می‌شود و از این مسیر سفارشی ارسال نمی‌شود.",
                 }
                 cache_seconds = 60
             except BloFinDemoAuthError as exc:
@@ -393,7 +412,7 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "AUTH_FAILED",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
                     "market_data": market_data,
                     "private_api": "FAIL" if stage.startswith("PRIVATE_") else "NOT_CHECKED",
                     "orders_enabled": False,
@@ -415,7 +434,8 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "CONNECTION_FAILED",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
+                    "api_key_permission": api_key_permission,
                     "market_data": "FAIL" if stage == "PUBLIC_MARKET_TICKER" else market_data,
                     "private_api": "FAIL" if stage.startswith("PRIVATE_") else private_api,
                     "orders_enabled": False,
@@ -430,7 +450,7 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "UNKNOWN",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
                     "market_data": market_data,
                     "private_api": private_api,
                     "orders_enabled": False,
@@ -440,6 +460,8 @@ def _blofin_demo_connection_status() -> dict:
                 }
                 cache_seconds = 20
 
+        payload.setdefault("api_key_permission", api_key_permission)
+        payload.setdefault("request_scope", "READ_ONLY_GET_REQUESTS")
         BLOFIN_STATUS_CACHE["payload"] = copy.deepcopy(payload)
         BLOFIN_STATUS_CACHE["expires_at"] = time.monotonic() + cache_seconds
         return copy.deepcopy(payload)
@@ -462,6 +484,7 @@ def _blofin_demo_account_snapshot() -> dict:
     """Fetch a deliberately whitelisted read-only account snapshot from BloFin Demo."""
     try:
         client = BloFinDemoReadOnly(timeout=8.0)
+        api_key_permission = _blofin_api_key_permission(client.get_api_key_info())
         balance = client.get_futures_balance(product_type="USDT-FUTURES")
         positions = client.get_positions()
         open_orders = client.get_open_orders()
@@ -474,7 +497,7 @@ def _blofin_demo_account_snapshot() -> dict:
         details = balance.get("details")
         details = details if isinstance(details, list) else []
         position_fields = (
-            "instId", "marginMode", "positionSide", "leverage", "positions",
+            "positionId", "instId", "marginMode", "positionSide", "leverage", "positions",
             "availablePositions", "averagePrice", "markPrice", "liquidationPrice",
             "unrealizedPnl", "unrealizedPnlRatio", "initialMargin",
             "maintenanceMargin", "createTime", "updateTime",
@@ -490,7 +513,9 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "CONNECTED_READ_ONLY",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
+            "api_key_permission": api_key_permission,
+            "request_scope": "READ_ONLY_GET_REQUESTS",
             "orders_enabled": False,
             "balance": {
                 "ts": balance.get("ts"),
@@ -512,7 +537,7 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "AUTH_FAILED",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
             "orders_enabled": False,
             "message_fa": "BloFin احراز هویت درخواست خواندن حساب را رد کرد.",
         }
@@ -520,7 +545,7 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "READ_FAILED",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
             "orders_enabled": False,
             "error_type": type(exc).__name__,
             "message_fa": "خواندن اطلاعات حساب از BloFin Demo کامل نشد.",
@@ -529,7 +554,7 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "UNKNOWN",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
             "orders_enabled": False,
             "error_type": type(exc).__name__,
             "message_fa": "خواندن حساب با خطای پیش‌بینی‌نشده متوقف شد.",
@@ -2297,10 +2322,31 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
 def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
     total = len(CRYPTO_MARKET_UNIVERSE)
     complete = len(items) >= total
-    status = (
-        "PASS" if complete and all(item.get("status") == "PASS" for item in items[:total])
-        else "PARTIAL" if complete else "LOADING"
-    )
+    passed_items = [
+        item for item in items[:total]
+        if isinstance(item, dict) and item.get("status") == "PASS"
+    ]
+    passed_count = len(passed_items)
+    observed_times = []
+    for item in passed_items:
+        raw = item.get("received_at_utc")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                observed_times.append(stamp.astimezone(timezone.utc))
+            except ValueError:
+                continue
+    # The board's age reflects its oldest successful quote, not the last fetch attempt.
+    oldest_observation = min(observed_times) if observed_times else None
+    if complete:
+        status = (
+            "PASS" if passed_count == total and len(observed_times) == total
+            else "PARTIAL" if passed_count else "UNKNOWN"
+        )
+    else:
+        status = "PARTIAL" if passed_count else "LOADING"
     # Report only venues that actually contributed to validated rows. This
     # keeps a successful OKX fallback from being mislabeled as Bybit data.
     sources = list(dict.fromkeys(
@@ -2314,8 +2360,12 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
         sources = ["Binance Spot", "Bybit Spot"]
     return {
         "status": status,
-        "freshness": "FRESH" if complete else "PARTIAL",
-        "updated_at_utc": datetime.now(timezone.utc).isoformat() if items else None,
+        "freshness": (
+            "FRESH" if status == "PASS"
+            else "PARTIAL" if passed_count else "UNKNOWN"
+        ),
+        "updated_at_utc": oldest_observation.isoformat() if oldest_observation else None,
+        "completed_at_utc": datetime.now(timezone.utc).isoformat() if complete else None,
         "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
         "sources": sources,
         "items": copy.deepcopy(items),
@@ -2426,7 +2476,9 @@ def _crypto_market_board() -> dict:
         }
 
     cached["refreshing"] = refreshing
-    if refreshing and cached.get("completed_items", 0) < cached.get("total_items", len(CRYPTO_MARKET_UNIVERSE)):
+    if refreshing:
+        # The last item may be published just before the worker commits the final
+        # cache expiry. Keep the board in LOADING until refreshing is cleared.
         cached["status"] = "LOADING"
         cached["freshness"] = "PARTIAL" if cached.get("items") else "LOADING"
         return cached
@@ -2728,7 +2780,7 @@ def _blofin_demo_execution_readiness() -> dict:
     else:
         message_fa = (
             "پیش‌نیازهای BloFin Demo آماده‌اند؛ مجوز Read/Write کلید واقعی با query-apikey تأیید شد. "
-            "قیمت، ۱۲ گیت، Nemotron و کنترل‌های ریسک در هر چرخه دوباره بررسی می‌شوند."
+            "در پروفایل Challenge 1، کندل‌های بسته‌شده، الگوی کندلی/نموداری، تأیید شکست، روند ۱ ساعته و کنترل‌های ضروری حساب و ریسک بررسی می‌شوند؛ ۱۲ فیلتر عمومی فقط نظارتی‌اند و Nemotron شرط ورود این پروفایل نیست."
         )
     return {
         "status": "READY" if ready else "BLOCKED",
@@ -2889,13 +2941,19 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
         ]
 
     try:
-        latest = read("local_latest_order", store.latest_order, None) if store is not None else None
+        latest = read(
+            "local_latest_order",
+            lambda: store.latest_order_for_instrument(inst_id) if store is not None else None,
+            None,
+        ) if store is not None else None
         ticker_rows = read(
             "market_ticker", lambda: client.get_tickers(inst_id=inst_id), []
         )
         mark_rows = read(
             "mark_price", lambda: client.get_mark_price(inst_id=inst_id), []
         )
+        api_key_info = read("api_key_info", client.get_api_key_info, {})
+        api_key_permission = _blofin_api_key_permission(api_key_info)
         balance = read(
             "futures_balance",
             lambda: client.get_futures_balance(product_type="USDT-FUTURES"),
@@ -3053,17 +3111,47 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             lambda: store.recent_all_events(limit=100) if store is not None else [],
             [],
         )
+        def _event_instrument(event: dict) -> str:
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if not isinstance(payload, dict):
+                return ""
+            return str(payload.get("instrument_id") or payload.get("instId") or "").strip().upper()
+
+        instrument_execution_events = [
+            event for event in execution_events
+            if _event_instrument(event) == inst_id
+            or (
+                not _event_instrument(event)
+                and isinstance(safe_latest, dict)
+                and event.get("client_order_id") == safe_latest.get("client_order_id")
+            )
+        ]
+        selected_positions = [
+            row for row in positions
+            if isinstance(row, dict) and str(row.get("instId") or "").strip().upper() == inst_id
+        ] if isinstance(positions, list) else []
+        selected_open_orders = [
+            row for row in open_orders
+            if isinstance(row, dict) and str(row.get("instId") or "").strip().upper() == inst_id
+        ] if isinstance(open_orders, list) else []
+        selected_open_tpsl = [
+            row for row in open_tpsl
+            if isinstance(row, dict) and str(row.get("instId") or "").strip().upper() == inst_id
+        ] if isinstance(open_tpsl, list) else []
         return {
             "instrument_id": inst_id,
             "position_scope": "ACCOUNT_WIDE",
             "open_order_scope": "ACCOUNT_WIDE",
+            "selected_instrument_scope": inst_id,
             "status": (
                 "AUTH_FAILED"
                 if any(item.get("error_type") == "BloFinDemoAuthError" for item in read_errors)
                 else "CONNECTED_READ_ONLY"
             ),
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
+            "api_key_permission": api_key_permission,
+            "request_scope": "READ_ONLY_GET_REQUESTS",
             "orders_enabled": False,
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             "refresh_interval_seconds": 5,
@@ -3086,7 +3174,10 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             "latest_local_order": safe_latest,
             "order_detail": safe_detail,
             "positions": rows(positions, position_fields),
+            "positions_for_instrument": rows(selected_positions, position_fields),
             "open_orders": rows(open_orders, order_fields),
+            "open_orders_for_instrument": rows(selected_open_orders, order_fields),
+            "open_tpsl_orders_for_instrument": rows(selected_open_tpsl, tpsl_fields),
             "fills": rows(fills, fill_fields),
             "completed_orders": rows(completed_orders, order_fields),
             "closed_positions": rows(closed_positions, closed_fields),
@@ -3094,6 +3185,7 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             "open_tpsl_orders": rows(open_tpsl, tpsl_fields),
             "tpsl_orders_history": rows(tpsl_history, tpsl_fields),
             "execution_events": execution_events,
+            "instrument_execution_events": instrument_execution_events,
         }
     finally:
         if store is not None:
@@ -5054,9 +5146,9 @@ class Handler(BaseHTTPRequestHandler):
           <div class="brand-copy">
             <span class="eyebrow">پایش بازار · دادهٔ عمومی و رایگان</span>
             <h1>CRYPTO SUPER RADAR</h1>
-            <p class="muted">تحلیل کمی و Paper Research؛ بدون اتصال کیف‌پول یا ارسال سفارش</p>
+            <p class="muted">پژوهش بازار با دادهٔ عمومی و Paper Research / Paper Trading؛ هیچ اتصال کیف‌پول یا سفارش Live ندارد. سفارش آزمایشی فقط در ماژول مستقل BloFin Demo و با کلید Trade جداگانه ممکن است.</p>
           </div>
-          <span class="mode-pill"><span class="mode-dot"></span>فقط خواندنی</span>
+          <span class="mode-pill"><span class="mode-dot"></span>Spot Research: فقط خواندنی · BloFin: Demo</span>
         </header>
         <section class="card" id="external-analysis-tools">
           <h2>ابزارهای تحلیل بازار</h2>
@@ -5075,8 +5167,8 @@ class Handler(BaseHTTPRequestHandler):
           </div>
         </section>
         <section class="card" id="blofin-demo-panel">
-          <h2>BloFin Demo Futures · اتصال و حساب فقط‌خواندنی</h2>
-          <p class="muted">اتصال API به‌صورت خودکار بررسی می‌شود. برای دیدن موجودی، پوزیشن‌ها و سفارش‌های باز، توکن مستقل پنل را وارد کن. این توکن در مرورگر ذخیره نمی‌شود.</p>
+          <h2>BloFin Demo Futures · مانیتور حساب خواندنی و اجرای Demo جداگانه</h2>
+          <p class="muted">اتصال حساب با درخواست‌های خواندنی بررسی می‌شود. سطح واقعی مجوز خود API Key جداگانه از BloFin خوانده می‌شود؛ حتی کلید Read/Write نیز در این صفحه فقط برای GET استفاده می‌شود. توکن پنل با API Key صرافی متفاوت است و در مرورگر ذخیره نمی‌شود.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="blofin-demo-check" type="button">بررسی اتصال BloFin Demo</button>
             <span id="blofin-demo-status" class="muted" aria-live="polite">اتصال هنوز بررسی نشده است.</span>
@@ -5091,7 +5183,7 @@ class Handler(BaseHTTPRequestHandler):
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
-            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف مادام‌العمر و روزانه وجود ندارد، اما هر کندل کامل ۱۵ دقیقه فقط یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
+            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف تعداد سفارش در روز یا در کل عمر سیستم تعریف نشده است؛ بااین‌حال هم‌زمان فقط یک پوزیشن مجاز است. هر کندل کامل ۱۵ دقیقه حداکثر یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
             <div class="grid" style="margin:10px 0">
               <div>
                 <label for="blofin-market-type">نوع بازار</label>
@@ -5167,14 +5259,14 @@ class Handler(BaseHTTPRequestHandler):
                 if(!response.ok)throw new Error('HTTP '+response.status);
                 const result=await response.json();
                 const messages={
-                  CONNECTED_READ_ONLY:'اتصال موفق است؛ بازار، موجودی Futures، پوزیشن‌ها و سفارش‌های باز با مجوز فقط‌خواندنی تأیید شدند.',
+                  CONNECTED_READ_ONLY:'اتصال Demo برقرار است؛ درخواست‌های این مسیر فقط GET هستند. مجوز واقعی کلید: '+(result.api_key_permission||'UNKNOWN')+'.',
                   NOT_CONFIGURED:'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
                   AUTH_FAILED:'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
                   CONNECTION_FAILED:'اتصال به BloFin Demo برقرار نشد؛ شبکه یا محدودیت IP را بررسی کن.',
                   UNKNOWN:'نتیجه آزمون نامشخص است؛ آزمون را بعداً تکرار کن.'
                 };
                 status.textContent=messages[result.status]||messages.UNKNOWN;
-                safety.textContent='محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال';
+                safety.textContent='محیط: Demo · عملیات این مسیر: فقط خواندن (GET) · مجوز واقعی کلید: '+(result.api_key_permission||'نامشخص')+' · ارسال سفارش از این مسیر: غیرفعال';
               }catch(error){
                 status.textContent='دریافت نتیجه آزمون ممکن نشد؛ اتصال داشبورد را بررسی کن.';
               }finally{
@@ -5193,8 +5285,9 @@ class Handler(BaseHTTPRequestHandler):
               const balance=result.balance||{};
               const summary=document.createElement('div');
               summary.className='grid';
-              [['ارزش کل حساب (USD)',balance.totalEquity],['ارزش مارجین ایزوله',balance.isolatedEquity],
-               ['تعداد پوزیشن‌ها',(result.positions||[]).length],['سفارش‌های باز',(result.open_orders||[]).length]]
+              [['ارزش کل حساب (USD)',balance.totalEquity],['ارزش مارجین ایزوله (USD)',balance.isolatedEquity],
+               ['تعداد پوزیشن‌ها',(result.positions||[]).length],['سفارش‌های باز',(result.open_orders||[]).length],
+               ['مجوز واقعی کلید API',result.api_key_permission||'UNKNOWN'],['محدودهٔ این مسیر','GET فقط؛ بدون ارسال سفارش']]
                 .forEach(([label,value])=>{
                   const metric=document.createElement('div');
                   metric.className='metric';
@@ -5264,8 +5357,8 @@ class Handler(BaseHTTPRequestHandler):
                   return;
                 }
                 renderAccount(result);
-                accountStatus.textContent='اطلاعات حساب Demo دریافت شد. زمان دریافت: '+new Date().toLocaleString();
-                safety.textContent='محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال';
+                accountStatus.textContent='اطلاعات حساب Demo دریافت شد. مجوز واقعی کلید: '+(result.api_key_permission||'UNKNOWN')+'. زمان دریافت: '+new Date().toLocaleString();
+                safety.textContent='محیط: Demo · عملیات این مسیر: فقط خواندن (GET) · مجوز واقعی کلید: '+(result.api_key_permission||'نامشخص')+' · ارسال سفارش از این مسیر: غیرفعال';
               }catch(error){
                 accountStatus.textContent='ارتباط با پنل حساب برقرار نشد.';
               }finally{
@@ -5318,35 +5411,54 @@ class Handler(BaseHTTPRequestHandler):
             function renderLiveMonitor(snapshot){
               monitorView.replaceChildren();monitorEvents.replaceChildren();
               const m=snapshot.market||{},account=snapshot.account||{};
-              const positions=Array.isArray(snapshot.positions)?snapshot.positions:[];
+              const accountPositions=Array.isArray(snapshot.positions)?snapshot.positions:[];
+              const positions=Array.isArray(snapshot.positions_for_instrument)
+                ?snapshot.positions_for_instrument
+                :accountPositions.filter(p=>String(p&&p.instId||'').toUpperCase()===String(snapshot.instrument_id||'').toUpperCase());
               const active=positions.filter(p=>{
                 const quantity=Number(p&&p.positions);
                 return Number.isFinite(quantity)&&Math.abs(quantity)>0;
               });
-              const position=active[0]||{},detail=snapshot.order_detail||{};
+              // Never join an arbitrary account-wide position to the selected market ticker.
+              const position=active.length===1?active[0]:{},detail=snapshot.order_detail||{};
               const localOrder=snapshot.latest_local_order||{};
               const fills=Array.isArray(snapshot.fills)?snapshot.fills:[];
               const closed=Array.isArray(snapshot.closed_positions)?snapshot.closed_positions:[];
-              const events=Array.isArray(snapshot.execution_events)?snapshot.execution_events:[];
+              const events=Array.isArray(snapshot.instrument_execution_events)?snapshot.instrument_execution_events:[];
+              const accountOpenPositions=accountPositions.filter(p=>{
+                const quantity=Number(p&&p.positions);
+                return Number.isFinite(quantity)&&Math.abs(quantity)>0;
+              });
+              const instrumentOpenOrders=Array.isArray(snapshot.open_orders_for_instrument)
+                ?snapshot.open_orders_for_instrument
+                :(snapshot.open_orders||[]).filter(x=>String(x&&x.instId||'').toUpperCase()===String(snapshot.instrument_id||'').toUpperCase());
+              const instrumentOpenTpsl=Array.isArray(snapshot.open_tpsl_orders_for_instrument)
+                ?snapshot.open_tpsl_orders_for_instrument
+                :(snapshot.open_tpsl_orders||[]).filter(x=>String(x&&x.instId||'').toUpperCase()===String(snapshot.instrument_id||'').toUpperCase());
               const usdt=(Array.isArray(account.details)?account.details:[]).find(x=>String(x.currency||'').toUpperCase()==='USDT')||{};
               const lastEvent=type=>events.filter(x=>String(x.event_type||'').toUpperCase()===type).slice(-1)[0]||{};
               const reserved=lastEvent('RESERVED'),accepted=lastEvent('ACCEPTED'),filledEvent=lastEvent('FILLED');
               const latestFill=fills[0]||{},latestClosed=closed[0]||{};
               const summary=document.createElement('div');summary.className='grid';
               const metrics=[
-                ['آخرین قیمت '+(snapshot.instrument_id||'قرارداد انتخابی'),m.last],['Mark Price واقعی',m.markPrice??position.markPrice],
-                ['Index Price',m.indexPrice],['وضعیت موقعیت',active.length?'پوزیشن باز':(detail.state||localOrder.status||'بدون پوزیشن باز')],
-                ['جهت پوزیشن',position.positionSide||localOrder.side],
-                ['میانگین قیمت ورود',position.averagePrice??detail.averagePrice??localOrder.entry_price],
-                ['حجم باز',position.positions],['حجم قابل‌بستن',position.availablePositions],
-                ['اهرم',position.leverage??detail.leverage??localOrder.leverage],
-                ['سود/زیان شناور USDT',position.unrealizedPnl],
+                ['آخرین قیمت '+(snapshot.instrument_id||'قرارداد انتخابی'),m.last],['Mark Price واقعی همان قرارداد',m.markPrice],
+                ['Index Price همان قرارداد',m.indexPrice],
+                ['وضعیت پوزیشن '+(snapshot.instrument_id||''),active.length===1?'پوزیشن باز':(active.length>1?'چند پوزیشن باز؛ جزئیات جداگانه':'بدون پوزیشن باز برای این قرارداد')],
+                ['جهت پوزیشن',active.length===1?position.positionSide:null],
+                ['میانگین قیمت ورود',active.length===1?position.averagePrice:null],
+                ['حجم باز (قرارداد)',active.length===1?position.positions:null],['حجم قابل‌بستن (قرارداد)',active.length===1?position.availablePositions:null],
+                ['اهرم',active.length===1?position.leverage:null],
+                ['سود/زیان شناور USDT',active.length===1?position.unrealizedPnl:null],
                 ['Equity کل حساب (USD)',account.totalEquity],['Equity ایزوله (USD)',account.isolatedEquity],
                 ['موجودی USDT',usdt.balance],['Equity موجودی USDT',usdt.equity],
                 ['Available USDT',usdt.available],['Available Equity USDT',usdt.availableEquity],
-                ['Frozen USDT',usdt.frozen],['تعداد پوزیشن‌های باز',active.length],
-                ['سفارش‌های فعال',Array.isArray(snapshot.open_orders)?snapshot.open_orders.length:0],
-                ['TP/SL فعال',Array.isArray(snapshot.open_tpsl_orders)?snapshot.open_tpsl_orders.length:0],
+                ['Frozen USDT',usdt.frozen],['پوزیشن‌های باز این قرارداد',active.length],
+                ['پوزیشن‌های باز کل حساب',accountOpenPositions.length],
+                ['سفارش‌های باز این قرارداد',instrumentOpenOrders.length],
+                ['سفارش‌های باز کل حساب',Array.isArray(snapshot.open_orders)?snapshot.open_orders.length:0],
+                ['TP/SL فعال این قرارداد',instrumentOpenTpsl.length],
+                ['TP/SL فعال کل حساب',Array.isArray(snapshot.open_tpsl_orders)?snapshot.open_tpsl_orders.length:0],
+                ['مجوز واقعی کلید API',snapshot.api_key_permission||'UNKNOWN'],
                 ['آخرین به‌روزرسانی',formatTime(snapshot.updated_at_utc)]
               ];
               metrics.forEach(([label,value])=>{
@@ -5386,45 +5498,50 @@ class Handler(BaseHTTPRequestHandler):
                 ok.textContent='پوشش منابع مانیتور: همهٔ endpointهای درخواستی پاسخ داده‌اند.';
                 monitorEvents.appendChild(ok);
               }
-              monitorEvents.appendChild(renderEvents('Fillهای واقعی صرافی · قیمت، حجم، کارمزد و زمان',fills,[
+              monitorEvents.appendChild(renderEvents('پوزیشن‌های باز برای '+(snapshot.instrument_id||'قرارداد انتخابی'),active,[
+                ['positionId','شناسه پوزیشن'],['instId','نماد'],['positionSide','جهت'],
+                ['positions','حجم (قرارداد)'],['averagePrice','قیمت ورود'],['markPrice','Mark Price'],
+                ['unrealizedPnl','PnL شناور'],['leverage','اهرم']
+              ],'برای قرارداد انتخاب‌شده پوزیشن بازی گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('Fillهای واقعی صرافی · قیمت، حجم قرارداد، کارمزد و زمان',fills,[
                 ['tradeId','شناسه Fill'],['orderId','شناسه سفارش'],['side','خرید/فروش'],
-                ['positionSide','جهت پوزیشن'],['fillPrice','قیمت Fill'],['fillSize','حجم'],
+                ['positionSide','جهت پوزیشن'],['fillPrice','قیمت Fill'],['fillSize','حجم Fill (قرارداد)'],
                 ['fillPnl','PnL تحقق‌یافته'],['fee','کارمزد'],['ts','زمان Fill']
               ],'BloFin در سوابق دریافتی Fill ثبت‌شده‌ای برنگرداند.'));
               monitorEvents.appendChild(renderEvents('پوزیشن‌های بسته‌شده · ورود، خروج و PnL نهایی',closed,[
                 ['historyId','شناسه سابقه'],['side','سمت'],['positionSide','جهت پوزیشن'],
                 ['openAveragePrice','میانگین ورود'],['closeAveragePrice','میانگین خروج'],
-                ['closePositions','حجم بسته‌شده'],['realizedPnl','PnL نهایی'],
+                ['closePositions','حجم بسته‌شده (واحد گزارش‌شده BloFin)'],['realizedPnl','PnL نهایی'],
                 ['realizedPnlRatio','درصد PnL'],['fee','کارمزد'],
                 ['createTime','زمان بازشدن'],['updateTime','زمان بسته‌شدن/آخرین تغییر']
-              ],'در تاریخچهٔ دریافتی، پوزیشن بسته‌شده‌ای برای BTC-USDT گزارش نشد.'));
+              ],'در تاریخچهٔ دریافتی، پوزیشن بسته‌شده‌ای برای '+(snapshot.instrument_id||'قرارداد انتخابی')+' گزارش نشد.'));
               monitorEvents.appendChild(renderEvents('سفارش‌های تکمیل‌شده و تاریخچه سفارش',snapshot.completed_orders||[],[
                 ['orderId','شناسه سفارش'],['orderCategory','دسته سفارش'],['side','سمت'],
                 ['orderType','نوع سفارش'],['state','وضعیت'],['price','قیمت درخواستی'],
-                ['averagePrice','میانگین اجرای واقعی'],['size','حجم درخواست‌شده'],
-                ['filledSize','حجم اجراشده'],['pnl','PnL'],['fee','کارمزد'],
+                ['averagePrice','میانگین اجرای واقعی'],['size','حجم درخواست‌شده (قرارداد)'],
+                ['filledSize','حجم اجراشده (قرارداد)'],['pnl','PnL'],['fee','کارمزد'],
                 ['createTime','زمان ثبت'],['updateTime','زمان تکمیل/تغییر']
               ],'در تاریخچهٔ دریافت‌شده سفارش تکمیل‌شده‌ای گزارش نشد.'));
-              monitorEvents.appendChild(renderEvents('سفارش‌های باز عادی',snapshot.open_orders||[],[
+              monitorEvents.appendChild(renderEvents('سفارش‌های باز عادی برای '+(snapshot.instrument_id||'قرارداد انتخابی'),instrumentOpenOrders,[
                 ['orderId','شناسه سفارش'],['side','سمت'],['orderType','نوع'],
                 ['orderCategory','دسته'],['price','قیمت'],['size','حجم'],
                 ['filledSize','پرشده'],['state','وضعیت'],['createTime','زمان ثبت'],
                 ['attachAlgoOrders','حد سود/ضرر متصل']
-              ],'در حال حاضر سفارش عادی بازی برای BTC-USDT گزارش نشد.'));
-              monitorEvents.appendChild(renderEvents('حد سود و حد ضرر فعال در BloFin',snapshot.open_tpsl_orders||[],[
+              ],'در حال حاضر سفارش عادی بازی برای '+(snapshot.instrument_id||'قرارداد انتخابی')+' گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('حد سود و حد ضرر فعال برای '+(snapshot.instrument_id||'قرارداد انتخابی'),instrumentOpenTpsl,[
                 ['tpslId','شناسه TP/SL'],['side','سمت'],['positionSide','جهت پوزیشن'],
                 ['tpTriggerPrice','قیمت فعال‌سازی TP'],['tpOrderPrice','قیمت اجرای TP'],
                 ['tpTriggerPriceType','مبنای TP'],['slTriggerPrice','قیمت فعال‌سازی SL'],
                 ['slOrderPrice','قیمت اجرای SL'],['slTriggerPriceType','مبنای SL'],
                 ['size','حجم'],['actualSize','حجم مؤثر'],['state','وضعیت'],['createTime','زمان ثبت']
-              ],'سفارشی از نوع TP/SL فعال در حساب Demo گزارش نشد.'));
+              ],'سفارشی از نوع TP/SL فعال برای '+(snapshot.instrument_id||'قرارداد انتخابی')+' گزارش نشد.'));
               monitorEvents.appendChild(renderEvents('تاریخچه سفارش‌های حد سود و حد ضرر',snapshot.tpsl_orders_history||[],[
                 ['tpslId','شناسه TP/SL'],['side','سمت'],['tpTriggerPrice','TP'],
                 ['tpOrderPrice','قیمت اجرای TP'],['slTriggerPrice','SL'],
                 ['slOrderPrice','قیمت اجرای SL'],['state','وضعیت'],
                 ['createTime','زمان ثبت'],['updateTime','آخرین تغییر']
               ],'در تاریخچهٔ دریافتی، سفارش TP/SL ثبت‌شده‌ای گزارش نشد.'));
-              monitorEvents.appendChild(renderEvents('تمام رویدادهای ثبت‌شده در ربات (همه سفارش‌ها)',events,[
+              monitorEvents.appendChild(renderEvents('رویدادهای ثبت‌شدهٔ ربات برای '+(snapshot.instrument_id||'قرارداد انتخابی'),events,[
                 ['sequence','ترتیب'],['client_order_id','شناسه سفارش ربات'],
                 ['event_type','رویداد'],['occurred_at','زمان ثبت'],['payload','جزئیات']
               ],'هنوز رویدادی در دفتر ثبت داخلی ربات ذخیره نشده است.'));
@@ -6271,7 +6388,7 @@ async function loadBlofinInstruments(){
           <p id="data-health-status" class="muted" aria-live="polite">در حال بررسی تازگی و پوشش داده‌ها...</p>
           <div id="data-health-details" class="grid"></div>
           <button type="button" id="data-health-refresh">بررسی دوباره سلامت داده</button>
-          <p class="muted">LIVE در این بخش فقط به معنی تازه‌بودن قیمت‌های منتخب و تأیید آن‌ها توسط Binance و Bybit است؛ این وضعیت به معنی پوشش کل بازار یا اتصال WebSocket نیست.</p>
+          <p class="muted">این سلامت‌سنج فقط فهرست ۲۰ نماد Spot را ارزیابی می‌کند و با منبع مستقل نمودار کندل یکی نیست. LIVE یعنی همهٔ ردیف‌های همین فهرست در پنجرهٔ تازگی تأیید شده‌اند؛ نه پوشش کل بازار و نه اتصال WebSocket.</p>
         </section>
         <script>
         (function(){
@@ -6310,7 +6427,7 @@ async function loadBlofinInstruments(){
           <p id="paper-performance-status" class="muted" aria-live="polite">در حال دریافت گزارش معاملات بسته‌شده...</p>
           <div id="paper-performance-metrics" class="grid"></div>
           <button type="button" id="paper-performance-refresh">به‌روزرسانی عملکرد</button>
-          <p class="muted">این گزارش فقط معاملات بسته‌شدهٔ Paper Trading را می‌سنجد. تا ثبت حداقل ۳۰ معامله، نمونه برای ارزیابی کافی نیست؛ حتی پس از آن نیز عملکرد گذشته تضمین سود آینده نیست. لغزش قیمت جداگانه از قیمت اجرای شبیه‌سازی‌شده تفکیک نشده است.</p>
+          <p class="muted">این گزارش فقط معاملات بسته‌شدهٔ Paper داخلی را می‌سنجد و معاملات حساب BloFin Demo را وارد نمی‌کند. تا ثبت حداقل ۳۰ معاملهٔ Paper، نمونه برای ارزیابی کافی نیست؛ حتی پس از آن نیز عملکرد گذشته تضمین سود آینده نیست. لغزش قیمت جداگانه از قیمت اجرای شبیه‌سازی‌شده تفکیک نشده است.</p>
         </section>
         <script>
         (function(){
@@ -6490,8 +6607,11 @@ async function loadBlofinInstruments(){
               marketItems=data.items||[];
               window.CryptoRadar.update('radar-market', marketItems, {state:data.refreshing?'scanning':'complete', caption:'آبی: قیمت تأییدشده از دو منبع مستقل · زرد: دادهٔ نامشخص. این رادار جهت خرید/فروش تولید نمی‌کند.'});
               renderRows();
-              const received=new Date(data.updated_at_utc).toLocaleString();
-              status.textContent='منابع: '+(data.sources||[]).join(' و ')+' · دریافت: '+received+
+              const receivedDate=data.updated_at_utc?new Date(data.updated_at_utc):null;
+              const received=receivedDate&&!Number.isNaN(receivedDate.getTime())
+                ?receivedDate.toLocaleString()
+                :'هنوز مشاهدهٔ معتبر ثبت نشده';
+              status.textContent='منابع: '+(data.sources||[]).join(' و ')+' · قدیمی‌ترین مشاهدهٔ معتبر: '+received+
                 ' · وضعیت کلی: '+data.status+' · cache: '+data.cache_ttl_seconds+' ثانیه';
             }catch(error){
               status.textContent='دادهٔ بازار در دسترس نیست: '+String(error.message||error);window.CryptoRadar.error('radar-market', 'دریافت قیمت بازار ناموفق بود؛ وضعیت قبلی به‌عنوان سیگنال تازه تلقی نمی‌شود.');
@@ -6582,8 +6702,8 @@ async function loadBlofinInstruments(){
             <section class="easy-trader-robot" id="easy-trader-robot" aria-label="ربات متحرک تحلیل‌گر حالت آسان">
               <div class="easy-robot-stage">
                 <div class="easy-robot-bubble" role="status" aria-live="polite">
-                  <span class="easy-robot-bubble-title">گزارش زنده تحلیل · CHALLENGE 1</span>
-                  <strong class="easy-robot-pattern" id="easy-robot-pattern">در انتظار الگوی تأییدشده Challenge 1...</strong>
+                  <span class="easy-robot-bubble-title">گزارش زنده تحلیل Spot · الگوهای کندلی و نموداری</span>
+                  <strong class="easy-robot-pattern" id="easy-robot-pattern">در انتظار الگوی تأییدشدهٔ بازار Spot...</strong>
                   <div class="easy-robot-chips">
                     <span class="easy-robot-chip" id="easy-robot-direction">جهت الگو: نامشخص</span>
                     <span class="easy-robot-chip" id="easy-robot-signal">سیگنال موتور: در انتظار داده</span>
@@ -6647,7 +6767,7 @@ async function loadBlofinInstruments(){
             </section>
             <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
             <p id="live-radar-provider" class="live-radar-note">اعتبارسنجی چندمنبعی: در انتظار داده</p>
-            <p class="live-radar-note">این بخش فعلاً هشدار تحلیلی است و به Paper Bot سفارش نمی‌دهد. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
+            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance/Bybit و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و موتور Challenge 1 فیوچرز BloFin نیست. Challenge 1 فقط کندل بسته‌شدهٔ ۱۵ دقیقه‌ای BloFin و تعارض تایم‌فریم یک‌ساعته را برای تصمیم Demo بررسی می‌کند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
           </div>
           <script>
           (function(){
@@ -6966,7 +7086,7 @@ async function loadBlofinInstruments(){
             window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);});
           })();
           </script>
-          <p class="muted">ربات فقط LONG در بازار Spot را با همان ۱۲ فیلتر ارزیابی می‌کند؛ هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
+          <p class="muted">موتور مستقل Spot Paper فقط LONG را با ۱۲ فیلتر ارزیابی می‌کند؛ این موتور با معاملهٔ BloFin Demo Challenge 1 یکی نیست. هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
           <div class="metric" style="margin:12px 0">
             <strong>اتصال الزامی به هوش مصنوعی رایگان · OpenRouter / NVIDIA Nemotron</strong>
             <p class="muted">برای هر ورود جدید، مدل زبانی واقعی باید نقش تحلیل‌گر بازار، تحلیل‌گر تکنیکال، تحلیل‌گر احساسات، پژوهشگر صعودی/نزولی، معامله‌گر و مدیر ریسک را بررسی و خروجی معتبر بدهد. مدل رایگان <code>nvidia/nemotron-3-ultra-550b-a55b:free</code> با هزینهٔ مدل صفر استفاده می‌شود. سقف برنامه ۳۵ درخواست در روز و حافظهٔ نتیجه ۴ ساعت است؛ در صورت قطعی یا اتمام سهمیه، ورود جدید متوقف می‌شود اما مدیریت و خروج موقعیت باز ادامه دارد.</p>
