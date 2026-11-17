@@ -313,6 +313,20 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
     return payload
 
 
+def _blofin_api_key_permission(info: dict | None) -> str:
+    """Translate BloFin's readOnly flag independently from this route's GET-only scope."""
+    if not isinstance(info, dict):
+        return "UNKNOWN"
+    value = info.get("readOnly")
+    if isinstance(value, bool):
+        return "UNKNOWN"
+    if value in (1, "1"):
+        return "READ_ONLY"
+    if value in (0, "0"):
+        return "READ_WRITE"
+    return "UNKNOWN"
+
+
 def _blofin_demo_connection_status() -> dict:
     """Return a rate-limited, non-sensitive read-only BloFin Demo connectivity result."""
     with BLOFIN_STATUS_LOCK:
@@ -330,11 +344,12 @@ def _blofin_demo_connection_status() -> dict:
         stage = "ENVIRONMENT_CHECK"
         market_data = "NOT_CHECKED"
         private_api = "NOT_CHECKED"
+        api_key_permission = "UNKNOWN"
         if not configured:
             payload = {
                 "status": "NOT_CONFIGURED",
                 "environment": "BLOFIN_DEMO",
-                "permission_mode": "READ_ONLY",
+                "permission_mode": "READ_ONLY_REQUESTS",
                 "market_data": market_data,
                 "private_api": private_api,
                 "orders_enabled": False,
@@ -344,6 +359,9 @@ def _blofin_demo_connection_status() -> dict:
         else:
             try:
                 client = BloFinDemoReadOnly(timeout=8.0)
+
+                stage = "PRIVATE_API_KEY_PERMISSION"
+                api_key_permission = _blofin_api_key_permission(client.get_api_key_info())
 
                 stage = "PUBLIC_MARKET_TICKER"
                 tickers = client.get_tickers(inst_id="BTC-USDT")
@@ -371,11 +389,12 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "CONNECTED_READ_ONLY",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
+                    "api_key_permission": api_key_permission,
                     "market_data": market_data,
                     "private_api": private_api,
                     "orders_enabled": False,
-                    "message_fa": "اتصال Demo و احراز هویت API موفق است. ربات هنوز فقط اطلاعات را می‌خواند و هیچ سفارشی ارسال نمی‌کند.",
+                    "message_fa": "اتصال Demo برقرار است. این مسیر فقط درخواست GET می‌فرستد؛ مجوز واقعی کلید در api_key_permission گزارش می‌شود و از این مسیر سفارشی ارسال نمی‌شود.",
                 }
                 cache_seconds = 60
             except BloFinDemoAuthError as exc:
@@ -393,7 +412,7 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "AUTH_FAILED",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
                     "market_data": market_data,
                     "private_api": "FAIL" if stage.startswith("PRIVATE_") else "NOT_CHECKED",
                     "orders_enabled": False,
@@ -415,7 +434,8 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "CONNECTION_FAILED",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
+                    "api_key_permission": api_key_permission,
                     "market_data": "FAIL" if stage == "PUBLIC_MARKET_TICKER" else market_data,
                     "private_api": "FAIL" if stage.startswith("PRIVATE_") else private_api,
                     "orders_enabled": False,
@@ -430,7 +450,7 @@ def _blofin_demo_connection_status() -> dict:
                 payload = {
                     "status": "UNKNOWN",
                     "environment": "BLOFIN_DEMO",
-                    "permission_mode": "READ_ONLY",
+                    "permission_mode": "READ_ONLY_REQUESTS",
                     "market_data": market_data,
                     "private_api": private_api,
                     "orders_enabled": False,
@@ -440,6 +460,8 @@ def _blofin_demo_connection_status() -> dict:
                 }
                 cache_seconds = 20
 
+        payload.setdefault("api_key_permission", api_key_permission)
+        payload.setdefault("request_scope", "READ_ONLY_GET_REQUESTS")
         BLOFIN_STATUS_CACHE["payload"] = copy.deepcopy(payload)
         BLOFIN_STATUS_CACHE["expires_at"] = time.monotonic() + cache_seconds
         return copy.deepcopy(payload)
@@ -462,6 +484,7 @@ def _blofin_demo_account_snapshot() -> dict:
     """Fetch a deliberately whitelisted read-only account snapshot from BloFin Demo."""
     try:
         client = BloFinDemoReadOnly(timeout=8.0)
+        api_key_permission = _blofin_api_key_permission(client.get_api_key_info())
         balance = client.get_futures_balance(product_type="USDT-FUTURES")
         positions = client.get_positions()
         open_orders = client.get_open_orders()
@@ -474,7 +497,7 @@ def _blofin_demo_account_snapshot() -> dict:
         details = balance.get("details")
         details = details if isinstance(details, list) else []
         position_fields = (
-            "instId", "marginMode", "positionSide", "leverage", "positions",
+            "positionId", "instId", "marginMode", "positionSide", "leverage",
             "availablePositions", "averagePrice", "markPrice", "liquidationPrice",
             "unrealizedPnl", "unrealizedPnlRatio", "initialMargin",
             "maintenanceMargin", "createTime", "updateTime",
@@ -490,7 +513,9 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "CONNECTED_READ_ONLY",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
+            "api_key_permission": api_key_permission,
+            "request_scope": "READ_ONLY_GET_REQUESTS",
             "orders_enabled": False,
             "balance": {
                 "ts": balance.get("ts"),
@@ -512,7 +537,7 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "AUTH_FAILED",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
             "orders_enabled": False,
             "message_fa": "BloFin احراز هویت درخواست خواندن حساب را رد کرد.",
         }
@@ -520,7 +545,7 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "READ_FAILED",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
             "orders_enabled": False,
             "error_type": type(exc).__name__,
             "message_fa": "خواندن اطلاعات حساب از BloFin Demo کامل نشد.",
@@ -529,7 +554,7 @@ def _blofin_demo_account_snapshot() -> dict:
         return {
             "status": "UNKNOWN",
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
             "orders_enabled": False,
             "error_type": type(exc).__name__,
             "message_fa": "خواندن حساب با خطای پیش‌بینی‌نشده متوقف شد.",
@@ -2889,13 +2914,19 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
         ]
 
     try:
-        latest = read("local_latest_order", store.latest_order, None) if store is not None else None
+        latest = read(
+            "local_latest_order",
+            lambda: store.latest_order_for_instrument(inst_id) if store is not None else None,
+            None,
+        ) if store is not None else None
         ticker_rows = read(
             "market_ticker", lambda: client.get_tickers(inst_id=inst_id), []
         )
         mark_rows = read(
             "mark_price", lambda: client.get_mark_price(inst_id=inst_id), []
         )
+        api_key_info = read("api_key_info", client.get_api_key_info, {})
+        api_key_permission = _blofin_api_key_permission(api_key_info)
         balance = read(
             "futures_balance",
             lambda: client.get_futures_balance(product_type="USDT-FUTURES"),
@@ -3053,17 +3084,47 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             lambda: store.recent_all_events(limit=100) if store is not None else [],
             [],
         )
+        def _event_instrument(event: dict) -> str:
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if not isinstance(payload, dict):
+                return ""
+            return str(payload.get("instrument_id") or payload.get("instId") or "").strip().upper()
+
+        instrument_execution_events = [
+            event for event in execution_events
+            if _event_instrument(event) == inst_id
+            or (
+                not _event_instrument(event)
+                and isinstance(safe_latest, dict)
+                and event.get("client_order_id") == safe_latest.get("client_order_id")
+            )
+        ]
+        selected_positions = [
+            row for row in positions
+            if isinstance(row, dict) and str(row.get("instId") or "").strip().upper() == inst_id
+        ] if isinstance(positions, list) else []
+        selected_open_orders = [
+            row for row in open_orders
+            if isinstance(row, dict) and str(row.get("instId") or "").strip().upper() == inst_id
+        ] if isinstance(open_orders, list) else []
+        selected_open_tpsl = [
+            row for row in open_tpsl
+            if isinstance(row, dict) and str(row.get("instId") or "").strip().upper() == inst_id
+        ] if isinstance(open_tpsl, list) else []
         return {
             "instrument_id": inst_id,
             "position_scope": "ACCOUNT_WIDE",
             "open_order_scope": "ACCOUNT_WIDE",
+            "selected_instrument_scope": inst_id,
             "status": (
                 "AUTH_FAILED"
                 if any(item.get("error_type") == "BloFinDemoAuthError" for item in read_errors)
                 else "CONNECTED_READ_ONLY"
             ),
             "environment": "BLOFIN_DEMO",
-            "permission_mode": "READ_ONLY",
+            "permission_mode": "READ_ONLY_REQUESTS",
+            "api_key_permission": api_key_permission,
+            "request_scope": "READ_ONLY_GET_REQUESTS",
             "orders_enabled": False,
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             "refresh_interval_seconds": 5,
@@ -3086,7 +3147,10 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             "latest_local_order": safe_latest,
             "order_detail": safe_detail,
             "positions": rows(positions, position_fields),
+            "positions_for_instrument": rows(selected_positions, position_fields),
             "open_orders": rows(open_orders, order_fields),
+            "open_orders_for_instrument": rows(selected_open_orders, order_fields),
+            "open_tpsl_orders_for_instrument": rows(selected_open_tpsl, tpsl_fields),
             "fills": rows(fills, fill_fields),
             "completed_orders": rows(completed_orders, order_fields),
             "closed_positions": rows(closed_positions, closed_fields),
@@ -3094,6 +3158,7 @@ def _blofin_demo_live_monitor_snapshot(inst_id: str = "BTC-USDT") -> dict:
             "open_tpsl_orders": rows(open_tpsl, tpsl_fields),
             "tpsl_orders_history": rows(tpsl_history, tpsl_fields),
             "execution_events": execution_events,
+            "instrument_execution_events": instrument_execution_events,
         }
     finally:
         if store is not None:
