@@ -74,6 +74,63 @@ class Challenge1CandleTests(unittest.TestCase):
         self.assertEqual(result["signal"], "NO_TRADE")
         self.assertEqual(result["challenge1_evidence"]["decision"], "CONFLICTING_PATTERNS")
 
+    def test_volume_and_opposing_hourly_context_are_advisory_not_entry_vetoes(self):
+        now = 2_000_000_000_000
+        client = FakeBloFin({
+            "15m": candle_rows(now, 15 * 60 * 1000),
+            "1H": candle_rows(now, 60 * 60 * 1000),
+        })
+        bullish = {"name_en": "Bullish Engulfing", "direction": "BULLISH", "score": 13}
+        bearish = {"name_en": "Bearish Engulfing", "direction": "BEARISH", "score": -13}
+        with (
+            patch(
+                "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+                side_effect=[[bullish], [bearish]],
+            ),
+            patch(
+                "crypto_super_radar.challenge1_strategy._volume_confirmation",
+                return_value={"confirmed": False, "volume_ratio": 0.7, "reason": "low volume"},
+            ),
+            patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
+            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+        ):
+            result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
+        self.assertEqual(result["signal"], "LONG")
+        self.assertEqual(result["execution"]["status"], "PASS")
+        self.assertTrue(result["challenge1_evidence"]["volume_is_advisory"])
+        self.assertTrue(result["challenge1_evidence"]["context_is_advisory"])
+        self.assertTrue(result["challenge1_evidence"]["context_conflict"])
+        self.assertIn("challenge1-v2:", result["signal_id"])
+        self.assertGreaterEqual(len(result["challenge1_evidence"]["candles_15m"]), 30)
+        self.assertGreaterEqual(len(result["challenge1_evidence"]["candles_1h"]), 30)
+
+    def test_unavailable_one_hour_context_does_not_block_a_valid_pattern(self):
+        now = 2_000_000_000_000
+        class ContextUnavailable(FakeBloFin):
+            def get_candles(self, inst_id, *, bar, limit):
+                if bar == "1H":
+                    raise RuntimeError("1H feed unavailable")
+                return super().get_candles(inst_id, bar=bar, limit=limit)
+
+        client = ContextUnavailable({"15m": candle_rows(now, 15 * 60 * 1000)})
+        bullish = {"name_en": "Hammer", "direction": "BULLISH", "score": 10}
+        with (
+            patch(
+                "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+                return_value=[bullish],
+            ),
+            patch(
+                "crypto_super_radar.challenge1_strategy._volume_confirmation",
+                return_value={"confirmed": False, "volume_ratio": 0.8, "reason": "low volume"},
+            ),
+            patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
+            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+        ):
+            result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
+        self.assertEqual(result["signal"], "LONG")
+        self.assertEqual(result["challenge1_evidence"]["context_data_status"], "UNAVAILABLE")
+        self.assertEqual(result["challenge1_evidence"]["candles_1h"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
