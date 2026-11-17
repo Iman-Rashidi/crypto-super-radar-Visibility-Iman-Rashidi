@@ -9155,8 +9155,6 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
         "evidence": evidence,
         "candles_5m": evidence.get("candles_5m") if isinstance(evidence.get("candles_5m"), list) else [],
-        "candles_15m": evidence.get("candles_15m") if isinstance(evidence.get("candles_15m"), list) else [],
-        "candles_1h": evidence.get("candles_1h") if isinstance(evidence.get("candles_1h"), list) else [],
         "entry_price": result.get("entry_price_usd") or result.get("entry_price") or evidence.get("entry_price"),
         "stop_loss": result.get("stop_loss_usd") or result.get("stop_loss"),
         "take_profit": result.get("take_profit_usd") or result.get("take_profit"),
@@ -9685,18 +9683,6 @@ def _start_notion_sync_worker() -> None:
             name="notion-event-outbox-sync",
         )
         NOTION_SYNC_THREAD.start()
-
-
-def _blofin_demo_next_15m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
-    """Return the delay and timestamp just after the next completed 15-minute candle."""
-    current = now_utc or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    next_boundary_epoch = (int(current.timestamp()) // 900 + 1) * 900 + 3
-    next_at = datetime.fromtimestamp(next_boundary_epoch, timezone.utc)
-    delay_seconds = max(5, int(math.ceil((next_at - current).total_seconds())))
-    return delay_seconds, next_at.isoformat()
-
 
 
 def _blofin_demo_next_5m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
