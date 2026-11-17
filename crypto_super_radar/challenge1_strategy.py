@@ -332,7 +332,7 @@ def analyze_blofin_challenge1(
     entry = stop = target = None
     signal_id = None
 
-decision_code = "CONFLICTING_PATTERNS" if bullish and bearish else "NO_TRADE"
+    decision_code = "CONFLICTING_PATTERNS" if bullish and bearish else "NO_TRADE"
     context_conflict = False
     if bullish and bearish:
         reason_fa = "الگوهای صعودی و نزولی هم‌زمان در ۱۵ دقیقه دیده شدند؛ به‌دلیل تعارض، معامله انجام نمی‌شود."
