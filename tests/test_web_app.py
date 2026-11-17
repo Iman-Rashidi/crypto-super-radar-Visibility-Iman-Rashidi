@@ -128,6 +128,11 @@ class WebAppHttpTests(unittest.TestCase):
         ai_review = {
             "status": "VETO",
             "model": "free-test-model",
+            "returned_model": "free-test-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
             "rationale_fa": "ریسک نامتقارن است.",
             "paper_entry_eligible": False,
         }
@@ -150,6 +155,38 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(ai_event["ai_model"], "free-test-model")
         self.assertFalse(any(item["event_type"] == "ORDER_SUBMITTED" for item in events))
 
+    def test_unattempted_ai_review_is_logged_as_not_called_without_claiming_a_model(self):
+        job = {
+            "status": "completed",
+            "stage": "AI_BLOCKED",
+            "ai_review": {
+                "status": "UNKNOWN",
+                "model": "configured-but-not-called",
+                "request_attempted": False,
+                "skip_reason_code": "NATIVE_COUNCIL_NOT_APPROVED",
+                "response_source": "NONE",
+                "response_validated": False,
+                "model_verified": False,
+                "paper_entry_eligible": False,
+            },
+            "result": {
+                "status": "AI_BLOCKED",
+                "signal": "LONG",
+                "reason_fa": "بازبینی بیرونی به دلیل عبور نکردن از شورای بومی اجرا نشد.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-ai-not-called", "BTC-USDT", job)
+        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        self.assertEqual(ai_event["event_type"], "AI_REVIEW_REQUESTED")
+        self.assertEqual(ai_event["ai_decision"], "NOT_CALLED")
+        self.assertEqual(ai_event["status"], "WARNING")
+        self.assertEqual(ai_event["ai_model"], "")
+        details = json.loads(ai_event["details"])
+        self.assertFalse(details["request_attempted"])
+        self.assertEqual(details["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
+
     def test_verified_demo_fill_creates_order_and_ai_approval_events(self):
         job = {
             "status": "completed",
@@ -157,6 +194,11 @@ class WebAppHttpTests(unittest.TestCase):
             "ai_review": {
                 "status": "APPROVED",
                 "model": "free-test-model",
+                "returned_model": "free-test-model",
+                "request_attempted": True,
+                "response_source": "LIVE_API",
+                "response_validated": True,
+                "model_verified": True,
                 "rationale_fa": "ریسک قابل قبول است.",
                 "paper_entry_eligible": True,
             },
