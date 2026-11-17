@@ -47,7 +47,11 @@ from .blofin_demo_executor import (
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
 from .database import storage_backend
-from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
+from .ai_second_opinion import (
+    ai_connection_status, second_ai_connection_status,
+    run_openrouter_connection_diagnostic, run_free_ai_second_opinion,
+    run_independent_ai_supervisor,
+)
 from .notion_event_sync import NotionEventOutbox
 from .demo_observability import (
     demo_history_monitor_status, queue_manual_action, start_demo_history_monitor,
@@ -3806,13 +3810,21 @@ def _blofin_demo_instrument_options(*, force: bool = False) -> dict:
 
 
 def _demo_ai_review_approved(review: Any) -> bool:
-    """Fail closed unless a real AI review explicitly approves Demo entry."""
+    """Fail closed unless a live response from the verified model explicitly approves."""
     if not isinstance(review, dict):
         return False
+    configured_model = str(review.get("configured_model") or review.get("model") or "").strip()
+    returned_model = str(review.get("returned_model") or "").strip()
     return (
         str(review.get("status") or "").strip().upper() == "APPROVED"
         and review.get("paper_entry_eligible") is True
-        and bool(str(review.get("model") or "").strip())
+        and review.get("request_attempted") is True
+        and str(review.get("response_source") or "").upper() == "LIVE_API"
+        and review.get("response_validated") is True
+        and review.get("model_verified") is True
+        and bool(configured_model)
+        and bool(returned_model)
+        and returned_model.split(":", 1)[0] == configured_model.split(":", 1)[0]
     )
 
 
@@ -5174,7 +5186,11 @@ class Handler(BaseHTTPRequestHandler):
             health = {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT") or None}
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
         if parsed.path == "/api/ai/status":
-            payload = ai_connection_status()
+            payload = {
+                "primary": ai_connection_status(),
+                "second_supervisor": second_ai_connection_status(),
+                "two_reviewer_gate": "REQUIRES_BOTH_VERIFIED_APPROVALS",
+            }
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/notion-sync/status":
