@@ -563,6 +563,12 @@ class NotionActivityJournal:
                MAX(synced_at_utc) AS last_success_utc
                FROM csr_notion_activity_journal"""
         ).fetchone()
+        latest = self._db.execute(
+            """SELECT experience_id, sync_status, attempts, last_error_type,
+                      last_http_status, updated_at_utc
+               FROM csr_notion_activity_journal
+               ORDER BY updated_at_utc DESC LIMIT 1"""
+        ).fetchone()
         return {
             "status": "CONFIGURED" if bool((os.getenv("NOTION_API_TOKEN") or "").strip()) else "NOT_CONFIGURED",
             "storage_backend": storage_backend(),
@@ -570,6 +576,12 @@ class NotionActivityJournal:
             "synced": int(row["synced"] or 0),
             "failed": int(row["failed"] or 0),
             "last_success_utc": row["last_success_utc"],
+            "latest_experience_id": latest["experience_id"] if latest else None,
+            "latest_sync_status": latest["sync_status"] if latest else None,
+            "latest_attempts": int(latest["attempts"] or 0) if latest else 0,
+            "last_error_type": latest["last_error_type"] if latest else None,
+            "last_http_status": latest["last_http_status"] if latest else None,
+            "latest_updated_at_utc": latest["updated_at_utc"] if latest else None,
         }
 
     def get_snapshot(self, experience_id: str) -> dict[str, Any] | None:
