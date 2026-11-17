@@ -191,6 +191,7 @@ class WebAppHttpTests(unittest.TestCase):
             "blofin-autopilot-toggle",
             "blofin-emergency-stop",
             "blofin-emergency-status",
+            "blofin-position-manager-status",
             "blofin-manual-order-form",
             "blofin-manual-direction",
             "blofin-manual-size",
@@ -205,6 +206,75 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("لغو همین سفارش", page)
         self.assertIn("PnL شناور", page)
         self.assertIn("اپراتور", page)
+
+    def test_profit_exit_decision_requires_exact_robot_position_and_positive_cushion(self):
+        order = {
+            "instrument_id": "BTC-USDT",
+            "position_id": "position-123",
+            "side": "LONG",
+            "take_profit": 104.0,
+            "created_at": 10_000,
+        }
+        position = {
+            "instId": "BTC-USDT",
+            "positionId": "position-123",
+            "positions": "0.1",
+            "unrealizedPnl": "1.25",
+        }
+        self.assertEqual(
+            web_app._blofin_demo_profit_exit_decision(
+                order, position, 104.1, now=10_100,
+                minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+            ),
+            "TAKE_PROFIT_LEVEL_REACHED",
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "unrealizedPnl": "-0.10"}, 104.1,
+                now=10_100, minimum_profit_usdt=0.50,
+            )
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "positionId": "different-position"}, 104.1,
+                now=10_100, minimum_profit_usdt=0.50,
+            )
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "instId": "XRP-USDT"}, 104.1,
+                now=10_100, minimum_profit_usdt=0.50,
+            )
+        )
+
+    def test_profit_time_exit_requires_minimum_positive_profit(self):
+        order = {
+            "instrument_id": "ETH-USDT",
+            "position_id": "position-456",
+            "side": "SHORT",
+            "take_profit": 90.0,
+            "created_at": 1_000,
+        }
+        position = {
+            "instId": "ETH-USDT",
+            "positionId": "position-456",
+            "positions": "-0.1",
+            "unrealizedPnl": "0.75",
+        }
+        self.assertEqual(
+            web_app._blofin_demo_profit_exit_decision(
+                order, position, 95.0, now=87_500,
+                minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+            ),
+            "MAX_HOLD_PROFIT_ONLY",
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "unrealizedPnl": "0.20"}, 95.0,
+                now=87_500, minimum_profit_usdt=0.50,
+                maximum_hold_seconds=86_400,
+            )
+        )
 
     def test_blofin_manual_write_routes_require_dashboard_token(self):
         routes = (
