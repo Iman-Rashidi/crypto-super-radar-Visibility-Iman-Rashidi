@@ -583,14 +583,14 @@ class NotionActivityJournal:
         latest = self._db.execute(
             """SELECT experience_id, sync_status, attempts, updated_at_utc
                FROM csr_notion_activity_journal
-               ORDER BY updated_at_utc DESC LIMIT 1"""
+               ORDER BY updated_at_utc DESC, rowid DESC LIMIT 1"""
         ).fetchone()
         last_error = self._db.execute(
             """SELECT experience_id, attempts, last_error_type, last_http_status,
                       last_error_stage, next_attempt_at
                FROM csr_notion_activity_journal
                WHERE last_error_type IS NOT NULL
-               ORDER BY updated_at_utc DESC, attempts DESC LIMIT 1"""
+               ORDER BY updated_at_utc DESC, rowid DESC, attempts DESC LIMIT 1"""
         ).fetchone()
         pending_with_error = self._db.execute(
             """SELECT COUNT(*) FROM csr_notion_activity_journal
