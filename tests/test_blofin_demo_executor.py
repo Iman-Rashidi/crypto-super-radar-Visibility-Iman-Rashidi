@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_executor import (
@@ -28,9 +29,9 @@ from crypto_super_radar.blofin_demo_readonly import (
 
 
 def signal_record(**overrides):
-    pass_count = int(overrides.get("gate_pass_count", 12))
-    fail_count = int(overrides.get("gate_fail_count", 0))
-    unknown_count = int(overrides.get("gate_unknown_count", max(0, 12 - pass_count - fail_count)))
+    pass_count = int(overrides.get("gate_pass_count", 0))
+    fail_count = int(overrides.get("gate_fail_count", 12))
+    unknown_count = int(overrides.get("gate_unknown_count", 0))
     statuses = (
         ["PASS"] * max(0, min(12, pass_count))
         + ["FAIL"] * max(0, min(12, fail_count))
@@ -39,9 +40,16 @@ def signal_record(**overrides):
     statuses += ["UNKNOWN"] * (12 - len(statuses))
     record = {
         "signal": "LONG",
-        "signal_id": "candle-2026-11-13T18:00:00Z",
+        "signal_id": "challenge1-v4:BTC-USDT:5m:2026-11-13T18:00:00+00:00",
+        "signal_bar_open_utc": "2026-11-13T18:00:00+00:00",
         "inst_id": "BTC-USDT",
+        "instrument_id": "BTC-USDT",
         "execution_profile": "CHALLENGE_1",
+        "execution": {
+            "status": "PASS",
+            "direction": "LONG",
+            "signal_id": "challenge1-v4:BTC-USDT:5m:2026-11-13T18:00:00+00:00",
+        },
         "confirmation_score": None,
         "estimated_risk_score": None,
         "gate_pass_count": pass_count,
@@ -56,21 +64,55 @@ def signal_record(**overrides):
     side = str(record["signal"]).upper()
     pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
     pattern_name = "Bullish Engulfing" if side == "LONG" else "Bearish Engulfing"
+    base_bar = datetime.fromisoformat("2026-11-13T18:00:00+00:00")
+    bar_offset = int(overrides.get("bar_offset_minutes", 0))
+    signal_bar = str(
+        overrides.get("signal_bar_open_utc")
+        or (base_bar + timedelta(minutes=bar_offset)).isoformat()
+    )
+    last_time = datetime.fromisoformat(signal_bar)
+    candles_5m = [
+        {
+            "open_time_utc": (last_time - timedelta(minutes=10)).isoformat(),
+            "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.4, "volume": 900.0,
+        },
+        {
+            "open_time_utc": (last_time - timedelta(minutes=5)).isoformat(),
+            "open": 99.4, "high": 100.5, "low": 99.0, "close": 100.0, "volume": 950.0,
+        },
+        {
+            "open_time_utc": signal_bar,
+            "open": 100.0 if side == "LONG" else 101.0,
+            "high": 101.5 if side == "LONG" else 101.2,
+            "low": 99.5 if side == "LONG" else 99.4,
+            "close": 101.0 if side == "LONG" else 100.0,
+            "volume": 1100.0,
+        },
+    ]
+    signal_id = f"challenge1-v4:BTC-USDT:5m:{signal_bar}"
+    record["signal_id"] = signal_id
+    record["signal_bar_open_utc"] = signal_bar
+    record["execution"] = {"status": "PASS", "direction": side, "signal_id": signal_id}
     record["challenge1_evidence"] = {
-        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
-        "setup_timeframe": "15m",
-        "context_timeframe": "1H",
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+        "setup_timeframe": "5m",
         "completed_candles_only": True,
+        "higher_timeframes_used": False,
         "legacy_12_gates_used_for_entry": False,
         "external_ai_required": False,
         "tinyfish_required": False,
+        "volume_is_advisory": True,
         "decision": side,
-        "detected_patterns": [{"name_en": pattern_name, "direction": pattern_direction}],
-        "chosen_pattern": {"name_en": pattern_name, "direction": pattern_direction},
-        "confirmation_candle": {
-            "open_time_utc": "2026-11-13T18:00:00+00:00",
-            "volume_confirmation": {"confirmed": True, "volume_ratio": 1.4},
+        "detected_patterns": [{
+            "name_en": pattern_name, "direction": pattern_direction,
+            "category": "CANDLESTICK", "timeframe": "5m",
+        }],
+        "chosen_pattern": {
+            "name_en": pattern_name, "direction": pattern_direction,
+            "category": "CANDLESTICK", "timeframe": "5m",
         },
+        "confirmation_candle": dict(candles_5m[-1]),
+        "candles_5m": candles_5m,
     }
     return record
 
@@ -120,7 +162,8 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
         self.assertEqual(plan["quantity"], "1250")
         self.assertEqual(plan["risk_budget_usdt"], 2.5)
         self.assertEqual(plan["leverage"], 3)
-        self.assertEqual(plan["client_order_id"], "205ccdbb36207dcd1acb9eba0a30ec04")
+        self.assertEqual(len(plan["client_order_id"]), 32)
+        self.assertTrue(plan["client_order_id"].isalnum())
 
     def test_legacy_gate_rows_are_observational_not_entry_requirements(self):
         for overrides in (
@@ -370,18 +413,18 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         budget = self.store.trade_budget_status()
         self.assertEqual(budget["unresolved_orders"], 1)
         second = build_demo_order_plan(
-            signal_record(signal_id="another-completed-candle"),
+            signal_record(bar_offset_minutes=5),
             instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
         )
         self.assertFalse(self.store.reserve_order(second, max_concurrent_positions=1))
 
     def test_list_unresolved_orders_returns_every_supported_state(self):
         first = build_demo_order_plan(
-            signal_record(signal_id="unresolved-oldest"),
+            signal_record(bar_offset_minutes=10),
             instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
         )
         second = build_demo_order_plan(
-            signal_record(signal_id="unresolved-next"),
+            signal_record(bar_offset_minutes=15),
             instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
         )
         self.assertTrue(self.store.reserve_order(first, max_concurrent_positions=3))
@@ -422,7 +465,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
     def test_aggregate_exposure_budget_blocks_third_risk_reservation_atomically(self):
         plans = [
             build_demo_order_plan(
-                signal_record(signal_id=f"aggregate-risk-{index}"),
+                signal_record(bar_offset_minutes=index * 5),
                 instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
             )
             for index in range(3)
@@ -437,11 +480,11 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
 
     def test_aggregate_margin_budget_blocks_second_full_margin_reservation(self):
         first = build_demo_order_plan(
-            signal_record(signal_id="aggregate-margin-first"),
+            signal_record(bar_offset_minutes=5),
             instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=1,
         )
         second = build_demo_order_plan(
-            signal_record(signal_id="aggregate-margin-second"),
+            signal_record(bar_offset_minutes=10),
             instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=1,
         )
         self.assertTrue(self.store.reserve_order(first, max_concurrent_positions=3))
@@ -450,11 +493,11 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
 
     def test_legacy_active_reservation_without_exposure_snapshot_fails_closed(self):
         first = build_demo_order_plan(
-            signal_record(signal_id="legacy-reservation"),
+            signal_record(bar_offset_minutes=0),
             instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
         )
         second = build_demo_order_plan(
-            signal_record(signal_id="new-after-legacy"),
+            signal_record(bar_offset_minutes=5),
             instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
         )
         self.assertTrue(self.store.reserve_order(first, max_concurrent_positions=3))
@@ -479,7 +522,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             try:
                 plans = [
                     build_demo_order_plan(
-                        signal_record(signal_id=f"parallel-candle-{index}"),
+                        signal_record(bar_offset_minutes=index * 5),
                         instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
                     )
                     for index in range(len(stores))
@@ -1028,7 +1071,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             results = []
             for index in range(7):
                 result = executor.execute(
-                    signal_record(signal_id=f"new-completed-candle-{index}"),
+                    signal_record(bar_offset_minutes=index * 5),
                     inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
                 )
                 results.append(result)
@@ -1105,7 +1148,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             store = BloFinDemoEventStore(":memory:")
         plans = [
             build_demo_order_plan(
-                signal_record(signal_id=f"multi-unresolved-{index}"),
+                signal_record(bar_offset_minutes=index * 5),
                 instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
             )
             for index in range(2)
