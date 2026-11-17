@@ -1210,8 +1210,7 @@ class WebAppHttpTests(unittest.TestCase):
                 }, clear=False),
                 patch.object(web_app, "_restore_blofin_autopilot_state"),
                 patch.object(
-                    web_app, "_reconcile_blofin_demo_orders_on_startup",
-                    return_value={"status": "RECONCILED", "orders_submitted": False},
+                    web_app, "_schedule_blofin_demo_startup_recovery",
                 ) as startup_reconcile,
                 patch.object(web_app, "_persist_blofin_autopilot_state"),
             ):
@@ -1222,6 +1221,30 @@ class WebAppHttpTests(unittest.TestCase):
             web_app.BLOFIN_STARTUP_RECONCILE_DONE = old_done
             web_app.BLOFIN_AUTOPILOT_STATE.clear()
             web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
+
+    def test_startup_recovery_is_scheduled_as_a_daemon_thread(self):
+        old_thread = web_app.BLOFIN_STARTUP_RECONCILE_THREAD
+        old_done = web_app.BLOFIN_STARTUP_RECONCILE_DONE
+        created = {}
+        class FakeThread:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+            def is_alive(self):
+                return False
+            def start(self):
+                created["started"] = True
+        try:
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = False
+            web_app.BLOFIN_STARTUP_RECONCILE_THREAD = None
+            with patch.object(web_app.threading, "Thread", FakeThread):
+                web_app._schedule_blofin_demo_startup_recovery()
+            self.assertTrue(created["daemon"])
+            self.assertTrue(created["started"])
+            self.assertEqual(created["name"], "blofin-demo-startup-recovery")
+            self.assertIs(created["target"], web_app._reconcile_blofin_demo_orders_on_startup)
+        finally:
+            web_app.BLOFIN_STARTUP_RECONCILE_THREAD = old_thread
+            web_app.BLOFIN_STARTUP_RECONCILE_DONE = old_done
 
     def test_startup_reconciliation_fails_closed_without_durable_turso(self):
         old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
