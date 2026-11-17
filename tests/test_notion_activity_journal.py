@@ -37,16 +37,14 @@ def sample_snapshot():
         "symbol": "BTC-USDT",
         "signal": "LONG",
         "status": "FILLED",
-        "reason_fa": "Bullish Engulfing pattern on a completed 15m candle.",
+        "reason_fa": "Bullish Engulfing pattern on a completed 5m candle.",
         "analysis_time_utc": "2026-11-17T16:15:00Z",
         "signal_bar_open_utc": "2026-11-17T16:00:00Z",
-        "engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+        "engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
         "patterns": [{"name_en": "Bullish Engulfing", "direction": "BULLISH"}],
         "volume_confirmation": {"confirmed": False, "volume_ratio": 0.8},
         "evidence": {"completed_candles_only": True},
         "candles_5m": candles(40),
-        "candles_15m": candles(40, base=95.0),
-        "candles_1h": candles(20, base=90.0),
         "entry_price": 108.0,
         "stop_loss": 105.0,
         "take_profit": 114.0,
@@ -74,7 +72,8 @@ class NotionActivityJournalTests(unittest.TestCase):
         saved = self.journal.get_snapshot(snapshot["experience_id"])
         self.assertEqual(saved["symbol"], "BTC-USDT")
         self.assertEqual(len(saved["candles_5m"]), 40)
-        self.assertEqual(len(saved["candles_15m"]), 40)
+        self.assertNotIn("candles_15m", saved)
+        self.assertNotIn("candles_1h", saved)
         changed = dict(snapshot)
         changed["status"] = "CLOSED_RECONCILED"
         changed["closed_confirmed"] = True
@@ -251,8 +250,8 @@ class NotionActivityJournalTests(unittest.TestCase):
         csv_upload = next(item for item in upload_calls if item["content_type"] == "text/csv")
         self.assertEqual(chart_upload["payload"][:8], bytes([137, 80, 78, 71, 13, 10, 26, 10]))
         self.assertIn(b"5m,", csv_upload["payload"])
-        self.assertIn(b"15m,", csv_upload["payload"])
-        self.assertIn(b"1H,", csv_upload["payload"])
+        self.assertNotIn(b"15m,", csv_upload["payload"])
+        self.assertNotIn(b"1H,", csv_upload["payload"])
         page_request = next(
             item for item in request_calls
             if item[1].endswith("/pages")
@@ -287,11 +286,11 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertNotIn("تصویر چارت", properties)
         self.assertNotIn("داده OHLCV", properties)
 
-    def test_csv_contains_both_real_market_timeframes(self):
+    def test_csv_contains_only_closed_5m_market_candles(self):
         payload = render_ohlcv_csv(sample_snapshot()).decode("utf-8")
         self.assertIn("5m,", payload)
-        self.assertIn("15m,", payload)
-        self.assertIn("1H,", payload)
+        self.assertNotIn("15m,", payload)
+        self.assertNotIn("1H,", payload)
         self.assertIn("open,high,low,close,volume", payload)
 
 
