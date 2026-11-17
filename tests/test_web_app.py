@@ -126,8 +126,15 @@ class WebAppHttpTests(unittest.TestCase):
 
     def test_ai_veto_is_recorded_separately_from_robot_analysis(self):
         ai_review = {
+            "reviewer_id": "nemotron",
+            "provider": "OpenRouter",
             "status": "VETO",
             "model": "free-test-model",
+            "returned_model": "free-test-model",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
             "rationale_fa": "ریسک نامتقارن است.",
             "paper_entry_eligible": False,
         }
@@ -144,7 +151,7 @@ class WebAppHttpTests(unittest.TestCase):
             },
         }
         events = web_app._blofin_job_notion_events("cycle-ai-veto", "BTC-USDT", job)
-        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        ai_event = next(item for item in events if item["actor"] == "Nemotron Supervisor")
         self.assertEqual(ai_event["event_type"], "AI_VETO")
         self.assertEqual(ai_event["ai_decision"], "REJECT")
         self.assertEqual(ai_event["ai_model"], "free-test-model")
@@ -154,11 +161,52 @@ class WebAppHttpTests(unittest.TestCase):
         job = {
             "status": "completed",
             "stage": "MONITORING",
-            "ai_review": {
-                "status": "APPROVED",
-                "model": "free-test-model",
-                "rationale_fa": "ریسک قابل قبول است.",
-                "paper_entry_eligible": True,
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron",
+                    "actor": "Nemotron Supervisor",
+                    "review": {
+                        "reviewer_id": "nemotron",
+                        "status": "APPROVED",
+                        "provider": "OpenRouter",
+                        "model": "free-test-model",
+                        "returned_model": "free-test-model",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": True,
+                        "model_verified": True,
+                        "paper_entry_eligible": True,
+                        "rationale_fa": "نظر اول الگوی کندلی را تأیید کرد.",
+                    },
+                },
+                {
+                    "reviewer_id": "second_ai",
+                    "actor": "Second AI Supervisor",
+                    "review": {
+                        "reviewer_id": "second_ai",
+                        "status": "APPROVED",
+                        "provider": "Independent Provider",
+                        "model": "independent-model:free",
+                        "returned_model": "independent-model:free",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": True,
+                        "model_verified": True,
+                        "paper_entry_eligible": True,
+                        "rationale_fa": "نظر دوم مستقل الگوی کندلی را تأیید کرد.",
+                    },
+                },
+            ],
+            "ai_consensus": {
+                "status": "AGREEMENT",
+                "primary_status": "APPROVED",
+                "second_status": "APPROVED",
+                "primary_verified": True,
+                "second_verified": True,
+                "primary_approved": True,
+                "second_approved": True,
+                "two_reviewer_approval": True,
+                "decision": "APPROVE",
             },
             "result": {
                 "status": "FILLED",
@@ -177,8 +225,10 @@ class WebAppHttpTests(unittest.TestCase):
         filled = next(item for item in events if item["event_type"] == "ORDER_FILLED")
         self.assertEqual(filled["order_id"], "demo-order-123")
         self.assertEqual(filled["position_id"], "demo-position-456")
-        approval = next(item for item in events if item["event_type"] == "AI_APPROVAL")
-        self.assertEqual(approval["ai_decision"], "APPROVE")
+        approvals = [item for item in events if item["event_type"] == "AI_APPROVAL"]
+        self.assertEqual({item["reviewer_id"] for item in approvals}, {"nemotron", "second_ai"})
+        self.assertEqual({item["ai_provider"] for item in approvals}, {"OpenRouter", "Independent Provider"})
+        self.assertTrue(all(item["ai_decision"] == "APPROVE" for item in approvals))
 
     def test_notion_sync_status_includes_activity_chart_journal_counters(self):
         event_outbox = MagicMock()
@@ -276,7 +326,13 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
         events = web_app._blofin_job_notion_events("journal-job-001", "BTC-USDT", job)
         self.assertEqual(events[0]["ai_decision"], "NOT_CALLED")
-        self.assertFalse(any(event["actor"] == "AI Supervisor" for event in events))
+        reviewer_events = [
+            event for event in events
+            if event["actor"] in {"Nemotron Supervisor", "Second AI Supervisor"}
+        ]
+        self.assertEqual({event["reviewer_id"] for event in reviewer_events}, {"nemotron", "second_ai"})
+        self.assertTrue(all(event["ai_decision"] == "NOT_CALLED" for event in reviewer_events))
+        self.assertTrue(all(event["ai_call_status"] == "NOT_CALLED" for event in reviewer_events))
 
     def test_profit_exit_decision_requires_exact_robot_position_and_positive_cushion(self):
         order = {
@@ -700,11 +756,26 @@ class WebAppHttpTests(unittest.TestCase):
             "configured": True,
             "secret_sent_to_model": False,
         }
-        with patch.object(web_app, "ai_connection_status", return_value=payload):
+        second = {
+            "reviewer_id": "second_ai",
+            "provider": None,
+            "model": None,
+            "status": "NOT_CONFIGURED",
+            "configured": False,
+            "configuration_issues": ["CSR_SECOND_AI_API_KEY_MISSING"],
+            "secret_sent_to_model": False,
+            "paper_entry_eligible": False,
+        }
+        with patch.object(web_app, "ai_connection_status", return_value=payload), patch.object(
+            web_app, "second_ai_connection_status", return_value=second
+        ):
             status, _, body = self.request("GET", "/api/ai/status")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), payload)
-        self.assertNotIn("api_key", body.decode().lower())
+        response = json.loads(body)
+        self.assertEqual(response["provider"], payload["provider"])
+        self.assertEqual(response["second_supervisor"], second)
+        self.assertEqual(response["two_reviewer_gate"], "REQUIRES_BOTH_VERIFIED_APPROVALS")
+        self.assertFalse(response["second_supervisor"]["secret_sent_to_model"])
 
     def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
         payload = {
