@@ -5318,6 +5318,11 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         partial_rows=partial_rows if isinstance(partial_rows, list) else [],
                     )
                     if outcome:
+                        activity_update = _update_blofin_activity_after_close(
+                            outcome, instrument_id, position_id,
+                            closed_rows if isinstance(closed_rows, list) else [],
+                            partial_rows if isinstance(partial_rows, list) else [],
+                        )
                         actions.append({
                             "status": outcome.get("status"),
                             "instrument_id": instrument_id,
@@ -5326,6 +5331,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                             "realized_pnl_after_reported_trading_fees": outcome.get(
                                 "realized_pnl_after_reported_trading_fees"
                             ),
+                            "activity_report_sync": activity_update,
                         })
                 except Exception as exc:
                     actions.append({
@@ -8976,6 +8982,13 @@ def _update_blofin_activity_after_close(
         if not isinstance(snapshot, dict):
             return {"status": "ACTIVITY_ROW_NOT_FOUND"}
         matching = []
+        def finite_number(value):
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if math.isfinite(number) else None
+
         for row in list(partial_rows or []) + list(closed_rows or []):
             if not isinstance(row, dict):
                 continue
@@ -8984,8 +8997,8 @@ def _update_blofin_activity_after_close(
                 or str(row.get("instId") or "").upper() != str(instrument_id).upper()
             ):
                 continue
-            quantity = _blofin_safe_float(row.get("closePositions"))
-            price = _blofin_safe_float(row.get("closeAveragePrice"))
+            quantity = finite_number(row.get("closePositions"))
+            price = finite_number(row.get("closeAveragePrice"))
             if quantity is None or quantity <= 0 or price is None or price <= 0:
                 continue
             matching.append((row, quantity, price))
@@ -9334,9 +9347,14 @@ def _blofin_demo_autopilot_worker() -> None:
                 notion_queue_result = _queue_blofin_job_notion_events(
                     job_id, instrument_id, finished_job
                 )
+                activity_queue_result = _queue_blofin_activity_journal(
+                    job_id, instrument_id, finished_job
+                )
                 with LOCK:
                     BLOFIN_AUTOPILOT_STATE["notion_last_queue_status"] = notion_queue_result.get("status")
                     BLOFIN_AUTOPILOT_STATE["notion_last_queued_count"] = notion_queue_result.get("queued", 0)
+                    BLOFIN_AUTOPILOT_STATE["notion_activity_last_queue_status"] = activity_queue_result.get("status")
+                    BLOFIN_AUTOPILOT_STATE["notion_activity_last_experience_id"] = activity_queue_result.get("experience_id")
             if not batch_jobs:
                 with LOCK:
                     BLOFIN_AUTOPILOT_STATE.update({
