@@ -209,7 +209,10 @@ def build_demo_order_plan(
         volume = confirmation.get("volume_confirmation") if isinstance(confirmation, Mapping) else None
         expected_pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
         if (
-            evidence.get("decision_engine_version") != "CHALLENGE_1_LOCAL_RULES_V1"
+            evidence.get("decision_engine_version") not in {
+                "CHALLENGE_1_LOCAL_RULES_V1",
+                "CHALLENGE_1_LOCAL_RULES_V2",
+            }
             or evidence.get("completed_candles_only") is not True
             or evidence.get("legacy_12_gates_used_for_entry") is not False
             or evidence.get("external_ai_required") is not False
@@ -223,9 +226,12 @@ def build_demo_order_plan(
             or not isinstance(confirmation, Mapping)
             or not str(confirmation.get("open_time_utc") or "").strip()
             or not isinstance(volume, Mapping)
-            or volume.get("confirmed") is not True
         ):
-            raise BloFinDemoExecutionBlocked("Challenge 1 pattern/closed-candle confirmation evidence is incomplete or inconsistent.")
+            raise BloFinDemoExecutionBlocked(
+                "Challenge 1 pattern/closed-candle evidence is incomplete or inconsistent."
+            )
+        # V2 deliberately treats volume and 1H context as advisory. Requiring
+        # volume.confirmed here would silently veto valid V2 candle-pattern setups.
     else:
         profile_rules = {
             "EASY": {"required": {1, 2, 3, 4, 5, 6, 9}, "minimum_pass": 7, "minimum_score": 55.0},
