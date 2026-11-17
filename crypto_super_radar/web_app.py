@@ -6356,7 +6356,20 @@ let blofinInstrumentRecords=[];
                 }
                 const activityQueueState=result.notion_activity_last_queue_status;
                 if(activityQueueState){
-                  liveMessage+=' · ثبت ژورنال بازار در Notion: '+activityQueueState;
+                  liveMessage+=' · صف ژورنال Notion: '+activityQueueState;
+                }
+                const syncState=result.notion_activity_sync||{};
+                if(syncState.status){
+                  liveMessage+=' · همگام‌سازی چارت: '+syncState.status
+                    +' · ثبت‌شده '+(syncState.synced??0)
+                    +' · در صف '+(syncState.pending??0)
+                    +' · ناموفق '+(syncState.failed??0);
+                  if(syncState.last_http_status||syncState.last_error_type){
+                    liveMessage+=' · خطای آخر '+(syncState.last_error_type||'')
+                      +(syncState.last_http_status?'/HTTP '+syncState.last_http_status:'');
+                  }else if(syncState.last_worker_error_type){
+                    liveMessage+=' · خطای Worker '+syncState.last_worker_error_type;
+                  }
                 }
                 autopilotStatus.textContent=liveMessage
                   +' وضعیت: '+state+'. چرخه‌های اجراشده: '+(result.cycles_started??'—');
