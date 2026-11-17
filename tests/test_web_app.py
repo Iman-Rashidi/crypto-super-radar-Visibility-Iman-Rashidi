@@ -143,6 +143,14 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(robot_event["signal"], "NO_TRADE")
         self.assertEqual(robot_event["cycle_id"], "cycle-no-trade")
         self.assertIn("orders_submitted", robot_event["details"])
+        reviewer_events = [item for item in events if item["actor"] in {
+            "Nemotron Supervisor", "Second AI Supervisor"
+        }]
+        self.assertEqual(len(reviewer_events), 2)
+        self.assertEqual({item["event_type"] for item in reviewer_events}, {"AI_REVIEW_REQUESTED"})
+        self.assertEqual({item["ai_decision"] for item in reviewer_events}, {"NOT_CALLED"})
+        self.assertEqual({item["ai_model"] for item in reviewer_events}, {""})
+        self.assertEqual({item["reviewer_consensus"] for item in reviewer_events}, {"NOT_CALLED"})
 
     def test_ai_veto_is_recorded_separately_from_robot_analysis(self):
         ai_review = {
