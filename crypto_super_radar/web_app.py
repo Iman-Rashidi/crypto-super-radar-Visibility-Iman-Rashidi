@@ -49,6 +49,7 @@ from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_I
 from .database import storage_backend
 from .ai_second_opinion import ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion
 from .notion_event_sync import NotionEventOutbox
+from .notion_activity_journal import NotionActivityJournal
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -4312,7 +4313,11 @@ def _run_blofin_demo_execution_job(
             }
 
         ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
-        if not _demo_ai_review_approved(ai_review):
+        ai_review_is_advisory = execution_profile == "CHALLENGE_1"
+        if isinstance(ai_review, dict):
+            ai_review["execution_role"] = "ADVISORY_ONLY" if ai_review_is_advisory else "ENTRY_REVIEW"
+            ai_review["entry_gate_enforced"] = not ai_review_is_advisory
+        if not ai_review_is_advisory and not _demo_ai_review_approved(ai_review):
             _set_blofin_execution_job(
                 job_id, "completed", stage="AI_BLOCKED",
                 message_fa="ناظر هوش مصنوعی تأیید معتبر صادر نکرد؛ ورود مسدود شد و هیچ سفارشی ارسال نشد.",
@@ -4533,9 +4538,11 @@ def _run_blofin_demo_execution_job(
         )
         result = {
             **execution,
+            **(challenge_record if execution_profile == "CHALLENGE_1" and isinstance(challenge_record, dict) else {}),
             "status": mapped_state or execution.get("status", "ACCEPTED"),
             "environment": "BLOFIN_DEMO",
             "instrument_id": instrument_id,
+            "learning_experience_id": learning_experience_id,
             "execution_profile": execution_profile,
             "analysis": gate_summary,
             "elliott_wave": wave_report,
@@ -5879,7 +5886,8 @@ class Handler(BaseHTTPRequestHandler):
             let autopilotIsEnabled=false;
             let autopilotIsStopping=false;
             let autopilotStatusPollTimer=null;
-            let autopilotStatusRefreshInFlight=false;
+            let autopilotStatusLatestRequest=0;
+            let autopilotControlBusy=false;
             let selectedExecutionMode='manual';
             let manualActionBusy=false;
             if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!emergencyStopButton||!emergencyStatus||!positionManagerStatus||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
@@ -6282,12 +6290,15 @@ let blofinInstrumentRecords=[];
               if(auto)refreshExecutionReadiness();
             }
             async function refreshAutoPilotStatus(){
-              if(autopilotStatusRefreshInFlight)return null;
-              autopilotStatusRefreshInFlight=true;
+              const requestSequence=++autopilotStatusLatestRequest;
               try{
-                const response=await fetch('/api/blofin/demo/autopilot/status?status_only=1',{cache:'no-store'});
+                const response=await fetch('/api/blofin/demo/autopilot/status?status_only=1&client_ts='+Date.now(),{
+                  cache:'no-store',headers:{'Cache-Control':'no-cache'}
+                });
                 const result=await response.json();
                 if(!response.ok)throw new Error(result.message_fa||'وضعیت AutoPilot دریافت نشد.');
+                // A slower response from an earlier poll/click must never overwrite newer state.
+                if(requestSequence!==autopilotStatusLatestRequest)return result;
                 autopilotIsEnabled=result.enabled===true;
                 autopilotIsStopping=String(result.status||'').toUpperCase()==='STOPPING';
                 const state=result.status||'UNKNOWN';
@@ -6325,13 +6336,14 @@ let blofinInstrumentRecords=[];
                 }
                 return result;
               }catch(error){
-                autopilotStatus.textContent='خواندن وضعیت AutoPilot ممکن نشد؛ حالت دستی و خودکار تا بررسی وضعیت سرور قفل می‌مانند.';
-                autopilotIsEnabled=true;
-                autopilotIsStopping=true;
-                manualOpenButton.disabled=true;
+                if(requestSequence===autopilotStatusLatestRequest){
+                  autopilotStatus.textContent='خواندن وضعیت AutoPilot ممکن نشد؛ تا تأیید دوباره سرور هیچ ورود دستی یا خودکاری انجام نمی‌شود.';
+                  autopilotIsEnabled=true;
+                  autopilotIsStopping=true;
+                  manualOpenButton.disabled=true;
+                }
                 return null;
               }finally{
-                autopilotStatusRefreshInFlight=false;
                 if(autopilotIsEnabled||autopilotIsStopping){
                   if(autopilotStatusPollTimer===null){
                     autopilotStatusPollTimer=window.setInterval(()=>{
@@ -6356,39 +6368,51 @@ let blofinInstrumentRecords=[];
               if(!response.ok)throw new Error(payload.message_fa||payload.status||'درخواست رد شد.');
               return payload;
             }
-            async function setAutoPilot(enabled){
+            async function setAutoPilot(enabled,options={}){
+              if(autopilotControlBusy)return false;
               if(!tokenInput.value.trim()){
-                autopilotStatus.textContent='برای تغییر AutoPilot ابتدا توکن پنل را در کادر بالاتر وارد کن.';
+                autopilotStatus.textContent='برای شروع یا توقف AutoPilot، توکن پنل را یک‌بار در کادر بالاتر وارد کن.';
                 return false;
               }
-              const promptText=enabled
-                ?'AutoPilot در BloFin DEMO فعال می‌شود و طبق زمان‌بندی بازارهای منتخب را پایش می‌کند. آیا ادامه می‌دهی؟'
-                :'AutoPilot متوقف می‌شود. چرخه‌ای که همین حالا در حال اجراست بدون قطع ناگهانی تمام خواهد شد. پس از پایان آن حالت دستی فعال می‌شود. ادامه؟';
-              if(!window.confirm(promptText))return false;
+              // Starting is a true one-click action; stopping can ask for confirmation.
+              if(!enabled&&options.confirmStop===true&&!window.confirm(
+                'AutoPilot متوقف می‌شود؛ چرخه جاری بدون قطع ناگهانی تمام می‌شود و پس از آن حالت دستی فعال خواهد شد. ادامه؟'
+              ))return false;
+              autopilotControlBusy=true;
+              modeAutopilotButton.disabled=true;
+              modeManualButton.disabled=true;
               autopilotToggle.disabled=true;
+              autopilotStatus.textContent=enabled
+                ?'درخواست شروع دریافت شد؛ اتصال Demo و آغاز اسکن بازار در سرور بررسی می‌شود...'
+                :'درخواست توقف به سرور ارسال می‌شود...';
               try{
                 const result=await postBlofinAction('/api/blofin/demo/autopilot/control',{enabled:enabled?'true':'false'});
-                autopilotStatus.textContent=result.message_fa||'درخواست تغییر AutoPilot ثبت شد.';
+                autopilotStatus.textContent=result.message_fa||'درخواست کنترل AutoPilot ثبت شد؛ وضعیت زنده در حال تازه‌سازی است.';
                 await refreshAutoPilotStatus();
                 if(!enabled&&result.status==='STOPPING'){
-                  autopilotStatus.textContent+=' پس از پایان چرخه جاری دوباره وضعیت را تازه کن.';
+                  autopilotStatus.textContent+=' چرخه جاری هنوز در حال پایان است.';
                 }
                 return true;
               }catch(error){
                 autopilotStatus.textContent=String(error.message||error);
+                await refreshAutoPilotStatus();
                 return false;
               }finally{
+                autopilotControlBusy=false;
+                modeAutopilotButton.disabled=false;
+                modeManualButton.disabled=false;
                 autopilotToggle.disabled=false;
+                await refreshAutoPilotStatus();
               }
             }
             autopilotToggle.addEventListener('click',function(){
-              setAutoPilot(!autopilotIsEnabled);
+              setAutoPilot(!autopilotIsEnabled,{confirmStop:autopilotIsEnabled});
             });
             emergencyStopButton.addEventListener('click',async function(){
               if(!(autopilotIsEnabled||autopilotIsStopping))return;
               emergencyStopButton.disabled=true;
               emergencyStatus.textContent='درخواست توقف اضطراری در حال ارسال به سرور است...';
-              const stopped=await setAutoPilot(false);
+              const stopped=await setAutoPilot(false,{confirmStop:true});
               if(!stopped){
                 emergencyStopButton.disabled=false;
                 emergencyStatus.textContent='سرور توقف را تأیید نکرد؛ وضعیت را دوباره بررسی کن.';
@@ -6398,7 +6422,7 @@ let blofinInstrumentRecords=[];
             });
             modeManualButton.addEventListener('click',async function(){
               if(autopilotIsEnabled){
-                const stopped=await setAutoPilot(false);
+                const stopped=await setAutoPilot(false,{confirmStop:true});
                 if(!stopped)return;
                 const state=await refreshAutoPilotStatus();
                 if(state&&state.status==='STOPPING'){
@@ -6412,6 +6436,7 @@ let blofinInstrumentRecords=[];
             modeAutopilotButton.addEventListener('click',async function(){
               applyExecutionMode('autopilot');
               if(!autopilotIsEnabled)await setAutoPilot(true);
+              else await refreshAutoPilotStatus();
             });
             async function refreshManualAccount(){
               const token=tokenInput.value.trim();
