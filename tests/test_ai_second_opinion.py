@@ -144,7 +144,6 @@ def challenge1_result(*, pattern_confirmed=True):
             )
             for gate_id in range(1, 13)
         ],
-        to_record=lambda: record,
     )
 
 
