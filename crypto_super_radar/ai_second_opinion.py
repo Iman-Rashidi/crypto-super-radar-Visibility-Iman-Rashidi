@@ -389,7 +389,6 @@ def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "correct side geometry and reward_risk >= 1.8. Never relax account risk limits. "
         "Expected side is " + expected_side + ". The selected pattern name must match exactly: " + chosen_name + ". "
         "Return exactly one JSON object, no markdown, using this schema: "
-        "{"
         '{"pattern_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","pattern_name":"exact selected name or NONE","reason_fa":"..."},'
         '"price_action_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
         '"timeframe_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
