@@ -4298,7 +4298,7 @@ def _run_blofin_demo_execution_job(
             return
 
         if execution_profile == "CHALLENGE_1":
-            # Challenge 1 deliberately makes its entry decision from completed 15m
+            # Challenge 1 deliberately makes its entry decision from completed 5m
             # candles and detected patterns. Do not make a remote AI call or wait for
             # an opinion that is not part of this execution profile.
             ai_review = {
@@ -7724,7 +7724,7 @@ let blofinInstrumentRecords=[];
               <label>تایم‌فریم
                 <select id="live-radar-interval">
                   <option value="1s">۱ ثانیه</option><option value="1m">۱ دقیقه</option><option value="5m" selected>۵ دقیقه</option>
-                  <option value="15m">۵ دقیقه</option><option value="1h">۱ ساعت</option>
+                  <option value="5m">۵ دقیقه</option><option value="1h">۱ ساعت</option>
                   <option value="4h">۴ ساعت</option><option value="1d">۱ روز</option>
                   <option value="1w">۱ هفته</option><option value="1M">۱ ماه</option>
                 </select>
@@ -9281,7 +9281,7 @@ def _start_notion_sync_worker() -> None:
 
 
 def _blofin_demo_next_5m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
-    """Return the delay and timestamp just after the next completed 15-minute candle."""
+    """Return the delay and timestamp just after the next completed 5-minute candle."""
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
