@@ -3998,16 +3998,9 @@ def _run_blofin_demo_execution_job(
             mtf_signal = challenge_record.get("execution") if isinstance(challenge_record.get("execution"), dict) else {}
             last_candle_time = challenge_record.get("signal_bar_open_utc")
             last_candle_close = challenge_record.get("entry_price_usd")
-            gates = [
-                {
-                    "gate_id": gate_id,
-                    "status": "UNKNOWN",
-                    "name_fa": f"فیلتر عمومی {gate_id}",
-                    "reason_fa": "در موتور Challenge 1 برای صدور سیگنال استفاده نمی‌شود؛ فقط در لایه نظارت جداگانه می‌ماند.",
-                    "execution_role": "OBSERVATION_ONLY",
-                }
-                for gate_id in range(1, 13)
-            ]
+            # No generic Radar gate calculations or placeholder rows are created
+            # for the candle-pattern-only Demo trading path.
+            gates = []
             challenge_record["gates"] = gates
             challenge_record["elliott_wave"] = {}
             metrics = {
@@ -4144,17 +4137,19 @@ def _run_blofin_demo_execution_job(
             "gate_enforcement": "OBSERVATION_ONLY" if pattern_only else "PROFILE_POLICY",
             "trading_supervisor_input": "CLOSED_CANDLE_OHLCV_AND_PATTERNS_ONLY" if pattern_only else "GENERAL_RADAR_EVIDENCE",
             "signal": direction or "UNKNOWN",
-            "gate_pass_count": pass_count, "gate_fail_count": fail_count,
-            "gate_unknown_count": unknown_count,
-            "required_gate_ids": sorted(profile_rule["required"]),
-            "min_pass_count": profile_rule["min_pass"],
-            "confirmation_score": record.get("confirmation_score"),
+            "gate_report_status": "NOT_RUN" if pattern_only else "REPORTED",
+            "gate_pass_count": None if pattern_only else pass_count,
+            "gate_fail_count": None if pattern_only else fail_count,
+            "gate_unknown_count": None if pattern_only else unknown_count,
+            "required_gate_ids": [] if pattern_only else sorted(profile_rule["required"]),
+            "min_pass_count": None if pattern_only else profile_rule["min_pass"],
+            "confirmation_score": None if pattern_only else record.get("confirmation_score"),
             "estimated_risk_score": record.get("estimated_risk_score"),
             "entry_reference_price": record.get("entry_price_usd"),
             "stop_loss": record.get("stop_loss_usd"),
             "take_profit": record.get("take_profit_usd"),
             "signal_fa": {"LONG": "خرید (LONG)", "SHORT": "فروش استقراضی (SHORT)"}.get(direction, "بدون معامله"),
-            "gates_fa": _blofin_gate_rows_fa(gates),
+            "gates_fa": [] if pattern_only else _blofin_gate_rows_fa(gates),
         }
         _set_blofin_execution_job(
             job_id, "running",
