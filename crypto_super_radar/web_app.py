@@ -4236,8 +4236,8 @@ def _run_blofin_demo_execution_job(
                     trade_context={
                         "asset": asset.raw, "instrument_id": instrument_id,
                         "execution_profile": "CHALLENGE_1",
-                        "execution_timeframe": "15m",
-                        "trend_confirmation_timeframe": "1H",
+                        "execution_timeframe": "5m",
+                        "higher_timeframes_used": False,
                         "completed_candles_only": True,
                     },
                     result={
@@ -4493,15 +4493,16 @@ def _run_blofin_demo_execution_job(
         analysis.stop_loss = mtf_signal["stop_loss"]
         analysis.take_profit = mtf_signal["take_profit"]
         analysis.metrics["execution_profile"] = execution_profile
-        analysis.metrics["blofin_mtf_execution"] = {
+        analysis.metrics["challenge1_execution"] = {
             key: value for key, value in mtf_signal.items()
             if key not in {"status", "reason_fa"}
         }
         trade_context.update({
             "last_completed_candle_time_utc": signal_bar,
-            "mtf_confirmation": mtf_signal,
-            "execution_timeframe": "15m",
-            "trend_confirmation_timeframe": "1H",
+            "challenge1_execution": mtf_signal,
+            "execution_timeframe": "5m",
+            "higher_timeframes_used": False,
+            "completed_candles_only": True,
         })
         gate_summary.update({
             "entry_reference_price": mtf_signal["entry_price"],
@@ -4573,11 +4574,10 @@ def _run_blofin_demo_execution_job(
         _set_blofin_execution_job(
             job_id, "running", stage="DEMO_ORDER_GUARDS",
             message_fa="کنترل حساب Demo، مارجین، قیمت، حجم حداقل قرارداد و حد ضرر/حد سود.",
-            ai_review={
-                "status": ai_status, "model": ai_review.get("model"),
-                "returned_model": ai_review.get("returned_model"),
-                "latency_ms": ai_review.get("latency_ms"),
-            },
+            ai_review=ai_review,
+            ai_reviews=ai_reviews,
+            ai_consensus=ai_consensus,
+            ai_status=ai_status,
             analysis=gate_summary,
             elliott_wave=wave_report,
             trade_context=trade_context,
@@ -8304,15 +8304,6 @@ def _start_blofin_demo_autopilot() -> None:
 
 
 
-NOTION_SYNC_THREAD = None
-NOTION_SYNC_START_LOCK = threading.Lock()
-NOTION_ACTIVITY_SYNC_STATE = {
-    "status": "STARTING", "pending": 0, "synced": 0, "failed": 0,
-    "last_success_utc": None, "latest_experience_id": None,
-    "last_error_type": None, "last_http_status": None,
-    "last_checked_at_utc": None,
-}
-
 def _demo_ai_review_approved(review: Any) -> bool:
     """Fail closed unless a real AI review explicitly approves Demo entry."""
     if not isinstance(review, dict):
@@ -8625,13 +8616,14 @@ def _blofin_manual_close_position(
         }
         store.record_manual_action(audit_event_id, requested_event, audit)
         try:
-            response = client.close_futures_position(
-                inst_id=instrument_id,
-                margin_mode=margin_mode,
-                position_side=position_side,
-                client_order_id=action_id,
-                position_id=actual_position_id or None,
-            )
+            with BLOFIN_ORDER_SUBMISSION_LOCK:
+                response = client.close_futures_position(
+                    inst_id=instrument_id,
+                    margin_mode=margin_mode,
+                    position_side=position_side,
+                    client_order_id=action_id,
+                    position_id=actual_position_id or None,
+                )
         except Exception as exc:
             store.record_manual_action(audit_event_id, unknown_event, {
                 **audit,
@@ -12522,7 +12514,7 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "reviewer_consensus": reviewer_consensus,
         "ai_consensus": consensus,
         "ai_reviews": ai_reviews,
-        "source_url": "RENDER_EXTERNAL_URL/api/blofin/demo/autopilot/status",
+        "source_url": (os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") + "/api/blofin/demo/autopilot/status") if os.getenv("RENDER_EXTERNAL_URL", "").strip() else "",
     }
 
 def _queue_blofin_activity_journal(job_id: str, instrument_id: str, job: dict) -> dict:
@@ -12794,7 +12786,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         "experience_id": experience_id,
         "order_id": order_id,
         "position_id": position_id,
-        "source_url": "RENDER_EXTERNAL_URL/api/blofin/demo/autopilot/status",
+        "source_url": (os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") + "/api/blofin/demo/autopilot/status") if os.getenv("RENDER_EXTERNAL_URL", "").strip() else "",
         "input_data_type": "LIVE_MARKET",
         "reviewer_consensus": consensus_status,
     }
@@ -13016,6 +13008,21 @@ def _notion_sync_worker() -> None:
                 NOTION_ACTIVITY_SYNC_STATE["status"] = "WORKER_ERROR"
                 NOTION_ACTIVITY_SYNC_STATE["last_worker_error_type"] = activity_sync_error
         time.sleep(interval)
+
+
+
+def _start_notion_sync_worker() -> None:
+    """Start a single best-effort outbox flusher for this web process."""
+    global NOTION_SYNC_THREAD
+    with NOTION_SYNC_START_LOCK:
+        if NOTION_SYNC_THREAD is not None and NOTION_SYNC_THREAD.is_alive():
+            return
+        NOTION_SYNC_THREAD = threading.Thread(
+            target=_notion_sync_worker,
+            daemon=True,
+            name="notion-event-outbox-sync",
+        )
+        NOTION_SYNC_THREAD.start()
 
 
 def main():
