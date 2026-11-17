@@ -2814,15 +2814,24 @@ def _blofin_demo_execution_readiness() -> dict:
         "message_fa": message_fa,
     }
 
-def _blofin_demo_smoke_test_readiness() -> dict:
-    """Require a complete read-only flat-account check before the independent Demo test."""
+def _blofin_demo_smoke_test_readiness(*, check_account_state: bool = False) -> dict:
+    """Require a complete read-only BTC-USDT account check before the independent Demo test.
+
+    Manual dashboard checks can inspect the Demo account even while Trade readiness or
+    the smoke-test feature flag is blocked. This path is GET-only and never submits,
+    amends, or cancels an order.
+    """
     base = _blofin_demo_execution_readiness()
     enabled = os.getenv("BLOFIN_DEMO_SMOKE_TEST_ENABLED", "").strip().lower() == "true"
     blockers: list[str] = []
     open_position_count = None
     open_order_count = None
+    snapshot = None
+    account_check_performed = bool(
+        check_account_state or (base.get("status") == "READY" and enabled)
+    )
 
-    if base.get("status") == "READY" and enabled:
+    if account_check_performed:
         try:
             snapshot = _blofin_demo_live_monitor_snapshot("BTC-USDT")
         except Exception:
@@ -2840,8 +2849,30 @@ def _blofin_demo_smoke_test_readiness() -> dict:
             blockers.append("LIVE_MONITOR_INCOMPLETE")
         else:
             try:
-                open_position_count = _active_position_count(snapshot.get("positions"))
-                open_order_count = _active_order_count(snapshot.get("open_orders"))
+                positions = snapshot.get("positions_for_instrument")
+                if not isinstance(positions, list):
+                    all_positions = snapshot.get("positions")
+                    positions = (
+                        [
+                            row for row in all_positions
+                            if not isinstance(row, dict)
+                            or str(row.get("instId") or "BTC-USDT").strip().upper() == "BTC-USDT"
+                        ]
+                        if isinstance(all_positions, list) else all_positions
+                    )
+                open_orders = snapshot.get("open_orders_for_instrument")
+                if not isinstance(open_orders, list):
+                    all_orders = snapshot.get("open_orders")
+                    open_orders = (
+                        [
+                            row for row in all_orders
+                            if not isinstance(row, dict)
+                            or str(row.get("instId") or "BTC-USDT").strip().upper() == "BTC-USDT"
+                        ]
+                        if isinstance(all_orders, list) else all_orders
+                    )
+                open_position_count = _active_position_count(positions)
+                open_order_count = _active_order_count(open_orders)
             except Exception:
                 blockers.append("POSITION_OR_ORDER_STATE_UNVERIFIABLE")
             else:
@@ -2851,24 +2882,44 @@ def _blofin_demo_smoke_test_readiness() -> dict:
                     blockers.append("EXISTING_OPEN_ORDER")
 
     ready = base.get("status") == "READY" and enabled and not blockers
+    account_summary_fa = ""
+    if account_check_performed:
+        if (
+            isinstance(snapshot, dict)
+            and snapshot.get("status") == "CONNECTED_READ_ONLY"
+            and snapshot.get("data_completeness") == "COMPLETE"
+            and open_position_count is not None
+            and open_order_count is not None
+        ):
+            account_summary_fa = (
+                f" بررسی فقط‌خواندنی BTC-USDT کامل شد: "
+                f"{open_position_count} پوزیشن باز و {open_order_count} سفارش باز."
+            )
+        else:
+            account_summary_fa = " بررسی فقط‌خواندنی حساب کامل نشد؛ تا رفع ابهام، هیچ سفارشی ارسال نمی‌شود."
+
     if blockers:
         message_fa = (
             "تست مستقل مسدود شد؛ وضعیت کامل و بدون ابهام حساب BTC-USDT لازم است. "
             "پوزیشن یا سفارش قبلی به‌هیچ‌وجه توسط تست بسته یا لغو نمی‌شود."
+            + account_summary_fa
         )
     elif base.get("status") != "READY":
         message_fa = (
-            "تست مستقل مسدود است؛ پیش‌نیازهای کلید Trade، احراز هویت، فعال‌سازی Demo "
-            "و ذخیره‌سازی پایدار کامل نیستند."
-        )
+            base.get("message_fa")
+            or "پیش‌نیازهای اجرای Demo کامل نیستند؛ تست مستقل مسدود می‌ماند."
+        ) + account_summary_fa
     elif not enabled:
         message_fa = (
-            "برای فعال‌کردن تست مستقل، BLOFIN_DEMO_SMOKE_TEST_ENABLED=true را در Environment سرویس Demo تنظیم کن."
+            "بررسی حساب انجام شد، اما اجرای تست مستقل هنوز غیرفعال است. "
+            "فعال‌سازی تست فقط با BLOFIN_DEMO_SMOKE_TEST_ENABLED=true در Environment سرویس Demo انجام می‌شود."
+            + account_summary_fa
         )
     else:
         message_fa = (
             "تست مستقل آماده است: حساب BTC-USDT در Demo بدون پوزیشن و سفارش باز تأیید شد؛ "
             "تست فقط LONG، حداقل حجم و ایزوله 1x است و فقط پوزیشن متعلق به همان تست را می‌بندد."
+            + account_summary_fa
         )
 
     return {
@@ -2883,6 +2934,16 @@ def _blofin_demo_smoke_test_readiness() -> dict:
         "smoke_test_blockers": blockers,
         "smoke_test_open_position_count": open_position_count,
         "smoke_test_open_order_count": open_order_count,
+        "read_only_account_check_performed": account_check_performed,
+        "read_only_account_status": (
+            snapshot.get("status") if isinstance(snapshot, dict) else
+            ("UNAVAILABLE" if account_check_performed else "NOT_CHECKED")
+        ),
+        "read_only_account_data_completeness": (
+            snapshot.get("data_completeness") if isinstance(snapshot, dict) else None
+        ),
+        "read_only_account_instrument": "BTC-USDT",
+        "read_only_account_orders_submitted": False,
         "message_fa": message_fa,
     }
 
@@ -4971,7 +5032,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/smoke-test-readiness":
-            payload = _blofin_demo_smoke_test_readiness()
+            manual_check = parse_qs(parsed.query).get("refresh", [""])[0] == "1"
+            payload = _blofin_demo_smoke_test_readiness(check_account_state=manual_check)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/execution-readiness":
@@ -5212,7 +5274,9 @@ class Handler(BaseHTTPRequestHandler):
           <div class="metric" id="blofin-smoke-test-panel" style="margin-top:16px;border-color:#2d6470">
             <h3>تست ربات در محیط دمو صرافی</h3>
             <p class="muted">راه‌انداز مستقل و بدون سیگنال: خود ربات فقط روی BTC-USDT در BloFin Demo یک سفارش LONG با حداقل حجم، اهرم ایزوله 1x و TP/SL حفاظتی می‌فرستد؛ پس از تأیید Fill، همان پوزیشن را می‌بندد و تخت‌شدن حساب را بررسی می‌کند. این تست به ۱۲ گیت یا Nemotron وابسته نیست و به محیط Live دسترسی ندارد. اگر روی BTC-USDT پوزیشن یا سفارش بازی از قبل وجود داشته باشد، تست بدون تغییر آن متوقف می‌شود.</p>
-            <p id="blofin-smoke-test-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای تست مستقل...</p>
+            <p class="muted">بررسی دستی حساب فقط اطلاعات BTC-USDT را از BloFin Demo با درخواست‌های GET می‌خواند؛ سفارش‌گذاری، لغو سفارش و بستن پوزیشن در این بررسی انجام نمی‌شود.</p>
+            <button id="blofin-smoke-test-refresh" type="button">بررسی دستی وضعیت حساب BTC-USDT (فقط‌خواندنی)</button>
+            <p id="blofin-smoke-test-readiness" class="muted" aria-live="polite">برای بررسی دستی، دکمهٔ بالا را بزن.</p>
             <button id="blofin-smoke-test-run" type="button" disabled>شروع «تست ربات در محیط دمو صرافی»</button>
             <p id="blofin-smoke-test-status" class="muted" aria-live="polite">برای اجرای تست، توکن پنل را در کادر بالاتر وارد کن.</p>
             <pre id="blofin-smoke-test-report" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
@@ -5237,6 +5301,7 @@ class Handler(BaseHTTPRequestHandler):
             const safety=document.getElementById('blofin-demo-safety');
             const executeButton=document.getElementById('blofin-demo-execute-once');
             const smokeButton=document.getElementById('blofin-smoke-test-run');
+            const smokeRefreshButton=document.getElementById('blofin-smoke-test-refresh');
             const smokeReadiness=document.getElementById('blofin-smoke-test-readiness');
             const smokeStatus=document.getElementById('blofin-smoke-test-status');
             const smokeReport=document.getElementById('blofin-smoke-test-report');
@@ -5249,7 +5314,7 @@ class Handler(BaseHTTPRequestHandler):
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!smokeButton||!smokeRefreshButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -5609,17 +5674,41 @@ async function loadBlofinInstruments(){
               if(monitorActive){monitorToggle.textContent='توقف مانیتور زنده';fetchLiveMonitor();}
               else{clearTimeout(monitorTimer);monitorStatus.textContent='مانیتور زنده متوقف شد.';monitorToggle.textContent='شروع مانیتور زنده هر ۵ ثانیه';}
             });
-            async function refreshSmokeTestReadiness(){
+            async function refreshSmokeTestReadiness(manual=false){
                smokeButton.disabled=true;
+               if(manual){
+                 smokeRefreshButton.disabled=true;
+                 smokeRefreshButton.textContent='در حال بررسی فقط‌خواندنی حساب...';
+               }
                try{
-                 const response=await fetch('/api/blofin/demo/smoke-test-readiness',{cache:'no-store'});
+                 const url='/api/blofin/demo/smoke-test-readiness'+(manual?'?refresh=1':'');
+                 const response=await fetch(url,{cache:'no-store'});
                  const result=await response.json();
-                 smokeReadiness.textContent=result.message_fa||'وضعیت تست مستقل نامشخص است.';
+                 let details='';
+                 if(result.read_only_account_check_performed){
+                   const positions=result.smoke_test_open_position_count;
+                   const orders=result.smoke_test_open_order_count;
+                   details='\nوضعیت بررسی: '+(result.read_only_account_status||'نامشخص')
+                     +' | کامل‌بودن داده: '+(result.read_only_account_data_completeness||'نامشخص')
+                     +' | پوزیشن باز BTC-USDT: '+(positions===null||positions===undefined?'نامشخص':positions)
+                     +' | سفارش باز BTC-USDT: '+(orders===null||orders===undefined?'نامشخص':orders)
+                     +' | سفارش ارسال‌شده در این بررسی: خیر';
+                 }
+                 smokeReadiness.textContent=(result.message_fa||'وضعیت تست مستقل نامشخص است.')+details;
                  smokeButton.disabled=result.status!=='READY';
                }catch(error){
                  smokeReadiness.textContent='بررسی پیش‌نیازهای تست مستقل ناموفق بود؛ ورود مسدود می‌ماند.';
+                 smokeButton.disabled=true;
+               }finally{
+                 if(manual){
+                   smokeRefreshButton.disabled=false;
+                   smokeRefreshButton.textContent='بررسی دستی وضعیت حساب BTC-USDT (فقط‌خواندنی)';
+                 }
                }
              }
+             smokeRefreshButton.addEventListener('click',function(){
+               refreshSmokeTestReadiness(true);
+             });
              async function pollSmokeTestJob(jobId,token,attempt){
                try{
                  const response=await fetch('/api/blofin/demo/execution-jobs/'+jobId,{
