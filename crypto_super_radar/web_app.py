@@ -2795,7 +2795,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
         "max_concurrent_positions": 1,
-        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_15M_CANDLE",
+        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_5M_CANDLE",
         "message_fa": message_fa,
     }
 
@@ -4062,8 +4062,8 @@ def _run_blofin_demo_execution_job(
                     trade_context={
                         "asset": asset.raw, "instrument_id": instrument_id,
                         "execution_profile": "CHALLENGE_1",
-                        "execution_timeframe": "15m",
-                        "trend_confirmation_timeframe": "1H",
+                        "execution_timeframe": "5m",
+                        "higher_timeframes_used": False,
                         "completed_candles_only": True,
                     },
                     result={
@@ -4127,8 +4127,11 @@ def _run_blofin_demo_execution_job(
             "analysis_time_utc": analysis_time_utc,
             "last_completed_candle_time_utc": last_candle_time,
             "last_candle_close": last_candle_close,
-            "execution_timeframe": "15m",
-            "trend_confirmation_timeframe": "1H",
+            **(
+                {"execution_timeframe": "5m", "higher_timeframes_used": False}
+                if execution_profile == "CHALLENGE_1"
+                else {"execution_timeframe": "15m", "trend_confirmation_timeframe": "1H"}
+            ),
         }
         pass_count = sum(
             1 for item in gates
@@ -4274,9 +4277,15 @@ def _run_blofin_demo_execution_job(
         }
         trade_context.update({
             "last_completed_candle_time_utc": signal_bar,
-            "mtf_confirmation": mtf_signal,
-            "execution_timeframe": "15m",
-            "trend_confirmation_timeframe": "1H",
+            **(
+                {"execution_timeframe": "5m", "higher_timeframes_used": False}
+                if execution_profile == "CHALLENGE_1"
+                else {
+                    "mtf_confirmation": mtf_signal,
+                    "execution_timeframe": "15m",
+                    "trend_confirmation_timeframe": "1H",
+                }
+            ),
         })
         gate_summary.update({
             "entry_reference_price": mtf_signal["entry_price"],
@@ -4404,36 +4413,16 @@ def _run_blofin_demo_execution_job(
                 "VETO" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
                 "UNKNOWN"
             )
-            if not (primary_approved and second_approved):
-                if consensus_status == "DISAGREEMENT":
-                    reason_fa = "دو ناظر مستقل دربارهٔ همان شواهد کندلی هم‌نظر نیستند؛ ورود جدید مسدود شد."
-                elif "NOT_CONFIGURED" in {primary_status, second_status}:
-                    reason_fa = "هر دو ناظر مستقل با کلید، مدل و ارائه‌دهنده جداگانه آماده نیستند؛ ورود جدید مسدود شد."
-                else:
-                    reason_fa = "هر دو ناظر مستقل تأیید زنده و معتبر صادر نکردند؛ ورود جدید مسدود شد."
-                _set_blofin_execution_job(
-                    job_id, "completed", stage="AI_BLOCKED",
-                    message_fa=reason_fa,
-                    ai_review=ai_review,
-                    ai_reviews=ai_reviews,
-                    ai_consensus=ai_consensus,
-                    result={
-                        "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
-                        **gate_summary,
-                        "challenge1_evidence": challenge_record.get("challenge1_evidence", {}),
-                        "ai_status": ai_status,
-                        "ai_reviews": ai_reviews,
-                        "ai_consensus": ai_consensus,
-                        "elliott_wave": wave_report, "trade_context": trade_context,
-                        "reason_fa": reason_fa,
-                        "orders_submitted": False, "trade_executed": False,
-                    },
-                )
-                return
-            ai_review["execution_role"] = "ENTRY_REVIEW"
-            second_ai_review["execution_role"] = "ENTRY_REVIEW"
-            ai_review["entry_gate_enforced"] = True
-            second_ai_review["entry_gate_enforced"] = True
+            # The two supervisors are independent audit/reporting services only.
+            # Their missing credentials, latency, disagreement, or veto must never
+            # delay or block a Challenge 1 entry: signal eligibility is determined
+            # solely by the closed 5m candle/pattern strategy and Demo risk controls.
+            ai_review["execution_role"] = "REPORT_ONLY"
+            second_ai_review["execution_role"] = "REPORT_ONLY"
+            ai_review["entry_gate_enforced"] = False
+            second_ai_review["entry_gate_enforced"] = False
+            ai_consensus["decision"] = "OBSERVE_ONLY"
+            ai_consensus["entry_gate_enforced"] = False
         else:
             raise BloFinDemoExecutionBlocked("Only the Challenge 1 execution profile is supported.")
 
@@ -6442,7 +6431,7 @@ let blofinInstrumentRecords=[];
                 let liveMessage=result.last_message_fa||'وضعیت AutoPilot دریافت شد.';
                 if(state==='RUNNING'){
                   liveMessage='موتور در حال جست‌وجوی بازار و تحلیل کندل‌ها و الگوهای Challenge 1 است. '+liveMessage;
-                }else if(state==='WAITING_FOR_NEXT_15M_CANDLE'&&result.next_cycle_at_utc){
+                }else if(state==='WAITING_FOR_NEXT_5M_CANDLE'&&result.next_cycle_at_utc){
                   const remaining=Math.max(0,Math.ceil((Date.parse(result.next_cycle_at_utc)-Date.now())/1000));
                   const minutes=Math.floor(remaining/60);
                   const seconds=remaining%60;
@@ -9165,8 +9154,7 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
         "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
         "evidence": evidence,
-        "candles_15m": evidence.get("candles_15m") if isinstance(evidence.get("candles_15m"), list) else [],
-        "candles_1h": evidence.get("candles_1h") if isinstance(evidence.get("candles_1h"), list) else [],
+        "candles_5m": evidence.get("candles_5m") if isinstance(evidence.get("candles_5m"), list) else [],
         "entry_price": result.get("entry_price_usd") or result.get("entry_price") or evidence.get("entry_price"),
         "stop_loss": result.get("stop_loss_usd") or result.get("stop_loss"),
         "take_profit": result.get("take_profit_usd") or result.get("take_profit"),
@@ -9456,7 +9444,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         ),
         "market": "Futures",
         "symbol": str(instrument_id).upper(),
-        "timeframe": "15m",
+        "timeframe": "5m",
         "signal": signal if signal in {"LONG", "SHORT", "NO_TRADE"} else "UNKNOWN",
         "experience_id": experience_id,
         "order_id": order_id,
@@ -9697,12 +9685,12 @@ def _start_notion_sync_worker() -> None:
         NOTION_SYNC_THREAD.start()
 
 
-def _blofin_demo_next_15m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
-    """Return the delay and timestamp just after the next completed 15-minute candle."""
+def _blofin_demo_next_5m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
+    """Return the delay just after the next completed 5-minute entry candle."""
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    next_boundary_epoch = (int(current.timestamp()) // 900 + 1) * 900 + 3
+    next_boundary_epoch = (int(current.timestamp()) // 300 + 1) * 300 + 3
     next_at = datetime.fromtimestamp(next_boundary_epoch, timezone.utc)
     delay_seconds = max(5, int(math.ceil((next_at - current).total_seconds())))
     return delay_seconds, next_at.isoformat()
@@ -9712,7 +9700,7 @@ def _blofin_demo_next_scan_after_cycle(
     cycle_started_at_utc: datetime, *, now_utc: datetime | None = None,
 ) -> tuple[int, str]:
     """Schedule from cycle start so a scan overlapping a candle close catches it."""
-    _, boundary_iso = _blofin_demo_next_15m_scan_window(cycle_started_at_utc)
+    _, boundary_iso = _blofin_demo_next_5m_scan_window(cycle_started_at_utc)
     target = datetime.fromisoformat(boundary_iso)
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -9726,8 +9714,8 @@ def _blofin_demo_next_scan_after_cycle(
 
 
 def _blofin_demo_autopilot_worker() -> None:
-    """Run Challenge 1 scans immediately after each completed 15-minute candle."""
-    interval_seconds = 900
+    """Run Challenge 1 scans after each completed 5m trigger candle."""
+    interval_seconds = 300
     raw_symbols = os.getenv(
         "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS",
         ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS),
@@ -9985,19 +9973,19 @@ def _blofin_demo_autopilot_worker() -> None:
                     for item in batch_results
                 )
                 autopilot_status = (
-                    "WAITING_FOR_NEXT_15M_CANDLE" if continue_search else "DISABLED"
+                    "WAITING_FOR_NEXT_5M_CANDLE" if continue_search else "DISABLED"
                 )
                 if not continue_search:
                     autopilot_message = "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
                 elif duplicates_only:
                     autopilot_message = (
                         "هر ۵ نماد به کندلی رسیدند که قبلاً پردازش شده است؛ از تحلیل و ورود تکراری جلوگیری شد. "
-                        f"اسکن بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
+                        f"اسکن بعدی پس از بسته‌شدن کندل ۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
                     )
                 else:
                     autopilot_message = (
                         f"چرخهٔ {job_id} پایان یافت؛ {len(batch_results)} بازار بررسی شد. "
-                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
+                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
                     )
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": bool(autopilot_enabled),

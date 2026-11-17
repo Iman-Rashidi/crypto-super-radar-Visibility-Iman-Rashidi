@@ -68,42 +68,35 @@ def valid_document(rating="Buy", risk_verdict="APPROVE", portfolio_verdict="APPR
 
 
 def challenge1_result(*, pattern_confirmed=True):
-    candle_rows_15m = [
-        {"open_time_utc": "2026-11-17T09:15:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 100.0},
-        {"open_time_utc": "2026-11-17T09:30:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 105.0},
-        {"open_time_utc": "2026-11-17T09:45:00+00:00", "open": 99.0, "high": 102.0, "low": 98.7, "close": 101.0, "volume": 160.0},
-    ]
-    candle_rows_1h = [
-        {"open_time_utc": "2026-11-17T07:00:00+00:00", "open": 98.0, "high": 100.0, "low": 97.0, "close": 99.0, "volume": 500.0},
-        {"open_time_utc": "2026-11-17T08:00:00+00:00", "open": 99.0, "high": 101.0, "low": 98.5, "close": 100.0, "volume": 520.0},
-        {"open_time_utc": "2026-11-17T09:00:00+00:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 540.0},
+    candle_rows_5m = [
+        {"open_time_utc": "2026-11-17T09:50:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 80.0},
+        {"open_time_utc": "2026-11-17T09:55:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 90.0},
+        {"open_time_utc": "2026-11-17T10:00:00+00:00", "open": 99.0, "high": 102.0, "low": 98.7, "close": 101.0, "volume": 160.0},
     ]
     pattern = {
         "name_en": "Bullish Engulfing",
         "direction": "BULLISH" if pattern_confirmed else "BEARISH",
         "score": 13,
         "category": "CANDLESTICK",
-        "timeframe": "15m",
+        "timeframe": "5m",
     }
     evidence = {
-        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
         "completed_candles_only": True,
-        "setup_timeframe": "15m",
-        "context_timeframe": "1H",
+        "setup_timeframe": "5m",
+        "higher_timeframes_used": False,
         "chosen_pattern": {
             "name_en": "Bullish Engulfing",
             "direction": "BULLISH",
             "score": 13,
             "category": "CANDLESTICK",
-            "timeframe": "15m",
+            "timeframe": "5m",
         },
         "detected_patterns": [pattern if pattern_confirmed else {
             **pattern, "direction": "BEARISH"
         }],
-        "context_patterns": [],
-        "confirmation_candle": dict(candle_rows_15m[-1]),
-        "candles_15m": candle_rows_15m,
-        "candles_1h": candle_rows_1h,
+        "confirmation_candle": dict(candle_rows_5m[-1]),
+        "candles_5m": candle_rows_5m,
         "chart_structure": {},
         "volume_confirmation": {
             "confirmed": True, "volume_ratio": 1.5,
@@ -711,25 +704,25 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(review["review_mode"], "CANDLE_PATTERN_ONLY")
         self.assertEqual(review["pattern_name"], "Bullish Engulfing")
         self.assertEqual(evidence["review_mode"], "CANDLE_PATTERN_ONLY")
-        self.assertEqual(len(evidence["pattern_evidence"]["candles_15m"]), 3)
-        self.assertEqual(len(evidence["pattern_evidence"]["candles_1h"]), 3)
+        self.assertEqual(len(evidence["pattern_evidence"]["candles_5m"]), 3)
+        self.assertEqual(evidence["pattern_evidence"]["setup_timeframe"], "5m")
+        self.assertFalse(evidence["pattern_evidence"]["higher_timeframes_used"])
+        self.assertEqual(
+            set(key for key in evidence["pattern_evidence"] if key.startswith("candles_")),
+            {"candles_5m"},
+        )
+        self.assertNotIn("context_timeframe", evidence["pattern_evidence"])
+        self.assertNotIn("candles_15m", json.dumps(evidence))
+        self.assertNotIn("candles_1h", json.dumps(evidence))
         self.assertEqual(evidence["pattern_evidence"]["chosen_pattern"]["name_en"], "Bullish Engulfing")
-        self.assertIn("Do not execute, request, count, score, or evaluate", system_prompt)
+        self.assertIn("This is an audit/recommendation report only", system_prompt)
         self.assertNotIn("mandatory_gates", evidence)
         self.assertNotIn("must_not_be_sent", json.dumps(payload))
         self.assertNotIn('"id":1', json.dumps(payload))
 
-    def test_challenge1_volume_and_opposing_1h_context_are_advisory_to_both_reviewers(self):
+    def test_challenge1_supervisors_receive_only_5m_patterns_and_cannot_add_higher_timeframe_gates(self):
         candidate = challenge1_result()
         evidence = candidate.metrics["challenge1_evidence"]
-        evidence["volume_confirmation"]["confirmed"] = False
-        evidence["volume_confirmation"]["volume_ratio"] = 0.65
-        evidence["context_patterns"] = [{
-            "name_en": "Bearish Engulfing",
-            "direction": "BEARISH",
-            "category": "CANDLESTICK",
-            "timeframe": "1H",
-        }]
         document = valid_pattern_document(timeframe_verdict="OPPOSE")
         primary_captured = {}
         secondary_captured = {}
@@ -767,9 +760,11 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         for captured in (primary_captured, secondary_captured):
             prompt = captured["payload"]["messages"][0]["content"]
             body = captured["payload"]["messages"][1]["content"]
-            self.assertIn("ADVISORY ONLY", prompt)
-            self.assertIn('"confirmed":false', body)
-            self.assertIn('"direction":"BEARISH"', body)
+            self.assertIn("must not request or infer 15m/1H data", prompt)
+            self.assertIn('"setup_timeframe":"5m"', body)
+            self.assertIn('"timeframe":"5m"', body)
+            self.assertNotIn("15m", body)
+            self.assertNotIn('"1H"', body)
         self.assertEqual(primary["specialist_views"]["timeframe_analyst"]["verdict"], "OPPOSE")
         self.assertEqual(secondary["specialist_views"]["timeframe_analyst"]["verdict"], "OPPOSE")
 

@@ -51,21 +51,30 @@ def signal_record(**overrides):
     side = str(record["signal"]).upper()
     pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
     pattern_name = "Bullish Engulfing" if side == "LONG" else "Bearish Engulfing"
+    candles_5m = [
+        {"open_time_utc": "2026-11-13T17:50:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 900.0},
+        {"open_time_utc": "2026-11-13T17:55:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 950.0},
+        {"open_time_utc": "2026-11-13T18:00:00+00:00", "open": 99.0, "high": 102.0, "low": 98.7, "close": 101.0, "volume": 1600.0},
+    ]
     record["challenge1_evidence"] = {
-        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
-        "setup_timeframe": "15m",
-        "context_timeframe": "1H",
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+        "setup_timeframe": "5m",
         "completed_candles_only": True,
         "legacy_12_gates_used_for_entry": False,
         "external_ai_required": False,
         "tinyfish_required": False,
+        "higher_timeframes_used": False,
         "decision": side,
-        "detected_patterns": [{"name_en": pattern_name, "direction": pattern_direction}],
-        "chosen_pattern": {"name_en": pattern_name, "direction": pattern_direction},
-        "confirmation_candle": {
-            "open_time_utc": "2026-11-13T18:00:00+00:00",
-            "volume_confirmation": {"confirmed": True, "volume_ratio": 1.4},
+        "detected_patterns": [{
+            "name_en": pattern_name, "direction": pattern_direction,
+            "category": "CANDLESTICK", "timeframe": "5m",
+        }],
+        "chosen_pattern": {
+            "name_en": pattern_name, "direction": pattern_direction,
+            "category": "CANDLESTICK", "timeframe": "5m",
         },
+        "confirmation_candle": dict(candles_5m[-1]),
+        "candles_5m": candles_5m,
     }
     return record
 
@@ -130,12 +139,10 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["side"], "LONG")
 
-    def test_challenge1_v2_does_not_require_volume_confirmation_or_legacy_engine_version(self):
+    def test_challenge1_5m_only_does_not_require_volume_confirmation(self):
         record = signal_record()
         evidence = record["challenge1_evidence"]
-        evidence["decision_engine_version"] = "CHALLENGE_1_LOCAL_RULES_V2"
         evidence["volume_is_advisory"] = True
-        evidence["context_is_advisory"] = True
         evidence["confirmation_candle"]["volume_confirmation"] = {
             "confirmed": False,
             "volume_ratio": 0.82,
@@ -459,12 +466,11 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
 
     def test_changed_closed_candle_snapshot_gets_a_new_immutable_experience_id(self):
         first_record = signal_record(signal="NO_TRADE")
-        first_record["challenge1_evidence"]["candles_15m"] = [{
+        first_record["challenge1_evidence"]["candles_5m"] = [{
             "time_utc": "2026-11-17T18:00:00Z",
             "open": 100.0, "high": 101.0, "low": 99.0,
             "close": 100.5, "volume": 1000.0,
         }]
-        first_record["challenge1_evidence"]["candles_1h"] = []
         first_id = self.store.record_challenge1_decision(
             instrument_id="BTC-USDT",
             challenge_record=first_record,
@@ -474,7 +480,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         # and risk plan must not reuse the immutable event_id from the first input.
         revised_record = dict(first_record)
         revised_record["challenge1_evidence"] = dict(first_record["challenge1_evidence"])
-        revised_record["challenge1_evidence"]["candles_15m"] = [{
+        revised_record["challenge1_evidence"]["candles_5m"] = [{
             "time_utc": "2026-11-17T18:00:00Z",
             "open": 100.0, "high": 101.2, "low": 99.0,
             "close": 100.5, "volume": 1200.0,
