@@ -292,6 +292,73 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("autopilotStatusPollTimer", page)
         self.assertIn("status_only=1", page)
 
+    def test_challenge1_activity_snapshot_keeps_both_real_supervisor_reviews_and_position_id(self):
+        candles = []
+        for index in range(8):
+            opened = 100.0 + index
+            candles.append({
+                "time_utc": f"2026-11-17T10:{index:02d}:00Z",
+                "open": opened, "high": opened + 1, "low": opened - 1,
+                "close": opened + 0.5, "volume": 1000 + index,
+            })
+        reviews = [
+            {
+                "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                "review": {
+                    "status": "APPROVED", "provider": "OpenRouter",
+                    "model": "configured-primary", "returned_model": "verified-primary",
+                    "request_attempted": True, "response_source": "LIVE_API",
+                    "response_validated": True, "model_verified": True,
+                    "paper_entry_eligible": True, "rationale_fa": "الگوی صعودی تأیید شد.",
+                },
+            },
+            {
+                "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                "review": {
+                    "status": "APPROVED", "provider": "Groq",
+                    "model": "openai/gpt-oss-120b", "returned_model": "openai/gpt-oss-120b",
+                    "request_attempted": True, "response_source": "LIVE_API",
+                    "response_validated": True, "model_verified": True,
+                    "paper_entry_eligible": True, "rationale_fa": "نظر دوم مستقل موافق است.",
+                },
+            },
+        ]
+        consensus = {
+            "status": "AGREEMENT", "primary_status": "APPROVED",
+            "second_status": "APPROVED", "primary_verified": True,
+            "second_verified": True, "primary_approved": True,
+            "second_approved": True, "two_reviewer_approval": True,
+            "decision": "APPROVE",
+        }
+        job = {
+            "status": "completed", "stage": "MONITORING",
+            "ai_reviews": reviews, "ai_consensus": consensus,
+            "result": {
+                "status": "FILLED", "signal": "LONG",
+                "learning_experience_id": "blofin-ch1-dual-review-001",
+                "orders_submitted": True, "trade_executed": True,
+                "exchange_order_id": "demo-order-dual-001",
+                "position_id": "demo-position-dual-001",
+                "positions": [{"instId": "BTC-USDT", "positionId": "demo-position-dual-001"}],
+                "average_fill_price": 101.0,
+                "filled_at_utc": "2026-11-17T10:15:00Z",
+                "ai_review": {"status": "APPROVED", "model": "configured-primary"},
+                "challenge1_evidence": {
+                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+                    "decision": "LONG", "detected_patterns": [],
+                    "candles_15m": candles, "candles_1h": [],
+                    "confirmation_candle": {"time_utc": candles[-1]["time_utc"]},
+                },
+            },
+        }
+        snapshot = web_app._blofin_activity_journal_snapshot("dual-review-job", "BTC-USDT", job)
+        self.assertEqual(snapshot["ai_status"], "APPROVED_BY_BOTH")
+        self.assertEqual(snapshot["reviewer_consensus"], "AGREEMENT")
+        self.assertEqual({item["reviewer_id"] for item in snapshot["ai_reviews"]}, {"nemotron", "second_ai"})
+        self.assertEqual(snapshot["ai_reviews"][1]["provider"], "Groq")
+        self.assertEqual(snapshot["position_id"], "demo-position-dual-001")
+        self.assertEqual(snapshot["order_id"], "demo-order-dual-001")
+
     def test_challenge1_activity_snapshot_keeps_real_ohlcv_and_marks_ai_not_called(self):
         candles = []
         for index in range(8):
