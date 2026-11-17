@@ -5688,7 +5688,7 @@ async function loadBlofinInstruments(){
                  if(result.read_only_account_check_performed){
                    const positions=result.smoke_test_open_position_count;
                    const orders=result.smoke_test_open_order_count;
-                   details='\nوضعیت بررسی: '+(result.read_only_account_status||'نامشخص')
+                   details='\\nوضعیت بررسی: '+(result.read_only_account_status||'نامشخص')
                      +' | کامل‌بودن داده: '+(result.read_only_account_data_completeness||'نامشخص')
                      +' | پوزیشن باز BTC-USDT: '+(positions===null||positions===undefined?'نامشخص':positions)
                      +' | سفارش باز BTC-USDT: '+(orders===null||orders===undefined?'نامشخص':orders)
