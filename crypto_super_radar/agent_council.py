@@ -13,6 +13,14 @@ from typing import Any
 MANDATORY_GATE_IDS = frozenset(range(1, 13))
 MAX_ESTIMATED_RISK_SCORE = 45.0
 PROFILE_POLICIES = {
+    # Challenge 1 is driven by its dedicated candle/chart-pattern engine.
+    # The twelve general radar gates remain visible as advisory evidence and
+    # must not be silently promoted to mandatory gates for this profile.
+    "CHALLENGE_1": {
+        "required_gate_ids": frozenset(),
+        "min_pass_count": 0,
+        "min_confirmation_score": 0.0,
+    },
     "EASY": {
         "required_gate_ids": frozenset({1, 2, 3, 4, 5, 6, 9}),
         "min_pass_count": 7,
