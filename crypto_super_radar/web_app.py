@@ -3280,6 +3280,7 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "LIVE_12_GATE_ANALYSIS": "تحلیل زندهٔ ۱۲ فیلتر",
         "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده موتور Challenge 1 · روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
         "PROFILE_GATE_REVIEW": "بررسی گیت‌های الزامی پروفایل انتخابی",
+        "PATTERN_EVIDENCE_REVIEW": "بررسی اختصاصی کندل و الگوی معاملاتی",
         "MTF_TRIGGER_BLOCKED": "عدم تطبیق روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
         "ELLIOTT_WAVE_ANALYSIS": "تحلیل و انتخاب سناریوی موج الیوت",
         "NO_TRADE": "عدم ورود؛ شرایط کامل نیست",
