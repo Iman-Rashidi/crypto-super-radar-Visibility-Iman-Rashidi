@@ -1247,10 +1247,15 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             old_plan["client_order_id"], "FILLED", exchange_order_id="old-demo-order",
         )
         self.assertTrue(store.attach_position_id(experience_id, "old-demo-position"))
-        # The exchange account read is flat, while the local FILLED record
-        # still awaits its final realized learning label. Pending learning alone
-        # must not be treated as active exchange exposure or an unresolved POST.
-        self.assertEqual(store.pending_learning_outcome_count(), 1)
+        # Exchange history has finalized the order as CLOSED. The learning
+        # experience remains pending until exact realized PnL is reconciled, but
+        # a closed order must no longer count as active exposure.
+        store.update_order(old_plan["client_order_id"], "CLOSED")
+        self.assertEqual(store.pending_learning_outcome_count(), 0)
+        self.assertEqual(
+            store.learning_memory.get_experience(experience_id)["learning_status"],
+            "PENDING_OUTCOME",
+        )
 
         # The old history is deliberately incomplete, so its PnL remains UNKNOWN.
         # Fresh exchange positions and open orders are nevertheless both empty.
@@ -1266,7 +1271,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 isinstance(call, tuple) and call[0] == "place_order"
                 for call in client.calls
             ))
-            self.assertEqual(store.pending_learning_outcome_count(), 2)
+            self.assertEqual(store.pending_learning_outcome_count(), 1)
             old_experience = store.learning_memory.get_experience(experience_id)
             self.assertEqual(old_experience["learning_status"], "PENDING_OUTCOME")
             self.assertEqual(
