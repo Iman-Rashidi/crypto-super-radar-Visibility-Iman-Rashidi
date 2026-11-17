@@ -130,6 +130,34 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["side"], "LONG")
 
+    def test_challenge1_v2_does_not_require_volume_confirmation_or_legacy_engine_version(self):
+        record = signal_record()
+        evidence = record["challenge1_evidence"]
+        evidence["decision_engine_version"] = "CHALLENGE_1_LOCAL_RULES_V2"
+        evidence["volume_is_advisory"] = True
+        evidence["context_is_advisory"] = True
+        evidence["confirmation_candle"]["volume_confirmation"] = {
+            "confirmed": False,
+            "volume_ratio": 0.82,
+            "reason": "Volume did not meet the optional advisory threshold.",
+        }
+        plan = build_demo_order_plan(
+            record, instrument_record(), inst_id="BTC-USDT",
+            equity_usdt=1000, leverage=1,
+            policy=BloFinDemoRiskPolicy(max_leverage=1),
+        )
+        self.assertEqual(plan["side"], "LONG")
+
+    def test_challenge1_rejects_unknown_evidence_engine_version(self):
+        record = signal_record()
+        record["challenge1_evidence"]["decision_engine_version"] = "UNRECOGNIZED_VERSION"
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            build_demo_order_plan(
+                record, instrument_record(), inst_id="BTC-USDT",
+                equity_usdt=1000, leverage=1,
+                policy=BloFinDemoRiskPolicy(max_leverage=1),
+            )
+
     def test_legacy_execution_profiles_are_rejected(self):
         for profile in ("EASY", "STANDARD", "STRICT"):
             with self.subTest(profile=profile), self.assertRaises(BloFinDemoExecutionBlocked):
