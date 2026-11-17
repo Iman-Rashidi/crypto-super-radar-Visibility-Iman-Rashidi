@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import unittest
 
 from crypto_super_radar.demo_observability import (
@@ -65,10 +66,11 @@ class DemoObservabilityEventTests(unittest.TestCase):
                 "unrealized_pnl_usdt_at_confirmation": "0.09",
             },
         )
-        self.assertEqual(event["event_type"], "HEARTBEAT")
+        self.assertEqual(event["event_type"], "MANUAL_POSITION_CLOSE_REQUESTED")
+        self.assertEqual(event["actor"], "Operator")
         self.assertEqual(event["status"], "PENDING")
         self.assertEqual(event["position_id"], "position-1")
-        self.assertIn("پس از تطبیق history", event["reason"])
+        self.assertIn("پس از تطبیق Position History", event["reason"])
 
     def test_manual_open_is_reported_as_submission_until_exchange_fill_is_confirmed(self):
         event = build_manual_action_event(
@@ -83,6 +85,67 @@ class DemoObservabilityEventTests(unittest.TestCase):
         self.assertEqual(event["event_type"], "ORDER_SUBMITTED")
         self.assertEqual(event["status"], "SUCCESS")
         self.assertEqual(event["order_id"], "order-55")
+
+    def test_manual_cancel_has_explicit_operator_event(self):
+        event = build_manual_action_event(
+            "/api/blofin/demo/manual-cancel-order",
+            {
+                "status": "CANCELED",
+                "instrument_id": "BTC-USDT",
+                "order_id": "order-99",
+            },
+        )
+        self.assertEqual(event["event_type"], "MANUAL_ORDER_CANCELED")
+        self.assertEqual(event["actor"], "Operator")
+        self.assertEqual(event["status"], "SUCCESS")
+        self.assertEqual(event["order_id"], "order-99")
+
+    def test_notion_outbox_serializes_independent_ai_audit_properties(self):
+        from crypto_super_radar.notion_event_sync import NotionEventOutbox
+
+        connection = sqlite3.connect(":memory:")
+        outbox = NotionEventOutbox(connection=connection)
+        event = {
+            "event_id": "cycle-1:AI:second_ai:AI_REVIEW_REQUESTED",
+            "cycle_id": "cycle-1",
+            "occurred_at_utc": "2026-11-17T12:00:00Z",
+            "event_type": "AI_REVIEW_REQUESTED",
+            "actor": "Second AI Supervisor",
+            "status": "WARNING",
+            "market": "Futures",
+            "symbol": "BTC-USDT",
+            "signal": "LONG",
+            "ai_decision": "NOT_CALLED",
+            "reviewer_id": "second_ai",
+            "ai_provider": "Second Provider",
+            "ai_call_status": "NOT_CONFIGURED",
+            "ai_validation": "NOT_RUN",
+            "reviewer_consensus": "SINGLE_REVIEWER",
+            "input_data_type": "LIVE_MARKET",
+            "ai_prompt_version": "prompt-v3-second",
+            "reason": "Second supervisor is not configured.",
+        }
+        normalized = outbox.normalize_event(event)
+        props = outbox._notion_properties(normalized, 1)
+        self.assertEqual(
+            props["شناسه ناظر"]["rich_text"][0]["text"]["content"], "second_ai"
+        )
+        self.assertEqual(
+            props["Provider ناظر AI"]["rich_text"][0]["text"]["content"], "Second Provider"
+        )
+        self.assertEqual(
+            props["وضعیت فراخوانی AI"]["select"]["name"], "NOT_CONFIGURED"
+        )
+        self.assertEqual(
+            props["اعتبارسنجی پاسخ AI"]["select"]["name"], "NOT_RUN"
+        )
+        self.assertEqual(
+            props["وضعیت توافق ناظران"]["select"]["name"], "SINGLE_REVIEWER"
+        )
+        self.assertEqual(
+            props["نوع داده ورودی"]["select"]["name"], "LIVE_MARKET"
+        )
+        outbox.close()
 
     def test_heartbeat_identifies_its_snapshot_as_read_only(self):
         event = build_heartbeat_event(
