@@ -359,7 +359,8 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     ORDER_PATH = "/api/v1/trade/order"
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
     CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
-    ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH})
+    CANCEL_ORDER_PATH = "/api/v1/trade/cancel-order"
+    ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH, CANCEL_ORDER_PATH})
 
     def __init__(self, **kwargs: Any) -> None:
         # Prefer a dedicated Demo Trade key, but reuse the already-configured
@@ -498,6 +499,14 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         }
         return self._post(self.ORDER_PATH, body)
 
+    def cancel_futures_order(self, *, inst_id: str, order_id: str) -> dict[str, Any]:
+        """Cancel exactly one verified pending Demo order; never cancel all orders."""
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
+            raise ValueError("Only a USDT linear Demo perpetual order can be canceled.")
+        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", order_id or ""):
+            raise ValueError("order_id must be a non-empty exchange order identifier.")
+        return self._post(self.CANCEL_ORDER_PATH, {"instId": inst_id, "orderId": order_id})
+
     def close_futures_position(
         self, *, inst_id: str, margin_mode: str, position_side: str,
         client_order_id: str, position_id: str | None = None,
@@ -507,8 +516,8 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             raise ValueError("client_order_id must be 1-32 alphanumeric characters.")
         if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
             raise ValueError("Only a USDT linear Demo perpetual can be closed.")
-        if margin_mode != "isolated" or position_side not in {"net", "long", "short"}:
-            raise ValueError("Smoke-test close requires isolated margin and a known position side.")
+        if margin_mode not in {"isolated", "cross"} or position_side not in {"net", "long", "short"}:
+            raise ValueError("Close requires a supported margin mode and a known position side.")
         if position_id is not None and not re.fullmatch(r"[A-Za-z0-9]{1,64}", position_id):
             raise ValueError("position_id is invalid.")
         body: dict[str, Any] = {
@@ -740,6 +749,17 @@ class BloFinDemoEventStore:
                 (status, exchange_order_id, now, client_order_id),
             )
             self._append_event(client_order_id, status, {"exchange_order_id_present": bool(exchange_order_id)})
+
+    def record_manual_action(
+        self, action_id: str, event_type: str, details: Mapping[str, Any]
+    ) -> None:
+        """Append one manual account-management action without mutating prior events."""
+        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", str(action_id or "")):
+            raise ValueError("action_id must be a stable opaque identifier.")
+        if event_type not in {"MANUAL_ORDER_CANCELED", "MANUAL_POSITION_CLOSE_REQUESTED", "MANUAL_POSITION_CLOSED"}:
+            raise ValueError("Unsupported manual action event type.")
+        with self._lock, self._db:
+            self._append_event(action_id, event_type, details)
 
     def equity_guard(self, equity_usdt: float, *, now: int | None = None) -> dict[str, float]:
         equity = _finite(equity_usdt, "equity_usdt", minimum=0.0000001)
