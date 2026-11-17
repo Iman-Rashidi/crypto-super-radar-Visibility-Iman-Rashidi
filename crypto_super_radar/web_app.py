@@ -5372,7 +5372,9 @@ class Handler(BaseHTTPRequestHandler):
                 <select id="blofin-market-type" disabled><option value="USDT-LINEAR-SWAP">USDT Perpetual · Linear SWAP</option></select>
               </div>
               <div>
-                <label for="blofin-instrument">رمزارز / قرارداد BloFin</label>
+                <label for="blofin-instrument-search">جست‌وجوی دستی رمزارز / نماد قرارداد</label>
+                <input id="blofin-instrument-search" type="search" autocomplete="off" placeholder="مثلاً BTC، ETH یا BTC-USDT">
+                <label for="blofin-instrument">انتخاب قرارداد BloFin Demo</label>
                 <select id="blofin-instrument" disabled><option value="">در حال دریافت فهرست قراردادها...</option></select>
               </div>
               <div>
@@ -5383,12 +5385,66 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </div>
             <p id="blofin-instrument-status" class="muted" aria-live="polite">قراردادهای زنده با مجوز Full برای بازکردن موقعیت در حال دریافت‌اند.</p>
+            <section class="metric" id="blofin-execution-mode-panel" style="margin-top:12px">
+              <h3>انتخاب حالت اجرا</h3>
+              <div class="grid" style="margin:8px 0">
+                <button id="blofin-mode-autopilot" type="button" aria-pressed="false">حالت AutoPilot</button>
+                <button id="blofin-mode-manual" type="button" aria-pressed="true">حالت دستی</button>
+              </div>
+              <p id="blofin-mode-status" class="muted" aria-live="polite">حالت دستی انتخاب شده است؛ برای سفارش دستی، نماد را جست‌وجو و انتخاب کن.</p>
+            </section>
+            <section class="metric" id="blofin-autopilot-controls" style="margin-top:12px;display:none">
+              <h3>AutoPilot · پایش خودکار Challenge 1</h3>
+              <p id="blofin-autopilot-status" class="muted" aria-live="polite">در حال خواندن وضعیت AutoPilot...</p>
+              <button id="blofin-autopilot-toggle" type="button">فعال‌سازی AutoPilot در BloFin Demo</button>
+              <p class="muted">برای تغییر به حالت دستی، AutoPilot را متوقف کن. چرخه‌ای که از قبل آغاز شده باشد بدون قطع ناگهانی تمام می‌شود.</p>
+            </section>
+            <section class="metric" id="blofin-manual-trading-panel" style="margin-top:12px">
+              <h3>کنترل دستی معاملات BloFin Demo</h3>
+              <p class="muted">این بخش از سیگنال، ۱۲ گیت و Nemotron مستقل است. سفارش دستی فقط پس از تأیید تو ارسال می‌شود. ورود با اهرم ایزوله 1x، TP/SL اجباری، سقف ارزش اسمی ۱۰٪ Equity و سقف زیان تا حد ضرر ۰٫۲۵٪ Equity محدود شده است.</p>
+              <form id="blofin-manual-order-form" class="grid" style="margin:10px 0">
+                <div>
+                  <label for="blofin-manual-direction">جهت معامله</label>
+                  <select id="blofin-manual-direction">
+                    <option value="LONG">خرید / LONG</option>
+                    <option value="SHORT">فروش / SHORT</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="blofin-manual-size">حجم قرارداد</label>
+                  <input id="blofin-manual-size" type="number" min="0" step="any" placeholder="حجم برحسب قرارداد">
+                </div>
+                <div>
+                  <label for="blofin-manual-stop">حد ضرر (Stop Loss)</label>
+                  <input id="blofin-manual-stop" type="number" min="0" step="any" placeholder="قیمت حد ضرر">
+                </div>
+                <div>
+                  <label for="blofin-manual-target">حد سود (Take Profit)</label>
+                  <input id="blofin-manual-target" type="number" min="0" step="any" placeholder="قیمت حد سود">
+                </div>
+                <div class="wide">
+                  <button id="blofin-manual-open" type="submit" disabled>ارسال سفارش دستی Market در BloFin Demo</button>
+                </div>
+              </form>
+              <p id="blofin-manual-order-status" class="muted" aria-live="polite">برای ورود دستی، ابتدا توکن پنل و پیش‌نیازهای Trade را تأیید کن.</p>
+              <div class="metric" style="margin-top:12px">
+                <div class="grid" style="align-items:center">
+                  <h3>مدیریت پوزیشن‌ها و سفارش‌های باز</h3>
+                  <button id="blofin-manual-refresh" type="button">به‌روزرسانی حساب و جست‌وجوی سفارش‌ها</button>
+                </div>
+                <p class="muted">لغو فقط برای یک سفارش معلق با شناسه دقیق انجام می‌شود. پوزیشن پرشده با فرمان بستن مشخص بسته می‌شود، نه با لغو سفارش. بستن پوزیشن با PnL منفی هم ممکن است، اما قیمت واقعی خروج و زیان نهایی ممکن است با مقدار شناور فرق کند.</p>
+                <p id="blofin-manual-account-status" class="muted" aria-live="polite">برای دریافت فهرست زنده، دکمه به‌روزرسانی را بزن.</p>
+                <div id="blofin-manual-account-view" style="overflow-x:auto"></div>
+              </div>
+            </section>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
             <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
-            <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
-            <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>
-            <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
-              <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
+            <div id="blofin-robot-cycle-controls">
+              <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
+              <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک چرخه با ربات (دستی و یک‌باره)</button>
+              <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
+                <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
+              </div>
             </div>
           </div>
           <div class="metric" id="blofin-smoke-test-panel" style="margin-top:16px;border-color:#2d6470">
