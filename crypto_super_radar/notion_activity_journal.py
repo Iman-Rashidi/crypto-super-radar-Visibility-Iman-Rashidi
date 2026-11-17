@@ -564,23 +564,37 @@ class NotionActivityJournal:
                FROM csr_notion_activity_journal"""
         ).fetchone()
         latest = self._db.execute(
-            """SELECT experience_id, sync_status, attempts, last_error_type,
-                      last_http_status, updated_at_utc
+            """SELECT experience_id, sync_status, attempts, updated_at_utc
                FROM csr_notion_activity_journal
                ORDER BY updated_at_utc DESC LIMIT 1"""
+        ).fetchone()
+        last_error = self._db.execute(
+            """SELECT experience_id, attempts, last_error_type, last_http_status,
+                      next_attempt_at
+               FROM csr_notion_activity_journal
+               WHERE last_error_type IS NOT NULL
+               ORDER BY next_attempt_at DESC, attempts DESC LIMIT 1"""
+        ).fetchone()
+        pending_with_error = self._db.execute(
+            """SELECT COUNT(*) FROM csr_notion_activity_journal
+               WHERE sync_status='PENDING' AND last_error_type IS NOT NULL"""
         ).fetchone()
         return {
             "status": "CONFIGURED" if bool((os.getenv("NOTION_API_TOKEN") or "").strip()) else "NOT_CONFIGURED",
             "storage_backend": storage_backend(),
             "pending": int(row["pending"] or 0),
             "synced": int(row["synced"] or 0),
-            "failed": int(row["failed"] or 0),
+            "failed": int(row["failed"] or 0) + int(pending_with_error[0] or 0),
+            "pending_with_error": int(pending_with_error[0] or 0),
             "last_success_utc": row["last_success_utc"],
             "latest_experience_id": latest["experience_id"] if latest else None,
             "latest_sync_status": latest["sync_status"] if latest else None,
             "latest_attempts": int(latest["attempts"] or 0) if latest else 0,
-            "last_error_type": latest["last_error_type"] if latest else None,
-            "last_http_status": latest["last_http_status"] if latest else None,
+            "last_failed_experience_id": last_error["experience_id"] if last_error else None,
+            "last_error_type": last_error["last_error_type"] if last_error else None,
+            "last_http_status": last_error["last_http_status"] if last_error else None,
+            "last_attempts": int(last_error["attempts"] or 0) if last_error else 0,
+            "retry_after_epoch": int(last_error["next_attempt_at"] or 0) if last_error else None,
             "latest_updated_at_utc": latest["updated_at_utc"] if latest else None,
         }
 
