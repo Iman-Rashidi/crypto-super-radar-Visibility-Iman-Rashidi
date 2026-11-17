@@ -89,6 +89,24 @@ BLOFIN_AUTOPILOT_STATE = {
     "restored_from_storage": False,
 }
 
+BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE: bool | None = None
+BLOFIN_AUTOPILOT_STOP_EVENT = threading.Event()
+
+
+def _blofin_demo_autopilot_enabled() -> bool:
+    """Resolve operator runtime choice before the deployment default."""
+    if BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE is not None:
+        return bool(BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE)
+    return os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+
+
+def _blofin_manual_mode_available() -> bool:
+    """Manual account controls are available only while AutoPilot is fully paused."""
+    with LOCK:
+        auto_enabled = _blofin_demo_autopilot_enabled()
+    return not auto_enabled and not BLOFIN_AUTOPILOT_LOCK.locked()
+
+
 def _persist_blofin_autopilot_state() -> bool:
     """Persist the operational snapshot only when durable Turso storage is configured."""
     store = None
@@ -2695,7 +2713,7 @@ def _blofin_demo_execution_readiness() -> dict:
             trade_permission_status = "CHECK_FAILED"
 
     trading_enabled = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
-    autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+    autopilot_enabled = _blofin_demo_autopilot_enabled()
     dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
     budget = None
     try:
@@ -5150,7 +5168,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/blofin/demo/autopilot/status":
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
-            payload["enabled"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+            payload["enabled"] = _blofin_demo_autopilot_enabled()
+            payload["runtime_override"] = BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
             payload["execution_profile"] = "CHALLENGE_1"
@@ -8077,17 +8096,19 @@ def _blofin_demo_autopilot_worker() -> None:
         })
     _persist_blofin_autopilot_state()
     while True:
-        if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
+        if not _blofin_demo_autopilot_enabled():
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": False, "status": "DISABLED",
-                    "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
+                    "search_continues": False,
+                    "next_cycle_scheduled": False,
+                    "last_message_fa": "اتوپایلوت توسط اپراتور متوقف شد؛ حالت دستی در دسترس است.",
                 })
             _persist_blofin_autopilot_state()
-            time.sleep(30)
-            continue
+            break
         if not BLOFIN_AUTOPILOT_LOCK.acquire(blocking=False):
-            time.sleep(10)
+            if BLOFIN_AUTOPILOT_STOP_EVENT.wait(10):
+                continue
             continue
         try:
             if SCAN_RUNNING:
@@ -8097,12 +8118,15 @@ def _blofin_demo_autopilot_worker() -> None:
                         "last_message_fa": "اسکن دیگری در حال اجراست؛ برای جلوگیری از تداخل، چرخه Demo به تعویق افتاد.",
                     })
                 _persist_blofin_autopilot_state()
-                time.sleep(30)
+                if BLOFIN_AUTOPILOT_STOP_EVENT.wait(30):
+                    continue
                 continue
             started = datetime.now(timezone.utc).isoformat()
             batch_results = []
             batch_jobs = []
             for scan_instrument in instrument_ids:
+                if not _blofin_demo_autopilot_enabled():
+                    break
                 instrument_id = scan_instrument
                 job_id = uuid.uuid4().hex
                 with LOCK:
@@ -8269,7 +8293,7 @@ def _blofin_demo_autopilot_worker() -> None:
                 # The scheduler keeps running even when a candle was already finalized,
                 # a signal was rejected, or a position is being managed. Reflect that fact
                 # instead of showing a false stopped state for duplicate-candle cycles.
-                autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+                autopilot_enabled = _blofin_demo_autopilot_enabled()
                 continue_search = bool(autopilot_enabled)
                 autopilot_status = "SEARCHING_FOR_SIGNAL" if continue_search else "DISABLED"
                 autopilot_message = (
@@ -8322,21 +8346,23 @@ def _blofin_demo_autopilot_worker() -> None:
             _persist_blofin_autopilot_state()
         finally:
             BLOFIN_AUTOPILOT_LOCK.release()
-        time.sleep(interval_seconds)
+        if BLOFIN_AUTOPILOT_STOP_EVENT.wait(interval_seconds):
+            continue
 
 
 def _start_blofin_demo_autopilot() -> None:
     """Restore operational state, then start at most one Demo loop per process."""
     global BLOFIN_AUTOPILOT_THREAD
     _restore_blofin_autopilot_state()
-    if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
+    if not _blofin_demo_autopilot_enabled():
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
                 "enabled": False, "status": "DISABLED",
-                "last_message_fa": "BLOFIN_DEMO_AUTOPILOT_ENABLED فعال نیست.",
+                "last_message_fa": "اتوپایلوت غیرفعال است؛ حالت دستی در دسترس است.",
             })
         _persist_blofin_autopilot_state()
         return
+    BLOFIN_AUTOPILOT_STOP_EVENT.clear()
     with BLOFIN_AUTOPILOT_START_LOCK:
         if BLOFIN_AUTOPILOT_THREAD is not None and BLOFIN_AUTOPILOT_THREAD.is_alive():
             return
