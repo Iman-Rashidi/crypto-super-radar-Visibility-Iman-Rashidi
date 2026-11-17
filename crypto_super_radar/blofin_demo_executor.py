@@ -756,7 +756,7 @@ class BloFinDemoEventStore:
         """Append one manual account-management action without mutating prior events."""
         if not re.fullmatch(r"[A-Za-z0-9]{1,64}", str(action_id or "")):
             raise ValueError("action_id must be a stable opaque identifier.")
-        if event_type not in {"MANUAL_ORDER_CANCELED", "MANUAL_ORDER_SUBMISSION_UNKNOWN", "MANUAL_POSITION_CLOSE_REQUESTED", "MANUAL_POSITION_CLOSE_ACCEPTED"}:
+        if event_type not in {"MANUAL_ORDER_CANCELED", "MANUAL_ORDER_SUBMISSION_UNKNOWN", "MANUAL_POSITION_CLOSE_REQUESTED", "MANUAL_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_REQUESTED", "AUTO_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_UNKNOWN"}:
             raise ValueError("Unsupported manual action event type.")
         with self._lock, self._db:
             self._append_event(action_id, event_type, details)
@@ -1283,6 +1283,8 @@ class BloFinDemoExecutor:
         leverage: int = 1,
         allow_demo_orders: bool = False,
         minimum_size_only: bool = False,
+        cancel_check: Any | None = None,
+        submission_lock: Any | None = None,
     ) -> dict[str, Any]:
         if not allow_demo_orders or not self.trading_enabled:
             raise BloFinDemoExecutionBlocked("Demo order execution is disabled by the two-key safety gate.")
@@ -1402,22 +1404,38 @@ class BloFinDemoExecutor:
             self.store.update_order(plan["client_order_id"], "REJECTED")
             raise BloFinDemoExecutionBlocked("Leverage setup failed; no entry order was submitted.") from exc
 
-        try:
-            response = self.client.place_futures_order(
-                inst_id=inst_id,
-                side=exchange_side,
-                position_side=position_side,
-                size=plan["quantity"],
-                client_order_id=plan["client_order_id"],
-                take_profit=plan["take_profit"],
-                stop_loss=plan["stop_loss"],
-                margin_mode="isolated",
-            )
-        except Exception as exc:
-            self.store.update_order(plan["client_order_id"], "UNKNOWN")
-            raise BloFinDemoExecutionUnknown(
-                "Order outcome is unknown. Do not retry; reconcile with BloFin using clientOrderId."
-            ) from exc
+        def submit_reserved_order() -> dict[str, Any]:
+            # The final cancellation check runs after all slow preflight calls and
+            # immediately before the one exchange write. The caller may hold a
+            # shared lock so stop requests can distinguish an in-flight write.
+            if cancel_check is not None and bool(cancel_check()):
+                self.store.update_order(plan["client_order_id"], "REJECTED")
+                raise BloFinDemoExecutionBlocked(
+                    "Automated entry was stopped before the BloFin Demo order was submitted."
+                )
+            self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
+            try:
+                return self.client.place_futures_order(
+                    inst_id=inst_id,
+                    side=exchange_side,
+                    position_side=position_side,
+                    size=plan["quantity"],
+                    client_order_id=plan["client_order_id"],
+                    take_profit=plan["take_profit"],
+                    stop_loss=plan["stop_loss"],
+                    margin_mode="isolated",
+                )
+            except Exception as exc:
+                self.store.update_order(plan["client_order_id"], "UNKNOWN")
+                raise BloFinDemoExecutionUnknown(
+                    "Order outcome is unknown. Do not retry; reconcile with BloFin using clientOrderId."
+                ) from exc
+
+        if submission_lock is None:
+            response = submit_reserved_order()
+        else:
+            with submission_lock:
+                response = submit_reserved_order()
 
         data = response.get("data")
         if isinstance(data, list):
