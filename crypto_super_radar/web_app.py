@@ -5519,9 +5519,20 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json; charset=utf-8")
         if parsed.path == "/api/notion-sync/status":
             outbox = None
+            activity_journal = None
             try:
                 outbox = NotionEventOutbox()
                 payload = outbox.status_snapshot()
+                try:
+                    activity_journal = NotionActivityJournal()
+                    payload["activity_journal"] = activity_journal.status_snapshot()
+                except Exception as activity_exc:
+                    # Report the chart journal independently; a file-upload backlog
+                    # must not hide the operational event outbox's health.
+                    payload["activity_journal"] = {
+                        "status": "UNAVAILABLE",
+                        "error_type": type(activity_exc).__name__,
+                    }
                 return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
             except Exception as exc:
@@ -5537,6 +5548,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 if outbox is not None:
                     outbox.close()
+                if activity_journal is not None:
+                    activity_journal.close()
         if parsed.path == "/api/blofin/demo/status":
             payload = _blofin_demo_connection_status()
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
