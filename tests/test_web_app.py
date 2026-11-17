@@ -267,7 +267,7 @@ class WebAppHttpTests(unittest.TestCase):
             patch.dict(os.environ, {"BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT": "0.50"}),
             patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
             patch.object(web_app, "BloFinDemoEventStore") as store_factory,
-            self.assertRaises(BloFinDemoExecutionBlocked),
+            self.assertRaises(web_app.BloFinDemoExecutionBlocked),
         ):
             web_app._blofin_manual_close_position(
                 instrument_id="BTC-USDT",
