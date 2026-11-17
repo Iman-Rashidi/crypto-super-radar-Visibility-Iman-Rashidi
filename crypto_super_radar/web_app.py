@@ -5117,9 +5117,12 @@ def _blofin_manual_close_position(
                 client_order_id=action_id,
                 position_id=actual_position_id or None,
             )
-        except BloFinDemoExecutionUnknown:
+        except Exception as exc:
             store.record_manual_action(audit_event_id, unknown_event, {
-                **audit, "submission_outcome": "UNKNOWN", "retry_allowed": False,
+                **audit,
+                "submission_outcome": "UNKNOWN",
+                "error_type": type(exc).__name__,
+                "retry_allowed": False,
             })
             raise
         store.record_manual_action(audit_event_id, accepted_event, {
