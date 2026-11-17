@@ -2322,10 +2322,28 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
 def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
     total = len(CRYPTO_MARKET_UNIVERSE)
     complete = len(items) >= total
-    status = (
-        "PASS" if complete and all(item.get("status") == "PASS" for item in items[:total])
-        else "PARTIAL" if complete else "LOADING"
-    )
+    passed_items = [
+        item for item in items[:total]
+        if isinstance(item, dict) and item.get("status") == "PASS"
+    ]
+    passed_count = len(passed_items)
+    if complete:
+        status = "PASS" if passed_count == total else "PARTIAL" if passed_count else "UNKNOWN"
+    else:
+        status = "PARTIAL" if passed_count else "LOADING"
+    observed_times = []
+    for item in passed_items:
+        raw = item.get("received_at_utc")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                observed_times.append(stamp.astimezone(timezone.utc))
+            except ValueError:
+                continue
+    # The board's age reflects its oldest successful quote, not the last fetch attempt.
+    oldest_observation = min(observed_times) if observed_times else None
     # Report only venues that actually contributed to validated rows. This
     # keeps a successful OKX fallback from being mislabeled as Bybit data.
     sources = list(dict.fromkeys(
@@ -2339,8 +2357,12 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
         sources = ["Binance Spot", "Bybit Spot"]
     return {
         "status": status,
-        "freshness": "FRESH" if complete else "PARTIAL",
-        "updated_at_utc": datetime.now(timezone.utc).isoformat() if items else None,
+        "freshness": (
+            "FRESH" if complete and passed_count == total
+            else "PARTIAL" if passed_count else "UNKNOWN"
+        ),
+        "updated_at_utc": oldest_observation.isoformat() if oldest_observation else None,
+        "completed_at_utc": datetime.now(timezone.utc).isoformat() if complete else None,
         "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
         "sources": sources,
         "items": copy.deepcopy(items),
@@ -5141,7 +5163,7 @@ class Handler(BaseHTTPRequestHandler):
         </section>
         <section class="card" id="blofin-demo-panel">
           <h2>BloFin Demo Futures · اتصال و حساب فقط‌خواندنی</h2>
-          <p class="muted">اتصال API به‌صورت خودکار بررسی می‌شود. برای دیدن موجودی، پوزیشن‌ها و سفارش‌های باز، توکن مستقل پنل را وارد کن. این توکن در مرورگر ذخیره نمی‌شود.</p>
+          <p class="muted">اتصال حساب با درخواست‌های خواندنی بررسی می‌شود. سطح واقعی مجوز خود API Key جداگانه از BloFin خوانده می‌شود؛ حتی کلید Read/Write نیز در این صفحه فقط برای GET استفاده می‌شود. توکن پنل با API Key صرافی متفاوت است و در مرورگر ذخیره نمی‌شود.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="blofin-demo-check" type="button">بررسی اتصال BloFin Demo</button>
             <span id="blofin-demo-status" class="muted" aria-live="polite">اتصال هنوز بررسی نشده است.</span>
