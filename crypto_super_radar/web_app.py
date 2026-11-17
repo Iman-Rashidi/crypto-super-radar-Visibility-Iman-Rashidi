@@ -4301,8 +4301,8 @@ def _run_blofin_demo_execution_job(
             return
 
         _set_blofin_execution_job(
-            job_id, "running", stage="NEMOTRON_SECOND_OPINION",
-            message_fa="تحلیل زنده برای بازبینی واقعی ناظر هوش مصنوعی رایگان ارسال می‌شود؛ هنوز هیچ سفارشی ارسال نشده است.",
+            job_id, "running", stage="AI_SUPERVISOR_COUNCIL",
+            message_fa="هر دو ناظر مستقل باید همین شواهد بازار را جداگانه بررسی کنند؛ هنوز هیچ سفارشی مجاز نیست.",
             analysis=gate_summary,
             elliott_wave=wave_report,
             trade_context=trade_context,
@@ -4311,36 +4311,116 @@ def _run_blofin_demo_execution_job(
             ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
         except Exception as exc:
             ai_review = {
-                "status": "UNKNOWN", "paper_entry_eligible": False,
+                "reviewer_id": "nemotron",
+                "provider": "OpenRouter",
+                "status": "ERROR",
+                "paper_entry_eligible": False,
                 "request_attempted": None,
-                "skip_reason_code": "UNHANDLED_AI_REVIEW_EXCEPTION",
+                "skip_reason_code": "UNHANDLED_PRIMARY_REVIEW_EXCEPTION",
                 "response_source": "UNKNOWN",
+                "response_validated": False,
+                "model_verified": False,
                 "error_type": type(exc).__name__,
             }
 
-        ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
-        if not _demo_ai_review_approved(ai_review):
+        try:
+            second_ai_review = run_independent_ai_supervisor(analysis, asset)
+        except Exception as exc:
+            second_ai_review = {
+                "reviewer_id": "second_ai",
+                "status": "ERROR",
+                "paper_entry_eligible": False,
+                "request_attempted": None,
+                "skip_reason_code": "UNHANDLED_SECOND_REVIEW_EXCEPTION",
+                "response_source": "UNKNOWN",
+                "response_validated": False,
+                "model_verified": False,
+                "error_type": type(exc).__name__,
+            }
+
+        primary_approved = _demo_ai_review_approved(ai_review)
+        second_approved = _demo_ai_review_approved(second_ai_review)
+        primary_status = str(ai_review.get("status") or "UNKNOWN").upper()
+        second_status = str(second_ai_review.get("status") or "UNKNOWN").upper()
+        primary_called_valid = (
+            ai_review.get("request_attempted") is True
+            and ai_review.get("response_source") == "LIVE_API"
+            and ai_review.get("response_validated") is True
+            and ai_review.get("model_verified") is True
+        )
+        second_called_valid = (
+            second_ai_review.get("request_attempted") is True
+            and second_ai_review.get("response_source") == "LIVE_API"
+            and second_ai_review.get("response_validated") is True
+            and second_ai_review.get("model_verified") is True
+        )
+        if primary_called_valid and second_called_valid:
+            if primary_status == second_status and primary_approved == second_approved:
+                consensus_status = "AGREEMENT"
+            else:
+                consensus_status = "DISAGREEMENT"
+        elif primary_called_valid or second_called_valid:
+            consensus_status = "SINGLE_REVIEWER"
+        elif (
+            ai_review.get("request_attempted") is False
+            and second_ai_review.get("request_attempted") is False
+        ):
+            consensus_status = "NOT_CALLED"
+        else:
+            consensus_status = "NOT_COMPARABLE"
+
+        ai_consensus = {
+            "status": consensus_status,
+            "primary_status": primary_status,
+            "second_status": second_status,
+            "primary_verified": primary_called_valid,
+            "second_verified": second_called_valid,
+            "primary_approved": primary_approved,
+            "second_approved": second_approved,
+            "two_reviewer_approval": primary_approved and second_approved,
+            "decision": (
+                "APPROVE" if primary_approved and second_approved else
+                "REJECT" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
+                "NOT_CALLED" if consensus_status == "NOT_CALLED" else
+                "OBSERVE_ONLY"
+            ),
+        }
+        ai_reviews = [
+            {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": ai_review},
+            {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second_ai_review},
+        ]
+        ai_status = (
+            "APPROVED" if primary_approved and second_approved else
+            "DISAGREEMENT" if consensus_status == "DISAGREEMENT" else
+            "NOT_CONFIGURED" if "NOT_CONFIGURED" in {primary_status, second_status} else
+            "VETO" if primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"} else
+            "UNKNOWN"
+        )
+        if not (primary_approved and second_approved):
+            if consensus_status == "DISAGREEMENT":
+                reason_fa = "دو ناظر مستقل به نتیجه یکسان نرسیدند؛ اختلاف ثبت شد و ورود مسدود ماند."
+            elif "NOT_CONFIGURED" in {primary_status, second_status}:
+                reason_fa = "ناظر مستقل دوم هنوز پیکربندی نشده است؛ تا دریافت دو تأیید مستقل هیچ ورودی جدیدی مجاز نیست."
+            elif consensus_status == "NOT_CALLED":
+                reason_fa = "گیت‌های شواهد بومی کامل نیستند؛ هیچ ناظر بیرونی فراخوانی نشد و ورود مسدود ماند."
+            elif primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"}:
+                reason_fa = "حداقل یکی از ناظران مستقل ورود را رد کرد؛ ورود مسدود ماند."
+            else:
+                reason_fa = "دو تأیید مستقل، پاسخ معتبر و شناسه مدل تأییدشده دریافت نشد؛ ورود مسدود ماند."
             _set_blofin_execution_job(
-                job_id, "completed", stage="AI_BLOCKED",
-                message_fa="ناظر هوش مصنوعی تأیید معتبر صادر نکرد؛ ورود مسدود شد و هیچ سفارشی ارسال نشد.",
-                ai_review={
-                    "status": ai_status,
-                    "model": ai_review.get("model") if isinstance(ai_review, dict) else None,
-                    "returned_model": ai_review.get("returned_model") if isinstance(ai_review, dict) else None,
-                    "latency_ms": ai_review.get("latency_ms") if isinstance(ai_review, dict) else None,
-                    "request_attempted": ai_review.get("request_attempted") if isinstance(ai_review, dict) else None,
-                    "skip_reason_code": ai_review.get("skip_reason_code") if isinstance(ai_review, dict) else "AI_REVIEW_RESULT_MISSING",
-                    "response_source": ai_review.get("response_source") if isinstance(ai_review, dict) else "UNKNOWN",
-                    "response_validated": ai_review.get("response_validated") if isinstance(ai_review, dict) else False,
-                    "model_verified": ai_review.get("model_verified") if isinstance(ai_review, dict) else False,
-                    "reason": ai_review.get("reason") if isinstance(ai_review, dict) else None,
-                    "status_fa": ai_review.get("status_fa") if isinstance(ai_review, dict) else None,
-                },
+                job_id, "completed", stage="AI_COUNCIL_BLOCKED",
+                message_fa=reason_fa,
+                ai_review=ai_review,
+                ai_reviews=ai_reviews,
+                ai_consensus=ai_consensus,
                 result={
                     "status": "AI_BLOCKED", "environment": "BLOFIN_DEMO",
                     **gate_summary, "ai_status": ai_status,
-                    "elliott_wave": wave_report, "trade_context": trade_context,
-                    "reason_fa": "Nemotron نظر تأییدکننده و مجوز ورود صادر نکرد؛ هیچ سفارشی ارسال نشد.",
+                    "ai_reviews": ai_reviews,
+                    "ai_consensus": ai_consensus,
+                    "elliott_wave": wave_report,
+                    "trade_context": trade_context,
+                    "reason_fa": reason_fa,
                     "orders_submitted": False, "trade_executed": False,
                 },
             )
@@ -4348,21 +4428,10 @@ def _run_blofin_demo_execution_job(
 
         _set_blofin_execution_job(
             job_id, "running", stage="DEMO_ORDER_GUARDS",
-            message_fa="کنترل حساب Demo، مارجین، قیمت، حجم حداقل قرارداد و حد ضرر/حد سود.",
-            ai_review={
-                "status": ai_status, "model": ai_review.get("model"),
-                "returned_model": ai_review.get("returned_model"),
-                "latency_ms": ai_review.get("latency_ms"),
-                "request_attempted": ai_review.get("request_attempted"),
-                "skip_reason_code": ai_review.get("skip_reason_code"),
-                "response_source": ai_review.get("response_source"),
-                "response_validated": ai_review.get("response_validated"),
-                "model_verified": ai_review.get("model_verified"),
-                "http_status": ai_review.get("http_status"),
-                "total_tokens": ai_review.get("total_tokens"),
-                "reason": ai_review.get("reason"),
-                "status_fa": ai_review.get("status_fa"),
-            },
+            message_fa="هر دو ناظر مستقل با پاسخ معتبر و شناسه مدل تأییدشده موافق‌اند؛ کنترل نهایی Demo آغاز می‌شود.",
+            ai_review=ai_review,
+            ai_reviews=ai_reviews,
+            ai_consensus=ai_consensus,
             analysis=gate_summary,
             elliott_wave=wave_report,
             trade_context=trade_context,
