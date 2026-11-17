@@ -1120,6 +1120,30 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
+    def test_autopilot_next_scan_aligns_to_next_5m_close(self):
+        now = datetime(2026, 11, 17, 16, 23, 32, tzinfo=timezone.utc)
+        delay_seconds, next_at = web_app._blofin_demo_next_5m_scan_window(now)
+        self.assertEqual(delay_seconds, 91)
+        self.assertEqual(next_at, "2026-11-17T16:25:03+00:00")
+
+    def test_autopilot_catches_candle_close_that_occurs_during_scan(self):
+        started = datetime(2026, 11, 17, 17, 14, 22, tzinfo=timezone.utc)
+        finished = datetime(2026, 11, 17, 17, 15, 43, tzinfo=timezone.utc)
+        delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
+            started, now_utc=finished,
+        )
+        self.assertEqual(delay, 5)
+        self.assertEqual(next_at, "2026-11-17T17:15:48+00:00")
+
+    def test_autopilot_keeps_next_boundary_when_scan_finishes_before_it(self):
+        started = datetime(2026, 11, 17, 17, 15, 5, tzinfo=timezone.utc)
+        finished = datetime(2026, 11, 17, 17, 16, 20, tzinfo=timezone.utc)
+        delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
+            started, now_utc=finished,
+        )
+        self.assertEqual(delay, 223)
+        self.assertEqual(next_at, "2026-11-17T17:20:03+00:00")
+
     def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
         class StopAfterTwoCycles(Exception):
             pass
@@ -1187,6 +1211,10 @@ class WebAppHttpTests(unittest.TestCase):
                     "read_errors": [],
                 }),
                 patch.object(web_app.time, "sleep", side_effect=stop_after_second_cycle_sleep),
+                patch.object(
+                    web_app, "_blofin_demo_next_scan_after_cycle",
+                    return_value=(300, "2026-11-17T17:20:03+00:00"),
+                ),
                 patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
                 with self.assertRaises(StopAfterTwoCycles):
@@ -1196,7 +1224,11 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(observed_profiles, ["CHALLENGE_1", "CHALLENGE_1"])
             self.assertEqual(sleep_calls, [300, 300])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
-            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SEARCHING_FOR_SIGNAL")
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_5M_CANDLE")
+            self.assertEqual(
+                web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"],
+                "2026-11-17T17:20:03+00:00",
+            )
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["last_cycle_status"], "completed")
