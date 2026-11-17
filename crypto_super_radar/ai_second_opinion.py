@@ -1151,7 +1151,7 @@ def run_free_ai_second_opinion(
 
 
 def second_ai_connection_status() -> dict[str, Any]:
-    """Expose only non-secret configuration facts for the independent second reviewer."""
+    """Expose only non-secret configuration facts for an independent free-tier reviewer."""
     key = (os.getenv("CSR_SECOND_AI_API_KEY") or "").strip()
     model = (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()
     provider = (os.getenv("CSR_SECOND_AI_PROVIDER") or "").strip()
@@ -1161,21 +1161,40 @@ def second_ai_connection_status() -> dict[str, Any]:
         reasons.append("CSR_SECOND_AI_API_KEY_MISSING")
     if not model:
         reasons.append("CSR_SECOND_AI_MODEL_MISSING")
-    elif not model.endswith(":free"):
-        reasons.append("SECOND_AI_MODEL_NOT_FREE")
     if not provider:
         reasons.append("CSR_SECOND_AI_PROVIDER_MISSING")
     if not endpoint:
         reasons.append("CSR_SECOND_AI_API_URL_MISSING")
     elif not endpoint.startswith("https://"):
         reasons.append("SECOND_AI_ENDPOINT_MUST_USE_HTTPS")
+
+    provider_key = provider.casefold().replace("-", "").replace("_", "").replace(" ", "")
+    endpoint_host = (urlsplit(endpoint).hostname or "").casefold() if endpoint else ""
+    endpoint_path = urlsplit(endpoint).path.rstrip("/") if endpoint else ""
+
+    # Groq publishes its own free-plan model IDs without OpenRouter's ":free"
+    # suffix. Keep the supported free-plan models and endpoint explicitly allowlisted.
+    if provider_key in {"groq", "groqcloud"}:
+        free_models = {
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
+        }
+        if model and model not in free_models:
+            reasons.append("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST")
+        if endpoint and (
+            endpoint_host != "api.groq.com"
+            or endpoint_path != "/openai/v1/chat/completions"
+        ):
+            reasons.append("GROQ_ENDPOINT_MUST_MATCH_OFFICIAL_OPENAI_COMPATIBLE_ENDPOINT")
+    elif model and not model.endswith(":free"):
+        reasons.append("SECOND_AI_MODEL_NOT_FREE")
     if key and key == _api_key():
         reasons.append("SECOND_AI_KEY_MUST_BE_SEPARATE")
     if model and model == _model():
         reasons.append("SECOND_AI_MODEL_MUST_DIFFER")
     if provider and provider.casefold() == "openrouter":
         reasons.append("SECOND_AI_PROVIDER_MUST_DIFFER")
-    endpoint_host = (urlsplit(endpoint).hostname or "").casefold() if endpoint else ""
     if endpoint_host in {"openrouter.ai", "www.openrouter.ai"}:
         reasons.append("SECOND_AI_ENDPOINT_MUST_DIFFER")
     configured = not reasons
@@ -1189,7 +1208,6 @@ def second_ai_connection_status() -> dict[str, Any]:
         "secret_sent_to_model": False,
         "paper_entry_eligible": False,
     }
-
 
 def run_independent_ai_supervisor(
     result: Any, asset: Any = None, http_post=None,
