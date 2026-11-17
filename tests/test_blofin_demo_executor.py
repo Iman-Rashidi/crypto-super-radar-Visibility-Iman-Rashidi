@@ -23,9 +23,9 @@ from crypto_super_radar.blofin_demo_readonly import (
 
 
 def signal_record(**overrides):
-    pass_count = int(overrides.get("gate_pass_count", 12))
-    fail_count = int(overrides.get("gate_fail_count", 0))
-    unknown_count = int(overrides.get("gate_unknown_count", max(0, 12 - pass_count - fail_count)))
+    pass_count = int(overrides.get("gate_pass_count", 0))
+    fail_count = int(overrides.get("gate_fail_count", 12))
+    unknown_count = int(overrides.get("gate_unknown_count", 0))
     statuses = (
         ["PASS"] * max(0, min(12, pass_count))
         + ["FAIL"] * max(0, min(12, fail_count))
@@ -34,9 +34,16 @@ def signal_record(**overrides):
     statuses += ["UNKNOWN"] * (12 - len(statuses))
     record = {
         "signal": "LONG",
-        "signal_id": "candle-2026-11-13T18:00:00Z",
+        "signal_id": "challenge1-v4:BTC-USDT:5m:2026-11-13T18:00:00+00:00",
+        "signal_bar_open_utc": "2026-11-13T18:00:00+00:00",
         "inst_id": "BTC-USDT",
+        "instrument_id": "BTC-USDT",
         "execution_profile": "CHALLENGE_1",
+        "execution": {
+            "status": "PASS",
+            "direction": "LONG",
+            "signal_id": "challenge1-v4:BTC-USDT:5m:2026-11-13T18:00:00+00:00",
+        },
         "confirmation_score": None,
         "estimated_risk_score": None,
         "gate_pass_count": pass_count,
@@ -51,21 +58,49 @@ def signal_record(**overrides):
     side = str(record["signal"]).upper()
     pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
     pattern_name = "Bullish Engulfing" if side == "LONG" else "Bearish Engulfing"
+    signal_bar = "2026-11-13T18:00:00+00:00"
+    candles_5m = [
+        {
+            "open_time_utc": "2026-11-13T17:50:00+00:00",
+            "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.4, "volume": 900.0,
+        },
+        {
+            "open_time_utc": "2026-11-13T17:55:00+00:00",
+            "open": 99.4, "high": 100.5, "low": 99.0, "close": 100.0, "volume": 950.0,
+        },
+        {
+            "open_time_utc": signal_bar,
+            "open": 100.0 if side == "LONG" else 101.0,
+            "high": 101.5 if side == "LONG" else 101.2,
+            "low": 99.5 if side == "LONG" else 99.4,
+            "close": 101.0 if side == "LONG" else 100.0,
+            "volume": 1100.0,
+        },
+    ]
+    signal_id = f"challenge1-v4:BTC-USDT:5m:{signal_bar}"
+    record["signal_id"] = signal_id
+    record["signal_bar_open_utc"] = signal_bar
+    record["execution"] = {"status": "PASS", "direction": side, "signal_id": signal_id}
     record["challenge1_evidence"] = {
-        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
-        "setup_timeframe": "15m",
-        "context_timeframe": "1H",
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+        "setup_timeframe": "5m",
         "completed_candles_only": True,
+        "higher_timeframes_used": False,
         "legacy_12_gates_used_for_entry": False,
         "external_ai_required": False,
         "tinyfish_required": False,
+        "volume_is_advisory": True,
         "decision": side,
-        "detected_patterns": [{"name_en": pattern_name, "direction": pattern_direction}],
-        "chosen_pattern": {"name_en": pattern_name, "direction": pattern_direction},
-        "confirmation_candle": {
-            "open_time_utc": "2026-11-13T18:00:00+00:00",
-            "volume_confirmation": {"confirmed": True, "volume_ratio": 1.4},
+        "detected_patterns": [{
+            "name_en": pattern_name, "direction": pattern_direction,
+            "category": "CANDLESTICK", "timeframe": "5m",
+        }],
+        "chosen_pattern": {
+            "name_en": pattern_name, "direction": pattern_direction,
+            "category": "CANDLESTICK", "timeframe": "5m",
         },
+        "confirmation_candle": dict(candles_5m[-1]),
+        "candles_5m": candles_5m,
     }
     return record
 
@@ -115,7 +150,8 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
         self.assertEqual(plan["quantity"], "1250")
         self.assertEqual(plan["risk_budget_usdt"], 2.5)
         self.assertEqual(plan["leverage"], 3)
-        self.assertEqual(plan["client_order_id"], "205ccdbb36207dcd1acb9eba0a30ec04")
+        self.assertEqual(len(plan["client_order_id"]), 32)
+        self.assertTrue(plan["client_order_id"].isalnum())
 
     def test_legacy_gate_rows_are_observational_not_entry_requirements(self):
         for overrides in (
@@ -130,23 +166,31 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["side"], "LONG")
 
-    def test_challenge1_v2_does_not_require_volume_confirmation_or_legacy_engine_version(self):
-        record = signal_record()
+    def test_challenge1_v4_5m_pattern_does_not_require_volume_confirmation_or_legacy_gates(self):
+        record = signal_record(gate_pass_count=0, gate_fail_count=12, gate_unknown_count=0)
         evidence = record["challenge1_evidence"]
-        evidence["decision_engine_version"] = "CHALLENGE_1_LOCAL_RULES_V2"
-        evidence["volume_is_advisory"] = True
-        evidence["context_is_advisory"] = True
-        evidence["confirmation_candle"]["volume_confirmation"] = {
-            "confirmed": False,
-            "volume_ratio": 0.82,
-            "reason": "Volume did not meet the optional advisory threshold.",
-        }
+        self.assertNotIn("volume_confirmation", evidence["confirmation_candle"])
         plan = build_demo_order_plan(
             record, instrument_record(), inst_id="BTC-USDT",
             equity_usdt=1000, leverage=1,
             policy=BloFinDemoRiskPolicy(max_leverage=1),
         )
         self.assertEqual(plan["side"], "LONG")
+
+    def test_challenge1_rejects_wrong_timeframe_or_conflicting_5m_confirmation(self):
+        for mutate in (
+            lambda evidence: evidence.update({"setup_timeframe": "15m"}),
+            lambda evidence: evidence["chosen_pattern"].update({"timeframe": "15m"}),
+            lambda evidence: evidence["confirmation_candle"].update({"volume": 0.0}),
+        ):
+            record = signal_record()
+            mutate(record["challenge1_evidence"])
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                build_demo_order_plan(
+                    record, instrument_record(), inst_id="BTC-USDT",
+                    equity_usdt=1000, leverage=1,
+                    policy=BloFinDemoRiskPolicy(max_leverage=1),
+                )
 
     def test_challenge1_rejects_unknown_evidence_engine_version(self):
         record = signal_record()
@@ -456,6 +500,19 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         outcome = experience["events"][-1]["payload"]
         self.assertEqual(outcome["realized_result"], "NOT_EXECUTED")
         self.assertIsNone(outcome["realized_net_pnl"])
+
+    def test_same_5m_timestamp_with_changed_volume_is_not_the_same_immutable_candle(self):
+        challenge = signal_record(signal="NO_TRADE")
+        experience_id = self.store.record_challenge1_decision(
+            instrument_id="BTC-USDT", challenge_record=challenge,
+        )
+        changed = json.loads(json.dumps(challenge))
+        changed["challenge1_evidence"]["confirmation_candle"]["volume"] += 1.0
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            self.store.record_challenge1_decision(
+                instrument_id="BTC-USDT", challenge_record=changed,
+            )
+        self.assertIsNotNone(self.store.learning_memory.get_experience(experience_id))
 
     def test_closed_position_outcome_uses_exact_position_id_and_deducts_trading_fees(self):
         challenge = signal_record()

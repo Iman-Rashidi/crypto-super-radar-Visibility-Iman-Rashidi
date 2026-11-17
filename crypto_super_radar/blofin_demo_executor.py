@@ -33,6 +33,7 @@ from .blofin_demo_readonly import (
 )
 from .database import connect_database, storage_backend
 from .learning_experience_memory import LearningExperienceMemory
+from .challenge1_strategy import challenge1_entry_evidence_ready
 
 
 class BloFinDemoExecutionBlocked(RuntimeError):
@@ -115,7 +116,7 @@ def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str,
     identity = {
         "engine_version": str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
         "instrument_id": str(instrument_id).strip().upper(),
-        "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
+        "setup_timeframe": str(evidence.get("setup_timeframe") or "5m"),
         "signal_bar_open_utc": candle_time,
     }
     canonical = json.dumps(
@@ -196,37 +197,11 @@ def build_demo_order_plan(
     if execution_profile != "CHALLENGE_1":
         raise BloFinDemoExecutionBlocked("Only Challenge 1 strategy evidence is allowed for BloFin Demo orders.")
     if execution_profile == "CHALLENGE_1":
-        evidence = record.get("challenge1_evidence")
-        if not isinstance(evidence, Mapping):
-            raise BloFinDemoExecutionBlocked("Challenge 1 evidence is missing.")
-        chosen = evidence.get("chosen_pattern")
-        confirmation = evidence.get("confirmation_candle")
-        volume = confirmation.get("volume_confirmation") if isinstance(confirmation, Mapping) else None
-        expected_pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
-        if (
-            evidence.get("decision_engine_version") not in {
-                "CHALLENGE_1_LOCAL_RULES_V1",
-                "CHALLENGE_1_LOCAL_RULES_V2",
-            }
-            or evidence.get("completed_candles_only") is not True
-            or evidence.get("legacy_12_gates_used_for_entry") is not False
-            or evidence.get("external_ai_required") is not False
-            or evidence.get("tinyfish_required") is not False
-            or evidence.get("decision") != side
-            or evidence.get("setup_timeframe") != "15m"
-            or not isinstance(evidence.get("detected_patterns"), list)
-            or not evidence.get("detected_patterns")
-            or not isinstance(chosen, Mapping)
-            or chosen.get("direction") != expected_pattern_direction
-            or not isinstance(confirmation, Mapping)
-            or not str(confirmation.get("open_time_utc") or "").strip()
-            or not isinstance(volume, Mapping)
-        ):
+        eligible, reason = challenge1_entry_evidence_ready(record)
+        if not eligible:
             raise BloFinDemoExecutionBlocked(
-                "Challenge 1 pattern/closed-candle evidence is incomplete or inconsistent."
+                "Challenge 1 5m-only pattern evidence is incomplete or inconsistent: " + reason
             )
-        # V2 deliberately treats volume and 1H context as advisory. Requiring
-        # volume.confirmed here would silently veto valid V2 candle-pattern setups.
     else:
         profile_rules = {
             "EASY": {"required": {1, 2, 3, 4, 5, 6, 9}, "minimum_pass": 7, "minimum_score": 55.0},
@@ -627,7 +602,7 @@ class BloFinDemoEventStore:
         current_time = str(current.get("open_time_utc") or "").strip().replace("Z", "+00:00")
         if not saved_time or saved_time != current_time:
             return False
-        for field in ("open", "high", "low", "close"):
+        for field in ("open", "high", "low", "close", "volume"):
             try:
                 left = float(saved.get(field))
                 right = float(current.get(field))
@@ -650,7 +625,7 @@ class BloFinDemoEventStore:
                  AND challenge_id='CHALLENGE_1_BLOFIN_DEMO'
                  AND environment='BLOFIN_DEMO'
                  AND event_type='DECISION_RECORDED'
-                 AND symbol=? AND timeframe='15M'
+                 AND symbol=? AND timeframe='5M'
                ORDER BY sequence ASC LIMIT 2000""",
             (str(instrument_id).strip().upper(),),
         ).fetchall()
@@ -706,7 +681,7 @@ class BloFinDemoEventStore:
     def record_challenge1_decision(
         self, *, instrument_id: str, challenge_record: Mapping[str, Any],
     ) -> str:
-        """Persist one immutable decision per completed 15m candle, idempotently."""
+        """Persist one immutable decision per completed 5m candle, idempotently."""
         if not isinstance(challenge_record, Mapping):
             raise TypeError("challenge_record must be a mapping")
         evidence = challenge_record.get("challenge1_evidence")
@@ -718,6 +693,8 @@ class BloFinDemoEventStore:
         )
         if not candle_time:
             raise ValueError("A completed confirmation candle timestamp is required.")
+        if evidence.get("setup_timeframe") != "5m":
+            raise BloFinDemoExecutionBlocked("Challenge 1 decisions must use completed 5m candles only.")
         instrument = str(instrument_id).strip().upper()
         existing = self._find_challenge1_decision_for_candle(instrument, candle_time)
         if existing is not None:
@@ -729,8 +706,8 @@ class BloFinDemoEventStore:
                 raise BloFinDemoExecutionBlocked(
                     "The same completed candle timestamp has conflicting immutable OHLC data; no order was submitted."
                 )
-            # The original 15m candle decision remains authoritative. Do not append
-            # a second event when optional 1H context, sentiment, or rationale changes.
+            # The original 5m candle decision remains authoritative. Do not append
+            # a second event when optional reviewer commentary or rationale changes.
             return experience_id
 
         experience_id = _challenge1_experience_id(instrument, challenge_record)
@@ -748,8 +725,7 @@ class BloFinDemoEventStore:
         input_snapshot = {
             "instrument_id": instrument,
             "signal_bar_open_utc": signal_bar,
-            "setup_timeframe": str(evidence.get("setup_timeframe") or "15m"),
-            "context_timeframe": str(evidence.get("context_timeframe") or "1H"),
+            "setup_timeframe": "5m",
             "completed_candles_only": evidence.get("completed_candles_only") is True,
             "future_data_in_input": False,
             "challenge1_evidence": evidence,
@@ -767,7 +743,7 @@ class BloFinDemoEventStore:
                 input_snapshot=input_snapshot,
                 market="CEX_FUTURES",
                 symbol=instrument,
-                timeframe="15M",
+                timeframe="5M",
                 model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
                 dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
             )
