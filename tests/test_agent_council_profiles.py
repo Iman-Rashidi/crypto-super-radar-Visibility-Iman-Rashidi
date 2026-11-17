@@ -8,6 +8,7 @@ from crypto_super_radar.agent_council import build_native_agent_council_review
 
 def result_for(profile: str):
     required = {
+        "CHALLENGE_1": set(),
         "EASY": {1, 2, 3, 4, 5, 6, 9},
         "STANDARD": {1, 2, 3, 4, 5, 6, 8, 9, 10},
         "STRICT": set(range(1, 13)),
@@ -25,7 +26,7 @@ def result_for(profile: str):
     return SimpleNamespace(
         asset="perp:BTCUSDT",
         signal="LONG",
-        confirmation_score={"EASY": 70, "STANDARD": 70, "STRICT": 90}[profile],
+        confirmation_score={"CHALLENGE_1": 70, "EASY": 70, "STANDARD": 70, "STRICT": 90}[profile],
         estimated_risk_score=20,
         entry_price=100.0,
         stop_loss=98.0,
@@ -36,6 +37,28 @@ def result_for(profile: str):
 
 
 class AgentCouncilProfilePolicyTests(unittest.TestCase):
+    def test_challenge1_keeps_the_twelve_general_gates_advisory(self):
+        candidate = result_for("CHALLENGE_1")
+        for gate in candidate.gates:
+            gate.status = "UNKNOWN"
+        review = build_native_agent_council_review(candidate)
+        self.assertEqual(review["execution_profile"], "CHALLENGE_1")
+        self.assertEqual(review["required_gate_ids"], [])
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["paper_entry_eligible"])
+        self.assertEqual(review["risk_manager"]["checks"][0]["status"], "PASS")
+        self.assertIn("Additional research gates", [
+            row["check"] for row in review["risk_manager"]["checks"]
+        ])
+        self.assertEqual(review["safety"]["llm_calls"], 0)
+
+    def test_challenge1_still_blocks_missing_risk_or_invalid_trade_plan(self):
+        candidate = result_for("CHALLENGE_1")
+        candidate.estimated_risk_score = 60
+        review = build_native_agent_council_review(candidate)
+        self.assertEqual(review["status"], "VETO")
+        self.assertFalse(review["paper_entry_eligible"])
+
     def test_easy_allows_non_required_research_gates_to_remain_unknown(self):
         result = build_native_agent_council_review(result_for("EASY"))
         self.assertEqual(result["status"], "APPROVED")
