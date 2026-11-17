@@ -864,6 +864,53 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_stale_learning_outcome_does_not_block_entry_when_exchange_is_flat(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        old_signal = signal_record(signal_id="old-filled-position")
+        experience_id = store.record_challenge1_decision(
+            instrument_id="BTC-USDT",
+            challenge_record=old_signal,
+        )
+        old_plan = build_demo_order_plan(
+            old_signal, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        old_plan["experience_id"] = experience_id
+        self.assertTrue(store.reserve_order(old_plan))
+        store.update_order(
+            old_plan["client_order_id"], "FILLED", exchange_order_id="old-demo-order",
+        )
+        self.assertTrue(store.attach_position_id(experience_id, "old-demo-position"))
+        self.assertEqual(store.pending_learning_outcome_count(), 1)
+
+        # The old history is deliberately incomplete, so its PnL remains UNKNOWN.
+        # Fresh exchange positions and open orders are nevertheless both empty.
+        client = FakeExecutorClient()
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            fresh = executor.execute(
+                signal_record(signal_id="fresh-completed-candle"),
+                inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
+            )
+            self.assertEqual(fresh["status"], "ACCEPTED")
+            self.assertTrue(any(
+                isinstance(call, tuple) and call[0] == "place_order"
+                for call in client.calls
+            ))
+            self.assertEqual(store.pending_learning_outcome_count(), 2)
+            old_experience = store.learning_memory.get_experience(experience_id)
+            self.assertEqual(old_experience["learning_status"], "PENDING_OUTCOME")
+            self.assertEqual(
+                old_experience["events"][-1]["event_type"],
+                "DECISION_RECORDED",
+            )
+        finally:
+            store.close()
+
     def test_pending_orders_or_existing_positions_block_new_entry(self):
         with patch.dict(os.environ, {
             "TURSO_DATABASE_URL": "",
