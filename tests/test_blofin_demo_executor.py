@@ -273,6 +273,37 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
                 take_profit="104", stop_loss="98",
             )
 
+    def test_cancel_futures_order_targets_one_exact_order_and_instrument(self):
+        response = self.client.cancel_futures_order(inst_id="BTC-USDT", order_id="123456789")
+        self.assertEqual(response["data"]["orderId"], "demo-order-1")
+        args, kwargs = self.session.post.call_args
+        self.assertTrue(args[0].endswith("/api/v1/trade/cancel-order"))
+        self.assertEqual(json.loads(kwargs["data"]), {
+            "instId": "BTC-USDT", "orderId": "123456789"
+        })
+
+    def test_cancel_futures_order_rejects_invalid_identifiers_before_post(self):
+        with self.assertRaises(ValueError):
+            self.client.cancel_futures_order(inst_id="BTC-USDT", order_id="")
+        with self.assertRaises(ValueError):
+            self.client.cancel_futures_order(inst_id="BTC-USDT", order_id="123/456")
+        with self.assertRaises(ValueError):
+            self.client.cancel_futures_order(inst_id="BTC-USD", order_id="123456789")
+        self.session.post.assert_not_called()
+
+    def test_close_futures_position_accepts_cross_margin_but_requires_exact_position(self):
+        self.client.close_futures_position(
+            inst_id="BTC-USDT", margin_mode="cross", position_side="net",
+            client_order_id="manualclose123", position_id="987654321",
+        )
+        args, kwargs = self.session.post.call_args
+        self.assertTrue(args[0].endswith("/api/v1/trade/close-position"))
+        self.assertEqual(json.loads(kwargs["data"]), {
+            "instId": "BTC-USDT", "marginMode": "cross",
+            "positionSide": "net", "clientOrderId": "manualclose123",
+            "positionId": "987654321",
+        })
+
     def test_only_explicitly_allowlisted_post_paths_are_permitted(self):
         with self.assertRaises(BloFinDemoExecutionBlocked):
             self.client._post("/api/v1/account/set-position-mode", {"positionMode": "net_mode"})
@@ -311,6 +342,16 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             (plan["client_order_id"],),
         ).fetchall()
         self.assertEqual([row[0] for row in events], ["RESERVED"])
+
+    def test_manual_action_audit_is_append_only_and_uses_action_identity(self):
+        self.store.record_manual_action(
+            "MANUALCLOSE123", "MANUAL_POSITION_CLOSE_REQUESTED",
+            {"instrument_id": "BTC-USDT", "position_id": "987654321", "unrealized_pnl": "-2.5"},
+        )
+        events = self.store.recent_events("MANUALCLOSE123")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "MANUAL_POSITION_CLOSE_REQUESTED")
+        self.assertIn("position_id", events[0]["payload"])
 
     def test_has_any_orders_tracks_reserved_order_history(self):
         self.assertFalse(self.store.has_any_orders())
