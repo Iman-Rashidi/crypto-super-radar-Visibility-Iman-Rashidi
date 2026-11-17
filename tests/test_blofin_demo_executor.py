@@ -1220,7 +1220,9 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             budget = store.trade_budget_status()
             self.assertEqual(budget["orders_today"], 2)
             self.assertIsNone(budget["max_orders_per_utc_day"])
-            self.assertEqual(store.pending_learning_outcome_count(), 2)
+            self.assertEqual(store.get_order(first["client_order_id"])["status"], "CLOSED")
+            self.assertEqual(store.get_order(second["client_order_id"])["status"], "ACCEPTED")
+            self.assertEqual(store.pending_learning_outcome_count(), 1)
         finally:
             store.close()
 
@@ -1245,9 +1247,9 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             old_plan["client_order_id"], "FILLED", exchange_order_id="old-demo-order",
         )
         self.assertTrue(store.attach_position_id(experience_id, "old-demo-position"))
-        # The exchange history reconciler confirms the old position is closed,
-        # but its realized learning label remains UNKNOWN and pending.
-        store.update_order(old_plan["client_order_id"], "CLOSED")
+        # The exchange account read is flat, while the local FILLED record
+        # still awaits its final realized learning label. Pending learning alone
+        # must not be treated as active exchange exposure or an unresolved POST.
         self.assertEqual(store.pending_learning_outcome_count(), 1)
 
         # The old history is deliberately incomplete, so its PnL remains UNKNOWN.

@@ -19,23 +19,42 @@ def instrument():
 
 
 def record():
+    signal_bar = "2026-11-16T10:00:00+00:00"
+    candles_5m = [
+        {
+            "open_time_utc": "2026-11-16T09:50:00+00:00",
+            "open": 98.5, "high": 99.5, "low": 98.0, "close": 99.0, "volume": 800.0,
+        },
+        {
+            "open_time_utc": "2026-11-16T09:55:00+00:00",
+            "open": 99.0, "high": 100.2, "low": 98.8, "close": 99.5, "volume": 900.0,
+        },
+        {
+            "open_time_utc": signal_bar,
+            "open": 99.5, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1100.0,
+        },
+    ]
+    signal_id = f"challenge1-v4:BTC-USDT:5m:{signal_bar}"
+    pattern = {
+        "name_en": "Bullish Engulfing", "direction": "BULLISH",
+        "category": "CANDLESTICK", "timeframe": "5m",
+    }
     return {
-        "signal": "LONG", "signal_id": "challenge1-closed-bar-001",
-        "inst_id": "BTC-USDT", "execution_profile": "CHALLENGE_1",
+        "signal": "LONG", "signal_id": signal_id,
+        "signal_bar_open_utc": signal_bar,
+        "inst_id": "BTC-USDT", "instrument_id": "BTC-USDT",
+        "execution_profile": "CHALLENGE_1",
+        "execution": {"status": "PASS", "direction": "LONG", "signal_id": signal_id},
         "entry_price_usd": 100.0, "stop_loss_usd": 98.0,
         "take_profit_usd": 104.0,
         "confirmation_score": None, "estimated_risk_score": None, "gates": [],
         "challenge1_evidence": {
-            "setup_timeframe": "15m", "context_timeframe": "1H",
-            "completed_candles_only": True, "legacy_12_gates_used_for_entry": False,
+            "setup_timeframe": "5m", "completed_candles_only": True,
+            "higher_timeframes_used": False, "legacy_12_gates_used_for_entry": False,
             "external_ai_required": False, "tinyfish_required": False,
-            "decision": "LONG", "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V1",
-            "detected_patterns": [{"name_en": "Bullish Engulfing", "direction": "BULLISH"}],
-            "chosen_pattern": {"name_en": "Bullish Engulfing", "direction": "BULLISH"},
-            "confirmation_candle": {
-                "open_time_utc": "2026-11-16T10:00:00+00:00",
-                "volume_confirmation": {"confirmed": True, "volume_ratio": 1.4},
-            },
+            "decision": "LONG", "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+            "detected_patterns": [pattern], "chosen_pattern": pattern,
+            "confirmation_candle": dict(candles_5m[-1]), "candles_5m": candles_5m,
         },
     }
 

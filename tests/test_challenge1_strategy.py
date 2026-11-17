@@ -24,7 +24,10 @@ class FakeBloFin:
 
 def candle_rows(now_ms, interval_ms, count=65, unclosed_last=False):
     rows = []
-    start = now_ms - count * interval_ms - interval_ms
+    # The final bar opens one interval before now_ms and closes at now_ms.
+    # When the last row is deliberately unclosed, the preceding close is one
+    # interval old and remains inside the strategy's freshness tolerance.
+    start = now_ms - count * interval_ms
     for index in range(count):
         stamp = start + index * interval_ms
         close = 100.0 + index * 0.05
