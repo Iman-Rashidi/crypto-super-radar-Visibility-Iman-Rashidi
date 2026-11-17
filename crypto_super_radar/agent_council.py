@@ -1,15 +1,46 @@
-"""Gate-free deterministic safety council for CRYPTO SUPER RADAR paper review.
+"""Zero-cost, deterministic multi-agent council for paper-trade review.
 
-The former twelve-gate framework is retired globally. Entry review is based on
-the strategy's actual candle/pattern evidence plus independent execution-risk
-checks. This module never submits or changes orders.
+This recreates the *workflow shape* of a multi-agent trading desk (specialist
+analysts, bull/bear debate, trader proposal and risk/portfolio veto) using only
+CRYPTO SUPER RADAR's already-computed evidence. It does not copy model weights,
+call an LLM, fetch extra data, or change the twelve underlying gates.
 """
 from __future__ import annotations
 
 import math
 from typing import Any
 
+MANDATORY_GATE_IDS = frozenset(range(1, 13))
 MAX_ESTIMATED_RISK_SCORE = 45.0
+PROFILE_POLICIES = {
+    "EASY": {
+        "required_gate_ids": frozenset({1, 2, 3, 4, 5, 6, 9}),
+        "min_pass_count": 7,
+        "min_confirmation_score": 55.0,
+    },
+    "STANDARD": {
+        "required_gate_ids": frozenset({1, 2, 3, 4, 5, 6, 8, 9}),
+        "min_pass_count": 9,
+        "min_confirmation_score": 65.0,
+    },
+    "STRICT": {
+        "required_gate_ids": MANDATORY_GATE_IDS,
+        "min_pass_count": 12,
+        "min_confirmation_score": 75.0,
+    },
+}
+
+_AGENT_GROUPS = (
+    ("Data integrity analyst", "تحلیل‌گر صحت داده", (1,)),
+    ("Market regime analyst", "تحلیل‌گر رژیم بازار", (2,)),
+    ("Technical analyst", "تحلیل‌گر تکنیکال", (3, 4)),
+    ("Liquidity and capital-flow analyst", "تحلیل‌گر نقدینگی و جریان سرمایه", (5,)),
+    ("On-chain and contract-risk analyst", "تحلیل‌گر آن‌چین و ریسک قرارداد", (6,)),
+    ("News and sentiment analyst", "تحلیل‌گر خبر و احساسات", (7, 11)),
+    ("Strategy validation analyst", "تحلیل‌گر اعتبارسنجی استراتژی", (8, 12)),
+    ("Whale intelligence analyst", "تحلیل‌گر رفتار نهنگ‌ها", (10,)),
+    ("Portfolio risk analyst", "مدیر ریسک پرتفوی", (9,)),
+)
 
 
 def _enum_text(value: Any) -> str:
@@ -26,82 +57,209 @@ def _finite_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _gate_status(gate: Any) -> str:
+    status = _enum_text(getattr(gate, "status", None))
+    return status if status in {"PASS", "FAIL", "UNKNOWN"} else "UNKNOWN"
+
+
 def build_native_agent_council_review(result: Any) -> dict[str, Any]:
-    """Review directional strategy output without consulting the retired gates."""
+    """Build an explainable, fail-closed second review from one radar result."""
+    raw_gates = getattr(result, "gates", None)
+    raw_gates = raw_gates if isinstance(raw_gates, (list, tuple)) else []
+    gates: dict[int, str] = {}
+    duplicate_ids: list[int] = []
+    invalid_ids = 0
+
+    for gate in raw_gates:
+        raw_id = getattr(gate, "gate_id", None)
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+            invalid_ids += 1
+            continue
+        gate_id = raw_id
+        if gate_id in gates:
+            duplicate_ids.append(gate_id)
+        else:
+            gates[gate_id] = _gate_status(gate)
+
     metrics = getattr(result, "metrics", {})
     metrics = metrics if isinstance(metrics, dict) else {}
-    signal = _enum_text(getattr(result, "signal", None)).replace("_", " ")
-    asset_name = str(getattr(result, "asset", "") or "")
-    perpetual = asset_name.lower().startswith("perp:")
+    execution_profile = _enum_text(metrics.get("execution_profile") or "STRICT")
+    if execution_profile not in PROFILE_POLICIES:
+        execution_profile = "STRICT"
+    profile_policy = PROFILE_POLICIES[execution_profile]
+    required_gate_ids = profile_policy["required_gate_ids"]
+    missing_ids = sorted(required_gate_ids - set(gates))
+    unexpected_ids = sorted(set(gates) - MANDATORY_GATE_IDS)
+    duplicate_ids = sorted(set(duplicate_ids))
+
+    agents: list[dict[str, Any]] = []
+    supporting: list[str] = []
+    opposing: list[str] = []
+    abstaining: list[str] = []
+
+    for name, name_fa, gate_ids in _AGENT_GROUPS:
+        statuses = [gates.get(gate_id, "UNKNOWN") for gate_id in gate_ids]
+        if "FAIL" in statuses:
+            status = "FAIL"
+            stance = "BEARISH_OBJECTION"
+            opposing.append(name_fa)
+        elif all(value == "PASS" for value in statuses):
+            status = "PASS"
+            stance = "BULLISH_SUPPORT"
+            supporting.append(name_fa)
+        else:
+            status = "UNKNOWN"
+            stance = "ABSTAIN"
+            abstaining.append(name_fa)
+        agents.append({
+            "name": name,
+            "name_fa": name_fa,
+            "gate_ids": list(gate_ids),
+            "status": status,
+            "stance": stance,
+        })
+
     checks: list[dict[str, str]] = []
 
     def add_check(label: str, status: str, detail: str) -> None:
         checks.append({"check": label, "status": status, "detail": detail})
 
-    if signal == "LONG":
-        add_check("Strategy direction", "PASS", "Strategy proposes LONG.")
-    elif signal == "SHORT" and perpetual:
-        add_check("Strategy direction", "PASS", "Perpetual strategy proposes SHORT.")
+    if duplicate_ids or invalid_ids:
+        add_check(
+            "Unique gate evidence",
+            "UNKNOWN",
+            "duplicate=" + str(duplicate_ids) + "; invalid_ids=" + str(invalid_ids),
+        )
+    elif unexpected_ids:
+        add_check(
+            "Known gate identifiers",
+            "FAIL",
+            "Unexpected gate IDs=" + str(unexpected_ids),
+        )
+    elif missing_ids:
+        add_check(
+            "Profile-required gate evidence",
+            "UNKNOWN",
+            "Missing required gate IDs=" + str(missing_ids),
+        )
     else:
-        add_check("Strategy direction", "FAIL", "A directional LONG or eligible perpetual SHORT is required.")
+        statuses = [gates[gate_id] for gate_id in sorted(required_gate_ids)]
+        pass_count = sum(value == "PASS" for value in gates.values())
+        min_pass = int(profile_policy["min_pass_count"])
+        if all(value == "PASS" for value in statuses) and pass_count >= min_pass:
+            add_check(
+                "Profile-required gate evidence",
+                "PASS",
+                f"{execution_profile} requires {sorted(required_gate_ids)} and at least {min_pass} PASS gates; observed {pass_count} PASS.",
+            )
+        elif any(value == "FAIL" for value in statuses):
+            add_check(
+                "Profile-required gate evidence",
+                "FAIL",
+                f"A required {execution_profile} gate failed: "
+                + str({gate_id: gates[gate_id] for gate_id in required_gate_ids}),
+            )
+        else:
+            add_check(
+                "Profile-required gate evidence",
+                "UNKNOWN",
+                f"{execution_profile} requires {min_pass} PASS gates; observed {pass_count}.",
+            )
+        if execution_profile != "STRICT":
+            add_check(
+                "Additional research gates",
+                "PASS",
+                "Non-required research gates remain visible as advisory evidence; UNKNOWN/FAIL values were not rewritten as PASS.",
+            )
+
+    signal = _enum_text(getattr(result, "signal", None)).replace("_", " ")
+    asset_name = str(getattr(result, "asset", "") or "")
+    perpetual = asset_name.lower().startswith("perp:")
+    if signal == "LONG":
+        add_check("Radar trade proposal", "PASS", "Radar proposes LONG.")
+    elif signal == "SHORT" and perpetual:
+        add_check("Radar trade proposal", "PASS", "Perpetual radar proposes SHORT.")
+    else:
+        add_check(
+            "Radar trade proposal", "FAIL",
+            "Only LONG spot or LONG/SHORT perpetual proposals can be reviewed for paper entry.",
+        )
+
+    confirmation = _finite_number(getattr(result, "confirmation_score", None))
+    if confirmation is None:
+        add_check("Confirmation score", "UNKNOWN", "No finite confirmation score was supplied.")
+    elif confirmation >= float(profile_policy["min_confirmation_score"]):
+        minimum = float(profile_policy["min_confirmation_score"])
+        add_check("Confirmation score", "PASS", f"Score {confirmation:.2f} meets the {minimum:.0f} {execution_profile} minimum.")
+    else:
+        minimum = float(profile_policy["min_confirmation_score"])
+        add_check("Confirmation score", "FAIL", f"Score {confirmation:.2f} is below the {minimum:.0f} {execution_profile} minimum.")
 
     risk = _finite_number(getattr(result, "estimated_risk_score", None))
     if risk is None:
-        add_check("Estimated execution risk", "UNKNOWN", "No finite execution-risk estimate was supplied.")
+        add_check("Estimated risk", "UNKNOWN", "No finite risk score was supplied.")
     elif risk < MAX_ESTIMATED_RISK_SCORE:
-        add_check("Estimated execution risk", "PASS", f"Risk {risk:.2f} is below the {MAX_ESTIMATED_RISK_SCORE:.0f} ceiling.")
+        add_check("Estimated risk", "PASS", f"Risk {risk:.2f} is below the {MAX_ESTIMATED_RISK_SCORE:.0f} ceiling.")
     else:
-        add_check("Estimated execution risk", "FAIL", f"Risk {risk:.2f} is at or above the {MAX_ESTIMATED_RISK_SCORE:.0f} ceiling.")
+        add_check("Estimated risk", "FAIL", f"Risk {risk:.2f} is at or above the {MAX_ESTIMATED_RISK_SCORE:.0f} ceiling.")
 
     entry = _finite_number(getattr(result, "entry_price", None))
     stop = _finite_number(getattr(result, "stop_loss", None))
     target = _finite_number(getattr(result, "take_profit", None))
     if entry is None or stop is None or target is None:
-        add_check("Entry and protective exit plan", "UNKNOWN", "Finite entry, stop-loss and take-profit levels are required.")
+        add_check(
+            "Stop-loss and take-profit plan", "UNKNOWN",
+            "Finite entry, stop-loss and take-profit levels are all required.",
+        )
     elif signal == "LONG" and 0 < stop < entry < target:
-        add_check("Entry and protective exit plan", "PASS", "LONG stop < entry < take-profit.")
+        add_check("Stop-loss and take-profit plan", "PASS", "LONG requires stop < entry < take-profit.")
     elif signal == "SHORT" and perpetual and 0 < target < entry < stop:
-        add_check("Entry and protective exit plan", "PASS", "SHORT take-profit < entry < stop.")
+        add_check("Stop-loss and take-profit plan", "PASS", "SHORT requires take-profit < entry < stop.")
     else:
-        add_check("Entry and protective exit plan", "FAIL", "Entry/stop/target ordering does not match the strategy direction.")
+        add_check("Stop-loss and take-profit plan", "FAIL", "Entry/stop/target ordering does not match the proposed trade direction.")
 
-    # Candle/pattern evidence is supplied by the strategy and must be explicit.
-    # Older radar profiles may not yet publish this evidence, so they remain
-    # ineligible rather than being approved from the retired gate score.
-    pattern = metrics.get("challenge1_evidence")
-    if isinstance(pattern, dict):
-        pattern_status = str(pattern.get("validation_status") or "").upper()
-        if pattern_status == "PASS":
-            add_check("Candle and chart-pattern evidence", "PASS", "Strategy's closed-candle pattern evidence passed.")
-        elif pattern_status == "FAIL":
-            add_check("Candle and chart-pattern evidence", "FAIL", str(pattern.get("reason") or "Pattern evidence failed."))
-        else:
-            add_check("Candle and chart-pattern evidence", "UNKNOWN", "Closed-candle pattern evidence has not been validated.")
+    check_statuses = [row["status"] for row in checks]
+    if "FAIL" in check_statuses:
+        status = "VETO"
+        status_fa = "مدیر ریسک ورود آزمایشی را رد کرد"
+    elif "UNKNOWN" in check_statuses:
+        status = "UNKNOWN"
+        status_fa = "شواهد برای تأیید ورود کافی نیست"
     else:
-        add_check("Candle and chart-pattern evidence", "UNKNOWN", "No validated closed-candle pattern evidence is attached to this strategy result.")
+        status = "APPROVED"
+        status_fa = "بررسی بومی ورود آزمایشی را تأیید کرد"
 
-    statuses = [item["status"] for item in checks]
-    status = "VETO" if "FAIL" in statuses else "UNKNOWN" if "UNKNOWN" in statuses else "APPROVED"
-    status_fa = {
-        "APPROVED": "بررسی مستقل استراتژی و کنترل‌های ریسک تأیید شد",
-        "VETO": "بررسی مستقل، ورود را به دلیل ریسک یا جهت نامعتبر رد کرد",
-        "UNKNOWN": "شواهد کندلی/الگویی یا کنترل‌های اجرایی هنوز کامل نیست",
-    }[status]
-    blockers = [item["detail"] for item in checks if item["status"] != "PASS"]
+    blockers = [
+        row["detail"] for row in checks if row["status"] != "PASS"
+    ]
+    reason_fa = (
+        "تمام بررسی‌های شورا عبور کردند؛ کنترل‌های اجرایی ربات هنوز جداگانه اعمال می‌شوند."
+        if status == "APPROVED" else
+        "شورا ورود را متوقف کرد: " + "؛ ".join(blockers)
+    )
+
     return {
-        "version": "native-pattern-risk-council-v3",
+        "version": "native-agent-council-v2",
         "mode": "LOCAL_RULES_ONLY",
-        "execution_profile": str(metrics.get("execution_profile") or "PATTERN_BASED").upper(),
-        "required_gate_ids": [],
-        "retired_gate_framework": True,
+        "execution_profile": execution_profile,
+        "required_gate_ids": sorted(required_gate_ids),
+        "min_pass_count": int(profile_policy["min_pass_count"]),
         "status": status,
         "status_fa": status_fa,
         "paper_entry_eligible": status == "APPROVED",
         "proposed_signal": signal or "UNKNOWN",
-        "agents": [],
-        "debate": {"bullish_support": [], "bearish_objections": [], "abstentions": []},
-        "risk_manager": {"status": status, "checks": checks, "blockers": blockers},
-        "reason_fa": "؛ ".join(blockers) if blockers else "الگوی بسته‌شده و کنترل‌های ریسک عبور کردند.",
+        "agents": agents,
+        "debate": {
+            "bullish_support": supporting,
+            "bearish_objections": opposing,
+            "abstentions": abstaining,
+        },
+        "risk_manager": {
+            "status": status,
+            "checks": checks,
+            "blockers": blockers,
+        },
+        "reason_fa": reason_fa,
         "safety": {
             "llm_calls": 0,
             "external_data_fetches": 0,
