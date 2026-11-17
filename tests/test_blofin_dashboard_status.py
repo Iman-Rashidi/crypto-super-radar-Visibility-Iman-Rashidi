@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from crypto_super_radar import web_app
@@ -231,6 +232,67 @@ class BloFinDashboardStatusTests(unittest.TestCase):
         self.assertEqual(report["elliott_wave"], {})
         self.assertIn("۱۲ فیلتر", report["gate_summary_fa"])
 
+
+
+class MarketBoardFreshnessTests(unittest.TestCase):
+    def setUp(self):
+        self.universe = (
+            ("BTCUSDT", "Bitcoin", "بیت‌کوین"),
+            ("ETHUSDT", "Ethereum", "اتریوم"),
+        )
+
+    def test_completed_but_all_unknown_attempts_are_not_fresh(self):
+        with patch.object(web_app, "CRYPTO_MARKET_UNIVERSE", self.universe):
+            result = web_app._market_board_payload(
+                [{"symbol": "BTCUSDT", "status": "UNKNOWN"},
+                 {"symbol": "ETHUSDT", "status": "UNKNOWN"}],
+                refreshing=False,
+            )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["freshness"], "UNKNOWN")
+        self.assertIsNone(result["updated_at_utc"])
+
+    def test_partial_quotes_report_oldest_successful_observation(self):
+        first = datetime(2026, 11, 17, 0, 0, tzinfo=timezone.utc)
+        second = first + timedelta(seconds=20)
+        items = [
+            {"symbol": "BTCUSDT", "status": "PASS", "received_at_utc": first.isoformat()},
+            {"symbol": "ETHUSDT", "status": "UNKNOWN"},
+        ]
+        with patch.object(web_app, "CRYPTO_MARKET_UNIVERSE", self.universe):
+            result = web_app._market_board_payload(items, refreshing=False)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["freshness"], "PARTIAL")
+        self.assertEqual(result["updated_at_utc"], first.isoformat())
+
+    def test_all_quotes_need_valid_timestamps_before_board_can_pass(self):
+        first = datetime(2026, 11, 17, 0, 0, tzinfo=timezone.utc)
+        second = first + timedelta(seconds=20)
+        items = [
+            {"symbol": "BTCUSDT", "status": "PASS", "received_at_utc": first.isoformat()},
+            {"symbol": "ETHUSDT", "status": "PASS", "received_at_utc": second.isoformat()},
+        ]
+        with patch.object(web_app, "CRYPTO_MARKET_UNIVERSE", self.universe):
+            result = web_app._market_board_payload(items, refreshing=False)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["freshness"], "FRESH")
+        self.assertEqual(result["updated_at_utc"], first.isoformat())
+        health = web_app.build_feed_health_report(
+            result, now=first + timedelta(seconds=70)
+        )
+        self.assertEqual(health["status"], "STALE")
+        self.assertEqual(health["age_seconds"], 70.0)
+
+    def test_missing_one_row_timestamp_prevents_full_board_pass(self):
+        first = datetime(2026, 11, 17, 0, 0, tzinfo=timezone.utc)
+        items = [
+            {"symbol": "BTCUSDT", "status": "PASS", "received_at_utc": first.isoformat()},
+            {"symbol": "ETHUSDT", "status": "PASS"},
+        ]
+        with patch.object(web_app, "CRYPTO_MARKET_UNIVERSE", self.universe):
+            result = web_app._market_board_payload(items, refreshing=False)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["freshness"], "PARTIAL")
 
 if __name__ == "__main__":
     unittest.main()
