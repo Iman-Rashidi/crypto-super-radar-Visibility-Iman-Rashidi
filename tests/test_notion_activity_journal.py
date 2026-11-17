@@ -44,7 +44,8 @@ def sample_snapshot():
         "patterns": [{"name_en": "Bullish Engulfing", "direction": "BULLISH"}],
         "volume_confirmation": {"confirmed": False, "volume_ratio": 0.8},
         "evidence": {"completed_candles_only": True},
-        "candles_15m": candles(40),
+        "candles_5m": candles(40),
+        "candles_15m": candles(40, base=95.0),
         "candles_1h": candles(20, base=90.0),
         "entry_price": 108.0,
         "stop_loss": 105.0,
@@ -72,6 +73,7 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertTrue(self.journal.enqueue(snapshot))
         saved = self.journal.get_snapshot(snapshot["experience_id"])
         self.assertEqual(saved["symbol"], "BTC-USDT")
+        self.assertEqual(len(saved["candles_5m"]), 40)
         self.assertEqual(len(saved["candles_15m"]), 40)
         changed = dict(snapshot)
         changed["status"] = "CLOSED_RECONCILED"
@@ -248,6 +250,7 @@ class NotionActivityJournalTests(unittest.TestCase):
         chart_upload = next(item for item in upload_calls if item["content_type"] == "image/png")
         csv_upload = next(item for item in upload_calls if item["content_type"] == "text/csv")
         self.assertEqual(chart_upload["payload"][:8], bytes([137, 80, 78, 71, 13, 10, 26, 10]))
+        self.assertIn(b"5m,", csv_upload["payload"])
         self.assertIn(b"15m,", csv_upload["payload"])
         self.assertIn(b"1H,", csv_upload["payload"])
         page_request = next(
@@ -266,7 +269,7 @@ class NotionActivityJournalTests(unittest.TestCase):
 
     def test_sync_row_does_not_attach_fabricated_chart_when_market_history_is_too_short(self):
         snapshot = sample_snapshot()
-        snapshot["candles_15m"] = candles(4)
+        snapshot["candles_5m"] = candles(4)
         request_calls = []
 
         def fake_request(method, url, token, *, body=None):
@@ -286,6 +289,7 @@ class NotionActivityJournalTests(unittest.TestCase):
 
     def test_csv_contains_both_real_market_timeframes(self):
         payload = render_ohlcv_csv(sample_snapshot()).decode("utf-8")
+        self.assertIn("5m,", payload)
         self.assertIn("15m,", payload)
         self.assertIn("1H,", payload)
         self.assertIn("open,high,low,close,volume", payload)
