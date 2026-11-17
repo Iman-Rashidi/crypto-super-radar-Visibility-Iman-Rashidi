@@ -80,6 +80,25 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertTrue(saved["closed_confirmed"])
         self.assertEqual(self.journal.pending_count(), 1)
 
+    def test_status_snapshot_exposes_retry_and_http_error_details(self):
+        snapshot = sample_snapshot()
+        self.journal.enqueue(snapshot)
+        self.connection.execute(
+            """UPDATE csr_notion_activity_journal
+               SET attempts=2, last_error_type='HTTPError', last_http_status=403
+               WHERE experience_id=?""",
+            (snapshot["experience_id"],),
+        )
+        self.connection.commit()
+        state = self.journal.status_snapshot()
+        self.assertEqual(state["pending"], 1)
+        self.assertEqual(state["synced"], 0)
+        self.assertEqual(state["failed"], 0)
+        self.assertEqual(state["latest_experience_id"], snapshot["experience_id"])
+        self.assertEqual(state["latest_attempts"], 2)
+        self.assertEqual(state["last_error_type"], "HTTPError")
+        self.assertEqual(state["last_http_status"], 403)
+
     def test_chart_is_a_png_rendered_from_real_ohlcv_and_exit_levels(self):
         snapshot = sample_snapshot()
         snapshot.update({
