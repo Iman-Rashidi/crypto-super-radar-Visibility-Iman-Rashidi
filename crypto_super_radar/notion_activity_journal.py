@@ -517,7 +517,7 @@ class NotionActivityJournal:
         rows = self._db.execute(
             """SELECT experience_id, payload_json, attempts, notion_page_id
                FROM csr_notion_activity_journal
-               WHERE sync_status='PENDING' AND next_attempt_at<=?
+               WHERE sync_status IN ('PENDING','FAILED') AND next_attempt_at<=?
                ORDER BY updated_at_utc ASC LIMIT ?""",
             (current, min(limit, 20)),
         ).fetchall()
@@ -535,7 +535,8 @@ class NotionActivityJournal:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET
                            attempts=?, sync_status='SYNCED', notion_page_id=?,
-                           synced_at_utc=?, last_error_type=NULL, last_http_status=NULL
+                           synced_at_utc=?, next_attempt_at=0, last_error_type=NULL,
+                           last_http_status=NULL, last_error_stage=NULL
                            WHERE experience_id=?""",
                         (attempts, saved_page_id, datetime.now(timezone.utc).isoformat(), experience_id),
                     )
