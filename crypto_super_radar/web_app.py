@@ -4297,27 +4297,36 @@ def _run_blofin_demo_execution_job(
             )
             return
 
-        _set_blofin_execution_job(
-            job_id, "running", stage="NEMOTRON_SECOND_OPINION",
-            message_fa="تحلیل زنده برای بازبینی واقعی ناظر هوش مصنوعی رایگان ارسال می‌شود؛ هنوز هیچ سفارشی ارسال نشده است.",
-            analysis=gate_summary,
-            elliott_wave=wave_report,
-            trade_context=trade_context,
-        )
-        try:
-            ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
-        except Exception as exc:
+        if execution_profile == "CHALLENGE_1":
+            # Challenge 1 deliberately makes its entry decision from completed 15m
+            # candles and detected patterns. Do not make a remote AI call or wait for
+            # an opinion that is not part of this execution profile.
             ai_review = {
-                "status": "UNKNOWN", "paper_entry_eligible": False,
-                "error_type": type(exc).__name__,
+                "status": "NOT_CALLED",
+                "paper_entry_eligible": False,
+                "execution_role": "ADVISORY_ONLY",
+                "entry_gate_enforced": False,
             }
+        else:
+            _set_blofin_execution_job(
+                job_id, "running", stage="NEMOTRON_SECOND_OPINION",
+                message_fa="تحلیل زنده برای بازبینی ناظر هوش مصنوعی ارسال می‌شود؛ هنوز هیچ سفارشی ارسال نشده است.",
+                analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
+            )
+            try:
+                ai_review = run_free_ai_second_opinion(analysis, asset, bypass_cache=True)
+            except Exception as exc:
+                ai_review = {
+                    "status": "UNKNOWN", "paper_entry_eligible": False,
+                    "error_type": type(exc).__name__,
+                }
+            ai_review["execution_role"] = "ENTRY_REVIEW"
+            ai_review["entry_gate_enforced"] = True
 
         ai_status = str(ai_review.get("status", "")).upper() if isinstance(ai_review, dict) else "UNKNOWN"
-        ai_review_is_advisory = execution_profile == "CHALLENGE_1"
-        if isinstance(ai_review, dict):
-            ai_review["execution_role"] = "ADVISORY_ONLY" if ai_review_is_advisory else "ENTRY_REVIEW"
-            ai_review["entry_gate_enforced"] = not ai_review_is_advisory
-        if not ai_review_is_advisory and not _demo_ai_review_approved(ai_review):
+        if execution_profile != "CHALLENGE_1" and not _demo_ai_review_approved(ai_review):
             _set_blofin_execution_job(
                 job_id, "completed", stage="AI_BLOCKED",
                 message_fa="ناظر هوش مصنوعی تأیید معتبر صادر نکرد؛ ورود مسدود شد و هیچ سفارشی ارسال نشد.",
@@ -4338,7 +4347,12 @@ def _run_blofin_demo_execution_job(
 
         _set_blofin_execution_job(
             job_id, "running", stage="DEMO_ORDER_GUARDS",
-            message_fa="کنترل حساب Demo، مارجین، قیمت، حجم حداقل قرارداد و حد ضرر/حد سود.",
+            message_fa=(
+                "Challenge 1: تأیید کندل و الگو انجام شد؛ بررسی نهایی قیمت، حجم قرارداد، "
+                "مارجین، حد ضرر و حد سود حساب Demo."
+                if execution_profile == "CHALLENGE_1"
+                else "کنترل حساب Demo، مارجین، قیمت، حجم حداقل قرارداد و حد ضرر/حد سود."
+            ),
             ai_review={
                 "status": ai_status, "model": ai_review.get("model"),
                 "returned_model": ai_review.get("returned_model"),
@@ -4545,6 +4559,15 @@ def _run_blofin_demo_execution_job(
             "learning_experience_id": learning_experience_id,
             "execution_profile": execution_profile,
             "analysis": gate_summary,
+            "challenge1_evidence": (
+                challenge_record.get("challenge1_evidence", {})
+                if execution_profile == "CHALLENGE_1" else {}
+            ),
+            "learning_experience_id": learning_experience_id,
+            "signal": direction,
+            "entry_price_usd": record.get("entry_price_usd"),
+            "stop_loss_usd": record.get("stop_loss_usd"),
+            "take_profit_usd": record.get("take_profit_usd"),
             "elliott_wave": wave_report,
             "trade_context": trade_context,
             "order_detail": safe_detail,
@@ -8949,7 +8972,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             }, ensure_ascii=False),
             "ai_decision": ai_decision,
         })
-    if ai_review:
+    if ai_review and ai_status != "NOT_CALLED":
         ai_event_type = (
             "AI_APPROVAL" if ai_status == "APPROVED" else
             "AI_VETO" if ai_status in {"VETO", "REJECT", "AI_BLOCKED"} else
@@ -9006,6 +9029,7 @@ def _notion_sync_worker() -> None:
     interval = max(15, min(interval, 300))
     while True:
         outbox = None
+        activity_journal = None
         try:
             outbox = NotionEventOutbox()
             outbox.flush_pending(limit=10)
@@ -9015,6 +9039,15 @@ def _notion_sync_worker() -> None:
         finally:
             if outbox is not None:
                 outbox.close()
+        try:
+            activity_journal = NotionActivityJournal()
+            activity_journal.flush_pending(limit=3)
+        except Exception:
+            # Chart/file sync is retryable and must never interrupt market analysis.
+            pass
+        finally:
+            if activity_journal is not None:
+                activity_journal.close()
         time.sleep(interval)
 
 
