@@ -559,6 +559,44 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(result["status"], "NOT_CONFIGURED")
         self.assertFalse(result["request_attempted"])
 
+    def test_groq_free_plan_models_are_accepted_without_openrouter_suffix(self):
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "separate-groq-key",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_PROVIDER": "GroqCloud",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+        self.assertTrue(status["configured"], status["configuration_issues"])
+        self.assertEqual(status["model"], "openai/gpt-oss-120b")
+
+    def test_groq_rejects_paid_or_unlisted_models_and_nonofficial_endpoint(self):
+        base = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "separate-groq-key",
+            "CSR_SECOND_AI_PROVIDER": "Groq",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, {**base, "CSR_SECOND_AI_MODEL": "unlisted/model"}, clear=True):
+            status = second_ai_connection_status()
+        self.assertFalse(status["configured"])
+        self.assertIn("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST", status["configuration_issues"])
+        with patch.dict(os.environ, {
+            **base,
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_API_URL": "https://other.example/v1/chat/completions",
+        }, clear=True):
+            status = second_ai_connection_status()
+        self.assertFalse(status["configured"])
+        self.assertIn(
+            "GROQ_ENDPOINT_MUST_MATCH_OFFICIAL_OPENAI_COMPATIBLE_ENDPOINT",
+            status["configuration_issues"],
+        )
+
     def test_second_ai_rejects_reuse_of_primary_provider_and_endpoint(self):
         env = {
             "OPENROUTER_API_KEY": "primary-key",
