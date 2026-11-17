@@ -239,6 +239,7 @@ class NotionActivityJournal:
     def __init__(self, connection: Any | None = None) -> None:
         self._owns_db = connection is None
         self._db = connection or connect_database()
+        self._current_operation = "INITIALIZE"
         self._db.execute("""
             CREATE TABLE IF NOT EXISTS csr_notion_activity_journal (
                 experience_id TEXT PRIMARY KEY,
@@ -251,9 +252,17 @@ class NotionActivityJournal:
                 notion_page_id TEXT,
                 last_error_type TEXT,
                 last_http_status INTEGER,
+                last_error_stage TEXT,
                 synced_at_utc TEXT
             )
         """)
+        columns = {str(row[1]) for row in self._db.execute(
+            "PRAGMA table_info(csr_notion_activity_journal)"
+        ).fetchall()}
+        if "last_error_stage" not in columns:
+            self._db.execute(
+                "ALTER TABLE csr_notion_activity_journal ADD COLUMN last_error_stage TEXT"
+            )
         self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_csr_notion_activity_pending
             ON csr_notion_activity_journal(sync_status, next_attempt_at, updated_at_utc)
@@ -275,7 +284,8 @@ class NotionActivityJournal:
                      next_attempt_at=0,
                      sync_status='PENDING',
                      last_error_type=NULL,
-                     last_http_status=NULL""",
+                     last_http_status=NULL,
+                      last_error_stage=NULL""",
                 (payload["experience_id"], _canonical(payload), now, now),
             )
         return bool(getattr(cursor, "rowcount", 0))
@@ -287,6 +297,8 @@ class NotionActivityJournal:
         }
 
     def _request_json(self, method: str, url: str, token: str, *, body: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        path = url.split(NOTION_API_BASE, 1)[-1].split("?", 1)[0]
+        self._current_operation = f"{str(method).upper()} {path[:120]}"
         headers = self._headers(token)
         headers["Content-Type"] = "application/json"
         response = requests.request(method, url, headers=headers, json=dict(body or {}), timeout=25)
@@ -308,6 +320,7 @@ class NotionActivityJournal:
         upload_id = _text(created.get("id"), 80)
         if not upload_id:
             raise RuntimeError("Notion file upload response omitted id")
+        self._current_operation = "POST /file_uploads/{upload_id}/send"
         response = requests.post(
             f"{NOTION_API_BASE}/file_uploads/{upload_id}/send",
             headers=self._headers(token),
@@ -461,7 +474,9 @@ class NotionActivityJournal:
         ohlcv_upload_id = None
         candles = snapshot.get("candles_15m") or []
         if len(candles) >= 5:
+            self._current_operation = "RENDER_CANDLE_CHART"
             chart = render_candlestick_chart(snapshot)
+            self._current_operation = "RENDER_OHLCV_CSV"
             ohlcv = render_ohlcv_csv(snapshot)
             chart_upload_id = self._upload(
                 token, f"{snapshot.get('symbol')}-CH1-{snapshot.get('experience_id')[:12]}.png",
@@ -527,21 +542,23 @@ class NotionActivityJournal:
                 synced += 1
             except requests.HTTPError as exc:
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                failed_stage = self._current_operation or "UNKNOWN_OPERATION"
                 delay = min(3600, 5 * (2 ** min(attempts - 1, 9)))
                 with self._db:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET attempts=?, next_attempt_at=?,
-                           last_error_type=?, last_http_status=? WHERE experience_id=?""",
-                        (attempts, current + delay, type(exc).__name__, status_code, experience_id),
+                           last_error_type=?, last_http_status=?, last_error_stage=? WHERE experience_id=?""",
+                        (attempts, current + delay, type(exc).__name__, status_code, failed_stage, experience_id),
                     )
                 failed += 1
             except Exception as exc:
+                failed_stage = self._current_operation or "UNKNOWN_OPERATION"
                 delay = min(3600, 5 * (2 ** min(attempts - 1, 9)))
                 with self._db:
                     self._db.execute(
                         """UPDATE csr_notion_activity_journal SET attempts=?, next_attempt_at=?,
-                           last_error_type=? WHERE experience_id=?""",
-                        (attempts, current + delay, type(exc).__name__, experience_id),
+                           last_error_type=?, last_error_stage=? WHERE experience_id=?""",
+                        (attempts, current + delay, type(exc).__name__, failed_stage, experience_id),
                     )
                 failed += 1
         state = self.status_snapshot()
@@ -570,7 +587,7 @@ class NotionActivityJournal:
         ).fetchone()
         last_error = self._db.execute(
             """SELECT experience_id, attempts, last_error_type, last_http_status,
-                      next_attempt_at
+                      last_error_stage, next_attempt_at
                FROM csr_notion_activity_journal
                WHERE last_error_type IS NOT NULL
                ORDER BY next_attempt_at DESC, attempts DESC LIMIT 1"""
@@ -593,6 +610,7 @@ class NotionActivityJournal:
             "last_failed_experience_id": last_error["experience_id"] if last_error else None,
             "last_error_type": last_error["last_error_type"] if last_error else None,
             "last_http_status": last_error["last_http_status"] if last_error else None,
+            "last_error_stage": last_error["last_error_stage"] if last_error else None,
             "last_attempts": int(last_error["attempts"] or 0) if last_error else 0,
             "retry_after_epoch": int(last_error["next_attempt_at"] or 0) if last_error else None,
             "latest_updated_at_utc": latest["updated_at_utc"] if latest else None,
