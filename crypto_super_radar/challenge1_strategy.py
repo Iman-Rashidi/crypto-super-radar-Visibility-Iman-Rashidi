@@ -1,7 +1,7 @@
 """Deterministic, closed-candle Challenge 1 strategy for BloFin Demo.
 
-Only completed 15m candles create setups. The 1H frame is a conflict veto,
-not a legacy indicator-score gate. All decisions are local and reproducible.
+Only completed 5m candles create setups. No higher timeframe is fetched or used.
+All entry decisions are local, pattern-based, and reproducible.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ DEFAULT_CHALLENGE1_INSTRUMENTS = (
     "LINK-USDT",
 )
 
-_INTERVAL_MS = {"5m": 5 * 60 * 1000, "1H": 60 * 60 * 1000, "1h": 60 * 60 * 1000}
+_INTERVAL_MS = {"5m": 5 * 60 * 1000}
 _ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY"
 
 
@@ -285,7 +285,7 @@ def _candles_for_report(frame: pd.DataFrame, *, limit: int) -> list[dict[str, An
 
 
 def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
-    """Validate a 5m entry trigger; 1H is optional advisory context only."""
+    """Validate a 5m-only entry trigger and its completed OHLCV evidence."""
     if not isinstance(record, Mapping):
         return False, "گزارش اختصاصی کندل و الگو موجود نیست."
     evidence = record.get("challenge1_evidence")
