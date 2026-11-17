@@ -261,6 +261,112 @@ def _atr(frame: pd.DataFrame, period: int = 14) -> float | None:
     return value if math.isfinite(value) and value > 0 else None
 
 
+def _candle_snapshot(frame: pd.DataFrame, *, limit: int = 30) -> list[dict[str, Any]]:
+    """Return a compact, timestamped OHLCV sample from completed candles only."""
+    rows: list[dict[str, Any]] = []
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return rows
+    for timestamp, row in frame.tail(max(3, min(int(limit), 60))).iterrows():
+        values = {
+            "open": _number(row.get("open")),
+            "high": _number(row.get("high")),
+            "low": _number(row.get("low")),
+            "close": _number(row.get("close")),
+            "volume": _number(row.get("volume")),
+        }
+        if any(value is None for value in values.values()):
+            continue
+        rows.append({
+            "open_time_utc": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+            **values,
+        })
+    return rows
+
+
+def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
+    """Validate Challenge 1 using only closed candles and candle/chart-pattern evidence."""
+    if not isinstance(record, Mapping):
+        return False, "گزارش اختصاصی کندل و الگو موجود نیست."
+    evidence = record.get("challenge1_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    execution = record.get("execution")
+    execution = execution if isinstance(execution, Mapping) else {}
+    signal = str(record.get("signal") or "").upper()
+    expected_direction = "BULLISH" if signal == "LONG" else "BEARISH" if signal == "SHORT" else ""
+    if not expected_direction or execution.get("status") != "PASS":
+        return False, "سیگنال جهت‌دار و تأیید الگوی اختصاصی ساخته نشده است."
+    if str(execution.get("direction") or "").upper() != signal:
+        return False, "جهت الگوی انتخاب‌شده با سیگنال ربات یکسان نیست."
+    if evidence.get("completed_candles_only") is not True:
+        return False, "بسته‌شدن کندل‌های تأییدشده قابل اثبات نیست."
+
+    chosen = evidence.get("chosen_pattern")
+    if not isinstance(chosen, Mapping):
+        return False, "الگوی کندلی یا ساختار نموداری منتخب وجود ندارد."
+    pattern_name = str(chosen.get("name_en") or "").strip()
+    category = str(chosen.get("category") or "").upper()
+    if not pattern_name or category not in {"CANDLESTICK", "CHART_STRUCTURE"}:
+        return False, "نوع الگوی منتخب معتبر نیست."
+    if str(chosen.get("direction") or "").upper() != expected_direction:
+        return False, "جهت الگوی منتخب با جهت معامله هم‌خوان نیست."
+
+    detected = evidence.get("detected_patterns")
+    detected = detected if isinstance(detected, list) else []
+    matched = any(
+        isinstance(item, Mapping)
+        and str(item.get("name_en") or "").strip() == pattern_name
+        and str(item.get("direction") or "").upper() == expected_direction
+        and str(item.get("timeframe") or "").lower() == "15m"
+        for item in detected
+    )
+    if not matched:
+        return False, "الگوی منتخب در فهرست شواهد ۱۵ دقیقه‌ای وجود ندارد."
+
+    candles_15m = evidence.get("candles_15m")
+    candles_1h = evidence.get("candles_1h")
+    if not isinstance(candles_15m, list) or len(candles_15m) < 3:
+        return False, "نمونه کندل‌های بسته‌شده ۱۵ دقیقه‌ای ناقص است."
+    if not isinstance(candles_1h, list) or len(candles_1h) < 3:
+        return False, "نمونه کندل‌های بسته‌شده یک‌ساعته ناقص است."
+    confirmation = evidence.get("confirmation_candle")
+    if not isinstance(confirmation, Mapping):
+        return False, "کندل تأیید نهایی ثبت نشده است."
+    last_candle = candles_15m[-1]
+    if not isinstance(last_candle, Mapping):
+        return False, "آخرین کندل ۱۵ دقیقه‌ای قابل تفسیر نیست."
+    if str(last_candle.get("open_time_utc")) != str(confirmation.get("open_time_utc")):
+        return False, "زمان کندل تأیید با آخرین کندل بسته‌شده ۱۵ دقیقه‌ای تطبیق ندارد."
+    for field in ("open", "high", "low", "close", "volume"):
+        actual = _number(confirmation.get(field))
+        expected = _number(last_candle.get(field))
+        if actual is None or expected is None or not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-12):
+            return False, "OHLCV کندل تأیید با نمونه کندل‌های بازار تطبیق ندارد."
+
+    volume = evidence.get("volume_confirmation")
+    if not isinstance(volume, Mapping) or volume.get("confirmed") is not True:
+        return False, "تأیید حجم و محل بسته‌شدن کندل کامل نیست."
+
+    context = evidence.get("context_patterns")
+    context = context if isinstance(context, list) else []
+    if any(
+        isinstance(item, Mapping)
+        and str(item.get("direction") or "").upper() not in {"", expected_direction}
+        for item in context
+    ):
+        return False, "الگوی یک‌ساعته با جهت ستاپ ۱۵ دقیقه تعارض دارد."
+
+    if category == "CHART_STRUCTURE":
+        structure = evidence.get("chart_structure")
+        structure = structure if isinstance(structure, Mapping) else {}
+        expected_breakout = "UP" if signal == "LONG" else "DOWN"
+        if (
+            structure.get("breakout_confirmation") != "CONFIRMED"
+            or str(structure.get("breakout") or "").upper() != expected_breakout
+        ):
+            return False, "شکست ساختار نموداری برای الگوی منتخب تأیید نشده است."
+    return True, "کندل‌های بسته‌شده، الگوی منتخب، زمینه یک‌ساعته و تأیید حجم با هم سازگارند."
+
+
 def _time_label(frame: pd.DataFrame) -> str:
     return frame.index[-1].isoformat()
 
@@ -382,6 +488,8 @@ def analyze_blofin_challenge1(
         "detected_patterns": all_detected,
         "chosen_pattern": chosen,
         "confirmation_candle": confirmation_candle,
+        "candles_15m": _candle_snapshot(frame_15m, limit=30),
+        "candles_1h": _candle_snapshot(frame_1h, limit=30),
         "chart_structure": chart_structure,
         "context_patterns": patterns_1h,
         "volume_confirmation": volume,
