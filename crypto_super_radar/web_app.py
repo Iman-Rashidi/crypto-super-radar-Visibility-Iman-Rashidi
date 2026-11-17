@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from typing import Any
 
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
@@ -5474,6 +5475,25 @@ class Handler(BaseHTTPRequestHandler):
             const accountView=document.getElementById('blofin-demo-account-view');
             const safety=document.getElementById('blofin-demo-safety');
             const executeButton=document.getElementById('blofin-demo-execute-once');
+            const instrumentSearch=document.getElementById('blofin-instrument-search');
+            const modeAutopilotButton=document.getElementById('blofin-mode-autopilot');
+            const modeManualButton=document.getElementById('blofin-mode-manual');
+            const modeStatus=document.getElementById('blofin-mode-status');
+            const autopilotControls=document.getElementById('blofin-autopilot-controls');
+            const autopilotStatus=document.getElementById('blofin-autopilot-status');
+            const autopilotToggle=document.getElementById('blofin-autopilot-toggle');
+            const manualPanel=document.getElementById('blofin-manual-trading-panel');
+            const robotCycleControls=document.getElementById('blofin-robot-cycle-controls');
+            const manualOrderForm=document.getElementById('blofin-manual-order-form');
+            const manualDirection=document.getElementById('blofin-manual-direction');
+            const manualSize=document.getElementById('blofin-manual-size');
+            const manualStop=document.getElementById('blofin-manual-stop');
+            const manualTarget=document.getElementById('blofin-manual-target');
+            const manualOpenButton=document.getElementById('blofin-manual-open');
+            const manualOrderStatus=document.getElementById('blofin-manual-order-status');
+            const manualRefreshButton=document.getElementById('blofin-manual-refresh');
+            const manualAccountStatus=document.getElementById('blofin-manual-account-status');
+            const manualAccountView=document.getElementById('blofin-manual-account-view');
             const smokeButton=document.getElementById('blofin-smoke-test-run');
             const smokeReadiness=document.getElementById('blofin-smoke-test-readiness');
             const smokeStatus=document.getElementById('blofin-smoke-test-status');
@@ -5487,7 +5507,7 @@ class Handler(BaseHTTPRequestHandler):
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!instrumentSearch||!modeAutopilotButton||!modeManualButton||!modeStatus||!autopilotControls||!autopilotStatus||!autopilotToggle||!manualPanel||!robotCycleControls||!manualOrderForm||!manualDirection||!manualSize||!manualStop||!manualTarget||!manualOpenButton||!manualOrderStatus||!manualRefreshButton||!manualAccountStatus||!manualAccountView||!smokeButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -5759,30 +5779,66 @@ class Handler(BaseHTTPRequestHandler):
                 ['event_type','رویداد'],['occurred_at','زمان ثبت'],['payload','جزئیات']
               ],'هنوز رویدادی در دفتر ثبت داخلی ربات ذخیره نشده است.'));
             }
-async function loadBlofinInstruments(){
+let blofinInstrumentRecords=[];
+            function applyBlofinInstrumentSearch(){
+              const query=String(instrumentSearch.value||'').trim().toUpperCase().replace(/\\s+/g,'');
+              const previous=instrumentSelect.value;
+              const filtered=blofinInstrumentRecords.filter(item=>{
+                const haystack=(String(item.inst_id||'')+' '+String(item.base_currency||'')).toUpperCase().replace(/\\s+/g,'');
+                return !query||haystack.includes(query);
+              });
+              instrumentSelect.replaceChildren();
+              if(!filtered.length){
+                const option=document.createElement('option');option.value='';option.textContent='قراردادی با این جست‌وجو پیدا نشد';
+                instrumentSelect.appendChild(option);
+                instrumentSelect.disabled=true;
+                instrumentStatus.textContent='نمادی با عبارت «'+instrumentSearch.value+'» در فهرست زنده BloFin Demo پیدا نشد.';
+                manualOpenButton.disabled=true;
+                return;
+              }
+              filtered.forEach(item=>{
+                const option=document.createElement('option');
+                option.value=item.inst_id;
+                option.textContent=item.inst_id+' · '+item.base_currency+'/USDT · min '+item.min_size;
+                instrumentSelect.appendChild(option);
+              });
+              instrumentSelect.value=filtered.some(x=>x.inst_id===previous)?previous:filtered[0].inst_id;
+              instrumentSelect.disabled=false;
+              instrumentStatus.textContent=filtered.length+' از '+blofinInstrumentRecords.length+' قرارداد زنده مطابق جست‌وجو؛ انتخاب فعلی: '+instrumentSelect.value;
+              updateManualInstrumentFields();
+            }
+            function selectedBlofinInstrument(){
+              return blofinInstrumentRecords.find(item=>item.inst_id===instrumentSelect.value)||null;
+            }
+            function updateManualInstrumentFields(){
+              const item=selectedBlofinInstrument();
+              if(!item)return;
+              manualSize.min=String(item.min_size);
+              manualSize.step=String(item.lot_size);
+              manualSize.placeholder='حداقل '+item.min_size+' · گام '+item.lot_size;
+              manualOpenButton.disabled=autopilotIsEnabled||!instrumentSelect.value;
+            }
+            async function loadBlofinInstruments(){
               instrumentSelect.disabled=true;
+              instrumentSearch.disabled=true;
               instrumentStatus.textContent='در حال دریافت قراردادهای زنده USDT Perpetual با مجوز Full...';
               try{
                 const response=await fetch('/api/blofin/demo/instruments',{cache:'no-store'});
                 const payload=await response.json();
                 if(!response.ok||payload.status!=='PASS'||!Array.isArray(payload.instruments)||!payload.instruments.length)
                   throw new Error(payload.message_fa||'فهرست قرارداد مجاز در دسترس نیست.');
-                const previous=instrumentSelect.value||'BTC-USDT';
-                instrumentSelect.replaceChildren();
-                payload.instruments.forEach(item=>{
-                  const option=document.createElement('option');
-                  option.value=item.inst_id;
-                  option.textContent=item.inst_id+' · '+item.base_currency+'/USDT · Full · min '+item.min_size;
-                  instrumentSelect.appendChild(option);
-                });
-                instrumentSelect.value=payload.instruments.some(x=>x.inst_id===previous)?previous:payload.instruments[0].inst_id;
-                instrumentSelect.disabled=false;
-                instrumentStatus.textContent=payload.count+' قرارداد زنده مجاز دریافت شد؛ انتخاب فعلی: '+instrumentSelect.value;
+                blofinInstrumentRecords=payload.instruments;
+                instrumentSearch.disabled=false;
+                applyBlofinInstrumentSearch();
+                instrumentStatus.textContent=payload.count+' قرارداد زنده مجاز دریافت شد؛ می‌توانی نماد را جست‌وجو کنی.';
               }catch(error){
+                blofinInstrumentRecords=[];
                 instrumentSelect.replaceChildren();
                 const option=document.createElement('option');option.value='';option.textContent='فهرست قراردادها دریافت نشد';
                 instrumentSelect.appendChild(option);
-                instrumentStatus.textContent='انتخاب بازار تا دریافت فهرست معتبر مسدود است: '+String(error.message||error);
+                instrumentSearch.disabled=true;
+                manualOpenButton.disabled=true;
+                instrumentStatus.textContent='انتخاب بازار تا دریافت فهرست معتبر متوقف است: '+String(error.message||error);
               }
             }
             async function refreshExecutionReadiness(){
