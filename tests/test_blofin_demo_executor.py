@@ -865,7 +865,8 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             equity_usdt=1000,
         )
         store.reserve_order(plan)
-        store.update_order(plan["client_order_id"], "UNKNOWN")
+        store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
+        self.assertEqual(store.trade_budget_status()["unresolved_orders"], 1)
         client = FakeExecutorClient()
         client.get_order_detail = lambda inst_id, *, client_order_id: {
             "clientOrderId": client_order_id,
