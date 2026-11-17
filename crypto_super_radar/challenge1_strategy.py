@@ -22,7 +22,7 @@ DEFAULT_CHALLENGE1_INSTRUMENTS = (
     "LINK-USDT",
 )
 
-_INTERVAL_MS = {"5m": 5 * 60 * 1000, "15m": 15 * 60 * 1000, "1H": 60 * 60 * 1000, "1h": 60 * 60 * 1000}
+_INTERVAL_MS = {"5m": 5 * 60 * 1000, "1H": 60 * 60 * 1000, "1h": 60 * 60 * 1000}
 _ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V3_DUAL_5M_15M"
 
 
@@ -283,8 +283,9 @@ def _candles_for_report(frame: pd.DataFrame, *, limit: int) -> list[dict[str, An
 
 
 
+
 def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
-    """Validate a 5m entry trigger and its mandatory completed 15m context."""
+    """Validate a 5m entry trigger; 1H is optional advisory context only."""
     if not isinstance(record, Mapping):
         return False, "گزارش اختصاصی کندل و الگو موجود نیست."
     evidence = record.get("challenge1_evidence")
@@ -324,45 +325,33 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
     if not matched:
         return False, "الگوی منتخب در فهرست شواهد ۵ دقیقه‌ای وجود ندارد."
 
-    def validate_candles(key: str, label: str, minimum: int = 3):
-        rows = evidence.get(key)
-        if not isinstance(rows, list) or len(rows) < minimum:
-            return None, f"نمونه کندل‌های بسته‌شده {label} ناقص است."
-        normalised = []
-        for item in rows:
-            if not isinstance(item, Mapping):
-                return None, f"ردیف کندل {label} قابل تفسیر نیست."
-            timestamp = str(item.get("open_time_utc") or item.get("time_utc") or "").strip()
-            values = {name: _number(item.get(name)) for name in ("open", "high", "low", "close", "volume")}
-            if not timestamp or any(value is None for value in values.values()):
-                return None, f"زمان یا OHLCV یکی از کندل‌های {label} ناقص است."
-            if min(values["open"], values["high"], values["low"], values["close"]) <= 0 or values["volume"] < 0:
-                return None, f"مقادیر OHLCV کندل {label} معتبر نیست."
-            if values["high"] < max(values["open"], values["close"], values["low"]):
-                return None, f"سقف کندل {label} با OHLC سازگار نیست."
-            if values["low"] > min(values["open"], values["close"], values["high"]):
-                return None, f"کف کندل {label} با OHLC سازگار نیست."
-            normalised.append({"time": timestamp, **values})
-        timestamps = [row["time"] for row in normalised]
-        if len(set(timestamps)) != len(timestamps) or timestamps != sorted(timestamps):
-            return None, f"ترتیب زمانی کندل‌های {label} معتبر یا یکتا نیست."
-        return normalised, ""
+    rows = evidence.get("candles_5m")
+    if not isinstance(rows, list) or len(rows) < 3:
+        return False, "نمونه کندل‌های بسته‌شده ۵ دقیقه‌ای ناقص است."
+    normalised: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, Mapping):
+            return False, "ردیف کندل ۵ دقیقه‌ای قابل تفسیر نیست."
+        timestamp = str(item.get("open_time_utc") or item.get("time_utc") or "").strip()
+        values = {key: _number(item.get(key)) for key in ("open", "high", "low", "close", "volume")}
+        if not timestamp or any(value is None for value in values.values()):
+            return False, "زمان یا OHLCV یکی از کندل‌های ۵ دقیقه‌ای ناقص است."
+        if min(values["open"], values["high"], values["low"], values["close"]) <= 0 or values["volume"] < 0:
+            return False, "مقادیر OHLCV کندل ۵ دقیقه‌ای معتبر نیست."
+        if values["high"] < max(values["open"], values["close"], values["low"]):
+            return False, "سقف کندل ۵ دقیقه‌ای با OHLC سازگار نیست."
+        if values["low"] > min(values["open"], values["close"], values["high"]):
+            return False, "کف کندل ۵ دقیقه‌ای با OHLC سازگار نیست."
+        normalised.append({"time": timestamp, **values})
 
-    candles_5m, reason = validate_candles("candles_5m", "۵ دقیقه‌ای")
-    if candles_5m is None:
-        return False, reason
-    candles_15m, reason = validate_candles("candles_15m", "۱۵ دقیقه‌ای")
-    if candles_15m is None:
-        return False, reason
+    timestamps = [row["time"] for row in normalised]
+    if len(set(timestamps)) != len(timestamps) or timestamps != sorted(timestamps):
+        return False, "ترتیب زمانی کندل‌های ۵ دقیقه‌ای معتبر یا یکتا نیست."
 
-    # A confirmed opposing 15m pattern is a real multi-timeframe conflict.
-    # Neutral 15m context is allowed; 1H and volume remain advisory.
-    if str(evidence.get("context_alignment_15m") or "").upper() == "CONFLICT":
-        return False, "ساختار یا الگوی بسته‌شده ۱۵ دقیقه‌ای خلاف جهت تریگر ۵ دقیقه‌ای است."
     confirmation = evidence.get("confirmation_candle")
     if not isinstance(confirmation, Mapping):
         return False, "کندل تأیید نهایی ۵ دقیقه‌ای ثبت نشده است."
-    last_candle = candles_5m[-1]
+    last_candle = normalised[-1]
     confirmation_time = str(
         confirmation.get("open_time_utc") or confirmation.get("time_utc") or ""
     ).strip()
@@ -370,8 +359,9 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         return False, "زمان کندل تأیید با آخرین کندل بسته‌شده ۵ دقیقه‌ای تطبیق ندارد."
     for field in ("open", "high", "low", "close", "volume"):
         actual = _number(confirmation.get(field))
-        expected = last_candle[field]
-        if actual is None or not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-12):
+        if actual is None or not math.isclose(
+            actual, last_candle[field], rel_tol=1e-9, abs_tol=1e-12
+        ):
             return False, "OHLCV کندل تأیید با نمونه بازار ۵ دقیقه‌ای تطبیق ندارد."
 
     if category == "CHART_STRUCTURE":
@@ -384,7 +374,7 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         ):
             return False, "شکست ساختار نموداری برای الگوی منتخب تأیید نشده است."
 
-    return True, "تریگر ۵ دقیقه‌ای و زمینه بسته‌شده ۱۵ دقیقه‌ای معتبر و هم‌جهت یا خنثی هستند."
+    return True, "کندل بسته‌شده ۵ دقیقه‌ای و الگوی منتخب با جهت معامله سازگارند؛ زمینه ۱H فقط مشورتی است."
 
 def analyze_blofin_challenge1(
     client: Any,
@@ -392,24 +382,26 @@ def analyze_blofin_challenge1(
     *,
     now_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Build a 5m entry trigger checked against mandatory completed 15m context."""
+    """Build a 5m-only entry decision; optional 1H context never delays or vetoes it."""
     instrument = str(inst_id or "").strip().upper()
     if not instrument.endswith("-USDT"):
         raise ValueError("Challenge 1 accepts only USDT linear Demo instrument IDs.")
 
-    # 5m drives the timely entry. 15m is always fetched as the structural
-    # context and must be fresh/complete. 1H stays optional advisory context.
-    frame_5m = _completed_frame(client, inst_id=instrument, bar="5m", now_ms=now_ms, minimum_rows=30)
-    frame_15m = _completed_frame(client, inst_id=instrument, bar="15m", now_ms=now_ms, minimum_rows=30)
+    # Entry, pattern, ATR, signal identity and deduplication all use 5m only.
+    # 1H is a best-effort advisory observation, never a mandatory dependency.
+    frame_5m = _completed_frame(
+        client, inst_id=instrument, bar="5m", now_ms=now_ms, minimum_rows=30,
+    )
     context_1h_status = "AVAILABLE"
     try:
-        frame_1h = _completed_frame(client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=30)
+        frame_1h = _completed_frame(
+            client, inst_id=instrument, bar="1H", now_ms=now_ms, minimum_rows=30,
+        )
     except Exception:
         frame_1h = pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"])
         context_1h_status = "UNAVAILABLE"
 
     patterns_5m = [dict(item, timeframe="5m") for item in _confirmed_pattern_candidates(frame_5m)]
-    patterns_15m = [dict(item, timeframe="15m") for item in _confirmed_pattern_candidates(frame_15m)]
     patterns_1h = [dict(item, timeframe="1H") for item in _confirmed_pattern_candidates(frame_1h)]
     chart_structure = monitor_chart_patterns(frame_5m)
     if (
@@ -428,8 +420,6 @@ def analyze_blofin_challenge1(
 
     bullish_5m = [item for item in patterns_5m if item.get("direction") == "BULLISH"]
     bearish_5m = [item for item in patterns_5m if item.get("direction") == "BEARISH"]
-    bullish_15m = [item for item in patterns_15m if item.get("direction") == "BULLISH"]
-    bearish_15m = [item for item in patterns_15m if item.get("direction") == "BEARISH"]
     signal = "NO_TRADE"
     chosen: dict[str, Any] | None = None
     volume: dict[str, Any] = {"confirmed": False, "volume_ratio": None, "close_location": None}
@@ -437,8 +427,6 @@ def analyze_blofin_challenge1(
     execution: dict[str, Any] = {"status": "NO_TRADE", "direction": None, "reason_fa": reason_fa}
     entry = stop = target = None
     signal_id = None
-    context_alignment_15m = "NEUTRAL"
-    context_conflict_1h = False
     decision_code = "CONFLICTING_5M_PATTERNS" if bullish_5m and bearish_5m else "NO_TRADE"
 
     if bullish_5m and bearish_5m:
@@ -449,70 +437,57 @@ def analyze_blofin_challenge1(
         chosen = max(patterns_5m, key=lambda item: abs(int(item.get("score") or 0)))
         direction = str(chosen["direction"])
         opposite = "BEARISH" if direction == "BULLISH" else "BULLISH"
-        has_same_15m = any(item.get("direction") == direction for item in patterns_15m)
-        has_opposite_15m = any(item.get("direction") == opposite for item in patterns_15m)
-        # An explicit opposing 15m pattern blocks the 5m trigger. Neutral
-        # context does not add a second 15m waiting period.
-        context_alignment_15m = (
-            "CONFLICT" if has_opposite_15m and not has_same_15m else
-            "CONFLICT" if has_opposite_15m and has_same_15m else
-            "ALIGNED" if has_same_15m else "NEUTRAL"
-        )
         context_conflict_1h = any(item.get("direction") == opposite for item in patterns_1h)
-        if context_alignment_15m == "CONFLICT":
-            decision_code = "CONFLICTING_5M_15M_CONTEXT"
-            reason_fa = "تریگر ۵ دقیقه‌ای با الگوی مخالف در زمینه ۱۵ دقیقه‌ای تعارض دارد؛ ورود متوقف شد."
+        # 1H is reported for the reviewers but remains advisory. It cannot
+        # add another candle wait or veto a valid completed 5m pattern.
+        volume = _volume_confirmation(frame_5m, direction)
+        atr = _atr(frame_5m)
+        entry_value = float(frame_5m["close"].iloc[-1])
+        if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
+            reason_fa = "داده کافی برای محاسبه حد ضرر ساختاری و ATR پنج‌دقیقه‌ای وجود ندارد."
         else:
-            volume = _volume_confirmation(frame_5m, direction)
-            atr = _atr(frame_5m)
-            entry_value = float(frame_5m["close"].iloc[-1])
-            if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
-                reason_fa = "داده کافی برای محاسبه حد ضرر ساختاری و ATR پنج‌دقیقه‌ای وجود ندارد."
+            buffer = atr * 0.10
+            if direction == "BULLISH":
+                structural_low = float(frame_5m["low"].tail(5).min())
+                stop_value = min(structural_low - buffer, entry_value - 1.5 * atr)
+                risk_distance = entry_value - stop_value
+                target_value = entry_value + 2.0 * risk_distance
+                signal = "LONG"
             else:
-                buffer = atr * 0.10
-                if direction == "BULLISH":
-                    structural_low = float(frame_5m["low"].tail(5).min())
-                    stop_value = min(structural_low - buffer, entry_value - 1.5 * atr)
-                    risk_distance = entry_value - stop_value
-                    target_value = entry_value + 2.0 * risk_distance
-                    signal = "LONG"
-                else:
-                    structural_high = float(frame_5m["high"].tail(5).max())
-                    stop_value = max(structural_high + buffer, entry_value + 1.5 * atr)
-                    risk_distance = stop_value - entry_value
-                    target_value = entry_value - 2.0 * risk_distance
-                    signal = "SHORT"
-                if risk_distance <= 0 or target_value <= 0:
-                    signal = "NO_TRADE"
-                    reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
-                else:
-                    entry, stop, target = entry_value, stop_value, target_value
-                    signal_bar = _time_label(frame_5m)
-                    signal_id = f"challenge1-v3:{instrument}:5m:{signal_bar}:{signal}"
-                    execution = {
-                        "status": "PASS",
-                        "direction": signal,
-                        "signal_id": signal_id,
-                        "signal_bar_open_utc": signal_bar,
-                        "entry_price": entry,
-                        "stop_loss": stop,
-                        "take_profit": target,
-                        "reward_risk": 2.0,
-                    }
-                    advisory = []
-                    if context_alignment_15m == "NEUTRAL":
-                        advisory.append("زمینه ۱۵ دقیقه‌ای الگوی جهت‌دار مشخصی ندارد")
-                    if not volume.get("confirmed"):
-                        advisory.append("تأیید حجم/محل بسته‌شدن کامل نیست")
-                    if context_conflict_1h:
-                        advisory.append("الگوی یک‌ساعته خلاف جهت است")
-                    if context_1h_status != "AVAILABLE":
-                        advisory.append("داده زمینه یک‌ساعته در دسترس نبود")
-                    suffix = "؛ موارد نظارتی: " + "، ".join(advisory) if advisory else ""
-                    reason_fa = (
-                        f"الگوی {chosen.get('name_en')} روی کندل بسته‌شده ۵ دقیقه‌ای فعال شد؛ "
-                        f"زمینه ۱۵ دقیقه‌ای: {context_alignment_15m}{suffix}."
-                    )
+                structural_high = float(frame_5m["high"].tail(5).max())
+                stop_value = max(structural_high + buffer, entry_value + 1.5 * atr)
+                risk_distance = stop_value - entry_value
+                target_value = entry_value - 2.0 * risk_distance
+                signal = "SHORT"
+            if risk_distance <= 0 or target_value <= 0:
+                signal = "NO_TRADE"
+                reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
+            else:
+                entry, stop, target = entry_value, stop_value, target_value
+                signal_bar = _time_label(frame_5m)
+                signal_id = f"challenge1-v4:{instrument}:5m:{signal_bar}:{signal}"
+                execution = {
+                    "status": "PASS",
+                    "direction": signal,
+                    "signal_id": signal_id,
+                    "signal_bar_open_utc": signal_bar,
+                    "entry_price": entry,
+                    "stop_loss": stop,
+                    "take_profit": target,
+                    "reward_risk": 2.0,
+                }
+                advisory = []
+                if not volume.get("confirmed"):
+                    advisory.append("تأیید حجم/محل بسته‌شدن کامل نیست")
+                if context_conflict_1h:
+                    advisory.append("الگوی یک‌ساعته خلاف جهت است")
+                if context_1h_status != "AVAILABLE":
+                    advisory.append("داده زمینه یک‌ساعته در دسترس نبود")
+                suffix = "؛ موارد نظارتی: " + "، ".join(advisory) if advisory else ""
+                reason_fa = (
+                    f"الگوی {chosen.get('name_en')} روی کندل بسته‌شده ۵ دقیقه‌ای فعال شد؛ "
+                    f"ورود بر اساس همان کندل انجام‌پذیر است{suffix}."
+                )
 
     latest_time = _time_label(frame_5m)
     last_5m = frame_5m.iloc[-1]
@@ -524,33 +499,28 @@ def analyze_blofin_challenge1(
         "close": float(last_5m["close"]),
         "volume": float(last_5m["volume"]),
     }
-    all_detected = patterns_5m + patterns_15m + patterns_1h
     evidence = {
         "decision_engine_version": _ENGINE_VERSION,
         "setup_timeframe": "5m",
-        "context_timeframe": "15m",
-        "secondary_context_timeframe": "1H",
+        "context_timeframe": "1H",
         "completed_candles_only": True,
         "legacy_12_gates_used_for_entry": False,
-        "external_ai_required": True,
+        "external_ai_required": False,
         "tinyfish_required": False,
         "volume_is_advisory": True,
-        "context_is_advisory": False,
-        "context_alignment_15m": context_alignment_15m,
-        "context_conflict_1h": context_conflict_1h,
+        "context_is_advisory": True,
+        "context_conflict_1h": context_conflict_1h if chosen else False,
         "context_1h_data_status": context_1h_status,
         "decision": decision_code if decision_code != "NO_TRADE" else signal,
-        "detected_patterns": all_detected,
+        "detected_patterns": patterns_5m + patterns_1h,
         "chosen_pattern": chosen,
         "confirmation_candle": confirmation_candle,
         "chart_structure": chart_structure,
-        "context_patterns_15m": patterns_15m,
         "context_patterns_1h": patterns_1h,
         "context_patterns": patterns_1h,
         "volume_confirmation": volume,
         "decision_reason_fa": reason_fa,
         "candles_5m": _candles_for_report(frame_5m, limit=160),
-        "candles_15m": _candles_for_report(frame_15m, limit=120),
         "candles_1h": _candles_for_report(frame_1h, limit=60),
     }
     return {
