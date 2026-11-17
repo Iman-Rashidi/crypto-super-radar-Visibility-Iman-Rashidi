@@ -176,6 +176,87 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertTrue(rendered.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertGreater(len(rendered), 5000)
 
+    def test_sync_row_uploads_real_png_and_csv_and_attaches_both_to_same_notion_page(self):
+        snapshot = sample_snapshot()
+        request_calls = []
+        upload_calls = []
+
+        def fake_request(method, url, token, *, body=None):
+            request_calls.append((method, url, body))
+            if url.endswith("/file_uploads"):
+                return {"id": f"upload-session-{len(request_calls)}"}
+            if url.endswith("/pages"):
+                return {"id": "notion-page-123"}
+            raise AssertionError(f"Unexpected Notion API request: {method} {url}")
+
+        class UploadedFileResponse:
+            def __init__(self, file_id):
+                self.file_id = file_id
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"id": self.file_id}
+
+        def fake_send(url, *, headers, files, timeout):
+            filename, payload, content_type = files["file"]
+            upload_calls.append({
+                "url": url, "filename": filename,
+                "payload": payload, "content_type": content_type,
+                "timeout": timeout,
+            })
+            return UploadedFileResponse(
+                "notion-chart-file" if content_type == "image/png" else "notion-ohlcv-file"
+            )
+
+        with patch.object(self.journal, "_request_json", side_effect=fake_request), patch(
+            "crypto_super_radar.notion_activity_journal.requests.post",
+            side_effect=fake_send,
+        ):
+            page_id = self.journal._sync_row("notion-test-token", snapshot, None)
+
+        self.assertEqual(page_id, "notion-page-123")
+        self.assertEqual(len(upload_calls), 2)
+        chart_upload = next(item for item in upload_calls if item["content_type"] == "image/png")
+        csv_upload = next(item for item in upload_calls if item["content_type"] == "text/csv")
+        self.assertTrue(chart_upload["payload"].startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
+        self.assertIn(b"15m,", csv_upload["payload"])
+        self.assertIn(b"1H,", csv_upload["payload"])
+        page_request = next(
+            item for item in request_calls
+            if item[1].endswith("/pages")
+        )
+        properties = page_request[2]["properties"]
+        self.assertEqual(
+            properties["تصویر چارت"]["files"][0]["file_upload"]["id"],
+            "notion-chart-file",
+        )
+        self.assertEqual(
+            properties["داده OHLCV"]["files"][0]["file_upload"]["id"],
+            "notion-ohlcv-file",
+        )
+
+    def test_sync_row_does_not_attach_fabricated_chart_when_market_history_is_too_short(self):
+        snapshot = sample_snapshot()
+        snapshot["candles_15m"] = candles(4)
+        request_calls = []
+
+        def fake_request(method, url, token, *, body=None):
+            request_calls.append((method, url, body))
+            if url.endswith("/pages"):
+                return {"id": "notion-page-short-history"}
+            raise AssertionError("Short market history must not create a file upload.")
+
+        with patch.object(self.journal, "_request_json", side_effect=fake_request):
+            page_id = self.journal._sync_row("notion-test-token", snapshot, None)
+
+        self.assertEqual(page_id, "notion-page-short-history")
+        self.assertEqual(len(request_calls), 1)
+        properties = request_calls[0][2]["properties"]
+        self.assertNotIn("تصویر چارت", properties)
+        self.assertNotIn("داده OHLCV", properties)
+
     def test_csv_contains_both_real_market_timeframes(self):
         payload = render_ohlcv_csv(sample_snapshot()).decode("utf-8")
         self.assertIn("15m,", payload)
