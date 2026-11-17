@@ -9039,8 +9039,90 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
          and str(row.get("instId") or "").upper() == str(instrument_id).upper()),
         {},
     )
-    ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else {}
-    patterns = evidence.get("detected_patterns")
+
+    # The successful execution result keeps a compact primary ai_review for the UI,
+    # while the full two-reviewer council stays at the job root. Prefer the complete
+    # reviewer records and preserve both independently in the activity journal.
+    raw_reviews = result.get("ai_reviews") if isinstance(result.get("ai_reviews"), list) else (
+        current.get("ai_reviews") if isinstance(current.get("ai_reviews"), list) else []
+    )
+    if not raw_reviews:
+        fallback = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
+            current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+        )
+        if fallback:
+            raw_reviews = [{
+                "reviewer_id": fallback.get("reviewer_id") or "nemotron",
+                "actor": "Nemotron Supervisor",
+                "review": fallback,
+            }]
+
+    ai_reviews = []
+    for item in raw_reviews[:2]:
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else item
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or "")
+        actor = str(item.get("actor") or (
+            "Nemotron Supervisor" if reviewer_id == "nemotron" else
+            "Second AI Supervisor" if reviewer_id == "second_ai" else
+            "AI Supervisor"
+        ))
+        request_attempted = review.get("request_attempted")
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        if request_attempted is None and review_status in {"NOT_CALLED", "NOT_CONFIGURED"}:
+            request_attempted = False
+        ai_reviews.append({
+            "reviewer_id": reviewer_id,
+            "actor": actor,
+            "status": review_status,
+            "provider": review.get("provider") or "",
+            "model": review.get("model") or "",
+            "returned_model": review.get("returned_model") or "",
+            "request_attempted": request_attempted,
+            "response_source": review.get("response_source") or "NONE",
+            "response_validated": review.get("response_validated") is True,
+            "model_verified": review.get("model_verified") is True,
+            "paper_entry_eligible": review.get("paper_entry_eligible") is True,
+            "skip_reason_code": review.get("skip_reason_code") or "",
+            "http_status": review.get("http_status"),
+            "latency_ms": review.get("latency_ms"),
+            "reason": (
+                review.get("rationale_fa") or review.get("reason")
+                or review.get("status_fa") or ""
+            ),
+        })
+
+    raw_consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
+        current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
+    )
+    consensus = {
+        key: raw_consensus.get(key)
+        for key in (
+            "status", "primary_status", "second_status",
+            "primary_verified", "second_verified",
+            "primary_approved", "second_approved",
+            "two_reviewer_approval", "decision",
+        )
+        if key in raw_consensus
+    }
+    reviewer_consensus = str(consensus.get("status") or "NOT_COMPARABLE").upper()
+    ai_status = (
+        "APPROVED_BY_BOTH"
+        if consensus.get("two_reviewer_approval") is True
+        and consensus.get("primary_verified") is True
+        and consensus.get("second_verified") is True
+        else reviewer_consensus
+    )
+    ai_model = " | ".join(
+        f"{item['reviewer_id'] or item['actor']}:{item['returned_model'] or item['model'] or 'UNKNOWN'}"
+        for item in ai_reviews
+    )[:300]
+    ai_reason = " | ".join(
+        f"{item['reviewer_id'] or item['actor']} {item['status']}: {item['reason']}"
+        for item in ai_reviews
+    )[:1600]
+
     return {
         "experience_id": str(experience_id),
         "job_id": str(job_id),
@@ -9049,9 +9131,9 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "status": str(result.get("status") or current.get("stage") or current.get("status") or "UNKNOWN"),
         "reason_fa": result.get("reason_fa") or current.get("message_fa") or "",
         "analysis_time_utc": current.get("completed_at_utc") or current.get("updated_at_utc") or datetime.now(timezone.utc).isoformat(),
-        "signal_bar_open_utc": result.get("signal_bar_open_utc") or evidence.get("confirmation_candle", {}).get("open_time_utc"),
+        "signal_bar_open_utc": result.get("signal_bar_open_utc") or evidence.get("confirmation_candle", {}).get("open_time_utc") or evidence.get("confirmation_candle", {}).get("time_utc"),
         "engine_version": evidence.get("decision_engine_version") or "CHALLENGE_1_UNKNOWN",
-        "patterns": patterns if isinstance(patterns, list) else [],
+        "patterns": evidence.get("detected_patterns") if isinstance(evidence.get("detected_patterns"), list) else [],
         "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
         "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
         "evidence": evidence,
@@ -9071,12 +9153,14 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "trade_executed": result.get("trade_executed") is True,
         "orders_submitted": result.get("orders_submitted") is True,
         "closed_confirmed": False,
-        "ai_status": ai_review.get("status") or "NOT_CALLED",
-        "ai_model": ai_review.get("model") or ai_review.get("returned_model") or "",
-        "ai_reason": ai_review.get("rationale_fa") or ai_review.get("reason") or "",
+        "ai_status": ai_status or "NOT_CALLED",
+        "ai_model": ai_model,
+        "ai_reason": ai_reason,
+        "reviewer_consensus": reviewer_consensus,
+        "ai_consensus": consensus,
+        "ai_reviews": ai_reviews,
         "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
     }
-
 
 def _queue_blofin_activity_journal(job_id: str, instrument_id: str, job: dict) -> dict:
     """Persist the activity/market snapshot to Turso before Notion network sync."""
