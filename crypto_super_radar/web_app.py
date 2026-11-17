@@ -497,7 +497,7 @@ def _blofin_demo_account_snapshot() -> dict:
         details = balance.get("details")
         details = details if isinstance(details, list) else []
         position_fields = (
-            "positionId", "instId", "marginMode", "positionSide", "leverage",
+            "positionId", "instId", "marginMode", "positionSide", "leverage", "positions",
             "availablePositions", "averagePrice", "markPrice", "liquidationPrice",
             "unrealizedPnl", "unrealizedPnlRatio", "initialMargin",
             "maintenanceMargin", "createTime", "updateTime",
@@ -5283,7 +5283,7 @@ class Handler(BaseHTTPRequestHandler):
               const balance=result.balance||{};
               const summary=document.createElement('div');
               summary.className='grid';
-              [['ارزش کل حساب (USDT)',balance.totalEquity],['ارزش مارجین ایزوله (USDT)',balance.isolatedEquity],
+              [['ارزش کل حساب (USD)',balance.totalEquity],['ارزش مارجین ایزوله (USD)',balance.isolatedEquity],
                ['تعداد پوزیشن‌ها',(result.positions||[]).length],['سفارش‌های باز',(result.open_orders||[]).length],
                ['مجوز واقعی کلید API',result.api_key_permission||'UNKNOWN'],['محدودهٔ این مسیر','GET فقط؛ بدون ارسال سفارش']]
                 .forEach(([label,value])=>{
@@ -5447,7 +5447,7 @@ class Handler(BaseHTTPRequestHandler):
                 ['حجم باز (قرارداد)',active.length===1?position.positions:null],['حجم قابل‌بستن (قرارداد)',active.length===1?position.availablePositions:null],
                 ['اهرم',active.length===1?position.leverage:null],
                 ['سود/زیان شناور USDT',active.length===1?position.unrealizedPnl:null],
-                ['Equity کل حساب (USDT)',account.totalEquity],['Equity ایزوله (USDT)',account.isolatedEquity],
+                ['Equity کل حساب (USD)',account.totalEquity],['Equity ایزوله (USD)',account.isolatedEquity],
                 ['موجودی USDT',usdt.balance],['Equity موجودی USDT',usdt.equity],
                 ['Available USDT',usdt.available],['Available Equity USDT',usdt.availableEquity],
                 ['Frozen USDT',usdt.frozen],['پوزیشن‌های باز این قرارداد',active.length],
