@@ -267,6 +267,8 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         self.assertTrue(second["model_verified"])
         self.assertTrue(second["response_validated"])
+        self.assertTrue(second["request_attempted"])
+        self.assertEqual(second["response_source"], "LIVE_API")
         self.assertEqual(second["returned_model"], DEFAULT_FREE_MODEL)
         self.assertEqual(second["http_status"], 200)
         self.assertEqual(second["total_tokens"], 99)
@@ -287,6 +289,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "MODEL_MISMATCH")
         self.assertFalse(result["model_verified"])
+        self.assertTrue(result["request_attempted"])
         self.assertFalse(result["paper_entry_eligible"])
 
     def test_more_than_eight_risk_flags_cannot_be_ignored(self):
@@ -410,6 +413,16 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(blocked["status"], "RATE_LIMITED")
         self.assertFalse(blocked["paper_entry_eligible"])
 
+    def test_missing_api_key_records_that_no_external_request_was_sent(self):
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT")
+            )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertFalse(result["request_attempted"])
+        self.assertEqual(result["skip_reason_code"], "OPENROUTER_KEY_MISSING")
+        self.assertEqual(result["response_source"], "NONE")
+
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
         invalid.gates[0].status = "UNKNOWN"
@@ -425,3 +438,5 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(calls["count"], 0)
+        self.assertFalse(result["request_attempted"])
+        self.assertEqual(result["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
