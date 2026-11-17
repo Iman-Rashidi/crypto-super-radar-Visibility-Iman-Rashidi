@@ -5232,14 +5232,14 @@ class Handler(BaseHTTPRequestHandler):
                 if(!response.ok)throw new Error('HTTP '+response.status);
                 const result=await response.json();
                 const messages={
-                  CONNECTED_READ_ONLY:'اتصال موفق است؛ بازار، موجودی Futures، پوزیشن‌ها و سفارش‌های باز با مجوز فقط‌خواندنی تأیید شدند.',
+                  CONNECTED_READ_ONLY:'اتصال Demo برقرار است؛ درخواست‌های این مسیر فقط GET هستند. مجوز واقعی کلید: '+(result.api_key_permission||'UNKNOWN')+'.',
                   NOT_CONFIGURED:'متغیرهای API در Environment همین سرویس تنظیم نشده‌اند.',
                   AUTH_FAILED:'احراز هویت ناموفق بود؛ مقادیر و مجوز READ را بررسی کن.',
                   CONNECTION_FAILED:'اتصال به BloFin Demo برقرار نشد؛ شبکه یا محدودیت IP را بررسی کن.',
                   UNKNOWN:'نتیجه آزمون نامشخص است؛ آزمون را بعداً تکرار کن.'
                 };
                 status.textContent=messages[result.status]||messages.UNKNOWN;
-                safety.textContent='محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال';
+                safety.textContent='محیط: Demo · عملیات این مسیر: فقط خواندن (GET) · مجوز واقعی کلید: '+(result.api_key_permission||'نامشخص')+' · ارسال سفارش از این مسیر: غیرفعال';
               }catch(error){
                 status.textContent='دریافت نتیجه آزمون ممکن نشد؛ اتصال داشبورد را بررسی کن.';
               }finally{
@@ -5258,8 +5258,9 @@ class Handler(BaseHTTPRequestHandler):
               const balance=result.balance||{};
               const summary=document.createElement('div');
               summary.className='grid';
-              [['ارزش کل حساب (USD)',balance.totalEquity],['ارزش مارجین ایزوله',balance.isolatedEquity],
-               ['تعداد پوزیشن‌ها',(result.positions||[]).length],['سفارش‌های باز',(result.open_orders||[]).length]]
+              [['ارزش کل حساب (USDT)',balance.totalEquity],['ارزش مارجین ایزوله (USDT)',balance.isolatedEquity],
+               ['تعداد پوزیشن‌ها',(result.positions||[]).length],['سفارش‌های باز',(result.open_orders||[]).length],
+               ['مجوز واقعی کلید API',result.api_key_permission||'UNKNOWN'],['محدودهٔ این مسیر','GET فقط؛ بدون ارسال سفارش']]
                 .forEach(([label,value])=>{
                   const metric=document.createElement('div');
                   metric.className='metric';
@@ -5329,8 +5330,8 @@ class Handler(BaseHTTPRequestHandler):
                   return;
                 }
                 renderAccount(result);
-                accountStatus.textContent='اطلاعات حساب Demo دریافت شد. زمان دریافت: '+new Date().toLocaleString();
-                safety.textContent='محیط: Demo · مجوز: فقط‌خواندنی · ارسال سفارش: غیرفعال';
+                accountStatus.textContent='اطلاعات حساب Demo دریافت شد. مجوز واقعی کلید: '+(result.api_key_permission||'UNKNOWN')+'. زمان دریافت: '+new Date().toLocaleString();
+                safety.textContent='محیط: Demo · عملیات این مسیر: فقط خواندن (GET) · مجوز واقعی کلید: '+(result.api_key_permission||'نامشخص')+' · ارسال سفارش از این مسیر: غیرفعال';
               }catch(error){
                 accountStatus.textContent='ارتباط با پنل حساب برقرار نشد.';
               }finally{
@@ -5383,35 +5384,54 @@ class Handler(BaseHTTPRequestHandler):
             function renderLiveMonitor(snapshot){
               monitorView.replaceChildren();monitorEvents.replaceChildren();
               const m=snapshot.market||{},account=snapshot.account||{};
-              const positions=Array.isArray(snapshot.positions)?snapshot.positions:[];
+              const accountPositions=Array.isArray(snapshot.positions)?snapshot.positions:[];
+              const positions=Array.isArray(snapshot.positions_for_instrument)
+                ?snapshot.positions_for_instrument
+                :accountPositions.filter(p=>String(p&&p.instId||'').toUpperCase()===String(snapshot.instrument_id||'').toUpperCase());
               const active=positions.filter(p=>{
                 const quantity=Number(p&&p.positions);
                 return Number.isFinite(quantity)&&Math.abs(quantity)>0;
               });
-              const position=active[0]||{},detail=snapshot.order_detail||{};
+              // Never join an arbitrary account-wide position to the selected market ticker.
+              const position=active.length===1?active[0]:{},detail=snapshot.order_detail||{};
               const localOrder=snapshot.latest_local_order||{};
               const fills=Array.isArray(snapshot.fills)?snapshot.fills:[];
               const closed=Array.isArray(snapshot.closed_positions)?snapshot.closed_positions:[];
-              const events=Array.isArray(snapshot.execution_events)?snapshot.execution_events:[];
+              const events=Array.isArray(snapshot.instrument_execution_events)?snapshot.instrument_execution_events:[];
+              const accountOpenPositions=accountPositions.filter(p=>{
+                const quantity=Number(p&&p.positions);
+                return Number.isFinite(quantity)&&Math.abs(quantity)>0;
+              });
+              const instrumentOpenOrders=Array.isArray(snapshot.open_orders_for_instrument)
+                ?snapshot.open_orders_for_instrument
+                :(snapshot.open_orders||[]).filter(x=>String(x&&x.instId||'').toUpperCase()===String(snapshot.instrument_id||'').toUpperCase());
+              const instrumentOpenTpsl=Array.isArray(snapshot.open_tpsl_orders_for_instrument)
+                ?snapshot.open_tpsl_orders_for_instrument
+                :(snapshot.open_tpsl_orders||[]).filter(x=>String(x&&x.instId||'').toUpperCase()===String(snapshot.instrument_id||'').toUpperCase());
               const usdt=(Array.isArray(account.details)?account.details:[]).find(x=>String(x.currency||'').toUpperCase()==='USDT')||{};
               const lastEvent=type=>events.filter(x=>String(x.event_type||'').toUpperCase()===type).slice(-1)[0]||{};
               const reserved=lastEvent('RESERVED'),accepted=lastEvent('ACCEPTED'),filledEvent=lastEvent('FILLED');
               const latestFill=fills[0]||{},latestClosed=closed[0]||{};
               const summary=document.createElement('div');summary.className='grid';
               const metrics=[
-                ['آخرین قیمت '+(snapshot.instrument_id||'قرارداد انتخابی'),m.last],['Mark Price واقعی',m.markPrice??position.markPrice],
-                ['Index Price',m.indexPrice],['وضعیت موقعیت',active.length?'پوزیشن باز':(detail.state||localOrder.status||'بدون پوزیشن باز')],
-                ['جهت پوزیشن',position.positionSide||localOrder.side],
-                ['میانگین قیمت ورود',position.averagePrice??detail.averagePrice??localOrder.entry_price],
-                ['حجم باز',position.positions],['حجم قابل‌بستن',position.availablePositions],
-                ['اهرم',position.leverage??detail.leverage??localOrder.leverage],
-                ['سود/زیان شناور USDT',position.unrealizedPnl],
-                ['Equity کل حساب (USD)',account.totalEquity],['Equity ایزوله (USD)',account.isolatedEquity],
+                ['آخرین قیمت '+(snapshot.instrument_id||'قرارداد انتخابی'),m.last],['Mark Price همان قرارداد',m.markPrice],
+                ['Index Price همان قرارداد',m.indexPrice],
+                ['وضعیت پوزیشن '+(snapshot.instrument_id||''),active.length===1?'پوزیشن باز':(active.length>1?'چند پوزیشن باز؛ جزئیات جداگانه':'بدون پوزیشن باز برای این قرارداد')],
+                ['جهت پوزیشن',active.length===1?position.positionSide:null],
+                ['میانگین قیمت ورود',active.length===1?position.averagePrice:null],
+                ['حجم باز (قرارداد)',active.length===1?position.positions:null],['حجم قابل‌بستن (قرارداد)',active.length===1?position.availablePositions:null],
+                ['اهرم',active.length===1?position.leverage:null],
+                ['سود/زیان شناور USDT',active.length===1?position.unrealizedPnl:null],
+                ['Equity کل حساب (USDT)',account.totalEquity],['Equity ایزوله (USDT)',account.isolatedEquity],
                 ['موجودی USDT',usdt.balance],['Equity موجودی USDT',usdt.equity],
                 ['Available USDT',usdt.available],['Available Equity USDT',usdt.availableEquity],
-                ['Frozen USDT',usdt.frozen],['تعداد پوزیشن‌های باز',active.length],
-                ['سفارش‌های فعال',Array.isArray(snapshot.open_orders)?snapshot.open_orders.length:0],
-                ['TP/SL فعال',Array.isArray(snapshot.open_tpsl_orders)?snapshot.open_tpsl_orders.length:0],
+                ['Frozen USDT',usdt.frozen],['پوزیشن‌های باز این قرارداد',active.length],
+                ['پوزیشن‌های باز کل حساب',accountOpenPositions.length],
+                ['سفارش‌های باز این قرارداد',instrumentOpenOrders.length],
+                ['سفارش‌های باز کل حساب',Array.isArray(snapshot.open_orders)?snapshot.open_orders.length:0],
+                ['TP/SL فعال این قرارداد',instrumentOpenTpsl.length],
+                ['TP/SL فعال کل حساب',Array.isArray(snapshot.open_tpsl_orders)?snapshot.open_tpsl_orders.length:0],
+                ['مجوز واقعی کلید API',snapshot.api_key_permission||'UNKNOWN'],
                 ['آخرین به‌روزرسانی',formatTime(snapshot.updated_at_utc)]
               ];
               metrics.forEach(([label,value])=>{
@@ -5451,32 +5471,37 @@ class Handler(BaseHTTPRequestHandler):
                 ok.textContent='پوشش منابع مانیتور: همهٔ endpointهای درخواستی پاسخ داده‌اند.';
                 monitorEvents.appendChild(ok);
               }
-              monitorEvents.appendChild(renderEvents('Fillهای واقعی صرافی · قیمت، حجم، کارمزد و زمان',fills,[
+              monitorEvents.appendChild(renderEvents('پوزیشن‌های باز برای '+(snapshot.instrument_id||'قرارداد انتخابی'),active,[
+                ['positionId','شناسه پوزیشن'],['instId','نماد'],['positionSide','جهت'],
+                ['positions','حجم (قرارداد)'],['averagePrice','قیمت ورود'],['markPrice','Mark Price'],
+                ['unrealizedPnl','PnL شناور'],['leverage','اهرم']
+              ],'برای قرارداد انتخاب‌شده پوزیشن بازی گزارش نشد.'));
+              monitorEvents.appendChild(renderEvents('Fillهای واقعی صرافی · قیمت، حجم قرارداد، کارمزد و زمان',fills,[
                 ['tradeId','شناسه Fill'],['orderId','شناسه سفارش'],['side','خرید/فروش'],
-                ['positionSide','جهت پوزیشن'],['fillPrice','قیمت Fill'],['fillSize','حجم'],
+                ['positionSide','جهت پوزیشن'],['fillPrice','قیمت Fill'],['fillSize','حجم Fill (قرارداد)'],
                 ['fillPnl','PnL تحقق‌یافته'],['fee','کارمزد'],['ts','زمان Fill']
               ],'BloFin در سوابق دریافتی Fill ثبت‌شده‌ای برنگرداند.'));
               monitorEvents.appendChild(renderEvents('پوزیشن‌های بسته‌شده · ورود، خروج و PnL نهایی',closed,[
                 ['historyId','شناسه سابقه'],['side','سمت'],['positionSide','جهت پوزیشن'],
                 ['openAveragePrice','میانگین ورود'],['closeAveragePrice','میانگین خروج'],
-                ['closePositions','حجم بسته‌شده'],['realizedPnl','PnL نهایی'],
+                ['closePositions','حجم بسته‌شده (واحد گزارش‌شده BloFin)'],['realizedPnl','PnL نهایی'],
                 ['realizedPnlRatio','درصد PnL'],['fee','کارمزد'],
                 ['createTime','زمان بازشدن'],['updateTime','زمان بسته‌شدن/آخرین تغییر']
               ],'در تاریخچهٔ دریافتی، پوزیشن بسته‌شده‌ای برای BTC-USDT گزارش نشد.'));
               monitorEvents.appendChild(renderEvents('سفارش‌های تکمیل‌شده و تاریخچه سفارش',snapshot.completed_orders||[],[
                 ['orderId','شناسه سفارش'],['orderCategory','دسته سفارش'],['side','سمت'],
                 ['orderType','نوع سفارش'],['state','وضعیت'],['price','قیمت درخواستی'],
-                ['averagePrice','میانگین اجرای واقعی'],['size','حجم درخواست‌شده'],
-                ['filledSize','حجم اجراشده'],['pnl','PnL'],['fee','کارمزد'],
+                ['averagePrice','میانگین اجرای واقعی'],['size','حجم درخواست‌شده (قرارداد)'],
+                ['filledSize','حجم اجراشده (قرارداد)'],['pnl','PnL'],['fee','کارمزد'],
                 ['createTime','زمان ثبت'],['updateTime','زمان تکمیل/تغییر']
               ],'در تاریخچهٔ دریافت‌شده سفارش تکمیل‌شده‌ای گزارش نشد.'));
-              monitorEvents.appendChild(renderEvents('سفارش‌های باز عادی',snapshot.open_orders||[],[
+              monitorEvents.appendChild(renderEvents('سفارش‌های باز عادی برای '+(snapshot.instrument_id||'قرارداد انتخابی'),instrumentOpenOrders,[
                 ['orderId','شناسه سفارش'],['side','سمت'],['orderType','نوع'],
                 ['orderCategory','دسته'],['price','قیمت'],['size','حجم'],
                 ['filledSize','پرشده'],['state','وضعیت'],['createTime','زمان ثبت'],
                 ['attachAlgoOrders','حد سود/ضرر متصل']
               ],'در حال حاضر سفارش عادی بازی برای BTC-USDT گزارش نشد.'));
-              monitorEvents.appendChild(renderEvents('حد سود و حد ضرر فعال در BloFin',snapshot.open_tpsl_orders||[],[
+              monitorEvents.appendChild(renderEvents('حد سود و حد ضرر فعال برای '+(snapshot.instrument_id||'قرارداد انتخابی'),instrumentOpenTpsl,[
                 ['tpslId','شناسه TP/SL'],['side','سمت'],['positionSide','جهت پوزیشن'],
                 ['tpTriggerPrice','قیمت فعال‌سازی TP'],['tpOrderPrice','قیمت اجرای TP'],
                 ['tpTriggerPriceType','مبنای TP'],['slTriggerPrice','قیمت فعال‌سازی SL'],
@@ -5489,7 +5514,7 @@ class Handler(BaseHTTPRequestHandler):
                 ['slOrderPrice','قیمت اجرای SL'],['state','وضعیت'],
                 ['createTime','زمان ثبت'],['updateTime','آخرین تغییر']
               ],'در تاریخچهٔ دریافتی، سفارش TP/SL ثبت‌شده‌ای گزارش نشد.'));
-              monitorEvents.appendChild(renderEvents('تمام رویدادهای ثبت‌شده در ربات (همه سفارش‌ها)',events,[
+              monitorEvents.appendChild(renderEvents('رویدادهای ثبت‌شدهٔ ربات برای '+(snapshot.instrument_id||'قرارداد انتخابی'),events,[
                 ['sequence','ترتیب'],['client_order_id','شناسه سفارش ربات'],
                 ['event_type','رویداد'],['occurred_at','زمان ثبت'],['payload','جزئیات']
               ],'هنوز رویدادی در دفتر ثبت داخلی ربات ذخیره نشده است.'));
@@ -6336,7 +6361,7 @@ async function loadBlofinInstruments(){
           <p id="data-health-status" class="muted" aria-live="polite">در حال بررسی تازگی و پوشش داده‌ها...</p>
           <div id="data-health-details" class="grid"></div>
           <button type="button" id="data-health-refresh">بررسی دوباره سلامت داده</button>
-          <p class="muted">LIVE در این بخش فقط به معنی تازه‌بودن قیمت‌های منتخب و تأیید آن‌ها توسط Binance و Bybit است؛ این وضعیت به معنی پوشش کل بازار یا اتصال WebSocket نیست.</p>
+          <p class="muted">این سلامت‌سنج فقط فهرست ۲۰ نماد Spot را ارزیابی می‌کند و با منبع مستقل نمودار کندل یکی نیست. LIVE یعنی همهٔ ردیف‌های همین فهرست در پنجرهٔ تازگی تأیید شده‌اند؛ نه پوشش کل بازار و نه اتصال WebSocket.</p>
         </section>
         <script>
         (function(){
@@ -6555,8 +6580,11 @@ async function loadBlofinInstruments(){
               marketItems=data.items||[];
               window.CryptoRadar.update('radar-market', marketItems, {state:data.refreshing?'scanning':'complete', caption:'آبی: قیمت تأییدشده از دو منبع مستقل · زرد: دادهٔ نامشخص. این رادار جهت خرید/فروش تولید نمی‌کند.'});
               renderRows();
-              const received=new Date(data.updated_at_utc).toLocaleString();
-              status.textContent='منابع: '+(data.sources||[]).join(' و ')+' · دریافت: '+received+
+              const receivedDate=data.updated_at_utc?new Date(data.updated_at_utc):null;
+              const received=receivedDate&&!Number.isNaN(receivedDate.getTime())
+                ?receivedDate.toLocaleString()
+                :'هنوز مشاهدهٔ معتبر ثبت نشده';
+              status.textContent='منابع: '+(data.sources||[]).join(' و ')+' · قدیمی‌ترین مشاهدهٔ معتبر: '+received+
                 ' · وضعیت کلی: '+data.status+' · cache: '+data.cache_ttl_seconds+' ثانیه';
             }catch(error){
               status.textContent='دادهٔ بازار در دسترس نیست: '+String(error.message||error);window.CryptoRadar.error('radar-market', 'دریافت قیمت بازار ناموفق بود؛ وضعیت قبلی به‌عنوان سیگنال تازه تلقی نمی‌شود.');
@@ -6712,7 +6740,7 @@ async function loadBlofinInstruments(){
             </section>
             <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
             <p id="live-radar-provider" class="live-radar-note">اعتبارسنجی چندمنبعی: در انتظار داده</p>
-            <p class="live-radar-note">این بخش فعلاً هشدار تحلیلی است و به Paper Bot سفارش نمی‌دهد. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
+            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance/Bybit و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و موتور Challenge 1 فیوچرز BloFin نیست. Challenge 1 فقط کندل بسته‌شدهٔ ۱۵ دقیقه‌ای BloFin و تعارض تایم‌فریم یک‌ساعته را برای تصمیم Demo بررسی می‌کند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
           </div>
           <script>
           (function(){
