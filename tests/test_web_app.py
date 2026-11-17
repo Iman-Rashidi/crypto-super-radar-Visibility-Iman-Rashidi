@@ -206,6 +206,8 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("لغو همین سفارش", page)
         self.assertIn("PnL شناور", page)
         self.assertIn("اپراتور", page)
+        self.assertIn("autopilotStatusPollTimer", page)
+        self.assertIn("status_only=1", page)
 
     def test_profit_exit_decision_requires_exact_robot_position_and_positive_cushion(self):
         order = {
@@ -1352,6 +1354,12 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
+    def test_autopilot_next_scan_aligns_to_next_15m_close(self):
+        now = datetime(2026, 11, 17, 16, 23, 32, tzinfo=timezone.utc)
+        delay_seconds, next_at = web_app._blofin_demo_next_15m_scan_window(now)
+        self.assertEqual(delay_seconds, 391)
+        self.assertEqual(next_at, "2026-11-17T16:30:03+00:00")
+
     def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
         class StopAfterTwoCycles(Exception):
             pass
@@ -1420,6 +1428,9 @@ class WebAppHttpTests(unittest.TestCase):
                     "read_errors": [],
                 }),
                 patch.object(web_app.BLOFIN_AUTOPILOT_STOP_EVENT, "wait", side_effect=stop_after_second_cycle_sleep),
+                patch.object(web_app, "_blofin_demo_next_15m_scan_window", return_value=(
+                    900, "2026-11-17T16:30:03+00:00"
+                )),
                 patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
                 with self.assertRaises(StopAfterTwoCycles):
@@ -1427,9 +1438,13 @@ class WebAppHttpTests(unittest.TestCase):
 
             self.assertEqual(len(cycle_ids), 2)
             self.assertEqual(observed_profiles, ["CHALLENGE_1", "CHALLENGE_1"])
-            self.assertEqual(sleep_calls, [300, 300])
+            self.assertEqual(sleep_calls, [900, 900])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
-            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SEARCHING_FOR_SIGNAL")
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_15M_CANDLE")
+            self.assertEqual(
+                web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"],
+                "2026-11-17T16:30:03+00:00",
+            )
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["last_cycle_status"], "completed")
