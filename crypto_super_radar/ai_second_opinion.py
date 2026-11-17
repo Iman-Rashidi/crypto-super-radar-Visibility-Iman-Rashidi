@@ -390,14 +390,14 @@ def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "Expected side is " + expected_side + ". The selected pattern name must match exactly: " + chosen_name + ". "
         "Return exactly one JSON object, no markdown, using this schema: "
         "{"
-        "\\"pattern_analyst\\":{\\"verdict\\":\\"SUPPORT|OPPOSE|UNCERTAIN\\",\\"pattern_name\\":\\"exact selected name or NONE\\",\\"reason_fa\\":\\"...\\"},"
-        "\\"price_action_analyst\\":{\\"verdict\\":\\"SUPPORT|OPPOSE|UNCERTAIN\\",\\"reason_fa\\":\\"...\\"},"
-        "\\"timeframe_analyst\\":{\\"verdict\\":\\"SUPPORT|OPPOSE|UNCERTAIN\\",\\"reason_fa\\":\\"...\\"},"
-        "\\"trader\\":{\\"proposal\\":\\"LONG|SHORT|NO_TRADE\\",\\"reason_fa\\":\\"...\\"},"
-        "\\"risk_manager\\":{\\"verdict\\":\\"APPROVE|REJECT|INSUFFICIENT_DATA\\",\\"reason_fa\\":\\"...\\"},"
-        "\\"portfolio_manager\\":{\\"verdict\\":\\"APPROVE|REJECT|INSUFFICIENT_DATA\\",\\"reason_fa\\":\\"...\\"},"
-        "\\"final_decision\\":\\"APPROVE|REJECT|INSUFFICIENT_DATA\\","
-        "\\"risk_flags\\":[\\"...\\"],\\"rationale_fa\\":\\"...\\""
+        '{"pattern_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","pattern_name":"exact selected name or NONE","reason_fa":"..."},'
+        '"price_action_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"timeframe_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"trader":{"proposal":"LONG|SHORT|NO_TRADE","reason_fa":"..."},'
+        '"risk_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
+        '"portfolio_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
+        '"final_decision":"APPROVE|REJECT|INSUFFICIENT_DATA",'
+        '"risk_flags":["..."],"rationale_fa":"..."'
         "}. "
         "APPROVE is permitted only when all three technical analysts SUPPORT, pattern_analyst.pattern_name "
         "matches the selected pattern exactly, trader proposal matches expected side, both risk and "
@@ -812,8 +812,6 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
 
 
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
-    if document.get("review_mode") == "CANDLE_PATTERN_ONLY":
-        return _validated_pattern_review(document, model, asset, evidence=evidence or {})
     rating = str(document.get("final_rating") or "REVIEW").strip()
     if rating.casefold() not in ALLOWED_RATINGS:
         raise ValueError("Unknown final rating")
