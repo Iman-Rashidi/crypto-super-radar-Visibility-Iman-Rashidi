@@ -901,7 +901,9 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 isinstance(call, tuple) and call[0] == "place_order"
                 for call in client.calls
             ))
-            self.assertEqual(store.pending_learning_outcome_count(), 2)
+            # The raw second signal has no learning_experience_id, so only the
+            # explicitly linked old fill is counted in this journal metric.
+            self.assertEqual(store.pending_learning_outcome_count(), 1)
             old_experience = store.learning_memory.get_experience(experience_id)
             self.assertEqual(old_experience["learning_status"], "PENDING_OUTCOME")
             self.assertEqual(
