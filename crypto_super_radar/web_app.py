@@ -5134,7 +5134,7 @@ def _blofin_manual_close_position(
     position_side_hint = str(position_side_hint or "").strip().lower()
     if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
         raise BloFinDemoExecutionBlocked("نماد پوزیشن معتبر نیست.")
-    if position_id and not re.fullmatch(r"[A-Za-z0-9]{1,64}", position_id):
+    if position_id and not re.fullmatch(r"[A-Za-z0-9-]{1,64}", position_id):
         raise BloFinDemoExecutionBlocked("شناسه پوزیشن معتبر نیست.")
     if position_side_hint and position_side_hint not in {"net", "long", "short"}:
         raise BloFinDemoExecutionBlocked("جهت پوزیشن معتبر نیست.")
@@ -5552,6 +5552,7 @@ class Handler(BaseHTTPRequestHandler):
             </section>
             <section class="metric" id="blofin-manual-trading-panel" style="margin-top:12px">
               <h3>کنترل دستی معاملات BloFin Demo</h3>
+              <p class="muted">این بخش فقط با اقدام صریح اپراتور فعال می‌شود و هر سفارش نیازمند تأیید جداگانه است.</p>
               <p class="muted">این بخش از سیگنال، ۱۲ گیت و Nemotron مستقل است. سفارش دستی فقط پس از تأیید تو ارسال می‌شود. ورود با اهرم ایزوله 1x، TP/SL اجباری، سقف ارزش اسمی ۱۰٪ Equity و سقف زیان تا حد ضرر ۰٫۲۵٪ Equity محدود شده است.</p>
               <form id="blofin-manual-order-form" class="grid" style="margin:10px 0">
                 <div>
