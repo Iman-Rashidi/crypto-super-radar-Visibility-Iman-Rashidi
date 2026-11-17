@@ -189,6 +189,8 @@ class WebAppHttpTests(unittest.TestCase):
             "blofin-mode-autopilot",
             "blofin-mode-manual",
             "blofin-autopilot-toggle",
+            "blofin-emergency-stop",
+            "blofin-emergency-status",
             "blofin-manual-order-form",
             "blofin-manual-direction",
             "blofin-manual-size",
@@ -1261,7 +1263,8 @@ class WebAppHttpTests(unittest.TestCase):
 
         observed_profiles = []
 
-        def complete_no_trade_cycle(job_id, instrument_id, execution_profile):
+        def complete_no_trade_cycle(job_id, instrument_id, execution_profile, *, autopilot_cycle=False):
+            self.assertTrue(autopilot_cycle)
             cycle_ids.append(job_id)
             observed_profiles.append(execution_profile)
             self.assertEqual(execution_profile, "CHALLENGE_1")
@@ -1335,6 +1338,44 @@ class WebAppHttpTests(unittest.TestCase):
                 web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
                 for job_id in set(web_app.BLOFIN_EXECUTION_JOBS) - old_job_ids:
                     web_app.BLOFIN_EXECUTION_JOBS.pop(job_id, None)
+
+    def test_autopilot_stop_latches_server_override_and_event(self):
+        old_override = web_app.BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE
+        old_event = web_app.BLOFIN_AUTOPILOT_STOP_EVENT.is_set()
+        old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        origin = f"http://{self.host}:{self.port}"
+        try:
+            with (
+                patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "test-dashboard-token"}),
+                patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
+            ):
+                web_app.BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = True
+                web_app.BLOFIN_AUTOPILOT_STOP_EVENT.clear()
+                status, _, payload = self.request(
+                    "POST", "/api/blofin/demo/autopilot/control",
+                    body="confirm=1&enabled=false",
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Authorization": "Bearer test-dashboard-token",
+                        "Origin": origin,
+                        "Sec-Fetch-Site": "same-origin",
+                    },
+                )
+            self.assertEqual(status, 200)
+            result = json.loads(payload)
+            self.assertFalse(result["enabled"])
+            self.assertIn(result["status"], {"DISABLED", "STOPPING"})
+            self.assertFalse(web_app._blofin_demo_autopilot_enabled())
+            self.assertTrue(web_app.BLOFIN_AUTOPILOT_STOP_EVENT.is_set())
+        finally:
+            web_app.BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = old_override
+            if old_event:
+                web_app.BLOFIN_AUTOPILOT_STOP_EVENT.set()
+            else:
+                web_app.BLOFIN_AUTOPILOT_STOP_EVENT.clear()
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE.clear()
+                web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
 
     def test_blofin_smoke_readiness_blocks_existing_open_position(self):
         with (
