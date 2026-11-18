@@ -82,6 +82,40 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_disabled_autopilot_startup_clears_stale_next_cycle_metadata(self):
+        previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        try:
+            web_app.BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": True,
+                "status": "WAITING_FOR_NEXT_5M_CANDLE",
+                "search_continues": True,
+                "next_cycle_scheduled": True,
+                "next_cycle_at_utc": "2026-11-18T12:25:03+00:00",
+                "next_cycle_in_seconds": 120,
+            })
+            with patch.dict(os.environ, {
+                "BLOFIN_DEMO_AUTOPILOT_ROLE": "WEB",
+                "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+            }), patch.object(
+                web_app, "_restore_blofin_autopilot_state",
+            ), patch.object(
+                web_app, "_schedule_blofin_demo_startup_recovery",
+            ), patch.object(
+                web_app, "_persist_blofin_autopilot_state",
+            ):
+                web_app._start_blofin_demo_autopilot()
+
+            state = web_app.BLOFIN_AUTOPILOT_STATE
+            self.assertFalse(state["enabled"])
+            self.assertEqual(state["status"], "DISABLED")
+            self.assertFalse(state["search_continues"])
+            self.assertFalse(state["next_cycle_scheduled"])
+            self.assertIsNone(state["next_cycle_at_utc"])
+            self.assertIsNone(state["next_cycle_in_seconds"])
+        finally:
+            web_app.BLOFIN_AUTOPILOT_STATE.clear()
+            web_app.BLOFIN_AUTOPILOT_STATE.update(previous)
+
     def test_notion_sync_worker_error_is_visible_in_status_api(self):
         previous = dict(web_app.NOTION_EVENT_SYNC_STATE)
         try:
