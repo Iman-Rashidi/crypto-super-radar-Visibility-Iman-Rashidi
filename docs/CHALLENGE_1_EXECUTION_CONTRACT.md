@@ -53,3 +53,10 @@ general twelve-gate CRYPTO SUPER RADAR architecture or change other profiles.
   BloFin Demo order/fill reconciliation, AI request/response evidence, durable
   learning/event records, Notion synchronization, and Position Manager outcomes.
   No deployment or live order is authorized by this document.
+
+
+## Staging runtime validation record
+
+Expected deployed Staging commit: `b2cf0992c6ae7b2e22c13988f8f1ac9e5879ed6b`.
+
+A guarded, one-shot CI check reads the Challenge 1 reviewer reports and Demo readiness. Its synthetic AI dry-run is not permitted to submit orders.
