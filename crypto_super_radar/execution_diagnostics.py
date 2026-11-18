@@ -15,14 +15,14 @@ _SECRET_ENV_MARKERS = (
     "API_KEY", "API_SECRET", "AUTH_TOKEN", "ACCESS_TOKEN", "REFRESH_TOKEN",
     "TOKEN", "SECRET", "PASSPHRASE", "PASSWORD", "PRIVATE_KEY",
 )
-_BEARER_RE = re.compile(r"(?i)\\b(Bearer\\s+)[A-Za-z0-9._~+/-]+=*")
+_BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*")
 _QUERY_SECRET_RE = re.compile(
-    r"(?i)([?&](?:access_token|refresh_token|token|api_key|api_secret|signature|secret|passphrase)=)[^&\\s]+"
+    r"(?i)([?&](?:access_token|refresh_token|token|api_key|api_secret|signature|secret|passphrase)=)[^&\s]+"
 )
 _ASSIGNMENT_SECRET_RE = re.compile(
-    r"(?i)\\b(api[_-]?key|api[_-]?secret|auth[_-]?token|access[_-]?token|"
+    r"(?i)\b(api[_-]?key|api[_-]?secret|auth[_-]?token|access[_-]?token|"
     r"refresh[_-]?token|token|secret|passphrase|password|authorization|signature)"
-    r"(\\s*[:=]\\s*)(?:['\"])?([^,\\s&'\"]+)"
+    r"(\s*[:=]\s*)(?:['\"])?([^,\s&'\"]+)"
 )
 
 
@@ -39,9 +39,9 @@ def redact_diagnostic_text(value: Any, *, environ: Mapping[str, str] | None = No
     }
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
-    text = _BEARER_RE.sub(r"\\1[REDACTED]", text)
-    text = _QUERY_SECRET_RE.sub(r"\\1[REDACTED]", text)
-    text = _ASSIGNMENT_SECRET_RE.sub(r"\\1\\2[REDACTED]", text)
+    text = _BEARER_RE.sub(r"\1[REDACTED]", text)
+    text = _QUERY_SECRET_RE.sub(r"\1[REDACTED]", text)
+    text = _ASSIGNMENT_SECRET_RE.sub(r"\1\2[REDACTED]", text)
     return text
 
 
