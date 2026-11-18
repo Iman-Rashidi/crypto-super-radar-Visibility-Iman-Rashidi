@@ -1761,9 +1761,9 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(nemotron["ai_decision"], "OBSERVE_ONLY")
         self.assertEqual(nemotron["order_id"], "demo-order-1")
         self.assertEqual(nemotron["position_id"], "demo-position-1")
-        self.assertEqual(second["event_type"], "AI_REVIEW_REQUESTED")
+        self.assertEqual(second["event_type"], "DATA_ERROR")
         self.assertEqual(second["status"], "WARNING")
-        self.assertEqual(second["ai_decision"], "OBSERVE_ONLY")
+        self.assertEqual(second["ai_decision"], "NOT_CALLED")
         self.assertNotIn("AI_APPROVAL", {item["event_type"] for item in events})
 
     def test_challenge1_observer_request_events_distinguish_configured_from_missing(self):
@@ -1783,6 +1783,48 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(nemotron["status"], "PENDING")
         self.assertEqual(second["status"], "WARNING")
         self.assertEqual(second["ai_suggestion"], "NOT_CONFIGURED")
+
+
+    def test_position_manager_records_exit_threshold_and_distinct_close_transition(self):
+        outbox = MagicMock()
+        outbox.enqueue.return_value = True
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            result = web_app._queue_blofin_position_manager_heartbeats(
+                {
+                    "actions": [
+                        {
+                            "status": "MONITORING_FOR_NET_PROFIT",
+                            "instrument_id": "BTC-USDT",
+                            "position_id": "demo-position-2",
+                            "order_id": "demo-order-2",
+                            "unrealized_pnl_usdt": "0.02",
+                            "estimated_net_profit_usdt": "0.005",
+                            "minimum_net_profit_usdt": 0.01,
+                            "slippage_buffer_usdt": 0.002,
+                            "exit_decision": "HOLD_BELOW_NET_PROFIT_THRESHOLD",
+                        },
+                        {
+                            "status": "CLOSE_ACCEPTED",
+                            "instrument_id": "BTC-USDT",
+                            "position_id": "demo-position-2",
+                            "order_id": "demo-order-2",
+                            "unrealized_pnl_usdt_at_request": "0.04",
+                            "estimated_net_profit_usdt": "0.02",
+                            "minimum_net_profit_usdt": 0.01,
+                            "slippage_buffer_usdt": 0.002,
+                            "exit_decision": "CLOSE_REQUEST_ACCEPTED",
+                        },
+                    ],
+                },
+                "2026-11-18T15:21:00+00:00",
+            )
+        self.assertEqual(result["queued"], 2)
+        first, second = [call.args[0] for call in outbox.enqueue.call_args_list]
+        self.assertNotEqual(first["event_id"], second["event_id"])
+        self.assertIn("MONITORING_FOR_NET_PROFIT", first["event_id"])
+        self.assertIn("CLOSE_ACCEPTED", second["event_id"])
+        self.assertIn('"slippage_buffer_usdt": 0.002', first["details"])
+        self.assertIn('"exit_decision": "CLOSE_REQUEST_ACCEPTED"', second["details"])
 
     def test_position_manager_emits_rate_limited_durable_heartbeat(self):
         outbox = MagicMock()
@@ -1891,7 +1933,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(args[3]["result"]["position_id"], "demo-position-btc")
         self.assertEqual(args[3]["result"]["exchange_order_id"], "demo-order-btc")
 
-    def test_observer_worker_skips_provider_calls_when_durable_request_already_exists(self):
+    def test_observer_worker_retries_when_request_exists_but_result_is_missing(self):
         job = {
             "status": "completed",
             "result": {
@@ -1912,17 +1954,85 @@ class WebAppHttpTests(unittest.TestCase):
                 "candles_1h": [],
             },
         }
+        outbox = MagicMock()
+        outbox.get_event.return_value = None
+        audit = {
+            "reviewers": [
+                {"reviewer_id": "nemotron", "status": "REVIEWED", "verdict": "SUPPORTS_DECISION"},
+                {"reviewer_id": "second_ai", "status": "NOT_CONFIGURED", "request_attempted": False},
+            ],
+        }
         with (
+            patch.object(web_app, "NotionEventOutbox", return_value=outbox),
             patch.object(web_app, "_queue_challenge1_observer_events", return_value={
                 "status": "QUEUED", "queued": 0,
-            }),
-            patch.object(web_app, "run_challenge1_observer_reviews") as run_review,
+            }) as queue_events,
+            patch.object(web_app, "run_challenge1_observer_reviews", return_value=audit) as run_review,
         ):
             web_app._run_challenge1_observer_job(
-                "position-audit:demo-position-1:initial",
+                "position-audit:demo-position-1:initial-v2",
+                "BTC-USDT", record, job,
+            )
+        run_review.assert_called_once()
+        self.assertEqual(run_review.call_args.kwargs["reviewer_ids"], {"nemotron", "second_ai"})
+        self.assertEqual(queue_events.call_count, 2)
+        self.assertEqual(queue_events.call_args.kwargs["phase"], "RESULT")
+
+    def test_observer_worker_skips_provider_calls_when_both_durable_results_exist(self):
+        job = {
+            "status": "completed",
+            "result": {
+                "status": "POSITION_MONITORING",
+                "signal": "LONG",
+                "position_id": "demo-position-1",
+                "exchange_order_id": "demo-order-1",
+                "learning_experience_id": "experience-1",
+                "positions": [{"positionId": "demo-position-1"}],
+            },
+        }
+        record = {
+            "signal": "LONG",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        details = {
+            "phase": "RESULT",
+            "review_status": "REVIEWED",
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
+            "verdict": "SUPPORTS_DECISION",
+        }
+        def existing(reviewer_id, provider, model):
+            return {
+                "event_type": "AI_RECOMMENDATION",
+                "ai_provider": provider,
+                "ai_model": model,
+                "ai_analysis": "review complete",
+                "details": json.dumps({**details, "reviewer_id": reviewer_id}),
+            }
+        outbox = MagicMock()
+        outbox.get_event.side_effect = lambda event_id: (
+            existing("nemotron", "OpenRouter", "nvidia/nemotron:free")
+            if ":AI:nemotron:RESULT" in event_id else
+            existing("second_ai", "Groq", "qwen/qwen3.8-27b")
+        )
+        with (
+            patch.object(web_app, "NotionEventOutbox", return_value=outbox),
+            patch.object(web_app, "run_challenge1_observer_reviews") as run_review,
+            patch.object(web_app, "_queue_challenge1_observer_events") as queue_events,
+        ):
+            web_app._run_challenge1_observer_job(
+                "position-audit:demo-position-1:initial-v2",
                 "BTC-USDT", record, job,
             )
         run_review.assert_not_called()
+        queue_events.assert_not_called()
 
 
 if __name__ == "__main__":
