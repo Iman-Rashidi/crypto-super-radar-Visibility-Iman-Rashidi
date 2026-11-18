@@ -9,6 +9,7 @@ import json
 import os
 import time
 import hashlib
+import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -19,6 +20,31 @@ from .database import connect_database, storage_backend
 NOTION_DATA_SOURCE_ID = "41a6c893-0218-81ce-9359-000bf3e47b44"
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2025-09-03"
+
+
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)(?:sk-or-v1-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{24,}|Bearer\\s+[A-Za-z0-9._~-]{16,})"
+)
+_MODEL_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,50}/[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$"
+)
+
+
+def _redact_secret_text(value: Any, limit: int = 1800) -> str:
+    text = _text(value, limit)
+    return _SECRET_VALUE_RE.sub("[REDACTED]", text)
+
+
+def _safe_model_id(value: Any) -> str:
+    """Accept a model identifier, never a credential or model+credential concatenation."""
+    candidate = _text(value, 160).strip()
+    if not candidate or _SECRET_VALUE_RE.search(candidate):
+        return ""
+    if len(candidate) > 140 or not _MODEL_ID_RE.fullmatch(candidate):
+        return ""
+    return candidate
+
+
 
 EVENT_TYPES = {
     "STARTUP", "WAKE", "SLEEP", "RESTART", "HEARTBEAT",
@@ -74,7 +100,40 @@ class NotionEventOutbox:
             CREATE INDEX IF NOT EXISTS idx_csr_notion_outbox_pending
             ON csr_notion_event_outbox(sync_status, next_attempt_at, created_at_utc)
         """)
+        self._redact_legacy_outbox_payloads()
         self._db.commit()
+
+    def _redact_legacy_outbox_payloads(self) -> None:
+        """Scrub any credential accidentally persisted in historical outbox text fields."""
+        rows = self._db.execute(
+            "SELECT event_id, payload_json FROM csr_notion_event_outbox"
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            changed = False
+            safe_model = _safe_model_id(payload.get("ai_model"))
+            if payload.get("ai_model") != safe_model:
+                payload["ai_model"] = safe_model
+                changed = True
+            for field in (
+                "ai_analysis", "ai_suggestion", "reason", "details", "ai_provider",
+            ):
+                value = payload.get(field)
+                if isinstance(value, str):
+                    scrubbed = _redact_secret_text(value, 1800)
+                    if scrubbed != value:
+                        payload[field] = scrubbed
+                        changed = True
+            if changed:
+                self._db.execute(
+                    "UPDATE csr_notion_event_outbox SET payload_json=? WHERE event_id=?",
+                    (_canonical(payload), str(row["event_id"])),
+                )
 
     @staticmethod
     def normalize_event(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -110,11 +169,12 @@ class NotionEventOutbox:
             "timeframe": _text(event.get("timeframe"), 40),
             "signal": signal,
             "ai_decision": decision,
-            "ai_model": _text(event.get("ai_model"), 160),
-            "ai_analysis": _text(event.get("ai_analysis"), 1800),
-            "ai_suggestion": _text(event.get("ai_suggestion"), 1800),
-            "reason": _text(event.get("reason"), 1800),
-            "details": _text(event.get("details"), 1800),
+            "ai_provider": _redact_secret_text(event.get("ai_provider"), 120),
+            "ai_model": _safe_model_id(event.get("ai_model")),
+            "ai_analysis": _redact_secret_text(event.get("ai_analysis"), 1800),
+            "ai_suggestion": _redact_secret_text(event.get("ai_suggestion"), 1800),
+            "reason": _redact_secret_text(event.get("reason"), 1800),
+            "details": _redact_secret_text(event.get("details"), 1800),
             "experience_id": _text(event.get("experience_id"), 180),
             "order_id": _text(event.get("order_id"), 180),
             "position_id": _text(event.get("position_id"), 180),
@@ -162,6 +222,7 @@ class NotionEventOutbox:
             "شناسه تجربه مرتبط": self._rich_text(event["experience_id"]),
             "شناسه سفارش BloFin": self._rich_text(event["order_id"]),
             "شناسه پوزیشن BloFin": self._rich_text(event["position_id"]),
+            "Provider ناظر AI": self._rich_text(event["ai_provider"]),
             "مدل ناظر AI": self._rich_text(event["ai_model"]),
             "تحلیل ناظر AI": self._rich_text(event["ai_analysis"]),
             "پیشنهاد ناظر AI": self._rich_text(event["ai_suggestion"]),
