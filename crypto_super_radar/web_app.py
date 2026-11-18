@@ -5194,7 +5194,9 @@ def _blofin_manual_close_position(
         "position_side": position_side,
         "unrealized_pnl_usdt_at_confirmation": str(pnl) if pnl is not None else None,
         "estimated_close_fee_usdt": estimated_close_fee,
+        "estimated_slippage_buffer_usdt": estimated_slippage_buffer if action_source == "AUTOPILOT" else None,
         "estimated_net_profit_usdt": estimated_net_profit,
+        "minimum_net_profit_usdt": minimum_net_profit_usdt if action_source == "AUTOPILOT" else None,
         "loss_making_position": bool(pnl is not None and pnl < 0),
         "exchange_response": response.get("data"),
         "message_fa": "درخواست بستن همین پوزیشن به قیمت بازار به BloFin Demo ارسال شد؛ سود نهایی پس از Fill و تطبیق کارمزدهای واقعی تعیین می‌شود.",
@@ -5565,8 +5567,10 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "take_profit": order.get("take_profit"),
                     "entry_fee_usdt": entry_fee,
                     "estimated_close_fee_usdt": estimated_close_fee,
+                    "slippage_buffer_usdt": slippage_buffer,
                     "estimated_net_profit_usdt": estimated_net_profit,
                     "minimum_net_profit_usdt": minimum_net_profit,
+                    "exit_decision": "HOLD_BELOW_NET_PROFIT_THRESHOLD",
                 })
                 continue
 
@@ -5590,8 +5594,12 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "unrealized_pnl_usdt_at_request": close_result.get(
                         "unrealized_pnl_usdt_at_confirmation"
                     ),
+                    "entry_fee_usdt": entry_fee,
                     "estimated_close_fee_usdt": close_result.get("estimated_close_fee_usdt"),
+                    "slippage_buffer_usdt": close_result.get("estimated_slippage_buffer_usdt"),
                     "estimated_net_profit_usdt": close_result.get("estimated_net_profit_usdt"),
+                    "minimum_net_profit_usdt": close_result.get("minimum_net_profit_usdt"),
+                    "exit_decision": "CLOSE_REQUEST_ACCEPTED",
                     "exchange_response": close_result.get("exchange_response"),
                 })
             except BloFinDemoExecutionBlocked as exc:
@@ -5600,6 +5608,12 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "instrument_id": instrument_id,
                     "position_id": position_id,
                     "exit_reason": reason,
+                    "entry_fee_usdt": entry_fee,
+                    "estimated_close_fee_usdt": estimated_close_fee,
+                    "slippage_buffer_usdt": slippage_buffer,
+                    "estimated_net_profit_usdt": estimated_net_profit,
+                    "minimum_net_profit_usdt": minimum_net_profit,
+                    "exit_decision": "CLOSE_REQUEST_BLOCKED",
                     "reason_fa": str(exc),
                 })
 
@@ -9410,23 +9424,20 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
 def _challenge1_observer_notion_events(
     job_id: str, instrument_id: str, job: dict, reviews: list[dict], *, phase: str,
 ) -> list[dict]:
-    """Create immutable per-reviewer Notion events; every reviewer is observation-only."""
+    """Create immutable per-reviewer Notion events; observers have no execution authority."""
     current = job if isinstance(job, dict) else {}
     result = current.get("result") if isinstance(current.get("result"), dict) else {}
+    order = result.get("order") if isinstance(result.get("order"), dict) else {}
     order_id = str(
         result.get("exchange_order_id") or result.get("order_id")
-        or (result.get("order") or {}).get("exchange_order_id")
-        or (result.get("order") or {}).get("order_id") or ""
+        or order.get("exchange_order_id") or order.get("order_id") or ""
     )
-    positions = result.get("positions") if isinstance(result.get("positions"), list) else []
     position_id = str(result.get("position_id") or "")
     if not position_id:
+        positions = result.get("positions") if isinstance(result.get("positions"), list) else []
         for position in positions:
-            if not isinstance(position, dict):
-                continue
-            candidate = str(position.get("positionId") or "")
-            if candidate:
-                position_id = candidate
+            if isinstance(position, dict) and position.get("positionId"):
+                position_id = str(position["positionId"])
                 break
     experience_id = str(
         result.get("learning_experience_id")
@@ -9478,6 +9489,9 @@ def _challenge1_observer_notion_events(
             "latency_ms": reviewer.get("latency_ms"),
             "http_status": reviewer.get("http_status"),
             "error_code": reviewer.get("error_code"),
+            "error_stage": reviewer.get("error_stage"),
+            "finish_reason": reviewer.get("finish_reason"),
+            "content_length": reviewer.get("content_length"),
             "configuration_issues": reviewer.get("configuration_issues"),
             "observations": reviewer.get("observations", []),
             "risk_flags": reviewer.get("risk_flags", []),
@@ -9506,13 +9520,16 @@ def _challenge1_observer_notion_events(
                 "details": json.dumps(details, ensure_ascii=False, sort_keys=True, default=str),
             })
             continue
-        completed = status == "REVIEWED" and reviewer.get("response_validated") is True and reviewer.get("model_verified") is True
-        event_type = "AI_RECOMMENDATION" if completed else "AI_REVIEW_REQUESTED"
-        event_status = (
-            "SUCCESS" if completed else
-            "FAILED" if status in {"ERROR", "MODEL_MISMATCH", "MODEL_UNCONFIRMED"} else
-            "WARNING"
+        completed = (
+            status == "REVIEWED"
+            and reviewer.get("response_validated") is True
+            and reviewer.get("model_verified") is True
         )
+        event_type = "AI_RECOMMENDATION" if completed else "DATA_ERROR"
+        event_status = "SUCCESS" if completed else (
+            "FAILED" if reviewer.get("request_attempted") is True else "WARNING"
+        )
+        ai_decision = "OBSERVE_ONLY" if reviewer.get("request_attempted") is True else "NOT_CALLED"
         events.append({
             **common,
             "event_id": f"{job_id}:AI:{reviewer_id}:RESULT",
@@ -9520,14 +9537,19 @@ def _challenge1_observer_notion_events(
             "event_type": event_type,
             "actor": actor,
             "status": event_status,
+            "ai_decision": ai_decision,
             "ai_provider": str(reviewer.get("provider") or ""),
             "ai_model": str(reviewer.get("returned_model") or reviewer.get("model") or ""),
             "ai_analysis": reason,
             "ai_suggestion": verdict,
-            "reason": "Post-decision audit only. This result did not authorize or alter any order or position.",
+            "reason": (
+                "Post-decision audit only. This result did not authorize or alter any order or position."
+            ),
             "details": json.dumps(details, ensure_ascii=False, sort_keys=True, default=str),
         })
     return events
+
+
 
 
 def _queue_challenge1_observer_events(
@@ -9549,10 +9571,66 @@ def _queue_challenge1_observer_events(
             outbox.close()
 
 
+def _blofin_observer_review_from_event(event: dict | None) -> dict | None:
+    """Rebuild a reviewer result from its durable Turso outbox event after a restart."""
+    if not isinstance(event, dict) or str(event.get("event_type") or "").upper() not in {
+        "AI_RECOMMENDATION", "DATA_ERROR",
+    }:
+        return None
+    try:
+        details = json.loads(event.get("details") or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    if not isinstance(details, dict) or str(details.get("phase") or "").upper() != "RESULT":
+        return None
+    reviewer_id = str(details.get("reviewer_id") or "").lower()
+    if reviewer_id not in {"nemotron", "second_ai"}:
+        return None
+    model = str(event.get("ai_model") or "")
+    return {
+        "reviewer_id": reviewer_id,
+        "provider": event.get("ai_provider"),
+        "model": model,
+        "returned_model": model,
+        "status": details.get("review_status") or (
+            "REVIEWED" if event.get("event_type") == "AI_RECOMMENDATION" else "ERROR"
+        ),
+        "verdict": details.get("verdict"),
+        "reason_fa": event.get("ai_analysis") or event.get("reason") or "",
+        "observations": details.get("observations") or [],
+        "risk_flags": details.get("risk_flags") or [],
+        "request_attempted": details.get("request_attempted") is True,
+        "response_source": details.get("response_source"),
+        "response_validated": details.get("response_validated") is True,
+        "model_verified": details.get("model_verified") is True,
+        "requested_at_utc": details.get("requested_at_utc"),
+        "completed_at_utc": details.get("completed_at_utc"),
+        "latency_ms": details.get("latency_ms"),
+        "http_status": details.get("http_status"),
+        "error_code": details.get("error_code"),
+        "error_stage": details.get("error_stage"),
+        "finish_reason": details.get("finish_reason"),
+        "content_length": details.get("content_length"),
+        "configuration_issues": details.get("configuration_issues"),
+        "observation_only": True,
+        "entry_gate_enforced": False,
+        "execution_effect": "NONE",
+    }
+
+
+def _observer_audit_consensus(reviews: list[dict]) -> str:
+    reviewed = [item for item in reviews if isinstance(item, dict) and item.get("status") == "REVIEWED"]
+    if len(reviewed) == 2:
+        return "AGREEMENT" if reviewed[0].get("verdict") == reviewed[1].get("verdict") else "DISAGREEMENT"
+    if len(reviewed) == 1:
+        return "SINGLE_REVIEWER"
+    return "NOT_COMPARABLE"
+
+
 def _run_challenge1_observer_job(
     job_id: str, instrument_id: str, challenge_record: dict, initial_job: dict,
 ) -> None:
-    """Run supervisors after the robot decision; the observer has no order-control path."""
+    """Run/recover independent post-decision audits without granting execution authority."""
     snapshot = initial_job if isinstance(initial_job, dict) else {}
     result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
     if str(result.get("status") or "").upper() == "SKIPPED_DUPLICATE_EXPERIENCE":
@@ -9589,67 +9667,121 @@ def _run_challenge1_observer_job(
         ),
         "position": position,
     }
+
+    # A REQUESTED row is not proof that a model result exists. On restart, replay
+    # only reviewers whose durable RESULT event is still absent.
+    outbox = None
+    existing_reviews: dict[str, dict] = {}
+    try:
+        outbox = NotionEventOutbox()
+        for reviewer_id in ("nemotron", "second_ai"):
+            event = outbox.get_event(f"{job_id}:AI:{reviewer_id}:RESULT")
+            recovered = _blofin_observer_review_from_event(event)
+            if recovered is not None:
+                existing_reviews[reviewer_id] = recovered
+    except Exception:
+        return
+    finally:
+        if outbox is not None:
+            outbox.close()
+
+    missing_reviewers = [
+        reviewer_id for reviewer_id in ("nemotron", "second_ai")
+        if reviewer_id not in existing_reviews
+    ]
+    if not missing_reviewers:
+        reviews = [existing_reviews[key] for key in ("nemotron", "second_ai")]
+        audit = {
+            "mode": "POST_DECISION_AUDIT_ONLY",
+            "observation_only": True,
+            "entry_gate_enforced": False,
+            "execution_effect": "NONE",
+            "consensus": _observer_audit_consensus(reviews),
+            "reviewers": reviews,
+            "symbol": instrument_id,
+            "signal": result.get("signal") or snapshot.get("signal"),
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "recovered_from_durable_outbox": True,
+        }
+        with LOCK:
+            current = BLOFIN_EXECUTION_JOBS.get(job_id)
+            if isinstance(current, dict):
+                current["observer_audit"] = copy.deepcopy(audit)
+                current["ai_reviews"] = copy.deepcopy(reviews)
+                current["ai_consensus"] = audit["consensus"]
+                current["observer_audit_completed_at_utc"] = audit["completed_at_utc"]
+                current["observer_audit_effect"] = "NONE"
+                BLOFIN_EXECUTION_JOBS[job_id] = current
+        return
+
+    observer_config = ai_connection_status().get("challenge1_observers", {})
+    if not isinstance(observer_config, dict):
+        observer_config = {}
     requested = []
-    primary_status = ai_connection_status()
-    primary_provider = str(primary_status.get("provider") or "OpenRouter")
-    primary_model = str(primary_status.get("model") or "")
-    for reviewer_id, provider, model in (
-        ("nemotron", primary_provider, primary_model),
-        ("second_ai", (os.getenv("CSR_SECOND_AI_PROVIDER") or "").strip(),
-         (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()),
-    ):
-        configured = bool(
-            (os.getenv("OPENROUTER_API_KEY") or os.getenv("CSR_OPENROUTER_API_KEY") or "").strip()
-        ) if reviewer_id == "nemotron" else bool(
-            (os.getenv("CSR_SECOND_AI_API_KEY") or "").strip()
-            and (os.getenv("CSR_SECOND_AI_API_URL") or "").strip()
-            and model
-            and provider
-        )
+    for reviewer_id in missing_reviewers:
+        config = observer_config.get(reviewer_id) if isinstance(observer_config.get(reviewer_id), dict) else {}
+        provider = str(config.get("provider") or ("OpenRouter" if reviewer_id == "nemotron" else ""))
+        model = str(config.get("model") or "")
+        configured = config.get("configured") is True
         requested.append({
-            "reviewer_id": reviewer_id, "provider": provider, "model": model,
+            "reviewer_id": reviewer_id,
+            "provider": provider,
+            "model": model,
             "status": "REQUESTING" if configured else "NOT_CONFIGURED",
-            "request_attempted": False, "requested_at_utc": datetime.now(timezone.utc).isoformat(),
-            "observation_only": True, "entry_gate_enforced": False,
+            "request_attempted": False,
+            "requested_at_utc": datetime.now(timezone.utc).isoformat(),
+            "observation_only": True,
+            "entry_gate_enforced": False,
             "execution_effect": "NONE",
         })
     request_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, requested, phase="REQUESTED",
     )
-    # The durable request event is the cross-restart idempotency key. If it
-    # already exists, do not call paid/free provider APIs a second time.
-    if request_queue.get("status") != "QUEUED" or int(request_queue.get("queued") or 0) <= 0:
+    # A duplicate REQUESTED event is expected during recovery. Only a storage
+    # failure prevents the provider call; queued=0 alone is not a failure.
+    if request_queue.get("status") != "QUEUED":
         return
+
     try:
-        audit = run_challenge1_observer_reviews(challenge_record, context)
-        reviews = audit.get("reviewers") if isinstance(audit.get("reviewers"), list) else []
-        if len(reviews) != 2:
-            raise ValueError("Observer result did not contain both reviewer records.")
+        audit_new = run_challenge1_observer_reviews(
+            challenge_record, context, reviewer_ids=set(missing_reviewers),
+        )
+        new_reviews = audit_new.get("reviewers") if isinstance(audit_new.get("reviewers"), list) else []
+        if {item.get("reviewer_id") for item in new_reviews if isinstance(item, dict)} != set(missing_reviewers):
+            raise ValueError("Observer result did not contain every missing reviewer.")
     except Exception as exc:
         now = datetime.now(timezone.utc).isoformat()
-        reviews = [
+        new_reviews = [
             {
-                "reviewer_id": reviewer_id, "provider": provider, "model": model,
-                "status": "ERROR", "request_attempted": False,
+                "reviewer_id": reviewer_id,
+                "status": "ERROR",
+                "request_attempted": False,
                 "error_code": "OBSERVER_WORKER_FAILED",
                 "error_message": type(exc).__name__,
-                "completed_at_utc": now, "observation_only": True,
-                "entry_gate_enforced": False, "execution_effect": "NONE",
+                "completed_at_utc": now,
+                "observation_only": True,
+                "entry_gate_enforced": False,
+                "execution_effect": "NONE",
             }
-            for reviewer_id, provider, model in (
-                ("nemotron", primary_provider, primary_model),
-                ("second_ai", (os.getenv("CSR_SECOND_AI_PROVIDER") or "").strip(),
-                 (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()),
-            )
+            for reviewer_id in missing_reviewers
         ]
-        audit = {
-            "mode": "POST_DECISION_AUDIT_ONLY", "observation_only": True,
-            "entry_gate_enforced": False, "execution_effect": "NONE",
-            "consensus": "NOT_COMPARABLE", "reviewers": reviews,
-            "completed_at_utc": now,
-        }
-    # Store the audit on the job for inspection without changing robot result/status,
-    # order state, TP/SL, or the position-manager state.
+
+    for item in new_reviews:
+        if isinstance(item, dict) and item.get("reviewer_id") in {"nemotron", "second_ai"}:
+            existing_reviews[item["reviewer_id"]] = item
+    reviews = [existing_reviews[key] for key in ("nemotron", "second_ai") if key in existing_reviews]
+    audit = {
+        "mode": "POST_DECISION_AUDIT_ONLY",
+        "observation_only": True,
+        "entry_gate_enforced": False,
+        "execution_effect": "NONE",
+        "consensus": _observer_audit_consensus(reviews),
+        "reviewers": reviews,
+        "symbol": instrument_id,
+        "signal": result.get("signal") or snapshot.get("signal"),
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "recovered_from_durable_outbox": bool(existing_reviews.keys() - {item.get("reviewer_id") for item in new_reviews}),
+    }
     with LOCK:
         current = BLOFIN_EXECUTION_JOBS.get(job_id)
         if isinstance(current, dict):
@@ -9659,9 +9791,12 @@ def _run_challenge1_observer_job(
             current["observer_audit_completed_at_utc"] = audit.get("completed_at_utc")
             current["observer_audit_effect"] = "NONE"
             BLOFIN_EXECUTION_JOBS[job_id] = current
+    # Queue only newly obtained results. Persisted results are never overwritten.
     _queue_challenge1_observer_events(
-        job_id, instrument_id, snapshot, reviews, phase="RESULT",
+        job_id, instrument_id, snapshot, new_reviews, phase="RESULT",
     )
+
+
 
 
 def _start_challenge1_observer_job(
@@ -9701,7 +9836,7 @@ def _start_challenge1_observer_job(
 def _queue_blofin_position_manager_heartbeats(
     result: dict, occurred_at_utc: str,
 ) -> dict:
-    """Append one durable position-management observation per linked position per minute."""
+    """Append durable exit evaluations; state transitions have distinct idempotency keys."""
     actions = result.get("actions") if isinstance(result, dict) else None
     if not isinstance(actions, list):
         return {"status": "NO_POSITION_ACTIONS", "queued": 0}
@@ -9727,16 +9862,18 @@ def _queue_blofin_position_manager_heartbeats(
             detail = {
                 key: action.get(key)
                 for key in (
-                    "status", "position_side", "size_contracts", "average_entry_price",
-                    "mark_price", "unrealized_pnl_usdt", "leverage", "liquidation_price",
-                    "entry_fee_usdt", "estimated_close_fee_usdt",
+                    "status", "exit_decision", "exit_reason", "close_status",
+                    "position_side", "size_contracts", "average_entry_price",
+                    "mark_price", "unrealized_pnl_usdt", "unrealized_pnl_usdt_at_request",
+                    "leverage", "liquidation_price", "entry_fee_usdt",
+                    "estimated_close_fee_usdt", "slippage_buffer_usdt",
                     "estimated_net_profit_usdt", "minimum_net_profit_usdt",
-                    "stop_loss", "take_profit", "exit_reason", "error_type",
+                    "stop_loss", "take_profit", "error_type",
                 )
                 if action.get(key) is not None
             }
             outbox_event = {
-                "event_id": f"CSR-POSITION-MONITOR:{position_id}:{minute_bucket}",
+                "event_id": f"CSR-POSITION-MONITOR:{position_id}:{minute_bucket}:{status}",
                 "cycle_id": f"POSITION-MANAGER:{minute_bucket}",
                 "occurred_at_utc": occurred_at_utc,
                 "event_type": "HEARTBEAT",
@@ -9747,8 +9884,10 @@ def _queue_blofin_position_manager_heartbeats(
                 "signal": "UNKNOWN",
                 "ai_decision": "OBSERVE_ONLY",
                 "reason": (
-                    "مدیر پوزیشن ربات این موقعیت را فقط‌خواندنی بررسی کرد؛ "
-                    "هیچ تغییری در سفارش یا پوزیشن از مسیر گزارش انجام نشد."
+                    "مدیر خروج نتیجه ارزیابی یا وضعیت درخواست خروج این پوزیشن را ثبت کرد؛ "
+                    "جزئیات تصمیم و هزینه‌ها در Payload خلاصه موجود است."
+                    if status != "MONITORING_FOR_NET_PROFIT" else
+                    "مدیر خروج این پوزیشن را فقط‌خواندنی بررسی کرد؛ سود خالص هنوز به آستانه خروج نرسیده است."
                 ),
                 "details": json.dumps(detail, ensure_ascii=False, sort_keys=True, default=str),
                 "order_id": action.get("order_id") or "",
@@ -9764,20 +9903,6 @@ def _queue_blofin_position_manager_heartbeats(
             outbox.close()
 
 
-
-NOTION_SYNC_THREAD = None
-NOTION_SYNC_START_LOCK = threading.Lock()
-NOTION_ACTIVITY_SYNC_STATE = {
-    "status": "STARTING",
-    "pending": 0,
-    "synced": 0,
-    "failed": 0,
-    "last_success_utc": None,
-    "latest_experience_id": None,
-    "last_error_type": None,
-    "last_http_status": None,
-    "last_checked_at_utc": None,
-}
 
 
 def _notion_sync_worker() -> None:
