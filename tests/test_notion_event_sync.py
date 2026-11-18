@@ -131,5 +131,30 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.assertEqual(self.outbox.pending_count(), 0)
 
 
+    def test_independent_supervisor_actors_are_accepted_for_audit_events(self):
+        nemotron = event(
+            event_id="cycle-ai:nemotron:result",
+            event_type="AI_RECOMMENDATION",
+            actor="Nemotron Supervisor",
+            status="SUCCESS",
+            signal="LONG",
+            ai_decision="OBSERVE_ONLY",
+            ai_model="nvidia/nemotron-free",
+            ai_suggestion="SUPPORTS_DECISION",
+        )
+        second = event(
+            event_id="cycle-ai:second:request",
+            event_type="AI_REVIEW_REQUESTED",
+            actor="Second AI Supervisor",
+            status="PENDING",
+            signal="LONG",
+            ai_decision="OBSERVE_ONLY",
+        )
+        self.assertTrue(self.outbox.enqueue(nemotron))
+        self.assertTrue(self.outbox.enqueue(second))
+        self.assertEqual(self.outbox.pending_count(), 2)
+
+
+
 if __name__ == "__main__":
     unittest.main()
