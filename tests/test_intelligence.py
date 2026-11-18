@@ -1,4 +1,6 @@
+import sqlite3
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,6 +18,7 @@ from crypto_super_radar.integrated_engine import WhaleAwareConfirmationEngine
 from crypto_super_radar.cex_whales import CexWhaleScanner
 from crypto_super_radar.providers import DataProviderError
 from crypto_super_radar.whale_store import WhaleStore
+from crypto_super_radar.wallet_event_store import WalletEventStore
 from crypto_super_radar.models import AssetSpec, MarketSnapshot
 from crypto_super_radar.config import AppConfig, IntelligenceScoringConfig
 
@@ -250,10 +253,34 @@ class SolanaWhaleTests(unittest.TestCase):
             tx,
         ])
         scanner = SolanaWhaleScanner(session=rpc, limiter=NoWaitLimiter())
+        self.addCleanup(scanner.close)
         result = scanner.scan_mint("S" * 32, price_usd=1.0)
         self.assertEqual(result["status"], "PARTIAL")
         self.assertEqual(result["whale_watchlist"][0]["address"], "WalletOwner")
         self.assertIn("LARGE_ENTITY_TRANSFER", result["classification_counts"])
+
+    def test_close_releases_owned_connection_but_preserves_injected_store(self):
+        owned_connection = sqlite3.connect(":memory:")
+        with patch(
+            "crypto_super_radar.solana_whales.connect_database",
+            return_value=owned_connection,
+        ):
+            owned_scanner = SolanaWhaleScanner(session=object(), limiter=NoWaitLimiter())
+        owned_scanner.close()
+        owned_scanner.close()
+        with self.assertRaises(sqlite3.ProgrammingError):
+            owned_connection.execute("SELECT 1")
+
+        injected_connection = sqlite3.connect(":memory:")
+        injected_store = WalletEventStore(injected_connection)
+        injected_scanner = SolanaWhaleScanner(
+            session=object(),
+            limiter=NoWaitLimiter(),
+            wallet_event_store=injected_store,
+        )
+        injected_scanner.close()
+        self.assertEqual(injected_connection.execute("SELECT 1").fetchone()[0], 1)
+        injected_connection.close()
 
 
 class MarketSentimentPipelineTests(unittest.TestCase):

@@ -120,6 +120,7 @@ class WhaleAwareMarketDataService(MarketDataService):
                 return {"status": "UNKNOWN", "reason": f"EVM security/whale evidence unavailable: {type(exc).__name__}"}
         if asset.market_type == "dex" and asset.chain == "solana":
             base = super().security(asset)
+            scanner = None
             try:
                 if snapshot is None:
                     raise ValueError("Validated market snapshot is unavailable for whale valuation")
@@ -134,6 +135,15 @@ class WhaleAwareMarketDataService(MarketDataService):
                 self.whale_evidence[asset.raw] = {
                     "status": "UNKNOWN", "reason": f"Solana whale scan unavailable: {type(exc).__name__}",
                 }
+            finally:
+                if scanner is not None:
+                    try:
+                        scanner.close()
+                    except Exception as close_exc:
+                        self.whale_evidence[asset.raw] = {
+                            "status": "UNKNOWN",
+                            "reason": f"Solana whale scanner cleanup unavailable: {type(close_exc).__name__}",
+                        }
             return base
         if asset.market_type in {"cex", "perp"}:
             base = super().security(asset)

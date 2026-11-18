@@ -31,17 +31,37 @@ class SolanaWhaleScanner:
         wallet_event_store: Optional[WalletEventStore] = None,
     ):
         self.rpc_url = rpc_url
-        self.session = session or requests.Session()
+        self._owns_session = session is None
+        self.session = session if session is not None else requests.Session()
         self.timeout = timeout
         self.max_accounts = max(1, min(int(max_accounts), 20))
         self.signatures_per_account = max(1, min(int(signatures_per_account), 100))
         self.limiter = limiter or SharedRateLimiter()
         self._wallet_db = None
         if wallet_event_store is None:
-            self._wallet_db = connect_database()
-            self.wallet_event_store = WalletEventStore(self._wallet_db)
+            wallet_db = connect_database()
+            try:
+                owned_wallet_store = WalletEventStore(wallet_db)
+            except Exception:
+                wallet_db.close()
+                raise
+            self._wallet_db = wallet_db
+            self.wallet_event_store = owned_wallet_store
         else:
             self.wallet_event_store = wallet_event_store
+
+    def close(self) -> None:
+        """Release only the RPC session and database connection owned by this scanner."""
+        wallet_db, self._wallet_db = self._wallet_db, None
+        owned_session = self.session if self._owns_session else None
+        self._owns_session = False
+        try:
+            if wallet_db is not None:
+                wallet_db.close()
+        finally:
+            close_session = getattr(owned_session, "close", None)
+            if callable(close_session):
+                close_session()
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
         self.limiter.wait(self.rpc_url)
