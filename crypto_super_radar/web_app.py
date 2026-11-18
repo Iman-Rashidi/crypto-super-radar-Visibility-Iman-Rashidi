@@ -50,6 +50,7 @@ from .ai_second_opinion import ai_connection_status, second_ai_connection_status
 from .notion_event_sync import NotionEventOutbox
 from .notion_activity_journal import NotionActivityJournal
 from .ai_supervisor import ai_supervisor_status, run_ai_supervisor
+from .execution_diagnostics import build_execution_error_diagnostic
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -4112,6 +4113,7 @@ def _run_blofin_demo_execution_job(
     submission_started = False
     learning_experience_id = None
     learning_signal = "NO_TRADE"
+    failed_operation = "execution_job_start"
     try:
         instrument_id = str(instrument_id or "").strip().upper()
         execution_profile = str(execution_profile or "").strip().upper()
@@ -4123,6 +4125,7 @@ def _run_blofin_demo_execution_job(
             job_id, "running", stage="ANALYSIS_STORAGE_CHECK",
             message_fa="در حال بررسی فقط حافظه پایدار؛ مجوز سفارش در مرحله جداگانه بررسی می‌شود.",
         )
+        failed_operation = "execution_readiness.preflight"
         readiness = _blofin_demo_execution_readiness()
         if not _blofin_demo_analysis_storage_ready(readiness):
             reason_fa = (
@@ -4141,12 +4144,14 @@ def _run_blofin_demo_execution_job(
             )
             return
 
+        failed_operation = "event_store.initialize"
         store = BloFinDemoEventStore()
         analysis_time_utc = datetime.now(timezone.utc).isoformat()
         pending_entry_block_reason = None
         # Reconcile previously filled positions before evaluating or entering a new market.
         # This prevents a fresh order from overtaking an exchange-close event that has not
         # yet reached the durable learning journal.
+        failed_operation = "event_store.orders_pending_learning_outcome"
         pending_learning_orders = store.orders_pending_learning_outcome(limit=50)
         if pending_learning_orders:
             outcome_client = BloFinDemoReadOnly(timeout=8.0)
@@ -4161,6 +4166,7 @@ def _run_blofin_demo_execution_job(
                     partial_history = outcome_client.get_positions_history(
                         inst_id=outcome_instrument, state="partially_closed", limit=100,
                     )
+                    failed_operation = "event_store.record_closed_position_outcome"
                     store.record_closed_position_outcome(
                         instrument_id=outcome_instrument,
                         history_rows=closed_history if isinstance(closed_history, list) else [],
@@ -4169,6 +4175,7 @@ def _run_blofin_demo_execution_job(
                 except Exception:
                     # Keep the experience pending; the entry guard prevents new exposure.
                     pass
+        failed_operation = "event_store.trade_budget_status"
         prior_budget = store.trade_budget_status()
         if prior_budget.get("unresolved_orders", 0) > 0:
             _set_blofin_execution_job(
@@ -4185,6 +4192,7 @@ def _run_blofin_demo_execution_job(
                 trading_enabled=False,
             )
             try:
+                failed_operation = "executor.reconcile_unresolved_orders_read_only"
                 reconciliation = reconciler.reconcile_unresolved_orders(limit=50)
             except Exception as exc:
                 reconciliation = {
@@ -4219,15 +4227,18 @@ def _run_blofin_demo_execution_job(
                 trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
             )
             try:
+                failed_operation = "challenge1.analyze_closed_5m_candles"
                 challenge_record = analyze_blofin_challenge1(read_client, instrument_id)
                 # Persist every closed-candle decision before any execution branch.
                 # The stable candle identity deduplicates repeated five-minute polls.
+                failed_operation = "learning_memory.record_challenge1_decision"
                 learning_experience_id = store.record_challenge1_decision(
                     instrument_id=instrument_id,
                     challenge_record=challenge_record,
                 )
                 learning_signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
                 challenge_record["learning_experience_id"] = learning_experience_id
+                failed_operation = "learning_memory.check_final_experience"
                 if store.has_final_experience(learning_experience_id):
                     _set_blofin_execution_job(
                         job_id, "completed", stage="DUPLICATE_CANDLE_FINALIZED",
@@ -4656,6 +4667,7 @@ def _run_blofin_demo_execution_job(
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
+        failed_operation = "ai_supervisors.request_and_validate_quorum"
         ai_quorum = _run_challenge1_supervisor_reviews(analysis, asset)
         ai_review = ai_quorum["ai_review"]
         ai_reviews = ai_quorum["ai_reviews"]
@@ -4732,6 +4744,7 @@ def _run_blofin_demo_execution_job(
             client=client, store=store, policy=policy, trading_enabled=True,
         )
         submission_started = True
+        failed_operation = "blofin_demo_executor.reserve_and_submit_order"
         execution = trader.execute(
             record, inst_id=instrument_id, leverage=1,
             allow_demo_orders=True, minimum_size_only=True,
@@ -4988,6 +5001,31 @@ def _run_blofin_demo_execution_job(
             },
         )
     except Exception as exc:
+        with LOCK:
+            failed_job_snapshot = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+        execution_stage = str(failed_job_snapshot.get("stage") or "EXECUTION_ERROR")
+        try:
+            database_backend = storage_backend()
+        except Exception as backend_exc:
+            database_backend = "UNAVAILABLE:" + type(backend_exc).__name__
+        diagnostic_timestamp = datetime.now(timezone.utc).isoformat()
+        diagnostic = build_execution_error_diagnostic(
+            exc,
+            failed_operation=failed_operation,
+            instrument_id=instrument_id,
+            cycle_id=job_id,
+            job_id=job_id,
+            execution_stage=execution_stage,
+            database_backend=str(database_backend),
+            timestamp_utc=diagnostic_timestamp,
+        )
+        # Render captures stdout as an application log. The helper redacts known
+        # server secrets and credential-shaped values before this line is emitted.
+        print(
+            "CSR_SAFE_EXECUTION_DIAGNOSTIC "
+            + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True),
+            flush=True,
+        )
         learning_memory_status = "NOT_APPLICABLE"
         if store is not None and not learning_experience_id:
             try:
@@ -4996,8 +5034,8 @@ def _run_blofin_demo_execution_job(
                     instrument_id=instrument_id,
                     failure_stage="CHALLENGE_1_CYCLE_FAILURE",
                     error_type=type(exc).__name__,
-                    reason=str(exc),
-                    timestamp_utc=analysis_time_utc,
+                    reason=diagnostic["error_message"],
+                    timestamp_utc=diagnostic_timestamp,
                 )
                 learning_memory_status = "PERSISTED"
             except Exception as memory_exc:
@@ -5011,7 +5049,7 @@ def _run_blofin_demo_execution_job(
                         instrument_id=instrument_id,
                         signal=learning_signal,
                         stage="EXECUTION_ERROR",
-                        reason=type(exc).__name__,
+                        reason=diagnostic["error_type"] + ": " + diagnostic["error_message"],
                     )
                     learning_memory_status = "PERSISTED"
             except Exception as memory_exc:
@@ -5020,7 +5058,8 @@ def _run_blofin_demo_execution_job(
             job_id, "failed", stage="EXECUTION_ERROR",
             message_fa="اجرای آزمایشی با خطای کنترل‌شده متوقف شد؛ قبل از تلاش مجدد باید وضعیت سفارش در BloFin بررسی شود.",
             error={
-                "type": type(exc).__name__,
+                **diagnostic,
+                "type": diagnostic["error_type"],
                 "learning_memory_status": learning_memory_status,
                 "learning_experience_id": learning_experience_id,
                 "orders_submitted": "UNKNOWN" if submission_started else False,
@@ -9645,6 +9684,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         or analysis.get("learning_experience_id")
         or ""
     )
+    error_record = current.get("error") if isinstance(current.get("error"), dict) else {}
     details = {
         "job_id": str(job_id),
         "stage": current.get("stage"),
@@ -9658,6 +9698,13 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         "result_status": result.get("status"),
         "input_data_type": "LIVE_MARKET",
         "reason": str(reason)[:1200],
+        "error_type": error_record.get("error_type") or error_record.get("type") or "",
+        "error_message": str(error_record.get("error_message") or "")[:1200],
+        "failed_operation": str(error_record.get("failed_operation") or "")[:160],
+        "execution_stage": str(error_record.get("execution_stage") or current.get("stage") or "")[:128],
+        "database_backend": str(error_record.get("database_backend") or "")[:64],
+        "error_trace_reference": str(error_record.get("error_trace_reference") or "")[:256],
+        "error_timestamp_utc": str(error_record.get("timestamp_utc") or "")[:64],
     }
     common = {
         "cycle_id": str(job_id),
