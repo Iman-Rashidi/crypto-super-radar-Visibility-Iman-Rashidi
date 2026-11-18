@@ -110,7 +110,10 @@ class NotionEventOutboxTests(unittest.TestCase):
 
     def test_http_failure_keeps_event_pending_and_applies_backoff(self):
         self.outbox.enqueue(event())
-        error = requests.HTTPError("Notion unavailable")
+        error = requests.HTTPError(
+            "Notion unavailable",
+            response=FakeResponse(status_code=429),
+        )
         with patch(
             "crypto_super_radar.notion_event_sync.requests.post",
             side_effect=error,
@@ -118,6 +121,13 @@ class NotionEventOutboxTests(unittest.TestCase):
             result = self.outbox.flush_pending(now=1_800_000_000)
         self.assertEqual(result["failed_this_run"], 1)
         self.assertEqual(result["pending"], 1)
+        self.assertEqual(result["pending_with_errors"], 1)
+        self.assertEqual(result["pending_in_backoff"], 1)
+        self.assertEqual(result["pending_due_now"], 0)
+        self.assertEqual(result["oldest_error_type"], "HTTPError")
+        self.assertEqual(result["oldest_error_http_status"], 429)
+        self.assertIsNotNone(result["oldest_error_next_retry_at_utc"])
+        self.assertEqual(result["diagnostic_scope"], "SAFE_METADATA_ONLY")
         row = self.db.execute(
             "SELECT attempts, next_attempt_at, last_error_type FROM csr_notion_event_outbox"
         ).fetchone()
@@ -154,10 +164,6 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.assertTrue(self.outbox.enqueue(second))
         self.assertEqual(self.outbox.pending_count(), 2)
 
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
     def test_outbox_redacts_credential_values_and_only_accepts_model_identifiers(self):
@@ -224,3 +230,6 @@ if __name__ == "__main__":
             "nvidia/nemotron-3-ultra-550b-a55b:free",
         )
 
+
+if __name__ == "__main__":
+    unittest.main()
