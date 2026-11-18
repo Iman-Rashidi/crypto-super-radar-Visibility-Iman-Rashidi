@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import threading
 import unittest
@@ -12,6 +13,22 @@ import pandas as pd
 
 from crypto_super_radar import web_app
 from crypto_super_radar.web_app import Handler
+
+
+def _close_web_app_test_database_connections():
+    resources = (
+        web_app.ENGINE.data,
+        web_app.ENGINE.whale_store,
+        web_app.PAPER_BOT.ledger,
+        web_app.FUTURES_PAPER_BOT.ledger,
+    )
+    for resource in resources:
+        close = getattr(resource, "close", None)
+        if callable(close):
+            close()
+
+
+atexit.register(_close_web_app_test_database_connections)
 
 
 class QuietHandler(Handler):
