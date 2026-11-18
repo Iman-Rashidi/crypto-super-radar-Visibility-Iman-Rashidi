@@ -3,8 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_readonly import (
     BloFinDemoAuthError,
@@ -49,6 +50,28 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
             self.client.websocket_urls(),
             {"public": DEMO_PUBLIC_WS_URL, "private": DEMO_PRIVATE_WS_URL},
         )
+
+    def test_unified_blofin_credentials_resolve_to_demo_readonly_client(self):
+        with patch.dict(os.environ, {
+            "BLOFIN_API_KEY": "shared-account-key",
+            "BLOFIN_API_SECRET": "shared-account-secret",
+            "BLOFIN_PASSPHRASE": "shared_passphrase",
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+        }, clear=False):
+            client = BloFinDemoReadOnly(
+                session=self.session, clock_ms=lambda: 1_800_000_000_000
+            )
+        self.assertEqual(client.api_key, "shared-account-key")
+        self.assertEqual(client.api_secret, "shared-account-secret")
+        self.assertEqual(client.passphrase, "shared_passphrase")
+        self.assertEqual(client.base_url, DEMO_REST_URL)
+        client.get_futures_balance()
+        args, kwargs = self.session.get.call_args
+        self.assertTrue(args[0].startswith(DEMO_REST_URL))
+        self.assertEqual(kwargs["headers"]["ACCESS-KEY"], "shared-account-key")
+        self.assertEqual(kwargs["headers"]["ACCESS-PASSPHRASE"], "shared_passphrase")
 
     def test_public_market_calls_do_not_send_credentials(self):
         self.client.get_futures_instruments(inst_id="BTC-USDT")

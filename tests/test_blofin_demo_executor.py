@@ -1413,5 +1413,26 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
+class BloFinDemoUnifiedCredentialEnvironmentTests(unittest.TestCase):
+    def test_trade_client_uses_unified_credentials_but_stays_demo_and_unverified(self):
+        with patch.dict(os.environ, {
+            "BLOFIN_DEMO_TRADE_API_KEY": "",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "",
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+            "BLOFIN_API_KEY": "shared-account-key",
+            "BLOFIN_API_SECRET": "shared-account-secret",
+            "BLOFIN_PASSPHRASE": "shared_passphrase",
+        }, clear=False):
+            client = BloFinDemoTradeClient()
+        self.assertEqual(client.api_key, "shared-account-key")
+        self.assertEqual(client.api_secret, "shared-account-secret")
+        self.assertEqual(client.passphrase, "shared_passphrase")
+        self.assertEqual(client.base_url, DEMO_REST_URL)
+        self.assertFalse(client._trade_permission_verified)
+
+
 if __name__ == "__main__":
     unittest.main()

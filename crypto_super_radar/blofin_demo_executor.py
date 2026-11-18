@@ -30,6 +30,8 @@ from .blofin_demo_readonly import (
     BloFinDemoReadOnly,
     BloFinDemoResponseError,
     DEMO_REST_URL,
+    DEMO_TRADE_CREDENTIAL_ENV,
+    _resolve_env_credential,
     _check_response_codes,
     _signature,
 )
@@ -456,20 +458,13 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH})
 
     def __init__(self, **kwargs: Any) -> None:
-        # Prefer a dedicated Demo Trade key, but reuse the already-configured
-        # Demo API key when it was explicitly granted TRADE permission as well.
-        kwargs.setdefault(
-            "api_key",
-            os.getenv("BLOFIN_DEMO_TRADE_API_KEY") or os.getenv("BLOFIN_DEMO_API_KEY", ""),
-        )
-        kwargs.setdefault(
-            "api_secret",
-            os.getenv("BLOFIN_DEMO_TRADE_API_SECRET") or os.getenv("BLOFIN_DEMO_API_SECRET", ""),
-        )
-        kwargs.setdefault(
-            "passphrase",
-            os.getenv("BLOFIN_DEMO_TRADE_PASSPHRASE") or os.getenv("BLOFIN_DEMO_PASSPHRASE", ""),
-        )
+        # Prefer a dedicated Demo Trade override. Otherwise use the unified
+        # BloFin account credentials, followed by legacy Demo-prefixed aliases.
+        for field_name in ("api_key", "api_secret", "passphrase"):
+            if kwargs.get(field_name) is None:
+                kwargs[field_name] = _resolve_env_credential(
+                    DEMO_TRADE_CREDENTIAL_ENV[field_name]
+                )[0]
         super().__init__(**kwargs)
         self._trade_permission_verified = False
 

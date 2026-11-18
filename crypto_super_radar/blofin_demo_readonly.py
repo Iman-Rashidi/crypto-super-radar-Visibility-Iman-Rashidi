@@ -22,6 +22,29 @@ DEMO_PUBLIC_WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public"
 DEMO_PRIVATE_WS_URL = "wss://demo-trading-openapi.blofin.com/ws/private"
 WS_LOGIN_PATH = "/users/self/verify"
 
+# BloFin account-level credentials are shared across Live and Demo. The API
+# host selects the environment; this adapter is permanently pinned to Demo.
+# Keep legacy Demo-prefixed names supported for existing deployments.
+DEMO_READ_CREDENTIAL_ENV = {
+    "api_key": ("BLOFIN_API_KEY", "BLOFIN_DEMO_API_KEY"),
+    "api_secret": ("BLOFIN_API_SECRET", "BLOFIN_DEMO_API_SECRET"),
+    "passphrase": ("BLOFIN_PASSPHRASE", "BLOFIN_DEMO_PASSPHRASE"),
+}
+DEMO_TRADE_CREDENTIAL_ENV = {
+    "api_key": ("BLOFIN_DEMO_TRADE_API_KEY", "BLOFIN_API_KEY", "BLOFIN_DEMO_API_KEY"),
+    "api_secret": ("BLOFIN_DEMO_TRADE_API_SECRET", "BLOFIN_API_SECRET", "BLOFIN_DEMO_API_SECRET"),
+    "passphrase": ("BLOFIN_DEMO_TRADE_PASSPHRASE", "BLOFIN_PASSPHRASE", "BLOFIN_DEMO_PASSPHRASE"),
+}
+
+
+def _resolve_env_credential(env_names: tuple[str, ...]) -> tuple[str, str]:
+    """Return the first configured credential and its variable name, not its value."""
+    for env_name in env_names:
+        raw = os.getenv(env_name)
+        if raw is not None and raw.strip():
+            return raw.strip(), env_name
+    return "", " or ".join(env_names)
+
 
 class BloFinDemoError(RuntimeError):
     """Base error for the read-only BloFin Demo adapter."""
@@ -113,19 +136,29 @@ class BloFinDemoReadOnly:
         clock_ms: Any = None,
         timeout: float = 10.0,
     ) -> None:
-        # Render dashboard pastes can accidentally retain leading/trailing whitespace.
-        # Normalize only the outside; never alter characters inside a credential.
-        self.api_key = str(api_key if api_key is not None else os.getenv("BLOFIN_DEMO_API_KEY", "")).strip()
-        self.api_secret = str(api_secret if api_secret is not None else os.getenv("BLOFIN_DEMO_API_SECRET", "")).strip()
-        self.passphrase = str(passphrase if passphrase is not None else os.getenv("BLOFIN_DEMO_PASSPHRASE", "")).strip()
-        for env_name, credential in (
-            ("BLOFIN_DEMO_API_KEY", self.api_key),
-            ("BLOFIN_DEMO_API_SECRET", self.api_secret),
-            ("BLOFIN_DEMO_PASSPHRASE", self.passphrase),
+        # Explicit constructor values win; otherwise standard BloFin account
+        # credentials are used before the legacy Demo-prefixed aliases.
+        resolved: dict[str, str] = {}
+        sources: dict[str, str] = {}
+        for field_name, explicit_value in (
+            ("api_key", api_key),
+            ("api_secret", api_secret),
+            ("passphrase", passphrase),
         ):
+            if explicit_value is None:
+                resolved[field_name], sources[field_name] = _resolve_env_credential(
+                    DEMO_READ_CREDENTIAL_ENV[field_name]
+                )
+            else:
+                resolved[field_name] = str(explicit_value).strip()
+                sources[field_name] = f"explicit {field_name}"
+        self.api_key = resolved["api_key"]
+        self.api_secret = resolved["api_secret"]
+        self.passphrase = resolved["passphrase"]
+        for field_name, credential in resolved.items():
             if any(ord(char) < 33 or ord(char) > 126 for char in credential):
                 raise BloFinDemoAuthError(
-                    f"{env_name} contains whitespace, a control character, or a non-ASCII character."
+                    f"{sources[field_name]} contains whitespace, a control character, or a non-ASCII character."
                 )
         self.session = session or requests.Session()
         self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
@@ -135,7 +168,7 @@ class BloFinDemoReadOnly:
     def _auth_headers(self, path_with_query: str) -> dict[str, str]:
         if not all((self.api_key, self.api_secret, self.passphrase)):
             raise BloFinDemoAuthError(
-                "Set BLOFIN_DEMO_API_KEY, BLOFIN_DEMO_API_SECRET and BLOFIN_DEMO_PASSPHRASE."
+                "Set BLOFIN_API_KEY, BLOFIN_API_SECRET and BLOFIN_PASSPHRASE, or the legacy Demo-prefixed aliases."
             )
         timestamp = str(int(self.clock_ms()))
         nonce = str(uuid.uuid4())
@@ -405,7 +438,7 @@ class BloFinDemoReadOnly:
         """Build the authenticated private-WebSocket login payload; sends no trade action."""
         if not all((self.api_key, self.api_secret, self.passphrase)):
             raise BloFinDemoAuthError(
-                "Set BLOFIN_DEMO_API_KEY, BLOFIN_DEMO_API_SECRET and BLOFIN_DEMO_PASSPHRASE."
+                "Set BLOFIN_API_KEY, BLOFIN_API_SECRET and BLOFIN_PASSPHRASE, or the legacy Demo-prefixed aliases."
             )
         timestamp = str(int(self.clock_ms()))
         nonce = str(uuid.uuid4())
