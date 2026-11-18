@@ -77,6 +77,14 @@ BLOFIN_POSITION_MANAGER_STATE = {
     "last_check_at_utc": None,
     "last_action": None,
     "last_message_fa": "مدیر مستقل خروج سود در حال آماده‌سازی است.",
+    "readiness_status": None,
+    "readiness_blockers": [],
+    "trade_permission_status": "UNKNOWN",
+    "credential_source": None,
+    "trading_enabled": False,
+    "dashboard_auth_configured": False,
+    "durable_storage": False,
+    "event_store_readable": False,
 }
 BLOFIN_EXECUTION_JOBS: dict[str, dict] = {}
 BLOFIN_AUTOPILOT_LOCK = threading.Lock()
@@ -8924,9 +8932,56 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
     try:
         readiness = _blofin_demo_execution_readiness()
         if readiness.get("status") != "READY":
+            readiness_blockers: list[str] = []
+            if not readiness.get("trade_credentials_configured"):
+                readiness_blockers.append("TRADE_CREDENTIALS_NOT_CONFIGURED")
+            if readiness.get("trade_permission_status") == "READ_ONLY":
+                readiness_blockers.append("TRADE_PERMISSION_READ_ONLY")
+            elif not readiness.get("trade_permission_verified"):
+                readiness_blockers.append("TRADE_PERMISSION_NOT_VERIFIED")
+            if not readiness.get("trading_enabled"):
+                readiness_blockers.append("DEMO_TRADING_DISABLED")
+            if not readiness.get("dashboard_auth_configured"):
+                readiness_blockers.append("DASHBOARD_TOKEN_NOT_CONFIGURED")
+            if not readiness.get("durable_storage"):
+                readiness_blockers.append("DURABLE_STORAGE_UNAVAILABLE")
+            if not readiness.get("event_store_readable"):
+                readiness_blockers.append("EVENT_STORE_UNREADABLE")
+            if not readiness_blockers:
+                readiness_blockers.append("EXECUTION_READINESS_NOT_READY")
+
+            if "TRADE_CREDENTIALS_NOT_CONFIGURED" in readiness_blockers:
+                message_fa = "اعتبارنامه‌های Trade در Environment کامل نیستند؛ مدیر خروج هیچ اقدامی انجام نداد."
+            elif "TRADE_PERMISSION_READ_ONLY" in readiness_blockers:
+                message_fa = "مجوز API فقط‌خواندنی است؛ مدیر خروج مجوز تغییر پوزیشن ندارد و هیچ اقدامی انجام نداد."
+            elif "TRADE_PERMISSION_NOT_VERIFIED" in readiness_blockers:
+                message_fa = "مجوز Trade تأیید نشد؛ مدیر خروج متوقف ماند و هیچ پوزیشنی تغییر نکرد."
+            else:
+                reasons = []
+                if "DEMO_TRADING_DISABLED" in readiness_blockers:
+                    reasons.append("فعال‌سازی معاملات Demo خاموش است")
+                if "DASHBOARD_TOKEN_NOT_CONFIGURED" in readiness_blockers:
+                    reasons.append("توکن پنل تنظیم نشده است")
+                if "DURABLE_STORAGE_UNAVAILABLE" in readiness_blockers:
+                    reasons.append("حافظه پایدار در دسترس نیست")
+                if "EVENT_STORE_UNREADABLE" in readiness_blockers:
+                    reasons.append("دفتر رویداد قابل خواندن نیست")
+                message_fa = (
+                    "مدیر خروج به‌دلیل پیش‌نیازهای مسدودشده اقدام نکرد: "
+                    + "؛ ".join(reasons or ["آمادگی اجرای Demo تأیید نشده است"])
+                    + ". هیچ پوزیشنی تغییر نکرد."
+                )
             return {
-                "status": "TRADE_PERMISSION_UNAVAILABLE",
-                "message_fa": "مدیر خروج برای اقدام خودکار به کلید Trade اختصاصی Demo نیاز دارد؛ هیچ پوزیشنی تغییر نکرد.",
+                "status": "EXECUTION_READINESS_BLOCKED",
+                "readiness_status": readiness.get("status"),
+                "readiness_blockers": readiness_blockers,
+                "trade_permission_status": readiness.get("trade_permission_status"),
+                "credential_source": readiness.get("credential_source"),
+                "trading_enabled": bool(readiness.get("trading_enabled")),
+                "dashboard_auth_configured": bool(readiness.get("dashboard_auth_configured")),
+                "durable_storage": bool(readiness.get("durable_storage")),
+                "event_store_readable": bool(readiness.get("event_store_readable")),
+                "message_fa": message_fa,
             }
         raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")
         raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
@@ -9129,6 +9184,14 @@ def _blofin_demo_position_manager_worker() -> None:
                     "last_check_at_utc": checked_at,
                     "last_action": result.get("actions", []),
                     "last_message_fa": result.get("message_fa", "مدیر خروج بررسی را انجام داد."),
+                    "readiness_status": result.get("readiness_status"),
+                    "readiness_blockers": list(result.get("readiness_blockers") or []),
+                    "trade_permission_status": result.get("trade_permission_status", "UNKNOWN"),
+                    "credential_source": result.get("credential_source"),
+                    "trading_enabled": result.get("trading_enabled"),
+                    "dashboard_auth_configured": result.get("dashboard_auth_configured"),
+                    "durable_storage": result.get("durable_storage"),
+                    "event_store_readable": result.get("event_store_readable"),
                 })
         except Exception as exc:
             with LOCK:
