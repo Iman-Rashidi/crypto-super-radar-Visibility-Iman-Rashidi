@@ -1,6 +1,8 @@
 """Offline integration tests for the dependency-light HTTP dashboard."""
 from __future__ import annotations
 
+
+import copy
 import json
 from datetime import datetime, timezone
 import os
