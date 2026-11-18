@@ -12,8 +12,8 @@ from collections.abc import Mapping
 from typing import Any
 
 _SECRET_ENV_MARKERS = (
-    "API_KEY", "API_SECRET", "AUTH_TOKEN", "ACCESS_TOKEN", "REFRESH_TOKEN",
-    "TOKEN", "SECRET", "PASSPHRASE", "PASSWORD", "PRIVATE_KEY",
+    "_KEY", "API_KEY", "API_SECRET", "AUTH_TOKEN", "ACCESS_TOKEN", "REFRESH_TOKEN",
+    "_TOKEN", "TOKEN", "SECRET", "PASSPHRASE", "PASSWORD", "PRIVATE_KEY", "AUTHORIZATION",
 )
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*")
 _QUERY_SECRET_RE = re.compile(
@@ -35,7 +35,7 @@ def redact_diagnostic_text(value: Any, *, environ: Mapping[str, str] | None = No
         for name, secret in source.items()
         if any(marker in str(name).upper() for marker in _SECRET_ENV_MARKERS)
         and secret is not None
-        and len(str(secret)) >= 4
+        and bool(str(secret))
     }
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
