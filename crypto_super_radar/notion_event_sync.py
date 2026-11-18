@@ -335,6 +335,17 @@ class NotionEventOutbox:
         snapshot.update({"synced_this_run": synced, "failed_this_run": failed})
         return snapshot
 
+    def has_event(self, event_id: str) -> bool:
+        """Return whether this immutable event already exists, pending or synced."""
+        key = _text(event_id, 180)
+        if not key:
+            return False
+        row = self._db.execute(
+            "SELECT 1 FROM csr_notion_event_outbox WHERE event_id=? LIMIT 1",
+            (key,),
+        ).fetchone()
+        return row is not None
+
     def pending_count(self) -> int:
         row = self._db.execute(
             "SELECT COUNT(*) FROM csr_notion_event_outbox WHERE sync_status='PENDING'"
