@@ -48,7 +48,12 @@ jobs:
           python -m compileall -q .
           PORT=18765 CSR_DB_PATH=/tmp/csr-render/crypto-super-radar/data/csr-test.sqlite3 python -m crypto_super_radar.web_app > /tmp/csr-render/server.log 2>&1 &
           server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          trap 'status=$?; if [[ "$status" -ne 0 ]]; then
+            echo "===== Render overlay server.log ====="
+            if [[ -f /tmp/csr-render/server.log ]]; then cat /tmp/csr-render/server.log; else echo "server.log missing"; fi
+          fi
+          kill "$server_pid" 2>/dev/null || true
+          exit "$status"' EXIT
           for attempt in $(seq 1 30); do
             if curl --connect-timeout 1 -fsS http://127.0.0.1:18765/health > /tmp/csr-render/health.json; then
               break
