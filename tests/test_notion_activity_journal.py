@@ -105,6 +105,22 @@ class NotionActivityJournalTests(unittest.TestCase):
         self.assertEqual(state["last_http_status"], 403)
         self.assertEqual(state["last_error_stage"], "POST /data_sources/{activity}/query")
 
+    def test_v3_five_minute_snapshot_is_preserved_and_used_for_chart_and_csv(self):
+        snapshot = sample_snapshot()
+        snapshot["engine_version"] = "CHALLENGE_1_LOCAL_RULES_V3"
+        snapshot["setup_timeframe"] = "5m"
+        snapshot["candles_5m"] = candles(12, base=105.0)
+        snapshot["candles_15m"] = []
+        self.assertTrue(self.journal.enqueue(snapshot))
+        saved = self.journal.get_snapshot(snapshot["experience_id"])
+        self.assertEqual(saved["setup_timeframe"], "5m")
+        self.assertEqual(len(saved["candles_5m"]), 12)
+        rendered = render_candlestick_chart(saved)
+        self.assertTrue(rendered.startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
+        csv_payload = render_ohlcv_csv(saved).decode("utf-8")
+        self.assertIn("5m,", csv_payload)
+        self.assertIn("1H,", csv_payload)
+
     def test_chart_is_a_png_rendered_from_real_ohlcv_and_exit_levels(self):
         snapshot = sample_snapshot()
         snapshot.update({

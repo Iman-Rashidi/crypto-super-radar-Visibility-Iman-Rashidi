@@ -636,9 +636,13 @@ class BloFinDemoEventStore:
         if not saved_time or saved_time != current_time:
             return False
         for field in ("open", "high", "low", "close"):
+            left_raw, right_raw = saved.get(field), current.get(field)
+            if left_raw in (None, "") and right_raw in (None, ""):
+                continue
+            if left_raw in (None, "") or right_raw in (None, ""):
+                return False
             try:
-                left = float(saved.get(field))
-                right = float(current.get(field))
+                left, right = float(left_raw), float(right_raw)
             except (TypeError, ValueError, OverflowError):
                 return False
             if not math.isfinite(left) or not math.isfinite(right):

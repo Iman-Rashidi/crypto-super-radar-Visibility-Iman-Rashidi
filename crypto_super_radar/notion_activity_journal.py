@@ -87,8 +87,17 @@ def _normalise_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     experience_id = _text(snapshot.get("experience_id") or snapshot.get("activity_id"), 180)
     if not experience_id:
         raise ValueError("experience_id is required")
+    engine_version = _text(snapshot.get("engine_version") or "CHALLENGE_1_LOCAL_RULES_V1", 100)
+    candles_5m = _normalise_candles(snapshot.get("candles_5m"), limit=160)
     candles_15m = _normalise_candles(snapshot.get("candles_15m"), limit=160)
     candles_1h = _normalise_candles(snapshot.get("candles_1h"), limit=96)
+    setup_timeframe = _text(
+        snapshot.get("setup_timeframe")
+        or ("5m" if candles_5m or engine_version == "CHALLENGE_1_LOCAL_RULES_V3" else "15m"),
+        10,
+    ).lower()
+    if setup_timeframe not in {"5m", "15m"}:
+        setup_timeframe = "15m"
     entry = _finite(snapshot.get("entry_price"))
     stop = _finite(snapshot.get("stop_loss"))
     target = _finite(snapshot.get("take_profit"))
@@ -104,11 +113,13 @@ def _normalise_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "reason_fa": _text(snapshot.get("reason_fa"), 1800),
         "analysis_time_utc": _iso(snapshot.get("analysis_time_utc") or snapshot.get("occurred_at_utc")),
         "signal_bar_open_utc": _iso(snapshot.get("signal_bar_open_utc")),
-        "engine_version": _text(snapshot.get("engine_version") or "CHALLENGE_1_LOCAL_RULES_V1", 100),
+        "engine_version": engine_version,
+        "setup_timeframe": setup_timeframe,
         "patterns": list(snapshot.get("patterns") or [])[:20] if isinstance(snapshot.get("patterns"), list) else [],
         "chart_structure": _text(snapshot.get("chart_structure"), 120),
         "volume_confirmation": dict(snapshot.get("volume_confirmation") or {}) if isinstance(snapshot.get("volume_confirmation"), Mapping) else {},
         "evidence": dict(snapshot.get("evidence") or {}) if isinstance(snapshot.get("evidence"), Mapping) else {},
+        "candles_5m": candles_5m,
         "candles_15m": candles_15m,
         "candles_1h": candles_1h,
         "entry_price": entry,
@@ -134,9 +145,12 @@ def _normalise_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 def render_candlestick_chart(snapshot: Mapping[str, Any]) -> bytes:
     """Render a real OHLCV chart. No candle, price level, or exit is fabricated."""
-    candles = _normalise_candles(snapshot.get("candles_15m"), limit=120)
+    candles_5m = _normalise_candles(snapshot.get("candles_5m"), limit=120)
+    candles_15m = _normalise_candles(snapshot.get("candles_15m"), limit=120)
+    candles = candles_5m or candles_15m
+    chart_timeframe = "5m" if candles_5m else "15m"
     if len(candles) < 5:
-        raise ValueError("At least five completed 15m candles are needed for a chart.")
+        raise ValueError("At least five completed setup candles are needed for a chart.")
     width, height = CHART_WIDTH, CHART_HEIGHT
     image = Image.new("RGB", (width, height), "#ffffff")
     draw = ImageDraw.Draw(image)
@@ -159,7 +173,7 @@ def render_candlestick_chart(snapshot: Mapping[str, Any]) -> bytes:
     span = max(high - low, abs(high) * 0.001, 1e-9)
     low -= span * 0.08
     high += span * 0.08
-    draw.text((left, 26), f"{_text(snapshot.get('symbol'), 40)}  |  15m completed candles  |  CHALLENGE 1", fill="#111827", font=title_font)
+    draw.text((left, 26), f"{_text(snapshot.get('symbol'), 40)}  |  {chart_timeframe} completed candles  |  CHALLENGE 1", fill="#111827", font=title_font)
     draw.text((left, 48), f"Decision: {_text(snapshot.get('signal'), 20)}  |  {(_text(snapshot.get('signal_bar_open_utc'), 40) or 'timestamp unavailable')}", fill="#374151", font=font)
     draw.line((left, price_top - 12, right, price_top - 12), fill="#d1d5db", width=1)
     draw.line((left, price_bottom, right, price_bottom), fill="#9ca3af", width=1)
@@ -222,7 +236,11 @@ def render_ohlcv_csv(snapshot: Mapping[str, Any]) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow(["timeframe", "time_utc", "open", "high", "low", "close", "volume", "quote_volume"])
-    for timeframe, rows in (("15m", snapshot.get("candles_15m") or []), ("1H", snapshot.get("candles_1h") or [])):
+    for timeframe, rows in (
+        ("5m", snapshot.get("candles_5m") or []),
+        ("15m", snapshot.get("candles_15m") or []),
+        ("1H", snapshot.get("candles_1h") or []),
+    ):
         for row in rows:
             if not isinstance(row, Mapping):
                 continue
@@ -416,7 +434,7 @@ class NotionActivityJournal:
             "وضعیت اجرا": {"select": {"name": execution_status}},
             "زمان ثبت": self._date(snapshot.get("analysis_time_utc")),
             "تصمیم ربات": self._select(signal),
-            "تایم‌فریم اجرا": {"select": {"name": "15m"}},
+            "تایم‌فریم اجرا": {"select": {"name": snapshot.get("setup_timeframe") or "15m"}},
             "تایم‌فریم زمینه": {"select": {"name": "1H"}},
             "نسخه موتور": self._rich_text(snapshot.get("engine_version"), 120),
             "الگوی کندلی": self._rich_text(", ".join(
@@ -497,7 +515,7 @@ class NotionActivityJournal:
     def _sync_row(self, token: str, snapshot: Mapping[str, Any], page_id: str | None) -> str:
         chart_upload_id = None
         ohlcv_upload_id = None
-        candles = snapshot.get("candles_15m") or []
+        candles = snapshot.get("candles_5m") or snapshot.get("candles_15m") or []
         if len(candles) >= 5:
             self._current_operation = "RENDER_CANDLE_CHART"
             chart = render_candlestick_chart(snapshot)
@@ -618,14 +636,14 @@ class NotionActivityJournal:
         latest = self._db.execute(
             """SELECT experience_id, sync_status, attempts, updated_at_utc
                FROM csr_notion_activity_journal
-               ORDER BY updated_at_utc DESC LIMIT 1"""
+               ORDER BY updated_at_utc DESC, rowid DESC LIMIT 1"""
         ).fetchone()
         last_error = self._db.execute(
             """SELECT experience_id, attempts, last_error_type, last_http_status,
                       last_error_stage, last_error_message, next_attempt_at
                FROM csr_notion_activity_journal
                WHERE last_error_type IS NOT NULL
-               ORDER BY updated_at_utc DESC, attempts DESC LIMIT 1"""
+               ORDER BY updated_at_utc DESC, attempts DESC, rowid DESC LIMIT 1"""
         ).fetchone()
         pending_with_error = self._db.execute(
             """SELECT COUNT(*) FROM csr_notion_activity_journal

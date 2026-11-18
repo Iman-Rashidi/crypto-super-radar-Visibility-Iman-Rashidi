@@ -917,8 +917,10 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         client = FakeExecutorClient()
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
         try:
+            fresh_signal = signal_record(signal_id="fresh-completed-candle")
+            fresh_signal["challenge1_evidence"]["confirmation_candle"]["open_time_utc"] = "2026-11-13T18:15:00+00:00"
             fresh = executor.execute(
-                signal_record(signal_id="fresh-completed-candle"),
+                fresh_signal,
                 inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
             )
             self.assertEqual(fresh["status"], "ACCEPTED")

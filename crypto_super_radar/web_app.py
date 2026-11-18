@@ -9038,6 +9038,7 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "analysis_time_utc": current.get("completed_at_utc") or current.get("updated_at_utc") or datetime.now(timezone.utc).isoformat(),
         "signal_bar_open_utc": result.get("signal_bar_open_utc") or evidence.get("confirmation_candle", {}).get("open_time_utc"),
         "engine_version": evidence.get("decision_engine_version") or "CHALLENGE_1_UNKNOWN",
+        "setup_timeframe": evidence.get("setup_timeframe") or "5m",
         "patterns": patterns if isinstance(patterns, list) else [],
         "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
         "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
