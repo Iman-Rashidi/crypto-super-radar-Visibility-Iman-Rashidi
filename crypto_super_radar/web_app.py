@@ -37,7 +37,7 @@ from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
-from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_REST_URL
+from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_TRADE_CREDENTIAL_ENV, DEMO_REST_URL, _resolve_env_credential
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
@@ -2816,28 +2816,30 @@ def _ensure_scan_worker():
 
 def _blofin_demo_execution_readiness() -> dict:
     """Expose Demo execution prerequisites; READY requires verified read/write API permission."""
-    trade_names = (
-        "BLOFIN_DEMO_TRADE_API_KEY",
-        "BLOFIN_DEMO_TRADE_API_SECRET",
-        "BLOFIN_DEMO_TRADE_PASSPHRASE",
+    credential_fields = ("api_key", "api_secret", "passphrase")
+    selected_credential_sources = tuple(
+        _resolve_env_credential(DEMO_TRADE_CREDENTIAL_ENV[field])[1]
+        for field in credential_fields
     )
-    demo_names = (
-        "BLOFIN_DEMO_API_KEY",
-        "BLOFIN_DEMO_API_SECRET",
-        "BLOFIN_DEMO_PASSPHRASE",
+    dedicated_source = tuple(
+        DEMO_TRADE_CREDENTIAL_ENV[field][0] for field in credential_fields
     )
-    dedicated_trade_credentials = all(bool(os.getenv(name, "").strip()) for name in trade_names)
-    existing_demo_credentials = all(bool(os.getenv(name, "").strip()) for name in demo_names)
-    # Use the same credential fallback resolver as the actual write client.
+    unified_source = tuple(
+        DEMO_TRADE_CREDENTIAL_ENV[field][1] for field in credential_fields
+    )
+    legacy_demo_source = tuple(
+        DEMO_TRADE_CREDENTIAL_ENV[field][2] for field in credential_fields
+    )
+    # Report the source selected by the same precedence as the actual client.
+    credential_source = {
+        dedicated_source: "DEDICATED_TRADE_KEY",
+        unified_source: "UNIFIED_ACCOUNT_KEY",
+        legacy_demo_source: "EXISTING_DEMO_KEY",
+    }.get(selected_credential_sources, "MIXED_OR_INCOMPLETE")
     trade_client = BloFinDemoTradeClient(timeout=8.0)
     trade_credentials_configured = all(bool(value) for value in (
         trade_client.api_key, trade_client.api_secret, trade_client.passphrase
     ))
-    credential_source = (
-        "DEDICATED_TRADE_KEY" if dedicated_trade_credentials else
-        "EXISTING_DEMO_KEY" if existing_demo_credentials else
-        "MIXED_OR_INCOMPLETE"
-    )
     trade_permission_status = "NOT_CHECKED"
     trade_permission_verified = False
     if trade_credentials_configured:
