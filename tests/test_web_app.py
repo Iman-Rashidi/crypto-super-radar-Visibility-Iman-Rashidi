@@ -2046,7 +2046,7 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertFalse(web_app._challenge1_observer_results_complete("cycle-resume"))
         self.assertEqual(
             outbox.has_event.call_args_list[0].args[0],
-            "cycle-resume:AI:nemotron:AI_APPROVAL",
+            "cycle-resume:AI:nemotron:RESULT",
         )
         self.assertEqual(
             [call.args[0] for call in outbox.has_event.call_args_list],
