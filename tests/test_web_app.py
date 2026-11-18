@@ -2095,6 +2095,7 @@ class WebAppHttpTests(unittest.TestCase):
             "markPrice": "100.2", "unrealizedPnl": "0.02",
             "leverage": "1", "liquidationPrice": "0",
         }]
+        reader.get_mark_price.return_value = [{"markPrice": "100.3"}]
         with (
             patch.object(web_app, "BloFinDemoEventStore", return_value=store),
             patch.object(web_app, "BloFinDemoReadOnly", return_value=reader),
@@ -2113,9 +2114,13 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["linked_positions"], 1)
         self.assertEqual(result["audits_scheduled"], 1)
         audit.assert_called_once()
+        self.assertEqual(audit.call_args.args[1]["markPrice"], "100.3")
         heartbeat.assert_called_once()
+        self.assertEqual(heartbeat.call_args.args[0]["actions"][0]["mark_price"], "100.3")
+        self.assertEqual(heartbeat.call_args.args[0]["actions"][0]["mark_price_source"], "BLOFIN_READ_MARK_PRICE")
         readiness.assert_not_called()
         reader.get_positions.assert_called_once()
+        reader.get_mark_price.assert_called_once_with(inst_id="BTC-USDT")
         store.close.assert_called_once()
 
 
