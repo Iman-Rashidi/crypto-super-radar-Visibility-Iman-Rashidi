@@ -1,6 +1,7 @@
 """Offline integration tests for the dependency-light HTTP dashboard."""
 from __future__ import annotations
 
+import atexit
 import json
 from datetime import datetime, timezone
 import os
@@ -20,6 +21,22 @@ from urllib.parse import quote
 
 from crypto_super_radar.web_app import Handler
 from crypto_super_radar import web_app
+
+
+def _close_web_app_test_database_connections():
+    resources = (
+        web_app.ENGINE.data,
+        web_app.ENGINE.whale_store,
+        web_app.PAPER_BOT.ledger,
+        web_app.FUTURES_PAPER_BOT.ledger,
+    )
+    for resource in resources:
+        close = getattr(resource, "close", None)
+        if callable(close):
+            close()
+
+
+atexit.register(_close_web_app_test_database_connections)
 
 
 class QuietHandler(Handler):
@@ -253,6 +270,7 @@ class WebAppHttpTests(unittest.TestCase):
             "status": "CANDIDATE",
             "pattern": "BULLISH",
             "phase": "WAVES_1_AND_2_CONFIRMED",
+            "timeframe": "5m",
             "wave_count": 2,
             "next_wave": 3,
             "invalidation_price": 64200.0,
@@ -267,6 +285,7 @@ class WebAppHttpTests(unittest.TestCase):
         short_report = web_app._blofin_elliott_wave_report_fa(wave, "SHORT")
 
         self.assertEqual(long_report["pattern_fa"], "صعودی")
+        self.assertEqual(long_report["timeframe_fa"], "۵ دقیقه‌ای")
         self.assertEqual(long_report["direction_alignment"], "ALIGNED")
         self.assertIn("موج ۳ صعودی", long_report["selected_wave_fa"])
         self.assertEqual(long_report["invalidation_price"], 64200.0)
@@ -377,6 +396,17 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("displayMonitorValue", page)
         self.assertNotIn("JSON.stringify(job,null,2)", page)
         self.assertNotIn('id="blofin-execution-result"', page)
+
+    def test_challenge1_dashboard_text_matches_5m_two_reviewer_architecture(self):
+        status, _, body = self.request("GET", "/")
+        page = body.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("هر کندل بسته‌شدهٔ ۵ دقیقه‌ای حداکثر یک سیگنال یکتا می‌سازد", page)
+        self.assertIn("هر دو ناظر مستقل AI", page)
+        self.assertIn("تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند", page)
+        self.assertNotIn("Challenge 1 فقط کندل بسته‌شدهٔ ۱۵ دقیقه‌ای", page)
+        self.assertNotIn("ساختار موج از تایم‌فریم یک‌ساعته", page)
+        self.assertNotIn("تأیید ۱۵ دقیقه/۱ ساعت", page)
 
     def test_trade_permission_block_does_not_block_analysis_when_durable_storage_is_ready(self):
         readiness = {

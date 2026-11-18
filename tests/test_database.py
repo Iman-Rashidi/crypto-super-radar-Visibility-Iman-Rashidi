@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from tempfile import TemporaryDirectory
 import sys
 import types
 import unittest
 from unittest.mock import patch
 
+from crypto_super_radar.whale_store import WhaleStore
 from crypto_super_radar.database import (
     _ConnectionAdapter,
     connect_database,
@@ -164,6 +167,55 @@ class DatabaseAdapterTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False):
             with self.assertRaisesRegex(RuntimeError, "Set both"):
                 connect_database("data/test.sqlite3")
+
+
+    def test_whale_store_serializes_shared_connection_access_across_threads(self):
+        with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}, clear=False):
+            store = WhaleStore(":memory:")
+            self.addCleanup(store.close)
+
+            def record(index):
+                return store.record(
+                    "cex:BTCUSDT",
+                    {
+                        "status": "KNOWN",
+                        "net_exchange_flow_usd": float(index),
+                        "coverage": "KNOWN",
+                    },
+                    whale_bias="ACCUMULATION_PRESSURE",
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                observation_ids = list(executor.map(record, range(64)))
+
+            self.assertEqual(len(observation_ids), 64)
+            self.assertEqual(len(set(observation_ids)), 64)
+            self.assertEqual(
+                store.summary("cex:BTCUSDT", limit=100)["observation_count"],
+                64,
+            )
+
+    def test_whale_store_recovers_persisted_history_after_connection_restart(self):
+        with TemporaryDirectory() as directory:
+            path = os.path.join(directory, "whale-restart.sqlite3")
+            with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}, clear=False):
+                first = WhaleStore(path)
+                try:
+                    first.record(
+                        "cex:ETHUSDT",
+                        {"status": "KNOWN", "net_exchange_flow_usd": -42.0, "coverage": "KNOWN"},
+                        whale_bias="DISTRIBUTION_PRESSURE",
+                    )
+                finally:
+                    first.close()
+
+                restarted = WhaleStore(path)
+                self.addCleanup(restarted.close)
+                history = restarted.history("cex:ETHUSDT", limit=10)
+
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["whale_bias"], "DISTRIBUTION_PRESSURE")
+            self.assertEqual(history[0]["exchange_net"], -42.0)
 
 
 if __name__ == "__main__":

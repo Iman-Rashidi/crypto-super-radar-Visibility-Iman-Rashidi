@@ -3296,7 +3296,7 @@ def _blofin_elliott_wave_report_fa(wave: dict | None, direction: str = "NO_TRADE
     }.get(phase, "مرحلهٔ موج به‌صورت قطعی قابل طبقه‌بندی نیست.")
 
     timeframe = str(source.get("timeframe") or "").upper()
-    timeframe_fa = {"1H": "یک‌ساعته", "15M": "۱۵ دقیقه‌ای", "4H": "چهارساعته", "1D": "روزانه"}.get(timeframe, "نامشخص")
+    timeframe_fa = {"5M": "۵ دقیقه‌ای", "1H": "یک‌ساعته", "15M": "۱۵ دقیقه‌ای", "4H": "چهارساعته", "1D": "روزانه"}.get(timeframe, "نامشخص")
     source_code = str(source.get("source") or "").upper()
     source_fa = (
         "منبع: کندل‌های بسته‌شده و تأییدشدهٔ BloFin Demo"
@@ -3446,9 +3446,9 @@ def _blofin_execution_report_fa(job: dict) -> dict:
         "READ_ONLY_ORDER_RECONCILIATION": "تطبیق فقط‌خواندنی سفارش قبلی",
         "ORDER_REMAINS_UNKNOWN": "نتیجه سفارش قبلی هنوز مشخص نیست",
         "LIVE_12_GATE_ANALYSIS": "تحلیل زندهٔ ۱۲ فیلتر",
-        "LIVE_EASY_MTF_ANALYSIS": "تحلیل زنده موتور Challenge 1 · روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
+        "LIVE_EASY_MTF_ANALYSIS": "مسیر قدیمی EASY · تحلیل ۱ ساعته/۱۵ دقیقه‌ای (خارج از Challenge 1)",
         "PROFILE_GATE_REVIEW": "بررسی گیت‌های الزامی پروفایل انتخابی",
-        "MTF_TRIGGER_BLOCKED": "عدم تطبیق روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای",
+        "MTF_TRIGGER_BLOCKED": "تعارض تایم‌فریم مسیر قدیمی EASY (خارج از Challenge 1)",
         "ELLIOTT_WAVE_ANALYSIS": "تحلیل و انتخاب سناریوی موج الیوت",
         "NO_TRADE": "عدم ورود؛ شرایط کامل نیست",
         "DUPLICATE_CANDLE_SKIPPED": "جلوگیری از معامله تکراری",
@@ -4252,7 +4252,7 @@ def _run_blofin_demo_execution_job(
         elif execution_profile == "EASY":
             _set_blofin_execution_job(
                 job_id, "running", stage="LIVE_EASY_MTF_ANALYSIS",
-                message_fa=f"موتور Challenge 1 در حال بررسی {instrument_id} با روند ۱ ساعته و تریگر ۱۵ دقیقه‌ای BloFin است.",
+                message_fa=f"مسیر قدیمی EASY برای {instrument_id}؛ این مسیر در اجرای Challenge 1 فعال نیست.",
                 trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
             )
             analysis = _blofin_easy_trader_analysis(read_client, store, asset, instrument_id)
@@ -5352,7 +5352,7 @@ class Handler(BaseHTTPRequestHandler):
           <p class="muted" id="blofin-demo-safety">محیط: Demo · مجوز Read برای مانیتور؛ ارسال سفارش فقط با کلید Trade آزمایشی و تأیید دستی</p>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
-            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف تعداد سفارش در روز یا در کل عمر سیستم تعریف نشده است؛ بااین‌حال هم‌زمان فقط یک پوزیشن مجاز است. هر کندل کامل ۱۵ دقیقه حداکثر یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
+            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف تعداد سفارش در روز یا در کل عمر سیستم تعریف نشده است؛ بااین‌حال هم‌زمان فقط یک پوزیشن مجاز است. هر کندل بسته‌شدهٔ ۵ دقیقه‌ای حداکثر یک سیگنال یکتا می‌سازد و تا بسته‌شدن و تعیین‌تکلیف کامل پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
             <div class="grid" style="margin:10px 0">
               <div>
                 <label for="blofin-market-type">نوع بازار</label>
@@ -5371,7 +5371,7 @@ class Handler(BaseHTTPRequestHandler):
             </div>
             <p id="blofin-instrument-status" class="muted" aria-live="polite">قراردادهای زنده با مجوز Full برای بازکردن موقعیت در حال دریافت‌اند.</p>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
-            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
+            <p class="muted">استراتژی اصلی Challenge 1: تحلیل کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای شامل الگوهای تک‌کندلی و چندکندلی، ساختار نمودار و شکست معتبر؛ سپس تحلیل موج الیوت، فاز/جهت موج و سطح ابطال و تطبیق موج با ساختار قیمت، حجم و شواهد مکمل. ورود فقط پس از دریافت پاسخ معتبر APPROVED از هر دو ناظر مستقل AI با Provider و Model متفاوت، توافق بر جهت و فاز موج و عبور از کنترل ریسک مجاز است. VETO، UNKNOWN، ERROR، قطع ارتباط یا اختلاف ناظران ورود را مسدود می‌کند. تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. سفارش فقط در BloFin Demo اجرا می‌شود؛ کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>
             <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
@@ -5983,7 +5983,7 @@ async function loadBlofinInstruments(){
                   exchangeLinks.appendChild(link);
                 });
                 waveBox.appendChild(exchangeLinks);
-                node(waveBox,'p','بازار مورد تحلیل ربات: '+selectedInstrument+' · USDT-M Perpetual · ساختار موج از تایم‌فریم یک‌ساعته. اجرا فقط در محیط BloFin Demo انجام می‌شود.','muted');
+                node(waveBox,'p','بازار مورد تحلیل ربات: '+selectedInstrument+' · USDT-M Perpetual · تایم‌فریم موج: '+(wave.timeframe_fa||wave.timeframe||'نامشخص')+' · تصمیم بر پایهٔ کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای است. اجرا فقط در محیط BloFin Demo انجام می‌شود.','muted');
                 makeTable(executionReport,'پیوت‌های تأییدشدهٔ موج الیوت',wave.pivots||[],[
                   ['kind_fa','نوع پیوت'],['price','قیمت'],['timestamp_utc','زمان وقوع پیوت'],['confirmed_at_utc','زمان تأیید پیوت']
                 ],'پیوت تأییدشده‌ای برای شماره‌گذاری موج در دسترس نیست.');
@@ -6037,7 +6037,7 @@ async function loadBlofinInstruments(){
               executionReport.replaceChildren();
               const runningMessage=document.createElement('p');
               runningMessage.className='muted';
-              runningMessage.textContent='در حال تحلیل زنده '+selectedInstrument+' با ربات '+selectedProfile+' و تأیید ۱۵ دقیقه/۱ ساعت؛ هنوز سفارشی ارسال نشده است.';
+              runningMessage.textContent='در حال تحلیل '+selectedInstrument+' با کندل بسته‌شدهٔ ۵ دقیقه‌ای، ساختار قیمت و موج الیوت و بررسی دو ناظر مستقل AI؛ هنوز سفارشی ارسال نشده است.';
               executionReport.appendChild(runningMessage);
               try{
                 const response=await fetch('/api/blofin/demo/execute-once',{
@@ -6963,7 +6963,7 @@ async function loadBlofinInstruments(){
             </section>
             <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
             <p id="live-radar-provider" class="live-radar-note">اعتبارسنجی چندمنبعی: در انتظار داده</p>
-            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance/Bybit و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و موتور Challenge 1 فیوچرز BloFin نیست. Challenge 1 فقط کندل بسته‌شدهٔ ۱۵ دقیقه‌ای BloFin و تعارض تایم‌فریم یک‌ساعته را برای تصمیم Demo بررسی می‌کند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
+            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance/Bybit و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و از موتور Challenge 1 فیوچرز BloFin جداست. Challenge 1 به‌طور مستقل فقط کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای BloFin را همراه با ساختار قیمت، موج الیوت و دو ناظر مستقل بررسی می‌کند؛ تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
           </div>
           <script>
           (function(){

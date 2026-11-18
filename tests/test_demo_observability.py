@@ -104,6 +104,7 @@ class DemoObservabilityEventTests(unittest.TestCase):
         from crypto_super_radar.notion_event_sync import NotionEventOutbox
 
         connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
         outbox = NotionEventOutbox(connection=connection)
         event = {
             "event_id": "cycle-1:AI:second_ai:AI_REVIEW_REQUESTED",
