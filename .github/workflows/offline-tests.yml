@@ -82,7 +82,7 @@ jobs:
           tar -xJf dist/crypto-super-radar-source.tar.xz -C /tmp/csr-bundle
           cd /tmp/csr-bundle/crypto-super-radar
           python -m compileall -q .
-          python -m unittest discover -s tests -v
+          PYTHONTRACEMALLOC=5 python -W always::ResourceWarning -m unittest discover -s tests -v
           python -m crypto_super_radar --help
           python -m crypto_super_radar.order_flow_service --help
           python scripts/paper_trading_bot.py --help
