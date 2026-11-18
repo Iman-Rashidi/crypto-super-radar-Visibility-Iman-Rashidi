@@ -10394,6 +10394,10 @@ def _challenge1_observer_results_complete(job_id: str) -> bool:
             "AI_APPROVAL", "AI_VETO", "AI_REVIEW_REQUESTED", "AI_RECOMMENDATION",
         )
         for reviewer_id in ("nemotron", "second_ai"):
+            # The report-only observer writes a stable :RESULT key. Also check
+            # historical event-type suffixes for compatibility with older rows.
+            if outbox.has_event(f"{job_id}:AI:{reviewer_id}:RESULT"):
+                continue
             reviewer_has_result = False
             for event_type in result_event_types:
                 if outbox.has_event(f"{job_id}:AI:{reviewer_id}:{event_type}"):
