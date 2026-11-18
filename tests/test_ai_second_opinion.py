@@ -595,3 +595,86 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "OBSERVER_CONTENT_MISSING"):
             _observer_message_text({"content": None}, {"finish_reason": "length"})
 
+
+
+    def test_observer_message_parser_accepts_provider_parsed_json_object(self):
+        parsed = {
+            "verdict": "INSUFFICIENT_DATA",
+            "reason_fa": "داده برای قضاوت کافی نیست.",
+            "observations": [],
+            "risk_flags": [],
+        }
+        content = _observer_message_text({"parsed": parsed, "content": None}, {})
+        self.assertEqual(json.loads(content)["verdict"], "INSUFFICIENT_DATA")
+
+    def test_observer_model_configuration_rejects_secret_contaminated_model_name(self):
+        suspicious = "sk-or-v1-THISISNOTAREALSECRET000000000000/nvidia/model:free"
+        with patch.dict(os.environ, {
+            "OPENROUTER_API_KEY": "primary-secret",
+            "CSR_AI_MODEL": suspicious,
+            "CSR_SECOND_AI_API_KEY": "",
+            "CSR_SECOND_AI_MODEL": suspicious,
+            "CSR_SECOND_AI_PROVIDER": "Groq",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }, clear=True):
+            status = ai_connection_status()
+            observers = status["challenge1_observers"]
+        self.assertEqual(status["model"], DEFAULT_FREE_MODEL)
+        self.assertTrue(observers["nemotron"]["model_defaulted_for_safety"])
+        self.assertEqual(observers["second_ai"]["status"], "NOT_CONFIGURED")
+        self.assertIn("CSR_SECOND_AI_MODEL_INVALID_IDENTIFIER", observers["second_ai"]["issues"])
+        self.assertNotIn("primary-secret", json.dumps(status))
+        self.assertNotIn("sk-or-v1-", json.dumps(status))
+
+    def test_observer_runner_can_retry_only_the_missing_reviewer(self):
+        challenge_record = {
+            "signal": "NO_TRADE",
+            "instrument_id": "BTC-USDT",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "chosen_pattern": None,
+                "detected_patterns": [],
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        calls = []
+        document = {
+            "verdict": "INSUFFICIENT_DATA",
+            "reason_fa": "شواهد برای نتیجه‌گیری کافی نیست.",
+            "observations": [],
+            "risk_flags": [],
+        }
+
+        class ObserverResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": "qwen/qwen3.8-27b",
+                    "choices": [{"message": {"content": json.dumps(document, ensure_ascii=False)}}],
+                }
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            calls.append(url)
+            return ObserverResponse()
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-observer-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-second-key",
+            "CSR_SECOND_AI_PROVIDER": "groq",
+            "CSR_SECOND_AI_MODEL": "qwen/qwen3.8-27b",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("crypto_super_radar.ai_second_opinion.requests.post", side_effect=fake_post):
+                audit = run_challenge1_observer_reviews(
+                    challenge_record, reviewer_ids={"second_ai"},
+                )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], "https://api.groq.com/openai/v1/chat/completions")
+        self.assertEqual(len(audit["reviewers"]), 1)
+        self.assertEqual(audit["reviewers"][0]["reviewer_id"], "second_ai")
+        self.assertEqual(audit["reviewers"][0]["status"], "REVIEWED")
