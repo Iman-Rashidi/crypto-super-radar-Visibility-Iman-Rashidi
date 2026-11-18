@@ -87,6 +87,29 @@ def _format_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def _position_margin_usdt(position: Mapping[str, Any]) -> Decimal:
+    """Read the correct BloFin margin field for the position's margin mode."""
+    margin_mode = str(position.get("marginMode") or "").strip().lower()
+    if margin_mode == "isolated":
+        field = "margin"
+        description = "isolated margin"
+    elif margin_mode == "cross":
+        field = "initialMargin"
+        description = "cross initial margin"
+    else:
+        raise BloFinDemoExecutionBlocked("Active position margin mode is unknown; aggregate margin cannot be confirmed.")
+    raw_value = position.get(field)
+    if raw_value in (None, ""):
+        raise BloFinDemoExecutionBlocked(f"Active position {description} is missing; aggregate margin cannot be confirmed.")
+    try:
+        value = Decimal(str(raw_value))
+    except Exception as exc:
+        raise BloFinDemoExecutionBlocked(f"Active position {description} is invalid.") from exc
+    if not value.is_finite() or value < 0:
+        raise BloFinDemoExecutionBlocked(f"Active position {description} is invalid.")
+    return value
+
+
 def _analysis_record(signal: Any) -> dict[str, Any]:
     if hasattr(signal, "to_record") and callable(signal.to_record):
         record = signal.to_record()
@@ -1526,16 +1549,10 @@ class BloFinDemoExecutor:
                 raise BloFinDemoExecutionBlocked("An active position has no instrument ID; aggregate risk cannot be confirmed.")
             if active_inst == inst_id:
                 raise BloFinDemoExecutionBlocked("A position is already open for this contract.")
-            raw_margin = row.get("initialMargin")
-            if raw_margin in (None, ""):
-                raise BloFinDemoExecutionBlocked("An active position has no initial-margin value; aggregate margin cannot be confirmed.")
-            try:
-                margin_value = Decimal(str(raw_margin))
-            except Exception as exc:
-                raise BloFinDemoExecutionBlocked("Active position initial margin is invalid.") from exc
-            if not margin_value.is_finite() or margin_value < 0:
-                raise BloFinDemoExecutionBlocked("Active position initial margin is invalid.")
-            active_initial_margin += margin_value
+            # BloFin returns "margin" for isolated positions and
+            # "initialMargin" for cross positions. The latter is not the
+            # isolated position-margin field.
+            active_initial_margin += _position_margin_usdt(row)
 
         if len(active_position_rows) >= self.policy.max_concurrent_positions:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")

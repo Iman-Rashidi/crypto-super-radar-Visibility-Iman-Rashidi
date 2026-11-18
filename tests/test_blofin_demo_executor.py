@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import unittest
+from decimal import Decimal
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_executor import (
@@ -13,6 +14,7 @@ from crypto_super_radar.blofin_demo_executor import (
     BloFinDemoExecutor,
     BloFinDemoRiskPolicy,
     BloFinDemoTradeClient,
+    _position_margin_usdt,
     build_demo_order_plan,
 )
 from crypto_super_radar.blofin_demo_readonly import (
@@ -360,6 +362,37 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
     def test_only_explicitly_allowlisted_post_paths_are_permitted(self):
         with self.assertRaises(BloFinDemoExecutionBlocked):
             self.client._post("/api/v1/account/set-position-mode", {"positionMode": "net_mode"})
+
+
+class BloFinPositionMarginTests(unittest.TestCase):
+    def test_isolated_margin_uses_margin_field(self):
+        self.assertEqual(
+            _position_margin_usdt({
+                "marginMode": "isolated",
+                "margin": "12.345",
+                "initialMargin": "",
+            }),
+            Decimal("12.345"),
+        )
+
+    def test_cross_margin_uses_initial_margin_field(self):
+        self.assertEqual(
+            _position_margin_usdt({
+                "marginMode": "cross",
+                "initialMargin": "45.67",
+                "margin": "1.0",
+            }),
+            Decimal("45.67"),
+        )
+
+    def test_unknown_or_missing_mode_specific_margin_fails_closed(self):
+        for position in (
+            {"marginMode": "isolated", "initialMargin": "12"},
+            {"marginMode": "cross", "margin": "12"},
+            {"marginMode": "unknown", "margin": "12"},
+        ):
+            with self.subTest(position=position), self.assertRaises(BloFinDemoExecutionBlocked):
+                _position_margin_usdt(position)
 
 
 class BloFinDemoEventStoreTests(unittest.TestCase):
