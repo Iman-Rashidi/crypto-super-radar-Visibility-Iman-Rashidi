@@ -2041,7 +2041,7 @@ class WebAppHttpTests(unittest.TestCase):
 
     def test_observer_runner_can_resume_when_request_event_exists_but_results_do_not(self):
         outbox = MagicMock()
-        outbox.has_event.side_effect = [False] * 8
+        outbox.has_event.side_effect = [False] * 4
         with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
             self.assertFalse(web_app._challenge1_observer_results_complete("cycle-resume"))
         self.assertEqual(
@@ -2049,8 +2049,13 @@ class WebAppHttpTests(unittest.TestCase):
             "cycle-resume:AI:nemotron:AI_APPROVAL",
         )
         self.assertEqual(
-            outbox.has_event.call_args_list[4].args[0],
-            "cycle-resume:AI:second_ai:AI_APPROVAL",
+            [call.args[0] for call in outbox.has_event.call_args_list],
+            [
+                "cycle-resume:AI:nemotron:AI_APPROVAL",
+                "cycle-resume:AI:nemotron:AI_VETO",
+                "cycle-resume:AI:nemotron:AI_REVIEW_REQUESTED",
+                "cycle-resume:AI:nemotron:AI_RECOMMENDATION",
+            ],
         )
         outbox.close.assert_called_once()
 
