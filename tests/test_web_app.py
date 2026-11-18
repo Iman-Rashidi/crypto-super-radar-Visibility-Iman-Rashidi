@@ -344,6 +344,34 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
+    def test_challenge1_supervisors_run_before_order_readiness_blocks_execution(self):
+        with open(web_app.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
+        start = source.index("def _run_blofin_demo_execution_job(")
+        end = source.index("\ndef _blofin_demo_autopilot_worker(", start)
+        execution_job = source[start:end]
+
+        reviewer_call = execution_job.index(
+            "_run_challenge1_supervisor_reviews(analysis, asset)"
+        )
+        order_readiness_check = execution_job.index(
+            "_blofin_demo_execution_readiness()",
+            reviewer_call,
+        )
+        self.assertLess(reviewer_call, order_readiness_check)
+
+        blocked_branch = execution_job[order_readiness_check:]
+        blocked_branch = blocked_branch[:blocked_branch.index(
+            "client = BloFinDemoTradeClient(timeout=10.0)"
+        )]
+        self.assertIn('stage="TRADE_READINESS_BLOCKED"', blocked_branch)
+        self.assertIn("ai_review=ai_review", blocked_branch)
+        self.assertIn("ai_reviews=ai_reviews", blocked_branch)
+        self.assertIn("ai_consensus=ai_consensus", blocked_branch)
+        self.assertIn('"orders_submitted": False', blocked_branch)
+        self.assertIn('"trade_executed": False', blocked_branch)
+        self.assertIn("_queue_blofin_completed_job_reports(job_id, instrument_id)", blocked_branch)
+
     def test_blofin_dashboard_inline_javascript_passes_node_syntax_check(self):
         if shutil.which("node") is None:
             self.skipTest("Node.js is not available in this test environment")
