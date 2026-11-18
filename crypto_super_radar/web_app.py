@@ -5334,7 +5334,7 @@ def _start_challenge1_active_position_observer(
         "reason_fa": saved.get("reason_fa") or "بازبینی اولیهٔ پوزیشن باز از روی شواهد ذخیره‌شده.",
         "challenge1_evidence": evidence,
     }
-    synthetic_job_id = f"position-audit:{position_id}:initial"
+    synthetic_job_id = f"position-audit:{position_id}:initial-v2"
     position_snapshot = {
         key: position.get(key)
         for key in (
