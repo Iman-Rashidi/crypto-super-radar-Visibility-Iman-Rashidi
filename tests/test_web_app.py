@@ -1895,3 +1895,60 @@ class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
             web_app.BLOFIN_STATUS_CACHE.update(
                 payload=previous_payload, expires_at=previous_expiry
             )
+
+
+class BloFinUnifiedReadinessTests(unittest.TestCase):
+    def test_unified_credential_source_is_reported_but_read_only_permission_stays_blocked(self):
+        class FakeTradeClient:
+            api_key = "test-unified-key"
+            api_secret = "test-unified-secret"
+            passphrase = "test-unified-passphrase"
+
+            def __init__(self, *, timeout):
+                self.timeout = timeout
+
+            def verify_trade_permission(self):
+                raise web_app.BloFinDemoExecutionBlocked("readOnly=1")
+
+        class FakeEventStore:
+            def trade_budget_status(self):
+                return {
+                    "orders_today": 0,
+                    "orders_total": 0,
+                    "unresolved_orders": 0,
+                    "latest_order_status": None,
+                    "latest_order_age_seconds": None,
+                }
+
+            def close(self):
+                pass
+
+        env = {
+            "BLOFIN_API_KEY": "test-unified-key",
+            "BLOFIN_API_SECRET": "test-unified-secret",
+            "BLOFIN_PASSPHRASE": "test-unified-passphrase",
+            "BLOFIN_DEMO_TRADE_API_KEY": "",
+            "BLOFIN_DEMO_TRADE_API_SECRET": "",
+            "BLOFIN_DEMO_TRADE_PASSPHRASE": "",
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+            "BLOFIN_DEMO_TRADING_ENABLED": "false",
+            "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+            "BLOFIN_DASHBOARD_TOKEN": "",
+        }
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(web_app, "BloFinDemoTradeClient", FakeTradeClient),
+            patch.object(web_app, "storage_backend", return_value="LOCAL_SQLITE"),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=FakeEventStore()),
+        ):
+            result = web_app._blofin_demo_execution_readiness()
+
+        self.assertTrue(result["trade_credentials_configured"])
+        self.assertEqual(result["credential_source"], "UNIFIED_ACCOUNT_KEY")
+        self.assertEqual(result["trade_permission_status"], "READ_ONLY")
+        self.assertFalse(result["trade_permission_verified"])
+        self.assertFalse(result["trading_enabled"])
+        self.assertFalse(result["autopilot_enabled"])
+        self.assertEqual(result["status"], "BLOCKED")
