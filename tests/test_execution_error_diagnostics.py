@@ -12,12 +12,13 @@ class ExecutionErrorDiagnosticTests(unittest.TestCase):
         environment = {
             "BLOFIN_DEMO_TRADE_API_SECRET": "env-secret-value-123",
             "NOTION_API_TOKEN": "notion-token-value-456",
+            "UNIFIED_ACCOUNT_KEY": "unified-account-key-value-789",
         }
         try:
             raise sqlite3.OperationalError(
                 "database is locked; Bearer bearer-secret-value "
                 "token=query-secret-value api_key=assignment-secret-value "
-                "env-secret-value-123 notion-token-value-456"
+                "env-secret-value-123 notion-token-value-456 unified-account-key-value-789"
             )
         except sqlite3.OperationalError as exc:
             diagnostic = build_execution_error_diagnostic(
@@ -53,7 +54,7 @@ class ExecutionErrorDiagnosticTests(unittest.TestCase):
         for secret in (
             "env-secret-value-123", "notion-token-value-456",
             "bearer-secret-value", "query-secret-value",
-            "assignment-secret-value",
+            "assignment-secret-value", "unified-account-key-value-789",
         ):
             self.assertNotIn(secret, serialized)
         self.assertIn("[REDACTED]", serialized)
