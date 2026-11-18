@@ -919,6 +919,11 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         try:
             fresh_signal = signal_record(signal_id="fresh-completed-candle")
             fresh_signal["challenge1_evidence"]["confirmation_candle"]["open_time_utc"] = "2026-11-13T18:15:00+00:00"
+            fresh_experience_id = store.record_challenge1_decision(
+                instrument_id="BTC-USDT",
+                challenge_record=fresh_signal,
+            )
+            fresh_signal["learning_experience_id"] = fresh_experience_id
             fresh = executor.execute(
                 fresh_signal,
                 inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
