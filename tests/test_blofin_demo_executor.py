@@ -148,6 +148,31 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["side"], "LONG")
 
+    def test_challenge1_v3_accepts_closed_5m_pattern_evidence(self):
+        record = signal_record()
+        evidence = record["challenge1_evidence"]
+        evidence["decision_engine_version"] = "CHALLENGE_1_LOCAL_RULES_V3"
+        evidence["setup_timeframe"] = "5m"
+        evidence["candles_5m"] = [{"time_utc": "2026-11-18T10:00:00Z"}]
+        plan = build_demo_order_plan(
+            record, instrument_record(), inst_id="BTC-USDT",
+            equity_usdt=1000, leverage=1,
+            policy=BloFinDemoRiskPolicy(max_leverage=1, min_reward_risk=1.0),
+        )
+        self.assertEqual(plan["side"], "LONG")
+
+    def test_risk_policy_supports_four_positions_with_aggregate_margin_cap(self):
+        policy = BloFinDemoRiskPolicy(
+            max_concurrent_positions=4,
+            max_total_margin_usage_pct=0.25,
+        )
+        self.assertEqual(policy.max_concurrent_positions, 4)
+        self.assertEqual(policy.max_total_margin_usage_pct, 0.25)
+        with self.assertRaises(ValueError):
+            BloFinDemoRiskPolicy(max_concurrent_positions=5)
+        with self.assertRaises(ValueError):
+            BloFinDemoRiskPolicy(max_total_margin_usage_pct=0.0)
+
     def test_challenge1_rejects_unknown_evidence_engine_version(self):
         record = signal_record()
         record["challenge1_evidence"]["decision_engine_version"] = "UNRECOGNIZED_VERSION"

@@ -37,10 +37,10 @@ def candle_rows(now_ms, interval_ms, count=65, unclosed_last=False):
 class Challenge1CandleTests(unittest.TestCase):
     def test_completed_frame_discards_unclosed_bars_and_preserves_volume(self):
         now = 2_000_000_000_000
-        rows = candle_rows(now, 15 * 60 * 1000, count=65, unclosed_last=True)
+        rows = candle_rows(now, 5 * 60 * 1000, count=65, unclosed_last=True)
         frame = _completed_frame(
-            FakeBloFin({"15m": rows}), inst_id="BTC-USDT",
-            bar="15m", now_ms=now, minimum_rows=60,
+            FakeBloFin({"5m": rows}), inst_id="BTC-USDT",
+            bar="5m", now_ms=now, minimum_rows=60,
         )
         self.assertEqual(len(frame), 64)
         self.assertEqual(float(frame["volume"].iloc[-1]), 1000.0)
@@ -49,7 +49,7 @@ class Challenge1CandleTests(unittest.TestCase):
     def test_no_trade_is_a_valid_result_when_no_confirmed_pattern_exists(self):
         now = 2_000_000_000_000
         client = FakeBloFin({
-            "15m": candle_rows(now, 15 * 60 * 1000),
+            "5m": candle_rows(now, 5 * 60 * 1000),
             "1H": candle_rows(now, 60 * 60 * 1000),
         })
         with patch("crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates", return_value=[]):
@@ -61,7 +61,7 @@ class Challenge1CandleTests(unittest.TestCase):
     def test_conflicting_confirmed_patterns_block_entry(self):
         now = 2_000_000_000_000
         client = FakeBloFin({
-            "15m": candle_rows(now, 15 * 60 * 1000),
+            "5m": candle_rows(now, 5 * 60 * 1000),
             "1H": candle_rows(now, 60 * 60 * 1000),
         })
         bullish = {"name_en": "Bullish Engulfing", "direction": "BULLISH", "score": 13}
@@ -77,7 +77,7 @@ class Challenge1CandleTests(unittest.TestCase):
     def test_volume_and_opposing_hourly_context_are_advisory_not_entry_vetoes(self):
         now = 2_000_000_000_000
         client = FakeBloFin({
-            "15m": candle_rows(now, 15 * 60 * 1000),
+            "5m": candle_rows(now, 5 * 60 * 1000),
             "1H": candle_rows(now, 60 * 60 * 1000),
         })
         bullish = {"name_en": "Bullish Engulfing", "direction": "BULLISH", "score": 13}
@@ -97,11 +97,17 @@ class Challenge1CandleTests(unittest.TestCase):
             result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
         self.assertEqual(result["signal"], "LONG")
         self.assertEqual(result["execution"]["status"], "PASS")
+        self.assertAlmostEqual(
+            abs(result["take_profit_usd"] - result["entry_price_usd"])
+            / abs(result["entry_price_usd"] - result["stop_loss_usd"]),
+            1.0,
+            places=6,
+        )
         self.assertTrue(result["challenge1_evidence"]["volume_is_advisory"])
         self.assertTrue(result["challenge1_evidence"]["context_is_advisory"])
         self.assertTrue(result["challenge1_evidence"]["context_conflict"])
-        self.assertIn("challenge1-v2:", result["signal_id"])
-        self.assertGreaterEqual(len(result["challenge1_evidence"]["candles_15m"]), 30)
+        self.assertIn("challenge1-v3:", result["signal_id"])
+        self.assertGreaterEqual(len(result["challenge1_evidence"]["candles_5m"]), 30)
         self.assertGreaterEqual(len(result["challenge1_evidence"]["candles_1h"]), 30)
 
     def test_unavailable_one_hour_context_does_not_block_a_valid_pattern(self):
@@ -112,7 +118,7 @@ class Challenge1CandleTests(unittest.TestCase):
                     raise RuntimeError("1H feed unavailable")
                 return super().get_candles(inst_id, bar=bar, limit=limit)
 
-        client = ContextUnavailable({"15m": candle_rows(now, 15 * 60 * 1000)})
+        client = ContextUnavailable({"5m": candle_rows(now, 5 * 60 * 1000)})
         bullish = {"name_en": "Hammer", "direction": "BULLISH", "score": 10}
         with (
             patch(

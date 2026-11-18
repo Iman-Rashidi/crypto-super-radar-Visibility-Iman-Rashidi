@@ -293,9 +293,9 @@ def analyze_blofin_challenge1(
     if not instrument.endswith("-USDT"):
         raise ValueError("Challenge 1 accepts only USDT linear Demo instrument IDs.")
 
-    # Thirty completed 15m bars cover the 20-bar breakout and ATR warm-up.
+    # Thirty completed 5m bars cover the 20-bar breakout and ATR warm-up.
     # The 1H frame is optional context only; an unavailable context feed must not
-    # suppress a valid, fully completed 15m candle-pattern setup.
+    # suppress a valid, fully completed 5m candle-pattern setup.
     frame_5m = _completed_frame(client, inst_id=instrument, bar="5m", now_ms=now_ms, minimum_rows=30)
     context_data_status = "AVAILABLE"
     try:
@@ -335,9 +335,9 @@ def analyze_blofin_challenge1(
     decision_code = "CONFLICTING_PATTERNS" if bullish and bearish else "NO_TRADE"
     context_conflict = False
     if bullish and bearish:
-        reason_fa = "الگوهای صعودی و نزولی هم‌زمان در ۱۵ دقیقه دیده شدند؛ به‌دلیل تعارض، معامله انجام نمی‌شود."
+        reason_fa = "الگوهای صعودی و نزولی هم‌زمان در ۵ دقیقه دیده شدند؛ به‌دلیل تعارض، معامله انجام نمی‌شود."
     elif not patterns_5m:
-        reason_fa = "در تایم‌فریم ۱۵ دقیقه الگوی ورود معتبر پیدا نشد؛ عدم معامله تصمیم معتبر است."
+        reason_fa = "در تایم‌فریم ۵ دقیقه الگوی ورود معتبر پیدا نشد؛ عدم معامله تصمیم معتبر است."
     else:
         chosen = max(patterns_5m, key=lambda item: abs(int(item.get("score") or 0)))
         direction = str(chosen["direction"])
@@ -369,7 +369,7 @@ def analyze_blofin_challenge1(
             else:
                 entry, stop, target = entry_value, stop_value, target_value
                 signal_bar = _time_label(frame_5m)
-                signal_id = f"challenge1-v3:{instrument}:15m:{signal_bar}:{signal}"
+                signal_id = f"challenge1-v3:{instrument}:5m:{signal_bar}:{signal}"
                 execution = {
                     "status": "PASS",
                     "direction": signal,

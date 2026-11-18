@@ -260,10 +260,10 @@ class WebAppHttpTests(unittest.TestCase):
                 "challenge1_evidence": {
                     "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
                     "decision": "NO_TRADE",
-                    "setup_timeframe": "15m",
+                    "setup_timeframe": "5m",
                     "context_timeframe": "1H",
                     "detected_patterns": [],
-                    "candles_15m": candles,
+                    "candles_5m": candles,
                     "candles_1h": [],
                     "confirmation_candle": {"open_time_utc": candles[-1]["time_utc"]},
                 },
@@ -272,13 +272,13 @@ class WebAppHttpTests(unittest.TestCase):
         snapshot = web_app._blofin_activity_journal_snapshot("journal-job-001", "BTC-USDT", job)
         self.assertEqual(snapshot["experience_id"], "blofin-ch1-test-journal-001")
         self.assertEqual(snapshot["signal"], "NO_TRADE")
-        self.assertEqual(len(snapshot["candles_15m"]), 8)
+        self.assertEqual(len(snapshot["candles_5m"]), 8)
         self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
         events = web_app._blofin_job_notion_events("journal-job-001", "BTC-USDT", job)
         self.assertEqual(events[0]["ai_decision"], "NOT_CALLED")
         self.assertFalse(any(event["actor"] == "AI Supervisor" for event in events))
 
-    def test_profit_exit_decision_requires_exact_robot_position_and_positive_cushion(self):
+    def test_profit_exit_requires_positive_net_after_entry_and_exit_costs(self):
         order = {
             "instrument_id": "BTC-USDT",
             "position_id": "position-123",
@@ -294,32 +294,39 @@ class WebAppHttpTests(unittest.TestCase):
         }
         self.assertEqual(
             web_app._blofin_demo_profit_exit_decision(
-                order, position, 104.1, now=10_100,
-                minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+                order, position, 104.1,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
             ),
-            "TAKE_PROFIT_LEVEL_REACHED",
+            "NET_PROFIT_AFTER_FEES",
         )
         self.assertIsNone(
             web_app._blofin_demo_profit_exit_decision(
-                order, {**position, "unrealizedPnl": "-0.10"}, 104.1,
-                now=10_100, minimum_profit_usdt=0.50,
+                order, {**position, "unrealizedPnl": "0.20"}, 104.1,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
             )
         )
         self.assertIsNone(
             web_app._blofin_demo_profit_exit_decision(
                 order, {**position, "positionId": "different-position"}, 104.1,
-                now=10_100, minimum_profit_usdt=0.50,
+                entry_fee_usdt=0.01, estimated_close_fee_usdt=0.01,
             )
         )
         self.assertIsNone(
             web_app._blofin_demo_profit_exit_decision(
                 order, {**position, "instId": "XRP-USDT"}, 104.1,
-                now=10_100, minimum_profit_usdt=0.50,
+                entry_fee_usdt=0.01, estimated_close_fee_usdt=0.01,
             )
         )
 
-    def test_automatic_close_rechecks_profit_before_any_close_write(self):
+    def test_automatic_close_rechecks_fee_aware_profit_before_close_write(self):
         close_calls = []
+
         class FakeManualClient:
             def get_positions(self, *, inst_id=None):
                 return [{
@@ -328,29 +335,83 @@ class WebAppHttpTests(unittest.TestCase):
                     "positionSide": "net",
                     "marginMode": "isolated",
                     "positions": "0.1",
-                    "unrealizedPnl": "0.10",
+                    "unrealizedPnl": "0.20",
                 }]
+
+            def get_mark_price(self, *, inst_id):
+                return [{"markPrice": "100"}]
+
+            def get_tradable_instrument(self, inst_id):
+                return {"contractValue": 0.001}
+
             def close_futures_position(self, **kwargs):
                 close_calls.append(kwargs)
                 return {"code": "0", "data": [{"code": "0", "orderId": "close-789"}]}
 
+        store = MagicMock()
         with (
-            patch.dict(os.environ, {"BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT": "0.50"}),
+            patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=store),
+        ):
+            result = web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT",
+                position_id="position-789",
+                action_source="AUTOPILOT",
+                audit_id="robot-order-789",
+                exit_reason="NET_PROFIT_AFTER_FEES",
+                entry_fee_usdt=0.01,
+                taker_fee_rate=0.0006,
+                slippage_buffer_rate=0.0,
+                minimum_net_profit_usdt=0.01,
+            )
+        self.assertEqual(result["status"], "CLOSE_ACCEPTED")
+        self.assertGreater(result["estimated_net_profit_usdt"], 0.01)
+        self.assertEqual(len(close_calls), 1)
+        self.assertEqual(close_calls[0]["position_id"], "position-789")
+        self.assertEqual(store.record_manual_action.call_args_list[0].args[1], "AUTO_POSITION_CLOSE_REQUESTED")
+
+    def test_automatic_close_refuses_if_fees_erase_unrealized_profit(self):
+        close_calls = []
+
+        class FakeManualClient:
+            def get_positions(self, *, inst_id=None):
+                return [{
+                    "instId": "BTC-USDT",
+                    "positionId": "position-790",
+                    "positionSide": "net",
+                    "marginMode": "isolated",
+                    "positions": "0.1",
+                    "unrealizedPnl": "0.01",
+                }]
+
+            def get_mark_price(self, *, inst_id):
+                return [{"markPrice": "100"}]
+
+            def get_tradable_instrument(self, inst_id):
+                return {"contractValue": 0.001}
+
+            def close_futures_position(self, **kwargs):
+                close_calls.append(kwargs)
+                return {"code": "0", "data": [{"code": "0", "orderId": "close-790"}]}
+
+        with (
             patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
             patch.object(web_app, "BloFinDemoEventStore") as store_factory,
             self.assertRaises(web_app.BloFinDemoExecutionBlocked),
         ):
             web_app._blofin_manual_close_position(
                 instrument_id="BTC-USDT",
-                position_id="position-789",
+                position_id="position-790",
                 action_source="AUTOPILOT",
-                audit_id="robot-order-789",
-                exit_reason="TAKE_PROFIT_LEVEL_REACHED",
+                audit_id="robot-order-790",
+                exit_reason="NET_PROFIT_AFTER_FEES",
+                entry_fee_usdt=0.02,
+                minimum_net_profit_usdt=0.01,
             )
         self.assertEqual(close_calls, [])
         store_factory.assert_not_called()
 
-    def test_profit_time_exit_requires_minimum_positive_profit(self):
+    def test_profit_exit_has_no_time_limit_and_uses_net_profit_only(self):
         order = {
             "instrument_id": "ETH-USDT",
             "position_id": "position-456",
@@ -364,18 +425,24 @@ class WebAppHttpTests(unittest.TestCase):
             "positions": "-0.1",
             "unrealizedPnl": "0.75",
         }
+        # The decision has no age/maximum-holding parameter: only net PnL and costs decide.
         self.assertEqual(
             web_app._blofin_demo_profit_exit_decision(
-                order, position, 95.0, now=87_500,
-                minimum_profit_usdt=0.50, maximum_hold_seconds=86_400,
+                order, position, 95.0,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
             ),
-            "MAX_HOLD_PROFIT_ONLY",
+            "NET_PROFIT_AFTER_FEES",
         )
         self.assertIsNone(
             web_app._blofin_demo_profit_exit_decision(
                 order, {**position, "unrealizedPnl": "0.20"}, 95.0,
-                now=87_500, minimum_profit_usdt=0.50,
-                maximum_hold_seconds=86_400,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
             )
         )
 
@@ -1423,11 +1490,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
-    def test_autopilot_next_scan_aligns_to_next_15m_close(self):
+    def test_autopilot_next_scan_repeats_after_30_seconds(self):
         now = datetime(2026, 11, 17, 16, 23, 32, tzinfo=timezone.utc)
         delay_seconds, next_at = web_app._blofin_demo_next_15m_scan_window(now)
-        self.assertEqual(delay_seconds, 391)
-        self.assertEqual(next_at, "2026-11-17T16:30:03+00:00")
+        self.assertEqual(delay_seconds, 30)
+        self.assertEqual(next_at, "2026-11-17T16:24:02+00:00")
 
     def test_autopilot_catches_candle_close_that_occurs_during_scan(self):
         started = datetime(2026, 11, 17, 17, 14, 22, tzinfo=timezone.utc)
@@ -1435,8 +1502,8 @@ class WebAppHttpTests(unittest.TestCase):
         delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
             started, now_utc=finished,
         )
-        self.assertEqual(delay, 5)
-        self.assertEqual(next_at, "2026-11-17T17:15:48+00:00")
+        self.assertEqual(delay, 30)
+        self.assertEqual(next_at, "2026-11-17T17:16:13+00:00")
 
     def test_autopilot_keeps_next_boundary_when_scan_finishes_before_it(self):
         started = datetime(2026, 11, 17, 17, 15, 5, tzinfo=timezone.utc)
@@ -1444,8 +1511,8 @@ class WebAppHttpTests(unittest.TestCase):
         delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
             started, now_utc=finished,
         )
-        self.assertEqual(delay, 823)
-        self.assertEqual(next_at, "2026-11-17T17:30:03+00:00")
+        self.assertEqual(delay, 30)
+        self.assertEqual(next_at, "2026-11-17T17:16:50+00:00")
 
     def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
         class StopAfterTwoCycles(Exception):
@@ -1516,7 +1583,7 @@ class WebAppHttpTests(unittest.TestCase):
                 }),
                 patch.object(web_app.BLOFIN_AUTOPILOT_STOP_EVENT, "wait", side_effect=stop_after_second_cycle_sleep),
                 patch.object(web_app, "_blofin_demo_next_15m_scan_window", return_value=(
-                    900, "2026-11-17T16:30:03+00:00"
+                    30, "2026-11-17T16:24:02+00:00"
                 )),
                 patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
             ):
@@ -1525,12 +1592,12 @@ class WebAppHttpTests(unittest.TestCase):
 
             self.assertEqual(len(cycle_ids), 2)
             self.assertEqual(observed_profiles, ["CHALLENGE_1", "CHALLENGE_1"])
-            self.assertEqual(sleep_calls, [900, 900])
+            self.assertEqual(sleep_calls, [30, 30])
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
-            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_15M_CANDLE")
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_SEARCH")
             self.assertEqual(
                 web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"],
-                "2026-11-17T16:30:03+00:00",
+                "2026-11-17T16:24:02+00:00",
             )
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
             self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])
