@@ -9494,7 +9494,8 @@ def _challenge1_observer_notion_events(
                 "event_type": "AI_REVIEW_REQUESTED",
                 "actor": actor,
                 "status": "PENDING" if is_configured else "WARNING",
-                "ai_model": model,
+                "ai_provider": str(reviewer.get("provider") or ""),
+                "ai_model": str(reviewer.get("model") or ""),
                 "ai_analysis": "",
                 "ai_suggestion": "AUDIT_REQUESTED" if is_configured else "NOT_CONFIGURED",
                 "reason": (
@@ -9519,7 +9520,8 @@ def _challenge1_observer_notion_events(
             "event_type": event_type,
             "actor": actor,
             "status": event_status,
-            "ai_model": model,
+            "ai_provider": str(reviewer.get("provider") or ""),
+            "ai_model": str(reviewer.get("returned_model") or reviewer.get("model") or ""),
             "ai_analysis": reason,
             "ai_suggestion": verdict,
             "reason": "Post-decision audit only. This result did not authorize or alter any order or position.",
@@ -9588,8 +9590,11 @@ def _run_challenge1_observer_job(
         "position": position,
     }
     requested = []
+    primary_status = ai_connection_status()
+    primary_provider = str(primary_status.get("provider") or "OpenRouter")
+    primary_model = str(primary_status.get("model") or "")
     for reviewer_id, provider, model in (
-        ("nemotron", "OpenRouter", (os.getenv("CSR_AI_MODEL") or "").strip()),
+        ("nemotron", primary_provider, primary_model),
         ("second_ai", (os.getenv("CSR_SECOND_AI_PROVIDER") or "").strip(),
          (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()),
     ):
@@ -9632,7 +9637,7 @@ def _run_challenge1_observer_job(
                 "entry_gate_enforced": False, "execution_effect": "NONE",
             }
             for reviewer_id, provider, model in (
-                ("nemotron", "OpenRouter", (os.getenv("CSR_AI_MODEL") or "").strip()),
+                ("nemotron", primary_provider, primary_model),
                 ("second_ai", (os.getenv("CSR_SECOND_AI_PROVIDER") or "").strip(),
                  (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()),
             )
