@@ -1066,11 +1066,13 @@ def _call_challenge1_observer(
     error_stage = "HTTP_REQUEST"
     finish_reason = None
     content_length = None
+    request_attempt_count = 0
     try:
         response = (http_post or requests.post)(
             endpoint, headers=headers, json=payload, timeout=(8, 28),
             allow_redirects=False,
         )
+        request_attempt_count += 1
         latency_ms = int((time.monotonic() - started) * 1000)
         http_status = int(getattr(response, "status_code", 0) or 0)
         if http_status != 200:
@@ -1087,7 +1089,8 @@ def _call_challenge1_observer(
                 "response_validated": False, "model_verified": False,
                 "observation_only": True, "entry_gate_enforced": False,
                 "execution_effect": "NONE", "http_status": http_status,
-                "latency_ms": latency_ms, "requested_at_utc": requested_at,
+                "latency_ms": latency_ms, "request_attempt_count": request_attempt_count,
+                "requested_at_utc": requested_at,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "error_code": code, "error_stage": "HTTP_STATUS",
                 "error_message": "ناظر مستقل پاسخ موفق نداد؛ اثر معاملاتی اعمال نشد.",
@@ -1101,8 +1104,54 @@ def _call_challenge1_observer(
         finish_reason = choice.get("finish_reason") or choice.get("native_finish_reason")
         message = choice.get("message")
         error_stage = "CONTENT_EXTRACTION"
-        content = _observer_message_text(message, choice)
+        try:
+            content = _observer_message_text(message, choice)
+        except ValueError as extraction_error:
+            if str(extraction_error) != "OBSERVER_CONTENT_MISSING":
+                raise
+            # Some OpenAI-compatible free-model routes return HTTP 200 but put
+            # no final text in message.content. Retry once without JSON-mode
+            # response_format, while explicitly requiring the final JSON in
+            # the user-visible content field. Never treat reasoning/tool data
+            # as a review and never fabricate a verdict.
+            if not _observer_rate_limit(reviewer_id):
+                raise ValueError("OBSERVER_EMPTY_CONTENT_RETRY_RATE_LIMITED") from extraction_error
+            retry_payload = copy.deepcopy(payload)
+            retry_payload.pop("response_format", None)
+            retry_payload["max_tokens"] = 900
+            retry_payload["messages"][0]["content"] = (
+                str(retry_payload["messages"][0]["content"])
+                + " Put the final answer in the assistant message content field. "
+                + "Do not return an empty content field or a tool call. "
+                + "If evidence is insufficient, return verdict INSUFFICIENT_DATA."
+            )
+            retry_payload["messages"][1]["content"] = (
+                "Return one compact JSON object in the final message content, with keys "
+                "verdict, reason_fa, observations, risk_flags. Evidence:\n"
+                + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            )
+            error_stage = "CONTENT_EXTRACTION_RETRY"
+            response = (http_post or requests.post)(
+                endpoint, headers=headers, json=retry_payload, timeout=(8, 28),
+                allow_redirects=False,
+            )
+            request_attempt_count += 1
+            latency_ms = int((time.monotonic() - started) * 1000)
+            http_status = int(getattr(response, "status_code", 0) or 0)
+            if http_status != 200:
+                raise ValueError("OBSERVER_RETRY_HTTP_ERROR")
+            error_stage = "PROVIDER_RESPONSE_JSON_RETRY"
+            body = response.json()
+            choices = body.get("choices") if isinstance(body, dict) else None
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise ValueError("OBSERVER_RETRY_CHOICES_MISSING")
+            choice = choices[0]
+            finish_reason = choice.get("finish_reason") or choice.get("native_finish_reason")
+            message = choice.get("message")
+            error_stage = "CONTENT_EXTRACTION_RETRY"
+            content = _observer_message_text(message, choice)
         content_length = len(content)
+        latency_ms = int((time.monotonic() - started) * 1000)
         error_stage = "JSON_PARSE"
         document = _extract_json(content)
         returned_model = body.get("model") if isinstance(body, dict) else None
@@ -1114,6 +1163,7 @@ def _call_challenge1_observer(
                 "model_verified": False, "observation_only": True,
                 "entry_gate_enforced": False, "execution_effect": "NONE",
                 "http_status": http_status, "latency_ms": latency_ms,
+                "request_attempt_count": request_attempt_count,
                 "requested_at_utc": requested_at,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "error_code": "RETURNED_MODEL_MISSING", "error_stage": "MODEL_VALIDATION",
@@ -1127,7 +1177,8 @@ def _call_challenge1_observer(
                 "response_validated": False, "model_verified": False,
                 "observation_only": True, "entry_gate_enforced": False,
                 "execution_effect": "NONE", "http_status": http_status,
-                "latency_ms": latency_ms, "requested_at_utc": requested_at,
+                "latency_ms": latency_ms, "request_attempt_count": request_attempt_count,
+                "requested_at_utc": requested_at,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "error_code": "RETURNED_MODEL_MISMATCH", "error_stage": "MODEL_VALIDATION",
                 "finish_reason": finish_reason, "content_length": content_length,
@@ -1159,7 +1210,8 @@ def _call_challenge1_observer(
             "response_validated": True, "model_verified": True,
             "observation_only": True, "entry_gate_enforced": False,
             "execution_effect": "NONE", "http_status": http_status,
-            "latency_ms": latency_ms, "requested_at_utc": requested_at,
+            "latency_ms": latency_ms, "request_attempt_count": request_attempt_count,
+            "requested_at_utc": requested_at,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "error_code": None, "error_stage": None,
             "finish_reason": finish_reason, "content_length": content_length,
@@ -1173,6 +1225,7 @@ def _call_challenge1_observer(
             "entry_gate_enforced": False, "execution_effect": "NONE",
             "http_status": http_status,
             "latency_ms": int((time.monotonic() - started) * 1000),
+            "request_attempt_count": request_attempt_count,
             "requested_at_utc": requested_at,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "error_code": str(exc)[:80] if isinstance(exc, ValueError) else type(exc).__name__,
