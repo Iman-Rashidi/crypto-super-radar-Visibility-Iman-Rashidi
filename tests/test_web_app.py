@@ -82,6 +82,40 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_disabled_autopilot_startup_clears_stale_next_cycle_metadata(self):
+        previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        try:
+            web_app.BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": True,
+                "status": "WAITING_FOR_NEXT_5M_CANDLE",
+                "search_continues": True,
+                "next_cycle_scheduled": True,
+                "next_cycle_at_utc": "2026-11-18T12:25:03+00:00",
+                "next_cycle_in_seconds": 120,
+            })
+            with patch.dict(os.environ, {
+                "BLOFIN_DEMO_AUTOPILOT_ROLE": "WEB",
+                "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+            }), patch.object(
+                web_app, "_restore_blofin_autopilot_state",
+            ), patch.object(
+                web_app, "_schedule_blofin_demo_startup_recovery",
+            ), patch.object(
+                web_app, "_persist_blofin_autopilot_state",
+            ):
+                web_app._start_blofin_demo_autopilot()
+
+            state = web_app.BLOFIN_AUTOPILOT_STATE
+            self.assertFalse(state["enabled"])
+            self.assertEqual(state["status"], "DISABLED")
+            self.assertFalse(state["search_continues"])
+            self.assertFalse(state["next_cycle_scheduled"])
+            self.assertIsNone(state["next_cycle_at_utc"])
+            self.assertIsNone(state["next_cycle_in_seconds"])
+        finally:
+            web_app.BLOFIN_AUTOPILOT_STATE.clear()
+            web_app.BLOFIN_AUTOPILOT_STATE.update(previous)
+
     def test_notion_sync_worker_error_is_visible_in_status_api(self):
         previous = dict(web_app.NOTION_EVENT_SYNC_STATE)
         try:
@@ -343,6 +377,73 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(report["events_fa"][0]["stage_fa"], "تحلیل و انتخاب سناریوی موج الیوت")
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
+
+    def test_autopilot_ai_summary_exposes_actual_reviewer_metadata_only(self):
+        job = {
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron",
+                    "review": {
+                        "provider": "OpenRouter",
+                        "model": "configured-model",
+                        "returned_model": "actual-model",
+                        "status": "APPROVED",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": True,
+                        "model_verified": True,
+                        "request_started_at_utc": "2026-11-18T12:30:00+00:00",
+                        "completed_at_utc": "2026-11-18T12:30:02+00:00",
+                        "http_status": 200,
+                        "latency_ms": 2000,
+                        "raw_response": "must not be projected",
+                        "api_key": "must never be projected",
+                    },
+                },
+            ],
+        }
+
+        summary = web_app._blofin_ai_review_summary(job)
+
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["reviewer_id"], "nemotron")
+        self.assertEqual(summary[0]["provider"], "OpenRouter")
+        self.assertEqual(summary[0]["model"], "configured-model")
+        self.assertEqual(summary[0]["returned_model"], "actual-model")
+        self.assertEqual(summary[0]["response_source"], "LIVE_API")
+        self.assertTrue(summary[0]["response_validated"])
+        self.assertTrue(summary[0]["model_verified"])
+        self.assertEqual(summary[0]["http_status"], 200)
+        self.assertNotIn("raw_response", summary[0])
+        self.assertNotIn("api_key", summary[0])
+
+    def test_challenge1_supervisors_run_before_order_readiness_blocks_execution(self):
+        with open(web_app.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
+        start = source.index("def _run_blofin_demo_execution_job(")
+        end = source.index("\ndef _blofin_demo_autopilot_worker(", start)
+        execution_job = source[start:end]
+
+        reviewer_call = execution_job.index(
+            "_run_challenge1_supervisor_reviews(analysis, asset)"
+        )
+        order_readiness_check = execution_job.index(
+            "_blofin_demo_execution_readiness()",
+            reviewer_call,
+        )
+        self.assertLess(reviewer_call, order_readiness_check)
+
+        blocked_branch = execution_job[order_readiness_check:]
+        blocked_branch = blocked_branch[:blocked_branch.index(
+            "client = BloFinDemoTradeClient(timeout=10.0)"
+        )]
+        self.assertIn('stage="TRADE_READINESS_BLOCKED"', blocked_branch)
+        self.assertIn("ai_review=ai_review", blocked_branch)
+        self.assertIn("ai_reviews=ai_reviews", blocked_branch)
+        self.assertIn("ai_consensus=ai_consensus", blocked_branch)
+        self.assertIn('"orders_submitted": False', blocked_branch)
+        self.assertIn('"trade_executed": False', blocked_branch)
+        self.assertIn("_queue_blofin_completed_job_reports(job_id, instrument_id)", blocked_branch)
 
     def test_blofin_dashboard_inline_javascript_passes_node_syntax_check(self):
         if shutil.which("node") is None:

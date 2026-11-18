@@ -4570,33 +4570,6 @@ def _run_blofin_demo_execution_job(
             )
             return
 
-        order_readiness = _blofin_demo_execution_readiness()
-        if order_readiness.get("status") != "READY":
-            reason_fa = (
-                order_readiness.get("message_fa")
-                or "پیش‌نیازهای اجرای سفارش BloFin Demo تأیید نشد."
-            )
-            if learning_experience_id and not store.has_final_experience(learning_experience_id):
-                store.record_experience_not_executed(
-                    experience_id=learning_experience_id,
-                    instrument_id=instrument_id,
-                    signal=learning_signal,
-                    stage="TRADE_READINESS_BLOCKED",
-                    reason=str(reason_fa),
-                )
-            _set_blofin_execution_job(
-                job_id, "completed", stage="TRADE_READINESS_BLOCKED",
-                message_fa=str(reason_fa) + " تحلیل و علت عدم اجرا در حافظه ثبت شد.",
-                analysis=gate_summary, trade_context=trade_context,
-                result={
-                    "status": "BLOCKED", "environment": "BLOFIN_DEMO",
-                    "reason_fa": str(reason_fa),
-                    "learning_experience_id": learning_experience_id,
-                    "orders_submitted": False, "trade_executed": False,
-                },
-            )
-            return
-
         signal_bar = mtf_signal["signal_bar_open_utc"]
         record.update({
             "signal_id": mtf_signal["signal_id"],
@@ -4736,6 +4709,52 @@ def _run_blofin_demo_execution_job(
             "ai_status": ai_status,
             "second_ai_review": second_ai_review,
         })
+        order_readiness = _blofin_demo_execution_readiness()
+        if order_readiness.get("status") != "READY":
+            reason_fa = (
+                order_readiness.get("message_fa")
+                or "پیش‌نیازهای اجرای سفارش BloFin Demo تأیید نشد."
+            )
+            if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                store.record_experience_not_executed(
+                    experience_id=learning_experience_id,
+                    instrument_id=instrument_id,
+                    signal=learning_signal,
+                    stage="TRADE_READINESS_BLOCKED",
+                    reason=str(reason_fa),
+                )
+            _set_blofin_execution_job(
+                job_id, "completed", stage="TRADE_READINESS_BLOCKED",
+                message_fa=(
+                    str(reason_fa)
+                    + " هر دو ناظر مستقل اجرا و نتیجه‌شان ثبت شد؛ هیچ سفارشی ارسال نشد."
+                ),
+                ai_review=ai_review,
+                ai_reviews=ai_reviews,
+                ai_consensus=ai_consensus,
+                ai_status=ai_status,
+                analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
+                result={
+                    **challenge_record,
+                    "status": "BLOCKED",
+                    "environment": "BLOFIN_DEMO",
+                    "learning_experience_id": learning_experience_id,
+                    "ai_review": ai_review,
+                    "ai_reviews": ai_reviews,
+                    "ai_consensus": ai_consensus,
+                    "ai_status": ai_status,
+                    "second_ai_review": second_ai_review,
+                    "reason_fa": str(reason_fa),
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                },
+                completed_at_utc=datetime.now(timezone.utc).isoformat(),
+            )
+            _queue_blofin_completed_job_reports(job_id, instrument_id)
+            return
+
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
             max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),
@@ -8136,6 +8155,10 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": False, "status": "DISABLED",
+                    "search_continues": False,
+                    "next_cycle_scheduled": False,
+                    "next_cycle_at_utc": None,
+                    "next_cycle_in_seconds": None,
                     "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
                 })
             _persist_blofin_autopilot_state()
@@ -8189,6 +8212,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                     finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 summary = _blofin_autopilot_cycle_summary(finished_job)
                 finished_result = finished_job.get("result") if isinstance(finished_job.get("result"), dict) else {}
+                ai_review_summary = _blofin_ai_review_summary(finished_job)
                 batch_results.append({
                     "instrument_id": instrument_id,
                     "job_id": job_id,
@@ -8202,6 +8226,8 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                         (finished_job.get("error") or {}).get("type")
                         if isinstance(finished_job.get("error"), dict) else None
                     ),
+                    "ai_review_summary": ai_review_summary,
+                    "ai_consensus": finished_job.get("ai_consensus") or finished_result.get("ai_consensus"),
                 })
                 batch_jobs.append((job_id, instrument_id))
             job_id, instrument_id = batch_jobs[-1]
@@ -8547,6 +8573,10 @@ def _start_blofin_demo_autopilot() -> None:
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
                 "enabled": False, "status": "DISABLED",
+                "search_continues": False,
+                "next_cycle_scheduled": False,
+                "next_cycle_at_utc": None,
+                "next_cycle_in_seconds": None,
                 "last_message_fa": "BLOFIN_DEMO_AUTOPILOT_ENABLED فعال نیست.",
             })
         _persist_blofin_autopilot_state()
@@ -8577,6 +8607,37 @@ def _demo_ai_review_approved(review: Any) -> bool:
         and bool(str(review.get("model") or "").strip())
         and bool(str(review.get("returned_model") or "").strip())
     )
+
+def _blofin_ai_review_summary(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose reviewer verification metadata without leaking prompts or credentials."""
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    review_rows = job.get("ai_reviews")
+    if not isinstance(review_rows, list):
+        review_rows = result.get("ai_reviews")
+    summary: list[dict[str, Any]] = []
+    for review_row in review_rows if isinstance(review_rows, list) else []:
+        if not isinstance(review_row, dict):
+            continue
+        review_payload = review_row.get("review")
+        review_payload = review_payload if isinstance(review_payload, dict) else review_row
+        summary.append({
+            "reviewer_id": review_row.get("reviewer_id") or review_payload.get("reviewer_id"),
+            "provider": review_payload.get("provider"),
+            "model": review_payload.get("model") or review_payload.get("configured_model"),
+            "returned_model": review_payload.get("returned_model"),
+            "status": review_payload.get("status") or "UNKNOWN",
+            "request_attempted": review_payload.get("request_attempted"),
+            "response_source": review_payload.get("response_source"),
+            "response_validated": review_payload.get("response_validated"),
+            "model_verified": review_payload.get("model_verified"),
+            "requested_at_utc": review_payload.get("requested_at_utc") or review_payload.get("request_started_at_utc"),
+            "completed_at_utc": review_payload.get("completed_at_utc"),
+            "http_status": review_payload.get("http_status"),
+            "latency_ms": review_payload.get("latency_ms"),
+            "error_type": review_payload.get("error_type"),
+        })
+    return summary
+
 
 def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict[str, Any]:
     """Queue the final Demo event and activity projections for manual and AutoPilot jobs."""
