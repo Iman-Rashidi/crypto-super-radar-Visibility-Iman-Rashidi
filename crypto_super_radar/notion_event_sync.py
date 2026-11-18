@@ -105,37 +105,37 @@ class NotionEventOutbox:
         self._redact_legacy_outbox_payloads()
         self._db.commit()
 
-def _redact_legacy_outbox_payloads(self) -> None:
-        """Scrub any credential accidentally persisted in historical outbox text fields."""
-        rows = self._db.execute(
-            "SELECT event_id, payload_json FROM csr_notion_event_outbox"
-        ).fetchall()
-        for row in rows:
-            try:
-                payload = json.loads(row["payload_json"])
-            except (TypeError, ValueError, KeyError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            changed = False
-            safe_model = _safe_model_id(payload.get("ai_model"))
-            if payload.get("ai_model") != safe_model:
-                payload["ai_model"] = safe_model
-                changed = True
-            for field in (
-                "ai_analysis", "ai_suggestion", "reason", "details", "ai_provider",
-            ):
-                value = payload.get(field)
-                if isinstance(value, str):
-                    scrubbed = _redact_secret_text(value, 1800)
-                    if scrubbed != value:
-                        payload[field] = scrubbed
-                        changed = True
-            if changed:
-                self._db.execute(
-                    "UPDATE csr_notion_event_outbox SET payload_json=? WHERE event_id=?",
-                    (_canonical(payload), str(row["event_id"])),
-                )
+    def _redact_legacy_outbox_payloads(self) -> None:
+            """Scrub any credential accidentally persisted in historical outbox text fields."""
+            rows = self._db.execute(
+                "SELECT event_id, payload_json FROM csr_notion_event_outbox"
+            ).fetchall()
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                changed = False
+                safe_model = _safe_model_id(payload.get("ai_model"))
+                if payload.get("ai_model") != safe_model:
+                    payload["ai_model"] = safe_model
+                    changed = True
+                for field in (
+                    "ai_analysis", "ai_suggestion", "reason", "details", "ai_provider",
+                ):
+                    value = payload.get(field)
+                    if isinstance(value, str):
+                        scrubbed = _redact_secret_text(value, 1800)
+                        if scrubbed != value:
+                            payload[field] = scrubbed
+                            changed = True
+                if changed:
+                    self._db.execute(
+                        "UPDATE csr_notion_event_outbox SET payload_json=? WHERE event_id=?",
+                        (_canonical(payload), str(row["event_id"])),
+                    )
 
     @staticmethod
     def normalize_event(event: Mapping[str, Any]) -> dict[str, Any]:
