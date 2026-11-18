@@ -5351,11 +5351,7 @@ def _start_challenge1_active_position_observer(
         position.get("historyId") or position.get("updateTime")
         or close_record.get("history_id") or close_record.get("close_time_utc") or "confirmed"
     )
-    synthetic_job_id = (
-        f"trade-audit:{experience_id}:{phase}"
-        if phase == "ENTRY"
-        else f"trade-audit:{experience_id}:EXIT:{close_identity}"
-    )
+    synthetic_job_id = _challenge1_audit_job_id(experience_id, phase, close_identity)
     position_snapshot = {
         key: position.get(key)
         for key in (
@@ -9517,6 +9513,19 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
 
 
 
+def _challenge1_audit_job_id(
+    experience_id: str, audit_phase: str = "ENTRY", phase_identity: str = "",
+) -> str:
+    """Return stable, bounded IDs shared by execution and position-manager audits."""
+    experience = str(experience_id or "").strip()
+    phase = str(audit_phase or "ENTRY").upper()
+    trade_key = hashlib.sha256(experience.encode("utf-8")).hexdigest()[:24] if experience else "unknown"
+    if phase == "EXIT":
+        close_key = hashlib.sha256(str(phase_identity or "confirmed").encode("utf-8")).hexdigest()[:12]
+        return f"trade-audit:{trade_key}:EXIT:{close_key}"
+    return f"trade-audit:{trade_key}:{phase}"
+
+
 def _challenge1_trade_report_identity(job_id: str, job: dict) -> dict:
     current = job if isinstance(job, dict) else {}
     result = current.get("result") if isinstance(current.get("result"), dict) else {}
@@ -9716,7 +9725,10 @@ def _challenge1_observer_notion_events(
             f"{str(item.get('reason_fa') or item.get('error_code') or 'بدون توضیح')[:650]}"
         )
     if phase == "REQUESTED":
-        request_ready = all(item.get("status") == "REQUESTING" for item in reviewer_summaries)
+        request_ready = (
+            len(reviewer_summaries) == 2
+            and all(item.get("status") in {"REQUESTING", "REVIEWED"} for item in reviewer_summaries)
+        )
         event_type = "AI_REVIEW_REQUESTED"
         event_status = "PENDING" if request_ready else "WARNING"
         suggestion = "BOTH_REVIEWERS_REQUESTED" if request_ready else "REVIEWER_CONFIGURATION_OR_REQUEST_INCOMPLETE"
@@ -9909,6 +9921,7 @@ def _blofin_observer_review_from_event(event: dict | None) -> dict | None:
         "status": details.get("review_status") or (
             "REVIEWED" if event.get("event_type") == "AI_RECOMMENDATION" else "ERROR"
         ),
+        "audit_phase": details.get("audit_phase") or "ENTRY",
         "verdict": details.get("verdict"),
         "reason_fa": event.get("ai_analysis") or event.get("reason") or "",
         "observations": details.get("observations") or [],
@@ -10154,6 +10167,27 @@ def _start_challenge1_observer_job(
     result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
     if str(result.get("status") or "").upper() == "SKIPPED_DUPLICATE_EXPERIENCE":
         return
+    audit_phase = str(
+        result.get("audit_phase") or snapshot.get("audit_phase") or "ENTRY"
+    ).upper()
+    if audit_phase not in {"ENTRY", "EXIT", "SIGNAL_REVIEW"}:
+        audit_phase = "ENTRY"
+    experience_id = str(
+        result.get("learning_experience_id") or result.get("experience_id")
+        or snapshot.get("learning_experience_id") or ""
+    ).strip()
+    if experience_id:
+        if audit_phase == "EXIT":
+            exit_history = result.get("exit_history") if isinstance(result.get("exit_history"), dict) else {}
+            close_identity = (
+                exit_history.get("historyId") or exit_history.get("updateTime")
+                or (result.get("close_context") or {}).get("close_time_utc")
+                or result.get("completed_at_utc") or snapshot.get("completed_at_utc")
+                or "confirmed"
+            )
+            job_id = _challenge1_audit_job_id(experience_id, audit_phase, str(close_identity))
+        else:
+            job_id = _challenge1_audit_job_id(experience_id, audit_phase)
     with BLOFIN_AI_OBSERVER_START_LOCK:
         if job_id in BLOFIN_AI_OBSERVER_STARTED:
             return
