@@ -499,6 +499,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(len(result.gates), 12)
         self.assertEqual(
@@ -526,6 +527,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         frames = build_dashboard_frames(result)
         self.assertEqual(len(frames["gates"]), 12)
@@ -543,6 +545,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         errors = build_dashboard_frames(result)["errors"]
         self.assertIn(6, errors["شماره فیلتر"].tolist())
@@ -557,6 +560,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.gates[9].status.value, "PASS")
         self.assertEqual(result.metrics["whale_alignment"], "OPPOSED")
@@ -580,6 +584,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         original_analyze = engine.base.analyze
 
         def analyze_with_independent_rank(*args, **kwargs):
@@ -600,6 +605,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         original_analyze = engine.base.analyze
 
         def analyze_below_confirmation(*args, **kwargs):
@@ -623,6 +629,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.gates[5].status.value, "FAIL")
         self.assertEqual(result.signal.value, "NO TRADE")
@@ -634,6 +641,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         result = engine.analyze("perp:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertNotEqual(result.gates[11].status.value, "PASS")
         self.assertEqual(result.signal.value, "NO TRADE")
@@ -645,6 +653,7 @@ class IntegratedEngineTests(unittest.TestCase):
             whale_store=WhaleStore(":memory:"),
         )
         self.addCleanup(engine.whale_store.close)
+        self.addCleanup(engine.data.close)
         result = engine.analyze("cex:BTCUSDT", headlines=["Bitcoin adoption institutional growth"])
         self.assertEqual(result.gates[10].status.value, "UNKNOWN")
         self.assertEqual(result.signal.value, "NO TRADE")
