@@ -323,17 +323,42 @@ class NotionEventOutbox:
                SUM(CASE WHEN sync_status='PENDING' THEN 1 ELSE 0 END) AS pending,
                SUM(CASE WHEN sync_status='SYNCED' THEN 1 ELSE 0 END) AS synced,
                SUM(CASE WHEN sync_status='FAILED' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN sync_status='PENDING' AND last_error_type IS NOT NULL THEN 1 ELSE 0 END) AS retrying,
                MAX(synced_at_utc) AS last_success_utc
                FROM csr_notion_event_outbox"""
         ).fetchone()
+        recent_rows = self._db.execute(
+            """SELECT event_id, attempts, next_attempt_at, last_error_type, last_http_status
+               FROM csr_notion_event_outbox
+               WHERE last_error_type IS NOT NULL
+               ORDER BY created_at_utc DESC LIMIT 5"""
+        ).fetchall()
+        recent_errors = [
+            {
+                "event_id": _text(item["event_id"], 80),
+                "attempts": int(item["attempts"] or 0),
+                "next_attempt_at": int(item["next_attempt_at"] or 0),
+                "error_type": _text(item["last_error_type"], 80),
+                "http_status": item["last_http_status"],
+            }
+            for item in recent_rows
+        ]
         token_configured = bool((os.getenv("NOTION_API_TOKEN") or "").strip())
+        retrying = int(row["retrying"] or 0)
         return {
-            "status": "CONFIGURED" if token_configured else "NOT_CONFIGURED",
+            "status": (
+                "NOT_CONFIGURED" if not token_configured
+                else "DEGRADED" if retrying else "CONFIGURED"
+            ),
             "token_configured": token_configured,
             "storage_backend": storage_backend(),
             "pending": int(row["pending"] or 0),
             "synced": int(row["synced"] or 0),
             "failed": int(row["failed"] or 0),
+            "retrying": retrying,
+            "last_error_type": recent_errors[0]["error_type"] if recent_errors else None,
+            "last_http_status": recent_errors[0]["http_status"] if recent_errors else None,
+            "recent_errors": recent_errors,
             "last_success_utc": row["last_success_utc"],
         }
 

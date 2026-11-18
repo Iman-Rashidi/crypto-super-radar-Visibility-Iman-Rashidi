@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import requests
@@ -113,6 +114,7 @@ class NotionEventOutboxTests(unittest.TestCase):
     def test_http_failure_keeps_event_pending_and_applies_backoff(self):
         self.outbox.enqueue(event())
         error = requests.HTTPError("Notion unavailable")
+        error.response = SimpleNamespace(status_code=503, headers={})
         with patch(
             "crypto_super_radar.notion_event_sync.requests.post",
             side_effect=error,
@@ -120,12 +122,18 @@ class NotionEventOutboxTests(unittest.TestCase):
             result = self.outbox.flush_pending(now=1_800_000_000)
         self.assertEqual(result["failed_this_run"], 1)
         self.assertEqual(result["pending"], 1)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["retrying"], 1)
+        self.assertEqual(result["last_error_type"], "HTTPError")
+        self.assertEqual(result["last_http_status"], 503)
+        self.assertEqual(result["recent_errors"][0]["http_status"], 503)
         row = self.db.execute(
-            "SELECT attempts, next_attempt_at, last_error_type FROM csr_notion_event_outbox"
+            "SELECT attempts, next_attempt_at, last_error_type, last_http_status FROM csr_notion_event_outbox"
         ).fetchone()
         self.assertEqual(row["attempts"], 1)
         self.assertEqual(row["next_attempt_at"], 1_800_000_005)
         self.assertEqual(row["last_error_type"], "HTTPError")
+        self.assertEqual(row["last_http_status"], 503)
 
     def test_invalid_event_type_is_rejected_before_persistence(self):
         with self.assertRaises(ValueError):
