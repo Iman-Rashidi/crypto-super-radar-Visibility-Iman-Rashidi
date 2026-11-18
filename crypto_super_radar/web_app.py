@@ -5368,6 +5368,12 @@ def _start_challenge1_active_position_observer(
     audit_state = _start_challenge1_observer_job(
         synthetic_job_id, instrument, challenge_record, initial_job,
     )
+    if not isinstance(audit_state, dict):
+        audit_state = {
+            "status": "SCHEDULED",
+            "audit_job_id": synthetic_job_id,
+            "execution_effect": "NONE",
+        }
     return {
         **audit_state,
         "position_id": position_id,
