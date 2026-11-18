@@ -333,6 +333,38 @@ class NotionEventOutbox:
         snapshot.update({"synced_this_run": synced, "failed_this_run": failed})
         return snapshot
 
+    def get_event(self, event_id: str) -> dict[str, Any] | None:
+        """Read one durable event by its idempotency key, independent of Notion sync state."""
+        key = _text(event_id, 180)
+        if not key:
+            return None
+        row = self._db.execute(
+            """SELECT payload_json, created_at_utc, attempts, next_attempt_at,
+                      sync_status, last_error_type, last_http_status, notion_page_id,
+                      synced_at_utc
+               FROM csr_notion_event_outbox WHERE event_id=?""",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload["_outbox"] = {
+            "created_at_utc": row["created_at_utc"],
+            "attempts": int(row["attempts"] or 0),
+            "next_attempt_at": int(row["next_attempt_at"] or 0),
+            "sync_status": str(row["sync_status"] or ""),
+            "last_error_type": row["last_error_type"],
+            "last_http_status": row["last_http_status"],
+            "notion_page_id": row["notion_page_id"],
+            "synced_at_utc": row["synced_at_utc"],
+        }
+        return payload
+
     def pending_count(self) -> int:
         row = self._db.execute(
             "SELECT COUNT(*) FROM csr_notion_event_outbox WHERE sync_status='PENDING'"
@@ -340,23 +372,81 @@ class NotionEventOutbox:
         return int(row[0] or 0)
 
     def status_snapshot(self) -> dict[str, Any]:
-        row = self._db.execute(
+        now = int(time.time())
+        totals = self._db.execute(
             """SELECT
                SUM(CASE WHEN sync_status='PENDING' THEN 1 ELSE 0 END) AS pending,
                SUM(CASE WHEN sync_status='SYNCED' THEN 1 ELSE 0 END) AS synced,
                SUM(CASE WHEN sync_status='FAILED' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN sync_status='PENDING' AND
+                    (attempts > 0 OR last_error_type IS NOT NULL OR last_http_status IS NOT NULL)
+                    THEN 1 ELSE 0 END) AS pending_with_errors,
+               SUM(CASE WHEN sync_status='PENDING' AND next_attempt_at > ?
+                    THEN 1 ELSE 0 END) AS pending_in_backoff,
                MAX(synced_at_utc) AS last_success_utc
-               FROM csr_notion_event_outbox"""
+               FROM csr_notion_event_outbox""",
+            (now,),
         ).fetchone()
+        oldest = self._db.execute(
+            """SELECT created_at_utc, attempts, next_attempt_at,
+                      last_error_type, last_http_status
+               FROM csr_notion_event_outbox
+               WHERE sync_status='PENDING'
+               ORDER BY created_at_utc ASC LIMIT 1"""
+        ).fetchone()
+        oldest_error = self._db.execute(
+            """SELECT created_at_utc, attempts, next_attempt_at,
+                      last_error_type, last_http_status
+               FROM csr_notion_event_outbox
+               WHERE sync_status='PENDING'
+                 AND (last_error_type IS NOT NULL OR last_http_status IS NOT NULL)
+               ORDER BY created_at_utc ASC LIMIT 1"""
+        ).fetchone()
+
+        def retry_at(value: Any) -> str | None:
+            try:
+                epoch = int(value or 0)
+                if epoch <= 0:
+                    return None
+                return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            except (TypeError, ValueError, OverflowError, OSError):
+                return None
+
+        def age_seconds(value: Any) -> int | None:
+            try:
+                created = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                return max(0, int((datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds()))
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+        pending = int(totals["pending"] or 0)
+        pending_in_backoff = int(totals["pending_in_backoff"] or 0)
         token_configured = bool((os.getenv("NOTION_API_TOKEN") or "").strip())
         return {
             "status": "CONFIGURED" if token_configured else "NOT_CONFIGURED",
             "token_configured": token_configured,
             "storage_backend": storage_backend(),
-            "pending": int(row["pending"] or 0),
-            "synced": int(row["synced"] or 0),
-            "failed": int(row["failed"] or 0),
-            "last_success_utc": row["last_success_utc"],
+            "pending": pending,
+            "synced": int(totals["synced"] or 0),
+            "failed": int(totals["failed"] or 0),
+            "last_success_utc": totals["last_success_utc"],
+            "pending_with_errors": int(totals["pending_with_errors"] or 0),
+            "pending_in_backoff": pending_in_backoff,
+            "pending_due_now": max(0, pending - pending_in_backoff),
+            "oldest_pending_created_at_utc": oldest["created_at_utc"] if oldest else None,
+            "oldest_pending_age_seconds": age_seconds(oldest["created_at_utc"]) if oldest else None,
+            "oldest_pending_attempts": int(oldest["attempts"] or 0) if oldest else None,
+            "oldest_pending_next_retry_at_utc": retry_at(oldest["next_attempt_at"]) if oldest else None,
+            "oldest_pending_error_type": oldest["last_error_type"] if oldest else None,
+            "oldest_pending_http_status": oldest["last_http_status"] if oldest else None,
+            "oldest_error_created_at_utc": oldest_error["created_at_utc"] if oldest_error else None,
+            "oldest_error_attempts": int(oldest_error["attempts"] or 0) if oldest_error else None,
+            "oldest_error_next_retry_at_utc": retry_at(oldest_error["next_attempt_at"]) if oldest_error else None,
+            "oldest_error_type": oldest_error["last_error_type"] if oldest_error else None,
+            "oldest_error_http_status": oldest_error["last_http_status"] if oldest_error else None,
+            "diagnostic_scope": "SAFE_METADATA_ONLY",
         }
 
     def close(self) -> None:
