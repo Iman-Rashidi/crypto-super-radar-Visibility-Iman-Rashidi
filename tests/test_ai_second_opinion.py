@@ -814,6 +814,62 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("must_not_be_sent", json.dumps(payload))
         self.assertNotIn('"id":1', json.dumps(payload))
 
+    def test_primary_http_200_invalid_payload_has_safe_error_code_and_latency(self):
+        class MissingChoicesResponse:
+            status_code = 200
+
+            def json(self):
+                return {"model": DEFAULT_FREE_MODEL, "choices": []}
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            return MissingChoicesResponse()
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                challenge1_result(),
+                AssetSpec.parse("perp:BTCUSDT"),
+                http_post=fake_post,
+                bypass_cache=True,
+            )
+
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertEqual(review["http_status"], 200)
+        self.assertEqual(review["error_type"], "ValueError")
+        self.assertEqual(review["error_code"], "AI_RESPONSE_CHOICES_MISSING")
+        self.assertIsInstance(review["latency_ms"], int)
+        self.assertTrue(review["request_attempted"])
+        self.assertEqual(review["response_source"], "LIVE_API")
+        self.assertFalse(review["response_validated"])
+        self.assertFalse(review["model_verified"])
+        self.assertFalse(review["paper_entry_eligible"])
+
+    def test_second_supervisor_http_401_has_safe_unauthorized_error_code(self):
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            return FakeResponse(status_code=401)
+
+        env = {
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "separate-test-key",
+            "CSR_SECOND_AI_MODEL": "independent/test-model:free",
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            review = run_independent_ai_supervisor(
+                challenge1_result(),
+                AssetSpec.parse("perp:BTCUSDT"),
+                http_post=fake_post,
+            )
+
+        self.assertEqual(review["status"], "ERROR")
+        self.assertEqual(review["http_status"], 401)
+        self.assertEqual(review["error_code"], "PROVIDER_UNAUTHORIZED")
+        self.assertTrue(review["request_attempted"])
+        self.assertEqual(review["response_source"], "LIVE_API")
+        self.assertFalse(review["response_validated"])
+        self.assertFalse(review["model_verified"])
+        self.assertFalse(review["paper_entry_eligible"])
+
     def test_challenge1_supervisors_receive_only_5m_patterns_and_cannot_add_higher_timeframe_gates(self):
         candidate = challenge1_result()
         evidence = candidate.metrics["challenge1_evidence"]

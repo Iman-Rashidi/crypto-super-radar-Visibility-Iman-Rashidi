@@ -8645,6 +8645,7 @@ def _blofin_ai_review_summary(job: dict[str, Any]) -> list[dict[str, Any]]:
             "http_status": review_payload.get("http_status"),
             "latency_ms": review_payload.get("latency_ms"),
             "error_type": review_payload.get("error_type"),
+            "error_code": review_payload.get("error_code"),
         })
     return summary
 
@@ -9894,6 +9895,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             "paper_entry_eligible": review.get("paper_entry_eligible"),
             "native_council": review.get("native_council"),
             "error_type": review.get("error_type"),
+            "error_code": review.get("error_code"),
             "consensus": consensus,
         }
         events.append({

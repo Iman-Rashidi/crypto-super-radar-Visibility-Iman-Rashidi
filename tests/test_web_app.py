@@ -434,8 +434,10 @@ class WebAppHttpTests(unittest.TestCase):
                         "model_verified": True,
                         "request_started_at_utc": "2026-11-18T12:30:00+00:00",
                         "completed_at_utc": "2026-11-18T12:30:02+00:00",
-                        "http_status": 200,
-                        "latency_ms": 2000,
+                        "http_status": 401,
+                        "latency_ms": 492,
+                        "error_type": "HTTPError",
+                        "error_code": "PROVIDER_UNAUTHORIZED",
                         "raw_response": "must not be projected",
                         "api_key": "must never be projected",
                     },
@@ -453,7 +455,10 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(summary[0]["response_source"], "LIVE_API")
         self.assertTrue(summary[0]["response_validated"])
         self.assertTrue(summary[0]["model_verified"])
-        self.assertEqual(summary[0]["http_status"], 200)
+        self.assertEqual(summary[0]["http_status"], 401)
+        self.assertEqual(summary[0]["error_type"], "HTTPError")
+        self.assertEqual(summary[0]["error_code"], "PROVIDER_UNAUTHORIZED")
+        self.assertEqual(summary[0]["latency_ms"], 492)
         self.assertNotIn("raw_response", summary[0])
         self.assertNotIn("api_key", summary[0])
 

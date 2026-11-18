@@ -31,6 +31,70 @@ PROMPT_VERSION = "free-second-opinion-v7-5m-candle-chart-elliott-wave"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
+
+_SAFE_AI_VALUE_ERRORS = {
+    "Challenge 1 candle/chart/Elliott review input is incomplete": "CHALLENGE1_EVIDENCE_INCOMPLETE",
+    "Challenge 1 specialist reviews are missing": "CHALLENGE1_SPECIALIST_REVIEWS_MISSING",
+    "Challenge 1 risk flags have an invalid format": "CHALLENGE1_RISK_FLAGS_INVALID",
+    "Challenge 1 technical analyst response is invalid": "CHALLENGE1_TECHNICAL_REVIEW_INVALID",
+    "Challenge 1 technical analyst verdict is invalid": "CHALLENGE1_TECHNICAL_VERDICT_INVALID",
+    "Challenge 1 Elliott wave analyst response is invalid": "CHALLENGE1_WAVE_REVIEW_INVALID",
+    "Challenge 1 Elliott phase/direction does not match supplied wave evidence": "CHALLENGE1_WAVE_EVIDENCE_MISMATCH",
+    "Challenge 1 trading/risk specialist response is invalid": "CHALLENGE1_RISK_REVIEW_INVALID",
+    "Challenge 1 trading/risk verdict is invalid": "CHALLENGE1_RISK_VERDICT_INVALID",
+    "Challenge 1 specialist explanation is missing": "CHALLENGE1_SPECIALIST_EXPLANATION_MISSING",
+    "Challenge 1 final decision is invalid": "CHALLENGE1_FINAL_DECISION_INVALID",
+    "No JSON object returned": "AI_JSON_OBJECT_MISSING",
+    "AI response is not a JSON object": "AI_JSON_OBJECT_INVALID",
+    "MISSING_CHOICES": "AI_RESPONSE_CHOICES_MISSING",
+    "MISSING_MESSAGE": "AI_RESPONSE_MESSAGE_MISSING",
+    "CONTENT_NOT_TEXT": "AI_RESPONSE_CONTENT_NOT_TEXT",
+    "CONTENT_TOO_LARGE": "AI_RESPONSE_CONTENT_TOO_LARGE",
+    "MARKER_NOT_RETURNED": "AI_RESPONSE_MARKER_MISSING",
+    "Unknown final rating": "AI_FINAL_RATING_INVALID",
+    "Required specialist views are missing": "AI_SPECIALIST_VIEWS_MISSING",
+    "Risk flags have an invalid format or exceed the maximum count": "AI_RISK_FLAGS_INVALID",
+    "Invalid specialist view": "AI_SPECIALIST_VIEW_INVALID",
+    "Invalid specialist verdict": "AI_SPECIALIST_VERDICT_INVALID",
+    "Specialist explanation is missing": "AI_SPECIALIST_EXPLANATION_MISSING",
+    "Missing AI response choices": "AI_RESPONSE_CHOICES_MISSING",
+    "Missing AI response message": "AI_RESPONSE_MESSAGE_MISSING",
+    "AI message content is not text": "AI_RESPONSE_CONTENT_NOT_TEXT",
+    "AI response exceeded the maximum accepted size": "AI_RESPONSE_CONTENT_TOO_LARGE",
+    "Missing second AI response choices": "SECOND_AI_RESPONSE_CHOICES_MISSING",
+    "Missing second AI response message": "SECOND_AI_RESPONSE_MESSAGE_MISSING",
+    "Second AI response content is missing or too large": "SECOND_AI_RESPONSE_CONTENT_INVALID",
+}
+
+
+def _safe_ai_error_code(exc: BaseException) -> str:
+    """Map provider/validation failures to stable codes without logging raw model output."""
+    exact = _SAFE_AI_VALUE_ERRORS.get(str(exc))
+    if exact:
+        return exact
+    if isinstance(exc, json.JSONDecodeError):
+        return "AI_JSON_DECODE_FAILED"
+    if isinstance(exc, requests.Timeout):
+        return "AI_PROVIDER_TIMEOUT"
+    if isinstance(exc, requests.RequestException):
+        return "AI_PROVIDER_REQUEST_FAILED"
+    if isinstance(exc, ValueError):
+        return "AI_RESPONSE_VALIDATION_FAILED"
+    return "AI_PROVIDER_CALL_FAILED"
+
+
+def _safe_provider_http_error_code(http_status: int | None) -> str:
+    """Return a bounded HTTP failure category, never a response body."""
+    if http_status == 401:
+        return "PROVIDER_UNAUTHORIZED"
+    if http_status == 403:
+        return "PROVIDER_FORBIDDEN"
+    if http_status == 429:
+        return "PROVIDER_RATE_LIMITED"
+    if isinstance(http_status, int) and 500 <= http_status <= 599:
+        return "PROVIDER_SERVER_ERROR"
+    return "PROVIDER_HTTP_ERROR"
+
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _REQUEST_COUNTS: dict[str, int] = {}
 _MINUTE_REQUEST_TIMESTAMPS: list[float] = []
@@ -1126,6 +1190,7 @@ def run_free_ai_second_opinion(
                 "provider": "OpenRouter", "model": model, "status": status,
                 "status_fa": "سرویس هوش مصنوعی رایگان در دسترس نیست؛ ورود جدید متوقف شد.",
                 "reason": detail, "http_status": http_status,
+                "error_code": _safe_provider_http_error_code(http_status),
                 "request_attempted": True, "response_source": "LIVE_API",
                 "request_started_at_utc": request_started_at_utc,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1217,7 +1282,9 @@ def run_free_ai_second_opinion(
             "provider": "OpenRouter", "model": model, "status": "UNKNOWN",
             "status_fa": "پاسخ معتبر از هوش مصنوعی دریافت نشد؛ ورود جدید متوقف شد.",
             "reason": "Free AI request or response validation failed.",
-            "error_type": type(exc).__name__, "http_status": http_status,
+            "error_type": type(exc).__name__, "error_code": _safe_ai_error_code(exc),
+            "http_status": http_status,
+            "latency_ms": int((time.monotonic() - started) * 1000),
             "request_attempted": True, "response_source": "LIVE_API",
             "request_started_at_utc": request_started_at_utc,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1409,6 +1476,7 @@ def run_independent_ai_supervisor(
                 "status": "ERROR" if http_status != 429 else "UNKNOWN",
                 "status_fa": "ناظر مستقل دوم پاسخ موفق و قابل بررسی برنگرداند.",
                 "reason": "Independent second reviewer endpoint returned a non-200 status.",
+                "error_code": _safe_provider_http_error_code(http_status),
                 "http_status": http_status, "latency_ms": latency_ms,
                 "request_attempted": True, "response_source": "LIVE_API",
                 "response_validated": False, "model_verified": False,
@@ -1489,8 +1557,10 @@ def run_independent_ai_supervisor(
             "status": "ERROR",
             "status_fa": "پاسخ ناظر مستقل دوم قابل اعتبارسنجی نبود؛ ورود جدید متوقف می‌ماند.",
             "reason": "Independent second reviewer request or validation failed.",
-            "error_type": type(exc).__name__, "http_status": http_status,
-            "latency_ms": latency_ms, "request_attempted": True,
+            "error_type": type(exc).__name__, "error_code": _safe_ai_error_code(exc),
+            "http_status": http_status,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "request_attempted": True,
             "response_source": "LIVE_API", "response_validated": False,
             "model_verified": False, "paper_entry_eligible": False,
             "requested_at_utc": requested_at,
