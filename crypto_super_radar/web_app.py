@@ -229,14 +229,46 @@ AI_DRY_RUN_MIN_INTERVAL_SECONDS = 300
 
 def _run_ai_synthetic_dry_run_limited() -> dict:
     """Call the real configured LLM on synthetic evidence, with no bot or ledger access."""
-    configured = ai_supervisor_status()
-    if not configured.get("configured"):
+    primary_config = ai_connection_status()
+    second_config = second_ai_connection_status()
+    if not primary_config.get("configured") or not second_config.get("configured"):
+        primary_state = {
+            "reviewer_id": "nemotron",
+            "provider": primary_config.get("provider"),
+            "model": primary_config.get("model"),
+            "status": primary_config.get("status"),
+            "request_attempted": False,
+            "response_source": "NONE",
+            "response_validated": False,
+            "model_verified": False,
+            "paper_entry_eligible": False,
+        }
+        second_state = {
+            "reviewer_id": "second_ai",
+            "provider": second_config.get("provider"),
+            "model": second_config.get("model"),
+            "status": second_config.get("status"),
+            "configuration_issues": list(second_config.get("configuration_issues") or []),
+            "request_attempted": False,
+            "response_source": "NONE",
+            "response_validated": False,
+            "model_verified": False,
+            "paper_entry_eligible": False,
+        }
         return {
-            "provider": "Independent Multi-Provider AI Supervisor", "model": configured.get("model"),
+            "provider": "Challenge 1 Independent Reviewer Pair",
+            "model": "Nemotron + independently configured second reviewer",
             "status": "PROVIDERS_INSUFFICIENT",
-            "status_fa": configured.get("status_fa"),
-            "test_passed": False, "paper_entry_eligible": False,
-            "orders_submitted": False, "trade_executed": False,
+            "status_fa": "هر دو ناظر اختصاصی Challenge 1 آماده نیستند؛ هیچ درخواست مدل ارسال نشد.",
+            "ai_reviews": [
+                {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": primary_state},
+                {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second_state},
+            ],
+            "ai_consensus": {"status": "NOT_CONFIGURED", "decision": "BLOCK_DEMO_ENTRY"},
+            "test_passed": False,
+            "paper_entry_eligible": False,
+            "orders_submitted": False,
+            "trade_executed": False,
         }
 
     now = time.monotonic()
@@ -265,63 +297,123 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
         AI_DRY_RUN_STATE["last_started"] = now
         AI_DRY_RUN_STATE["count"] = int(AI_DRY_RUN_STATE.get("count") or 0) + 1
 
-    # Synthetic evidence exercises the real model call and response validator,
-    # but it is not a live-market signal and never enters either paper ledger.
+    # This fixture deliberately satisfies the actual 5m candle/pattern/wave
+    # evidence contract. It is synthetic and cannot be submitted as a market order.
     asset = AssetSpec.parse("perp:BTCUSDT")
+    candles_5m = [
+        {"open_time_utc": "2026-11-18T09:50:00+00:00", "open": 99.0, "high": 100.0, "low": 98.0, "close": 99.2, "volume": 80.0},
+        {"open_time_utc": "2026-11-18T09:55:00+00:00", "open": 99.2, "high": 100.2, "low": 98.8, "close": 99.0, "volume": 90.0},
+        {"open_time_utc": "2026-11-18T10:00:00+00:00", "open": 99.0, "high": 102.0, "low": 98.7, "close": 101.0, "volume": 160.0},
+    ]
+    signal_bar = candles_5m[-1]["open_time_utc"]
+    signal_id = f"challenge1-v4:BTC-USDT:5m:{signal_bar}"
+    chosen_pattern = {
+        "name_en": "Bullish Engulfing",
+        "direction": "BULLISH",
+        "score": 13,
+        "category": "CANDLESTICK",
+        "timeframe": "5m",
+    }
+    elliott_wave = {
+        "status": "CANDIDATE",
+        "pattern": "BULLISH",
+        "phase": "WAVES_1_AND_2_CONFIRMED",
+        "wave_count": 2,
+        "next_wave": 3,
+        "confirmed_pivot_count": 3,
+        "pivot_reversal_threshold_pct": 0.15,
+        "invalidation_price": 98.0,
+        "pivots": [
+            {"index": 1, "kind": "LOW", "price": 98.0, "timestamp": "2026-11-18T09:35:00+00:00", "confirmed_at": "2026-11-18T09:40:00+00:00"},
+            {"index": 2, "kind": "HIGH", "price": 100.0, "timestamp": "2026-11-18T09:45:00+00:00", "confirmed_at": "2026-11-18T09:50:00+00:00"},
+            {"index": 3, "kind": "LOW", "price": 99.0, "timestamp": "2026-11-18T09:55:00+00:00", "confirmed_at": "2026-11-18T10:00:00+00:00"},
+        ],
+        "reason": "Synthetic directional Elliott wave prefix for reviewer integration testing.",
+    }
+    evidence = {
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
+        "completed_candles_only": True,
+        "setup_timeframe": "5m",
+        "higher_timeframes_used": False,
+        "chosen_pattern": dict(chosen_pattern),
+        "detected_patterns": [dict(chosen_pattern)],
+        "confirmation_candle": dict(candles_5m[-1]),
+        "candles_5m": candles_5m,
+        "chart_structure": {},
+        "elliott_wave": elliott_wave,
+        "wave_alignment": "ALIGNED",
+        "volume_confirmation": {
+            "confirmed": True, "volume_ratio": 1.5,
+            "close_location": 0.8, "minimum_volume_ratio": 1.2,
+        },
+        "decision": "LONG",
+        "legacy_12_gates_used_for_entry": False,
+        "external_ai_required": True,
+        "tinyfish_required": False,
+    }
+    record = {
+        "asset": "perp:BTCUSDT",
+        "signal": "LONG",
+        "execution_profile": "CHALLENGE_1",
+        "entry_price_usd": 101.0,
+        "stop_loss_usd": 99.0,
+        "take_profit_usd": 105.0,
+        "inst_id": "BTC-USDT",
+        "instrument_id": "BTC-USDT",
+        "signal_bar_open_utc": signal_bar,
+        "signal_id": signal_id,
+        "execution": {"status": "PASS", "direction": "LONG", "signal_id": signal_id},
+        "challenge1_evidence": evidence,
+    }
     result = SimpleNamespace(
         asset=asset.raw,
         signal=Signal.LONG,
+        to_record=lambda: record,
         confirmation_score=82.0,
         estimated_risk_score=20.0,
         opportunity_rank=80.0,
-        entry_price=100.0,
-        stop_loss=98.0,
-        take_profit=106.0,
+        entry_price=101.0,
+        stop_loss=99.0,
+        take_profit=105.0,
         expected_holding_days=2,
-        metrics={
-            "asset_regime": "BULLISH",
-            "benchmark_regime": "BULLISH",
-            "rsi_14": 58.0,
-            "ema20": 101.0,
-            "ema50": 99.0,
-            "ema200": 95.0,
-            "funding_rate_pct": 0.003,
-            "open_interest_change_24h_pct": 2.0,
-            "market_sentiment_score": 55.0,
-            "fear_greed_value": 55.0,
-            "expected_holding_days": 2,
-        },
-        gates=[
-            SimpleNamespace(
-                gate_id=gate_id,
-                name_en=f"Synthetic validation gate {gate_id}",
-                status=GateStatus.PASS,
-                evidence={"rsi_14": 58.0},
-            )
-            for gate_id in range(1, 13)
-        ],
+        metrics={"execution_profile": "CHALLENGE_1", "challenge1_evidence": evidence},
+        gates=[],
     )
-    review = run_ai_supervisor(result, asset, bypass_cache=True)
-    payload = copy.deepcopy(review) if isinstance(review, dict) else {
-        "provider": "Independent Multi-Provider AI Supervisor", "model": configured.get("model"),
-        "status": "UNKNOWN",
-    }
-    payload.update({
-        "test_mode": "SYNTHETIC_DRY_RUN",
+    quorum = _run_challenge1_supervisor_reviews(result, asset)
+    consensus = quorum.get("ai_consensus") if isinstance(quorum.get("ai_consensus"), dict) else {}
+    payload = {
+        "provider": "Challenge 1 Independent Reviewer Pair",
+        "model": "Nemotron + independently configured second reviewer",
+        "status": quorum.get("status", "UNKNOWN"),
+        "status_fa": quorum.get("reason_fa") or "بررسی دو ناظر کامل نشد.",
+        "ai_review": quorum.get("ai_review"),
+        "second_ai_review": quorum.get("second_ai_review"),
+        "ai_reviews": quorum.get("ai_reviews", []),
+        "ai_consensus": consensus,
+        "test_mode": "SYNTHETIC_CHALLENGE1_DUAL_REVIEWER_DRY_RUN",
         "input_data": "SYNTHETIC_NOT_LIVE_MARKET",
         "synthetic_asset": "perp:BTCUSDT",
-        "synthetic_gate_set": "12 PASS (synthetic fixture only)",
+        "synthetic_setup": {
+            "timeframe": "5m",
+            "pattern": chosen_pattern["name_en"],
+            "elliott_wave_phase": elliott_wave["phase"],
+            "elliott_wave_direction": elliott_wave["pattern"],
+            "signal": "LONG",
+            "orders_enabled": False,
+        },
         "test_passed": bool(
-            payload.get("status") == "APPROVED"
-            and payload.get("approved_provider_count", 0) >= 2
-            and payload.get("model_verified") is True
-            and payload.get("response_validated") is True
+            quorum.get("approved") is True
+            and consensus.get("status") == "APPROVED_BY_BOTH"
+            and consensus.get("primary_verified") is True
+            and consensus.get("second_verified") is True
+            and consensus.get("providers_independent") is True
+            and consensus.get("models_independent") is True
         ),
-        "ai_approval_for_synthetic_scenario": payload.get("paper_entry_eligible") is True,
+        "ai_approval_for_synthetic_scenario": quorum.get("approved") is True,
         "paper_entry_eligible": False,
         "orders_submitted": False,
         "trade_executed": False,
-    })
+    }
     return payload
 
 
