@@ -156,10 +156,6 @@ class NotionEventOutboxTests(unittest.TestCase):
 
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_outbox_redacts_credential_values_and_only_accepts_model_identifiers(self):
         suspicious = event(
             event_id="cycle-ai:secret:request",
@@ -224,3 +220,44 @@ if __name__ == "__main__":
             "nvidia/nemotron-3-ultra-550b-a55b:free",
         )
 
+
+
+    def test_get_event_survives_notion_sync_state_transition(self):
+        self.outbox.enqueue(event(event_id="observer:REQUESTED"))
+        pending = self.outbox.get_event("observer:REQUESTED")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["event_id"], "observer:REQUESTED")
+        self.assertEqual(pending["_outbox"]["sync_status"], "PENDING")
+
+        with patch(
+            "crypto_super_radar.notion_event_sync.requests.post",
+            return_value=FakeResponse({"results": [{"id": "notion-page-observer"}]}),
+        ):
+            self.outbox.flush_pending(now=1_800_000_000)
+        synced = self.outbox.get_event("observer:REQUESTED")
+        self.assertEqual(synced["_outbox"]["sync_status"], "SYNCED")
+        self.assertEqual(synced["event_type"], "NO_TRADE")
+
+    def test_status_snapshot_exposes_safe_retry_and_http_error_metadata(self):
+        self.outbox.enqueue(event(event_id="backoff:429"))
+        error = requests.HTTPError(
+            "Notion unavailable",
+            response=FakeResponse(status_code=429),
+        )
+        with patch(
+            "crypto_super_radar.notion_event_sync.requests.post",
+            side_effect=error,
+        ):
+            result = self.outbox.flush_pending(now=1_800_000_000)
+        snapshot = self.outbox.status_snapshot()
+        self.assertEqual(result["failed_this_run"], 1)
+        self.assertEqual(snapshot["pending_with_errors"], 1)
+        self.assertEqual(snapshot["pending_in_backoff"], 1)
+        self.assertEqual(snapshot["pending_due_now"], 0)
+        self.assertEqual(snapshot["oldest_pending_http_status"], 429)
+        self.assertEqual(snapshot["oldest_error_http_status"], 429)
+        self.assertEqual(snapshot["diagnostic_scope"], "SAFE_METADATA_ONLY")
+
+
+if __name__ == "__main__":
+    unittest.main()
