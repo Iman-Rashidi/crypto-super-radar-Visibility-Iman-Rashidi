@@ -1883,7 +1883,8 @@ class WebAppHttpTests(unittest.TestCase):
             result = web_app._start_challenge1_active_position_observer(
                 order, position, "BTC-USDT",
             )
-        self.assertEqual(result["status"], "OBSERVER_AUDIT_SCHEDULED")
+        self.assertEqual(result["status"], "SCHEDULED")
+        self.assertEqual(result["audit_job_id"], "position-audit:demo-position-btc:initial-v2")
         self.assertEqual(result["position_id"], "demo-position-btc")
         args = start_job.call_args.args
         self.assertEqual(args[0], "position-audit:demo-position-btc:initial-v2")
