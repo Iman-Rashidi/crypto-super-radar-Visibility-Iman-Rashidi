@@ -1838,7 +1838,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIsNone(result["smoke_test_open_position_count"])
 
 
-    def test_challenge1_observer_events_are_separate_and_never_signal_approval(self):
+    def test_challenge1_observers_write_one_unified_trade_report_without_order_authority(self):
         job = {
             "status": "completed",
             "result": {
@@ -1865,8 +1865,6 @@ class WebAppHttpTests(unittest.TestCase):
                 "requested_at_utc": "2026-11-18T15:20:00Z",
                 "completed_at_utc": "2026-11-18T15:20:02Z",
                 "latency_ms": 2000,
-                "entry_gate_enforced": False,
-                "execution_effect": "NONE",
             },
             {
                 "reviewer_id": "second_ai",
@@ -1875,27 +1873,90 @@ class WebAppHttpTests(unittest.TestCase):
                 "model": "qwen/qwen3.8-27b",
                 "request_attempted": False,
                 "error_code": "SECOND_AI_NOT_CONFIGURED",
-                "entry_gate_enforced": False,
-                "execution_effect": "NONE",
             },
         ]
         events = web_app._challenge1_observer_notion_events(
             "cycle-observer-1", "BTC-USDT", job, reviews, phase="RESULT",
+            audit_phase="ENTRY",
         )
-        self.assertEqual(len(events), 2)
-        nemotron = next(item for item in events if item["actor"] == "Nemotron Supervisor")
-        second = next(item for item in events if item["actor"] == "Second AI Supervisor")
-        self.assertEqual(nemotron["event_type"], "AI_RECOMMENDATION")
-        self.assertEqual(nemotron["ai_decision"], "OBSERVE_ONLY")
-        self.assertEqual(nemotron["order_id"], "demo-order-1")
-        self.assertEqual(nemotron["position_id"], "demo-position-1")
-        self.assertEqual(second["event_type"], "DATA_ERROR")
-        self.assertEqual(second["status"], "WARNING")
-        self.assertEqual(second["ai_decision"], "NOT_CALLED")
-        self.assertNotIn("AI_APPROVAL", {item["event_type"] for item in events})
+        self.assertEqual(len(events), 1)
+        report_event = events[0]
+        self.assertEqual(report_event["actor"], "AI Supervisor")
+        self.assertEqual(report_event["event_type"], "AI_RECOMMENDATION")
+        self.assertEqual(report_event["ai_decision"], "OBSERVE_ONLY")
+        self.assertEqual(report_event["order_id"], "demo-order-1")
+        self.assertEqual(report_event["position_id"], "demo-position-1")
+        self.assertEqual(report_event["experience_id"], "experience-1")
+        detail = json.loads(report_event["details"])
+        self.assertEqual(detail["report_type"], "UNIFIED_TRADE_SUPERVISION")
+        self.assertEqual(
+            {item["reviewer_id"] for item in detail["phases"]["ENTRY"]["reviewers"]},
+            {"nemotron", "second_ai"},
+        )
+        self.assertEqual(detail["phases"]["ENTRY"]["consensus"], "SINGLE_REVIEWER")
+        self.assertEqual(detail["final_trade_opinion"], "AWAITING_EXIT_REVIEW")
+        self.assertFalse(detail["execution_effect"] != "NONE")
+        self.assertNotEqual(report_event["ai_decision"], "APPROVE")
+        self.assertNotIn("AI_APPROVAL", {report_event["event_type"]})
 
-    def test_challenge1_observer_request_events_distinguish_configured_from_missing(self):
-        job = {"result": {"signal": "SHORT"}}
+    def test_entry_and_exit_update_the_same_unified_trade_report(self):
+        entry_job = {
+            "result": {
+                "status": "FILLED", "signal": "LONG",
+                "learning_experience_id": "experience-lifecycle",
+                "exchange_order_id": "demo-order-lifecycle",
+                "position_id": "demo-position-lifecycle",
+            }
+        }
+        entry_reviews = [
+            {"reviewer_id": "nemotron", "status": "REVIEWED", "provider": "OpenRouter",
+             "model": "nvidia/nemotron:free", "verdict": "SUPPORTS_DECISION",
+             "reason_fa": "ورود قابل دفاع بود.", "request_attempted": True,
+             "response_validated": True, "model_verified": True},
+            {"reviewer_id": "second_ai", "status": "REVIEWED", "provider": "Groq",
+             "model": "openai/gpt-oss-120b", "verdict": "SUPPORTS_DECISION",
+             "reason_fa": "ریسک ورود قابل قبول بود.", "request_attempted": True,
+             "response_validated": True, "model_verified": True},
+        ]
+        entry_event = web_app._challenge1_observer_notion_events(
+            "entry-job", "BTC-USDT", entry_job, entry_reviews,
+            phase="RESULT", audit_phase="ENTRY",
+        )[0]
+        exit_job = {
+            "result": {
+                **entry_job["result"],
+                "status": "POSITION_CLOSED",
+                "audit_phase": "EXIT",
+                "closed_confirmed": True,
+                "close_context": {"realized_pnl_after_reported_trading_fees": "0.42"},
+                "exit_history": {"historyId": "history-123", "realizedPnl": "0.45"},
+            }
+        }
+        exit_reviews = [
+            {"reviewer_id": "nemotron", "status": "REVIEWED", "provider": "OpenRouter",
+             "model": "nvidia/nemotron:free", "verdict": "SUPPORTS_DECISION",
+             "reason_fa": "خروج سود را حفظ کرد.", "request_attempted": True,
+             "response_validated": True, "model_verified": True},
+            {"reviewer_id": "second_ai", "status": "REVIEWED", "provider": "Groq",
+             "model": "openai/gpt-oss-120b", "verdict": "SUPPORTS_DECISION",
+             "reason_fa": "خروج با هدف ریسک سازگار بود.", "request_attempted": True,
+             "response_validated": True, "model_verified": True},
+        ]
+        exit_event = web_app._challenge1_observer_notion_events(
+            "exit-job", "BTC-USDT", exit_job, exit_reviews,
+            phase="RESULT", audit_phase="EXIT",
+            existing_report={"details": entry_event["details"]},
+        )[0]
+        self.assertEqual(entry_event["event_id"], exit_event["event_id"])
+        detail = json.loads(exit_event["details"])
+        self.assertIn("ENTRY", detail["phases"])
+        self.assertIn("EXIT", detail["phases"])
+        self.assertEqual(detail["trade_status"], "CLOSED")
+        self.assertEqual(detail["final_trade_opinion"], "ENTRY_AND_EXIT_REVIEW_CONSISTENT")
+        self.assertEqual(detail["exit_history"]["historyId"], "history-123")
+
+    def test_challenge1_observer_request_is_one_combined_event(self):
+        job = {"result": {"signal": "SHORT", "learning_experience_id": "experience-request"}}
         reviews = [
             {"reviewer_id": "nemotron", "status": "REQUESTING", "provider": "OpenRouter",
              "model": "nemotron:free", "request_attempted": False},
@@ -1905,12 +1966,13 @@ class WebAppHttpTests(unittest.TestCase):
         events = web_app._challenge1_observer_notion_events(
             "cycle-observer-request", "ETH-USDT", job, reviews, phase="REQUESTED",
         )
-        self.assertEqual(len(events), 2)
-        nemotron = next(item for item in events if item["actor"] == "Nemotron Supervisor")
-        second = next(item for item in events if item["actor"] == "Second AI Supervisor")
-        self.assertEqual(nemotron["status"], "PENDING")
-        self.assertEqual(second["status"], "WARNING")
-        self.assertEqual(second["ai_suggestion"], "NOT_CONFIGURED")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["actor"], "AI Supervisor")
+        self.assertEqual(events[0]["event_type"], "AI_REVIEW_REQUESTED")
+        detail = json.loads(events[0]["details"])
+        by_reviewer = {item["reviewer_id"]: item for item in detail["phases"]["ENTRY"]["reviewers"]}
+        self.assertEqual(by_reviewer["nemotron"]["status"], "REQUESTING")
+        self.assertEqual(by_reviewer["second_ai"]["status"], "NOT_CONFIGURED")
 
 
     def test_position_manager_records_exit_threshold_and_distinct_close_transition(self):
@@ -2054,7 +2116,9 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["status"], "OBSERVER_AUDIT_SCHEDULED")
         self.assertEqual(result["position_id"], "demo-position-btc")
         args = start_job.call_args.args
-        self.assertEqual(args[0], "position-audit:demo-position-btc:initial-v2")
+        self.assertEqual(
+            args[0], web_app._challenge1_audit_job_id("experience-btc-1", "ENTRY")
+        )
         self.assertEqual(args[1], "BTC-USDT")
         self.assertEqual(args[2]["signal"], "LONG")
         self.assertEqual(args[2]["challenge1_evidence"]["setup_timeframe"], "5m")
@@ -2193,7 +2257,8 @@ class WebAppHttpTests(unittest.TestCase):
                 "BTC-USDT", record, job,
             )
         run_review.assert_not_called()
-        queue_events.assert_not_called()
+        queue_events.assert_called_once()
+        self.assertEqual(queue_events.call_args.kwargs["phase"], "RESULT")
 
 
 if __name__ == "__main__":
