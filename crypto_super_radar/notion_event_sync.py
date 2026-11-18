@@ -6,6 +6,7 @@ missing or invalid Notion credentials must never block analysis or order safety.
 from __future__ import annotations
 
 import json
+import re
 import os
 import time
 import hashlib
