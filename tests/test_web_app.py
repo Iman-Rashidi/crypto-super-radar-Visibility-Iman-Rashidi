@@ -1933,6 +1933,39 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(args[3]["result"]["position_id"], "demo-position-btc")
         self.assertEqual(args[3]["result"]["exchange_order_id"], "demo-order-btc")
 
+
+    def test_observer_worker_releases_start_marker_after_durable_store_error(self):
+        job_id = "position-audit:demo-position-store-error:initial-v2"
+        job = {
+            "status": "completed",
+            "result": {
+                "status": "POSITION_MONITORING",
+                "signal": "LONG",
+                "position_id": "demo-position-store-error",
+                "exchange_order_id": "demo-order-store-error",
+                "learning_experience_id": "experience-store-error",
+                "positions": [{"positionId": "demo-position-store-error"}],
+            },
+        }
+        record = {
+            "signal": "LONG",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        outbox = MagicMock()
+        outbox.get_event.side_effect = RuntimeError("temporary database error")
+        web_app.BLOFIN_AI_OBSERVER_STARTED.add(job_id)
+        try:
+            with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+                web_app._run_challenge1_observer_job(job_id, "BTC-USDT", record, job)
+            self.assertNotIn(job_id, web_app.BLOFIN_AI_OBSERVER_STARTED)
+        finally:
+            web_app.BLOFIN_AI_OBSERVER_STARTED.discard(job_id)
+
     def test_observer_worker_retries_when_request_exists_but_result_is_missing(self):
         job = {
             "status": "completed",
