@@ -10390,11 +10390,18 @@ def _challenge1_observer_results_complete(job_id: str) -> bool:
     outbox = None
     try:
         outbox = NotionEventOutbox()
-        results_present = [
-            outbox.has_event(f"{job_id}:AI:{reviewer_id}:RESULT")
-            for reviewer_id in ("nemotron", "second_ai")
-        ]
-        return all(results_present)
+        result_event_types = (
+            "AI_APPROVAL", "AI_VETO", "AI_REVIEW_REQUESTED", "AI_RECOMMENDATION",
+        )
+        for reviewer_id in ("nemotron", "second_ai"):
+            reviewer_has_result = False
+            for event_type in result_event_types:
+                if outbox.has_event(f"{job_id}:AI:{reviewer_id}:{event_type}"):
+                    reviewer_has_result = True
+                    break
+            if not reviewer_has_result:
+                return False
+        return True
     except Exception:
         return False
     finally:
