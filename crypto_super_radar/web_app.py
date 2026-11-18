@@ -5296,9 +5296,10 @@ def _blofin_demo_profit_exit_decision(
 
 
 def _start_challenge1_active_position_observer(
-    order: dict, position: dict, instrument_id: str,
+    order: dict, position: dict, instrument_id: str, *,
+    audit_phase: str = "ENTRY", close_context: dict | None = None,
 ) -> dict:
-    """Audit an already-open robot-linked position once, using its stored decision evidence."""
+    """Audit the opening or confirmed exchange close of a robot-linked Demo trade."""
     if not isinstance(order, dict) or not isinstance(position, dict):
         return {"status": "INVALID_POSITION_CONTEXT"}
     experience_id = str(order.get("experience_id") or "").strip()
@@ -5342,13 +5343,26 @@ def _start_challenge1_active_position_observer(
         "reason_fa": saved.get("reason_fa") or "بازبینی اولیهٔ پوزیشن باز از روی شواهد ذخیره‌شده.",
         "challenge1_evidence": evidence,
     }
-    synthetic_job_id = f"position-audit:{position_id}:initial-v2"
+    phase = str(audit_phase or "ENTRY").upper()
+    if phase not in {"ENTRY", "EXIT"}:
+        return {"status": "INVALID_AUDIT_PHASE", "audit_phase": phase}
+    close_record = dict(close_context) if isinstance(close_context, dict) else {}
+    close_identity = str(
+        position.get("historyId") or position.get("updateTime")
+        or close_record.get("history_id") or close_record.get("close_time_utc") or "confirmed"
+    )
+    synthetic_job_id = (
+        f"trade-audit:{experience_id}:{phase}"
+        if phase == "ENTRY"
+        else f"trade-audit:{experience_id}:EXIT:{close_identity}"
+    )
     position_snapshot = {
         key: position.get(key)
         for key in (
-            "positionId", "instId", "positionSide", "positions",
-            "averagePrice", "markPrice", "unrealizedPnl", "leverage",
-            "liquidationPrice", "createTime", "updateTime",
+            "historyId", "positionId", "instId", "positionSide", "positions",
+            "closePositions", "averagePrice", "markPrice", "unrealizedPnl", "leverage",
+            "liquidationPrice", "createTime", "updateTime", "openAveragePrice",
+            "closeAveragePrice", "realizedPnl", "realizedPnlRatio", "fee",
         )
         if position.get(key) is not None
     }
@@ -5359,18 +5373,26 @@ def _start_challenge1_active_position_observer(
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "learning_experience_id": experience_id,
         "result": {
-            "status": "POSITION_MONITORING",
+            "status": "POSITION_CLOSED" if phase == "EXIT" else "POSITION_MONITORING",
             "signal": signal,
             "learning_experience_id": experience_id,
-            "exchange_order_id": order.get("exchange_order_id"),
-            "order_id": order.get("exchange_order_id"),
+            "exchange_order_id": order.get("exchange_order_id") or order.get("order_id"),
+            "order_id": order.get("exchange_order_id") or order.get("order_id"),
             "position_id": position_id,
             "positions": [position_snapshot],
             "average_fill_price": saved.get("actual_entry_price") or order.get("entry_price"),
-            "filled_size": position.get("positions"),
+            "filled_size": position.get("positions") or position.get("closePositions"),
             "trade_executed": True,
             "orders_submitted": True,
-            "reason_fa": "بازبینی اولیهٔ فقط‌گزارشی برای پوزیشن باز ربات.",
+            "audit_phase": phase,
+            "closed_confirmed": phase == "EXIT",
+            "close_context": close_record if phase == "EXIT" else None,
+            "exit_history": position_snapshot if phase == "EXIT" else None,
+            "reason_fa": (
+                "بازبینی نهایی فقط‌گزارشی پس از تأیید بسته‌شدن پوزیشن در تاریخچه BloFin Demo."
+                if phase == "EXIT" else
+                "بازبینی آغاز معامله فقط‌گزارشی پس از تأیید پوزیشن باز در BloFin Demo."
+            ),
         },
     }
     _start_challenge1_observer_job(
@@ -5378,6 +5400,7 @@ def _start_challenge1_active_position_observer(
     )
     return {
         "status": "OBSERVER_AUDIT_SCHEDULED",
+        "audit_phase": phase,
         "position_id": position_id,
         "experience_id": experience_id,
         "audit_job_id": synthetic_job_id,
@@ -5497,6 +5520,22 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                             closed_rows if isinstance(closed_rows, list) else [],
                             partial_rows if isinstance(partial_rows, list) else [],
                         )
+                        confirmed_close = next(
+                            (
+                                row for row in (closed_rows if isinstance(closed_rows, list) else [])
+                                if isinstance(row, dict)
+                                and str(row.get("positionId") or "").strip() == position_id
+                            ),
+                            None,
+                        )
+                        exit_observer = (
+                            _start_challenge1_active_position_observer(
+                                order, confirmed_close, instrument_id,
+                                audit_phase="EXIT", close_context=outcome,
+                            )
+                            if isinstance(confirmed_close, dict) else
+                            {"status": "CLOSE_HISTORY_ROW_NOT_FOUND"}
+                        )
                         actions.append({
                             "status": outcome.get("status"),
                             "instrument_id": instrument_id,
@@ -5506,6 +5545,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                                 "realized_pnl_after_reported_trading_fees"
                             ),
                             "activity_report_sync": activity_update,
+                            "exit_observer_audit": exit_observer,
                         })
                 except Exception as exc:
                     actions.append({
@@ -5519,7 +5559,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             position = matching_active[0]
             managed += 1
             observer_audit = _start_challenge1_active_position_observer(
-                order, position, instrument_id,
+                order, position, instrument_id, audit_phase="ENTRY",
             )
             # A previously accepted/unknown close is not resent blindly.
             prior_events = store.recent_events(client_order_id, limit=100)
