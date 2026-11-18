@@ -378,6 +378,45 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(report["orders_submitted"])
         self.assertFalse(report["trade_executed"])
 
+    def test_autopilot_ai_summary_exposes_actual_reviewer_metadata_only(self):
+        job = {
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron",
+                    "review": {
+                        "provider": "OpenRouter",
+                        "model": "configured-model",
+                        "returned_model": "actual-model",
+                        "status": "APPROVED",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": True,
+                        "model_verified": True,
+                        "request_started_at_utc": "2026-11-18T12:30:00+00:00",
+                        "completed_at_utc": "2026-11-18T12:30:02+00:00",
+                        "http_status": 200,
+                        "latency_ms": 2000,
+                        "raw_response": "must not be projected",
+                        "api_key": "must never be projected",
+                    },
+                },
+            ],
+        }
+
+        summary = web_app._blofin_ai_review_summary(job)
+
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["reviewer_id"], "nemotron")
+        self.assertEqual(summary[0]["provider"], "OpenRouter")
+        self.assertEqual(summary[0]["model"], "configured-model")
+        self.assertEqual(summary[0]["returned_model"], "actual-model")
+        self.assertEqual(summary[0]["response_source"], "LIVE_API")
+        self.assertTrue(summary[0]["response_validated"])
+        self.assertTrue(summary[0]["model_verified"])
+        self.assertEqual(summary[0]["http_status"], 200)
+        self.assertNotIn("raw_response", summary[0])
+        self.assertNotIn("api_key", summary[0])
+
     def test_challenge1_supervisors_run_before_order_readiness_blocks_execution(self):
         with open(web_app.__file__, encoding="utf-8") as source_file:
             source = source_file.read()
