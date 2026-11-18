@@ -9,6 +9,8 @@ from unittest.mock import patch
 from crypto_super_radar.ai_second_opinion import (
     DEFAULT_FREE_MODEL,
     MAX_REQUESTS_PER_MINUTE,
+    _extract_json,
+    _observer_message_text,
     ai_connection_status,
     run_free_ai_second_opinion,
     run_challenge1_observer_reviews,
@@ -565,4 +567,31 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(audit["reviewers"][0]["status"], "REVIEWED")
         self.assertEqual(audit["reviewers"][1]["status"], "NOT_CONFIGURED")
         self.assertFalse(audit["reviewers"][1]["request_attempted"])
+
+
+
+    def test_observer_json_parser_accepts_fenced_json_with_leading_text(self):
+        fence = chr(96) * 3
+        result = _extract_json(
+            'Review result:\n' + fence + 'json\n'
+            + '{"verdict":"SUPPORTS_DECISION",'
+            + '"reason_fa":"شواهد ثبت‌شده همسو هستند.",'
+            + '"observations":[],"risk_flags":[]}\n' + fence
+        )
+        self.assertEqual(result["verdict"], "SUPPORTS_DECISION")
+
+    def test_observer_message_parser_handles_openai_structured_content(self):
+        text = _observer_message_text(
+            {"content": [
+                {"type": "output_text", "text": '{"verdict":"CONCERNS",'},
+                {"type": "text", "text": '"reason_fa":"ریسک مشخص وجود دارد."}'},
+            ]},
+            {},
+        )
+        parsed = _extract_json(text)
+        self.assertEqual(parsed["verdict"], "CONCERNS")
+
+    def test_observer_message_parser_rejects_missing_text_without_echoing_raw_body(self):
+        with self.assertRaisesRegex(ValueError, "OBSERVER_CONTENT_MISSING"):
+            _observer_message_text({"content": None}, {"finish_reason": "length"})
 
