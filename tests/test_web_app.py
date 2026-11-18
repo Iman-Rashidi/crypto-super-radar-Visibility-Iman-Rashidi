@@ -131,6 +131,47 @@ class WebAppHttpTests(unittest.TestCase):
             web_app.NOTION_EVENT_SYNC_STATE.clear()
             web_app.NOTION_EVENT_SYNC_STATE.update(previous)
 
+    def test_autopilot_status_hides_stale_schedule_when_disabled(self):
+        previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        try:
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE.update({
+                    "enabled": True,
+                    "status": "WAITING_FOR_NEXT_5M_CANDLE",
+                    "search_continues": True,
+                    "next_cycle_scheduled": True,
+                    "next_cycle_at_utc": "2026-11-18T12:30:00+00:00",
+                    "next_cycle_in_seconds": 120,
+                })
+            with (
+                patch.dict(os.environ, {"BLOFIN_DEMO_AUTOPILOT_ENABLED": "false"}),
+                patch.object(
+                    web_app, "_blofin_demo_execution_readiness",
+                    return_value={"status": "BLOCKED", "trading_enabled": False},
+                ),
+            ):
+                status, _headers, payload = self.request(
+                    "GET", "/api/blofin/demo/autopilot/status?status_only=1"
+                )
+
+            data = json.loads(payload)
+            self.assertEqual(status, 200)
+            self.assertFalse(data["enabled"])
+            self.assertEqual(data["status"], "DISABLED")
+            self.assertFalse(data["search_continues"])
+            self.assertFalse(data["next_cycle_scheduled"])
+            self.assertIsNone(data["next_cycle_at_utc"])
+            self.assertIsNone(data["next_cycle_in_seconds"])
+            # Preserve the most recent cycle's audit evidence.
+            self.assertEqual(
+                data["last_cycle_diagnostics"],
+                previous.get("last_cycle_diagnostics"),
+            )
+        finally:
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE.clear()
+                web_app.BLOFIN_AUTOPILOT_STATE.update(previous)
+
     def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
         with open(web_app.__file__, encoding="utf-8") as source_file:
             source = source_file.read()
@@ -1417,6 +1458,14 @@ class WebAppHttpTests(unittest.TestCase):
         old_done = web_app.BLOFIN_STARTUP_RECONCILE_DONE
         try:
             web_app.BLOFIN_STARTUP_RECONCILE_DONE = False
+            web_app.BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": True,
+                "status": "WAITING_FOR_NEXT_5M_CANDLE",
+                "search_continues": True,
+                "next_cycle_scheduled": True,
+                "next_cycle_at_utc": "2026-11-18T12:30:00+00:00",
+                "next_cycle_in_seconds": 120,
+            })
             with (
                 patch.dict(os.environ, {
                     "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
@@ -1431,6 +1480,11 @@ class WebAppHttpTests(unittest.TestCase):
                 web_app._start_blofin_demo_autopilot()
             startup_reconcile.assert_called_once_with()
             self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "DISABLED")
+            self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["enabled"])
+            self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
+            self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])
+            self.assertIsNone(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"])
+            self.assertIsNone(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_in_seconds"])
         finally:
             web_app.BLOFIN_STARTUP_RECONCILE_DONE = old_done
             web_app.BLOFIN_AUTOPILOT_STATE.clear()
