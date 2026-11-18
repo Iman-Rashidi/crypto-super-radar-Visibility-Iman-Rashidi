@@ -5365,11 +5365,11 @@ def _start_challenge1_active_position_observer(
             "reason_fa": "بازبینی اولیهٔ فقط‌گزارشی برای پوزیشن باز ربات.",
         },
     }
-    _start_challenge1_observer_job(
+    audit_state = _start_challenge1_observer_job(
         synthetic_job_id, instrument, challenge_record, initial_job,
     )
     return {
-        "status": "OBSERVER_AUDIT_SCHEDULED",
+        **audit_state,
         "position_id": position_id,
         "experience_id": experience_id,
         "audit_job_id": synthetic_job_id,
@@ -9621,6 +9621,14 @@ def _run_challenge1_observer_job(
     # The durable request event is the cross-restart idempotency key. If it
     # already exists, do not call paid/free provider APIs a second time.
     if request_queue.get("status") != "QUEUED" or int(request_queue.get("queued") or 0) <= 0:
+        with LOCK:
+            CHALLENGE1_OBSERVER_AUDIT_STATE[job_id] = {
+                "status": "REQUEST_EVENT_NOT_PERSISTED",
+                "audit_job_id": job_id,
+                "request_outbox": request_queue,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "execution_effect": "NONE",
+            }
         return
     try:
         audit = run_challenge1_observer_reviews(challenge_record, context)
@@ -9661,20 +9669,51 @@ def _run_challenge1_observer_job(
             current["observer_audit_completed_at_utc"] = audit.get("completed_at_utc")
             current["observer_audit_effect"] = "NONE"
             BLOFIN_EXECUTION_JOBS[job_id] = current
-    _queue_challenge1_observer_events(
+    result_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, reviews, phase="RESULT",
     )
+    reviewed_count = sum(1 for item in reviews if item.get("status") == "REVIEWED")
+    if reviewed_count == len(reviews) and len(reviews) == 2:
+        audit_status = "COMPLETED"
+    elif reviewed_count:
+        audit_status = "PARTIAL"
+    else:
+        audit_status = "FAILED"
+    with LOCK:
+        CHALLENGE1_OBSERVER_AUDIT_STATE[job_id] = {
+            "status": audit_status,
+            "audit_job_id": job_id,
+            "symbol": str(instrument_id).upper(),
+            "consensus": audit.get("consensus"),
+            "reviewers": [
+                {
+                    "reviewer_id": item.get("reviewer_id"),
+                    "status": item.get("status"),
+                    "provider": item.get("provider"),
+                    "model": item.get("returned_model") or item.get("model"),
+                    "response_validated": item.get("response_validated") is True,
+                    "model_verified": item.get("model_verified") is True,
+                    "error_code": item.get("error_code"),
+                    "http_status": item.get("http_status"),
+                }
+                for item in reviews
+            ],
+            "request_outbox": request_queue,
+            "result_outbox": result_queue,
+            "completed_at_utc": audit.get("completed_at_utc") or datetime.now(timezone.utc).isoformat(),
+            "execution_effect": "NONE",
+        }
 
 
 def _start_challenge1_observer_job(
     job_id: str, instrument_id: str, challenge_record: dict | None,
     initial_job: dict | None = None,
-) -> None:
+) -> dict:
     if not isinstance(challenge_record, dict):
-        return
+        return {"status": "INVALID_CHALLENGE_RECORD"}
     evidence = challenge_record.get("challenge1_evidence")
     if not isinstance(evidence, dict):
-        return
+        return {"status": "CHALLENGE1_EVIDENCE_MISSING"}
     if isinstance(initial_job, dict):
         snapshot = copy.deepcopy(initial_job)
     else:
@@ -9682,15 +9721,33 @@ def _start_challenge1_observer_job(
             snapshot = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id, {}))
     result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
     if str(result.get("status") or "").upper() == "SKIPPED_DUPLICATE_EXPERIENCE":
-        return
+        return {"status": "SKIPPED_DUPLICATE_EXPERIENCE"}
     with BLOFIN_AI_OBSERVER_START_LOCK:
         if job_id in BLOFIN_AI_OBSERVER_STARTED:
-            return
+            with LOCK:
+                return copy.deepcopy(
+                    CHALLENGE1_OBSERVER_AUDIT_STATE.get(
+                        job_id, {"status": "ALREADY_STARTED", "audit_job_id": job_id},
+                    )
+                )
         BLOFIN_AI_OBSERVER_STARTED.add(job_id)
         if len(BLOFIN_AI_OBSERVER_STARTED) > 2000:
             # Bounded process-local deduplication; durable event IDs provide final idempotency.
             BLOFIN_AI_OBSERVER_STARTED.clear()
             BLOFIN_AI_OBSERVER_STARTED.add(job_id)
+    scheduled = {
+        "status": "SCHEDULED",
+        "audit_job_id": job_id,
+        "symbol": str(instrument_id).upper(),
+        "scheduled_at_utc": datetime.now(timezone.utc).isoformat(),
+        "execution_effect": "NONE",
+    }
+    with LOCK:
+        CHALLENGE1_OBSERVER_AUDIT_STATE[job_id] = scheduled
+        if len(CHALLENGE1_OBSERVER_AUDIT_STATE) > 50:
+            oldest = next(iter(CHALLENGE1_OBSERVER_AUDIT_STATE))
+            if oldest != job_id:
+                CHALLENGE1_OBSERVER_AUDIT_STATE.pop(oldest, None)
     worker = threading.Thread(
         target=_run_challenge1_observer_job,
         args=(job_id, instrument_id, copy.deepcopy(challenge_record), snapshot),
@@ -9698,6 +9755,7 @@ def _start_challenge1_observer_job(
         name=f"challenge1-observer-{job_id[:24]}",
     )
     worker.start()
+    return scheduled
 
 
 def _queue_blofin_position_manager_heartbeats(
