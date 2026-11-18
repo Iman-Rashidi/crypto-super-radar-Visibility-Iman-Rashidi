@@ -2011,7 +2011,7 @@ class WebAppHttpTests(unittest.TestCase):
             },
         }
         outbox = MagicMock()
-        outbox.has_event.side_effect = [False] * 8
+        outbox.has_event.side_effect = [False] * 5
         with (
             patch.object(web_app, "NotionEventOutbox", return_value=outbox),
             patch.object(web_app, "_queue_challenge1_observer_events", side_effect=[
@@ -2041,7 +2041,7 @@ class WebAppHttpTests(unittest.TestCase):
 
     def test_observer_runner_can_resume_when_request_event_exists_but_results_do_not(self):
         outbox = MagicMock()
-        outbox.has_event.side_effect = [False] * 4
+        outbox.has_event.side_effect = [False] * 5
         with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
             self.assertFalse(web_app._challenge1_observer_results_complete("cycle-resume"))
         self.assertEqual(
@@ -2051,10 +2051,25 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in outbox.has_event.call_args_list],
             [
+                "cycle-resume:AI:nemotron:RESULT",
                 "cycle-resume:AI:nemotron:AI_APPROVAL",
                 "cycle-resume:AI:nemotron:AI_VETO",
                 "cycle-resume:AI:nemotron:AI_REVIEW_REQUESTED",
                 "cycle-resume:AI:nemotron:AI_RECOMMENDATION",
+            ],
+        )
+        outbox.close.assert_called_once()
+
+    def test_observer_results_complete_checks_stable_result_ids_for_both_reviewers(self):
+        outbox = MagicMock()
+        outbox.has_event.side_effect = [True, True]
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            self.assertTrue(web_app._challenge1_observer_results_complete("cycle-stable"))
+        self.assertEqual(
+            [call.args[0] for call in outbox.has_event.call_args_list],
+            [
+                "cycle-stable:AI:nemotron:RESULT",
+                "cycle-stable:AI:second_ai:RESULT",
             ],
         )
         outbox.close.assert_called_once()
