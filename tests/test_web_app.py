@@ -1970,5 +1970,47 @@ class WebAppHttpTests(unittest.TestCase):
         outbox.enqueue.assert_not_called()
 
 
+    def test_autopilot_status_exposes_event_outbox_health_and_observer_results(self):
+        previous_event_state = copy.deepcopy(web_app.NOTION_EVENT_SYNC_STATE)
+        previous_observer_state = copy.deepcopy(web_app.CHALLENGE1_OBSERVER_AUDIT_STATE)
+        try:
+            web_app.NOTION_EVENT_SYNC_STATE.update({
+                "status": "CONFIGURED",
+                "pending": 2,
+                "pending_with_error": 1,
+                "last_error_type": "HTTPError",
+                "last_http_status": 503,
+                "last_event_id": "observer-cycle:nemotron:result",
+            })
+            web_app.CHALLENGE1_OBSERVER_AUDIT_STATE["audit-test-1"] = {
+                "status": "PARTIAL",
+                "audit_job_id": "audit-test-1",
+                "reviewers": [
+                    {"reviewer_id": "nemotron", "status": "REVIEWED"},
+                    {"reviewer_id": "second_ai", "status": "NOT_CONFIGURED"},
+                ],
+                "execution_effect": "NONE",
+            }
+            status, _headers, body = self.request(
+                "GET", "/api/blofin/demo/autopilot/status?status_only=1",
+            )
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["notion_event_sync"]["pending_with_error"], 1)
+            self.assertEqual(payload["notion_event_sync"]["last_http_status"], 503)
+            self.assertEqual(
+                payload["notion_event_sync"]["last_event_id"],
+                "observer-cycle:nemotron:result",
+            )
+            self.assertEqual(
+                payload["observer_audits"]["audit-test-1"]["status"], "PARTIAL",
+            )
+        finally:
+            web_app.NOTION_EVENT_SYNC_STATE.clear()
+            web_app.NOTION_EVENT_SYNC_STATE.update(previous_event_state)
+            web_app.CHALLENGE1_OBSERVER_AUDIT_STATE.clear()
+            web_app.CHALLENGE1_OBSERVER_AUDIT_STATE.update(previous_observer_state)
+
+
 if __name__ == "__main__":
     unittest.main()
