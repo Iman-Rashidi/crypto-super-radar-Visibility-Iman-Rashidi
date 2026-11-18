@@ -591,11 +591,36 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(result["status"], "NOT_CONFIGURED")
         self.assertFalse(result["request_attempted"])
 
+    def test_groq_key_requires_gsk_prefix_without_exposing_key(self):
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "not-a-groq-key",
+            "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
+            "CSR_SECOND_AI_PROVIDER": "Groq",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+            review = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("invalid Groq key format must block before the provider call")
+                ),
+            )
+        self.assertFalse(status["configured"])
+        self.assertFalse(status["credential_format_valid"])
+        self.assertIn("GROQ_API_KEY_PREFIX_INVALID", status["configuration_issues"])
+        self.assertEqual(review["status"], "NOT_CONFIGURED")
+        self.assertFalse(review["request_attempted"])
+        self.assertNotIn(env["CSR_SECOND_AI_API_KEY"], json.dumps(status))
+        self.assertNotIn(env["CSR_SECOND_AI_API_KEY"], json.dumps(review))
+
     def test_groq_free_plan_models_are_accepted_without_openrouter_suffix(self):
         env = {
             "OPENROUTER_API_KEY": "primary-key",
             "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
-            "CSR_SECOND_AI_API_KEY": "separate-groq-key",
+            "CSR_SECOND_AI_API_KEY": "gsk_separate-groq-key",
             "CSR_SECOND_AI_MODEL": "openai/gpt-oss-120b",
             "CSR_SECOND_AI_PROVIDER": "GroqCloud",
             "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
@@ -609,7 +634,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         base = {
             "OPENROUTER_API_KEY": "primary-key",
             "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
-            "CSR_SECOND_AI_API_KEY": "separate-groq-key",
+            "CSR_SECOND_AI_API_KEY": "gsk_separate-groq-key",
             "CSR_SECOND_AI_PROVIDER": "Groq",
             "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
         }
