@@ -756,6 +756,38 @@ def _extract_json(content: str) -> dict[str, Any]:
         raise ValueError("AI response is not a JSON object")
     return parsed
 
+_SAFE_REVIEW_ERROR_CODES = {
+    "No JSON object returned": ("NO_JSON_OBJECT", "The model response did not contain a JSON object."),
+    "AI response is not a JSON object": ("RESPONSE_NOT_JSON_OBJECT", "The model response was not a JSON object."),
+    "Challenge 1 candle/chart/Elliott review input is incomplete": ("REVIEW_EVIDENCE_INCOMPLETE", "The reviewer evidence contract was incomplete."),
+    "Challenge 1 specialist reviews are missing": ("SPECIALIST_REVIEWS_MISSING", "Required specialist sections were missing from the response."),
+    "Challenge 1 risk flags have an invalid format": ("RISK_FLAGS_INVALID", "The response risk flags did not match the schema."),
+    "Challenge 1 technical analyst response is invalid": ("TECHNICAL_REVIEW_INVALID", "A technical reviewer section did not match the schema."),
+    "Challenge 1 technical analyst verdict is invalid": ("TECHNICAL_VERDICT_INVALID", "A technical reviewer verdict was outside the allowed set."),
+    "Challenge 1 Elliott wave analyst response is invalid": ("ELLIOTT_REVIEW_INVALID", "The Elliott reviewer section did not match the schema."),
+    "Challenge 1 Elliott phase/direction does not match supplied wave evidence": ("ELLIOTT_EVIDENCE_MISMATCH", "The model's Elliott phase or direction did not match the supplied evidence."),
+    "Challenge 1 trading/risk specialist response is invalid": ("TRADING_RISK_REVIEW_INVALID", "A trading or risk reviewer section did not match the schema."),
+    "Challenge 1 trading/risk verdict is invalid": ("TRADING_RISK_VERDICT_INVALID", "A trading or risk verdict was outside the allowed set."),
+    "Challenge 1 specialist explanation is missing": ("SPECIALIST_EXPLANATION_MISSING", "A required specialist explanation was missing."),
+    "Unknown final rating": ("FINAL_RATING_INVALID", "The model returned an unsupported final rating."),
+    "Required specialist views are missing": ("SPECIALIST_VIEWS_MISSING", "Required specialist views were missing."),
+    "Risk flags have an invalid format or exceed the maximum count": ("RISK_FLAGS_INVALID", "The response risk flags did not match the schema."),
+    "Invalid specialist view": ("SPECIALIST_VIEW_INVALID", "A specialist view did not match the schema."),
+    "Invalid specialist verdict": ("SPECIALIST_VERDICT_INVALID", "A specialist verdict was outside the allowed set."),
+    "Specialist explanation is missing": ("SPECIALIST_EXPLANATION_MISSING", "A required specialist explanation was missing."),
+}
+def _safe_ai_review_error(exc: BaseException) -> tuple[str, str]:
+    """Return a bounded allowlisted diagnostic without exposing raw model output."""
+    if isinstance(exc, json.JSONDecodeError):
+        return "INVALID_JSON_RESPONSE", "The model response was not valid JSON."
+    message = str(exc)
+    mapped = _SAFE_REVIEW_ERROR_CODES.get(message)
+    if mapped:
+        return mapped
+    if isinstance(exc, ValueError):
+        return "RESPONSE_VALIDATION_FAILED", "The model response did not satisfy the expected review schema."
+    return type(exc).__name__.upper() + "_DURING_REVIEW", "The provider request or response processing failed."
+
 
 
 def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
@@ -1213,11 +1245,15 @@ def run_free_ai_second_opinion(
                         _CACHE.pop(next(iter(_CACHE)))
         return review
     except Exception as exc:
+        error_code, error_message = _safe_ai_review_error(exc)
         return {
             "provider": "OpenRouter", "model": model, "status": "UNKNOWN",
             "status_fa": "پاسخ معتبر از هوش مصنوعی دریافت نشد؛ ورود جدید متوقف شد.",
             "reason": "Free AI request or response validation failed.",
-            "error_type": type(exc).__name__, "http_status": http_status,
+            "error_type": type(exc).__name__,
+            "error_code": error_code,
+            "error_message": error_message,
+            "http_status": http_status,
             "request_attempted": True, "response_source": "LIVE_API",
             "request_started_at_utc": request_started_at_utc,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1260,6 +1296,9 @@ def second_ai_connection_status() -> dict[str, Any]:
         }
         if model and model not in free_models:
             reasons.append("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST")
+        key_format_valid = key.startswith("gsk_") if key else False
+        if key and not key_format_valid:
+            reasons.append("GROQ_API_KEY_PREFIX_INVALID")
         if endpoint and (
             endpoint_host != "api.groq.com"
             or endpoint_path != "/openai/v1/chat/completions"
@@ -1282,6 +1321,10 @@ def second_ai_connection_status() -> dict[str, Any]:
         "model": model or None,
         "status": "CONFIGURED" if configured else "NOT_CONFIGURED",
         "configured": configured,
+        "credential_format_valid": (
+            key.startswith("gsk_") if key and provider_key in {"groq", "groqcloud"}
+            else bool(key)
+        ),
         "configuration_issues": reasons,
         "secret_sent_to_model": False,
         "paper_entry_eligible": False,
@@ -1404,11 +1447,23 @@ def run_independent_ai_supervisor(
         latency_ms = int((time.monotonic() - started) * 1000)
         http_status = int(getattr(response, "status_code", 0) or 0)
         if http_status != 200:
+            provider_error_codes = {
+                401: ("PROVIDER_AUTH_REJECTED", "The provider rejected the authentication credentials."),
+                403: ("PROVIDER_ACCESS_DENIED", "The provider denied access to this endpoint or model."),
+                402: ("PROVIDER_QUOTA_OR_BILLING_REJECTED", "The provider rejected the request due to quota or account limits."),
+                429: ("PROVIDER_RATE_LIMITED", "The provider rate limit was reached."),
+            }
+            error_code, error_message = provider_error_codes.get(
+                http_status,
+                ("PROVIDER_HTTP_ERROR", "The provider returned a non-success HTTP status."),
+            )
             return {
                 "reviewer_id": "second_ai", "provider": provider, "model": model,
                 "status": "ERROR" if http_status != 429 else "UNKNOWN",
                 "status_fa": "ناظر مستقل دوم پاسخ موفق و قابل بررسی برنگرداند.",
                 "reason": "Independent second reviewer endpoint returned a non-200 status.",
+                "error_code": error_code,
+                "error_message": error_message,
                 "http_status": http_status, "latency_ms": latency_ms,
                 "request_attempted": True, "response_source": "LIVE_API",
                 "response_validated": False, "model_verified": False,
@@ -1484,12 +1539,16 @@ def run_independent_ai_supervisor(
         })
         return review
     except Exception as exc:
+        error_code, error_message = _safe_ai_review_error(exc)
         return {
             "reviewer_id": "second_ai", "provider": provider, "model": model,
             "status": "ERROR",
             "status_fa": "پاسخ ناظر مستقل دوم قابل اعتبارسنجی نبود؛ ورود جدید متوقف می‌ماند.",
             "reason": "Independent second reviewer request or validation failed.",
-            "error_type": type(exc).__name__, "http_status": http_status,
+            "error_type": type(exc).__name__,
+            "error_code": error_code,
+            "error_message": error_message,
+            "http_status": http_status,
             "latency_ms": latency_ms, "request_attempted": True,
             "response_source": "LIVE_API", "response_validated": False,
             "model_verified": False, "paper_entry_eligible": False,
