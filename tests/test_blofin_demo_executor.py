@@ -385,6 +385,21 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         with self.assertRaises(BloFinDemoExecutionBlocked):
             self.client._post("/api/v1/account/set-position-mode", {"positionMode": "net_mode"})
 
+    def test_trade_post_refuses_redirects_and_never_follows_location(self):
+        self.session.post.return_value = FakeResponse(
+            {"code": "0", "data": {"orderId": "unused"}}, status=302,
+            headers={"Location": "https://api.blofin.com/api/v1/trade/order"},
+        )
+        with self.assertRaises(BloFinDemoHTTPError) as caught:
+            self.client.place_futures_order(
+                inst_id="BTC-USDT", side="buy", position_side="net", size="1",
+                client_order_id="0123456789abcdef0123456789abcdef",
+                take_profit="104", stop_loss="98",
+            )
+        self.assertEqual(caught.exception.status_code, 302)
+        self.session.post.assert_called_once()
+        self.assertFalse(self.session.post.call_args.kwargs["allow_redirects"])
+
     def test_order_post_429_is_not_retried(self):
         self.session.post.return_value = FakeResponse(
             {"code": "0", "data": {"code": "0", "orderId": "unused"}},

@@ -78,6 +78,7 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.assertEqual(result["synced"], 1)
         self.assertEqual(post.call_count, 1)
         self.assertIn("/data_sources/", post.call_args.args[0])
+        self.assertFalse(post.call_args.kwargs["allow_redirects"])
 
     def test_create_page_after_empty_idempotency_query(self):
         self.outbox.enqueue(event())
@@ -91,6 +92,7 @@ class NotionEventOutboxTests(unittest.TestCase):
             result = self.outbox.flush_pending(now=1_800_000_000)
         self.assertEqual(result["synced_this_run"], 1)
         self.assertEqual(post.call_count, 2)
+        self.assertTrue(all(not call.kwargs["allow_redirects"] for call in post.call_args_list))
         create_body = post.call_args.kwargs["json"]
         self.assertEqual(
             create_body["parent"]["data_source_id"],

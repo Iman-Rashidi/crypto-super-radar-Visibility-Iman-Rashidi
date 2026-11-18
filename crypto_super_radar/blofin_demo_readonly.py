@@ -163,7 +163,13 @@ class BloFinDemoReadOnly:
         url = f"{self.base_url}{path_with_query}"
         for attempt in range(3):
             try:
-                response = self.session.get(url, headers=headers, timeout=self.timeout)
+                response = self.session.get(
+                    url, headers=headers, timeout=self.timeout,
+                    allow_redirects=False,
+                )
+                status_code = int(getattr(response, "status_code", 0) or 0)
+                if 300 <= status_code < 400:
+                    raise BloFinDemoHTTPError(status_code)
                 response.raise_for_status()
                 payload = response.json()
                 break

@@ -225,7 +225,10 @@ class NotionEventOutbox:
                 },
             },
             timeout=15,
+            allow_redirects=False,
         )
+        if 300 <= int(getattr(response, "status_code", 0) or 0) < 400:
+            raise requests.HTTPError("Notion API redirect refused.", response=response)
         response.raise_for_status()
         data = response.json()
         rows = data.get("results") if isinstance(data, dict) else []
@@ -242,7 +245,10 @@ class NotionEventOutbox:
                 "properties": self._notion_properties(event, attempts),
             },
             timeout=20,
+            allow_redirects=False,
         )
+        if 300 <= int(getattr(response, "status_code", 0) or 0) < 400:
+            raise requests.HTTPError("Notion API redirect refused.", response=response)
         response.raise_for_status()
         data = response.json()
         page_id = data.get("id") if isinstance(data, dict) else None

@@ -513,7 +513,11 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
                 data=body_text.encode("utf-8"),
                 headers=headers,
                 timeout=self.timeout,
+                allow_redirects=False,
             )
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            if 300 <= status_code < 400:
+                raise BloFinDemoHTTPError(status_code)
             response.raise_for_status()
             payload = response.json()
         except requests.HTTPError as exc:

@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 from crypto_super_radar.blofin_demo_readonly import (
     BloFinDemoAuthError,
+    BloFinDemoHTTPError,
     BloFinDemoReadOnly,
     DEMO_REST_URL,
     DEMO_PRIVATE_WS_URL,
@@ -57,6 +58,14 @@ class BloFinDemoReadOnlyTests(unittest.TestCase):
         self.assertIn("/api/v1/market/instruments?instId=BTC-USDT", url)
         self.assertEqual(kwargs["headers"], {})
         self.assertNotIn("ACCESS-KEY", kwargs["headers"])
+
+    def test_redirect_responses_are_rejected_without_following_them(self):
+        self.session.get.return_value = FakeResponse({"code": "0", "data": []}, status=302)
+        with self.assertRaises(BloFinDemoHTTPError) as caught:
+            self.client.get_positions()
+        self.assertEqual(caught.exception.status_code, 302)
+        self.session.get.assert_called_once()
+        self.assertFalse(self.session.get.call_args.kwargs["allow_redirects"])
 
     def test_candles_validate_limit_and_use_demo_endpoint(self):
         self.client.get_candles("BTC-USDT", bar="5m", limit=250)
