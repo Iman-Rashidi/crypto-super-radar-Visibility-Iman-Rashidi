@@ -1845,3 +1845,53 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
             )
         self.assertFalse(result["approved"])
         self.assertNotEqual(result["status"], "APPROVED_BY_BOTH")
+
+
+class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
+    def test_demo_connection_status_accepts_unified_account_credentials(self):
+        class FakeBloFinReadOnly:
+            def __init__(self, *, timeout):
+                self.timeout = timeout
+
+            def get_api_key_info(self):
+                return {"readOnly": 1}
+
+            def get_tickers(self, *, inst_id):
+                self.assert_inst_id = inst_id
+                return [{"instId": inst_id, "last": "100"}]
+
+            def get_futures_balance(self, *, product_type):
+                return {"productType": product_type, "balance": "0"}
+
+            def get_positions(self):
+                return []
+
+            def get_open_orders(self):
+                return []
+
+        env = {
+            "BLOFIN_API_KEY": "test-unified-key",
+            "BLOFIN_API_SECRET": "test-unified-secret",
+            "BLOFIN_PASSPHRASE": "test-unified-passphrase",
+            "BLOFIN_DEMO_API_KEY": "",
+            "BLOFIN_DEMO_API_SECRET": "",
+            "BLOFIN_DEMO_PASSPHRASE": "",
+        }
+        previous_payload = web_app.BLOFIN_STATUS_CACHE.get("payload")
+        previous_expiry = web_app.BLOFIN_STATUS_CACHE.get("expires_at", 0.0)
+        try:
+            web_app.BLOFIN_STATUS_CACHE.update(payload=None, expires_at=0.0)
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(web_app, "BloFinDemoReadOnly", FakeBloFinReadOnly),
+            ):
+                result = web_app._blofin_demo_connection_status()
+            self.assertEqual(result["status"], "CONNECTED_READ_ONLY")
+            self.assertEqual(result["api_key_permission"], "READ_ONLY")
+            self.assertEqual(result["market_data"], "PASS")
+            self.assertEqual(result["private_api"], "PASS")
+            self.assertFalse(result["orders_enabled"])
+        finally:
+            web_app.BLOFIN_STATUS_CACHE.update(
+                payload=previous_payload, expires_at=previous_expiry
+            )
