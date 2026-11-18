@@ -5365,11 +5365,17 @@ def _start_challenge1_active_position_observer(
             "reason_fa": "بازبینی اولیهٔ فقط‌گزارشی برای پوزیشن باز ربات.",
         },
     }
-    _start_challenge1_observer_job(
+    audit_state = _start_challenge1_observer_job(
         synthetic_job_id, instrument, challenge_record, initial_job,
     )
+    if not isinstance(audit_state, dict):
+        audit_state = {
+            "status": "SCHEDULED",
+            "audit_job_id": synthetic_job_id,
+            "execution_effect": "NONE",
+        }
     return {
-        "status": "OBSERVER_AUDIT_SCHEDULED",
+        **audit_state,
         "position_id": position_id,
         "experience_id": experience_id,
         "audit_job_id": synthetic_job_id,
@@ -5488,6 +5494,13 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             observer_audit = _start_challenge1_active_position_observer(
                 order, position, instrument_id,
             )
+            position_audit_gap = _queue_challenge1_position_audit_gap_event(
+                order, position, instrument_id, observer_audit,
+            )
+            if position_audit_gap.get("status") in {"QUEUED", "ALREADY_QUEUED"}:
+                observer_audit["gap_event"] = position_audit_gap
+            elif position_audit_gap.get("status") == "OUTBOX_UNAVAILABLE":
+                observer_audit["gap_event"] = position_audit_gap
             # A previously accepted/unknown close is not resent blindly.
             prior_events = store.recent_events(client_order_id, limit=100)
             prior_close = [
@@ -5775,7 +5788,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload["readiness"] = _blofin_demo_execution_readiness()
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
+                payload["notion_event_sync"] = copy.deepcopy(NOTION_EVENT_SYNC_STATE)
                 payload["notion_activity_sync"] = copy.deepcopy(NOTION_ACTIVITY_SYNC_STATE)
+                payload["observer_audits"] = copy.deepcopy(CHALLENGE1_OBSERVER_AUDIT_STATE)
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/live-monitor":
@@ -9619,6 +9634,14 @@ def _run_challenge1_observer_job(
     # The durable request event is the cross-restart idempotency key. If it
     # already exists, do not call paid/free provider APIs a second time.
     if request_queue.get("status") != "QUEUED" or int(request_queue.get("queued") or 0) <= 0:
+        with LOCK:
+            CHALLENGE1_OBSERVER_AUDIT_STATE[job_id] = {
+                "status": "REQUEST_EVENT_NOT_PERSISTED",
+                "audit_job_id": job_id,
+                "request_outbox": request_queue,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "execution_effect": "NONE",
+            }
         return
     try:
         audit = run_challenge1_observer_reviews(challenge_record, context)
@@ -9659,20 +9682,51 @@ def _run_challenge1_observer_job(
             current["observer_audit_completed_at_utc"] = audit.get("completed_at_utc")
             current["observer_audit_effect"] = "NONE"
             BLOFIN_EXECUTION_JOBS[job_id] = current
-    _queue_challenge1_observer_events(
+    result_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, reviews, phase="RESULT",
     )
+    reviewed_count = sum(1 for item in reviews if item.get("status") == "REVIEWED")
+    if reviewed_count == len(reviews) and len(reviews) == 2:
+        audit_status = "COMPLETED"
+    elif reviewed_count:
+        audit_status = "PARTIAL"
+    else:
+        audit_status = "FAILED"
+    with LOCK:
+        CHALLENGE1_OBSERVER_AUDIT_STATE[job_id] = {
+            "status": audit_status,
+            "audit_job_id": job_id,
+            "symbol": str(instrument_id).upper(),
+            "consensus": audit.get("consensus"),
+            "reviewers": [
+                {
+                    "reviewer_id": item.get("reviewer_id"),
+                    "status": item.get("status"),
+                    "provider": item.get("provider"),
+                    "model": item.get("returned_model") or item.get("model"),
+                    "response_validated": item.get("response_validated") is True,
+                    "model_verified": item.get("model_verified") is True,
+                    "error_code": item.get("error_code"),
+                    "http_status": item.get("http_status"),
+                }
+                for item in reviews
+            ],
+            "request_outbox": request_queue,
+            "result_outbox": result_queue,
+            "completed_at_utc": audit.get("completed_at_utc") or datetime.now(timezone.utc).isoformat(),
+            "execution_effect": "NONE",
+        }
 
 
 def _start_challenge1_observer_job(
     job_id: str, instrument_id: str, challenge_record: dict | None,
     initial_job: dict | None = None,
-) -> None:
+) -> dict:
     if not isinstance(challenge_record, dict):
-        return
+        return {"status": "INVALID_CHALLENGE_RECORD"}
     evidence = challenge_record.get("challenge1_evidence")
     if not isinstance(evidence, dict):
-        return
+        return {"status": "CHALLENGE1_EVIDENCE_MISSING"}
     if isinstance(initial_job, dict):
         snapshot = copy.deepcopy(initial_job)
     else:
@@ -9680,15 +9734,33 @@ def _start_challenge1_observer_job(
             snapshot = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id, {}))
     result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
     if str(result.get("status") or "").upper() == "SKIPPED_DUPLICATE_EXPERIENCE":
-        return
+        return {"status": "SKIPPED_DUPLICATE_EXPERIENCE"}
     with BLOFIN_AI_OBSERVER_START_LOCK:
         if job_id in BLOFIN_AI_OBSERVER_STARTED:
-            return
+            with LOCK:
+                return copy.deepcopy(
+                    CHALLENGE1_OBSERVER_AUDIT_STATE.get(
+                        job_id, {"status": "ALREADY_STARTED", "audit_job_id": job_id},
+                    )
+                )
         BLOFIN_AI_OBSERVER_STARTED.add(job_id)
         if len(BLOFIN_AI_OBSERVER_STARTED) > 2000:
             # Bounded process-local deduplication; durable event IDs provide final idempotency.
             BLOFIN_AI_OBSERVER_STARTED.clear()
             BLOFIN_AI_OBSERVER_STARTED.add(job_id)
+    scheduled = {
+        "status": "SCHEDULED",
+        "audit_job_id": job_id,
+        "symbol": str(instrument_id).upper(),
+        "scheduled_at_utc": datetime.now(timezone.utc).isoformat(),
+        "execution_effect": "NONE",
+    }
+    with LOCK:
+        CHALLENGE1_OBSERVER_AUDIT_STATE[job_id] = scheduled
+        if len(CHALLENGE1_OBSERVER_AUDIT_STATE) > 50:
+            oldest = next(iter(CHALLENGE1_OBSERVER_AUDIT_STATE))
+            if oldest != job_id:
+                CHALLENGE1_OBSERVER_AUDIT_STATE.pop(oldest, None)
     worker = threading.Thread(
         target=_run_challenge1_observer_job,
         args=(job_id, instrument_id, copy.deepcopy(challenge_record), snapshot),
@@ -9696,6 +9768,77 @@ def _start_challenge1_observer_job(
         name=f"challenge1-observer-{job_id[:24]}",
     )
     worker.start()
+    return scheduled
+
+
+def _queue_challenge1_position_audit_gap_event(
+    order: dict, position: dict, instrument_id: str, audit_result: dict,
+) -> dict:
+    """Persist an explicit gap when a real robot position has no recoverable decision evidence."""
+    if not isinstance(audit_result, dict):
+        return {"status": "NOT_APPLICABLE"}
+    gap_status = str(audit_result.get("status") or "").upper()
+    gap_codes = {
+        "POSITION_LINK_INCOMPLETE",
+        "ACTIVITY_EVIDENCE_UNAVAILABLE",
+        "ACTIVITY_EVIDENCE_NOT_FOUND",
+    }
+    if gap_status not in gap_codes:
+        return {"status": "NOT_A_GAP"}
+    order = order if isinstance(order, dict) else {}
+    position = position if isinstance(position, dict) else {}
+    position_id = str(
+        position.get("positionId") or order.get("position_id") or ""
+    ).strip()
+    symbol = str(instrument_id or order.get("instrument_id") or "").strip().upper()
+    if not position_id or not symbol:
+        return {"status": "GAP_IDENTITY_INCOMPLETE"}
+    event_id = f"CSR-POSITION-AUDIT-GAP:{position_id}:{gap_status}"
+    details = {
+        "gap_code": gap_status,
+        "position_id": position_id,
+        "order_id": order.get("exchange_order_id") or order.get("order_id") or "",
+        "experience_id": order.get("experience_id") or "",
+        "evidence_status": "MISSING_OR_UNAVAILABLE",
+        "synthetic_evidence_created": False,
+        "reviewer_calls_skipped": True,
+        "execution_effect": "NONE",
+    }
+    payload = {
+        "event_id": event_id,
+        "cycle_id": f"POSITION-AUDIT:{position_id}",
+        "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+        "event_type": "DATA_ERROR",
+        "actor": "Robot",
+        "status": "WARNING",
+        "market": "Futures",
+        "symbol": symbol,
+        "timeframe": "5m",
+        "signal": "UNKNOWN",
+        "ai_decision": "OBSERVE_ONLY",
+        "reason": (
+            "شواهد تصمیم اصلی این پوزیشن در حافظهٔ پایدار پیدا یا بازیابی نشد؛ "
+            "ربات از ساخت دادهٔ جایگزین خودداری کرد و بازبینی AI بدون شواهد اجرا نشد."
+        ),
+        "details": json.dumps(details, ensure_ascii=False, sort_keys=True, default=str),
+        "order_id": details["order_id"],
+        "position_id": position_id,
+        "experience_id": details["experience_id"],
+        "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
+    }
+    outbox = None
+    try:
+        outbox = NotionEventOutbox()
+        inserted = outbox.enqueue(payload)
+        return {
+            "status": "QUEUED" if inserted else "ALREADY_QUEUED",
+            "event_id": event_id,
+        }
+    except Exception as exc:
+        return {"status": "OUTBOX_UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if outbox is not None:
+            outbox.close()
 
 
 def _queue_blofin_position_manager_heartbeats(
@@ -9735,6 +9878,16 @@ def _queue_blofin_position_manager_heartbeats(
                 )
                 if action.get(key) is not None
             }
+            audit = action.get("observer_audit")
+            if isinstance(audit, dict):
+                detail["observer_audit"] = {
+                    key: audit.get(key)
+                    for key in (
+                        "status", "audit_job_id", "experience_id", "error_type",
+                        "gap_event",
+                    )
+                    if audit.get(key) is not None
+                }
             outbox_event = {
                 "event_id": f"CSR-POSITION-MONITOR:{position_id}:{minute_bucket}",
                 "cycle_id": f"POSITION-MANAGER:{minute_bucket}",
@@ -9767,6 +9920,19 @@ def _queue_blofin_position_manager_heartbeats(
 
 NOTION_SYNC_THREAD = None
 NOTION_SYNC_START_LOCK = threading.Lock()
+NOTION_EVENT_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "pending_with_error": 0,
+    "synced": 0,
+    "failed": 0,
+    "last_success_utc": None,
+    "last_event_id": None,
+    "last_error_type": None,
+    "last_http_status": None,
+    "last_checked_at_utc": None,
+    "last_worker_error_type": None,
+}
 NOTION_ACTIVITY_SYNC_STATE = {
     "status": "STARTING",
     "pending": 0,
@@ -9778,6 +9944,7 @@ NOTION_ACTIVITY_SYNC_STATE = {
     "last_http_status": None,
     "last_checked_at_utc": None,
 }
+CHALLENGE1_OBSERVER_AUDIT_STATE: dict[str, dict[str, Any]] = {}
 
 
 def _notion_sync_worker() -> None:
@@ -9789,16 +9956,25 @@ def _notion_sync_worker() -> None:
     interval = max(15, min(interval, 300))
     while True:
         outbox = None
-        activity_journal = None
+        event_sync_result = None
+        event_sync_error = None
         try:
             outbox = NotionEventOutbox()
-            outbox.flush_pending(limit=10)
-        except Exception:
-            # Keep a temporary Notion/Turso outage from stopping the Demo worker.
-            pass
+            event_sync_result = outbox.flush_pending(limit=10)
+        except Exception as exc:
+            # Event delivery errors stay visible while the worker continues retrying.
+            event_sync_error = type(exc).__name__
         finally:
             if outbox is not None:
                 outbox.close()
+        with LOCK:
+            NOTION_EVENT_SYNC_STATE["last_checked_at_utc"] = datetime.now(timezone.utc).isoformat()
+            if isinstance(event_sync_result, dict):
+                NOTION_EVENT_SYNC_STATE.update(event_sync_result)
+                NOTION_EVENT_SYNC_STATE["last_worker_error_type"] = None
+            elif event_sync_error:
+                NOTION_EVENT_SYNC_STATE["status"] = "WORKER_ERROR"
+                NOTION_EVENT_SYNC_STATE["last_worker_error_type"] = event_sync_error
         activity_sync_result = None
         activity_sync_error = None
         try:

@@ -1,6 +1,8 @@
 """Offline integration tests for the dependency-light HTTP dashboard."""
 from __future__ import annotations
 
+
+import copy
 import json
 from datetime import datetime, timezone
 import os
@@ -1881,7 +1883,8 @@ class WebAppHttpTests(unittest.TestCase):
             result = web_app._start_challenge1_active_position_observer(
                 order, position, "BTC-USDT",
             )
-        self.assertEqual(result["status"], "OBSERVER_AUDIT_SCHEDULED")
+        self.assertEqual(result["status"], "SCHEDULED")
+        self.assertEqual(result["audit_job_id"], "position-audit:demo-position-btc:initial-v2")
         self.assertEqual(result["position_id"], "demo-position-btc")
         args = start_job.call_args.args
         self.assertEqual(args[0], "position-audit:demo-position-btc:initial-v2")
@@ -1923,6 +1926,93 @@ class WebAppHttpTests(unittest.TestCase):
                 "BTC-USDT", record, job,
             )
         run_review.assert_not_called()
+
+
+    def test_position_audit_gap_creates_durable_data_error_without_fabricating_evidence(self):
+        outbox = MagicMock()
+        outbox.enqueue.return_value = True
+        order = {
+            "client_order_id": "client-order-btc",
+            "exchange_order_id": "demo-order-btc",
+            "experience_id": "experience-missing-btc",
+        }
+        position = {"positionId": "demo-position-btc"}
+        audit_result = {
+            "status": "ACTIVITY_EVIDENCE_NOT_FOUND",
+            "position_id": "demo-position-btc",
+            "experience_id": "experience-missing-btc",
+        }
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            result = web_app._queue_challenge1_position_audit_gap_event(
+                order, position, "BTC-USDT", audit_result,
+            )
+        self.assertEqual(result["status"], "QUEUED")
+        payload = outbox.enqueue.call_args.args[0]
+        self.assertEqual(payload["event_type"], "DATA_ERROR")
+        self.assertEqual(payload["actor"], "Robot")
+        self.assertEqual(payload["status"], "WARNING")
+        self.assertEqual(payload["position_id"], "demo-position-btc")
+        self.assertEqual(payload["order_id"], "demo-order-btc")
+        self.assertEqual(payload["experience_id"], "experience-missing-btc")
+        details = json.loads(payload["details"])
+        self.assertFalse(details["synthetic_evidence_created"])
+        self.assertTrue(details["reviewer_calls_skipped"])
+        self.assertEqual(details["gap_code"], "ACTIVITY_EVIDENCE_NOT_FOUND")
+        outbox.close.assert_called_once()
+
+    def test_position_audit_gap_is_not_created_for_a_normal_scheduled_audit(self):
+        outbox = MagicMock()
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            result = web_app._queue_challenge1_position_audit_gap_event(
+                {"experience_id": "experience-1"},
+                {"positionId": "position-1"},
+                "ETH-USDT",
+                {"status": "SCHEDULED"},
+            )
+        self.assertEqual(result["status"], "NOT_A_GAP")
+        outbox.enqueue.assert_not_called()
+
+
+    def test_autopilot_status_exposes_event_outbox_health_and_observer_results(self):
+        previous_event_state = copy.deepcopy(web_app.NOTION_EVENT_SYNC_STATE)
+        previous_observer_state = copy.deepcopy(web_app.CHALLENGE1_OBSERVER_AUDIT_STATE)
+        try:
+            web_app.NOTION_EVENT_SYNC_STATE.update({
+                "status": "CONFIGURED",
+                "pending": 2,
+                "pending_with_error": 1,
+                "last_error_type": "HTTPError",
+                "last_http_status": 503,
+                "last_event_id": "observer-cycle:nemotron:result",
+            })
+            web_app.CHALLENGE1_OBSERVER_AUDIT_STATE["audit-test-1"] = {
+                "status": "PARTIAL",
+                "audit_job_id": "audit-test-1",
+                "reviewers": [
+                    {"reviewer_id": "nemotron", "status": "REVIEWED"},
+                    {"reviewer_id": "second_ai", "status": "NOT_CONFIGURED"},
+                ],
+                "execution_effect": "NONE",
+            }
+            status, _headers, body = self.request(
+                "GET", "/api/blofin/demo/autopilot/status?status_only=1",
+            )
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["notion_event_sync"]["pending_with_error"], 1)
+            self.assertEqual(payload["notion_event_sync"]["last_http_status"], 503)
+            self.assertEqual(
+                payload["notion_event_sync"]["last_event_id"],
+                "observer-cycle:nemotron:result",
+            )
+            self.assertEqual(
+                payload["observer_audits"]["audit-test-1"]["status"], "PARTIAL",
+            )
+        finally:
+            web_app.NOTION_EVENT_SYNC_STATE.clear()
+            web_app.NOTION_EVENT_SYNC_STATE.update(previous_event_state)
+            web_app.CHALLENGE1_OBSERVER_AUDIT_STATE.clear()
+            web_app.CHALLENGE1_OBSERVER_AUDIT_STATE.update(previous_observer_state)
 
 
 if __name__ == "__main__":

@@ -156,6 +156,25 @@ class NotionEventOutboxTests(unittest.TestCase):
 
 
 
+    def test_status_snapshot_exposes_pending_event_retry_diagnostics(self):
+        self.assertTrue(self.outbox.enqueue(event(event_id="retry-event-1")))
+        self.db.execute(
+            """UPDATE csr_notion_event_outbox
+               SET attempts=?, next_attempt_at=?, last_error_type=?, last_http_status=?
+               WHERE event_id=?""",
+            (3, 1_800_000_120, "HTTPError", 503, "retry-event-1"),
+        )
+        self.db.commit()
+        state = self.outbox.status_snapshot()
+        self.assertEqual(state["pending"], 1)
+        self.assertEqual(state["pending_with_error"], 1)
+        self.assertEqual(state["last_event_id"], "retry-event-1")
+        self.assertEqual(state["last_error_type"], "HTTPError")
+        self.assertEqual(state["last_http_status"], 503)
+        self.assertEqual(state["last_attempts"], 3)
+        self.assertEqual(state["retry_after_epoch"], 1_800_000_120)
+
+
 if __name__ == "__main__":
     unittest.main()
 
