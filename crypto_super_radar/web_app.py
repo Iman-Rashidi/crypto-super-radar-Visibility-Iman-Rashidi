@@ -9450,6 +9450,17 @@ def _queue_blofin_position_manager_heartbeats(
 
 NOTION_SYNC_THREAD = None
 NOTION_SYNC_START_LOCK = threading.Lock()
+NOTION_EVENT_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "synced": 0,
+    "failed": 0,
+    "retrying": 0,
+    "last_error_type": None,
+    "last_http_status": None,
+    "last_checked_at_utc": None,
+}
+
 NOTION_ACTIVITY_SYNC_STATE = {
     "status": "STARTING",
     "pending": 0,
@@ -10379,10 +10390,11 @@ def _challenge1_observer_results_complete(job_id: str) -> bool:
     outbox = None
     try:
         outbox = NotionEventOutbox()
-        return all(
+        results_present = [
             outbox.has_event(f"{job_id}:AI:{reviewer_id}:RESULT")
             for reviewer_id in ("nemotron", "second_ai")
-        )
+        ]
+        return all(results_present)
     except Exception:
         return False
     finally:
@@ -10454,14 +10466,14 @@ def _run_challenge1_observer_job(
             "observation_only": True, "entry_gate_enforced": False,
             "execution_effect": "NONE",
         })
+    # Skip only when both independent reviewer result events are durable.
+    # A prior REQUESTED event alone is not proof that the worker completed.
+    if _challenge1_observer_results_complete(job_id):
+        return
     request_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, requested, phase="REQUESTED",
     )
-    # The request event may already exist after a process restart. Resume when
-    # either durable reviewer result is missing; skip only a fully completed audit.
     if request_queue.get("status") != "QUEUED":
-        return
-    if _challenge1_observer_results_complete(job_id):
         return
     try:
         audit = run_challenge1_observer_reviews(challenge_record, context)
