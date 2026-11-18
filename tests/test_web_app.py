@@ -370,6 +370,134 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(close_calls[0]["position_id"], "position789")
         self.assertEqual(store.record_manual_action.call_args_list[0].args[1], "AUTO_POSITION_CLOSE_REQUESTED")
 
+    def test_autopilot_close_cannot_bypass_the_minimum_net_profit_floor(self):
+        close_calls = []
+
+        class FakeManualClient:
+            def get_positions(self, *, inst_id=None):
+                return [{
+                    "instId": "BTC-USDT",
+                    "positionId": "position791",
+                    "positionSide": "net",
+                    "marginMode": "isolated",
+                    "positions": "0.1",
+                    "unrealizedPnl": "0.02",
+                }]
+
+            def get_mark_price(self, *, inst_id):
+                return [{"markPrice": "100"}]
+
+            def get_tradable_instrument(self, inst_id):
+                return {"contractValue": 0.001}
+
+            def close_futures_position(self, **kwargs):
+                close_calls.append(kwargs)
+                return {"code": "0", "data": [{"code": "0", "orderId": "close-791"}]}
+
+        with (
+            patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
+            patch.object(web_app, "BloFinDemoEventStore") as store_factory,
+            self.assertRaises(web_app.BloFinDemoExecutionBlocked),
+        ):
+            web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT",
+                position_id="position791",
+                action_source="AUTOPILOT",
+                audit_id="robotorder791",
+                exit_reason="NET_PROFIT_AFTER_FEES",
+                entry_fee_usdt=0.011,
+                taker_fee_rate=0.0006,
+                slippage_buffer_rate=0.0,
+                minimum_net_profit_usdt=0.0,
+            )
+        self.assertEqual(close_calls, [])
+        store_factory.assert_not_called()
+
+    def test_minimum_net_profit_environment_cannot_reduce_the_absolute_floor(self):
+        for raw_value in ("0", "-1", "0.001", "invalid", "NaN"):
+            with self.subTest(value=raw_value), patch.dict(
+                os.environ, {"BLOFIN_DEMO_EXIT_MIN_NET_PROFIT_USDT": raw_value},
+            ):
+                self.assertEqual(web_app._blofin_demo_minimum_net_profit_usdt(), 0.01)
+        with patch.dict(os.environ, {"BLOFIN_DEMO_EXIT_MIN_NET_PROFIT_USDT": "0.05"}):
+            self.assertEqual(web_app._blofin_demo_minimum_net_profit_usdt(), 0.05)
+
+    def test_close_request_marker_blocks_blind_resubmission_after_restart(self):
+        self.assertTrue(web_app._blofin_demo_has_unresolved_close_request([
+            {"event_type": "AUTO_POSITION_CLOSE_REQUESTED"},
+        ]))
+        self.assertTrue(web_app._blofin_demo_has_unresolved_close_request([
+            {"event_type": "AUTO_POSITION_CLOSE_UNKNOWN"},
+        ]))
+        self.assertTrue(web_app._blofin_demo_has_unresolved_close_request([
+            {"event_type": "AUTO_POSITION_CLOSE_ACCEPTED"},
+        ]))
+        self.assertFalse(web_app._blofin_demo_has_unresolved_close_request([
+            {"event_type": "AUTO_POSITION_OPEN_ACCEPTED"},
+        ]))
+
+    def test_position_manager_surfaces_unknown_close_for_notion_audit(self):
+        order = {
+            "instrument_id": "BTC-USDT",
+            "position_id": "position792",
+            "client_order_id": "robotorder792",
+            "exchange_order_id": "exchangeorder792",
+        }
+        position = {
+            "instId": "BTC-USDT",
+            "positionId": "position792",
+            "positionSide": "net",
+            "positions": "0.1",
+            "averagePrice": "100",
+            "markPrice": "101",
+            "unrealizedPnl": "1.0",
+            "leverage": "1",
+            "liquidationPrice": "0",
+        }
+
+        class FakeStore:
+            def orders_pending_learning_outcome(self, *, limit):
+                return [order]
+            def recent_events(self, client_order_id, limit):
+                return []
+            def close(self):
+                return None
+
+        class FakeReader:
+            def get_positions(self):
+                return [position]
+            def get_mark_price(self, *, inst_id):
+                return [{"markPrice": "101"}]
+
+        outbox = MagicMock()
+        with (
+            patch.dict(os.environ, {
+                "BLOFIN_DEMO_EXIT_MIN_NET_PROFIT_USDT": "0.01",
+                "BLOFIN_DEMO_TAKER_FEE_RATE": "0.0006",
+                "BLOFIN_DEMO_EXIT_SLIPPAGE_BUFFER_RATE": "0.0002",
+            }, clear=False),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=FakeStore()),
+            patch.object(web_app, "BloFinDemoReadOnly", return_value=FakeReader()),
+            patch.object(web_app, "_start_challenge1_active_position_observer", return_value={"status": "NOT_NEEDED"}),
+            patch.object(web_app, "_blofin_demo_entry_fee_usdt", return_value=0.001),
+            patch.object(web_app, "_blofin_demo_contract_value", return_value=0.001),
+            patch.object(web_app, "_blofin_manual_close_position", side_effect=web_app.BloFinDemoExecutionUnknown("network outcome unknown")),
+            patch.object(web_app, "NotionEventOutbox", return_value=outbox),
+        ):
+            result = web_app._blofin_demo_position_manager_cycle()
+            self.assertEqual(result["actions"][0]["status"], "CLOSE_REQUEST_UNKNOWN")
+            self.assertEqual(result["actions"][0]["error_type"], "BloFinDemoExecutionUnknown")
+            queued = web_app._queue_blofin_position_manager_heartbeats(
+                result, "2026-11-18T16:00:00+00:00",
+            )
+        self.assertEqual(queued["status"], "QUEUED")
+        event = outbox.enqueue.call_args.args[0]
+        detail = json.loads(event["details"])
+        self.assertEqual(detail["status"], "CLOSE_REQUEST_UNKNOWN")
+        self.assertEqual(detail["exit_decision"], "CLOSE_REQUEST_UNKNOWN")
+        self.assertEqual(detail["error_type"], "BloFinDemoExecutionUnknown")
+
     def test_automatic_close_refuses_if_fees_erase_unrealized_profit(self):
         close_calls = []
 
