@@ -348,15 +348,31 @@ class NotionEventOutbox:
                MAX(synced_at_utc) AS last_success_utc
                FROM csr_notion_event_outbox"""
         ).fetchone()
+        last_error = self._db.execute(
+            """SELECT event_id, attempts, last_error_type, last_http_status, next_attempt_at
+               FROM csr_notion_event_outbox
+               WHERE last_error_type IS NOT NULL
+               ORDER BY created_at_utc DESC, attempts DESC LIMIT 1"""
+        ).fetchone()
+        pending_with_error = self._db.execute(
+            """SELECT COUNT(*) FROM csr_notion_event_outbox
+               WHERE sync_status='PENDING' AND last_error_type IS NOT NULL"""
+        ).fetchone()
         token_configured = bool((os.getenv("NOTION_API_TOKEN") or "").strip())
         return {
             "status": "CONFIGURED" if token_configured else "NOT_CONFIGURED",
             "token_configured": token_configured,
             "storage_backend": storage_backend(),
             "pending": int(row["pending"] or 0),
+            "pending_with_error": int(pending_with_error[0] or 0),
             "synced": int(row["synced"] or 0),
             "failed": int(row["failed"] or 0),
             "last_success_utc": row["last_success_utc"],
+            "last_event_id": last_error["event_id"] if last_error else None,
+            "last_error_type": last_error["last_error_type"] if last_error else None,
+            "last_http_status": last_error["last_http_status"] if last_error else None,
+            "last_attempts": int(last_error["attempts"] or 0) if last_error else 0,
+            "retry_after_epoch": int(last_error["next_attempt_at"] or 0) if last_error else None,
         }
 
     def close(self) -> None:
