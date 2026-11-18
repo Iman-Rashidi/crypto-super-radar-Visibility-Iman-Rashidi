@@ -8645,6 +8645,8 @@ def _blofin_ai_review_summary(job: dict[str, Any]) -> list[dict[str, Any]]:
             "http_status": review_payload.get("http_status"),
             "latency_ms": review_payload.get("latency_ms"),
             "error_type": review_payload.get("error_type"),
+            "error_code": review_payload.get("error_code"),
+            "error_message": review_payload.get("error_message"),
         })
     return summary
 
