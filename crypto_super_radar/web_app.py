@@ -37,7 +37,7 @@ from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
-from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_REST_URL
+from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_REST_URL
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
@@ -440,12 +440,15 @@ def _blofin_demo_connection_status() -> dict:
         if isinstance(cached, dict) and BLOFIN_STATUS_CACHE.get("expires_at", 0.0) > now:
             return copy.deepcopy(cached)
 
-        credential_names = (
-            "BLOFIN_DEMO_API_KEY",
-            "BLOFIN_DEMO_API_SECRET",
-            "BLOFIN_DEMO_PASSPHRASE",
+        # Use the same standard + legacy credential aliases as the Demo adapter.
+        credential_name_groups = tuple(DEMO_READ_CREDENTIAL_ENV.values())
+        credential_names = tuple(
+            name for name_group in credential_name_groups for name in name_group
         )
-        configured = all(bool(os.getenv(name, "").strip()) for name in credential_names)
+        configured = all(
+            any(bool(os.getenv(name, "").strip()) for name in name_group)
+            for name_group in credential_name_groups
+        )
         stage = "ENVIRONMENT_CHECK"
         market_data = "NOT_CHECKED"
         private_api = "NOT_CHECKED"
