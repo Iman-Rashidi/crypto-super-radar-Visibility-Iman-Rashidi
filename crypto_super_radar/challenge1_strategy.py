@@ -316,7 +316,7 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         return False, "سیگنال جهت‌دار و تأیید الگوی اختصاصی ساخته نشده است."
     if str(execution.get("direction") or "").upper() != signal:
         return False, "جهت الگوی انتخاب‌شده با سیگنال ربات یکسان نیست."
-    if evidence.get("decision_engine_version") != "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY":
+    if evidence.get("decision_engine_version") != _ENGINE_VERSION:
         return False, "نسخه موتور ورود Challenge 1 معتبر نیست."
     if (
         evidence.get("setup_timeframe") != "5m"
