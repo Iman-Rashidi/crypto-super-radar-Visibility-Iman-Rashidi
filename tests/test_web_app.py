@@ -1955,7 +1955,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(args[3]["result"]["position_id"], "demo-position-btc")
         self.assertEqual(args[3]["result"]["exchange_order_id"], "demo-order-btc")
 
-    def test_observer_worker_skips_provider_calls_when_durable_request_already_exists(self):
+    def test_observer_worker_skips_provider_calls_when_both_durable_results_exist(self):
         job = {
             "status": "completed",
             "result": {
@@ -1977,16 +1977,67 @@ class WebAppHttpTests(unittest.TestCase):
             },
         }
         with (
-            patch.object(web_app, "_queue_challenge1_observer_events", return_value={
-                "status": "QUEUED", "queued": 0,
-            }),
+            patch.object(web_app, "_challenge1_observer_results_complete", return_value=True) as complete,
+            patch.object(web_app, "_queue_challenge1_observer_events") as queue_events,
             patch.object(web_app, "run_challenge1_observer_reviews") as run_review,
         ):
             web_app._run_challenge1_observer_job(
                 "position-audit:demo-position-1:initial",
                 "BTC-USDT", record, job,
             )
+        complete.assert_called_once_with("position-audit:demo-position-1:initial")
+        queue_events.assert_not_called()
         run_review.assert_not_called()
+
+    def test_observer_worker_retries_when_request_exists_but_result_events_are_missing(self):
+        job = {
+            "status": "completed",
+            "result": {
+                "status": "POSITION_MONITORING",
+                "signal": "LONG",
+                "position_id": "demo-position-1",
+                "exchange_order_id": "demo-order-1",
+                "learning_experience_id": "experience-1",
+                "positions": [{"positionId": "demo-position-1"}],
+            },
+        }
+        record = {
+            "signal": "LONG",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        outbox = MagicMock()
+        outbox.has_event.side_effect = [False, False]
+        with (
+            patch.object(web_app, "NotionEventOutbox", return_value=outbox),
+            patch.object(web_app, "_queue_challenge1_observer_events", side_effect=[
+                {"status": "QUEUED", "queued": 0},
+                {"status": "QUEUED", "queued": 2},
+            ]) as queue_events,
+            patch.object(web_app, "run_challenge1_observer_reviews", return_value={
+                "consensus": "NOT_COMPARABLE",
+                "completed_at_utc": "2026-11-18T16:00:00Z",
+                "reviewers": [
+                    {"reviewer_id": "nemotron", "status": "ERROR"},
+                    {"reviewer_id": "second_ai", "status": "NOT_CONFIGURED"},
+                ],
+            }) as run_review,
+        ):
+            web_app._run_challenge1_observer_job(
+                "position-audit:demo-position-1:initial",
+                "BTC-USDT",
+                record,
+                job,
+            )
+        run_review.assert_called_once()
+        self.assertEqual(queue_events.call_count, 2)
+        self.assertEqual(queue_events.call_args_list[0].kwargs["phase"], "REQUESTED")
+        self.assertEqual(queue_events.call_args_list[1].kwargs["phase"], "RESULT")
+        outbox.close.assert_called_once()
 
     def test_observer_runner_can_resume_when_request_event_exists_but_results_do_not(self):
         outbox = MagicMock()
