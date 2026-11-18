@@ -17,6 +17,12 @@ on:
       - staging/challenge1-integration-2026-11-16
 permissions:
   contents: write
+
+# Serialize archive publication for this branch. Concurrent runs used to race
+# while pushing the generated Render source bundle to the same Git ref.
+concurrency:
+  group: csr-render-source-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   test:
     runs-on: ubuntu-latest
