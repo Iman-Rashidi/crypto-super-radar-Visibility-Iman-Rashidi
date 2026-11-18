@@ -293,7 +293,7 @@ def _observer_message_text(message: Any, choice: Any) -> str:
     if not chunks:
         raise ValueError("OBSERVER_CONTENT_MISSING")
     result = "\\n".join(chunks).strip()
-    if len(result) > 8000:
+    if len(result) > 12000:
         raise ValueError("OBSERVER_CONTENT_TOO_LONG")
     return result
 
@@ -953,8 +953,9 @@ def _call_challenge1_observer(
                 + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
             )},
         ],
-        "temperature": 0.1,
-        "max_tokens": 700,
+        "temperature": 0,
+        "max_tokens": 500,
+        "response_format": {"type": "json_object"},
     }
     headers = {
         "Authorization": f"Bearer {key}",
