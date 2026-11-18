@@ -55,7 +55,7 @@ def _api_key() -> str:
 
 
 _OBSERVER_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,50}/[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$")
-_OBSERVER_SECRET_RE = re.compile(r"(?i)(?:sk-or-v1-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{24,}|Bearer\\s+[A-Za-z0-9._~-]{16,})")
+_OBSERVER_SECRET_RE = re.compile(r"(?i)(?:sk-or-v1-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{24,}|Bearer\s+[A-Za-z0-9._~-]{16,})")
 _GROQ_FREE_OBSERVER_MODELS = {
     "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
 }
