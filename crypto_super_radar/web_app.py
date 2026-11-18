@@ -5366,7 +5366,7 @@ def _start_challenge1_active_position_observer(
         },
     }
     _start_challenge1_observer_job(
-        synthetic_job_id, instrument, challenge_record,
+        synthetic_job_id, instrument, challenge_record, initial_job,
     )
     return {
         "status": "OBSERVER_AUDIT_SCHEDULED",
@@ -9661,14 +9661,18 @@ def _run_challenge1_observer_job(
 
 def _start_challenge1_observer_job(
     job_id: str, instrument_id: str, challenge_record: dict | None,
+    initial_job: dict | None = None,
 ) -> None:
     if not isinstance(challenge_record, dict):
         return
     evidence = challenge_record.get("challenge1_evidence")
     if not isinstance(evidence, dict):
         return
-    with LOCK:
-        snapshot = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id, {}))
+    if isinstance(initial_job, dict):
+        snapshot = copy.deepcopy(initial_job)
+    else:
+        with LOCK:
+            snapshot = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id, {}))
     result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
     if str(result.get("status") or "").upper() == "SKIPPED_DUPLICATE_EXPERIENCE":
         return
