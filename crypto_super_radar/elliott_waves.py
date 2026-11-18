@@ -1,7 +1,8 @@
 """Rule-based Elliott impulse-wave monitor with confirmed, non-repainting pivots.
 
-The output is descriptive technical evidence. It is not a forecast probability,
-trade signal, or mandatory decision gate.
+The output is structural evidence, not a forecast probability. Callers may
+supply an interval-appropriate reversal floor; the generic default remains
+conservative for slower research candles.
 """
 from __future__ import annotations
 

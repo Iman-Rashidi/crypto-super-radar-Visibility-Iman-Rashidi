@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from .chart_patterns import monitor_chart_patterns
+from .elliott_waves import monitor_elliott_waves
 
 DEFAULT_CHALLENGE1_INSTRUMENTS = (
     "BTC-USDT",
@@ -23,7 +24,7 @@ DEFAULT_CHALLENGE1_INSTRUMENTS = (
 )
 
 _INTERVAL_MS = {"5m": 5 * 60 * 1000}
-_ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY"
+_ENGINE_VERSION = "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE"
 
 
 def _number(value: Any) -> float | None:
@@ -322,7 +323,7 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         or evidence.get("completed_candles_only") is not True
         or evidence.get("higher_timeframes_used") is not False
         or evidence.get("legacy_12_gates_used_for_entry") is not False
-        or evidence.get("external_ai_required") is not False
+        or evidence.get("external_ai_required") is not True
         or evidence.get("tinyfish_required") is not False
     ):
         return False, "ورودی Challenge 1 باید فقط بر پایه کندل ۵ دقیقه‌ای باشد."
@@ -330,6 +331,25 @@ def challenge1_entry_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, st
         return False, "تصمیم ثبت‌شده با جهت سیگنال یکسان نیست."
     if any(str(key).startswith("candles_") and key != "candles_5m" for key in evidence):
         return False, "شواهد Challenge 1 نباید کندل تایم‌فریم دیگری داشته باشد."
+
+    wave = evidence.get("elliott_wave")
+    wave = wave if isinstance(wave, Mapping) else {}
+    wave_status = str(wave.get("status") or "").upper()
+    wave_direction = str(wave.get("pattern") or "").upper()
+    wave_phase = str(wave.get("phase") or "").upper()
+    wave_pivots = _number(wave.get("confirmed_pivot_count"))
+    if (
+        wave_status not in {"CANDIDATE", "CONFIRMED"}
+        or wave_direction != expected_direction
+        or wave_phase not in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        or wave_pivots is None or wave_pivots < 3
+        or _number(wave.get("invalidation_price")) is None
+        or evidence.get("wave_alignment") != "ALIGNED"
+    ):
+        return False, "ساختار موج الیوت ۵ دقیقه‌ای تأیید یا با جهت الگوی ورود هم‌سو نیست."
 
     chosen = evidence.get("chosen_pattern")
     if not isinstance(chosen, Mapping):
@@ -441,7 +461,14 @@ def analyze_blofin_challenge1(
         dict(item, timeframe="5m")
         for item in _confirmed_pattern_candidates(frame_5m)
     ]
-    chart_structure = monitor_chart_patterns(frame_5m)
+    # 5m swings require an intraday reversal floor. The generic 3% floor
+    # suppresses ordinary 5m pivots and is not used in Challenge 1.
+    elliott_wave = monitor_elliott_waves(
+        frame_5m, min_reversal_pct=0.0015, max_reversal_pct=0.03,
+    )
+    chart_structure = monitor_chart_patterns(
+        frame_5m, elliott_wave=elliott_wave,
+    )
     if (
         chart_structure.get("status") in {"BREAKOUT_UP", "BREAKOUT_DOWN"}
         and chart_structure.get("breakout_confirmation") == "CONFIRMED"
@@ -466,6 +493,16 @@ def analyze_blofin_challenge1(
     entry = stop = target = None
     signal_id = None
     decision_code = "CONFLICTING_5M_PATTERNS" if bullish and bearish else "NO_TRADE"
+    wave_status = str(elliott_wave.get("status") or "").upper()
+    wave_direction = str(elliott_wave.get("pattern") or "").upper()
+    pivot_count = _number(elliott_wave.get("confirmed_pivot_count"))
+    wave_directional = (
+        wave_status in {"CANDIDATE", "CONFIRMED"}
+        and wave_direction in {"BULLISH", "BEARISH"}
+        and pivot_count is not None and pivot_count >= 3
+        and _number(elliott_wave.get("invalidation_price")) is not None
+    )
+    wave_alignment = "UNCONFIRMED"
 
     if bullish and bearish:
         reason_fa = "الگوهای صعودی و نزولی هم‌زمان در کندل‌های بسته‌شده ۵ دقیقه‌ای دیده شدند؛ معامله انجام نمی‌شود."
@@ -474,51 +511,75 @@ def analyze_blofin_challenge1(
     else:
         chosen = max(patterns_5m, key=lambda item: abs(int(item.get("score") or 0)))
         direction = str(chosen["direction"])
-        volume = _volume_confirmation(frame_5m, direction)
-        atr = _atr(frame_5m)
-        entry_value = float(frame_5m["close"].iloc[-1])
-        if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
-            reason_fa = "دادهٔ کندل‌های ۵ دقیقه‌ای برای محاسبهٔ حد ضرر ساختاری کافی نیست."
+        expected_wave_direction = "BULLISH" if direction == "BULLISH" else "BEARISH"
+        if not wave_directional:
+            chosen = None
+            decision_code = "ELLIOTT_WAVE_UNCONFIRMED"
+            reason_fa = (
+                "الگوی کندلی/ساختاری شناسایی شد، اما موج الیوت ۵ دقیقه‌ای "
+                "شمارش معتبر و نقطه ابطال تأییدشده ندارد؛ ورود مسدود شد."
+            )
+        elif wave_direction != expected_wave_direction:
+            chosen = None
+            decision_code = "ELLIOTT_WAVE_DIRECTION_CONFLICT"
+            reason_fa = (
+                "جهت موج الیوت با جهت الگوی کندلی/ساختاری هم‌سو نیست؛ "
+                "برای جلوگیری از ورود متناقض معامله انجام نمی‌شود."
+            )
         else:
-            buffer = atr * 0.10
-            if direction == "BULLISH":
-                structural_low = float(frame_5m["low"].tail(5).min())
-                stop_value = min(structural_low - buffer, entry_value - 1.5 * atr)
-                risk_distance = entry_value - stop_value
-                target_value = entry_value + 2.0 * risk_distance
-                signal = "LONG"
-            else:
-                structural_high = float(frame_5m["high"].tail(5).max())
-                stop_value = max(structural_high + buffer, entry_value + 1.5 * atr)
-                risk_distance = stop_value - entry_value
-                target_value = entry_value - 2.0 * risk_distance
-                signal = "SHORT"
+            wave_alignment = "ALIGNED"
 
-            if risk_distance <= 0 or target_value <= 0:
-                signal = "NO_TRADE"
-                reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
+        if chosen is not None:
+            volume = _volume_confirmation(frame_5m, direction)
+            atr = _atr(frame_5m)
+            entry_value = float(frame_5m["close"].iloc[-1])
+            if atr is None or not math.isfinite(entry_value) or entry_value <= 0:
+                reason_fa = "دادهٔ کندل‌های ۵ دقیقه‌ای برای محاسبهٔ حد ضرر ساختاری کافی نیست."
             else:
-                entry, stop, target = entry_value, stop_value, target_value
-                signal_bar = _time_label(frame_5m)
-                signal_id = f"challenge1-v4:{instrument}:5m:{signal_bar}"
-                execution = {
-                    "status": "PASS",
-                    "direction": signal,
-                    "signal_id": signal_id,
-                    "signal_bar_open_utc": signal_bar,
-                    "entry_price": entry,
-                    "stop_loss": stop,
-                    "take_profit": target,
-                    "reward_risk": 2.0,
-                }
-                advisory = []
-                if not volume.get("confirmed"):
-                    advisory.append("حجم نسبی فقط به‌عنوان دادهٔ توصیفی ثبت شد و شرط ورود نیست")
-                reason_fa = (
-                    f"الگوی {chosen.get('name_en')} روی کندل بسته‌شدهٔ ۵ دقیقه‌ای تأیید شد؛ "
-                    "تصمیم ورود فقط بر پایهٔ الگوی کندلی/ساختار نمودار و شواهد همان کندل‌هاست."
-                    + (" " + "؛ ".join(advisory) + "." if advisory else "")
-                )
+                buffer = atr * 0.10
+                if direction == "BULLISH":
+                    structural_low = float(frame_5m["low"].tail(5).min())
+                    stop_value = min(structural_low - buffer, entry_value - 1.5 * atr)
+                    risk_distance = entry_value - stop_value
+                    target_value = entry_value + 2.0 * risk_distance
+                    signal = "LONG"
+                else:
+                    structural_high = float(frame_5m["high"].tail(5).max())
+                    stop_value = max(structural_high + buffer, entry_value + 1.5 * atr)
+                    risk_distance = stop_value - entry_value
+                    target_value = entry_value - 2.0 * risk_distance
+
+                if risk_distance <= 0 or target_value <= 0:
+                    signal = "NO_TRADE"
+                    reason_fa = "سطوح ساختاری ورود، حد ضرر یا هدف معتبر نیستند."
+                else:
+                    signal = "LONG" if direction == "BULLISH" else "SHORT"
+                    entry, stop, target = entry_value, stop_value, target_value
+                    signal_bar = _time_label(frame_5m)
+                    # Preserve v4 ids to honor reservations from the previous engine.
+                    signal_id = f"challenge1-v4:{instrument}:5m:{signal_bar}"
+                    execution = {
+                        "status": "PASS",
+                        "direction": signal,
+                        "signal_id": signal_id,
+                        "signal_bar_open_utc": signal_bar,
+                        "entry_price": entry,
+                        "stop_loss": stop,
+                        "take_profit": target,
+                        "reward_risk": 2.0,
+                        "elliott_wave_phase": str(elliott_wave.get("phase") or ""),
+                        "elliott_wave_direction": wave_direction,
+                        "elliott_wave_invalidation_price": _number(elliott_wave.get("invalidation_price")),
+                    }
+                    advisory = []
+                    if not volume.get("confirmed"):
+                        advisory.append("حجم نسبی فقط به‌عنوان دادهٔ توصیفی ثبت شد و شرط ورود نیست")
+                    reason_fa = (
+                        f"الگوی {chosen.get('name_en')} و موج {elliott_wave.get('phase')} "
+                        "در داده‌های بسته‌شدهٔ ۵ دقیقه‌ای هم‌جهت تأیید شدند؛ "
+                        "پیش از سفارش، دو ناظر مستقل باید هر دو همین شواهد را بررسی و تأیید کنند."
+                        + (" " + "؛ ".join(advisory) + "." if advisory else "")
+                    )
 
     latest_time = _time_label(frame_5m)
     last_5m = frame_5m.iloc[-1]
@@ -535,7 +596,7 @@ def analyze_blofin_challenge1(
         "setup_timeframe": "5m",
         "completed_candles_only": True,
         "legacy_12_gates_used_for_entry": False,
-        "external_ai_required": False,
+        "external_ai_required": True,
         "tinyfish_required": False,
         "volume_is_advisory": True,
         "higher_timeframes_used": False,
@@ -544,6 +605,8 @@ def analyze_blofin_challenge1(
         "chosen_pattern": chosen,
         "confirmation_candle": confirmation_candle,
         "chart_structure": chart_structure,
+        "elliott_wave": elliott_wave,
+        "wave_alignment": wave_alignment,
         "volume_confirmation": volume,
         "decision_reason_fa": reason_fa,
         "candles_5m": _candles_for_report(frame_5m, limit=160),

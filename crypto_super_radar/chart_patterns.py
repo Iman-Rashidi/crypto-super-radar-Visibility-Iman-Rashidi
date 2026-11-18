@@ -250,8 +250,17 @@ def detect_hammer_candlestick(candles: Optional[pd.DataFrame]) -> dict[str, Any]
     }
 
 
-def monitor_chart_patterns(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
-    """Detect triangle structures from close-only, confirmed non-repainting pivots."""
+def monitor_chart_patterns(
+    candles: Optional[pd.DataFrame],
+    *,
+    elliott_wave: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Detect chart structures from confirmed pivots, optionally reusing wave evidence.
+
+    Challenge 1 passes its interval-calibrated 5m wave result so triangle
+    classification and AI review use one identical, non-repainting pivot set.
+    Other consumers retain the conservative monitor default.
+    """
     if not isinstance(candles, pd.DataFrame) or "close" not in candles:
         return _unknown("Validated candle history is unavailable.")
     if not isinstance(candles.index, pd.DatetimeIndex) or len(candles) < 30:
@@ -261,7 +270,11 @@ def monitor_chart_patterns(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
     if close.isna().any() or not np.isfinite(values).all() or (values <= 0).any():
         return _unknown("Candle closes contain missing, non-finite, or non-positive values.")
     hammer = detect_hammer_candlestick(candles)
-    wave = monitor_elliott_waves(candles)
+    wave = (
+        elliott_wave
+        if isinstance(elliott_wave, dict)
+        else monitor_elliott_waves(candles)
+    )
     result = classify_confirmed_pivots(
         wave.get("pivots", []), float(values[-1]), len(candles) - 1
     )

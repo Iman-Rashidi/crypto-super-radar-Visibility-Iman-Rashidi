@@ -58,6 +58,35 @@ def bearish_pattern():
     }
 
 
+def wave_evidence(direction="BULLISH", status="CANDIDATE"):
+    bullish = direction == "BULLISH"
+    return {
+        "status": status,
+        "pattern": direction,
+        "phase": "WAVES_1_AND_2_CONFIRMED" if status == "CANDIDATE" else "AMBIGUOUS",
+        "wave_count": 2 if status == "CANDIDATE" else None,
+        "next_wave": 3 if status == "CANDIDATE" else None,
+        "confirmed_pivot_count": 3,
+        "pivot_reversal_threshold_pct": 0.15,
+        "invalidation_price": (98.0 if bullish else 102.0) if status == "CANDIDATE" else None,
+        "pivots": [
+            {"index": 2, "kind": "LOW" if bullish else "HIGH",
+             "price": 98.0 if bullish else 102.0,
+             "timestamp": "2026-11-17T09:10:00+00:00",
+             "confirmed_at": "2026-11-17T09:20:00+00:00"},
+            {"index": 5, "kind": "HIGH" if bullish else "LOW",
+             "price": 101.0 if bullish else 99.0,
+             "timestamp": "2026-11-17T09:25:00+00:00",
+             "confirmed_at": "2026-11-17T09:35:00+00:00"},
+            {"index": 8, "kind": "LOW" if bullish else "HIGH",
+             "price": 99.0 if bullish else 101.0,
+             "timestamp": "2026-11-17T09:40:00+00:00",
+             "confirmed_at": "2026-11-17T09:50:00+00:00"},
+        ],
+        "reason": "Synthetic rule-valid wave prefix for the isolated unit test.",
+    }
+
+
 class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
     def client(self, now):
         return FakeBloFin({"5m": candle_rows(now, 5 * 60 * 1000)})
@@ -155,6 +184,10 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
                 "crypto_super_radar.challenge1_strategy.monitor_chart_patterns",
                 return_value={},
             ),
+            patch(
+                "crypto_super_radar.challenge1_strategy.monitor_elliott_waves",
+                return_value=wave_evidence("BULLISH"),
+            ),
         ):
             result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
 
@@ -163,9 +196,12 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
         self.assertEqual(result["execution"]["status"], "PASS")
         self.assertEqual(result["signal_id"], "challenge1-v4:BTC-USDT:5m:" + result["signal_bar_open_utc"])
         evidence = result["challenge1_evidence"]
-        self.assertEqual(evidence["decision_engine_version"], "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY")
+        self.assertEqual(evidence["decision_engine_version"], "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE")
         self.assertEqual(evidence["setup_timeframe"], "5m")
         self.assertTrue(evidence["volume_is_advisory"])
+        self.assertTrue(evidence["external_ai_required"])
+        self.assertEqual(evidence["wave_alignment"], "ALIGNED")
+        self.assertEqual(evidence["elliott_wave"]["phase"], "WAVES_1_AND_2_CONFIRMED")
         self.assertFalse(evidence["higher_timeframes_used"])
         self.assertEqual(set(k for k in evidence if k.startswith("candles_")), {"candles_5m"})
         self.assertEqual(evidence["chosen_pattern"]["timeframe"], "5m")
@@ -184,6 +220,7 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
             patch("crypto_super_radar.challenge1_strategy._volume_confirmation", return_value={"confirmed": False}),
             patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
             patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+            patch("crypto_super_radar.challenge1_strategy.monitor_elliott_waves", return_value=wave_evidence("BULLISH")),
         ):
             long_result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
         with (
@@ -194,12 +231,53 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
             patch("crypto_super_radar.challenge1_strategy._volume_confirmation", return_value={"confirmed": False}),
             patch("crypto_super_radar.challenge1_strategy._atr", return_value=1.0),
             patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+            patch("crypto_super_radar.challenge1_strategy.monitor_elliott_waves", return_value=wave_evidence("BEARISH")),
         ):
             short_result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
 
         self.assertEqual(long_result["signal"], "LONG")
         self.assertEqual(short_result["signal"], "SHORT")
         self.assertEqual(long_result["signal_id"], short_result["signal_id"])
+
+    def test_opposing_elliott_wave_blocks_a_candle_pattern_entry(self):
+        now = 2_000_000_000_000
+        client = self.client(now)
+        with (
+            patch(
+                "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+                return_value=[bullish_pattern()],
+            ),
+            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+            patch(
+                "crypto_super_radar.challenge1_strategy.monitor_elliott_waves",
+                return_value=wave_evidence("BEARISH"),
+            ),
+        ):
+            result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
+        self.assertEqual(result["signal"], "NO_TRADE")
+        self.assertEqual(result["challenge1_evidence"]["decision"], "ELLIOTT_WAVE_DIRECTION_CONFLICT")
+        self.assertIsNone(result["challenge1_evidence"]["chosen_pattern"])
+        self.assertFalse(result["orders_submitted"])
+
+    def test_ambiguous_elliott_wave_blocks_entry_without_inventing_direction(self):
+        now = 2_000_000_000_000
+        client = self.client(now)
+        with (
+            patch(
+                "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+                return_value=[bullish_pattern()],
+            ),
+            patch("crypto_super_radar.challenge1_strategy.monitor_chart_patterns", return_value={}),
+            patch(
+                "crypto_super_radar.challenge1_strategy.monitor_elliott_waves",
+                return_value=wave_evidence("AMBIGUOUS", status="AMBIGUOUS"),
+            ),
+        ):
+            result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
+        self.assertEqual(result["signal"], "NO_TRADE")
+        self.assertEqual(result["challenge1_evidence"]["decision"], "ELLIOTT_WAVE_UNCONFIRMED")
+        self.assertIsNone(result["challenge1_evidence"]["chosen_pattern"])
+        self.assertFalse(result["orders_submitted"])
 
     def test_valid_5m_pattern_does_not_wait_for_15m_or_1h_data(self):
         now = 2_000_000_000_000
@@ -217,6 +295,10 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
             patch(
                 "crypto_super_radar.challenge1_strategy.monitor_chart_patterns",
                 return_value={},
+            ),
+            patch(
+                "crypto_super_radar.challenge1_strategy.monitor_elliott_waves",
+                return_value=wave_evidence("BEARISH"),
             ),
         ):
             result = analyze_blofin_challenge1(client, "BTC-USDT", now_ms=now)
