@@ -83,6 +83,8 @@ BLOFIN_POSITION_MANAGER_STATE = {
     "last_action": None,
     "last_message_fa": "مدیر مستقل خروج سود در حال آماده‌سازی است.",
 }
+BLOFIN_POSITION_MANAGER_CACHE = {"entry_fees": {}, "contract_values": {}}
+BLOFIN_POSITION_MANAGER_CACHE_LOCK = threading.Lock()
 BLOFIN_AUTOPILOT_STATE = {
     "enabled": False,
     "status": "DISABLED",
@@ -90,7 +92,7 @@ BLOFIN_AUTOPILOT_STATE = {
     "market": "BTC-USDT",
     "instrument_id": "BTC-USDT",
     "execution_profile": "CHALLENGE_1",
-    "interval_seconds": 300,
+    "interval_seconds": 30,
     "last_cycle_started_at_utc": None,
     "last_cycle_finished_at_utc": None,
     "last_stage": None,
@@ -2790,8 +2792,11 @@ def _blofin_demo_execution_readiness() -> dict:
         "daily_loss_limit_pct": 1.0,
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
-        "max_concurrent_positions": 1,
-        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_15M_CANDLE",
+        "max_total_margin_usage_pct": 25.0,
+        "max_concurrent_positions": 4,
+        "signal_deduplication": "ONE_ORDER_PER_COMPLETED_5M_CANDLE",
+        "autopilot_search_interval_seconds": 30,
+        "net_profit_exit": True,
         "message_fa": message_fa,
     }
 
@@ -4053,7 +4058,7 @@ def _run_blofin_demo_execution_job(
                     trade_context={
                         "asset": asset.raw, "instrument_id": instrument_id,
                         "execution_profile": "CHALLENGE_1",
-                        "execution_timeframe": "15m",
+                        "execution_timeframe": "5m",
                         "trend_confirmation_timeframe": "1H",
                         "completed_candles_only": True,
                     },
@@ -4118,7 +4123,7 @@ def _run_blofin_demo_execution_job(
             "analysis_time_utc": analysis_time_utc,
             "last_completed_candle_time_utc": last_candle_time,
             "last_candle_close": last_candle_close,
-            "execution_timeframe": "15m",
+            "execution_timeframe": ("5m" if execution_profile == "CHALLENGE_1" else "15m"),
             "trend_confirmation_timeframe": "1H",
         }
         pass_count = sum(
@@ -4266,7 +4271,7 @@ def _run_blofin_demo_execution_job(
         trade_context.update({
             "last_completed_candle_time_utc": signal_bar,
             "mtf_confirmation": mtf_signal,
-            "execution_timeframe": "15m",
+            "execution_timeframe": ("5m" if execution_profile == "CHALLENGE_1" else "15m"),
             "trend_confirmation_timeframe": "1H",
         })
         gate_summary.update({
@@ -4298,7 +4303,7 @@ def _run_blofin_demo_execution_job(
             return
 
         if execution_profile == "CHALLENGE_1":
-            # Challenge 1 deliberately makes its entry decision from completed 15m
+            # Challenge 1 deliberately makes its entry decision from completed 5m
             # candles and detected patterns. Do not make a remote AI call or wait for
             # an opinion that is not part of this execution profile.
             ai_review = {
@@ -4364,7 +4369,11 @@ def _run_blofin_demo_execution_job(
         )
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
-            max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),
+            max_leverage=1,
+            max_concurrent_positions=4,
+            max_total_margin_usage_pct=0.25,
+            min_reward_risk=1.0,
+            min_confirmation_score=float(profile_rule["min_score"]),
         )
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
@@ -5050,8 +5059,12 @@ def _blofin_manual_close_position(
     *, instrument_id: str, position_id: str, position_side_hint: str = "",
     action_source: str = "MANUAL", audit_id: str | None = None,
     exit_reason: str | None = None,
+    entry_fee_usdt: float | None = None,
+    taker_fee_rate: float = 0.0006,
+    slippage_buffer_rate: float = 0.0002,
+    minimum_net_profit_usdt: float = 0.01,
 ) -> dict[str, Any]:
-    """Close one freshly revalidated Demo position; loss-making positions are not blocked."""
+    """Close one freshly revalidated Demo position; AutoPilot requires fee-aware net profit."""
     instrument_id = str(instrument_id or "").strip().upper()
     position_id = str(position_id or "").strip()
     position_side_hint = str(position_side_hint or "").strip().lower()
@@ -5072,25 +5085,17 @@ def _blofin_manual_close_position(
             raise BloFinDemoExecutionBlocked("ردیف پوزیشن موجود قابل تفسیر نیست.")
         if str(row.get("instId") or "").strip().upper() != instrument_id:
             continue
-        raw_size = row.get("positions")
-        quantity = _blofin_manual_decimal(raw_size, "position_size")
+        quantity = _blofin_manual_decimal(row.get("positions"), "position_size")
         if abs(quantity) > 0:
             active.append(row)
 
-    if position_id:
-        matches = [
-            row for row in active
-            if str(row.get("positionId") or "").strip() == position_id
-        ]
-    else:
-        matches = [
-            row for row in active
-            if str(row.get("positionSide") or "").strip().lower() == position_side_hint
-        ]
+    matches = (
+        [row for row in active if str(row.get("positionId") or "").strip() == position_id]
+        if position_id else
+        [row for row in active if str(row.get("positionSide") or "").strip().lower() == position_side_hint]
+    )
     if len(matches) != 1:
-        raise BloFinDemoExecutionBlocked(
-            "پوزیشن دقیق و یکتا در وضعیت زنده حساب پیدا نشد؛ شناسه Position ID را دوباره از مانیتور تازه انتخاب کن."
-        )
+        raise BloFinDemoExecutionBlocked("پوزیشن دقیق و یکتا در وضعیت زنده حساب پیدا نشد؛ خروج متوقف شد.")
     row = matches[0]
     actual_position_id = str(row.get("positionId") or "").strip()
     if position_id and actual_position_id != position_id:
@@ -5099,71 +5104,74 @@ def _blofin_manual_close_position(
     margin_mode = str(row.get("marginMode") or "").strip().lower()
     if position_side not in {"net", "long", "short"} or margin_mode not in {"isolated", "cross"}:
         raise BloFinDemoExecutionBlocked("Margin Mode یا Position Side این پوزیشن کامل نیست.")
-    pnl_value = row.get("unrealizedPnl")
     try:
-        pnl = _blofin_manual_decimal(pnl_value, "unrealized_pnl") if pnl_value not in (None, "") else None
+        pnl = _blofin_manual_decimal(row.get("unrealizedPnl"), "unrealized_pnl")
     except BloFinDemoExecutionBlocked:
         pnl = None
 
     action_source = str(action_source or "MANUAL").strip().upper()
     if action_source not in {"MANUAL", "AUTOPILOT"}:
         raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
+    estimated_close_fee = None
+    estimated_net_profit = None
     if action_source == "AUTOPILOT":
+        if pnl is None or entry_fee_usdt is None:
+            raise BloFinDemoExecutionBlocked("PnL یا کارمزد واقعی ورود موجود نیست؛ خروج خودکار ارسال نشد.")
         try:
-            minimum_profit = max(
-                0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")), 100_000.0)
-            )
-        except (TypeError, ValueError):
-            minimum_profit = 0.50
-        if pnl is None or pnl < Decimal(str(minimum_profit)):
-            raise BloFinDemoExecutionBlocked(
-                "سود شناور پوزیشن در بازبینی نهایی به حداقل محافظه‌کارانه نرسید؛ خروج خودکار ارسال نشد."
-            )
+            fee_rate = float(taker_fee_rate)
+            slip_rate = float(slippage_buffer_rate)
+            min_net = float(minimum_net_profit_usdt)
+            entry_fee = abs(float(entry_fee_usdt))
+            mark_rows = client.get_mark_price(inst_id=instrument_id)
+            mark_row = mark_rows[0] if isinstance(mark_rows, list) and mark_rows and isinstance(mark_rows[0], dict) else mark_rows if isinstance(mark_rows, dict) else None
+            mark_price = float(mark_row.get("markPrice")) if isinstance(mark_row, dict) else 0.0
+            instrument = client.get_tradable_instrument(instrument_id)
+            contract_value = float(instrument.get("contractValue"))
+            contracts = abs(float(row.get("positions") or 0))
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked("اطلاعات تازه Mark Price یا مشخصات قرارداد قابل تأیید نیست.") from exc
+        values = (fee_rate, slip_rate, min_net, entry_fee, mark_price, contract_value, contracts)
+        if not all(math.isfinite(value) for value in values) or min(fee_rate, slip_rate, min_net, entry_fee) < 0 or min(mark_price, contract_value, contracts) <= 0:
+            raise BloFinDemoExecutionBlocked("محاسبه سود خالص خروج معتبر نیست.")
+        close_notional = contracts * contract_value * mark_price
+        estimated_close_fee = close_notional * fee_rate
+        estimated_slippage_buffer = close_notional * slip_rate
+        estimated_net_profit = float(pnl) - entry_fee - estimated_close_fee - estimated_slippage_buffer
+        if estimated_net_profit < min_net:
+            raise BloFinDemoExecutionBlocked("سود خالص برآوردی پس از هزینه‌های ورود و خروج هنوز مثبت نیست.")
+
     action_id = "CLOSE" + uuid.uuid4().hex[:20]
     audit_event_id = str(audit_id or action_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_event_id):
         raise BloFinDemoExecutionBlocked("شناسه ثبت گزارش بستن پوزیشن معتبر نیست.")
-    requested_event = (
-        "AUTO_POSITION_CLOSE_REQUESTED" if action_source == "AUTOPILOT"
-        else "MANUAL_POSITION_CLOSE_REQUESTED"
-    )
-    accepted_event = (
-        "AUTO_POSITION_CLOSE_ACCEPTED" if action_source == "AUTOPILOT"
-        else "MANUAL_POSITION_CLOSE_ACCEPTED"
-    )
-    unknown_event = (
-        "AUTO_POSITION_CLOSE_UNKNOWN" if action_source == "AUTOPILOT"
-        else "MANUAL_POSITION_CLOSE_REQUESTED"
-    )
+    requested_event = "AUTO_POSITION_CLOSE_REQUESTED" if action_source == "AUTOPILOT" else "MANUAL_POSITION_CLOSE_REQUESTED"
+    accepted_event = "AUTO_POSITION_CLOSE_ACCEPTED" if action_source == "AUTOPILOT" else "MANUAL_POSITION_CLOSE_ACCEPTED"
+    unknown_event = "AUTO_POSITION_CLOSE_UNKNOWN" if action_source == "AUTOPILOT" else "MANUAL_POSITION_CLOSE_REQUESTED"
     store = None
     try:
         store = BloFinDemoEventStore()
         audit = {
-            "instrument_id": instrument_id,
-            "position_id": actual_position_id or None,
-            "position_side": position_side,
-            "margin_mode": margin_mode,
+            "instrument_id": instrument_id, "position_id": actual_position_id or None,
+            "position_side": position_side, "margin_mode": margin_mode,
             "unrealized_pnl_usdt": str(pnl) if pnl is not None else None,
+            "entry_fee_usdt": entry_fee_usdt, "estimated_close_fee_usdt": estimated_close_fee,
+            "estimated_net_profit_usdt": estimated_net_profit,
+            "taker_fee_rate": taker_fee_rate if action_source == "AUTOPILOT" else None,
+            "slippage_buffer_rate": slippage_buffer_rate if action_source == "AUTOPILOT" else None,
             "loss_making_position": bool(pnl is not None and pnl < 0),
-            "action_source": action_source,
-            "exit_reason": exit_reason,
+            "action_source": action_source, "exit_reason": exit_reason,
             "exchange_close_client_order_id": action_id,
         }
         store.record_manual_action(audit_event_id, requested_event, audit)
         try:
             response = client.close_futures_position(
-                inst_id=instrument_id,
-                margin_mode=margin_mode,
-                position_side=position_side,
-                client_order_id=action_id,
-                position_id=actual_position_id or None,
+                inst_id=instrument_id, margin_mode=margin_mode, position_side=position_side,
+                client_order_id=action_id, position_id=actual_position_id or None,
             )
         except Exception as exc:
             store.record_manual_action(audit_event_id, unknown_event, {
-                **audit,
-                "submission_outcome": "UNKNOWN",
-                "error_type": type(exc).__name__,
-                "retry_allowed": False,
+                **audit, "submission_outcome": "UNKNOWN",
+                "error_type": type(exc).__name__, "retry_allowed": False,
             })
             raise
         store.record_manual_action(audit_event_id, accepted_event, {
@@ -5174,27 +5182,76 @@ def _blofin_manual_close_position(
             store.close()
 
     return {
-        "status": "CLOSE_ACCEPTED",
-        "environment": "BLOFIN_DEMO",
-        "instrument_id": instrument_id,
-        "position_id": actual_position_id or None,
+        "status": "CLOSE_ACCEPTED", "environment": "BLOFIN_DEMO",
+        "instrument_id": instrument_id, "position_id": actual_position_id or None,
         "position_side": position_side,
         "unrealized_pnl_usdt_at_confirmation": str(pnl) if pnl is not None else None,
+        "estimated_close_fee_usdt": estimated_close_fee,
+        "estimated_net_profit_usdt": estimated_net_profit,
         "loss_making_position": bool(pnl is not None and pnl < 0),
         "exchange_response": response.get("data"),
-        "message_fa": (
-            "درخواست بستن همین پوزیشن به قیمت بازار به BloFin Demo ارسال شد. "
-            "منفی بودن PnL مانع بستن نبود؛ قیمت اجرای واقعی و PnL نهایی پس از Fill مشخص می‌شود."
-        ),
+        "message_fa": "درخواست بستن همین پوزیشن به قیمت بازار به BloFin Demo ارسال شد؛ سود نهایی پس از Fill و تطبیق کارمزدهای واقعی تعیین می‌شود.",
     }
+
+
+def _blofin_demo_entry_fee_usdt(reader: Any, order: dict[str, Any]) -> float | None:
+    """Read and cache actual entry fill fees for one exact exchange order."""
+    order_id = str(order.get("exchange_order_id") or "").strip()
+    instrument_id = str(order.get("instrument_id") or "").strip().upper()
+    if not order_id or not instrument_id:
+        return None
+    with BLOFIN_POSITION_MANAGER_CACHE_LOCK:
+        cached = BLOFIN_POSITION_MANAGER_CACHE["entry_fees"].get(order_id)
+    if cached is not None:
+        return float(cached)
+    rows = reader.get_fills_history(inst_id=instrument_id, order_id=order_id, limit=100)
+    if not isinstance(rows, list) or not rows:
+        return None
+    matched = [row for row in rows if isinstance(row, dict) and str(row.get("orderId") or "") == order_id]
+    if not matched:
+        return None
+    total_fee = 0.0
+    for row in matched:
+        raw_fee = row.get("fee")
+        currency = str(row.get("feeCurrency") or "USDT").upper()
+        if raw_fee in (None, "") or currency not in {"USDT", "USD"}:
+            return None
+        try:
+            fee = abs(float(raw_fee))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(fee):
+            return None
+        total_fee += fee
+    with BLOFIN_POSITION_MANAGER_CACHE_LOCK:
+        BLOFIN_POSITION_MANAGER_CACHE["entry_fees"][order_id] = total_fee
+    return total_fee
+
+
+def _blofin_demo_contract_value(reader: Any, instrument_id: str) -> float | None:
+    """Read and cache the BloFin contract multiplier."""
+    with BLOFIN_POSITION_MANAGER_CACHE_LOCK:
+        cached = BLOFIN_POSITION_MANAGER_CACHE["contract_values"].get(instrument_id)
+    if cached is not None:
+        return float(cached)
+    instrument = reader.get_tradable_instrument(instrument_id)
+    try:
+        value = float(instrument.get("contractValue"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    with BLOFIN_POSITION_MANAGER_CACHE_LOCK:
+        BLOFIN_POSITION_MANAGER_CACHE["contract_values"][instrument_id] = value
+    return value
 
 
 def _blofin_demo_profit_exit_decision(
     order: dict[str, Any], position: dict[str, Any], mark_price: Any,
-    *, now: int | None = None, minimum_profit_usdt: float = 0.50,
-    maximum_hold_seconds: int = 86_400,
+    *, entry_fee_usdt: float, estimated_close_fee_usdt: float,
+    slippage_buffer_usdt: float = 0.0, minimum_net_profit_usdt: float = 0.01,
 ) -> str | None:
-    """Return a profit-only exit reason for one exact robot-linked Demo position."""
+    """Exit the exact robot-linked position when estimated net PnL is positive after costs."""
     if not isinstance(order, dict) or not isinstance(position, dict):
         return None
     instrument = str(order.get("instrument_id") or "").strip().upper()
@@ -5208,30 +5265,18 @@ def _blofin_demo_profit_exit_decision(
         quantity = float(position.get("positions") or 0)
         pnl = float(position.get("unrealizedPnl"))
         current_mark = float(mark_price)
-        target = float(order.get("take_profit"))
-        opened_at = int(order.get("created_at") or 0)
-        current_time = int(time.time()) if now is None else int(now)
+        entry_fee = abs(float(entry_fee_usdt))
+        close_fee = abs(float(estimated_close_fee_usdt))
+        slip_buffer = abs(float(slippage_buffer_usdt))
+        minimum_net = float(minimum_net_profit_usdt)
     except (TypeError, ValueError, OverflowError):
         return None
-    if not all(math.isfinite(value) for value in (quantity, pnl, current_mark, target)):
+    values = (quantity, pnl, current_mark, entry_fee, close_fee, slip_buffer, minimum_net)
+    if not all(math.isfinite(value) for value in values) or abs(quantity) <= 0 or current_mark <= 0:
         return None
-    if abs(quantity) <= 0 or current_mark <= 0 or target <= 0:
+    if min(entry_fee, close_fee, slip_buffer, minimum_net) < 0:
         return None
-    # Never call a losing or fee-fragile position a profitable exit.
-    if pnl < max(0.01, float(minimum_profit_usdt)):
-        return None
-    side = str(order.get("side") or "").strip().upper()
-    if side not in {"LONG", "SHORT"}:
-        return None
-    target_reached = (
-        current_mark >= target if side == "LONG" else current_mark <= target
-    )
-    if target_reached:
-        return "TAKE_PROFIT_LEVEL_REACHED"
-    age_seconds = max(0, current_time - opened_at) if opened_at > 0 else 0
-    if opened_at > 0 and age_seconds >= max(900, int(maximum_hold_seconds)):
-        return "MAX_HOLD_PROFIT_ONLY"
-    return None
+    return "NET_PROFIT_AFTER_FEES" if pnl - entry_fee - close_fee - slip_buffer >= minimum_net else None
 
 
 def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
@@ -5244,16 +5289,12 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "status": "TRADE_PERMISSION_UNAVAILABLE",
                 "message_fa": "مدیر خروج برای اقدام خودکار به کلید Trade اختصاصی Demo نیاز دارد؛ هیچ پوزیشنی تغییر نکرد.",
             }
-        raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")
-        raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
         try:
-            minimum_profit = max(0.01, min(float(raw_min_profit), 100_000.0))
+            minimum_net_profit = max(0.0, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_NET_PROFIT_USDT", "0.01")), 100_000.0))
+            taker_fee_rate = max(0.0, min(float(os.getenv("BLOFIN_DEMO_TAKER_FEE_RATE", "0.0006")), 0.01))
+            slippage_buffer_rate = max(0.0, min(float(os.getenv("BLOFIN_DEMO_EXIT_SLIPPAGE_BUFFER_RATE", "0.0002")), 0.01))
         except (TypeError, ValueError):
-            minimum_profit = 0.50
-        try:
-            maximum_hold = max(900, min(int(raw_max_hold), 604_800))
-        except (TypeError, ValueError):
-            maximum_hold = 86_400
+            minimum_net_profit, taker_fee_rate, slippage_buffer_rate = 0.01, 0.0006, 0.0002
 
         store = BloFinDemoEventStore()
         pending_orders = store.orders_pending_learning_outcome(limit=50)
@@ -5373,18 +5414,45 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "position_id": position_id,
                 })
                 continue
+            mark_price = mark_row.get("markPrice")
+            try:
+                current_mark = float(mark_price)
+                current_pnl = float(position.get("unrealizedPnl"))
+                contracts = abs(float(position.get("positions") or 0))
+            except (TypeError, ValueError, OverflowError):
+                actions.append({"status": "POSITION_PNL_OR_MARK_UNKNOWN", "instrument_id": instrument_id, "position_id": position_id})
+                continue
+            entry_fee = _blofin_demo_entry_fee_usdt(reader, order)
+            contract_value = _blofin_demo_contract_value(reader, instrument_id)
+            if entry_fee is None or contract_value is None or not all(math.isfinite(v) for v in (current_mark, current_pnl, contracts)):
+                actions.append({
+                    "status": "FEE_OR_CONTRACT_DATA_UNKNOWN",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "message_fa": "کارمزد واقعی ورود یا ضریب قرارداد تأیید نشد؛ پوزیشن برای جلوگیری از خروج زیان‌ده حفظ شد.",
+                })
+                continue
+            close_notional = contracts * contract_value * current_mark
+            estimated_close_fee = close_notional * taker_fee_rate
+            slippage_buffer = close_notional * slippage_buffer_rate
+            estimated_net_profit = current_pnl - entry_fee - estimated_close_fee - slippage_buffer
             reason = _blofin_demo_profit_exit_decision(
-                order, position, mark_row.get("markPrice"),
-                minimum_profit_usdt=minimum_profit,
-                maximum_hold_seconds=maximum_hold,
+                order, position, mark_price,
+                entry_fee_usdt=entry_fee,
+                estimated_close_fee_usdt=estimated_close_fee,
+                slippage_buffer_usdt=slippage_buffer,
+                minimum_net_profit_usdt=minimum_net_profit,
             )
             if not reason:
                 actions.append({
-                    "status": "HOLD_UNTIL_PROFIT_EXIT",
+                    "status": "MONITORING_FOR_NET_PROFIT",
                     "instrument_id": instrument_id,
                     "position_id": position_id,
                     "unrealized_pnl_usdt": position.get("unrealizedPnl"),
-                    "minimum_profit_usdt": minimum_profit,
+                    "entry_fee_usdt": entry_fee,
+                    "estimated_close_fee_usdt": estimated_close_fee,
+                    "estimated_net_profit_usdt": estimated_net_profit,
+                    "minimum_net_profit_usdt": minimum_net_profit,
                 })
                 continue
 
@@ -5395,6 +5463,10 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     action_source="AUTOPILOT",
                     audit_id=client_order_id,
                     exit_reason=reason,
+                    entry_fee_usdt=entry_fee,
+                    taker_fee_rate=taker_fee_rate,
+                    slippage_buffer_rate=slippage_buffer_rate,
+                    minimum_net_profit_usdt=minimum_net_profit,
                 )
                 actions.append({
                     "status": close_result.get("status"),
@@ -5404,6 +5476,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "unrealized_pnl_usdt_at_request": close_result.get(
                         "unrealized_pnl_usdt_at_confirmation"
                     ),
+                    "estimated_close_fee_usdt": close_result.get("estimated_close_fee_usdt"),
+                    "estimated_net_profit_usdt": close_result.get("estimated_net_profit_usdt"),
                     "exchange_response": close_result.get("exchange_response"),
                 })
             except BloFinDemoExecutionBlocked as exc:
@@ -5419,11 +5493,11 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             "status": "PASS",
             "managed_positions": managed,
             "actions": actions,
-            "minimum_profit_usdt": minimum_profit,
-            "maximum_hold_seconds": maximum_hold,
+            "minimum_net_profit_usdt": minimum_net_profit,
+            "taker_fee_rate": taker_fee_rate,
+            "slippage_buffer_rate": slippage_buffer_rate,
             "message_fa": (
-                "مدیر خروج فقط پوزیشن‌های دقیقاً لینک‌شده به سفارش ربات را بررسی می‌کند؛ "
-                "خروج خودکار فقط با رسیدن به حد سود یا پایان زمان نگهداری و سود شناور کافی انجام می‌شود."
+                "مدیر خروج هر پوزیشن رباتی را مستقل بررسی می‌کند؛ به‌محض مثبت‌شدن سود برآوردی پس از کارمزد ورود، کارمزد تخمینی Market خروج و حاشیه لغزش، همان پوزیشن را می‌بندد. محدودیت زمانی نگهداری وجود ندارد."
             ),
         }
     finally:
@@ -5455,7 +5529,11 @@ def _blofin_demo_position_manager_worker() -> None:
                     "last_error_type": type(exc).__name__,
                     "last_message_fa": "مدیر خروج با خطای کنترل‌شده روبه‌رو شد؛ هیچ خروج تأییدنشده‌ای فرض نمی‌شود.",
                 })
-        time.sleep(15)
+        try:
+            check_interval = max(2, min(int(os.getenv("BLOFIN_DEMO_EXIT_CHECK_INTERVAL_SECONDS", "5")), 15))
+        except (TypeError, ValueError):
+            check_interval = 5
+        time.sleep(check_interval)
 
 
 def _start_blofin_demo_position_manager() -> None:
@@ -5778,11 +5856,11 @@ class Handler(BaseHTTPRequestHandler):
             <button id="blofin-emergency-stop" type="button" disabled style="background:#b42318;color:#fff">توقف اضطراری ورودهای جدید</button>
             <p id="blofin-emergency-status" class="muted" aria-live="polite">برای فعال‌شدن کنترل، وضعیت AutoPilot از سرور خوانده می‌شود.</p>
             <p id="blofin-position-manager-status" class="muted" aria-live="polite">مدیر خروج خودکار هنوز وضعیت خود را گزارش نکرده است.</p>
-            <p class="muted">قانون خروج: رسیدن Mark Price به TP یا حداکثر ۲۴ ساعت نگهداری، فقط با سود شناور حداقل ۰٫۵۰ USDT. سود نهایی پس از Fill و کارمزدها باید از تاریخچه BloFin تأیید شود؛ این آستانه تضمین سود خالص نیست.</p>
+            <p class="muted">قانون خروج: محدودیت زمانی نگهداری وجود ندارد؛ هر پوزیشن مستقل به‌محض مثبت‌شدن سود برآوردی پس از کارمزد واقعی ورود، کارمزد تخمینی Market خروج و حاشیه لغزش بسته می‌شود. نتیجه نهایی پس از Fill از تاریخچه BloFin تطبیق داده می‌شود.</p>
           </section>
           <div class="metric" style="margin-top:16px">
             <h3>معاملات آزمایشی نامحدود · انتخاب انسانی بازار و ربات</h3>
-            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف مادام‌العمر و روزانه وجود ندارد، اما هر کندل کامل ۱۵ دقیقه فقط یک سیگنال می‌سازد و تا بسته‌شدن پوزیشن قبلی ورود تازه ممنوع است. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
+            <p class="muted">بازار فعلی این اتصال: BloFin Demo · USDT-M Perpetual · قرارداد خطی SWAP. نماد قرارداد را خودت انتخاب می‌کنی؛ جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود. سقف روزانه وجود ندارد؛ جست‌وجوی بازار هر ۳۰ ثانیه انجام می‌شود و سیگنال‌های تازه از کندل‌های بسته‌شده ۵ دقیقه‌ای می‌آیند. تا چهار پوزیشن هم‌زمان روی نمادهای متفاوت مجاز است؛ برای هر نماد فقط یک پوزیشن و هر سیگنال فقط یک‌بار اجرا می‌شود. اهرم ایزوله 1x، حداقل حجم مجاز، SL/TP، کنترل موجودی و حد ریسک اجباری‌اند.</p>
             <div class="grid" style="margin:10px 0">
               <div>
                 <label for="blofin-market-type">نوع بازار</label>
@@ -5855,7 +5933,7 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </section>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
-            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۱۵ دقیقه‌ای، تأیید شکست با کندل بعدی و حجم، بررسی تعارض الگوی یک‌ساعته، سپس تعیین ورود/حدضرر/حدسود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
+            <p class="muted">استراتژی اصلی Challenge 1: تشخیص الگوهای کندلی و نموداری روی کندل‌های بسته‌شده ۵ دقیقه‌ای، بررسی زمینه یک‌ساعته، سپس تعیین ورود/حدضرر و هدف اولیه ۱R. پس از جست‌وجوی معتبر، سفارش در همان چرخه اجرا می‌شود؛ جست‌وجو هر ۳۰ ثانیه تکرار می‌شود. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. موتور معامله به TinyFish، OpenRouter یا اعتبار مدل پولی نیاز ندارد. کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <div id="blofin-robot-cycle-controls">
               <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
               <button id="blofin-demo-execute-once" type="button" disabled>اجرای یک چرخه با ربات (دستی و یک‌باره)</button>
@@ -6348,7 +6426,7 @@ let blofinInstrumentRecords=[];
                 let liveMessage=result.last_message_fa||'وضعیت AutoPilot دریافت شد.';
                 if(state==='RUNNING'){
                   liveMessage='موتور در حال جست‌وجوی بازار و تحلیل کندل‌ها و الگوهای Challenge 1 است. '+liveMessage;
-                }else if(state==='WAITING_FOR_NEXT_15M_CANDLE'&&result.next_cycle_at_utc){
+                }else if(state==='WAITING_FOR_NEXT_SEARCH'&&result.next_cycle_at_utc){
                   const remaining=Math.max(0,Math.ceil((Date.parse(result.next_cycle_at_utc)-Date.now())/1000));
                   const minutes=Math.floor(remaining/60);
                   const seconds=remaining%60;
@@ -6877,7 +6955,7 @@ let blofinInstrumentRecords=[];
               executionReport.replaceChildren();
               const runningMessage=document.createElement('p');
               runningMessage.className='muted';
-              runningMessage.textContent='در حال تحلیل زنده '+selectedInstrument+' با ربات '+selectedProfile+' و تأیید ۱۵ دقیقه/۱ ساعت؛ هنوز سفارشی ارسال نشده است.';
+              runningMessage.textContent='در حال تحلیل زنده '+selectedInstrument+' با ربات '+selectedProfile+' و کندل بسته‌شده ۵ دقیقه/زمینه ۱ ساعت؛ هنوز سفارشی ارسال نشده است.';
               executionReport.appendChild(runningMessage);
               try{
                 const response=await fetch('/api/blofin/demo/execute-once',{
@@ -8961,7 +9039,7 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
         "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
         "evidence": evidence,
-        "candles_15m": evidence.get("candles_15m") if isinstance(evidence.get("candles_15m"), list) else [],
+        "candles_5m": evidence.get("candles_5m") if isinstance(evidence.get("candles_5m"), list) else [],
         "candles_1h": evidence.get("candles_1h") if isinstance(evidence.get("candles_1h"), list) else [],
         "entry_price": result.get("entry_price_usd") or result.get("entry_price") or evidence.get("entry_price"),
         "stop_loss": result.get("stop_loss_usd") or result.get("stop_loss"),
@@ -9129,7 +9207,7 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         ),
         "market": "Futures",
         "symbol": str(instrument_id).upper(),
-        "timeframe": "15m",
+        "timeframe": "5m",
         "signal": signal if signal in {"LONG", "SHORT", "NO_TRADE"} else "UNKNOWN",
         "experience_id": experience_id,
         "order_id": order_id,
@@ -9282,36 +9360,32 @@ def _start_notion_sync_worker() -> None:
 
 
 def _blofin_demo_next_15m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
-    """Return the delay and timestamp just after the next completed 15-minute candle."""
+    """Compatibility name for rapid search scheduling; no wait for a 15m boundary."""
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    next_boundary_epoch = (int(current.timestamp()) // 900 + 1) * 900 + 3
-    next_at = datetime.fromtimestamp(next_boundary_epoch, timezone.utc)
-    delay_seconds = max(5, int(math.ceil((next_at - current).total_seconds())))
-    return delay_seconds, next_at.isoformat()
+    try:
+        interval = max(15, min(int(os.getenv("BLOFIN_DEMO_AUTOPILOT_SEARCH_INTERVAL_SECONDS", "30")), 120))
+    except (TypeError, ValueError):
+        interval = 30
+    next_at = current + timedelta(seconds=interval)
+    return interval, next_at.isoformat()
 
 
 def _blofin_demo_next_scan_after_cycle(
     cycle_started_at_utc: datetime, *, now_utc: datetime | None = None,
 ) -> tuple[int, str]:
-    """Schedule from cycle start so a scan overlapping a candle close catches it."""
-    _, boundary_iso = _blofin_demo_next_15m_scan_window(cycle_started_at_utc)
-    target = datetime.fromisoformat(boundary_iso)
+    """Schedule the next search a short interval after the multi-symbol scan completes."""
     current = now_utc or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    if target <= current:
-        # The scan crossed the candle boundary. Re-check shortly rather than
-        # skipping the just-closed candle and sleeping for another full interval.
-        target = current + timedelta(seconds=5)
-    delay_seconds = max(5, int(math.ceil((target - current).total_seconds())))
-    return delay_seconds, target.isoformat()
+    return _blofin_demo_next_15m_scan_window(current)
+
 
 
 def _blofin_demo_autopilot_worker() -> None:
     """Run Challenge 1 scans immediately after each completed 15-minute candle."""
-    interval_seconds = 900
+    interval_seconds = 30
     raw_symbols = os.getenv(
         "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS",
         ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS),
@@ -9569,19 +9643,19 @@ def _blofin_demo_autopilot_worker() -> None:
                     for item in batch_results
                 )
                 autopilot_status = (
-                    "WAITING_FOR_NEXT_15M_CANDLE" if continue_search else "DISABLED"
+                    "WAITING_FOR_NEXT_SEARCH" if continue_search else "DISABLED"
                 )
                 if not continue_search:
                     autopilot_message = "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
                 elif duplicates_only:
                     autopilot_message = (
                         "هر ۵ نماد به کندلی رسیدند که قبلاً پردازش شده است؛ از تحلیل و ورود تکراری جلوگیری شد. "
-                        f"اسکن بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} آغاز می‌شود."
+                        f"اسکن بعدی حداکثر ۳۰ ثانیه بعد در {next_cycle_at_utc} آغاز می‌شود."
                     )
                 else:
                     autopilot_message = (
                         f"چرخهٔ {job_id} پایان یافت؛ {len(batch_results)} بازار بررسی شد. "
-                        f"جست‌وجوی بعدی پس از بسته‌شدن کندل ۱۵دقیقه‌ای در {next_cycle_at_utc} انجام می‌شود."
+                        f"جست‌وجوی بعدی حداکثر ۳۰ ثانیه بعد در {next_cycle_at_utc} انجام می‌شود."
                     )
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": bool(autopilot_enabled),

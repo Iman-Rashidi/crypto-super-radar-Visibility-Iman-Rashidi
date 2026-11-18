@@ -132,7 +132,8 @@ class BloFinDemoRiskPolicy:
     max_drawdown_pct: float = 0.05
     max_margin_usage_pct: float = 0.10
     max_leverage: int = 3
-    max_concurrent_positions: int = 1
+    max_concurrent_positions: int = 4
+    max_total_margin_usage_pct: float = 0.25
     max_orders_per_utc_day: int | None = None
     min_seconds_between_orders: int = 0
     min_confirmation_score: float = 75.0
@@ -143,7 +144,8 @@ class BloFinDemoRiskPolicy:
     def __post_init__(self) -> None:
         values = (
             self.risk_per_trade_pct, self.daily_loss_limit_pct, self.max_drawdown_pct,
-            self.max_margin_usage_pct, self.min_confirmation_score, self.max_risk_score,
+            self.max_margin_usage_pct, self.max_total_margin_usage_pct,
+            self.min_confirmation_score, self.max_risk_score,
             self.min_reward_risk, self.max_entry_deviation_pct,
         )
         if not all(math.isfinite(float(v)) for v in values):
@@ -155,7 +157,9 @@ class BloFinDemoRiskPolicy:
         if not 0 < self.max_drawdown_pct <= 0.15:
             raise ValueError("Maximum drawdown must be in (0, 15%]")
         if not 0 < self.max_margin_usage_pct <= 0.25:
-            raise ValueError("Margin usage must be in (0, 25%]")
+            raise ValueError("Per-position margin usage must be in (0, 25%]")
+        if not 0 < self.max_total_margin_usage_pct <= 0.50:
+            raise ValueError("Aggregate margin usage must be in (0, 50%]")
         if self.max_orders_per_utc_day is not None and (
             isinstance(self.max_orders_per_utc_day, bool)
             or not 1 <= int(self.max_orders_per_utc_day) <= 5
@@ -165,8 +169,8 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Minimum seconds between Demo orders must be between 0 and 86400")
         if isinstance(self.max_leverage, bool) or not 1 <= int(self.max_leverage) <= 3:
             raise ValueError("Demo test leverage is restricted to 1x through 3x")
-        if not 1 <= int(self.max_concurrent_positions) <= 3:
-            raise ValueError("Concurrent positions must be between 1 and 3")
+        if not 1 <= int(self.max_concurrent_positions) <= 4:
+            raise ValueError("Concurrent positions must be between 1 and 4")
         if self.min_reward_risk < 1.0 or self.max_entry_deviation_pct <= 0:
             raise ValueError("Reward/risk or entry-deviation policy is invalid")
 
@@ -203,17 +207,21 @@ def build_demo_order_plan(
         confirmation = evidence.get("confirmation_candle")
         volume = confirmation.get("volume_confirmation") if isinstance(confirmation, Mapping) else None
         expected_pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
+        engine_version = str(evidence.get("decision_engine_version") or "")
+        expected_setup_timeframe = "5m" if engine_version == "CHALLENGE_1_LOCAL_RULES_V3" else "15m"
         if (
             evidence.get("decision_engine_version") not in {
                 "CHALLENGE_1_LOCAL_RULES_V1",
                 "CHALLENGE_1_LOCAL_RULES_V2",
+                "CHALLENGE_1_LOCAL_RULES_V3",
             }
             or evidence.get("completed_candles_only") is not True
             or evidence.get("legacy_12_gates_used_for_entry") is not False
             or evidence.get("external_ai_required") is not False
             or evidence.get("tinyfish_required") is not False
             or evidence.get("decision") != side
-            or evidence.get("setup_timeframe") != "15m"
+            or evidence.get("setup_timeframe") != expected_setup_timeframe
+            or (engine_version == "CHALLENGE_1_LOCAL_RULES_V3" and not isinstance(evidence.get("candles_5m"), list))
             or not isinstance(evidence.get("detected_patterns"), list)
             or not evidence.get("detected_patterns")
             or not isinstance(chosen, Mapping)
@@ -650,7 +658,7 @@ class BloFinDemoEventStore:
                  AND challenge_id='CHALLENGE_1_BLOFIN_DEMO'
                  AND environment='BLOFIN_DEMO'
                  AND event_type='DECISION_RECORDED'
-                 AND symbol=? AND timeframe='15M'
+                 AND symbol=? AND timeframe IN ('15M', '5M')
                ORDER BY sequence ASC LIMIT 2000""",
             (str(instrument_id).strip().upper(),),
         ).fetchall()
@@ -767,7 +775,7 @@ class BloFinDemoEventStore:
                 input_snapshot=input_snapshot,
                 market="CEX_FUTURES",
                 symbol=instrument,
-                timeframe="15M",
+                timeframe=str(evidence.get("setup_timeframe") or "15m").upper(),
                 model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_UNKNOWN"),
                 dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
             )
@@ -1486,11 +1494,46 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("Maximum account drawdown limit has been reached.")
 
         positions = self.client.get_positions()
-        # Account-wide pending orders can fill on another symbol and consume the
-        # concurrency/margin budget, so the safety check is intentionally global.
-        pending = self.client.get_open_orders()
-        if _active_position_count(positions) >= self.policy.max_concurrent_positions:
+        # Account-wide checks are global. Only one active position per contract is
+        # allowed; concurrent positions must use different instruments.
+        if not isinstance(positions, list):
+            raise BloFinDemoExecutionBlocked("Positions response is not a list.")
+        active_position_rows = []
+        active_initial_margin = Decimal("0")
+        for row in positions:
+            if not isinstance(row, Mapping):
+                raise BloFinDemoExecutionBlocked("Position metadata is unreadable; no new entry is allowed.")
+            raw_size = next((row.get(k) for k in ("positions", "pos", "positionSize", "positionAmt") if k in row), None)
+            if raw_size is None:
+                raise BloFinDemoExecutionBlocked("Position size is missing; no new entry is allowed.")
+            try:
+                size_value = Decimal(str(raw_size))
+            except Exception as exc:
+                raise BloFinDemoExecutionBlocked("Position size is invalid; no new entry is allowed.") from exc
+            if not size_value.is_finite():
+                raise BloFinDemoExecutionBlocked("Position size is non-finite; no new entry is allowed.")
+            if abs(size_value) <= Decimal("1e-12"):
+                continue
+            active_position_rows.append(row)
+            active_inst = str(row.get("instId") or "").strip().upper()
+            if not active_inst:
+                raise BloFinDemoExecutionBlocked("An active position has no instrument ID; aggregate risk cannot be confirmed.")
+            if active_inst == inst_id:
+                raise BloFinDemoExecutionBlocked("A position is already open for this contract.")
+            raw_margin = row.get("initialMargin")
+            if raw_margin in (None, ""):
+                raise BloFinDemoExecutionBlocked("An active position has no initial-margin value; aggregate margin cannot be confirmed.")
+            try:
+                margin_value = Decimal(str(raw_margin))
+            except Exception as exc:
+                raise BloFinDemoExecutionBlocked("Active position initial margin is invalid.") from exc
+            if not margin_value.is_finite() or margin_value < 0:
+                raise BloFinDemoExecutionBlocked("Active position initial margin is invalid.")
+            active_initial_margin += margin_value
+
+        if len(active_position_rows) >= self.policy.max_concurrent_positions:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")
+        pending = self.client.get_open_orders()
         if _active_order_count(pending) > 0:
             raise BloFinDemoExecutionBlocked("Pending orders exist; reconcile them before a new entry.")
 
@@ -1521,6 +1564,10 @@ class BloFinDemoExecutor:
             plan["notional_usdt"] = float(quantity_notional)
             plan["estimated_initial_margin_usdt"] = float(quantity_margin)
             plan["minimum_size_only"] = True
+        projected_margin = active_initial_margin + Decimal(str(plan.get("estimated_initial_margin_usdt") or 0))
+        aggregate_margin_limit = Decimal(str(equity)) * Decimal(str(self.policy.max_total_margin_usage_pct))
+        if projected_margin > aggregate_margin_limit:
+            raise BloFinDemoExecutionBlocked("Aggregate initial margin would exceed the account-wide margin cap.")
         if not self.store.reserve_order(plan):
             raise BloFinDemoExecutionBlocked("This signal/order ID was already reserved; duplicate entry blocked.")
 
