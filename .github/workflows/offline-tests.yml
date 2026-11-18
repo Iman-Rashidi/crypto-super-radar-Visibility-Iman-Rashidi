@@ -65,7 +65,14 @@ jobs:
               test_chart_patterns.py \
               test_challenge1_strategy.py \
               test_ai_second_opinion.py \
-              test_web_app.py; do
+              test_web_app.py \
+              test_blofin_demo_executor.py \
+              test_challenge1_executor.py \
+              test_notion_event_sync.py \
+              test_notion_activity_journal.py \
+              test_demo_observability.py \
+              test_database.py \
+              test_demo_autopilot_once.py; do
               python -m unittest discover -s tests -p "${test_file}" -v
             done
           done
