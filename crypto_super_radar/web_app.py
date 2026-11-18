@@ -276,7 +276,8 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
     with AI_DRY_RUN_LOCK:
         if AI_DRY_RUN_STATE.get("day") != day:
             AI_DRY_RUN_STATE.update(day=day, count=0, last_started=0.0)
-        elapsed = now - float(AI_DRY_RUN_STATE.get("last_started") or 0.0)
+        last_started = float(AI_DRY_RUN_STATE.get("last_started") or 0.0)
+        elapsed = now - last_started if last_started > 0 else AI_DRY_RUN_MIN_INTERVAL_SECONDS
         if elapsed < AI_DRY_RUN_MIN_INTERVAL_SECONDS:
             return {
                 "provider": "OpenRouter", "model": primary_config.get("model"),
