@@ -10374,6 +10374,22 @@ def _queue_challenge1_observer_events(
             outbox.close()
 
 
+def _challenge1_observer_results_complete(job_id: str) -> bool:
+    """Check durable per-reviewer results, allowing recovery after a worker restart."""
+    outbox = None
+    try:
+        outbox = NotionEventOutbox()
+        return all(
+            outbox.has_event(f"{job_id}:AI:{reviewer_id}:RESULT")
+            for reviewer_id in ("nemotron", "second_ai")
+        )
+    except Exception:
+        return False
+    finally:
+        if outbox is not None:
+            outbox.close()
+
+
 def _run_challenge1_observer_job(
     job_id: str, instrument_id: str, challenge_record: dict, initial_job: dict,
 ) -> None:
@@ -10441,9 +10457,11 @@ def _run_challenge1_observer_job(
     request_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, requested, phase="REQUESTED",
     )
-    # The durable request event is the cross-restart idempotency key. If it
-    # already exists, do not call paid/free provider APIs a second time.
-    if request_queue.get("status") != "QUEUED" or int(request_queue.get("queued") or 0) <= 0:
+    # The request event may already exist after a process restart. Resume when
+    # either durable reviewer result is missing; skip only a fully completed audit.
+    if request_queue.get("status") != "QUEUED":
+        return
+    if _challenge1_observer_results_complete(job_id):
         return
     try:
         audit = run_challenge1_observer_reviews(challenge_record, context)
@@ -10489,6 +10507,16 @@ def _run_challenge1_observer_job(
     )
 
 
+def _run_challenge1_observer_job_with_cleanup(
+    job_id: str, instrument_id: str, challenge_record: dict, initial_job: dict,
+) -> None:
+    try:
+        _run_challenge1_observer_job(job_id, instrument_id, challenge_record, initial_job)
+    finally:
+        with BLOFIN_AI_OBSERVER_START_LOCK:
+            BLOFIN_AI_OBSERVER_STARTED.discard(job_id)
+
+
 def _start_challenge1_observer_job(
     job_id: str, instrument_id: str, challenge_record: dict | None,
     initial_job: dict | None = None,
@@ -10506,6 +10534,8 @@ def _start_challenge1_observer_job(
     result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
     if str(result.get("status") or "").upper() == "SKIPPED_DUPLICATE_EXPERIENCE":
         return
+    if _challenge1_observer_results_complete(job_id):
+        return
     with BLOFIN_AI_OBSERVER_START_LOCK:
         if job_id in BLOFIN_AI_OBSERVER_STARTED:
             return
@@ -10515,7 +10545,7 @@ def _start_challenge1_observer_job(
             BLOFIN_AI_OBSERVER_STARTED.clear()
             BLOFIN_AI_OBSERVER_STARTED.add(job_id)
     worker = threading.Thread(
-        target=_run_challenge1_observer_job,
+        target=_run_challenge1_observer_job_with_cleanup,
         args=(job_id, instrument_id, copy.deepcopy(challenge_record), snapshot),
         daemon=True,
         name=f"challenge1-observer-{job_id[:24]}",
