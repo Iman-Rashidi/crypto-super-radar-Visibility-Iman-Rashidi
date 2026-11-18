@@ -9498,6 +9498,7 @@ def _challenge1_active_position_observer_recovery_cycle() -> dict[str, Any]:
             if math.isfinite(size) and abs(size) > 0:
                 active_positions.append(row)
         linked = 0
+        mark_price_cache: dict[str, tuple[Any, str]] = {}
         for order in linked_orders:
             if not isinstance(order, dict):
                 continue
@@ -9514,7 +9515,30 @@ def _challenge1_active_position_observer_recovery_cycle() -> dict[str, Any]:
                 continue
             linked += 1
             position = matches[0]
-            audit = _start_challenge1_active_position_observer(order, position, instrument_id)
+            if instrument_id not in mark_price_cache:
+                mark_price = position.get("markPrice")
+                mark_price_source = "POSITIONS_RESPONSE" if mark_price is not None else "UNKNOWN"
+                try:
+                    mark_rows = reader.get_mark_price(inst_id=instrument_id)
+                    mark_row = (
+                        mark_rows[0] if isinstance(mark_rows, list) and mark_rows
+                        and isinstance(mark_rows[0], dict)
+                        else mark_rows if isinstance(mark_rows, dict) else None
+                    )
+                    if isinstance(mark_row, dict) and mark_row.get("markPrice") is not None:
+                        mark_price = mark_row.get("markPrice")
+                        mark_price_source = "BLOFIN_READ_MARK_PRICE"
+                except Exception:
+                    # A price lookup failure must not suppress the independent audits.
+                    pass
+                mark_price_cache[instrument_id] = (mark_price, mark_price_source)
+            mark_price, mark_price_source = mark_price_cache[instrument_id]
+            position_snapshot = dict(position)
+            if mark_price is not None:
+                position_snapshot["markPrice"] = mark_price
+            audit = _start_challenge1_active_position_observer(
+                order, position_snapshot, instrument_id,
+            )
             if audit.get("status") == "OBSERVER_AUDIT_SCHEDULED":
                 scheduled += 1
             actions.append({
@@ -9524,7 +9548,8 @@ def _challenge1_active_position_observer_recovery_cycle() -> dict[str, Any]:
                 "position_side": position.get("positionSide"),
                 "size_contracts": position.get("positions"),
                 "average_entry_price": position.get("averagePrice"),
-                "mark_price": position.get("markPrice"),
+                "mark_price": mark_price,
+                "mark_price_source": mark_price_source,
                 "unrealized_pnl_usdt": position.get("unrealizedPnl"),
                 "leverage": position.get("leverage"),
                 "liquidation_price": position.get("liquidationPrice"),
