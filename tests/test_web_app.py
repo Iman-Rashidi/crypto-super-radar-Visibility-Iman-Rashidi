@@ -532,6 +532,96 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(result["orders_submitted"])
         self.assertFalse(result["trade_executed"])
 
+    def test_challenge1_synthetic_dry_run_uses_exact_two_reviewer_gate_and_never_trades(self):
+        previous = dict(web_app.AI_DRY_RUN_STATE)
+        primary_config = {
+            "configured": True, "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "status": "CONFIGURED",
+        }
+        second_config = {
+            "configured": True, "provider": "Groq",
+            "model": "openai/gpt-oss-120b", "status": "CONFIGURED",
+            "configuration_issues": [],
+        }
+        expected_quorum = {
+            "approved": True,
+            "status": "APPROVED_BY_BOTH",
+            "reason_fa": "Synthetic test quorum only.",
+            "ai_consensus": {
+                "status": "APPROVED_BY_BOTH",
+                "primary_verified": True, "second_verified": True,
+                "providers_independent": True, "models_independent": True,
+            },
+            "ai_reviews": [
+                {"reviewer_id": "nemotron", "review": {"request_attempted": True, "response_source": "LIVE_API"}},
+                {"reviewer_id": "second_ai", "review": {"request_attempted": True, "response_source": "LIVE_API"}},
+            ],
+            "ai_review": {"reviewer_id": "nemotron"},
+            "second_ai_review": {"reviewer_id": "second_ai"},
+        }
+        try:
+            web_app.AI_DRY_RUN_STATE.update(day=datetime.now(timezone.utc).date().isoformat(), count=0, last_started=0.0)
+            with (
+                patch.object(web_app, "ai_connection_status", return_value=primary_config),
+                patch.object(web_app, "second_ai_connection_status", return_value=second_config),
+                patch.object(web_app, "_run_challenge1_supervisor_reviews", return_value=expected_quorum) as quorum,
+                patch.object(web_app, "run_ai_supervisor") as generic_supervisor,
+                patch.object(web_app.FUTURES_PAPER_BOT, "run_once") as futures_tick,
+                patch.object(web_app.PAPER_BOT, "run_once") as spot_tick,
+            ):
+                result = web_app._run_ai_synthetic_dry_run_limited()
+            self.assertTrue(result["test_passed"])
+            self.assertEqual(result["test_mode"], "SYNTHETIC_CHALLENGE1_DUAL_REVIEWER_DRY_RUN")
+            self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_BOTH")
+            self.assertFalse(result["paper_entry_eligible"])
+            self.assertFalse(result["orders_submitted"])
+            self.assertFalse(result["trade_executed"])
+            quorum.assert_called_once()
+            analysis, asset = quorum.call_args.args
+            self.assertEqual(asset.raw, "perp:BTCUSDT")
+            self.assertEqual(analysis.metrics["execution_profile"], "CHALLENGE_1")
+            record = analysis.to_record()
+            self.assertEqual(record["challenge1_evidence"]["setup_timeframe"], "5m")
+            self.assertEqual(record["challenge1_evidence"]["elliott_wave"]["phase"], "WAVES_1_AND_2_CONFIRMED")
+            self.assertEqual(record["challenge1_evidence"]["chosen_pattern"]["name_en"], "Bullish Engulfing")
+            generic_supervisor.assert_not_called()
+            futures_tick.assert_not_called()
+            spot_tick.assert_not_called()
+        finally:
+            web_app.AI_DRY_RUN_STATE.clear()
+            web_app.AI_DRY_RUN_STATE.update(previous)
+
+    def test_challenge1_synthetic_dry_run_fails_closed_before_any_model_call_when_second_reviewer_missing(self):
+        previous = dict(web_app.AI_DRY_RUN_STATE)
+        primary_config = {
+            "configured": True, "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "status": "CONFIGURED",
+        }
+        second_config = {
+            "configured": False, "provider": None, "model": None,
+            "status": "NOT_CONFIGURED", "configuration_issues": ["CSR_SECOND_AI_API_KEY_MISSING"],
+        }
+        try:
+            with (
+                patch.object(web_app, "ai_connection_status", return_value=primary_config),
+                patch.object(web_app, "second_ai_connection_status", return_value=second_config),
+                patch.object(web_app, "_run_challenge1_supervisor_reviews") as quorum,
+            ):
+                result = web_app._run_ai_synthetic_dry_run_limited()
+            self.assertEqual(result["status"], "PROVIDERS_INSUFFICIENT")
+            self.assertFalse(result["test_passed"])
+            self.assertFalse(result["paper_entry_eligible"])
+            self.assertFalse(result["orders_submitted"])
+            self.assertFalse(result["trade_executed"])
+            self.assertTrue(all(
+                item["review"]["request_attempted"] is False
+                for item in result["ai_reviews"]
+            ))
+            quorum.assert_not_called()
+        finally:
+            web_app.AI_DRY_RUN_STATE.clear()
+            web_app.AI_DRY_RUN_STATE.update(previous)
+
     def test_ai_synthetic_dry_run_rejects_cross_origin_requests(self):
         with patch.object(web_app, "_run_ai_synthetic_dry_run_limited") as dry_run:
             status, _, body = self.request(
