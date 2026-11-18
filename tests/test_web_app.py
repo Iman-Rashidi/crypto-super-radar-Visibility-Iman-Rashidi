@@ -65,6 +65,55 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_notion_sync_worker_error_is_visible_in_status_api(self):
+        previous = dict(web_app.NOTION_EVENT_SYNC_STATE)
+        try:
+            web_app._record_notion_event_sync_state(error_type="OperationalError")
+
+            class FakeOutbox:
+                def status_snapshot(self):
+                    return {
+                        "status": "DEGRADED",
+                        "pending": 1,
+                        "retrying": 1,
+                        "last_error_type": "HTTPError",
+                        "last_http_status": 503,
+                        "recent_errors": [
+                            {"error_type": "HTTPError", "http_status": 503}
+                        ],
+                    }
+
+                def close(self):
+                    pass
+
+            class FakeActivity:
+                def status_snapshot(self):
+                    return {"status": "CONFIGURED", "pending": 0, "synced": 1}
+
+                def close(self):
+                    pass
+
+            with patch.object(web_app, "NotionEventOutbox", FakeOutbox), patch.object(
+                web_app, "NotionActivityJournal", FakeActivity,
+            ):
+                status, _headers, payload = self.request(
+                    "GET", "/api/notion-sync/status"
+                )
+
+            data = json.loads(payload)
+            self.assertEqual(status, 200)
+            self.assertEqual(data["status"], "DEGRADED")
+            self.assertEqual(data["last_error_type"], "HTTPError")
+            self.assertEqual(data["last_http_status"], 503)
+            self.assertEqual(data["worker"]["status"], "WORKER_ERROR")
+            self.assertEqual(
+                data["worker"]["last_worker_error_type"], "OperationalError"
+            )
+            self.assertEqual(data["activity_journal"]["status"], "CONFIGURED")
+        finally:
+            web_app.NOTION_EVENT_SYNC_STATE.clear()
+            web_app.NOTION_EVENT_SYNC_STATE.update(previous)
+
     def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
         with open(web_app.__file__, encoding="utf-8") as source_file:
             source = source_file.read()

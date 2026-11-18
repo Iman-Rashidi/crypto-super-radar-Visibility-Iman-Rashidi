@@ -5090,6 +5090,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 outbox = NotionEventOutbox()
                 payload = outbox.status_snapshot()
+                with LOCK:
+                    payload["worker"] = copy.deepcopy(NOTION_EVENT_SYNC_STATE)
                 try:
                     activity_journal = NotionActivityJournal()
                     payload["activity_journal"] = activity_journal.status_snapshot()
@@ -5108,6 +5110,8 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     "error_type": type(exc).__name__,
                 }
+                with LOCK:
+                    payload["worker"] = copy.deepcopy(NOTION_EVENT_SYNC_STATE)
                 return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
             finally:
@@ -9660,6 +9664,18 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
 
 NOTION_SYNC_THREAD = None
 NOTION_SYNC_START_LOCK = threading.Lock()
+NOTION_EVENT_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "synced": 0,
+    "failed": 0,
+    "retrying": 0,
+    "last_error_type": None,
+    "last_http_status": None,
+    "recent_errors": [],
+    "last_worker_error_type": None,
+    "last_checked_at_utc": None,
+}
 NOTION_ACTIVITY_SYNC_STATE = {
     "status": "STARTING",
     "pending": 0,
@@ -9672,6 +9688,23 @@ NOTION_ACTIVITY_SYNC_STATE = {
     "last_checked_at_utc": None,
 }
 
+def _record_notion_event_sync_state(
+    result: dict | None = None, *, error_type: str | None = None,
+) -> dict:
+    """Publish outbox retry details and worker errors without exposing credentials."""
+    with LOCK:
+        NOTION_EVENT_SYNC_STATE["last_checked_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if isinstance(result, dict):
+            NOTION_EVENT_SYNC_STATE.update(copy.deepcopy(result))
+            NOTION_EVENT_SYNC_STATE["last_worker_error_type"] = None
+        elif error_type:
+            NOTION_EVENT_SYNC_STATE.update({
+                "status": "WORKER_ERROR",
+                "last_worker_error_type": str(error_type)[:100],
+            })
+        return copy.deepcopy(NOTION_EVENT_SYNC_STATE)
+
+
 def _notion_sync_worker() -> None:
     """Flush pending outbox events while the Demo web process is awake."""
     try:
@@ -9682,15 +9715,19 @@ def _notion_sync_worker() -> None:
     while True:
         outbox = None
         activity_journal = None
+        event_sync_result = None
+        event_sync_error = None
         try:
             outbox = NotionEventOutbox()
-            outbox.flush_pending(limit=10)
-        except Exception:
-            # Keep a temporary Notion/Turso outage from stopping the Demo worker.
-            pass
+            event_sync_result = outbox.flush_pending(limit=10)
+        except Exception as exc:
+            # A temporary Notion/Turso outage must not stop trading, but it must
+            # remain visible in the operational status endpoint.
+            event_sync_error = type(exc).__name__
         finally:
             if outbox is not None:
                 outbox.close()
+        _record_notion_event_sync_state(event_sync_result, error_type=event_sync_error)
         activity_sync_result = None
         activity_sync_error = None
         try:
