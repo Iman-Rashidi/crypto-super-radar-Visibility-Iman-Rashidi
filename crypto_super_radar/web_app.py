@@ -9390,17 +9390,22 @@ def _challenge1_observer_notion_events(
             "execution_effect": "NONE",
         }
         if phase == "REQUESTED":
+            is_configured = status == "REQUESTING"
             events.append({
                 **common,
                 "event_id": f"{job_id}:AI:{reviewer_id}:REQUESTED",
                 "occurred_at_utc": requested_at or datetime.now(timezone.utc).isoformat(),
                 "event_type": "AI_REVIEW_REQUESTED",
                 "actor": actor,
-                "status": "PENDING",
+                "status": "PENDING" if is_configured else "WARNING",
                 "ai_model": model,
                 "ai_analysis": "",
-                "ai_suggestion": "AUDIT_REQUESTED",
-                "reason": "Independent post-decision audit request; no trading authority.",
+                "ai_suggestion": "AUDIT_REQUESTED" if is_configured else "NOT_CONFIGURED",
+                "reason": (
+                    "Independent post-decision audit request; no trading authority."
+                    if is_configured else
+                    "Reviewer configuration is incomplete; no live model request was made."
+                ),
                 "details": json.dumps(details, ensure_ascii=False, sort_keys=True, default=str),
             })
             continue
