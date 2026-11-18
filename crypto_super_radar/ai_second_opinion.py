@@ -85,7 +85,11 @@ def challenge1_observer_configuration_status() -> dict[str, Any]:
     primary_env_model = os.getenv("CSR_AI_MODEL")
     primary_model = _model()
     primary_model_defaulted = bool(
-        primary_env_model and _safe_observer_model(primary_env_model) != primary_env_model.strip()
+        primary_env_model
+        and (
+            _safe_observer_model(primary_env_model) != primary_env_model.strip()
+            or not _safe_observer_model(primary_env_model).endswith(":free")
+        )
     )
 
     second_key = (os.getenv("CSR_SECOND_AI_API_KEY") or "").strip()
