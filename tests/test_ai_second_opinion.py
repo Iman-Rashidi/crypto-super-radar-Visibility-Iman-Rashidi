@@ -719,6 +719,58 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertFalse(result["request_attempted"])
         self.assertFalse(result["paper_entry_eligible"])
 
+    def test_challenge1_review_bypasses_local_daily_app_cap(self):
+        from crypto_super_radar import ai_second_opinion
+        candidate = challenge1_result()
+        calls = {"count": 0}
+        day = ai_second_opinion.datetime.now(ai_second_opinion.timezone.utc).date().isoformat()
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            calls["count"] += 1
+            return FakeResponse(document=valid_pattern_document())
+
+        with ai_second_opinion._LOCK:
+            ai_second_opinion._REQUEST_COUNTS[day] = ai_second_opinion.MAX_REQUESTS_PER_UTC_DAY
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["request_attempted"])
+        self.assertEqual(review["response_source"], "LIVE_API")
+        self.assertEqual(
+            ai_second_opinion._REQUEST_COUNTS[day],
+            ai_second_opinion.MAX_REQUESTS_PER_UTC_DAY,
+        )
+        status = ai_connection_status()
+        self.assertIsNone(status["challenge1_requests_per_day_app_cap"])
+        self.assertFalse(status["challenge1_daily_app_cap_enabled"])
+
+    def test_non_challenge1_profile_still_obeys_local_daily_app_cap(self):
+        from crypto_super_radar import ai_second_opinion
+        day = ai_second_opinion.datetime.now(ai_second_opinion.timezone.utc).date().isoformat()
+        calls = {"count": 0}
+
+        def forbidden_post(*args, **kwargs):
+            calls["count"] += 1
+            raise AssertionError("Non-Challenge 1 app daily cap must block before the provider call.")
+
+        with ai_second_opinion._LOCK:
+            ai_second_opinion._REQUEST_COUNTS[day] = ai_second_opinion.MAX_REQUESTS_PER_UTC_DAY
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=forbidden_post,
+            )
+
+        self.assertEqual(calls["count"], 0)
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["skip_reason_code"], "LOCAL_DAILY_LIMIT")
+        self.assertFalse(result["paper_entry_eligible"])
+
     def test_challenge1_ai_supervisor_receives_only_closed_candles_and_patterns(self):
         candidate = challenge1_result()
         captured = {}

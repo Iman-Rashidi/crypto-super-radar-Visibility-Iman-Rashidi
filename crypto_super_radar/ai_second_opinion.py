@@ -76,6 +76,9 @@ def ai_connection_status() -> dict[str, Any]:
         ),
         "configured": key_present,
         "requests_per_day_app_cap": MAX_REQUESTS_PER_UTC_DAY,
+        "requests_per_day_app_cap_scope": "NON_CHALLENGE_1_PROFILES",
+        "challenge1_requests_per_day_app_cap": None,
+        "challenge1_daily_app_cap_enabled": False,
         "requests_per_minute_app_cap": MAX_REQUESTS_PER_MINUTE,
         "secret_sent_to_model": False,
     }
@@ -1037,6 +1040,10 @@ def run_free_ai_second_opinion(
             "cost_usd": 0.0,
         }
     evidence = _build_review_input(result, asset)
+    # Challenge 1 is an always-on Demo challenge: do not impose a local
+    # per-UTC-day request quota on its real reviewer calls. Provider-side 429s,
+    # the short-window safety throttle, and fail-closed response validation remain.
+    challenge1_review = evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
     model = _model()
     cache_material = {
         "prompt_version": PROMPT_VERSION,
@@ -1069,16 +1076,17 @@ def run_free_ai_second_opinion(
                 "response_source": "NONE",
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
-        if _REQUEST_COUNTS.get(day, 0) >= MAX_REQUESTS_PER_UTC_DAY:
+        if not challenge1_review and _REQUEST_COUNTS.get(day, 0) >= MAX_REQUESTS_PER_UTC_DAY:
             return {
                 "provider": "OpenRouter", "model": model, "status": "UNKNOWN",
-                "status_fa": "سقف محافظه‌کارانهٔ روزانهٔ برنامه برای API رایگان پر شده است.",
-                "reason": "Local daily free-request safety cap reached.",
+                "status_fa": "سقف محافظه‌کارانهٔ روزانهٔ برنامه برای پروفایل‌های غیر Challenge 1 پر شده است.",
+                "reason": "Local daily free-request safety cap reached for non-Challenge 1 profiles.",
                 "request_attempted": False, "skip_reason_code": "LOCAL_DAILY_LIMIT",
                 "response_source": "NONE",
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
-        _REQUEST_COUNTS[day] = _REQUEST_COUNTS.get(day, 0) + 1
+        if not challenge1_review:
+            _REQUEST_COUNTS[day] = _REQUEST_COUNTS.get(day, 0) + 1
         _MINUTE_REQUEST_TIMESTAMPS.append(now)
 
     payload = {
