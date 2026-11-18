@@ -1925,5 +1925,50 @@ class WebAppHttpTests(unittest.TestCase):
         run_review.assert_not_called()
 
 
+    def test_position_audit_gap_creates_durable_data_error_without_fabricating_evidence(self):
+        outbox = MagicMock()
+        outbox.enqueue.return_value = True
+        order = {
+            "client_order_id": "client-order-btc",
+            "exchange_order_id": "demo-order-btc",
+            "experience_id": "experience-missing-btc",
+        }
+        position = {"positionId": "demo-position-btc"}
+        audit_result = {
+            "status": "ACTIVITY_EVIDENCE_NOT_FOUND",
+            "position_id": "demo-position-btc",
+            "experience_id": "experience-missing-btc",
+        }
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            result = web_app._queue_challenge1_position_audit_gap_event(
+                order, position, "BTC-USDT", audit_result,
+            )
+        self.assertEqual(result["status"], "QUEUED")
+        payload = outbox.enqueue.call_args.args[0]
+        self.assertEqual(payload["event_type"], "DATA_ERROR")
+        self.assertEqual(payload["actor"], "Robot")
+        self.assertEqual(payload["status"], "WARNING")
+        self.assertEqual(payload["position_id"], "demo-position-btc")
+        self.assertEqual(payload["order_id"], "demo-order-btc")
+        self.assertEqual(payload["experience_id"], "experience-missing-btc")
+        details = json.loads(payload["details"])
+        self.assertFalse(details["synthetic_evidence_created"])
+        self.assertTrue(details["reviewer_calls_skipped"])
+        self.assertEqual(details["gap_code"], "ACTIVITY_EVIDENCE_NOT_FOUND")
+        outbox.close.assert_called_once()
+
+    def test_position_audit_gap_is_not_created_for_a_normal_scheduled_audit(self):
+        outbox = MagicMock()
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            result = web_app._queue_challenge1_position_audit_gap_event(
+                {"experience_id": "experience-1"},
+                {"positionId": "position-1"},
+                "ETH-USDT",
+                {"status": "SCHEDULED"},
+            )
+        self.assertEqual(result["status"], "NOT_A_GAP")
+        outbox.enqueue.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
