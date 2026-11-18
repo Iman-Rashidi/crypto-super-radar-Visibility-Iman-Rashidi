@@ -8155,6 +8155,10 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": False, "status": "DISABLED",
+                    "search_continues": False,
+                    "next_cycle_scheduled": False,
+                    "next_cycle_at_utc": None,
+                    "next_cycle_in_seconds": None,
                     "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
                 })
             _persist_blofin_autopilot_state()
@@ -8566,6 +8570,10 @@ def _start_blofin_demo_autopilot() -> None:
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
                 "enabled": False, "status": "DISABLED",
+                "search_continues": False,
+                "next_cycle_scheduled": False,
+                "next_cycle_at_utc": None,
+                "next_cycle_in_seconds": None,
                 "last_message_fa": "BLOFIN_DEMO_AUTOPILOT_ENABLED فعال نیست.",
             })
         _persist_blofin_autopilot_state()
