@@ -1952,3 +1952,37 @@ class BloFinUnifiedReadinessTests(unittest.TestCase):
         self.assertFalse(result["trading_enabled"])
         self.assertFalse(result["autopilot_enabled"])
         self.assertEqual(result["status"], "BLOCKED")
+
+class BloFinPositionManagerReadinessReportingTests(unittest.TestCase):
+    def test_position_manager_reports_actual_readiness_blockers_without_false_key_diagnosis(self):
+        readiness = {
+            "status": "BLOCKED",
+            "trade_credentials_configured": True,
+            "credential_source": "UNIFIED_ACCOUNT_KEY",
+            "trade_permission_status": "READ_WRITE_CONFIRMED",
+            "trade_permission_verified": True,
+            "trading_enabled": False,
+            "dashboard_auth_configured": False,
+            "durable_storage": True,
+            "event_store_readable": True,
+        }
+        with patch.object(
+            web_app, "_blofin_demo_execution_readiness", return_value=readiness,
+        ):
+            result = web_app._blofin_demo_position_manager_cycle()
+
+        self.assertEqual(result["status"], "EXECUTION_READINESS_BLOCKED")
+        self.assertEqual(result["readiness_status"], "BLOCKED")
+        self.assertEqual(
+            result["readiness_blockers"],
+            ["DEMO_TRADING_DISABLED", "DASHBOARD_TOKEN_NOT_CONFIGURED"],
+        )
+        self.assertEqual(result["trade_permission_status"], "READ_WRITE_CONFIRMED")
+        self.assertEqual(result["credential_source"], "UNIFIED_ACCOUNT_KEY")
+        self.assertFalse(result["trading_enabled"])
+        self.assertFalse(result["dashboard_auth_configured"])
+        self.assertTrue(result["durable_storage"])
+        self.assertTrue(result["event_store_readable"])
+        self.assertNotIn("کلید Trade اختصاصی", result["message_fa"])
+        self.assertIn("فعال‌سازی معاملات Demo خاموش است", result["message_fa"])
+        self.assertIn("توکن پنل تنظیم نشده است", result["message_fa"])
