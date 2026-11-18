@@ -165,6 +165,57 @@ class WebAppHttpTests(unittest.TestCase):
             web_app.NOTION_EVENT_SYNC_STATE.clear()
             web_app.NOTION_EVENT_SYNC_STATE.update(previous)
 
+    def test_ai_reviewer_diagnostics_are_exposed_without_raw_provider_content(self):
+        job = {
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron",
+                    "review": {
+                        "provider": "OpenRouter",
+                        "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                        "returned_model": None,
+                        "status": "UNKNOWN",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": False,
+                        "model_verified": False,
+                        "http_status": 200,
+                        "error_type": "ValueError",
+                        "error_code": "NO_JSON_OBJECT",
+                        "error_message": "The model response did not contain a JSON object.",
+                    },
+                },
+                {
+                    "reviewer_id": "second_ai",
+                    "review": {
+                        "provider": "Groq",
+                        "model": "openai/gpt-oss-120b",
+                        "returned_model": None,
+                        "status": "ERROR",
+                        "request_attempted": True,
+                        "response_source": "LIVE_API",
+                        "response_validated": False,
+                        "model_verified": False,
+                        "http_status": 401,
+                        "error_code": "PROVIDER_AUTH_REJECTED",
+                        "error_message": "The provider rejected the authentication credentials.",
+                    },
+                },
+            ],
+        }
+
+        summary = web_app._blofin_ai_review_summary(job)
+
+        self.assertEqual(len(summary), 2)
+        self.assertEqual(summary[0]["error_code"], "NO_JSON_OBJECT")
+        self.assertEqual(summary[0]["error_message"], "The model response did not contain a JSON object.")
+        self.assertEqual(summary[1]["error_code"], "PROVIDER_AUTH_REJECTED")
+        self.assertEqual(summary[1]["error_message"], "The provider rejected the authentication credentials.")
+        serialized = json.dumps(summary, ensure_ascii=False)
+        self.assertNotIn("Authorization", serialized)
+        self.assertNotIn("Bearer ", serialized)
+        self.assertNotIn("api_key", serialized.lower())
+
     def test_autopilot_status_hides_stale_schedule_when_disabled(self):
         previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
         try:
