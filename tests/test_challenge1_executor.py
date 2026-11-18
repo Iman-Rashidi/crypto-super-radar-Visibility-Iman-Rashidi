@@ -51,16 +51,22 @@ def record():
         "challenge1_evidence": {
             "setup_timeframe": "5m", "completed_candles_only": True,
             "higher_timeframes_used": False, "legacy_12_gates_used_for_entry": False,
-            "external_ai_required": False, "tinyfish_required": False,
-            "decision": "LONG", "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+            "external_ai_required": True, "tinyfish_required": False,
+            "decision": "LONG", "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
             "detected_patterns": [pattern], "chosen_pattern": pattern,
             "confirmation_candle": dict(candles_5m[-1]), "candles_5m": candles_5m,
+            "elliott_wave": {
+                "status": "CONFIRMED", "pattern": "BULLISH",
+                "phase": "WAVE_3_CONFIRMED", "confirmed_pivot_count": 5,
+                "invalidation_price": 97.0, "wave_count": 2, "next_wave": 3,
+            },
+            "wave_alignment": "ALIGNED",
         },
     }
 
 
 class Challenge1OrderPlanTests(unittest.TestCase):
-    def test_pattern_profile_does_not_require_twelve_gate_rows_or_external_ai(self):
+    def test_order_plan_uses_v5_pattern_and_wave_evidence_without_legacy_twelve_gate_rows(self):
         plan = build_demo_order_plan(
             record(), instrument(), inst_id="BTC-USDT",
             equity_usdt=1000, leverage=1,
@@ -73,6 +79,15 @@ class Challenge1OrderPlanTests(unittest.TestCase):
     def test_pattern_profile_rejects_missing_closed_candle_evidence(self):
         bad = record()
         bad["challenge1_evidence"]["completed_candles_only"] = False
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            build_demo_order_plan(
+                bad, instrument(), inst_id="BTC-USDT", equity_usdt=1000,
+                leverage=1, policy=BloFinDemoRiskPolicy(max_leverage=1),
+            )
+
+    def test_pattern_profile_rejects_unconfirmed_elliott_wave(self):
+        bad = record()
+        bad["challenge1_evidence"]["elliott_wave"]["status"] = "AMBIGUOUS"
         with self.assertRaises(BloFinDemoExecutionBlocked):
             build_demo_order_plan(
                 bad, instrument(), inst_id="BTC-USDT", equity_usdt=1000,

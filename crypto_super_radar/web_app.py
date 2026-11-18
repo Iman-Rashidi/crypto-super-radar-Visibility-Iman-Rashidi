@@ -4608,6 +4608,16 @@ def _run_blofin_demo_execution_job(
             trade_context=trade_context,
         )
 
+        # Pass the independently validated quorum into the Executor. The Executor
+        # revalidates it before any exchange read/write, so a direct call cannot
+        # bypass the Web App entry gate.
+        record.update({
+            "ai_review": ai_review,
+            "ai_reviews": ai_reviews,
+            "ai_consensus": ai_consensus,
+            "ai_status": ai_status,
+            "second_ai_review": second_ai_review,
+        })
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
             max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),

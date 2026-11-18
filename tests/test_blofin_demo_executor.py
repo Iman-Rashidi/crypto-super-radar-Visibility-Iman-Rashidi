@@ -93,13 +93,28 @@ def signal_record(**overrides):
     record["signal_id"] = signal_id
     record["signal_bar_open_utc"] = signal_bar
     record["execution"] = {"status": "PASS", "direction": side, "signal_id": signal_id}
+    if side == "SHORT":
+        if "stop_loss_usd" not in overrides:
+            record["stop_loss_usd"] = 102.0
+        if "take_profit_usd" not in overrides:
+            record["take_profit_usd"] = 96.0
+    wave_phase = "WAVE_3_CONFIRMED"
+    elliott_wave = {
+        "status": "CONFIRMED",
+        "pattern": pattern_direction,
+        "phase": wave_phase,
+        "confirmed_pivot_count": 5,
+        "invalidation_price": 97.0 if side == "LONG" else 103.0,
+        "wave_count": 2,
+        "next_wave": 3,
+    }
     record["challenge1_evidence"] = {
-        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
         "setup_timeframe": "5m",
         "completed_candles_only": True,
         "higher_timeframes_used": False,
         "legacy_12_gates_used_for_entry": False,
-        "external_ai_required": False,
+        "external_ai_required": True,
         "tinyfish_required": False,
         "volume_is_advisory": True,
         "decision": side,
@@ -113,6 +128,51 @@ def signal_record(**overrides):
         },
         "confirmation_candle": dict(candles_5m[-1]),
         "candles_5m": candles_5m,
+        "elliott_wave": elliott_wave,
+        "wave_alignment": "ALIGNED",
+    }
+    reviewers = [
+        {
+            "reviewer_id": "nemotron",
+            "review": {
+                "reviewer_id": "nemotron", "provider": "OpenRouter",
+                "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "returned_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "status": "APPROVED", "paper_entry_eligible": True,
+                "request_attempted": True, "response_source": "LIVE_API",
+                "response_validated": True, "model_verified": True,
+                "expected_side": side, "trader_proposal": side,
+                "elliott_wave_phase": wave_phase,
+                "elliott_wave_direction": pattern_direction,
+            },
+        },
+        {
+            "reviewer_id": "second_ai",
+            "review": {
+                "reviewer_id": "second_ai", "provider": "Groq",
+                "model": "openai/gpt-oss-120b",
+                "returned_model": "openai/gpt-oss-120b",
+                "status": "APPROVED", "paper_entry_eligible": True,
+                "request_attempted": True, "response_source": "LIVE_API",
+                "response_validated": True, "model_verified": True,
+                "expected_side": side, "trader_proposal": side,
+                "elliott_wave_phase": wave_phase,
+                "elliott_wave_direction": pattern_direction,
+            },
+        },
+    ]
+    record["ai_reviews"] = reviewers
+    record["ai_consensus"] = {
+        "status": "APPROVED_BY_BOTH",
+        "primary_status": "APPROVED", "second_status": "APPROVED",
+        "primary_verified": True, "second_verified": True,
+        "primary_approved": True, "second_approved": True,
+        "providers_independent": True, "models_independent": True,
+        "expected_side": side, "elliott_wave_phase": wave_phase,
+        "elliott_wave_direction": pattern_direction,
+        "two_reviewer_approval": True,
+        "decision": "AUTHORIZE_DEMO_EXECUTION",
+        "entry_gate_enforced": True,
     }
     return record
 
@@ -997,6 +1057,63 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             )
         finally:
             store.close()
+
+    def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call(self):
+        mutations = {
+            "missing consensus": lambda item: item.pop("ai_consensus"),
+            "missing second reviewer": lambda item: item["ai_reviews"].pop(),
+            "veto": lambda item: item["ai_reviews"][0]["review"].update(
+                status="VETO", paper_entry_eligible=False,
+            ),
+            "unknown response": lambda item: item["ai_reviews"][1]["review"].update(
+                status="UNKNOWN", paper_entry_eligible=False,
+            ),
+            "duplicate provider": lambda item: item["ai_reviews"][1]["review"].update(
+                provider="OpenRouter",
+            ),
+            "duplicate model": lambda item: item["ai_reviews"][1]["review"].update(
+                model="nvidia/nemotron-3-ultra-550b-a55b:free",
+                returned_model="nvidia/nemotron-3-ultra-550b-a55b:free",
+            ),
+            "direction disagreement": lambda item: item["ai_reviews"][1]["review"].update(
+                trader_proposal="SHORT",
+            ),
+            "wave phase disagreement": lambda item: item["ai_reviews"][1]["review"].update(
+                elliott_wave_phase="WAVE_4_CONFIRMED",
+            ),
+            "cached response": lambda item: item["ai_reviews"][1]["review"].update(
+                response_source="CACHE", request_attempted=False,
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(case=label):
+                with patch.dict(os.environ, {
+                    "TURSO_DATABASE_URL": "",
+                    "TURSO_AUTH_TOKEN": "",
+                }):
+                    store = BloFinDemoEventStore(":memory:")
+                store.backend = "TURSO_CLOUD_SQLITE"
+                client = FakeExecutorClient()
+                executor = BloFinDemoExecutor(
+                    client=client, store=store, trading_enabled=True,
+                )
+                bad_record = signal_record()
+                mutate(bad_record)
+                try:
+                    with self.assertRaises(BloFinDemoExecutionBlocked):
+                        executor.execute(
+                            bad_record, inst_id="BTC-USDT", leverage=1,
+                            allow_demo_orders=True,
+                        )
+                    self.assertFalse(any(
+                        isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                        for call in client.calls
+                    ))
+                    self.assertEqual(store._db.execute(
+                        "SELECT COUNT(*) FROM blofin_demo_orders"
+                    ).fetchone()[0], 0)
+                finally:
+                    store.close()
 
     def test_timeout_keeps_unknown_order_reserved_without_resubmission(self):
         with patch.dict(os.environ, {

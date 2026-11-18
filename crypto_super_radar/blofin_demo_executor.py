@@ -102,6 +102,102 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
     return record
 
 
+def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
+    """Require two independent, live, verified AI approvals before Demo writes."""
+    evidence = record.get("challenge1_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    wave = evidence.get("elliott_wave")
+    wave = wave if isinstance(wave, Mapping) else {}
+    side = str(record.get("signal") or "").strip().upper()
+    wave_phase = str(wave.get("phase") or "").strip().upper()
+    wave_direction = str(wave.get("pattern") or "").strip().upper()
+    allowed_phases = {
+        "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+        "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+    }
+    expected_direction = "BULLISH" if side == "LONG" else "BEARISH" if side == "SHORT" else ""
+    if (
+        side not in {"LONG", "SHORT"}
+        or wave_phase not in allowed_phases
+        or wave_direction != expected_direction
+    ):
+        return False, "A valid directional signal and aligned confirmed Elliott phase are required."
+
+    consensus = record.get("ai_consensus")
+    if not isinstance(consensus, Mapping):
+        return False, "The two-reviewer consensus record is missing."
+    required_consensus = (
+        consensus.get("status") == "APPROVED_BY_BOTH"
+        and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
+        and consensus.get("two_reviewer_approval") is True
+        and consensus.get("entry_gate_enforced") is True
+        and consensus.get("primary_verified") is True
+        and consensus.get("second_verified") is True
+        and consensus.get("primary_approved") is True
+        and consensus.get("second_approved") is True
+        and consensus.get("providers_independent") is True
+        and consensus.get("models_independent") is True
+        and consensus.get("expected_side") == side
+        and consensus.get("elliott_wave_phase") == wave_phase
+        and consensus.get("elliott_wave_direction") == wave_direction
+        and str(consensus.get("primary_status") or "").upper() == "APPROVED"
+        and str(consensus.get("second_status") or "").upper() == "APPROVED"
+    )
+    if not required_consensus:
+        return False, "The recorded consensus is not a verified two-reviewer approval for this signal and wave."
+
+    raw_reviews = record.get("ai_reviews")
+    if not isinstance(raw_reviews, list) or len(raw_reviews) != 2:
+        return False, "Exactly two independent reviewer records are required."
+    verified: dict[str, Mapping[str, Any]] = {}
+    for item in raw_reviews:
+        if not isinstance(item, Mapping):
+            return False, "A reviewer record is malformed."
+        review = item.get("review")
+        if not isinstance(review, Mapping):
+            return False, "A reviewer response is missing."
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or "").strip().lower()
+        if reviewer_id not in {"nemotron", "second_ai"} or reviewer_id in verified:
+            return False, "Reviewer identities must be exactly Nemotron and the independent second reviewer."
+        verified[reviewer_id] = review
+    if set(verified) != {"nemotron", "second_ai"}:
+        return False, "One of the two required reviewers is missing."
+
+    providers: set[str] = set()
+    models: set[str] = set()
+    returned_models: set[str] = set()
+    for reviewer_id in ("nemotron", "second_ai"):
+        review = verified[reviewer_id]
+        provider = str(review.get("provider") or "").strip().casefold()
+        model = str(review.get("model") or "").strip()
+        returned_model = str(review.get("returned_model") or "").strip()
+        returned_identity = returned_model.split(":", 1)[0].casefold()
+        configured_identity = model.split(":", 1)[0].casefold()
+        valid = (
+            str(review.get("status") or "").strip().upper() == "APPROVED"
+            and review.get("paper_entry_eligible") is True
+            and review.get("request_attempted") is True
+            and str(review.get("response_source") or "").strip().upper() == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and bool(provider and model and returned_model)
+            and configured_identity == returned_identity
+            and str(review.get("expected_side") or "").strip().upper() == side
+            and str(review.get("trader_proposal") or "").strip().upper() == side
+            and str(review.get("elliott_wave_phase") or "").strip().upper() == wave_phase
+            and str(review.get("elliott_wave_direction") or "").strip().upper() == wave_direction
+        )
+        if not valid:
+            return False, f"{reviewer_id} did not provide a verified live approval aligned with the signal and Elliott wave."
+        providers.add(provider)
+        models.add(configured_identity)
+        returned_models.add(returned_identity)
+
+    if len(providers) != 2 or len(models) != 2 or len(returned_models) != 2:
+        return False, "The two approvals must come from distinct providers and distinct verified models."
+    return True, "Both independent live AI reviewers approved the same signal and Elliott phase."
+
+
 def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str, Any]) -> str:
     """Return a stable identity for one instrument's immutable closed-candle evidence."""
     evidence = challenge_record.get("challenge1_evidence")
@@ -1674,6 +1770,12 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("Durable Turso storage is required before Demo trading.")
         record = _analysis_record(signal)
         is_challenge1 = str(record.get("execution_profile") or "").strip().upper() == "CHALLENGE_1"
+        if is_challenge1:
+            quorum_ready, quorum_reason = _challenge1_two_reviewer_approval_ready(record)
+            if not quorum_ready:
+                raise BloFinDemoExecutionBlocked(
+                    "Challenge 1 two-reviewer AI gate blocked Demo entry: " + quorum_reason
+                )
         # Challenge 1 has no daily order-count quota: the completed-5m candle key
         # is the idempotency boundary. Keep daily loss/drawdown and exposure guards.
         daily_order_limit = None if is_challenge1 else self.policy.max_orders_per_utc_day
