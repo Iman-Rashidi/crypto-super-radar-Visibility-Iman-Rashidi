@@ -9477,43 +9477,271 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
 
 
 
-def _challenge1_observer_notion_events(
-    job_id: str, instrument_id: str, job: dict, reviews: list[dict], *, phase: str,
-) -> list[dict]:
-    """Create immutable per-reviewer Notion events; observers have no execution authority."""
+def _challenge1_trade_report_identity(job_id: str, job: dict) -> dict:
     current = job if isinstance(job, dict) else {}
     result = current.get("result") if isinstance(current.get("result"), dict) else {}
     order = result.get("order") if isinstance(result.get("order"), dict) else {}
-    order_id = str(
-        result.get("exchange_order_id") or result.get("order_id")
-        or order.get("exchange_order_id") or order.get("order_id") or ""
-    )
+    positions = result.get("positions") if isinstance(result.get("positions"), list) else []
     position_id = str(result.get("position_id") or "")
     if not position_id:
-        positions = result.get("positions") if isinstance(result.get("positions"), list) else []
         for position in positions:
             if isinstance(position, dict) and position.get("positionId"):
                 position_id = str(position["positionId"])
                 break
+    order_id = str(
+        result.get("exchange_order_id") or result.get("order_id")
+        or order.get("exchange_order_id") or order.get("order_id") or ""
+    )
     experience_id = str(
-        result.get("learning_experience_id")
+        result.get("learning_experience_id") or result.get("experience_id")
         or current.get("learning_experience_id") or ""
     )
+    stable_key = experience_id or position_id or order_id or str(job_id)
+    return {
+        "experience_id": experience_id,
+        "order_id": order_id,
+        "position_id": position_id,
+        "report_event_id": f"CSR-TRADE-SUPERVISION:{stable_key}"[:180],
+    }
+
+
+def _challenge1_observer_review_summary(reviewer: dict) -> dict:
+    """Keep each independent opinion explicit inside the unified trade report."""
+    keys = (
+        "reviewer_id", "provider", "model", "returned_model", "status", "verdict",
+        "reason_fa", "request_attempted", "response_source", "response_validated",
+        "model_verified", "requested_at_utc", "completed_at_utc", "latency_ms",
+        "http_status", "error_code", "error_stage", "finish_reason", "content_length",
+        "configuration_issues", "observations", "risk_flags",
+    )
+    summary = {key: reviewer.get(key) for key in keys if reviewer.get(key) is not None}
+    summary["reviewer_id"] = str(reviewer.get("reviewer_id") or "").lower()
+    summary["status"] = str(reviewer.get("status") or "UNKNOWN").upper()
+    summary["observation_only"] = True
+    summary["entry_gate_enforced"] = False
+    summary["execution_effect"] = "NONE"
+    return summary
+
+
+def _challenge1_observer_phase_opinion(reviewers: list[dict], consensus: str) -> str:
+    valid = [
+        item for item in reviewers
+        if isinstance(item, dict) and item.get("status") == "REVIEWED"
+        and item.get("response_validated") is True and item.get("model_verified") is True
+    ]
+    if consensus == "AGREEMENT" and valid:
+        return f"توافق دو ناظر: {valid[0].get('verdict') or 'UNKNOWN'}"
+    if consensus == "DISAGREEMENT" and len(valid) == 2:
+        return (
+            f"اختلاف نظر: Nemotron={valid[0].get('verdict') or 'UNKNOWN'}؛ "
+            f"ناظر دوم={valid[1].get('verdict') or 'UNKNOWN'}"
+        )
+    if consensus == "SINGLE_REVIEWER" and valid:
+        return f"نظر ناقص؛ فقط {valid[0].get('reviewer_id')} پاسخ معتبر داده است."
+    return "نظر نهایی قابل جمع‌بندی نیست؛ پاسخ معتبر کافی وجود ندارد."
+
+
+def _challenge1_observer_notion_events(
+    job_id: str, instrument_id: str, job: dict, reviews: list[dict], *,
+    phase: str, audit_phase: str = "ENTRY",
+    existing_report: dict | None = None,
+) -> list[dict]:
+    """Build one Notion report per trade, with both reviewers and both lifecycle phases."""
+    current = job if isinstance(job, dict) else {}
+    result = current.get("result") if isinstance(current.get("result"), dict) else {}
+    identity = _challenge1_trade_report_identity(job_id, current)
     signal = str(result.get("signal") or current.get("signal") or "UNKNOWN").upper()
     if signal not in {"LONG", "SHORT", "NO_TRADE"}:
         signal = "UNKNOWN"
-    common = {
-        "cycle_id": job_id,
+
+    report: dict = {}
+    if isinstance(existing_report, dict):
+        try:
+            report = json.loads(existing_report.get("details") or "{}")
+        except (TypeError, ValueError):
+            report = {}
+    if not isinstance(report, dict):
+        report = {}
+    if report.get("report_type") != "UNIFIED_TRADE_SUPERVISION":
+        report = {
+            "schema_version": 1,
+            "report_type": "UNIFIED_TRADE_SUPERVISION",
+            "experience_id": identity["experience_id"],
+            "order_id": identity["order_id"],
+            "position_id": identity["position_id"],
+            "symbol": str(instrument_id).upper(),
+            "signal": signal,
+            "phases": {},
+        }
+    report["experience_id"] = identity["experience_id"] or report.get("experience_id")
+    report["order_id"] = identity["order_id"] or report.get("order_id")
+    report["position_id"] = identity["position_id"] or report.get("position_id")
+    report["symbol"] = str(instrument_id).upper()
+    report["signal"] = signal
+    phase_key = str(audit_phase or "ENTRY").upper()
+    if phase_key not in {"ENTRY", "EXIT", "SIGNAL_REVIEW"}:
+        phase_key = "ENTRY"
+    phases = report.get("phases")
+    if not isinstance(phases, dict):
+        phases = {}
+    prior_phase = phases.get(phase_key) if isinstance(phases.get(phase_key), dict) else {}
+    prior_reviewers = {
+        str(item.get("reviewer_id") or "").lower(): item
+        for item in prior_phase.get("reviewers", [])
+        if isinstance(item, dict)
+    }
+    for reviewer in reviews:
+        if not isinstance(reviewer, dict):
+            continue
+        summary = _challenge1_observer_review_summary(reviewer)
+        reviewer_id = summary["reviewer_id"]
+        if reviewer_id in {"nemotron", "second_ai"}:
+            prior_reviewers[reviewer_id] = summary
+
+    reviewer_summaries = [
+        prior_reviewers[key] for key in ("nemotron", "second_ai")
+        if key in prior_reviewers
+    ]
+    reviewed = [
+        item for item in reviewer_summaries
+        if item.get("status") == "REVIEWED"
+        and item.get("response_validated") is True
+        and item.get("model_verified") is True
+    ]
+    consensus = _observer_audit_consensus(reviewer_summaries)
+    now = datetime.now(timezone.utc).isoformat()
+    phase_status = "REQUESTED" if phase == "REQUESTED" else (
+        "COMPLETED" if len(reviewer_summaries) == 2 else "INCOMPLETE"
+    )
+    phase_opinion = (
+        "در انتظار پاسخ مستقل هر دو ناظر."
+        if phase == "REQUESTED"
+        else _challenge1_observer_phase_opinion(reviewer_summaries, consensus)
+    )
+    phases[phase_key] = {
+        "phase": phase_key,
+        "status": phase_status,
+        "requested_or_completed_at_utc": now,
+        "reviewers": reviewer_summaries,
+        "consensus": "PENDING" if phase == "REQUESTED" else consensus,
+        "final_opinion": phase_opinion,
+    }
+    report["phases"] = phases
+    report["trade_status"] = (
+        "CLOSED" if phase_key == "EXIT" and (
+            result.get("closed_confirmed") is True
+            or str(result.get("status") or "").upper() in {"POSITION_CLOSED", "CLOSED", "CLOSED_VERIFIED"}
+        ) else
+        "OPEN" if result.get("trade_executed") is True or phase_key == "ENTRY"
+        else str(result.get("status") or "UNKNOWN").upper()
+    )
+    if result.get("close_context") is not None:
+        report["close_context"] = result.get("close_context")
+    if result.get("exit_history") is not None:
+        report["exit_history"] = result.get("exit_history")
+    entry_phase = phases.get("ENTRY") if isinstance(phases.get("ENTRY"), dict) else {}
+    exit_phase = phases.get("EXIT") if isinstance(phases.get("EXIT"), dict) else {}
+    if exit_phase.get("status") == "COMPLETED":
+        entry_opinion = str(entry_phase.get("consensus") or "NOT_REVIEWED")
+        exit_opinion = str(exit_phase.get("consensus") or "NOT_COMPARABLE")
+        report["final_trade_opinion"] = (
+            "ENTRY_AND_EXIT_REVIEW_CONSISTENT"
+            if entry_opinion == exit_opinion == "AGREEMENT"
+            else "ENTRY_EXIT_REVIEW_DIFFERENCE"
+            if entry_opinion != exit_opinion
+            else "FINAL_REVIEW_REQUIRES_HUMAN_ATTENTION"
+        )
+    elif entry_phase.get("status") == "COMPLETED":
+        report["final_trade_opinion"] = "AWAITING_EXIT_REVIEW"
+    else:
+        report["final_trade_opinion"] = "AWAITING_ENTRY_REVIEW"
+
+    all_reviewers = []
+    for key in ("ENTRY", "EXIT", "SIGNAL_REVIEW"):
+        phase_item = phases.get(key)
+        if isinstance(phase_item, dict):
+            all_reviewers.extend(item for item in phase_item.get("reviewers", []) if isinstance(item, dict))
+    any_attempted = any(item.get("request_attempted") is True for item in all_reviewers)
+    provider_names = list(dict.fromkeys(str(item.get("provider") or "") for item in reviewer_summaries if item.get("provider")))
+    model_lines = []
+    analysis_lines = []
+    for reviewer_id in ("nemotron", "second_ai"):
+        item = next((row for row in reviewer_summaries if row.get("reviewer_id") == reviewer_id), None)
+        if not item:
+            continue
+        name = "Nemotron" if reviewer_id == "nemotron" else "ناظر دوم"
+        model_lines.append(f"{name}: {item.get('provider') or 'UNKNOWN'} / {item.get('model') or item.get('returned_model') or 'UNKNOWN'}")
+        analysis_lines.append(
+            f"{name} [{item.get('status')} / {item.get('verdict') or 'NO_VERDICT'}]: "
+            f"{str(item.get('reason_fa') or item.get('error_code') or 'بدون توضیح')[:650]}"
+        )
+    if phase == "REQUESTED":
+        request_ready = all(item.get("status") == "REQUESTING" for item in reviewer_summaries)
+        event_type = "AI_REVIEW_REQUESTED"
+        event_status = "PENDING" if request_ready else "WARNING"
+        suggestion = "BOTH_REVIEWERS_REQUESTED" if request_ready else "REVIEWER_CONFIGURATION_OR_REQUEST_INCOMPLETE"
+    else:
+        event_type = "AI_RECOMMENDATION"
+        if len(reviewed) == 2:
+            event_status = "SUCCESS"
+        elif len(reviewed) == 1:
+            event_status = "WARNING"
+        elif any_attempted:
+            event_status = "FAILED"
+        else:
+            event_status = "WARNING"
+        suggestion = phase_opinion
+    detail = {
+        **report,
+        "current_phase": phase_key,
+        "current_phase_status": phase_status,
+        "current_phase_consensus": "PENDING" if phase == "REQUESTED" else consensus,
+        "current_phase_final_opinion": phase_opinion,
+        "reviewer_reports": reviewer_summaries,
+        "observation_only": True,
+        "entry_gate_enforced": False,
+        "execution_effect": "NONE",
+        "updated_at_utc": now,
+    }
+    reason = (
+        "گزارش تجمیعی دو ناظر برای یک معامله؛ این بررسی صرفاً نظارتی است و هیچ اختیار ورود، خروج یا تغییر سفارش ندارد."
+    )
+    return [{
+        "event_id": identity["report_event_id"],
+        "cycle_id": str(job_id),
+        "occurred_at_utc": now,
+        "event_type": event_type,
+        "actor": "AI Supervisor",
+        "status": event_status,
         "market": "Futures",
         "symbol": str(instrument_id).upper(),
         "timeframe": "5m",
         "signal": signal,
-        "experience_id": experience_id,
-        "order_id": order_id,
-        "position_id": position_id,
+        "ai_decision": "OBSERVE_ONLY" if any_attempted else "NOT_CALLED",
+        "ai_provider": " + ".join(provider_names)[:120],
+        "ai_model": "",
+        "ai_analysis": "\n".join(analysis_lines),
+        "ai_suggestion": suggestion,
+        "reason": reason,
+        "details": json.dumps(detail, ensure_ascii=False, sort_keys=True, default=str),
+        "experience_id": identity["experience_id"],
+        "order_id": identity["order_id"],
+        "position_id": identity["position_id"],
         "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
-        "ai_decision": "OBSERVE_ONLY",
-    }
+    }]
+
+
+def _challenge1_observer_durable_result_events(
+    job_id: str, instrument_id: str, job: dict, reviews: list[dict], *,
+    audit_phase: str = "ENTRY",
+) -> list[dict]:
+    """Store each model's immutable result in Turso only, for exact single-reviewer recovery."""
+    current = job if isinstance(job, dict) else {}
+    result = current.get("result") if isinstance(current.get("result"), dict) else {}
+    identity = _challenge1_trade_report_identity(job_id, current)
+    signal = str(result.get("signal") or current.get("signal") or "UNKNOWN").upper()
+    if signal not in {"LONG", "SHORT", "NO_TRADE"}:
+        signal = "UNKNOWN"
     events = []
     for reviewer in reviews:
         if not isinstance(reviewer, dict):
@@ -9521,7 +9749,6 @@ def _challenge1_observer_notion_events(
         reviewer_id = str(reviewer.get("reviewer_id") or "").lower()
         if reviewer_id not in {"nemotron", "second_ai"}:
             continue
-        actor = "Nemotron Supervisor" if reviewer_id == "nemotron" else "Second AI Supervisor"
         status = str(reviewer.get("status") or "UNKNOWN").upper()
         model = str(reviewer.get("returned_model") or reviewer.get("model") or "")
         reason = str(
@@ -9529,11 +9756,10 @@ def _challenge1_observer_notion_events(
             or reviewer.get("status_fa") or reviewer.get("error_code")
             or "No validated observer response was returned."
         )[:1200]
-        verdict = str(reviewer.get("verdict") or status)
-        requested_at = reviewer.get("requested_at_utc") or reviewer.get("completed_at_utc")
         details = {
             "reviewer_id": reviewer_id,
-            "phase": phase,
+            "phase": "RESULT",
+            "audit_phase": str(audit_phase or "ENTRY").upper(),
             "review_status": status,
             "verdict": reviewer.get("verdict"),
             "request_attempted": reviewer.get("request_attempted"),
@@ -9551,81 +9777,73 @@ def _challenge1_observer_notion_events(
             "configuration_issues": reviewer.get("configuration_issues"),
             "observations": reviewer.get("observations", []),
             "risk_flags": reviewer.get("risk_flags", []),
-            "observer_role": "POST_DECISION_AUDIT_ONLY",
+            "observer_role": "TRADE_SUPERVISION_AUDIT_ONLY",
             "entry_gate_enforced": False,
             "execution_effect": "NONE",
         }
-        if phase == "REQUESTED":
-            is_configured = status == "REQUESTING"
-            events.append({
-                **common,
-                "event_id": f"{job_id}:AI:{reviewer_id}:REQUESTED",
-                "occurred_at_utc": requested_at or datetime.now(timezone.utc).isoformat(),
-                "event_type": "AI_REVIEW_REQUESTED",
-                "actor": actor,
-                "status": "PENDING" if is_configured else "WARNING",
-                "ai_provider": str(reviewer.get("provider") or ""),
-                "ai_model": str(reviewer.get("model") or ""),
-                "ai_analysis": "",
-                "ai_suggestion": "AUDIT_REQUESTED" if is_configured else "NOT_CONFIGURED",
-                "reason": (
-                    "Independent post-decision audit request; no trading authority."
-                    if is_configured else
-                    "Reviewer configuration is incomplete; no live model request was made."
-                ),
-                "details": json.dumps(details, ensure_ascii=False, sort_keys=True, default=str),
-            })
-            continue
         completed = (
-            status == "REVIEWED"
-            and reviewer.get("response_validated") is True
+            status == "REVIEWED" and reviewer.get("response_validated") is True
             and reviewer.get("model_verified") is True
         )
-        event_type = "AI_RECOMMENDATION" if completed else "DATA_ERROR"
-        event_status = "SUCCESS" if completed else (
-            "FAILED" if reviewer.get("request_attempted") is True else "WARNING"
-        )
-        ai_decision = "OBSERVE_ONLY" if reviewer.get("request_attempted") is True else "NOT_CALLED"
         events.append({
-            **common,
             "event_id": f"{job_id}:AI:{reviewer_id}:RESULT",
+            "cycle_id": str(job_id),
             "occurred_at_utc": reviewer.get("completed_at_utc") or datetime.now(timezone.utc).isoformat(),
-            "event_type": event_type,
-            "actor": actor,
-            "status": event_status,
-            "ai_decision": ai_decision,
-            "ai_provider": str(reviewer.get("provider") or ""),
-            "ai_model": str(reviewer.get("returned_model") or reviewer.get("model") or ""),
-            "ai_analysis": reason,
-            "ai_suggestion": verdict,
-            "reason": (
-                "Post-decision audit only. This result did not authorize or alter any order or position."
+            "event_type": "AI_RECOMMENDATION" if completed else "DATA_ERROR",
+            "actor": "Nemotron Supervisor" if reviewer_id == "nemotron" else "Second AI Supervisor",
+            "status": "SUCCESS" if completed else (
+                "FAILED" if reviewer.get("request_attempted") is True else "WARNING"
             ),
+            "market": "Futures",
+            "symbol": str(instrument_id).upper(),
+            "timeframe": "5m",
+            "signal": signal,
+            "ai_decision": "OBSERVE_ONLY" if reviewer.get("request_attempted") is True else "NOT_CALLED",
+            "ai_provider": str(reviewer.get("provider") or ""),
+            "ai_model": model,
+            "ai_analysis": reason,
+            "ai_suggestion": str(reviewer.get("verdict") or status),
+            "reason": "Durable reviewer result for recovery; no trading authority.",
             "details": json.dumps(details, ensure_ascii=False, sort_keys=True, default=str),
+            "experience_id": identity["experience_id"],
+            "order_id": identity["order_id"],
+            "position_id": identity["position_id"],
+            "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
         })
     return events
 
 
-
-
 def _queue_challenge1_observer_events(
-    job_id: str, instrument_id: str, job: dict, reviews: list[dict], *, phase: str,
+    job_id: str, instrument_id: str, job: dict, reviews: list[dict], *,
+    phase: str, audit_phase: str = "ENTRY",
 ) -> dict:
     outbox = None
     queued = 0
     try:
         outbox = NotionEventOutbox()
-        for event in _challenge1_observer_notion_events(
+        if phase == "RESULT":
+            for local_event in _challenge1_observer_durable_result_events(
+                job_id, instrument_id, job, reviews, audit_phase=audit_phase,
+            ):
+                queued += int(outbox.enqueue(local_event, sync_to_notion=False))
+        candidate = _challenge1_observer_notion_events(
             job_id, instrument_id, job, reviews, phase=phase,
-        ):
-            queued += int(outbox.enqueue(event))
-        return {"status": "QUEUED", "queued": queued}
+            audit_phase=audit_phase,
+        )
+        for event in candidate:
+            existing = outbox.get_event(event["event_id"])
+            report_events = _challenge1_observer_notion_events(
+                job_id, instrument_id, job, reviews, phase=phase,
+                audit_phase=audit_phase, existing_report=existing,
+            )
+            for report_event in report_events:
+                queued += int(outbox.enqueue(report_event, replace=True))
+        return {"status": "QUEUED", "queued": queued, "report_count": len(candidate)}
     except Exception as exc:
         return {"status": "UNAVAILABLE", "queued": queued, "error_type": type(exc).__name__}
     finally:
         if outbox is not None:
             outbox.close()
-
 
 def _blofin_observer_review_from_event(event: dict | None) -> dict | None:
     """Rebuild a reviewer result from its durable Turso outbox event after a restart."""
