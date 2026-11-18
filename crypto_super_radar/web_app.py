@@ -9603,7 +9603,14 @@ def _update_blofin_activity_after_close(
         weighted_exit = sum(qty * price for _, qty, _, price, _, _ in matching) / total_quantity
         entry_ms = min((item[4] for item in matching if item[4] > 0), default=0)
         exit_ms = max((item[5] for item in matching if item[5] > 0), default=0)
-        fee_values = [_blofin_safe_float(row.get("fee")) for row, *_ in matching]
+        def finite_fee(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if math.isfinite(number) else None
+
+        fee_values = [finite_fee(row.get("fee")) for row, *_ in matching]
         fee_total = sum(value for value in fee_values if value is not None) if all(
             value is not None for value in fee_values
         ) else None
