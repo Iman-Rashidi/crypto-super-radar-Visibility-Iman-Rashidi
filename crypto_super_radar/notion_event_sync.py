@@ -27,7 +27,7 @@ EVENT_TYPES = {
     "AI_REVIEW_REQUESTED", "AI_RECOMMENDATION", "AI_VETO", "AI_APPROVAL",
     "NOTION_SYNC_PENDING", "NOTION_SYNCED", "NOTION_SYNC_FAILED", "SYSTEM_ERROR",
 }
-ACTORS = {"Robot", "AI Supervisor", "Render Runtime", "BloFin Demo", "Turso Event Store", "Notion Sync", "Scheduler"}
+ACTORS = {"Robot", "AI Supervisor", "Nemotron Supervisor", "Second AI Supervisor", "Render Runtime", "BloFin Demo", "Turso Event Store", "Notion Sync", "Scheduler", "Operator"}
 EVENT_STATUSES = {"SUCCESS", "WARNING", "FAILED", "UNKNOWN", "PENDING"}
 SIGNALS = {"LONG", "SHORT", "NO_TRADE", "UNKNOWN"}
 AI_DECISIONS = {"APPROVE", "REJECT", "MODIFY", "OBSERVE_ONLY", "NOT_CALLED"}

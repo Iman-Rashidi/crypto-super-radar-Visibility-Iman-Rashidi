@@ -11,6 +11,7 @@ from crypto_super_radar.ai_second_opinion import (
     MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
     run_free_ai_second_opinion,
+    run_challenge1_observer_reviews,
     run_openrouter_connection_diagnostic,
 )
 from crypto_super_radar.models import AssetSpec, Signal
@@ -425,3 +426,143 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(calls["count"], 0)
+
+
+    def test_challenge1_two_supervisors_are_live_post_decision_observers(self):
+        challenge_record = {
+            "signal": "LONG",
+            "instrument_id": "BTC-USDT",
+            "entry_price_usd": 100.0,
+            "stop_loss_usd": 99.0,
+            "take_profit_usd": 101.0,
+            "reason_fa": "الگوی صعودی در کندل بسته تأیید شد.",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "context_timeframe": "1H",
+                "completed_candles_only": True,
+                "chosen_pattern": {
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                },
+                "detected_patterns": [{
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                }],
+                "context_patterns": [],
+                "volume_confirmation": {"confirmed": False, "volume_ratio": 0.7},
+                "candles_5m": [{
+                    "time_utc": "2026-11-18T15:00:00Z",
+                    "open": 99.0, "high": 101.0, "low": 98.5,
+                    "close": 100.5, "volume": 1000,
+                }],
+                "candles_1h": [],
+            },
+        }
+        calls = []
+        document = {
+            "verdict": "SUPPORTS_DECISION",
+            "reason_fa": "شواهد کندل بسته با جهت ثبت‌شده همسو است.",
+            "observations": ["حجم در این چرخه پایین‌تر از مرجع ثبت شده است."],
+            "risk_flags": [],
+        }
+
+        class ObserverResponse:
+            status_code = 200
+
+            def __init__(self, model):
+                self.model = model
+
+            def json(self):
+                return {
+                    "model": self.model,
+                    "choices": [{"message": {"content": json.dumps(document, ensure_ascii=False)}}],
+                }
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            calls.append((url, json))
+            model = DEFAULT_FREE_MODEL if "openrouter.ai" in url else "qwen/qwen3.8-27b"
+            return ObserverResponse(model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-observer-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-second-key",
+            "CSR_SECOND_AI_PROVIDER": "groq",
+            "CSR_SECOND_AI_MODEL": "qwen/qwen3.8-27b",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("crypto_super_radar.ai_second_opinion.requests.post", side_effect=fake_post):
+                audit = run_challenge1_observer_reviews(
+                    challenge_record,
+                    {
+                        "instrument_id": "BTC-USDT",
+                        "execution_status": "FILLED",
+                        "order_id": "demo-order-1",
+                        "position_id": "demo-position-1",
+                        "average_fill_price": 100.2,
+                        "filled_size": 0.1,
+                        "position": {
+                            "instId": "BTC-USDT",
+                            "positionSide": "net",
+                            "positions": "0.1",
+                            "averagePrice": "100.2",
+                            "markPrice": "100.4",
+                            "unrealizedPnl": "0.02",
+                        },
+                    },
+                )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(audit["consensus"], "AGREEMENT")
+        self.assertFalse(audit["entry_gate_enforced"])
+        self.assertEqual(audit["execution_effect"], "NONE")
+        self.assertTrue(all(item["status"] == "REVIEWED" for item in audit["reviewers"]))
+        self.assertTrue(all(item["response_validated"] for item in audit["reviewers"]))
+        self.assertTrue(all(item["model_verified"] for item in audit["reviewers"]))
+        self.assertTrue(all(item["entry_gate_enforced"] is False for item in audit["reviewers"]))
+        sent_prompts = [call[1]["messages"][1]["content"] for call in calls]
+        self.assertTrue(all('"setup_timeframe":"5m"' in prompt for prompt in sent_prompts))
+        self.assertTrue(all('"completed_candles_only":true' in prompt for prompt in sent_prompts))
+        self.assertTrue(all("demo-position-1" not in prompt for prompt in sent_prompts))
+        self.assertTrue(all("OPENROUTER_API_KEY" not in prompt for prompt in sent_prompts))
+
+    def test_challenge1_observer_records_missing_second_supervisor_without_gating(self):
+        challenge_record = {
+            "signal": "NO_TRADE",
+            "instrument_id": "ETH-USDT",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "chosen_pattern": None,
+                "detected_patterns": [],
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        class ObserverResponse:
+            status_code = 200
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{"message": {"content": json.dumps({
+                        "verdict": "INSUFFICIENT_DATA",
+                        "reason_fa": "برای این کندل الگوی انتخاب‌شده ثبت نشده است.",
+                        "observations": [], "risk_flags": [],
+                    }, ensure_ascii=False)}}],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "primary-only"}, clear=True):
+            with patch("crypto_super_radar.ai_second_opinion.requests.post", return_value=ObserverResponse()):
+                audit = run_challenge1_observer_reviews(challenge_record)
+
+        self.assertEqual(audit["consensus"], "SINGLE_REVIEWER")
+        self.assertFalse(audit["entry_gate_enforced"])
+        self.assertEqual(audit["reviewers"][0]["status"], "REVIEWED")
+        self.assertEqual(audit["reviewers"][1]["status"], "NOT_CONFIGURED")
+        self.assertFalse(audit["reviewers"][1]["request_attempted"])
+
