@@ -271,6 +271,60 @@ def _clean_pattern_item(item: Any) -> dict[str, Any] | None:
     return row
 
 
+def _clean_elliott_wave(value: Any) -> dict[str, Any]:
+    """Whitelist deterministic 5m wave evidence before exposing it to an LLM."""
+    if not isinstance(value, Mapping):
+        return {"status": "UNKNOWN", "direction": "AMBIGUOUS",
+                "phase": "INSUFFICIENT_DATA", "confirmed_pivot_count": 0,
+                "pivots": [], "invalidation_price": None}
+    status = str(value.get("status") or "UNKNOWN").upper()
+    if status not in {"UNKNOWN", "AMBIGUOUS", "CANDIDATE", "CONFIRMED"}:
+        status = "UNKNOWN"
+    direction = str(value.get("pattern") or "AMBIGUOUS").upper()
+    if direction not in {"BULLISH", "BEARISH", "AMBIGUOUS"}:
+        direction = "AMBIGUOUS"
+    phase = str(value.get("phase") or "UNKNOWN").upper()[:64]
+    count = value.get("confirmed_pivot_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        count = 0
+    wave_count = value.get("wave_count")
+    if isinstance(wave_count, bool) or not isinstance(wave_count, int) or wave_count < 0:
+        wave_count = None
+    next_wave = value.get("next_wave")
+    if isinstance(next_wave, bool) or not isinstance(next_wave, int) or not 1 <= next_wave <= 5:
+        next_wave = None
+    pivots = []
+    raw_pivots = value.get("pivots")
+    if isinstance(raw_pivots, list):
+        for item in raw_pivots[-6:]:
+            if not isinstance(item, Mapping):
+                continue
+            price = _safe_float(item.get("price"))
+            index = item.get("index")
+            kind = str(item.get("kind") or "").upper()
+            timestamp = str(item.get("timestamp") or "").strip()[:64]
+            confirmed_at = str(item.get("confirmed_at") or "").strip()[:64]
+            if (
+                price is None or price <= 0
+                or isinstance(index, bool) or not isinstance(index, int) or index < 0
+                or kind not in {"HIGH", "LOW"} or not timestamp or not confirmed_at
+            ):
+                continue
+            pivots.append({
+                "index": index, "kind": kind, "price": price,
+                "timestamp": timestamp, "confirmed_at": confirmed_at,
+            })
+    return {
+        "status": status, "direction": direction, "phase": phase,
+        "wave_count": wave_count, "next_wave": next_wave,
+        "confirmed_pivot_count": count,
+        "pivot_reversal_threshold_pct": _safe_float(value.get("pivot_reversal_threshold_pct")),
+        "invalidation_price": _safe_float(value.get("invalidation_price")),
+        "pivots": pivots, "reason": str(value.get("reason") or "")[:360],
+        "confidence_semantics": "Structural hypothesis, not a probability of profit.",
+    }
+
+
 def _clean_ohlcv_rows(value: Any, *, limit: int = 30) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -325,6 +379,7 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
         value = _safe_float(structure_raw.get(key))
         if value is not None:
             structure[key] = value
+    elliott_wave = _clean_elliott_wave(raw_evidence.get("elliott_wave"))
     entry = _safe_float(record.get("entry_price_usd", record.get("entry_price")))
     stop = _safe_float(record.get("stop_loss_usd", record.get("stop_loss")))
     target = _safe_float(record.get("take_profit_usd", record.get("take_profit")))
@@ -341,7 +396,7 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
         "market_type": "perpetual",
         "expected_side": side,
         "execution_profile": "CHALLENGE_1",
-        "review_mode": "CANDLE_PATTERN_ONLY",
+        "review_mode": "CANDLE_CHART_ELLIOTT_WAVE_REVIEW",
         "pattern_evidence": {
             "completed_candles_only": raw_evidence.get("completed_candles_only") is True,
             "setup_timeframe": "5m",
@@ -352,6 +407,7 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
             "confirmation_candle": confirmation_rows[0] if confirmation_rows else None,
             "candles_5m": raw_candles,
             "chart_structure": structure,
+            "elliott_wave": elliott_wave,
         },
         "risk_plan": {
             "entry": entry,
@@ -363,45 +419,59 @@ def _build_pattern_review_input(result: Any, asset: Any, metrics: Mapping[str, A
         "policy": {
             "general_radar_protocols": "NOT_APPLIED_TO_CHALLENGE_1",
             "higher_timeframes": "NOT_USED",
-            "technical_decision_evidence": "CLOSED_5M_OHLCV_CANDLES_AND_5M_PATTERNS_ONLY",
+            "technical_decision_evidence": "CLOSED_5M_OHLCV_CANDLES_CANDLE_PATTERNS_CHART_STRUCTURE_AND_ELLIOTT_WAVES_ONLY",
             "account_risk_limits_remain_active": True,
-            "supervisor_role": "REPORT_ONLY_NOT_AN_ENTRY_GATE",
+            "supervisor_role": "INDEPENDENT_REVIEW_AND_RECOMMENDATION_ONLY",
         },
     }
 
 def _pattern_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     expected_side = str(evidence.get("expected_side") or "NO_TRADE").upper()
-    pattern = (evidence.get("pattern_evidence") or {}).get("chosen_pattern") or {}
+    pattern_evidence = evidence.get("pattern_evidence") or {}
+    pattern = pattern_evidence.get("chosen_pattern") or {}
+    wave = pattern_evidence.get("elliott_wave") or {}
     chosen_name = str(pattern.get("name_en") or "UNKNOWN")
     system = (
-        "You are an independent candle-and-chart-pattern supervisor for a BloFin Demo trading robot. "
-        "This is the CHALLENGE_1 5m-only path. Do not apply the general Radar protocols or twelve-gate framework. "
-        "Do not use news, sentiment, whale, on-chain, RSI, EMA, funding, open-interest, or any higher timeframe. "
-        "Base your review only on the supplied completed 5m OHLCV candles, selected 5m candle pattern, and "
-        "5m chart structure. Never use an unclosed or future candle. Confirm that the selected pattern is "
-        "visible in the 5m pattern list and its direction matches the expected side. "
-        "Do not require a 15m or 1H confirmation and do not wait for another timeframe to close. "
-        "The risk plan is shown only for a separate report; account risk and protective order controls "
-        "remain enforced by the Demo executor, not by this supervisor. "
-        "Expected side is " + expected_side + ". Selected pattern name: " + chosen_name + ". "
+        "You are an independent technical-analysis supervisor for a BloFin Demo trading robot. "
+        "This is the CHALLENGE_1 closed-5m-candle path. Review the combined evidence: "
+        "multi-candle candlestick patterns, confirmed chart structure, Elliott impulse-wave "
+        "phase/direction, and the protective entry/stop/target geometry. "
+        "Use only the supplied completed 5m OHLCV candles and derived 5m structures. "
+        "Never use an unclosed or future candle, invent pivots, relabel an ambiguous wave, "
+        "or infer a wave phase that is absent from the supplied wave record. "
+        "For a directional Elliott status, check the confirmed pivots, phase, direction, "
+        "and invalidation price. The wave analyst must echo the exact supplied phase and "
+        "direction. If the supplied wave is UNKNOWN or AMBIGUOUS, return UNCERTAIN. "
+        "A trade is eligible only when the selected candle/chart pattern and directional "
+        "Elliott evidence agree with the expected side. "
+        "Do not use news, sentiment, whale, on-chain, RSI, EMA, funding, open-interest, or "
+        "any higher timeframe. The timeframe analyst must not request or infer 15m/1H data. "
+        "Do not require or infer 15m/1H confirmation. The timeframe analyst checks only "
+        "timestamps, ordering, and completed status of the supplied 5m candles. "
+        "Risk and portfolio analysts must check the protective plan and supplied account limits, "
+        "but must not invent account state or change leverage, size, or order controls. "
+        "You have no exchange tools and must never submit, cancel, or modify an order. "
+        "Expected side: " + expected_side + ". Selected pattern: " + chosen_name + ". "
+        "Supplied Elliott phase: " + str(wave.get("phase") or "UNKNOWN") + ". "
+        "Supplied Elliott direction: " + str(wave.get("direction") or "AMBIGUOUS") + ". "
         "Return exactly one JSON object, no markdown, using this schema: "
         '{"pattern_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","pattern_name":"exact selected name or NONE","reason_fa":"..."},'
         '"price_action_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"wave_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","phase":"exact supplied phase","direction":"exact supplied direction","reason_fa":"..."},'
         '"timeframe_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
         '"trader":{"proposal":"LONG|SHORT|NO_TRADE","reason_fa":"..."},'
         '"risk_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
         '"portfolio_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
-        '"final_decision":"APPROVE|REJECT|INSUFFICIENT_DATA",'
-        '"risk_flags":["..."],"rationale_fa":"..."'
-        "}. "
-        "The timeframe_analyst must assess only the chronology and completion of the supplied 5m candles; "
-        "it must not request or infer 15m/1H data. Keep explanations concise and in Persian. "
-        "This is an audit/recommendation report only and must never authorize, veto, delay, or submit an order."
+        '"final_decision":"APPROVE|REJECT|INSUFFICIENT_DATA","risk_flags":["..."],"rationale_fa":"..."'
+        "}. Keep explanations concise and in Persian. Any disagreement, unsupported wave count, "
+        "invalid invalidation level, missing 5m chronology, or insufficient evidence must not be APPROVE."
     )
     user = "Review only this sanitized 5m Challenge 1 evidence:\n" + json.dumps(
         evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def _validated_pattern_review(
     document: dict[str, Any], model: str, asset: str, *, evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -411,12 +481,23 @@ def _validated_pattern_review(
     chosen = pattern_evidence.get("chosen_pattern")
     chosen = chosen if isinstance(chosen, Mapping) else {}
     chosen_name = str(chosen.get("name_en") or "")
+    wave = pattern_evidence.get("elliott_wave")
+    wave = wave if isinstance(wave, Mapping) else {}
+    expected_wave_phase = str(wave.get("phase") or "").upper()
+    expected_wave_direction = str(wave.get("direction") or "").upper()
     required = {
-        "pattern_analyst", "price_action_analyst", "timeframe_analyst",
-        "trader", "risk_manager", "portfolio_manager",
+        "pattern_analyst", "price_action_analyst", "wave_analyst",
+        "timeframe_analyst", "trader", "risk_manager", "portfolio_manager",
     }
-    if expected_side not in {"LONG", "SHORT"} or not chosen_name:
-        raise ValueError("Challenge 1 review input is incomplete")
+    if (
+        expected_side not in {"LONG", "SHORT"} or not chosen_name
+        or expected_wave_phase not in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        or expected_wave_direction not in {"BULLISH", "BEARISH"}
+    ):
+        raise ValueError("Challenge 1 candle/chart/Elliott review input is incomplete")
     if not isinstance(document, dict) or not required.issubset(document):
         raise ValueError("Challenge 1 specialist reviews are missing")
     risk_flags = document.get("risk_flags")
@@ -434,11 +515,27 @@ def _validated_pattern_review(
             raise ValueError("Challenge 1 technical analyst verdict is invalid")
         cleaned[key] = {"verdict": verdict, "reason_fa": reason[:360]}
         if key == "pattern_analyst":
-            pattern_name = str(view.get("pattern_name") or "").strip()
-            cleaned[key]["pattern_name"] = pattern_name[:120]
-    trader = document.get("trader")
-    risk = document.get("risk_manager")
-    portfolio = document.get("portfolio_manager")
+            cleaned[key]["pattern_name"] = str(view.get("pattern_name") or "").strip()[:120]
+
+    wave_view = document.get("wave_analyst")
+    if not isinstance(wave_view, Mapping):
+        raise ValueError("Challenge 1 Elliott wave analyst response is invalid")
+    wave_verdict = str(wave_view.get("verdict") or "").upper()
+    wave_phase = str(wave_view.get("phase") or "").upper()
+    wave_direction = str(wave_view.get("direction") or "").upper()
+    wave_reason = str(wave_view.get("reason_fa") or "").strip()
+    if (
+        wave_verdict not in {"SUPPORT", "OPPOSE", "UNCERTAIN"}
+        or not wave_reason or wave_phase != expected_wave_phase
+        or wave_direction != expected_wave_direction
+    ):
+        raise ValueError("Challenge 1 Elliott phase/direction does not match supplied wave evidence")
+    cleaned["wave_analyst"] = {
+        "verdict": wave_verdict, "phase": wave_phase,
+        "direction": wave_direction, "reason_fa": wave_reason[:360],
+    }
+
+    trader, risk, portfolio = document.get("trader"), document.get("risk_manager"), document.get("portfolio_manager")
     if not all(isinstance(v, Mapping) for v in (trader, risk, portfolio)):
         raise ValueError("Challenge 1 trading/risk specialist response is invalid")
     proposal = str(trader.get("proposal") or "").upper()
@@ -459,51 +556,50 @@ def _validated_pattern_review(
             "view": proposal if key == "trader" else (risk_verdict if key == "risk_manager" else portfolio_verdict),
             "reason_fa": reason[:360],
         }
+
     pattern_matches = cleaned["pattern_analyst"]["pattern_name"] == chosen_name
     final_decision = str(document.get("final_decision") or "INSUFFICIENT_DATA").upper()
     if final_decision not in {"APPROVE", "REJECT", "INSUFFICIENT_DATA"}:
         raise ValueError("Challenge 1 final decision is invalid")
+    expected_wave = "BULLISH" if expected_side == "LONG" else "BEARISH"
     approved = (
-        final_decision == "APPROVE"
-        and pattern_matches
+        final_decision == "APPROVE" and pattern_matches
         and cleaned["pattern_analyst"]["verdict"] == "SUPPORT"
         and cleaned["price_action_analyst"]["verdict"] == "SUPPORT"
+        and wave_verdict == "SUPPORT" and wave_direction == expected_wave
+        and cleaned["timeframe_analyst"]["verdict"] == "SUPPORT"
         and proposal == expected_side
-        and risk_verdict == "APPROVE"
-        and portfolio_verdict == "APPROVE"
+        and risk_verdict == "APPROVE" and portfolio_verdict == "APPROVE"
         and not risk_flags
     )
     explicit_veto = (
         final_decision == "REJECT" or not pattern_matches
         or cleaned["pattern_analyst"]["verdict"] == "OPPOSE"
         or cleaned["price_action_analyst"]["verdict"] == "OPPOSE"
-        or proposal not in {expected_side}
+        or wave_verdict == "OPPOSE" or wave_direction != expected_wave
+        or cleaned["timeframe_analyst"]["verdict"] == "OPPOSE"
+        or proposal != expected_side
         or risk_verdict == "REJECT" or portfolio_verdict == "REJECT" or bool(risk_flags)
     )
     status = "APPROVED" if approved else "VETO" if explicit_veto else "UNKNOWN"
-    for key, item in (("risk_manager", risk), ("portfolio_manager", portfolio)):
-        cleaned[key]["view"] = str(item.get("verdict") or "").upper()
     return {
-        "provider": "OpenRouter",
-        "model": model,
-        "asset": asset,
-        "market_type": "perpetual",
-        "expected_side": expected_side,
+        "provider": "OpenRouter", "model": model, "asset": asset,
+        "market_type": "perpetual", "expected_side": expected_side,
         "execution_profile": "CHALLENGE_1",
-        "review_mode": "CANDLE_PATTERN_ONLY",
+        "review_mode": "CANDLE_CHART_ELLIOTT_WAVE_REVIEW",
         "status": status,
-        "status_fa": "ناظر الگوی کندلی ورود Demo را تأیید کرد." if approved else
-            "ناظر الگوی کندلی ورود را رد یا نامشخص اعلام کرد.",
+        "status_fa": "ناظر مستقل، الگوی نموداری و موج الیوت را هم‌جهت تأیید کرد." if approved
+            else "ناظر مستقل، الگو/موج را رد یا نامشخص اعلام کرد؛ سفارش مسدود است.",
         "final_rating": "Buy" if expected_side == "LONG" and approved else
             "Sell" if expected_side == "SHORT" and approved else "REVIEW",
-        "specialist_views": cleaned,
-        "risk_flags": risk_flags,
+        "specialist_views": cleaned, "risk_flags": risk_flags,
         "rationale_fa": str(document.get("rationale_fa") or "")[:1_000],
         "risk_manager_verdict": risk_verdict,
         "portfolio_manager_verdict": portfolio_verdict,
-        "trader_proposal": proposal,
-        "pattern_name": chosen_name,
+        "trader_proposal": proposal, "pattern_name": chosen_name,
         "pattern_name_verified": pattern_matches,
+        "elliott_wave_phase": wave_phase,
+        "elliott_wave_direction": wave_direction,
         "paper_entry_eligible": approved,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "cost_usd": 0.0,
@@ -561,7 +657,7 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     perpetual = evidence.get("market_type") == "perpetual"
     expected_side = str(evidence.get("expected_side") or "LONG").upper()
     execution_profile = str(evidence.get("execution_profile") or "STRICT").upper()
-    if execution_profile == "CHALLENGE_1" and evidence.get("review_mode") == "CANDLE_PATTERN_ONLY":
+    if execution_profile == "CHALLENGE_1" and evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW":
         return _pattern_prompt_messages(evidence)
     required_gate_ids = {
         "CHALLENGE_1": [],
@@ -1076,7 +1172,7 @@ def run_free_ai_second_opinion(
             }
         review = (
             _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
-            if evidence.get("review_mode") == "CANDLE_PATTERN_ONLY"
+            if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
             else _validated_review(
                 parsed, model, asset_name, expected_side=expected_side, market_type=market_type
             )
@@ -1357,7 +1453,7 @@ def run_independent_ai_supervisor(
             }
         review = (
             _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
-            if evidence.get("review_mode") == "CANDLE_PATTERN_ONLY"
+            if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
             else _validated_review(
                 parsed, model, asset_name, expected_side=expected_side, market_type=market_type,
             )

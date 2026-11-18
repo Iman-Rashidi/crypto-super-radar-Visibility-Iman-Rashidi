@@ -80,8 +80,26 @@ def challenge1_result(*, pattern_confirmed=True):
         "category": "CANDLESTICK",
         "timeframe": "5m",
     }
+    wave = {
+        "status": "CANDIDATE", "pattern": "BULLISH",
+        "phase": "WAVES_1_AND_2_CONFIRMED", "wave_count": 2,
+        "next_wave": 3, "confirmed_pivot_count": 3,
+        "pivot_reversal_threshold_pct": 0.15, "invalidation_price": 98.0,
+        "pivots": [
+            {"index": 1, "kind": "LOW", "price": 98.0,
+             "timestamp": "2026-11-17T09:35:00+00:00",
+             "confirmed_at": "2026-11-17T09:40:00+00:00"},
+            {"index": 2, "kind": "HIGH", "price": 100.0,
+             "timestamp": "2026-11-17T09:45:00+00:00",
+             "confirmed_at": "2026-11-17T09:50:00+00:00"},
+            {"index": 3, "kind": "LOW", "price": 99.0,
+             "timestamp": "2026-11-17T09:55:00+00:00",
+             "confirmed_at": "2026-11-17T10:00:00+00:00"},
+        ],
+        "reason": "A synthetic rule-valid bullish 5m wave prefix.",
+    }
     evidence = {
-        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V4_5M_ONLY",
+        "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
         "completed_candles_only": True,
         "setup_timeframe": "5m",
         "higher_timeframes_used": False,
@@ -98,6 +116,8 @@ def challenge1_result(*, pattern_confirmed=True):
         "confirmation_candle": dict(candle_rows_5m[-1]),
         "candles_5m": candle_rows_5m,
         "chart_structure": {},
+        "elliott_wave": wave,
+        "wave_alignment": "ALIGNED",
         "volume_confirmation": {
             "confirmed": True, "volume_ratio": 1.5,
             "close_location": 0.8, "minimum_volume_ratio": 1.2,
@@ -122,7 +142,7 @@ def challenge1_result(*, pattern_confirmed=True):
             **evidence,
             "decision": "LONG",
             "legacy_12_gates_used_for_entry": False,
-            "external_ai_required": False,
+            "external_ai_required": True,
             "tinyfish_required": False,
         },
     }
@@ -147,7 +167,7 @@ def challenge1_result(*, pattern_confirmed=True):
     )
 
 
-def valid_pattern_document(*, timeframe_verdict="SUPPORT"):
+def valid_pattern_document(*, timeframe_verdict="SUPPORT", wave_verdict="SUPPORT"):
     return {
         "pattern_analyst": {
             "verdict": "SUPPORT", "pattern_name": "Bullish Engulfing",
@@ -156,9 +176,15 @@ def valid_pattern_document(*, timeframe_verdict="SUPPORT"):
         "price_action_analyst": {
             "verdict": "SUPPORT", "reason_fa": "ساختار قیمت با جهت خرید هم‌سو است.",
         },
+        "wave_analyst": {
+            "verdict": wave_verdict,
+            "phase": "WAVES_1_AND_2_CONFIRMED",
+            "direction": "BULLISH",
+            "reason_fa": "موج صعودی و نقطه ابطال با داده بسته‌شده ۵ دقیقه‌ای هم‌خوان است.",
+        },
         "timeframe_analyst": {
             "verdict": timeframe_verdict,
-            "reason_fa": "زمینه یک‌ساعته یک مشاهده مشورتی است و به تنهایی مانع ورود نیست.",
+            "reason_fa": "ترتیب زمانی و بسته‌شدن همه کندل‌های ۵ دقیقه‌ای معتبر است.",
         },
         "trader": {"proposal": "LONG", "reason_fa": "ورود فقط بر پایه الگوی تأییدشده پیشنهاد می‌شود."},
         "risk_manager": {"verdict": "APPROVE", "reason_fa": "حد ضرر و نسبت بازده به ریسک معتبر است."},
@@ -714,9 +740,9 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(review["request_attempted"])
         self.assertTrue(review["model_verified"])
         self.assertTrue(review["paper_entry_eligible"])
-        self.assertEqual(review["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(review["review_mode"], "CANDLE_CHART_ELLIOTT_WAVE_REVIEW")
         self.assertEqual(review["pattern_name"], "Bullish Engulfing")
-        self.assertEqual(evidence["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(evidence["review_mode"], "CANDLE_CHART_ELLIOTT_WAVE_REVIEW")
         self.assertEqual(len(evidence["pattern_evidence"]["candles_5m"]), 3)
         self.assertEqual(evidence["pattern_evidence"]["setup_timeframe"], "5m")
         self.assertFalse(evidence["pattern_evidence"]["higher_timeframes_used"])
@@ -728,7 +754,10 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("candles_15m", json.dumps(evidence))
         self.assertNotIn("candles_1h", json.dumps(evidence))
         self.assertEqual(evidence["pattern_evidence"]["chosen_pattern"]["name_en"], "Bullish Engulfing")
-        self.assertIn("This is an audit/recommendation report only", system_prompt)
+        self.assertIn("must never submit, cancel, or modify an order", system_prompt)
+        self.assertIn("Elliott impulse-wave", system_prompt)
+        self.assertEqual(evidence["pattern_evidence"]["elliott_wave"]["phase"], "WAVES_1_AND_2_CONFIRMED")
+        self.assertEqual(len(evidence["pattern_evidence"]["elliott_wave"]["pivots"]), 3)
         self.assertNotIn("mandatory_gates", evidence)
         self.assertNotIn("must_not_be_sent", json.dumps(payload))
         self.assertNotIn('"id":1', json.dumps(payload))
@@ -766,10 +795,10 @@ class FreeAISecondOpinionTests(unittest.TestCase):
                 http_post=second_post,
             )
 
-        self.assertEqual(primary["status"], "APPROVED")
-        self.assertEqual(secondary["status"], "APPROVED")
-        self.assertTrue(primary["paper_entry_eligible"])
-        self.assertTrue(secondary["paper_entry_eligible"])
+        self.assertEqual(primary["status"], "VETO")
+        self.assertEqual(secondary["status"], "VETO")
+        self.assertFalse(primary["paper_entry_eligible"])
+        self.assertFalse(secondary["paper_entry_eligible"])
         for captured in (primary_captured, secondary_captured):
             prompt = captured["payload"]["messages"][0]["content"]
             body = captured["payload"]["messages"][1]["content"]
@@ -828,9 +857,41 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(review["model_verified"])
         self.assertTrue(review["paper_entry_eligible"])
         self.assertEqual(payload["model"], second_model)
-        self.assertEqual(prompt_evidence["review_mode"], "CANDLE_PATTERN_ONLY")
+        self.assertEqual(prompt_evidence["review_mode"], "CANDLE_CHART_ELLIOTT_WAVE_REVIEW")
         self.assertNotIn("mandatory_gates", prompt_evidence)
         self.assertNotIn("must_not_be_sent", json.dumps(payload))
+
+    def test_elliott_phase_mismatch_in_ai_response_fails_closed(self):
+        candidate = challenge1_result()
+        document = valid_pattern_document()
+        document["wave_analyst"]["phase"] = "WAVE_3_CONFIRMED"
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            return FakeResponse(document=document)
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+        self.assertEqual(review["status"], "UNKNOWN")
+        self.assertFalse(review["paper_entry_eligible"])
+        self.assertFalse(review["response_validated"])
+
+    def test_elliott_wave_analyst_veto_blocks_reviewer_approval(self):
+        candidate = challenge1_result()
+        document = valid_pattern_document(wave_verdict="OPPOSE")
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            return FakeResponse(document=document)
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                candidate, AssetSpec.parse("perp:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+        self.assertEqual(review["status"], "VETO")
+        self.assertFalse(review["paper_entry_eligible"])
 
     def test_native_council_veto_prevents_paid_or_free_llm_call(self):
         invalid = valid_result()
