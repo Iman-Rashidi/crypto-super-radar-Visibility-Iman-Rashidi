@@ -1988,6 +1988,28 @@ class WebAppHttpTests(unittest.TestCase):
             )
         run_review.assert_not_called()
 
+    def test_observer_runner_can_resume_when_request_event_exists_but_results_do_not(self):
+        outbox = MagicMock()
+        outbox.has_event.side_effect = [False, False]
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            self.assertFalse(web_app._challenge1_observer_results_complete("cycle-resume"))
+        self.assertEqual(
+            outbox.has_event.call_args_list[0].args[0],
+            "cycle-resume:AI:nemotron:RESULT",
+        )
+        self.assertEqual(
+            outbox.has_event.call_args_list[1].args[0],
+            "cycle-resume:AI:second_ai:RESULT",
+        )
+        outbox.close.assert_called_once()
+
+    def test_observer_runner_skips_only_when_both_results_are_durable(self):
+        outbox = MagicMock()
+        outbox.has_event.side_effect = [True, True]
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            self.assertTrue(web_app._challenge1_observer_results_complete("cycle-done"))
+        outbox.close.assert_called_once()
+
     def test_read_only_position_observer_recovery_runs_without_trade_readiness(self):
         store = MagicMock()
         store.orders_pending_learning_outcome.return_value = [{
