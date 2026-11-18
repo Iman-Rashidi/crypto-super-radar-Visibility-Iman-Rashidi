@@ -5775,7 +5775,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload["readiness"] = _blofin_demo_execution_readiness()
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
+                payload["notion_event_sync"] = copy.deepcopy(NOTION_EVENT_SYNC_STATE)
                 payload["notion_activity_sync"] = copy.deepcopy(NOTION_ACTIVITY_SYNC_STATE)
+                payload["observer_audits"] = copy.deepcopy(CHALLENGE1_OBSERVER_AUDIT_STATE)
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/live-monitor":
@@ -9767,6 +9769,19 @@ def _queue_blofin_position_manager_heartbeats(
 
 NOTION_SYNC_THREAD = None
 NOTION_SYNC_START_LOCK = threading.Lock()
+NOTION_EVENT_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "pending_with_error": 0,
+    "synced": 0,
+    "failed": 0,
+    "last_success_utc": None,
+    "last_event_id": None,
+    "last_error_type": None,
+    "last_http_status": None,
+    "last_checked_at_utc": None,
+    "last_worker_error_type": None,
+}
 NOTION_ACTIVITY_SYNC_STATE = {
     "status": "STARTING",
     "pending": 0,
@@ -9778,6 +9793,7 @@ NOTION_ACTIVITY_SYNC_STATE = {
     "last_http_status": None,
     "last_checked_at_utc": None,
 }
+CHALLENGE1_OBSERVER_AUDIT_STATE: dict[str, dict[str, Any]] = {}
 
 
 def _notion_sync_worker() -> None:
@@ -9789,16 +9805,25 @@ def _notion_sync_worker() -> None:
     interval = max(15, min(interval, 300))
     while True:
         outbox = None
-        activity_journal = None
+        event_sync_result = None
+        event_sync_error = None
         try:
             outbox = NotionEventOutbox()
-            outbox.flush_pending(limit=10)
-        except Exception:
-            # Keep a temporary Notion/Turso outage from stopping the Demo worker.
-            pass
+            event_sync_result = outbox.flush_pending(limit=10)
+        except Exception as exc:
+            # Event delivery errors stay visible while the worker continues retrying.
+            event_sync_error = type(exc).__name__
         finally:
             if outbox is not None:
                 outbox.close()
+        with LOCK:
+            NOTION_EVENT_SYNC_STATE["last_checked_at_utc"] = datetime.now(timezone.utc).isoformat()
+            if isinstance(event_sync_result, dict):
+                NOTION_EVENT_SYNC_STATE.update(event_sync_result)
+                NOTION_EVENT_SYNC_STATE["last_worker_error_type"] = None
+            elif event_sync_error:
+                NOTION_EVENT_SYNC_STATE["status"] = "WORKER_ERROR"
+                NOTION_EVENT_SYNC_STATE["last_worker_error_type"] = event_sync_error
         activity_sync_result = None
         activity_sync_error = None
         try:
