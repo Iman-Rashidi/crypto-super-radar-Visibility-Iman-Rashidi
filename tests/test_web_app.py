@@ -1709,5 +1709,113 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("LIVE_MONITOR_INCOMPLETE", result["smoke_test_blockers"])
         self.assertIsNone(result["smoke_test_open_position_count"])
 
+
+    def test_challenge1_observer_events_are_separate_and_never_signal_approval(self):
+        job = {
+            "status": "completed",
+            "result": {
+                "status": "FILLED",
+                "signal": "LONG",
+                "learning_experience_id": "experience-1",
+                "exchange_order_id": "demo-order-1",
+                "position_id": "demo-position-1",
+            },
+        }
+        reviews = [
+            {
+                "reviewer_id": "nemotron",
+                "status": "REVIEWED",
+                "provider": "OpenRouter",
+                "model": "nvidia/nemotron:free",
+                "returned_model": "nvidia/nemotron:free",
+                "verdict": "SUPPORTS_DECISION",
+                "reason_fa": "کندل بسته با جهت ثبت‌شده همسو است.",
+                "response_validated": True,
+                "model_verified": True,
+                "request_attempted": True,
+                "response_source": "LIVE_API",
+                "requested_at_utc": "2026-11-18T15:20:00Z",
+                "completed_at_utc": "2026-11-18T15:20:02Z",
+                "latency_ms": 2000,
+                "entry_gate_enforced": False,
+                "execution_effect": "NONE",
+            },
+            {
+                "reviewer_id": "second_ai",
+                "status": "NOT_CONFIGURED",
+                "provider": "Groq",
+                "model": "qwen/qwen3.8-27b",
+                "request_attempted": False,
+                "error_code": "SECOND_AI_NOT_CONFIGURED",
+                "entry_gate_enforced": False,
+                "execution_effect": "NONE",
+            },
+        ]
+        events = web_app._challenge1_observer_notion_events(
+            "cycle-observer-1", "BTC-USDT", job, reviews, phase="RESULT",
+        )
+        self.assertEqual(len(events), 2)
+        nemotron = next(item for item in events if item["actor"] == "Nemotron Supervisor")
+        second = next(item for item in events if item["actor"] == "Second AI Supervisor")
+        self.assertEqual(nemotron["event_type"], "AI_RECOMMENDATION")
+        self.assertEqual(nemotron["ai_decision"], "OBSERVE_ONLY")
+        self.assertEqual(nemotron["order_id"], "demo-order-1")
+        self.assertEqual(nemotron["position_id"], "demo-position-1")
+        self.assertEqual(second["event_type"], "AI_REVIEW_REQUESTED")
+        self.assertEqual(second["status"], "WARNING")
+        self.assertEqual(second["ai_decision"], "OBSERVE_ONLY")
+        self.assertNotIn("AI_APPROVAL", {item["event_type"] for item in events})
+
+    def test_challenge1_observer_request_events_distinguish_configured_from_missing(self):
+        job = {"result": {"signal": "SHORT"}}
+        reviews = [
+            {"reviewer_id": "nemotron", "status": "REQUESTING", "provider": "OpenRouter",
+             "model": "nemotron:free", "request_attempted": False},
+            {"reviewer_id": "second_ai", "status": "NOT_CONFIGURED", "provider": "Groq",
+             "model": "", "request_attempted": False},
+        ]
+        events = web_app._challenge1_observer_notion_events(
+            "cycle-observer-request", "ETH-USDT", job, reviews, phase="REQUESTED",
+        )
+        self.assertEqual(len(events), 2)
+        nemotron = next(item for item in events if item["actor"] == "Nemotron Supervisor")
+        second = next(item for item in events if item["actor"] == "Second AI Supervisor")
+        self.assertEqual(nemotron["status"], "PENDING")
+        self.assertEqual(second["status"], "WARNING")
+        self.assertEqual(second["ai_suggestion"], "NOT_CONFIGURED")
+
+    def test_position_manager_emits_rate_limited_durable_heartbeat(self):
+        outbox = MagicMock()
+        outbox.enqueue.return_value = True
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            result = web_app._queue_blofin_position_manager_heartbeats(
+                {
+                    "actions": [{
+                        "status": "MONITORING_FOR_NET_PROFIT",
+                        "instrument_id": "BTC-USDT",
+                        "position_id": "demo-position-1",
+                        "order_id": "demo-order-1",
+                        "position_side": "net",
+                        "size_contracts": "0.1",
+                        "average_entry_price": "63606.3",
+                        "mark_price": 63728.4,
+                        "unrealized_pnl_usdt": "0.012",
+                        "entry_fee_usdt": 0.001,
+                        "estimated_close_fee_usdt": 0.001,
+                        "estimated_net_profit_usdt": 0.009,
+                        "minimum_net_profit_usdt": 0.01,
+                    }],
+                },
+                "2026-11-18T15:21:00+00:00",
+            )
+        self.assertEqual(result["queued"], 1)
+        event_payload = outbox.enqueue.call_args.args[0]
+        self.assertEqual(event_payload["event_type"], "HEARTBEAT")
+        self.assertEqual(event_payload["actor"], "BloFin Demo")
+        self.assertEqual(event_payload["ai_decision"], "OBSERVE_ONLY")
+        self.assertEqual(event_payload["position_id"], "demo-position-1")
+        self.assertIn('"mark_price": 63728.4', event_payload["details"])
+
+
 if __name__ == "__main__":
     unittest.main()
