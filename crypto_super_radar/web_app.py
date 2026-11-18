@@ -9905,6 +9905,20 @@ def _queue_blofin_position_manager_heartbeats(
 
 
 
+NOTION_SYNC_THREAD = None
+NOTION_SYNC_START_LOCK = threading.Lock()
+NOTION_ACTIVITY_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "synced": 0,
+    "failed": 0,
+    "last_success_utc": None,
+    "latest_experience_id": None,
+    "last_error_type": None,
+    "last_http_status": None,
+    "last_checked_at_utc": None,
+}
+
 def _notion_sync_worker() -> None:
     """Flush pending outbox events while the Demo web process is awake."""
     try:
