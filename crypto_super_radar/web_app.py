@@ -9412,6 +9412,7 @@ def _queue_blofin_position_manager_heartbeats(
                 for key in (
                     "status", "position_side", "size_contracts", "average_entry_price",
                     "mark_price", "unrealized_pnl_usdt", "leverage", "liquidation_price",
+                    "observer_audit_status",
                     "entry_fee_usdt", "estimated_close_fee_usdt",
                     "estimated_net_profit_usdt", "minimum_net_profit_usdt",
                     "stop_loss", "take_profit", "exit_reason", "error_type",
@@ -10539,20 +10540,6 @@ def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) 
             outbox.close()
 
 
-NOTION_SYNC_THREAD = None
-NOTION_SYNC_START_LOCK = threading.Lock()
-NOTION_EVENT_SYNC_STATE = {
-    "status": "STARTING",
-    "pending": 0,
-    "synced": 0,
-    "failed": 0,
-    "retrying": 0,
-    "last_error_type": None,
-    "last_http_status": None,
-    "recent_errors": [],
-    "last_worker_error_type": None,
-    "last_checked_at_utc": None,
-}
 NOTION_ACTIVITY_SYNC_STATE = {
     "status": "STARTING",
     "pending": 0,
