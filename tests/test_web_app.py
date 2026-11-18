@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import os
 import queue
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from http.server import ThreadingHTTPServer
 from http.client import HTTPConnection
 from urllib.parse import quote
@@ -61,6 +65,461 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("commit", health)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_send_silently_handles_disconnected_client(self):
+        class BrokenPipeStream:
+            def write(self, _content):
+                raise BrokenPipeError("client disconnected")
+
+        handler = object.__new__(Handler)
+        handler.close_connection = False
+        handler.send_response = lambda _status: None
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+        handler.wfile = BrokenPipeStream()
+
+        self.assertFalse(handler._send(200, b"response"))
+        self.assertTrue(handler.close_connection)
+
+    def test_demo_ai_gate_requires_explicit_real_approval(self):
+        self.assertFalse(web_app._demo_ai_review_approved(None))
+        self.assertFalse(web_app._demo_ai_review_approved({"status": "UNKNOWN"}))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "LOCAL_RULES_ONLY",
+            "paper_entry_eligible": True,
+            "model": "CHALLENGE_1_LOCAL_RULES_V1",
+        }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": False, "model": "free-model"
+        }))
+        self.assertFalse(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": True
+        }))
+        self.assertTrue(web_app._demo_ai_review_approved({
+            "status": "APPROVED", "paper_entry_eligible": True, "model": "free-model"
+        }))
+
+    def test_embedded_http_retry_regex_uses_python_safe_escaping(self):
+        with open(web_app.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
+        self.assertIn(r"/^HTTP (429|5\\d\\d)$/.test(message);", source)
+
+    def test_no_trade_job_creates_durable_robot_event_payload(self):
+        job = {
+            "status": "completed",
+            "stage": "NO_TRADE",
+            "updated_at_utc": "2026-11-16T18:00:00Z",
+            "message_fa": "ورود معتبر نبود.",
+            "result": {
+                "status": "NO_TRADE",
+                "signal": "NO_TRADE",
+                "reason_fa": "هیچ الگوی ۱۵ دقیقه‌ای معتبر نبود.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-no-trade", "ETH-USDT", job)
+        robot_event = next(item for item in events if item["actor"] == "Robot")
+        self.assertEqual(robot_event["event_type"], "NO_TRADE")
+        self.assertEqual(robot_event["signal"], "NO_TRADE")
+        self.assertEqual(robot_event["cycle_id"], "cycle-no-trade")
+        self.assertIn("orders_submitted", robot_event["details"])
+
+    def test_ai_veto_is_recorded_separately_from_robot_analysis(self):
+        ai_review = {
+            "status": "VETO",
+            "model": "free-test-model",
+            "rationale_fa": "ریسک نامتقارن است.",
+            "paper_entry_eligible": False,
+        }
+        job = {
+            "status": "completed",
+            "stage": "AI_BLOCKED",
+            "ai_review": ai_review,
+            "result": {
+                "status": "AI_BLOCKED",
+                "signal": "LONG",
+                "reason_fa": "ناظر ورود را رد کرد.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-ai-veto", "BTC-USDT", job)
+        ai_event = next(item for item in events if item["actor"] == "AI Supervisor")
+        self.assertEqual(ai_event["event_type"], "AI_VETO")
+        self.assertEqual(ai_event["ai_decision"], "REJECT")
+        self.assertEqual(ai_event["ai_model"], "free-test-model")
+        self.assertFalse(any(item["event_type"] == "ORDER_SUBMITTED" for item in events))
+
+    def test_verified_demo_fill_creates_order_and_ai_approval_events(self):
+        job = {
+            "status": "completed",
+            "stage": "MONITORING",
+            "ai_review": {
+                "status": "APPROVED",
+                "model": "free-test-model",
+                "rationale_fa": "ریسک قابل قبول است.",
+                "paper_entry_eligible": True,
+            },
+            "result": {
+                "status": "FILLED",
+                "signal": "LONG",
+                "orders_submitted": True,
+                "trade_executed": True,
+                "exchange_order_id": "demo-order-123",
+                "positions": [{"positionId": "demo-position-456"}],
+                "average_fill_price": 100.5,
+                "filled_size": "0.01",
+            },
+        }
+        events = web_app._blofin_job_notion_events("cycle-fill", "BTC-USDT", job)
+        types = {item["event_type"] for item in events}
+        self.assertTrue({"ANALYSIS_COMPLETED", "ORDER_SUBMITTED", "ORDER_FILLED", "AI_APPROVAL"}.issubset(types))
+        filled = next(item for item in events if item["event_type"] == "ORDER_FILLED")
+        self.assertEqual(filled["order_id"], "demo-order-123")
+        self.assertEqual(filled["position_id"], "demo-position-456")
+        approval = next(item for item in events if item["event_type"] == "AI_APPROVAL")
+        self.assertEqual(approval["ai_decision"], "APPROVE")
+
+    def test_notion_sync_status_includes_activity_chart_journal_counters(self):
+        event_outbox = MagicMock()
+        event_outbox.status_snapshot.return_value = {
+            "status": "CONFIGURED", "pending": 1, "synced": 10, "failed": 0,
+        }
+        activity_journal = MagicMock()
+        activity_journal.status_snapshot.return_value = {
+            "status": "CONFIGURED", "pending": 2, "synced": 3, "failed": 1,
+        }
+        with (
+            patch.object(web_app, "NotionEventOutbox", return_value=event_outbox),
+            patch.object(web_app, "NotionActivityJournal", return_value=activity_journal),
+        ):
+            status, headers, payload = self.request("GET", "/api/notion-sync/status")
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertEqual(body["pending"], 1)
+        self.assertEqual(body["activity_journal"]["pending"], 2)
+        self.assertEqual(body["activity_journal"]["synced"], 3)
+        self.assertEqual(body["activity_journal"]["failed"], 1)
+        event_outbox.close.assert_called_once()
+        activity_journal.close.assert_called_once()
+
+    def test_blofin_demo_dashboard_exposes_manual_mode_autopilot_and_symbol_search(self):
+        status, headers, payload = self.request("GET", "/")
+        page = payload.decode("utf-8")
+        self.assertEqual(status, 200)
+        for element_id in (
+            "blofin-instrument-search",
+            "blofin-mode-autopilot",
+            "blofin-mode-manual",
+            "blofin-autopilot-toggle",
+            "blofin-emergency-stop",
+            "blofin-emergency-status",
+            "blofin-position-manager-status",
+            "blofin-manual-order-form",
+            "blofin-manual-direction",
+            "blofin-manual-size",
+            "blofin-manual-stop",
+            "blofin-manual-target",
+            "blofin-manual-open",
+            "blofin-manual-refresh",
+            "blofin-manual-account-view",
+        ):
+            self.assertIn(f'id="{element_id}"', page)
+        self.assertIn("بستن همین پوزیشن", page)
+        self.assertIn("لغو همین سفارش", page)
+        self.assertIn("PnL شناور", page)
+        self.assertIn("اپراتور", page)
+        self.assertIn("autopilotStatusPollTimer", page)
+        self.assertIn("status_only=1", page)
+
+    def test_challenge1_activity_snapshot_keeps_real_ohlcv_and_marks_ai_not_called(self):
+        candles = []
+        for index in range(8):
+            opened = 100.0 + index
+            candles.append({
+                "time_utc": f"2026-11-17T10:{index:02d}:00Z",
+                "open": opened,
+                "high": opened + 1,
+                "low": opened - 1,
+                "close": opened + 0.5,
+                "volume": 1000 + index,
+                "quote_volume": 100000 + index,
+            })
+        job = {
+            "status": "completed",
+            "stage": "NO_TRADE",
+            "message_fa": "No confirmed pattern.",
+            "result": {
+                "status": "NO_TRADE",
+                "signal": "NO_TRADE",
+                "learning_experience_id": "blofin-ch1-test-journal-001",
+                "orders_submitted": False,
+                "trade_executed": False,
+                "reason_fa": "No 15m entry pattern.",
+                "ai_review": {"status": "NOT_CALLED", "execution_role": "ADVISORY_ONLY"},
+                "challenge1_evidence": {
+                    "decision_engine_version": "CHALLENGE_1_LOCAL_RULES_V2",
+                    "decision": "NO_TRADE",
+                    "setup_timeframe": "5m",
+                    "context_timeframe": "1H",
+                    "detected_patterns": [],
+                    "candles_5m": candles,
+                    "candles_1h": [],
+                    "confirmation_candle": {"open_time_utc": candles[-1]["time_utc"]},
+                },
+            },
+        }
+        snapshot = web_app._blofin_activity_journal_snapshot("journal-job-001", "BTC-USDT", job)
+        self.assertEqual(snapshot["experience_id"], "blofin-ch1-test-journal-001")
+        self.assertEqual(snapshot["signal"], "NO_TRADE")
+        self.assertEqual(len(snapshot["candles_5m"]), 8)
+        self.assertEqual(snapshot["ai_status"], "NOT_CALLED")
+        events = web_app._blofin_job_notion_events("journal-job-001", "BTC-USDT", job)
+        self.assertEqual(events[0]["ai_decision"], "NOT_CALLED")
+        self.assertFalse(any(event["actor"] == "AI Supervisor" for event in events))
+
+    def test_profit_exit_requires_positive_net_after_entry_and_exit_costs(self):
+        order = {
+            "instrument_id": "BTC-USDT",
+            "position_id": "position123",
+            "side": "LONG",
+            "take_profit": 104.0,
+            "created_at": 10_000,
+        }
+        position = {
+            "instId": "BTC-USDT",
+            "positionId": "position123",
+            "positions": "0.1",
+            "unrealizedPnl": "1.25",
+        }
+        self.assertEqual(
+            web_app._blofin_demo_profit_exit_decision(
+                order, position, 104.1,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
+            ),
+            "NET_PROFIT_AFTER_FEES",
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "unrealizedPnl": "0.20"}, 104.1,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
+            )
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "positionId": "different-position"}, 104.1,
+                entry_fee_usdt=0.01, estimated_close_fee_usdt=0.01,
+            )
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "instId": "XRP-USDT"}, 104.1,
+                entry_fee_usdt=0.01, estimated_close_fee_usdt=0.01,
+            )
+        )
+
+    def test_automatic_close_rechecks_fee_aware_profit_before_close_write(self):
+        close_calls = []
+
+        class FakeManualClient:
+            def get_positions(self, *, inst_id=None):
+                return [{
+                    "instId": "BTC-USDT",
+                    "positionId": "position789",
+                    "positionSide": "net",
+                    "marginMode": "isolated",
+                    "positions": "0.1",
+                    "unrealizedPnl": "0.20",
+                }]
+
+            def get_mark_price(self, *, inst_id):
+                return [{"markPrice": "100"}]
+
+            def get_tradable_instrument(self, inst_id):
+                return {"contractValue": 0.001}
+
+            def close_futures_position(self, **kwargs):
+                close_calls.append(kwargs)
+                return {"code": "0", "data": [{"code": "0", "orderId": "close-789"}]}
+
+        store = MagicMock()
+        with (
+            patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=store),
+        ):
+            result = web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT",
+                position_id="position789",
+                action_source="AUTOPILOT",
+                audit_id="robotorder789",
+                exit_reason="NET_PROFIT_AFTER_FEES",
+                entry_fee_usdt=0.01,
+                taker_fee_rate=0.0006,
+                slippage_buffer_rate=0.0,
+                minimum_net_profit_usdt=0.01,
+            )
+        self.assertEqual(result["status"], "CLOSE_ACCEPTED")
+        self.assertGreater(result["estimated_net_profit_usdt"], 0.01)
+        self.assertEqual(len(close_calls), 1)
+        self.assertEqual(close_calls[0]["position_id"], "position789")
+        self.assertEqual(store.record_manual_action.call_args_list[0].args[1], "AUTO_POSITION_CLOSE_REQUESTED")
+
+    def test_automatic_close_refuses_if_fees_erase_unrealized_profit(self):
+        close_calls = []
+
+        class FakeManualClient:
+            def get_positions(self, *, inst_id=None):
+                return [{
+                    "instId": "BTC-USDT",
+                    "positionId": "position790",
+                    "positionSide": "net",
+                    "marginMode": "isolated",
+                    "positions": "0.1",
+                    "unrealizedPnl": "0.01",
+                }]
+
+            def get_mark_price(self, *, inst_id):
+                return [{"markPrice": "100"}]
+
+            def get_tradable_instrument(self, inst_id):
+                return {"contractValue": 0.001}
+
+            def close_futures_position(self, **kwargs):
+                close_calls.append(kwargs)
+                return {"code": "0", "data": [{"code": "0", "orderId": "close-790"}]}
+
+        with (
+            patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
+            patch.object(web_app, "BloFinDemoEventStore") as store_factory,
+            self.assertRaises(web_app.BloFinDemoExecutionBlocked),
+        ):
+            web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT",
+                position_id="position790",
+                action_source="AUTOPILOT",
+                audit_id="robotorder790",
+                exit_reason="NET_PROFIT_AFTER_FEES",
+                entry_fee_usdt=0.02,
+                minimum_net_profit_usdt=0.01,
+            )
+        self.assertEqual(close_calls, [])
+        store_factory.assert_not_called()
+
+    def test_profit_exit_has_no_time_limit_and_uses_net_profit_only(self):
+        order = {
+            "instrument_id": "ETH-USDT",
+            "position_id": "position456",
+            "side": "SHORT",
+            "take_profit": 90.0,
+            "created_at": 1_000,
+        }
+        position = {
+            "instId": "ETH-USDT",
+            "positionId": "position456",
+            "positions": "-0.1",
+            "unrealizedPnl": "0.75",
+        }
+        # The decision has no age/maximum-holding parameter: only net PnL and costs decide.
+        self.assertEqual(
+            web_app._blofin_demo_profit_exit_decision(
+                order, position, 95.0,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
+            ),
+            "NET_PROFIT_AFTER_FEES",
+        )
+        self.assertIsNone(
+            web_app._blofin_demo_profit_exit_decision(
+                order, {**position, "unrealizedPnl": "0.20"}, 95.0,
+                entry_fee_usdt=0.10,
+                estimated_close_fee_usdt=0.10,
+                slippage_buffer_usdt=0.05,
+                minimum_net_profit_usdt=0.01,
+            )
+        )
+
+    def test_blofin_manual_write_routes_require_dashboard_token(self):
+        routes = (
+            "/api/blofin/demo/autopilot/control",
+            "/api/blofin/demo/manual-open",
+            "/api/blofin/demo/manual-cancel-order",
+            "/api/blofin/demo/manual-close-position",
+        )
+        origin = f"http://{self.host}:{self.port}"
+        with patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "not-a-real-dashboard-token"}):
+            for route in routes:
+                status, _, payload = self.request(
+                    "POST", route, body="confirm=1&enabled=false",
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Origin": origin,
+                        "Sec-Fetch-Site": "same-origin",
+                    },
+                )
+                self.assertEqual(status, 401, route)
+                self.assertEqual(json.loads(payload)["status"], "UNAUTHORIZED")
+
+    def test_manual_close_allows_a_loss_making_position_but_targets_exact_position_id(self):
+        calls = []
+        class FakeManualClient:
+            def get_positions(self, *, inst_id=None):
+                return [{
+                    "instId": "BTC-USDT",
+                    "positionId": "position123",
+                    "positionSide": "net",
+                    "marginMode": "isolated",
+                    "positions": "0.01",
+                    "unrealizedPnl": "-3.25",
+                }]
+            def close_futures_position(self, **kwargs):
+                calls.append(kwargs)
+                return {"code": "0", "data": [{"code": "0", "orderId": "close-456"}]}
+
+        store = MagicMock()
+        with (
+            patch.object(web_app, "_blofin_manual_write_client", return_value=FakeManualClient()),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=store),
+        ):
+            result = web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT", position_id="position123"
+            )
+
+        self.assertEqual(result["status"], "CLOSE_ACCEPTED")
+        self.assertTrue(result["loss_making_position"])
+        self.assertEqual(result["unrealized_pnl_usdt_at_confirmation"], "-3.25")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["position_id"], "position123")
+        self.assertEqual(calls[0]["inst_id"], "BTC-USDT")
+        store.record_manual_action.assert_any_call(
+            calls[0]["client_order_id"],
+            "MANUAL_POSITION_CLOSE_REQUESTED",
+            {
+                "instrument_id": "BTC-USDT",
+                "position_id": "position123",
+                "position_side": "net",
+                "margin_mode": "isolated",
+                "unrealized_pnl_usdt": "-3.25",
+                "entry_fee_usdt": None,
+                "estimated_close_fee_usdt": None,
+                "estimated_net_profit_usdt": None,
+                "taker_fee_rate": None,
+                "slippage_buffer_rate": None,
+                "loss_making_position": True,
+                "action_source": "MANUAL",
+                "exit_reason": None,
+                "exchange_close_client_order_id": calls[0]["client_order_id"],
+            },
+        )
+        store.close.assert_called_once()
+
     def test_home_page_is_persian_and_lists_twelve_gates(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
@@ -85,6 +544,15 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("✓ مورد با موفقیت در فهرست زیر نظر همین مرورگر ذخیره شد.", page)
         self.assertIn("افزودن ناموفق؛ جزئیات را بررسی کنید", page)
         self.assertIn("ربات معامله‌گر آزمایشی", page)
+        self.assertIn('id="ai-diagnostic-panel"', page)
+        self.assertIn("آزمایش واقعی اتصال Nemotron", page)
+        self.assertIn('id="ai-dry-run-panel"', page)
+        self.assertIn("اجرای تست واقعی Nemotron (Dry-Run)", page)
+        self.assertIn("https://blofin.com/trade/en/futures/BTC-USDT", page)
+        self.assertIn("https://blofin.com/market/derivatives", page)
+        self.assertIn("https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading", page)
+        self.assertIn("راهنمای رسمی ورود به BloFin Demo", page)
+        self.assertIn("/api/ai/dry-run", page)
         self.assertIn("سقف زیان روزانه", page)
         self.assertIn("پوشش دادهٔ کارمزد", page)
         self.assertIn("اجزای کارمزد مشاهده‌شده", page)
@@ -150,6 +618,247 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(body), payload)
         state.assert_called_once_with()
         self.assertFalse(json.loads(body)["orders_submitted"])
+
+    def test_futures_cycle_report_translates_unknown_market_data_failure(self):
+        report = web_app._futures_paper_cycle_report({
+            "status": "UNKNOWN",
+            "asset": "perp:ETHUSDT",
+            "reason_code": "PERPETUAL_MARKET_DATA_UNAVAILABLE",
+            "technical_error_type": "DataProviderError",
+            "technical_detail": "HTTP 451 from fapi.binance.com",
+        })
+        self.assertEqual(report["status_fa"], "نتیجه نامشخص؛ چرخه به‌صورت ایمن متوقف شد")
+        self.assertEqual(report["decision_fa"], "توقف ایمن؛ داده یا وضعیت لازم تأیید نشد")
+        self.assertEqual(report["direction_fa"], "بدون معامله")
+        self.assertTrue(report["entry_blocked"])
+        self.assertFalse(report["orders_submitted"])
+        self.assertIn("دادهٔ لحظه‌ای قرارداد دائمی", report["reason_fa"])
+
+    def test_blofin_elliott_wave_report_selects_directional_scenario_and_discloses_alignment(self):
+        wave = {
+            "status": "CANDIDATE",
+            "pattern": "BULLISH",
+            "phase": "WAVES_1_AND_2_CONFIRMED",
+            "wave_count": 2,
+            "next_wave": 3,
+            "invalidation_price": 64200.0,
+            "pivot_reversal_threshold_pct": 3.25,
+            "pivots": [{
+                "kind": "LOW", "price": 64000.0,
+                "timestamp": "2026-11-14T10:00:00+00:00",
+                "confirmed_at": "2026-11-14T12:00:00+00:00",
+            }],
+        }
+        long_report = web_app._blofin_elliott_wave_report_fa(wave, "LONG")
+        short_report = web_app._blofin_elliott_wave_report_fa(wave, "SHORT")
+
+        self.assertEqual(long_report["pattern_fa"], "صعودی")
+        self.assertEqual(long_report["direction_alignment"], "ALIGNED")
+        self.assertIn("موج ۳ صعودی", long_report["selected_wave_fa"])
+        self.assertEqual(long_report["invalidation_price"], 64200.0)
+        self.assertEqual(long_report["pivots"][0]["kind_fa"], "کف تأییدشده")
+        self.assertEqual(short_report["direction_alignment"], "CONFLICT")
+        self.assertIn("هم‌جهت نیست", short_report["direction_alignment_fa"])
+        self.assertIn("احتمال موفقیت", long_report["confidence_note_fa"])
+
+    def test_blofin_execution_report_is_persian_and_contains_live_timing_and_gate_details(self):
+        wave = web_app._blofin_elliott_wave_report_fa({
+            "status": "CANDIDATE", "pattern": "BEARISH",
+            "phase": "WAVE_3_CONFIRMED", "wave_count": 3, "next_wave": 4,
+            "invalidation_price": 67250.0, "pivots": [],
+        }, "NO_TRADE")
+        job = {
+            "status": "completed",
+            "stage": "NO_TRADE",
+            "message_fa": "شرایط ورود تأیید نشد.",
+            "updated_at_utc": "2026-11-14T15:36:46.503528+00:00",
+            "analysis": {
+                "signal": "NO_TRADE", "gate_pass_count": 0,
+                "gate_fail_count": 0, "gate_unknown_count": 12,
+                "gates_fa": [{
+                    "gate_id": 1, "name_fa": "کیفیت داده بازار",
+                    "status_fa": "نامشخص", "reason_fa": "دادهٔ معتبر دریافت نشد.",
+                }],
+            },
+            "elliott_wave": wave,
+            "trade_context": {
+                "analysis_time_utc": "2026-11-14T15:36:43+00:00",
+                "last_completed_candle_time_utc": "2026-11-14T00:00:00+00:00",
+                "last_candle_close": 66100.0,
+            },
+            "events": [{
+                "time_utc": "2026-11-14T15:36:43+00:00",
+                "status": "running", "stage": "ELLIOTT_WAVE_ANALYSIS",
+                "message_fa": "ساختار موج الیوت بررسی شد.",
+            }],
+            "result": {
+                "status": "NO_TRADE",
+                "reason_fa": "۱۲ فیلتر تأیید نشد؛ هیچ سفارشی ارسال نشد.",
+                "orders_submitted": False,
+                "trade_executed": False,
+            },
+        }
+
+        report = web_app._blofin_execution_report_fa(job)
+
+        self.assertEqual(report["status_fa"], "معامله‌ای انجام نشد")
+        self.assertEqual(report["signal_fa"], "بدون معامله")
+        self.assertIn("۰ فیلتر تأیید", report["gate_summary_fa"])
+        self.assertIn("۱۲ فیلتر نامشخص", report["gate_summary_fa"])
+        self.assertEqual(report["analysis_time_utc"], "2026-11-14T15:36:43+00:00")
+        self.assertIn("موج ۴ نزولی", report["elliott_wave"]["selected_wave_fa"])
+        self.assertEqual(report["events_fa"][0]["stage_fa"], "تحلیل و انتخاب سناریوی موج الیوت")
+        self.assertFalse(report["orders_submitted"])
+        self.assertFalse(report["trade_executed"])
+
+    def test_blofin_dashboard_inline_javascript_passes_node_syntax_check(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is not available in this test environment")
+        status, _, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        page = body.decode("utf-8")
+        panel_start = page.index('id="blofin-demo-panel"')
+        script_tag = page.index("<script>", panel_start)
+        script_start = page.index("\n", script_tag) + 1
+        script_end = page.index("</script>", script_start)
+        script = page[script_start:script_end]
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".js", delete=False
+        ) as handle:
+            handle.write(script)
+            script_path = handle.name
+        try:
+            result = subprocess.run(
+                ["node", "--check", script_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            os.unlink(script_path)
+
+    def test_blofin_execution_dashboard_renders_persian_report_instead_of_raw_json(self):
+        status, _, body = self.request("GET", "/")
+        page = body.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn('id="blofin-execution-report"', page)
+        self.assertIn("function renderExecutionJob(job){", page)
+        self.assertNotIn("function renderExecutionJob(job){{", page)
+        self.assertNotIn("const report=job&&job.report_fa?job.report_fa:{{}};", page)
+        self.assertIn("checkButton.click();", page)
+        self.assertIn("انتخاب ساختار موج الیوت در لحظه تحلیل", page)
+        self.assertIn("خط زمانی رویدادهای چرخه", page)
+        self.assertIn("Mark Price واقعی", page)
+        self.assertIn("حد سود و حد ضرر فعال در BloFin", page)
+        self.assertIn("سفارش‌های تکمیل‌شده و تاریخچه سفارش", page)
+        self.assertIn("تمام رویدادهای ثبت‌شده در ربات (همه سفارش‌ها)", page)
+        self.assertIn("displayMonitorValue", page)
+        self.assertNotIn("JSON.stringify(job,null,2)", page)
+        self.assertNotIn('id="blofin-execution-result"', page)
+
+    def test_dashboard_does_not_label_risk_circuit_breaker_as_trade_permission(self):
+        status, _, body = self.request("GET", "/")
+        page = body.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("به‌معنای مجوز نهایی ورود نیست", page)
+        self.assertNotIn("risk.entry_allowed?'ورود مجاز'", page)
+
+    def test_ai_status_endpoint_reports_configuration_without_exposing_secret(self):
+        payload = {
+            "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "status": "CONFIGURED",
+            "configured": True,
+            "secret_sent_to_model": False,
+        }
+        with patch.object(web_app, "ai_connection_status", return_value=payload):
+            status, _, body = self.request("GET", "/api/ai/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), payload)
+        self.assertNotIn("api_key", body.decode().lower())
+
+    def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
+        payload = {
+            "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "status": "CONNECTED",
+            "probe": "PASS",
+            "model_verified": True,
+            "paper_entry_eligible": False,
+            "orders_submitted": False,
+        }
+        with patch.object(web_app, "_run_ai_diagnostic_limited", return_value=payload) as probe:
+            status, _, body = self.request(
+                "POST", "/api/ai/diagnostic", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": f"http://{self.host}:{self.port}",
+                },
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), payload)
+        probe.assert_called_once_with()
+        self.assertFalse(json.loads(body)["paper_entry_eligible"])
+        self.assertFalse(json.loads(body)["orders_submitted"])
+
+    def test_ai_synthetic_dry_run_calls_only_the_ai_review_and_forces_trade_flags_off(self):
+        payload = {
+            "provider": "OpenRouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "status": "APPROVED",
+            "model_verified": True,
+            "response_validated": True,
+            "test_passed": True,
+            "paper_entry_eligible": False,
+            "orders_submitted": False,
+            "trade_executed": False,
+            "test_mode": "SYNTHETIC_DRY_RUN",
+        }
+        with patch.object(web_app, "_run_ai_synthetic_dry_run_limited", return_value=payload) as dry_run, \
+             patch.object(web_app.FUTURES_PAPER_BOT, "run_once") as futures_tick, \
+             patch.object(web_app.PAPER_BOT, "run_once") as spot_tick:
+            status, _, body = self.request(
+                "POST", "/api/ai/dry-run", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": f"http://{self.host}:{self.port}",
+                },
+            )
+        result = json.loads(body)
+        self.assertEqual(status, 200)
+        dry_run.assert_called_once_with()
+        futures_tick.assert_not_called()
+        spot_tick.assert_not_called()
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertFalse(result["orders_submitted"])
+        self.assertFalse(result["trade_executed"])
+
+    def test_ai_synthetic_dry_run_rejects_cross_origin_requests(self):
+        with patch.object(web_app, "_run_ai_synthetic_dry_run_limited") as dry_run:
+            status, _, body = self.request(
+                "POST", "/api/ai/dry-run", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://attacker.invalid",
+                },
+            )
+        self.assertEqual(status, 403)
+        self.assertIn(b"Cross-origin", body)
+        dry_run.assert_not_called()
+
+    def test_ai_diagnostic_endpoint_rejects_cross_origin_requests(self):
+        with patch.object(web_app, "_run_ai_diagnostic_limited") as probe:
+            status, _, body = self.request(
+                "POST", "/api/ai/diagnostic", "confirm=1",
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://attacker.invalid",
+                },
+            )
+        self.assertEqual(status, 403)
+        self.assertIn(b"Cross-origin scan requests are not allowed", body)
+        probe.assert_not_called()
 
     def test_futures_paper_post_rejects_spot_asset(self):
         body = "asset=cex%3ABTCUSDT"
@@ -717,6 +1426,503 @@ class WebAppHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 403)
         self.assertIn(b"Cross-origin", payload)
+
+
+    def test_blofin_market_and_challenge1_is_the_only_demo_strategy_and_contract_catalog_is_live(self):
+        status, _, home = self.request("GET", "/")
+        page = home.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn('id="blofin-market-type"', page)
+        self.assertIn('id="blofin-instrument"', page)
+        self.assertIn('id="blofin-engine-profile"', page)
+        self.assertIn("USDT Perpetual · Linear SWAP", page)
+        profile_match = re.search(
+            r'<select[^>]*id="blofin-engine-profile"[^>]*>(.*?)</select>',
+            page,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(profile_match)
+        profile_options = profile_match.group(1)
+        self.assertIn('value="CHALLENGE_1"', profile_options)
+        self.assertNotRegex(profile_options, r'value="(?:EASY|STANDARD|STRICT)"')
+        self.assertIn("جهت LONG/SHORT فقط از سیگنال زنده صادر می‌شود", page)
+
+        payload = {
+            "status": "PASS",
+            "market": "BloFin Demo USDT Perpetual (linear SWAP)",
+            "count": 1,
+            "instruments": [{
+                "inst_id": "ETH-USDT", "base_currency": "ETH", "quote_currency": "USDT",
+                "api_permission": "full", "min_size": 0.1,
+                "lot_size": 0.1, "contract_value": 0.001, "tick_size": 0.1,
+            }],
+        }
+        with patch.object(web_app, "_blofin_demo_instrument_options", return_value=payload) as options:
+            catalog_status, _, catalog_body = self.request(
+                "GET", "/api/blofin/demo/instruments?refresh=1",
+            )
+        self.assertEqual(catalog_status, 200)
+        self.assertEqual(json.loads(catalog_body), payload)
+        options.assert_called_once_with(force=True)
+
+    def test_blofin_farsi_execution_report_identifies_selected_contract_and_strategy(self):
+        report = web_app._blofin_execution_report_fa({
+            "status": "completed",
+            "stage": "PROFILE_GATE_REVIEW",
+            "message_fa": "شرایط ورود هنوز کامل نیست.",
+            "trade_context": {
+                "instrument_id": "ETH-USDT",
+                "execution_profile": "CHALLENGE_1",
+                "analysis_time_utc": "2026-11-15T05:00:00+00:00",
+            },
+            "analysis": {
+                "signal": "NO_TRADE",
+                "gate_pass_count": 0,
+                "gate_fail_count": 0,
+                "gate_unknown_count": 12,
+            },
+            "result": {
+                "status": "NO_TRADE",
+                "orders_submitted": False,
+                "trade_executed": False,
+                "reason_fa": "الگوی معتبر پیدا نشد.",
+            },
+        })
+        self.assertIn("ETH-USDT", report["title_fa"])
+        self.assertEqual(report["instrument_id"], "ETH-USDT")
+        self.assertEqual(report["execution_profile"], "CHALLENGE_1")
+        self.assertIn("Challenge 1", report["stage_fa"])
+        self.assertFalse(report["orders_submitted"])
+        self.assertFalse(report["trade_executed"])
+
+    def test_autopilot_next_scan_repeats_after_30_seconds(self):
+        now = datetime(2026, 11, 17, 16, 23, 32, tzinfo=timezone.utc)
+        delay_seconds, next_at = web_app._blofin_demo_next_15m_scan_window(now)
+        self.assertEqual(delay_seconds, 30)
+        self.assertEqual(next_at, "2026-11-17T16:24:02+00:00")
+
+    def test_autopilot_catches_candle_close_that_occurs_during_scan(self):
+        started = datetime(2026, 11, 17, 17, 14, 22, tzinfo=timezone.utc)
+        finished = datetime(2026, 11, 17, 17, 15, 43, tzinfo=timezone.utc)
+        delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
+            started, now_utc=finished,
+        )
+        self.assertEqual(delay, 30)
+        self.assertEqual(next_at, "2026-11-17T17:16:13+00:00")
+
+    def test_autopilot_keeps_next_boundary_when_scan_finishes_before_it(self):
+        started = datetime(2026, 11, 17, 17, 15, 5, tzinfo=timezone.utc)
+        finished = datetime(2026, 11, 17, 17, 16, 20, tzinfo=timezone.utc)
+        delay, next_at = web_app._blofin_demo_next_scan_after_cycle(
+            started, now_utc=finished,
+        )
+        self.assertEqual(delay, 30)
+        self.assertEqual(next_at, "2026-11-17T17:16:50+00:00")
+
+    def test_blofin_autopilot_repeats_after_no_trade_with_spaced_signal(self):
+        class StopAfterTwoCycles(Exception):
+            pass
+
+        old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        old_job_ids = set(web_app.BLOFIN_EXECUTION_JOBS)
+        cycle_ids = []
+        sleep_calls = []
+
+        def record_job(job_id, status, **values):
+            with web_app.LOCK:
+                job = web_app.BLOFIN_EXECUTION_JOBS.setdefault(job_id, {})
+                job.update({"status": status, **values})
+
+        observed_profiles = []
+
+        def complete_no_trade_cycle(job_id, instrument_id, execution_profile, *, autopilot_cycle=False):
+            self.assertTrue(autopilot_cycle)
+            cycle_ids.append(job_id)
+            observed_profiles.append(execution_profile)
+            self.assertEqual(execution_profile, "CHALLENGE_1")
+            record_job(
+                job_id,
+                "completed",
+                stage="NO_TRADE",
+                message_fa="شرایط ورود تأیید نشد؛ سفارش ارسال نشد.",
+                analysis={
+                    "signal": web_app.Signal.NO_TRADE.value,
+                    "gate_pass_count": 6,
+                    "gate_fail_count": 0,
+                    "gate_unknown_count": 6,
+                },
+                result={
+                    "status": "NO_TRADE",
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                    "reason_fa": "سیگنال ورود معتبر وجود ندارد.",
+                },
+            )
+
+        def stop_after_second_cycle_sleep(seconds):
+            sleep_calls.append(seconds)
+            if len(sleep_calls) == 2:
+                raise StopAfterTwoCycles()
+
+        web_app.BLOFIN_AUTOPILOT_STATE.update({
+            "enabled": False,
+            "status": "DISABLED",
+            "cycles_started": 0,
+        })
+        try:
+            with (
+                patch.dict(os.environ, {
+                    "BLOFIN_DEMO_AUTOPILOT_ENABLED": "true",
+                    "BLOFIN_DEMO_AUTOPILOT_INTERVAL_SECONDS": "300",
+                    "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS": "BTC-USDT",
+                }),
+                patch.object(web_app, "SCAN_RUNNING", False),
+                patch.object(web_app, "_set_blofin_execution_job", side_effect=record_job),
+                patch.object(web_app, "_run_blofin_demo_execution_job", side_effect=complete_no_trade_cycle),
+                patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                    "status": "PASS",
+                    "data_completeness": "COMPLETE",
+                    "positions": [],
+                    "closed_positions": [],
+                    "read_errors": [],
+                }),
+                patch.object(web_app.BLOFIN_AUTOPILOT_STOP_EVENT, "wait", side_effect=stop_after_second_cycle_sleep),
+                patch.object(web_app, "_blofin_demo_next_15m_scan_window", return_value=(
+                    30, "2026-11-17T16:24:02+00:00"
+                )),
+                patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
+            ):
+                with self.assertRaises(StopAfterTwoCycles):
+                    web_app._blofin_demo_autopilot_worker()
+
+            self.assertEqual(len(cycle_ids), 2)
+            self.assertEqual(observed_profiles, ["CHALLENGE_1", "CHALLENGE_1"])
+            self.assertEqual(sleep_calls, [30, 30])
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["cycles_started"], 2)
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "WAITING_FOR_NEXT_SEARCH")
+            self.assertEqual(
+                web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_at_utc"],
+                "2026-11-17T16:24:02+00:00",
+            )
+            self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["search_continues"])
+            self.assertTrue(web_app.BLOFIN_AUTOPILOT_STATE["next_cycle_scheduled"])
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["last_cycle_status"], "completed")
+            diagnostics = web_app.BLOFIN_AUTOPILOT_STATE["last_cycle_diagnostics"]
+            self.assertEqual(diagnostics["signal"], "NO_TRADE")
+            self.assertFalse(diagnostics["orders_submitted"])
+            self.assertFalse(diagnostics["trade_executed"])
+        finally:
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE.clear()
+                web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
+                for job_id in set(web_app.BLOFIN_EXECUTION_JOBS) - old_job_ids:
+                    web_app.BLOFIN_EXECUTION_JOBS.pop(job_id, None)
+
+    def test_autopilot_stop_latches_server_override_and_event(self):
+        old_override = web_app.BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE
+        old_event = web_app.BLOFIN_AUTOPILOT_STOP_EVENT.is_set()
+        old_state = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        origin = f"http://{self.host}:{self.port}"
+        try:
+            with (
+                patch.dict(os.environ, {"BLOFIN_DASHBOARD_TOKEN": "test-dashboard-token"}),
+                patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True),
+            ):
+                web_app.BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = True
+                web_app.BLOFIN_AUTOPILOT_STOP_EVENT.clear()
+                status, _, payload = self.request(
+                    "POST", "/api/blofin/demo/autopilot/control",
+                    body="confirm=1&enabled=false",
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Authorization": "Bearer test-dashboard-token",
+                        "Origin": origin,
+                        "Sec-Fetch-Site": "same-origin",
+                    },
+                )
+            self.assertEqual(status, 200)
+            result = json.loads(payload)
+            self.assertFalse(result["enabled"])
+            self.assertIn(result["status"], {"DISABLED", "STOPPING"})
+            self.assertFalse(web_app._blofin_demo_autopilot_enabled())
+            self.assertTrue(web_app.BLOFIN_AUTOPILOT_STOP_EVENT.is_set())
+        finally:
+            web_app.BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = old_override
+            if old_event:
+                web_app.BLOFIN_AUTOPILOT_STOP_EVENT.set()
+            else:
+                web_app.BLOFIN_AUTOPILOT_STOP_EVENT.clear()
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE.clear()
+                web_app.BLOFIN_AUTOPILOT_STATE.update(old_state)
+
+    def test_blofin_smoke_readiness_blocks_existing_open_position(self):
+        with (
+            patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}),
+            patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                "status": "CONNECTED_READ_ONLY",
+                "data_completeness": "COMPLETE",
+                "read_errors": [],
+                "positions": [{"instId": "BTC-USDT", "positions": "-0.1"}],
+                "open_orders": [],
+            }),
+        ):
+            result = web_app._blofin_demo_smoke_test_readiness()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("EXISTING_OPEN_POSITION", result["smoke_test_blockers"])
+        self.assertEqual(result["smoke_test_open_position_count"], 1)
+        self.assertEqual(result["smoke_test_open_order_count"], 0)
+
+    def test_blofin_smoke_readiness_blocks_existing_pending_order(self):
+        with (
+            patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}),
+            patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                "status": "CONNECTED_READ_ONLY",
+                "data_completeness": "COMPLETE",
+                "read_errors": [],
+                "positions": [],
+                "open_orders": [{"instId": "BTC-USDT", "orderId": "prior-order"}],
+            }),
+        ):
+            result = web_app._blofin_demo_smoke_test_readiness()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("EXISTING_OPEN_ORDER", result["smoke_test_blockers"])
+        self.assertEqual(result["smoke_test_open_position_count"], 0)
+        self.assertEqual(result["smoke_test_open_order_count"], 1)
+
+    def test_blofin_smoke_readiness_fails_closed_on_incomplete_monitor_data(self):
+        with (
+            patch.dict(os.environ, {"BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}),
+            patch.object(web_app, "_blofin_demo_live_monitor_snapshot", return_value={
+                "status": "CONNECTED_READ_ONLY",
+                "data_completeness": "PARTIAL",
+                "read_errors": [{"endpoint": "positions", "error_type": "Timeout"}],
+                "positions": [],
+                "open_orders": [],
+            }),
+        ):
+            result = web_app._blofin_demo_smoke_test_readiness()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("LIVE_MONITOR_INCOMPLETE", result["smoke_test_blockers"])
+        self.assertIsNone(result["smoke_test_open_position_count"])
+
+
+    def test_challenge1_observer_events_are_separate_and_never_signal_approval(self):
+        job = {
+            "status": "completed",
+            "result": {
+                "status": "FILLED",
+                "signal": "LONG",
+                "learning_experience_id": "experience-1",
+                "exchange_order_id": "demo-order-1",
+                "position_id": "demo-position-1",
+            },
+        }
+        reviews = [
+            {
+                "reviewer_id": "nemotron",
+                "status": "REVIEWED",
+                "provider": "OpenRouter",
+                "model": "nvidia/nemotron:free",
+                "returned_model": "nvidia/nemotron:free",
+                "verdict": "SUPPORTS_DECISION",
+                "reason_fa": "کندل بسته با جهت ثبت‌شده همسو است.",
+                "response_validated": True,
+                "model_verified": True,
+                "request_attempted": True,
+                "response_source": "LIVE_API",
+                "requested_at_utc": "2026-11-18T15:20:00Z",
+                "completed_at_utc": "2026-11-18T15:20:02Z",
+                "latency_ms": 2000,
+                "entry_gate_enforced": False,
+                "execution_effect": "NONE",
+            },
+            {
+                "reviewer_id": "second_ai",
+                "status": "NOT_CONFIGURED",
+                "provider": "Groq",
+                "model": "qwen/qwen3.8-27b",
+                "request_attempted": False,
+                "error_code": "SECOND_AI_NOT_CONFIGURED",
+                "entry_gate_enforced": False,
+                "execution_effect": "NONE",
+            },
+        ]
+        events = web_app._challenge1_observer_notion_events(
+            "cycle-observer-1", "BTC-USDT", job, reviews, phase="RESULT",
+        )
+        self.assertEqual(len(events), 2)
+        nemotron = next(item for item in events if item["actor"] == "Nemotron Supervisor")
+        second = next(item for item in events if item["actor"] == "Second AI Supervisor")
+        self.assertEqual(nemotron["event_type"], "AI_RECOMMENDATION")
+        self.assertEqual(nemotron["ai_decision"], "OBSERVE_ONLY")
+        self.assertEqual(nemotron["order_id"], "demo-order-1")
+        self.assertEqual(nemotron["position_id"], "demo-position-1")
+        self.assertEqual(second["event_type"], "AI_REVIEW_REQUESTED")
+        self.assertEqual(second["status"], "WARNING")
+        self.assertEqual(second["ai_decision"], "OBSERVE_ONLY")
+        self.assertNotIn("AI_APPROVAL", {item["event_type"] for item in events})
+
+    def test_challenge1_observer_request_events_distinguish_configured_from_missing(self):
+        job = {"result": {"signal": "SHORT"}}
+        reviews = [
+            {"reviewer_id": "nemotron", "status": "REQUESTING", "provider": "OpenRouter",
+             "model": "nemotron:free", "request_attempted": False},
+            {"reviewer_id": "second_ai", "status": "NOT_CONFIGURED", "provider": "Groq",
+             "model": "", "request_attempted": False},
+        ]
+        events = web_app._challenge1_observer_notion_events(
+            "cycle-observer-request", "ETH-USDT", job, reviews, phase="REQUESTED",
+        )
+        self.assertEqual(len(events), 2)
+        nemotron = next(item for item in events if item["actor"] == "Nemotron Supervisor")
+        second = next(item for item in events if item["actor"] == "Second AI Supervisor")
+        self.assertEqual(nemotron["status"], "PENDING")
+        self.assertEqual(second["status"], "WARNING")
+        self.assertEqual(second["ai_suggestion"], "NOT_CONFIGURED")
+
+    def test_position_manager_emits_rate_limited_durable_heartbeat(self):
+        outbox = MagicMock()
+        outbox.enqueue.return_value = True
+        with patch.object(web_app, "NotionEventOutbox", return_value=outbox):
+            result = web_app._queue_blofin_position_manager_heartbeats(
+                {
+                    "actions": [{
+                        "status": "MONITORING_FOR_NET_PROFIT",
+                        "instrument_id": "BTC-USDT",
+                        "position_id": "demo-position-1",
+                        "order_id": "demo-order-1",
+                        "position_side": "net",
+                        "size_contracts": "0.1",
+                        "average_entry_price": "63606.3",
+                        "mark_price": 63728.4,
+                        "unrealized_pnl_usdt": "0.012",
+                        "entry_fee_usdt": 0.001,
+                        "estimated_close_fee_usdt": 0.001,
+                        "estimated_net_profit_usdt": 0.009,
+                        "minimum_net_profit_usdt": 0.01,
+                    }],
+                },
+                "2026-11-18T15:21:00+00:00",
+            )
+        self.assertEqual(result["queued"], 1)
+        event_payload = outbox.enqueue.call_args.args[0]
+        self.assertEqual(event_payload["event_type"], "HEARTBEAT")
+        self.assertEqual(event_payload["actor"], "BloFin Demo")
+        self.assertEqual(event_payload["ai_decision"], "OBSERVE_ONLY")
+        self.assertEqual(event_payload["position_id"], "demo-position-1")
+        self.assertIn('"mark_price": 63728.4', event_payload["details"])
+
+
+
+    def test_existing_demo_position_schedules_first_observer_audit_from_saved_evidence(self):
+        journal = MagicMock()
+        journal.get_snapshot.return_value = {
+            "experience_id": "experience-btc-1",
+            "symbol": "BTC-USDT",
+            "signal": "LONG",
+            "entry_price": 63606.3,
+            "stop_loss": 63100.0,
+            "take_profit": 64112.6,
+            "reason_fa": "الگوی صعودی کندل بسته ثبت شده است.",
+            "setup_timeframe": "5m",
+            "engine_version": "CHALLENGE_1_LOCAL_RULES_V3",
+            "evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "chosen_pattern": {
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                },
+                "detected_patterns": [{
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                }],
+                "candles_5m": [{
+                    "time_utc": "2026-11-18T15:10:00Z",
+                    "open": 63600.0, "high": 63700.0, "low": 63550.0,
+                    "close": 63650.0, "volume": 100,
+                }],
+                "candles_1h": [],
+            },
+            "candles_5m": [],
+            "candles_1h": [],
+        }
+        position = {
+            "positionId": "demo-position-btc",
+            "instId": "BTC-USDT",
+            "positionSide": "net",
+            "positions": "0.1",
+            "averagePrice": "63606.3",
+            "markPrice": "63728.4",
+            "unrealizedPnl": "0.012",
+            "leverage": "1",
+            "liquidationPrice": "0",
+        }
+        order = {
+            "experience_id": "experience-btc-1",
+            "position_id": "demo-position-btc",
+            "instrument_id": "BTC-USDT",
+            "exchange_order_id": "demo-order-btc",
+            "side": "LONG",
+            "entry_price": "63606.3",
+        }
+        with (
+            patch.object(web_app, "NotionActivityJournal", return_value=journal),
+            patch.object(web_app, "_start_challenge1_observer_job") as start_job,
+        ):
+            result = web_app._start_challenge1_active_position_observer(
+                order, position, "BTC-USDT",
+            )
+        self.assertEqual(result["status"], "OBSERVER_AUDIT_SCHEDULED")
+        self.assertEqual(result["position_id"], "demo-position-btc")
+        args = start_job.call_args.args
+        self.assertEqual(args[0], "position-audit:demo-position-btc:initial-v2")
+        self.assertEqual(args[1], "BTC-USDT")
+        self.assertEqual(args[2]["signal"], "LONG")
+        self.assertEqual(args[2]["challenge1_evidence"]["setup_timeframe"], "5m")
+        self.assertEqual(args[3]["result"]["position_id"], "demo-position-btc")
+        self.assertEqual(args[3]["result"]["exchange_order_id"], "demo-order-btc")
+
+    def test_observer_worker_skips_provider_calls_when_durable_request_already_exists(self):
+        job = {
+            "status": "completed",
+            "result": {
+                "status": "POSITION_MONITORING",
+                "signal": "LONG",
+                "position_id": "demo-position-1",
+                "exchange_order_id": "demo-order-1",
+                "learning_experience_id": "experience-1",
+                "positions": [{"positionId": "demo-position-1"}],
+            },
+        }
+        record = {
+            "signal": "LONG",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        with (
+            patch.object(web_app, "_queue_challenge1_observer_events", return_value={
+                "status": "QUEUED", "queued": 0,
+            }),
+            patch.object(web_app, "run_challenge1_observer_reviews") as run_review,
+        ):
+            web_app._run_challenge1_observer_job(
+                "position-audit:demo-position-1:initial",
+                "BTC-USDT", record, job,
+            )
+        run_review.assert_not_called()
 
 
 if __name__ == "__main__":

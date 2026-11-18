@@ -171,6 +171,74 @@ def _item(
     }
 
 
+def _three_inside_down_pattern(
+    frame: pd.DataFrame,
+    volume_ratio: float | None,
+) -> dict[str, Any] | None:
+    """Detect a confirmed Three Inside Down reversal on three completed candles."""
+    if len(frame) < 11:
+        return None
+
+    first, middle, last = (frame.iloc[-3], frame.iloc[-2], frame.iloc[-1])
+    fo, fh, fl, fc = (float(first[k]) for k in ("open", "high", "low", "close"))
+    mo, mh, ml, mc = (float(middle[k]) for k in ("open", "high", "low", "close"))
+    lo, lh, ll, lc = (float(last[k]) for k in ("open", "high", "low", "close"))
+
+    # The pattern must follow an established upswing before candle one.
+    prior = frame["close"].iloc[-11:-3].astype(float)
+    if len(prior) < 6 or float(prior.iloc[0]) <= 0:
+        return None
+    prior_change = float(prior.iloc[-1] / prior.iloc[0] - 1.0)
+    if prior_change < 0.003:
+        return None
+
+    first_range = max(fh - fl, 1e-15)
+    first_body = fc - fo
+    middle_body = mo - mc
+    last_body = lo - lc
+
+    # Candle one: a meaningful bullish body.
+    first_is_long_bull = (
+        first_body > 0
+        and first_body >= first_range * 0.45
+    )
+    # Candle two: bearish real body contained inside candle one's real body
+    # (the bearish Harami component). Wicks may extend beyond the body.
+    middle_is_bearish_harami = (
+        middle_body > 0
+        and mo <= fc
+        and mc >= fo
+        and mh <= fh
+        and ml >= fl
+    )
+    # Candle three: bearish close below candle one's low confirms reversal.
+    last_confirms = (
+        last_body > 0
+        and lc < fl
+    )
+    if not (first_is_long_bull and middle_is_bearish_harami and last_confirms):
+        return None
+
+    volume_confirmed = volume_ratio is not None and volume_ratio >= 1.20
+    return _item(
+        name_fa="سه‌تایی داخلی نزولی",
+        name_en="Three Inside Down",
+        category="CANDLE",
+        direction="BEARISH",
+        state="CONFIRMED",
+        strength="STRONG" if volume_confirmed else "MODERATE",
+        description=(
+            "پس از روند صعودی، کندل اول صعودی و بلند است؛ بدنهٔ کندل دوم نزولی "
+            "داخل بدنهٔ کندل اول (هارامی نزولی) قرار دارد؛ کندل سوم با بسته‌شدن "
+            "زیر کف کندل اول، برگشت نزولی را تأیید می‌کند."
+        ),
+        timestamp=frame.index[-1].isoformat(),
+        score=-16,
+        trigger_price=fl,
+        invalidation_price=fh,
+    )
+
+
 def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[dict[str, Any]]:
     if len(frame) < 3:
         return []
@@ -236,9 +304,19 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if pc < po and last_bull and o < pl and c > (po + pc) / 2.0 and c < po:
         add("خط نفوذی صعودی", "Piercing Line", "BULLISH",
             "کندل صعودی بیش از نیمهٔ بدنهٔ نزولی قبلی را بازیابی کرده است.", 10)
-    elif pc > po and last_bear and o > ph and c < (po + pc) / 2.0 and c > po:
+    elif (
+        context == "UP"
+        and pc > po
+        and (ph - pl) > 0
+        and (pc - po) >= (ph - pl) * 0.45
+        and last_bear
+        and o > ph
+        and c < (po + pc) / 2.0
+        and c > po
+    ):
         add("ابر تیره", "Dark Cloud Cover", "BEARISH",
-            "کندل نزولی بیش از نیمهٔ بدنهٔ صعودی قبلی را پس گرفته است.", -10)
+            "پس از روند صعودی، کندل دوم بالاتر از سقف کندل صعودی باز شده اما نزولی بسته شده و بیش از نیمی از بدنهٔ قبلی را پوشانده است؛ برای تصمیم معاملاتی، تأیید نزولی بعدی و سایر شواهد لازم است.",
+            -12, state="NEEDS_CONFIRMATION")
 
     # The classic three-soldiers / three-crows formations.
     three = frame.tail(3)
@@ -280,6 +358,51 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
             add("ستاره معکوس خنثی", "Inverted Star", "NEUTRAL",
                 "سایهٔ بالایی بلند بدون زمینهٔ روند مشخص؛ جهت برگشت هنوز معلوم نیست.", 0)
 
+    # Bearish Marubozu: dominant bearish body with negligible upper/lower shadows.
+    prior_bodies = (frame["close"].iloc[-11:-1] - frame["open"].iloc[-11:-1]).abs()
+    typical_prior_body = float(prior_bodies.median()) if len(prior_bodies) else 0.0
+    bearish_marubozu = (
+        c < o
+        and body_ratio >= 0.85
+        and upper <= candle_range * 0.08
+        and lower <= candle_range * 0.08
+        and (typical_prior_body <= 0 or body >= typical_prior_body * 1.20)
+    )
+    if bearish_marubozu:
+        if context == "UP":
+            marubozu_score = -14
+            marubozu_description = "ماروبوزوی نزولی پس از روند صعودی؛ فروشندگان از آغاز تا پایان کندل کنترل بازار را در دست داشته‌اند و احتمال برگشت نزولی وجود دارد."
+            marubozu_strength = "STRONG"
+        elif context == "DOWN":
+            marubozu_score = -11
+            marubozu_description = "ماروبوزوی نزولی در ادامهٔ روند نزولی؛ فشار فروش و احتمال تداوم افت را تقویت می‌کند، اما پس از افت طولانی می‌تواند نشانهٔ فرسودگی فروش نیز باشد."
+            marubozu_strength = "MODERATE"
+        else:
+            marubozu_score = -8
+            marubozu_description = "ماروبوزوی نزولی با بدنهٔ بلند و سایه‌های ناچیز؛ فشار فروش شدید را نشان می‌دهد، اما روند زمینه‌ای روشن نیست."
+            marubozu_strength = "MODERATE" if volume_confirmed else "WEAK"
+        add("ماروبوزوی نزولی", "Bearish Marubozu", "BEARISH",
+            marubozu_description, marubozu_score,
+            state="NEEDS_CONFIRMATION",
+            strength="STRONG" if volume_confirmed and marubozu_score <= -11 else marubozu_strength)
+
+    # Gravestone Doji: tiny body at/near the low, long upper wick, tiny lower wick.
+    gravestone_doji = (
+        body_ratio <= 0.10
+        and upper >= candle_range * 0.60
+        and lower <= candle_range * 0.10
+        and close_location <= 0.15
+    )
+    if gravestone_doji:
+        if context == "UP":
+            add("دوجی سنگ‌قبر", "Gravestone Doji", "BEARISH",
+                "بدنهٔ بسیار کوچک نزدیک کف، سایهٔ بالایی بلند و سایهٔ پایینی ناچیز پس از روند صعودی؛ نشانهٔ احتمالی برگشت نزولی است و به تأیید کندل بعدی نیاز دارد.",
+                -11, state="NEEDS_CONFIRMATION", strength="STRONG" if volume_confirmed else "MODERATE")
+        else:
+            add("دوجی سنگ‌قبر", "Gravestone Doji", "NEUTRAL",
+                "شکل دوجی سنگ‌قبر دیده شده، اما بدون روند صعودی قبلی جهت نزولی آن قابل اتکا نیست؛ منتظر تأیید بمانید.",
+                0, state="NEEDS_CONFIRMATION", strength="WEAK")
+
     if body_ratio <= 0.10 and (long_lower == long_upper):
         add("دوجی", "Doji", "NEUTRAL",
             "بدنه بسیار کوچک نسبت به دامنهٔ کندل؛ نشان‌دهندهٔ تردید است، نه سیگنال مستقل خرید یا فروش.", 0, strength="MODERATE")
@@ -290,6 +413,10 @@ def _candle_patterns(frame: pd.DataFrame, volume_ratio: float | None) -> list[di
     if h < ph and low > pl:
         add("کندل داخلی", "Inside Bar", "NEUTRAL",
             "دامنهٔ کندل آخر داخل دامنهٔ کندل قبلی است؛ شکست هر طرف می‌تواند جهت حرکت بعدی را روشن کند.", 0, strength="WEAK")
+
+    three_inside_down = _three_inside_down_pattern(frame, volume_ratio)
+    if three_inside_down is not None:
+        out.append(three_inside_down)
 
     return out[-5:]
 

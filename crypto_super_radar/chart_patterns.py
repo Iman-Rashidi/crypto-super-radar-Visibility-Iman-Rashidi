@@ -171,6 +171,85 @@ def contradicts_confirmed_breakout(direction: Optional[str], pattern: dict[str, 
     )
 
 
+def detect_hammer_candlestick(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
+    """Detect a hammer after a downtrend; setup only, never a standalone trade signal.
+
+    Uses the latest supplied completed candle. A later close above its high is
+    required for confirmation and is reported separately when available.
+    """
+    unknown = {
+        "status": "UNKNOWN", "pattern": "NONE", "direction": "NONE",
+        "body": None, "lower_shadow": None, "upper_shadow": None,
+        "lower_shadow_body_ratio": None, "confirmation": "PENDING",
+        "reason": "At least six valid timestamped OHLC candles are required.",
+    }
+    required = {"open", "high", "low", "close"}
+    if not isinstance(candles, pd.DataFrame) or not required.issubset(candles.columns):
+        return unknown
+    if not isinstance(candles.index, pd.DatetimeIndex) or len(candles) < 6:
+        return unknown
+    frame = candles.loc[:, ["open", "high", "low", "close"]].tail(7).apply(
+        pd.to_numeric, errors="coerce"
+    )
+    values = frame.to_numpy(dtype=float)
+    if not np.isfinite(values).all() or (frame <= 0).any().any():
+        return {**unknown, "reason": "OHLC data contains missing or invalid values."}
+    if ((frame["high"] < frame[["open", "close", "low"]].max(axis=1)).any()
+        or (frame["low"] > frame[["open", "close", "high"]].min(axis=1)).any()):
+        return {**unknown, "reason": "OHLC candle boundaries are inconsistent."}
+
+    # Prefer the previous completed candle when the latest candle can confirm it.
+    candidate_index = -2 if float(frame["close"].iloc[-1]) > float(frame["high"].iloc[-2]) else -1
+    candle = frame.iloc[candidate_index]
+    prior = frame.iloc[:candidate_index]["close"]
+    body = abs(float(candle["close"] - candle["open"]))
+    lower = float(min(candle["open"], candle["close"]) - candle["low"])
+    upper = float(candle["high"] - max(candle["open"], candle["close"]))
+    candle_range = float(candle["high"] - candle["low"])
+    if candle_range <= 0:
+        return {**unknown, "reason": "Latest candle has no valid trading range."}
+    # A tiny body is handled with a range-relative floor to avoid division by zero.
+    body_floor = max(body, candle_range * 0.01)
+    ratio = lower / body_floor
+    small_body = body <= candle_range * 0.35
+    long_lower = lower >= 2.0 * body_floor
+    tiny_upper = upper <= max(body_floor * 0.25, candle_range * 0.05)
+    downtrend = bool(
+        len(prior) >= 5
+        and float(prior.iloc[0]) > float(prior.iloc[-1])
+        and float(prior.iloc[-1]) <= float(prior.max()) * 0.99
+    )
+    is_hammer = bool(downtrend and small_body and long_lower and tiny_upper)
+    confirmation = (
+        "CONFIRMED" if is_hammer and candidate_index == -2
+        else "PENDING" if is_hammer
+        else "NOT_APPLICABLE"
+    )
+    return {
+        "status": "SETUP" if is_hammer else "NOT_DETECTED",
+        "pattern": "HAMMER" if is_hammer else "NONE",
+        "direction": "BULLISH" if is_hammer else "NONE",
+        "body": round(body, 10),
+        "lower_shadow": round(lower, 10),
+        "upper_shadow": round(upper, 10),
+        "lower_shadow_body_ratio": round(ratio, 3),
+        "small_body": small_body,
+        "long_lower_shadow": long_lower,
+        "small_upper_shadow": tiny_upper,
+        "preceding_downtrend": downtrend,
+        "confirmation": confirmation,
+        "reason": (
+            "Hammer geometry detected after a preceding downtrend; subsequent close above hammer high confirms the setup." if confirmation == "CONFIRMED" else "Hammer geometry detected after a preceding downtrend; wait for a later candle to close above the hammer high."
+            if is_hammer else
+            "No valid hammer: downtrend, small body, lower-shadow ratio, and small upper shadow must all qualify."
+        ),
+        "hammer_time": str(frame.index[candidate_index]) if is_hammer else None,
+        "hammer_high": float(candle["high"]) if is_hammer else None,
+        "hammer_low": float(candle["low"]) if is_hammer else None,
+        "confidence_semantics": "Pattern setup only; not a probability or trade recommendation.",
+    }
+
+
 def monitor_chart_patterns(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
     """Detect triangle structures from close-only, confirmed non-repainting pivots."""
     if not isinstance(candles, pd.DataFrame) or "close" not in candles:
@@ -181,6 +260,7 @@ def monitor_chart_patterns(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
     values = close.to_numpy(dtype=float)
     if close.isna().any() or not np.isfinite(values).all() or (values <= 0).any():
         return _unknown("Candle closes contain missing, non-finite, or non-positive values.")
+    hammer = detect_hammer_candlestick(candles)
     wave = monitor_elliott_waves(candles)
     result = classify_confirmed_pivots(
         wave.get("pivots", []), float(values[-1]), len(candles) - 1
@@ -190,4 +270,5 @@ def monitor_chart_patterns(candles: Optional[pd.DataFrame]) -> dict[str, Any]:
     result["breakout_volume_ratio"] = confirmation.get("volume_ratio")
     result["breakout_close_location"] = confirmation.get("close_location")
     result["breakout_confirmation_reason"] = confirmation.get("reason")
+    result["candlestick_pattern"] = hammer
     return result

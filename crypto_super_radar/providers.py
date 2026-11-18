@@ -806,28 +806,188 @@ class PerpetualMarketProvider:
             raise DataProviderError(f"Bybit Linear returned incomplete ticker for {symbol}")
         return {**values, "raw": item}
 
-    def execution_snapshot(self, symbol: str) -> Dict[str, Any]:
-        """Return independently checked USD-M/Bybit mark, funding and top-of-book data."""
+    def _gate_okx_execution_snapshot(
+        self, symbol: str, *, fallback_reason: str
+    ) -> Dict[str, Any]:
+        """Build a two-venue public-data snapshot when Binance/Bybit are IP-blocked."""
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            binance_book_future = executor.submit(
-                self.http.get, f"{self.BINANCE}/fapi/v1/ticker/bookTicker", {"symbol": symbol}
+        normalized = str(symbol or "").strip().upper()
+        if not normalized.endswith("USDT") or len(normalized) <= 4:
+            raise DataProviderError("Gate.io/OKX fallback supports only USDT-margined symbols")
+        base = normalized[:-4]
+        contract = f"{base}_USDT"
+        instrument = f"{base}-USDT-SWAP"
+        index_instrument = f"{base}-USDT"
+
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            gate_ticker_future = executor.submit(
+                self.http.get, f"{self.GATE}/futures/usdt/tickers", {"contract": contract}
             )
-            binance_mark_future = executor.submit(
-                self.http.get, f"{self.BINANCE}/fapi/v1/premiumIndex", {"symbol": symbol}
+            gate_book_future = executor.submit(
+                self.http.get, f"{self.GATE}/futures/usdt/order_book",
+                {"contract": contract, "limit": 1, "with_id": "true"},
             )
-            binance_oi_future = executor.submit(
-                self.http.get, f"{self.BINANCE}/fapi/v1/openInterest", {"symbol": symbol}
+            okx_ticker_future = executor.submit(
+                self.http.get, f"{self.OKX}/market/ticker", {"instId": instrument}
             )
-            bybit_future = executor.submit(
-                self.http.get, f"{self.BYBIT}/v5/market/tickers",
-                {"category": "linear", "symbol": symbol},
+            okx_mark_future = executor.submit(
+                self.http.get, f"{self.OKX}/public/mark-price",
+                {"instType": "SWAP", "instId": instrument},
             )
-            book = binance_book_future.result()
-            premium = binance_mark_future.result()
-            binance_oi = binance_oi_future.result()
-            bybit_payload = bybit_future.result()
+            okx_index_future = executor.submit(
+                self.http.get, f"{self.OKX}/market/index-tickers", {"instId": index_instrument}
+            )
+            okx_funding_future = executor.submit(
+                self.http.get, f"{self.OKX}/public/funding-rate", {"instId": instrument}
+            )
+            okx_oi_future = executor.submit(
+                self.http.get, f"{self.OKX}/public/open-interest",
+                {"instType": "SWAP", "instId": instrument},
+            )
+            gate_tickers = gate_ticker_future.result()
+            gate_book = gate_book_future.result()
+            okx_ticker_payload = okx_ticker_future.result()
+            okx_mark_payload = okx_mark_future.result()
+            okx_index_payload = okx_index_future.result()
+            okx_funding_payload = okx_funding_future.result()
+            okx_oi_payload = okx_oi_future.result()
+
+        if not isinstance(gate_tickers, list) or len(gate_tickers) != 1 or not isinstance(gate_tickers[0], dict):
+            raise DataProviderError(f"Gate.io fallback returned no unique futures ticker for {contract}")
+        gate = gate_tickers[0]
+        if gate.get("contract") != contract:
+            raise DataProviderError(f"Gate.io futures contract mismatch for {contract}")
+        if not isinstance(gate_book, dict):
+            raise DataProviderError("Gate.io futures order book returned an invalid schema")
+        gate_bids, gate_asks = gate_book.get("bids"), gate_book.get("asks")
+        if not isinstance(gate_bids, list) or not gate_bids or not isinstance(gate_bids[0], dict):
+            raise DataProviderError("Gate.io futures order book has no valid best bid")
+        if not isinstance(gate_asks, list) or not gate_asks or not isinstance(gate_asks[0], dict):
+            raise DataProviderError("Gate.io futures order book has no valid best ask")
+
+        def okx_row(payload: Any, label: str) -> Dict[str, Any]:
+            if not isinstance(payload, dict) or payload.get("code") != "0":
+                raise DataProviderError(f"OKX {label} endpoint returned an API error")
+            rows = payload.get("data")
+            if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+                raise DataProviderError(f"OKX {label} endpoint returned no unique instrument row")
+            return rows[0]
+
+        okx_ticker = okx_row(okx_ticker_payload, "ticker")
+        okx_mark = okx_row(okx_mark_payload, "mark-price")
+        okx_index = okx_row(okx_index_payload, "index-ticker")
+        okx_funding = okx_row(okx_funding_payload, "funding-rate")
+        okx_oi = okx_row(okx_oi_payload, "open-interest")
+        for row, expected, label in (
+            (okx_ticker, instrument, "ticker"),
+            (okx_mark, instrument, "mark-price"),
+            (okx_funding, instrument, "funding-rate"),
+            (okx_oi, instrument, "open-interest"),
+            (okx_index, index_instrument, "index-ticker"),
+        ):
+            if row.get("instId") != expected:
+                raise DataProviderError(f"OKX {label} instrument mismatch for {expected}")
+
+        values = {
+            "gate_mark": _positive_float(gate.get("mark_price")),
+            "gate_index": _positive_float(gate.get("index_price")),
+            "gate_funding": _finite_float(gate.get("funding_rate")),
+            "gate_open_interest": _positive_float(gate.get("total_size")),
+            "gate_bid": _positive_float(gate_bids[0].get("p")),
+            "gate_ask": _positive_float(gate_asks[0].get("p")),
+            "gate_book_time": _positive_float(gate_book.get("current") or gate_book.get("update")),
+            "okx_mark": _positive_float(okx_mark.get("markPx")),
+            "okx_index": _positive_float(okx_index.get("idxPx")),
+            "okx_funding": _finite_float(okx_funding.get("fundingRate")),
+            "okx_open_interest": _positive_float(okx_oi.get("oi")),
+            "okx_bid": _positive_float(okx_ticker.get("bidPx")),
+            "okx_ask": _positive_float(okx_ticker.get("askPx")),
+            "okx_ticker_time": _positive_float(okx_ticker.get("ts")),
+            "okx_mark_time": _positive_float(okx_mark.get("ts")),
+            "okx_index_time": _positive_float(okx_index.get("ts")),
+            "okx_oi_time": _positive_float(okx_oi.get("ts")),
+        }
+        if any(value is None for value in values.values()):
+            missing = sorted(key for key, value in values.items() if value is None)
+            raise DataProviderError("Gate.io/OKX execution snapshot is incomplete: " + ", ".join(missing))
+        if values["gate_ask"] < values["gate_bid"] or values["okx_ask"] < values["okx_bid"]:
+            raise DataProviderError("Gate.io or OKX returned a crossed futures order book")
+        now_ms = int(time.time() * 1000)
+        timestamp_values = [
+            int(values["gate_book_time"] * 1000),
+            int(values["okx_ticker_time"]),
+            int(values["okx_mark_time"]),
+            int(values["okx_index_time"]),
+            int(values["okx_oi_time"]),
+        ]
+        if any(ts > now_ms + 5_000 or now_ms - ts > 120_000 for ts in timestamp_values):
+            raise DataProviderError("Gate.io/OKX futures quote or reference data is stale")
+        mark_discrepancy = relative_difference_pct(values["gate_mark"], values["okx_mark"])
+        index_discrepancy = relative_difference_pct(values["gate_index"], values["okx_index"])
+        funding_discrepancy = abs(values["gate_funding"] - values["okx_funding"])
+        if mark_discrepancy > self.http.config.thresholds.provider_discrepancy_pct:
+            raise DataProviderError("Gate.io/OKX mark-price discrepancy is above the configured limit")
+        if index_discrepancy > self.http.config.thresholds.provider_discrepancy_pct:
+            raise DataProviderError("Gate.io/OKX index-price discrepancy is above the configured limit")
+        if funding_discrepancy > 0.0002:
+            raise DataProviderError("Gate.io/OKX funding-rate discrepancy exceeds 2 bps")
+
+        funding_interval = self.funding_interval_hours(normalized)
+        if not math.isfinite(funding_interval) or funding_interval <= 0:
+            raise DataProviderError("Gate.io/OKX funding settlement interval is invalid")
+        best_bid = max(values["gate_bid"], values["okx_bid"])
+        best_ask = min(values["gate_ask"], values["okx_ask"])
+        if best_ask < best_bid:
+            raise DataProviderError("Gate.io/OKX cross-venue best bid/ask is crossed")
+        return {
+            "status": "PASS",
+            "symbol": normalized,
+            "mark_price": (values["gate_mark"] + values["okx_mark"]) / 2.0,
+            "index_price": (values["gate_index"] + values["okx_index"]) / 2.0,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "funding_rate": (values["gate_funding"] + values["okx_funding"]) / 2.0,
+            "funding_interval_hours": funding_interval,
+            "open_interest_binance": values["gate_open_interest"],
+            "open_interest_bybit": values["okx_open_interest"],
+            "mark_price_discrepancy_pct": mark_discrepancy,
+            "index_price_discrepancy_pct": index_discrepancy,
+            "funding_rate_discrepancy": funding_discrepancy,
+            "timestamp_ms": min(timestamp_values),
+            "sources": ["Gate.io USDT Perpetual", "OKX USDT Swap"],
+            "provider_fallback_reason": str(fallback_reason)[:240],
+            "next_funding_time_ms": _positive_float(okx_funding.get("nextFundingTime")),
+            "quote_quality": "OBSERVED_CROSS_VENUE_FALLBACK",
+        }
+
+    def execution_snapshot(self, symbol: str) -> Dict[str, Any]:
+        """Return independently checked perpetual data, with a strict regional fallback."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        try:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                binance_book_future = executor.submit(
+                    self.http.get, f"{self.BINANCE}/fapi/v1/ticker/bookTicker", {"symbol": symbol}
+                )
+                binance_mark_future = executor.submit(
+                    self.http.get, f"{self.BINANCE}/fapi/v1/premiumIndex", {"symbol": symbol}
+                )
+                binance_oi_future = executor.submit(
+                    self.http.get, f"{self.BINANCE}/fapi/v1/openInterest", {"symbol": symbol}
+                )
+                bybit_future = executor.submit(
+                    self.http.get, f"{self.BYBIT}/v5/market/tickers",
+                    {"category": "linear", "symbol": symbol},
+                )
+                book = binance_book_future.result()
+                premium = binance_mark_future.result()
+                binance_oi = binance_oi_future.result()
+                bybit_payload = bybit_future.result()
+        except DataProviderError as exc:
+            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                raise
+            return self._gate_okx_execution_snapshot(symbol, fallback_reason=str(exc))
 
         if not isinstance(book, dict) or not isinstance(premium, dict) or not isinstance(binance_oi, dict):
             raise DataProviderError("Binance perpetual order-book/mark response has an invalid schema")

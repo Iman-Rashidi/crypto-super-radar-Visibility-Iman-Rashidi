@@ -9,8 +9,12 @@ from unittest.mock import patch
 from crypto_super_radar.ai_second_opinion import (
     DEFAULT_FREE_MODEL,
     MAX_REQUESTS_PER_MINUTE,
+    _extract_json,
+    _observer_message_text,
     ai_connection_status,
     run_free_ai_second_opinion,
+    run_challenge1_observer_reviews,
+    run_openrouter_connection_diagnostic,
 )
 from crypto_super_radar.models import AssetSpec, Signal
 
@@ -65,12 +69,15 @@ def valid_document(rating="Buy", risk_verdict="APPROVE", portfolio_verdict="APPR
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, document=None):
+    def __init__(self, status_code=200, document=None, model=DEFAULT_FREE_MODEL):
         self.status_code = status_code
         self.document = document or {}
+        self.model = model
 
     def json(self):
         return {
+            "model": self.model,
+            "usage": {"total_tokens": 99},
             "choices": [{
                 "message": {"content": json.dumps(self.document, ensure_ascii=False)}
             }]
@@ -99,6 +106,124 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(status["model"], DEFAULT_FREE_MODEL)
         self.assertTrue(status["model"].endswith(":free"))
 
+    def test_connection_diagnostic_verifies_model_and_never_returns_secret(self):
+        captured = {}
+        marker = "CSR_NEMOTRON_PROBE_OK"
+
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({"probe": marker})
+                        }
+                    }],
+                    "usage": {"total_tokens": 12},
+                }
+
+        def fake_post(url, headers, json: dict, timeout, allow_redirects=False):
+            captured.update({
+                "url": url, "headers": headers, "payload": json,
+                "timeout": timeout, "allow_redirects": allow_redirects,
+            })
+            return DiagnosticResponse()
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(http_post=fake_post)
+
+        self.assertEqual(result["status"], "CONNECTED")
+        self.assertTrue(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertFalse(result["orders_submitted"])
+        self.assertNotIn("diagnostic-secret", json.dumps(result))
+        self.assertEqual(captured["payload"]["model"], DEFAULT_FREE_MODEL)
+        self.assertEqual(captured["payload"]["max_tokens"], 128)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer diagnostic-secret")
+        self.assertFalse(captured["allow_redirects"])
+        prompt = json.dumps(captured["payload"], ensure_ascii=False)
+        self.assertNotIn("wallet", prompt.lower())
+        self.assertNotIn("blofin", prompt.lower())
+
+    def test_connection_diagnostic_accepts_plain_text_and_content_blocks(self):
+        marker = "CSR_NEMOTRON_PROBE_OK"
+
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "analysis omitted"},
+                                {"type": "text", "text": marker},
+                            ]
+                        }
+                    }],
+                    "usage": {"total_tokens": 22},
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(
+                http_post=lambda *args, **kwargs: DiagnosticResponse()
+            )
+        self.assertEqual(result["status"], "CONNECTED")
+        self.assertTrue(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("diagnostic-secret", json.dumps(result))
+
+    def test_connection_diagnostic_reports_safe_reason_when_marker_is_missing(self):
+        class DiagnosticResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{"message": {"content": "No token returned."}}],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+            result = run_openrouter_connection_diagnostic(
+                http_post=lambda *args, **kwargs: DiagnosticResponse()
+            )
+        self.assertEqual(result["status"], "INVALID_RESPONSE")
+        self.assertEqual(result["error_type"], "MARKER_NOT_RETURNED")
+        self.assertFalse(result["paper_entry_eligible"])
+        self.assertNotIn("No token returned", json.dumps(result))
+
+    def test_connection_diagnostic_never_calls_provider_without_key(self):
+        called = []
+
+        def fake_post(*args, **kwargs):
+            called.append(True)
+            raise AssertionError("Provider must not be called without a key")
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = run_openrouter_connection_diagnostic(http_post=fake_post)
+
+        self.assertEqual(result["status"], "MISSING_API_KEY")
+        self.assertFalse(called)
+        self.assertFalse(result["paper_entry_eligible"])
+
+    def test_connection_diagnostic_maps_invalid_key_and_rate_limit(self):
+        class ErrorResponse:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        for code, expected in ((401, "INVALID_API_KEY"), (429, "RATE_LIMITED")):
+            with self.subTest(code=code):
+                with patch.dict(os.environ, {"OPENROUTER_API_KEY": "diagnostic-secret"}, clear=True):
+                    result = run_openrouter_connection_diagnostic(
+                        http_post=lambda *args, _code=code, **kwargs: ErrorResponse(_code)
+                    )
+                self.assertEqual(result["status"], expected)
+                self.assertFalse(result["paper_entry_eligible"])
+                self.assertNotIn("diagnostic-secret", json.dumps(result))
+
     def test_approved_ai_response_is_accepted_and_sends_only_public_data(self):
         captured = {}
 
@@ -123,6 +248,49 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertNotIn("must-not-send-list-values", prompt)
         self.assertNotIn("ignore previous instructions", prompt)
         self.assertFalse(captured["allow_redirects"])
+
+    def test_bypass_cache_forces_fresh_request_and_reports_verified_telemetry(self):
+        captured = []
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.append(json)
+            return FakeResponse(document=valid_document())
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            first = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+            second = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+
+        self.assertEqual(first["status"], "APPROVED")
+        self.assertEqual(second["status"], "APPROVED")
+        self.assertEqual(len(captured), 2)
+        self.assertTrue(second["model_verified"])
+        self.assertTrue(second["response_validated"])
+        self.assertEqual(second["returned_model"], DEFAULT_FREE_MODEL)
+        self.assertEqual(second["http_status"], 200)
+        self.assertEqual(second["total_tokens"], 99)
+        self.assertIn("latency_ms", second)
+
+    def test_full_review_rejects_returned_model_mismatch(self):
+        class MismatchedResponse(FakeResponse):
+            def json(self):
+                body = super().json()
+                body["model"] = "other/provider:free"
+                return body
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: MismatchedResponse(document=valid_document()),
+                bypass_cache=True,
+            )
+        self.assertEqual(result["status"], "MODEL_MISMATCH")
+        self.assertFalse(result["model_verified"])
+        self.assertFalse(result["paper_entry_eligible"])
 
     def test_more_than_eight_risk_flags_cannot_be_ignored(self):
         document = valid_document()
@@ -206,7 +374,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
 
         def fake_post(url, headers, json, timeout, allow_redirects=False):
             models.append(json["model"])
-            return FakeResponse(document=valid_document())
+            return FakeResponse(document=valid_document(), model=json["model"])
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
             first = run_free_ai_second_opinion(
@@ -260,3 +428,170 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(calls["count"], 0)
+
+
+    def test_challenge1_two_supervisors_are_live_post_decision_observers(self):
+        challenge_record = {
+            "signal": "LONG",
+            "instrument_id": "BTC-USDT",
+            "entry_price_usd": 100.0,
+            "stop_loss_usd": 99.0,
+            "take_profit_usd": 101.0,
+            "reason_fa": "الگوی صعودی در کندل بسته تأیید شد.",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "context_timeframe": "1H",
+                "completed_candles_only": True,
+                "chosen_pattern": {
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                },
+                "detected_patterns": [{
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                }],
+                "context_patterns": [],
+                "volume_confirmation": {"confirmed": False, "volume_ratio": 0.7},
+                "candles_5m": [{
+                    "time_utc": "2026-11-18T15:00:00Z",
+                    "open": 99.0, "high": 101.0, "low": 98.5,
+                    "close": 100.5, "volume": 1000,
+                }],
+                "candles_1h": [],
+            },
+        }
+        calls = []
+        document = {
+            "verdict": "SUPPORTS_DECISION",
+            "reason_fa": "شواهد کندل بسته با جهت ثبت‌شده همسو است.",
+            "observations": ["حجم در این چرخه پایین‌تر از مرجع ثبت شده است."],
+            "risk_flags": [],
+        }
+
+        class ObserverResponse:
+            status_code = 200
+
+            def __init__(self, model):
+                self.model = model
+
+            def json(self):
+                return {
+                    "model": self.model,
+                    "choices": [{"message": {"content": json.dumps(document, ensure_ascii=False)}}],
+                }
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            calls.append((url, json))
+            model = DEFAULT_FREE_MODEL if "openrouter.ai" in url else "qwen/qwen3.8-27b"
+            return ObserverResponse(model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-observer-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-second-key",
+            "CSR_SECOND_AI_PROVIDER": "groq",
+            "CSR_SECOND_AI_MODEL": "qwen/qwen3.8-27b",
+            "CSR_SECOND_AI_API_URL": "https://api.groq.com/openai/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("crypto_super_radar.ai_second_opinion.requests.post", side_effect=fake_post):
+                audit = run_challenge1_observer_reviews(
+                    challenge_record,
+                    {
+                        "instrument_id": "BTC-USDT",
+                        "execution_status": "FILLED",
+                        "order_id": "demo-order-1",
+                        "position_id": "demo-position-1",
+                        "average_fill_price": 100.2,
+                        "filled_size": 0.1,
+                        "position": {
+                            "instId": "BTC-USDT",
+                            "positionSide": "net",
+                            "positions": "0.1",
+                            "averagePrice": "100.2",
+                            "markPrice": "100.4",
+                            "unrealizedPnl": "0.02",
+                        },
+                    },
+                )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(audit["consensus"], "AGREEMENT")
+        self.assertFalse(audit["entry_gate_enforced"])
+        self.assertEqual(audit["execution_effect"], "NONE")
+        self.assertTrue(all(item["status"] == "REVIEWED" for item in audit["reviewers"]))
+        self.assertTrue(all(item["response_validated"] for item in audit["reviewers"]))
+        self.assertTrue(all(item["model_verified"] for item in audit["reviewers"]))
+        self.assertTrue(all(item["entry_gate_enforced"] is False for item in audit["reviewers"]))
+        sent_prompts = [call[1]["messages"][1]["content"] for call in calls]
+        self.assertTrue(all('"setup_timeframe":"5m"' in prompt for prompt in sent_prompts))
+        self.assertTrue(all('"completed_candles_only":true' in prompt for prompt in sent_prompts))
+        self.assertTrue(all("demo-position-1" not in prompt for prompt in sent_prompts))
+        self.assertTrue(all("OPENROUTER_API_KEY" not in prompt for prompt in sent_prompts))
+
+    def test_challenge1_observer_records_missing_second_supervisor_without_gating(self):
+        challenge_record = {
+            "signal": "NO_TRADE",
+            "instrument_id": "ETH-USDT",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "chosen_pattern": None,
+                "detected_patterns": [],
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        class ObserverResponse:
+            status_code = 200
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{"message": {"content": json.dumps({
+                        "verdict": "INSUFFICIENT_DATA",
+                        "reason_fa": "برای این کندل الگوی انتخاب‌شده ثبت نشده است.",
+                        "observations": [], "risk_flags": [],
+                    }, ensure_ascii=False)}}],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "primary-only"}, clear=True):
+            with patch("crypto_super_radar.ai_second_opinion.requests.post", return_value=ObserverResponse()):
+                audit = run_challenge1_observer_reviews(challenge_record)
+
+        self.assertEqual(audit["consensus"], "SINGLE_REVIEWER")
+        self.assertFalse(audit["entry_gate_enforced"])
+        self.assertEqual(audit["reviewers"][0]["status"], "REVIEWED")
+        self.assertEqual(audit["reviewers"][1]["status"], "NOT_CONFIGURED")
+        self.assertFalse(audit["reviewers"][1]["request_attempted"])
+
+
+
+    def test_observer_json_parser_accepts_fenced_json_with_leading_text(self):
+        fence = chr(96) * 3
+        result = _extract_json(
+            'Review result:\n' + fence + 'json\n'
+            + '{"verdict":"SUPPORTS_DECISION",'
+            + '"reason_fa":"شواهد ثبت‌شده همسو هستند.",'
+            + '"observations":[],"risk_flags":[]}\n' + fence
+        )
+        self.assertEqual(result["verdict"], "SUPPORTS_DECISION")
+
+    def test_observer_message_parser_handles_openai_structured_content(self):
+        text = _observer_message_text(
+            {"content": [
+                {"type": "output_text", "text": '{"verdict":"CONCERNS",'},
+                {"type": "text", "text": '"reason_fa":"ریسک مشخص وجود دارد."}'},
+            ]},
+            {},
+        )
+        parsed = _extract_json(text)
+        self.assertEqual(parsed["verdict"], "CONCERNS")
+
+    def test_observer_message_parser_rejects_missing_text_without_echoing_raw_body(self):
+        with self.assertRaisesRegex(ValueError, "OBSERVER_CONTENT_MISSING"):
+            _observer_message_text({"content": None}, {"finish_reason": "length"})
+
