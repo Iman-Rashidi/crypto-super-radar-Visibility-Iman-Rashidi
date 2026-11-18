@@ -9946,7 +9946,13 @@ def _run_challenge1_observer_job(
             else result.get("filled_size")
         ),
         "position": position,
+        "audit_phase": str(
+            result.get("audit_phase") or snapshot.get("audit_phase") or "ENTRY"
+        ).upper(),
+        "close_context": result.get("close_context"),
+        "exit_history": result.get("exit_history"),
     }
+    audit_phase = context["audit_phase"]
 
     # A REQUESTED row is not proof that a model result exists. On restart, replay
     # only reviewers whose durable RESULT event is still absent.
@@ -9993,6 +9999,12 @@ def _run_challenge1_observer_job(
                 current["observer_audit_completed_at_utc"] = audit["completed_at_utc"]
                 current["observer_audit_effect"] = "NONE"
                 BLOFIN_EXECUTION_JOBS[job_id] = current
+        recovered_queue = _queue_challenge1_observer_events(
+            job_id, instrument_id, snapshot, reviews, phase="RESULT",
+            audit_phase=audit_phase,
+        )
+        if recovered_queue.get("status") != "QUEUED":
+            _release_challenge1_observer_retry(job_id)
         return
 
     observer_config = ai_connection_status().get("challenge1_observers", {})
@@ -10017,6 +10029,7 @@ def _run_challenge1_observer_job(
         })
     request_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, requested, phase="REQUESTED",
+        audit_phase=audit_phase,
     )
     # A duplicate REQUESTED event is expected during recovery. Only a storage
     # failure prevents the provider call; queued=0 alone is not a failure.
@@ -10075,7 +10088,8 @@ def _run_challenge1_observer_job(
             BLOFIN_EXECUTION_JOBS[job_id] = current
     # Queue only newly obtained results. Persisted results are never overwritten.
     result_queue = _queue_challenge1_observer_events(
-        job_id, instrument_id, snapshot, new_reviews, phase="RESULT",
+        job_id, instrument_id, snapshot, reviews, phase="RESULT",
+        audit_phase=audit_phase,
     )
     if result_queue.get("status") != "QUEUED":
         _release_challenge1_observer_retry(job_id)
