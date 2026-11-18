@@ -8212,31 +8212,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                     finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 summary = _blofin_autopilot_cycle_summary(finished_job)
                 finished_result = finished_job.get("result") if isinstance(finished_job.get("result"), dict) else {}
-                review_rows = finished_job.get("ai_reviews")
-                if not isinstance(review_rows, list):
-                    review_rows = finished_result.get("ai_reviews")
-                ai_review_summary = []
-                for review_row in review_rows if isinstance(review_rows, list) else []:
-                    if not isinstance(review_row, dict):
-                        continue
-                    review_payload = review_row.get("review")
-                    review_payload = review_payload if isinstance(review_payload, dict) else review_row
-                    ai_review_summary.append({
-                        "reviewer_id": review_row.get("reviewer_id") or review_payload.get("reviewer_id"),
-                        "provider": review_payload.get("provider"),
-                        "model": review_payload.get("model") or review_payload.get("configured_model"),
-                        "returned_model": review_payload.get("returned_model"),
-                        "status": review_payload.get("status") or "UNKNOWN",
-                        "request_attempted": review_payload.get("request_attempted"),
-                        "response_source": review_payload.get("response_source"),
-                        "response_validated": review_payload.get("response_validated"),
-                        "model_verified": review_payload.get("model_verified"),
-                        "requested_at_utc": review_payload.get("requested_at_utc") or review_payload.get("request_started_at_utc"),
-                        "completed_at_utc": review_payload.get("completed_at_utc"),
-                        "http_status": review_payload.get("http_status"),
-                        "latency_ms": review_payload.get("latency_ms"),
-                        "error_type": review_payload.get("error_type"),
-                    })
+                ai_review_summary = _blofin_ai_review_summary(finished_job)
                 batch_results.append({
                     "instrument_id": instrument_id,
                     "job_id": job_id,
@@ -8631,6 +8607,37 @@ def _demo_ai_review_approved(review: Any) -> bool:
         and bool(str(review.get("model") or "").strip())
         and bool(str(review.get("returned_model") or "").strip())
     )
+
+def _blofin_ai_review_summary(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose reviewer verification metadata without leaking prompts or credentials."""
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    review_rows = job.get("ai_reviews")
+    if not isinstance(review_rows, list):
+        review_rows = result.get("ai_reviews")
+    summary: list[dict[str, Any]] = []
+    for review_row in review_rows if isinstance(review_rows, list) else []:
+        if not isinstance(review_row, dict):
+            continue
+        review_payload = review_row.get("review")
+        review_payload = review_payload if isinstance(review_payload, dict) else review_row
+        summary.append({
+            "reviewer_id": review_row.get("reviewer_id") or review_payload.get("reviewer_id"),
+            "provider": review_payload.get("provider"),
+            "model": review_payload.get("model") or review_payload.get("configured_model"),
+            "returned_model": review_payload.get("returned_model"),
+            "status": review_payload.get("status") or "UNKNOWN",
+            "request_attempted": review_payload.get("request_attempted"),
+            "response_source": review_payload.get("response_source"),
+            "response_validated": review_payload.get("response_validated"),
+            "model_verified": review_payload.get("model_verified"),
+            "requested_at_utc": review_payload.get("requested_at_utc") or review_payload.get("request_started_at_utc"),
+            "completed_at_utc": review_payload.get("completed_at_utc"),
+            "http_status": review_payload.get("http_status"),
+            "latency_ms": review_payload.get("latency_ms"),
+            "error_type": review_payload.get("error_type"),
+        })
+    return summary
+
 
 def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict[str, Any]:
     """Queue the final Demo event and activity projections for manual and AutoPilot jobs."""
