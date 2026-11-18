@@ -9896,6 +9896,8 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             "paper_entry_eligible": review.get("paper_entry_eligible"),
             "native_council": review.get("native_council"),
             "error_type": review.get("error_type"),
+            "error_code": review.get("error_code"),
+            "error_message": str(review.get("error_message") or "")[:500],
             "consensus": consensus,
         }
         events.append({
