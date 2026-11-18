@@ -93,9 +93,13 @@ class NotionEventOutbox:
                 last_error_type TEXT,
                 last_http_status INTEGER,
                 notion_page_id TEXT,
-                synced_at_utc TEXT
+                synced_at_utc TEXT,
+                sync_to_notion INTEGER NOT NULL DEFAULT 1
             )
         """)
+        columns = {str(row["name"]) for row in self._db.execute("PRAGMA table_info(csr_notion_event_outbox)").fetchall()}
+        if "sync_to_notion" not in columns:
+            self._db.execute("ALTER TABLE csr_notion_event_outbox ADD COLUMN sync_to_notion INTEGER NOT NULL DEFAULT 1")
         self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_csr_notion_outbox_pending
             ON csr_notion_event_outbox(sync_status, next_attempt_at, created_at_utc)
@@ -120,12 +124,17 @@ class NotionEventOutbox:
             if payload.get("ai_model") != safe_model:
                 payload["ai_model"] = safe_model
                 changed = True
-            for field in (
-                "ai_analysis", "ai_suggestion", "reason", "details", "ai_provider",
-            ):
+            field_limits = {
+                "ai_analysis": 3600,
+                "ai_suggestion": 1800,
+                "reason": 1800,
+                "details": 12000,
+                "ai_provider": 120,
+            }
+            for field, limit in field_limits.items():
                 value = payload.get(field)
                 if isinstance(value, str):
-                    scrubbed = _redact_secret_text(value, 1800)
+                    scrubbed = _redact_secret_text(value, limit)
                     if scrubbed != value:
                         payload[field] = scrubbed
                         changed = True
@@ -171,10 +180,10 @@ class NotionEventOutbox:
             "ai_decision": decision,
             "ai_provider": _redact_secret_text(event.get("ai_provider"), 120),
             "ai_model": _safe_model_id(event.get("ai_model")),
-            "ai_analysis": _redact_secret_text(event.get("ai_analysis"), 1800),
+            "ai_analysis": _redact_secret_text(event.get("ai_analysis"), 3600),
             "ai_suggestion": _redact_secret_text(event.get("ai_suggestion"), 1800),
             "reason": _redact_secret_text(event.get("reason"), 1800),
-            "details": _redact_secret_text(event.get("details"), 1800),
+            "details": _redact_secret_text(event.get("details"), 12000),
             "experience_id": _text(event.get("experience_id"), 180),
             "order_id": _text(event.get("order_id"), 180),
             "position_id": _text(event.get("position_id"), 180),
@@ -184,22 +193,49 @@ class NotionEventOutbox:
             payload["source_url"] = ""
         return payload
 
-    def enqueue(self, event: Mapping[str, Any]) -> bool:
-        """Append an immutable event and an outbox item atomically; duplicates are no-ops."""
+    def enqueue(
+        self, event: Mapping[str, Any], *, sync_to_notion: bool = True,
+        replace: bool = False,
+    ) -> bool:
+        """Persist a reviewer result locally or refresh the single aggregated Notion report."""
         payload = self.normalize_event(event)
         now = _utc()
+        sync_flag = 1 if sync_to_notion else 0
+        sync_status = "PENDING" if sync_to_notion else "LOCAL_ONLY"
         with self._db:
-            cursor = self._db.execute(
-                """INSERT OR IGNORE INTO csr_notion_event_outbox
-                   (event_id, payload_json, created_at_utc, attempts, next_attempt_at, sync_status)
-                   VALUES (?, ?, ?, 0, 0, 'PENDING')""",
-                (payload["event_id"], _canonical(payload), now),
-            )
+            if replace:
+                cursor = self._db.execute(
+                    """INSERT INTO csr_notion_event_outbox
+                       (event_id, payload_json, created_at_utc, attempts, next_attempt_at,
+                        sync_status, sync_to_notion)
+                       VALUES (?, ?, ?, 0, 0, ?, ?)
+                       ON CONFLICT(event_id) DO UPDATE SET
+                         payload_json=excluded.payload_json,
+                         attempts=0,
+                         next_attempt_at=0,
+                         sync_status=excluded.sync_status,
+                         sync_to_notion=excluded.sync_to_notion,
+                         last_error_type=NULL,
+                         last_http_status=NULL,
+                         synced_at_utc=NULL""",
+                    (payload["event_id"], _canonical(payload), now, sync_status, sync_flag),
+                )
+            else:
+                cursor = self._db.execute(
+                    """INSERT OR IGNORE INTO csr_notion_event_outbox
+                       (event_id, payload_json, created_at_utc, attempts, next_attempt_at,
+                        sync_status, sync_to_notion)
+                       VALUES (?, ?, ?, 0, 0, ?, ?)""",
+                    (payload["event_id"], _canonical(payload), now, sync_status, sync_flag),
+                )
         return bool(getattr(cursor, "rowcount", 0))
 
     def _rich_text(self, value: str) -> dict[str, Any]:
-        value = _text(value, 1800)
-        return {"rich_text": [{"text": {"content": value}}]} if value else {"rich_text": []}
+        value = _text(value, 12000)
+        if not value:
+            return {"rich_text": []}
+        chunks = [value[index:index + 1800] for index in range(0, len(value), 1800)]
+        return {"rich_text": [{"type": "text", "text": {"content": chunk}} for chunk in chunks[:100]]}
 
     def _notion_properties(self, event: dict[str, Any], attempts: int) -> dict[str, Any]:
         title = f"{event['event_type']} · {event['symbol'] or 'BLOFIN DEMO'} · {event['event_id'][:24]}"
@@ -278,6 +314,15 @@ class NotionEventOutbox:
             raise RuntimeError("Notion create-page response omitted page ID")
         return _text(page_id, 80)
 
+    def _update_page(self, token: str, page_id: str, event: dict[str, Any], attempts: int) -> None:
+        response = requests.patch(
+            f"{NOTION_API_BASE}/pages/{page_id}",
+            headers=self._headers(token),
+            json={"properties": self._notion_properties(event, attempts)},
+            timeout=20,
+        )
+        response.raise_for_status()
+
     def flush_pending(self, *, limit: int = 10, now: int | None = None) -> dict[str, Any]:
         """Retry pending events. Safe to call after restarts; query-before-create avoids duplicates."""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -287,8 +332,9 @@ class NotionEventOutbox:
             return {"status": "NOT_CONFIGURED", "queued": self.pending_count(), "synced": 0, "failed": 0}
         current = int(time.time()) if now is None else int(now)
         rows = self._db.execute(
-            """SELECT event_id, payload_json, attempts FROM csr_notion_event_outbox
-               WHERE sync_status='PENDING' AND next_attempt_at<=?
+            """SELECT event_id, payload_json, attempts, notion_page_id
+               FROM csr_notion_event_outbox
+               WHERE sync_to_notion=1 AND sync_status='PENDING' AND next_attempt_at<=?
                ORDER BY created_at_utc ASC LIMIT ?""",
             (current, min(limit, 50)),
         ).fetchall()
@@ -298,9 +344,11 @@ class NotionEventOutbox:
             attempts = int(row["attempts"] or 0) + 1
             try:
                 event = json.loads(row["payload_json"])
-                page_id = self._find_existing_page(token, event_id)
+                page_id = _text(row["notion_page_id"], 80) or self._find_existing_page(token, event_id)
                 if page_id is None:
                     page_id = self._create_page(token, event, attempts)
+                else:
+                    self._update_page(token, page_id, event, attempts)
                 with self._db:
                     self._db.execute(
                         """UPDATE csr_notion_event_outbox SET
@@ -333,30 +381,123 @@ class NotionEventOutbox:
         snapshot.update({"synced_this_run": synced, "failed_this_run": failed})
         return snapshot
 
+    def get_event(self, event_id: str) -> dict[str, Any] | None:
+        """Read one durable event by its idempotency key, independent of Notion sync state."""
+        key = _text(event_id, 180)
+        if not key:
+            return None
+        row = self._db.execute(
+            """SELECT payload_json, created_at_utc, attempts, next_attempt_at,
+                      sync_status, last_error_type, last_http_status, notion_page_id,
+                      synced_at_utc, sync_to_notion
+               FROM csr_notion_event_outbox WHERE event_id=?""",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload["_outbox"] = {
+            "created_at_utc": row["created_at_utc"],
+            "attempts": int(row["attempts"] or 0),
+            "next_attempt_at": int(row["next_attempt_at"] or 0),
+            "sync_status": str(row["sync_status"] or ""),
+            "last_error_type": row["last_error_type"],
+            "last_http_status": row["last_http_status"],
+            "notion_page_id": row["notion_page_id"],
+            "synced_at_utc": row["synced_at_utc"],
+            "sync_to_notion": bool(row["sync_to_notion"]),
+        }
+        return payload
+
     def pending_count(self) -> int:
         row = self._db.execute(
-            "SELECT COUNT(*) FROM csr_notion_event_outbox WHERE sync_status='PENDING'"
+            "SELECT COUNT(*) FROM csr_notion_event_outbox WHERE sync_to_notion=1 AND sync_status='PENDING'"
         ).fetchone()
         return int(row[0] or 0)
 
     def status_snapshot(self) -> dict[str, Any]:
-        row = self._db.execute(
+        now = int(time.time())
+        totals = self._db.execute(
             """SELECT
-               SUM(CASE WHEN sync_status='PENDING' THEN 1 ELSE 0 END) AS pending,
-               SUM(CASE WHEN sync_status='SYNCED' THEN 1 ELSE 0 END) AS synced,
-               SUM(CASE WHEN sync_status='FAILED' THEN 1 ELSE 0 END) AS failed,
-               MAX(synced_at_utc) AS last_success_utc
-               FROM csr_notion_event_outbox"""
+               SUM(CASE WHEN sync_to_notion=1 AND sync_status='PENDING' THEN 1 ELSE 0 END) AS pending,
+               SUM(CASE WHEN sync_to_notion=1 AND sync_status='SYNCED' THEN 1 ELSE 0 END) AS synced,
+               SUM(CASE WHEN sync_to_notion=1 AND sync_status='FAILED' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN sync_to_notion=1 AND sync_status='PENDING' AND
+                    (attempts > 0 OR last_error_type IS NOT NULL OR last_http_status IS NOT NULL)
+                    THEN 1 ELSE 0 END) AS pending_with_errors,
+               SUM(CASE WHEN sync_to_notion=1 AND sync_status='PENDING' AND next_attempt_at > ?
+                    THEN 1 ELSE 0 END) AS pending_in_backoff,
+               SUM(CASE WHEN sync_to_notion=0 THEN 1 ELSE 0 END) AS local_only,
+               MAX(CASE WHEN sync_to_notion=1 THEN synced_at_utc ELSE NULL END) AS last_success_utc
+               FROM csr_notion_event_outbox""",
+            (now,),
         ).fetchone()
+        oldest = self._db.execute(
+            """SELECT created_at_utc, attempts, next_attempt_at,
+                      last_error_type, last_http_status
+               FROM csr_notion_event_outbox
+               WHERE sync_to_notion=1 AND sync_status='PENDING'
+               ORDER BY created_at_utc ASC LIMIT 1"""
+        ).fetchone()
+        oldest_error = self._db.execute(
+            """SELECT created_at_utc, attempts, next_attempt_at,
+                      last_error_type, last_http_status
+               FROM csr_notion_event_outbox
+               WHERE sync_to_notion=1 AND sync_status='PENDING'
+                 AND (last_error_type IS NOT NULL OR last_http_status IS NOT NULL)
+               ORDER BY created_at_utc ASC LIMIT 1"""
+        ).fetchone()
+
+        def retry_at(value: Any) -> str | None:
+            try:
+                epoch = int(value or 0)
+                if epoch <= 0:
+                    return None
+                return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            except (TypeError, ValueError, OverflowError, OSError):
+                return None
+
+        def age_seconds(value: Any) -> int | None:
+            try:
+                created = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                return max(0, int((datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds()))
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+        pending = int(totals["pending"] or 0)
+        pending_in_backoff = int(totals["pending_in_backoff"] or 0)
         token_configured = bool((os.getenv("NOTION_API_TOKEN") or "").strip())
         return {
             "status": "CONFIGURED" if token_configured else "NOT_CONFIGURED",
             "token_configured": token_configured,
             "storage_backend": storage_backend(),
-            "pending": int(row["pending"] or 0),
-            "synced": int(row["synced"] or 0),
-            "failed": int(row["failed"] or 0),
-            "last_success_utc": row["last_success_utc"],
+            "pending": pending,
+            "synced": int(totals["synced"] or 0),
+            "failed": int(totals["failed"] or 0),
+            "local_only": int(totals["local_only"] or 0),
+            "last_success_utc": totals["last_success_utc"],
+            "pending_with_errors": int(totals["pending_with_errors"] or 0),
+            "pending_in_backoff": pending_in_backoff,
+            "pending_due_now": max(0, pending - pending_in_backoff),
+            "oldest_pending_created_at_utc": oldest["created_at_utc"] if oldest else None,
+            "oldest_pending_age_seconds": age_seconds(oldest["created_at_utc"]) if oldest else None,
+            "oldest_pending_attempts": int(oldest["attempts"] or 0) if oldest else None,
+            "oldest_pending_next_retry_at_utc": retry_at(oldest["next_attempt_at"]) if oldest else None,
+            "oldest_pending_error_type": oldest["last_error_type"] if oldest else None,
+            "oldest_pending_http_status": oldest["last_http_status"] if oldest else None,
+            "oldest_error_created_at_utc": oldest_error["created_at_utc"] if oldest_error else None,
+            "oldest_error_attempts": int(oldest_error["attempts"] or 0) if oldest_error else None,
+            "oldest_error_next_retry_at_utc": retry_at(oldest_error["next_attempt_at"]) if oldest_error else None,
+            "oldest_error_type": oldest_error["last_error_type"] if oldest_error else None,
+            "oldest_error_http_status": oldest_error["last_http_status"] if oldest_error else None,
+            "diagnostic_scope": "SAFE_METADATA_ONLY",
         }
 
     def close(self) -> None:
