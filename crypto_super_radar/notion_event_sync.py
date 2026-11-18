@@ -124,12 +124,17 @@ class NotionEventOutbox:
             if payload.get("ai_model") != safe_model:
                 payload["ai_model"] = safe_model
                 changed = True
-            for field in (
-                "ai_analysis", "ai_suggestion", "reason", "details", "ai_provider",
-            ):
+            field_limits = {
+                "ai_analysis": 3600,
+                "ai_suggestion": 1800,
+                "reason": 1800,
+                "details": 12000,
+                "ai_provider": 120,
+            }
+            for field, limit in field_limits.items():
                 value = payload.get(field)
                 if isinstance(value, str):
-                    scrubbed = _redact_secret_text(value, 1800)
+                    scrubbed = _redact_secret_text(value, limit)
                     if scrubbed != value:
                         payload[field] = scrubbed
                         changed = True
