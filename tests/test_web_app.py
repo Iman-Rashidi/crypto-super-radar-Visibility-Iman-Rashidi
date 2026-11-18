@@ -1879,7 +1879,7 @@ class BloFinClosedPositionNotionAuditTests(unittest.TestCase):
                 [self.history_row()], [], order=order,
             )
 
-        self.assertEqual(result["status"], "QUEUED")
+        self.assertEqual(result["status"], "QUEUED", result)
         self.assertEqual(len(queued), 1)
         snapshot = queued[0]
         self.assertEqual(snapshot["experience_id"], "experience-42")
