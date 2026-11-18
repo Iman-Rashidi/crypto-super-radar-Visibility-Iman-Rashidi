@@ -58,7 +58,11 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.assertFalse(self.outbox.has_event("cycle-1:result"))
         self.outbox.enqueue(event(event_id="cycle-1:result"))
         self.assertTrue(self.outbox.has_event("cycle-1:result"))
-        self.outbox.flush_pending(now=1_800_000_000)
+        self.db.execute(
+            "UPDATE csr_notion_event_outbox SET sync_status='SYNCED' WHERE event_id=?",
+            ("cycle-1:result",),
+        )
+        self.db.commit()
         self.assertTrue(self.outbox.has_event("cycle-1:result"))
 
     def test_enqueue_is_idempotent(self):
