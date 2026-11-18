@@ -1817,5 +1817,113 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('"mark_price": 63728.4', event_payload["details"])
 
 
+
+    def test_existing_demo_position_schedules_first_observer_audit_from_saved_evidence(self):
+        journal = MagicMock()
+        journal.get_snapshot.return_value = {
+            "experience_id": "experience-btc-1",
+            "symbol": "BTC-USDT",
+            "signal": "LONG",
+            "entry_price": 63606.3,
+            "stop_loss": 63100.0,
+            "take_profit": 64112.6,
+            "reason_fa": "الگوی صعودی کندل بسته ثبت شده است.",
+            "setup_timeframe": "5m",
+            "engine_version": "CHALLENGE_1_LOCAL_RULES_V3",
+            "evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "chosen_pattern": {
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                },
+                "detected_patterns": [{
+                    "name_en": "Bullish Engulfing",
+                    "direction": "BULLISH",
+                    "category": "CANDLESTICK",
+                    "timeframe": "5m",
+                }],
+                "candles_5m": [{
+                    "time_utc": "2026-11-18T15:10:00Z",
+                    "open": 63600.0, "high": 63700.0, "low": 63550.0,
+                    "close": 63650.0, "volume": 100,
+                }],
+                "candles_1h": [],
+            },
+            "candles_5m": [],
+            "candles_1h": [],
+        }
+        position = {
+            "positionId": "demo-position-btc",
+            "instId": "BTC-USDT",
+            "positionSide": "net",
+            "positions": "0.1",
+            "averagePrice": "63606.3",
+            "markPrice": "63728.4",
+            "unrealizedPnl": "0.012",
+            "leverage": "1",
+            "liquidationPrice": "0",
+        }
+        order = {
+            "experience_id": "experience-btc-1",
+            "position_id": "demo-position-btc",
+            "instrument_id": "BTC-USDT",
+            "exchange_order_id": "demo-order-btc",
+            "side": "LONG",
+            "entry_price": "63606.3",
+        }
+        with (
+            patch.object(web_app, "NotionActivityJournal", return_value=journal),
+            patch.object(web_app, "_start_challenge1_observer_job") as start_job,
+        ):
+            result = web_app._start_challenge1_active_position_observer(
+                order, position, "BTC-USDT",
+            )
+        self.assertEqual(result["status"], "OBSERVER_AUDIT_SCHEDULED")
+        self.assertEqual(result["position_id"], "demo-position-btc")
+        args = start_job.call_args.args
+        self.assertEqual(args[0], "position-audit:demo-position-btc:initial")
+        self.assertEqual(args[1], "BTC-USDT")
+        self.assertEqual(args[2]["signal"], "LONG")
+        self.assertEqual(args[2]["challenge1_evidence"]["setup_timeframe"], "5m")
+        self.assertEqual(args[3]["result"]["position_id"], "demo-position-btc")
+        self.assertEqual(args[3]["result"]["exchange_order_id"], "demo-order-btc")
+
+    def test_observer_worker_skips_provider_calls_when_durable_request_already_exists(self):
+        job = {
+            "status": "completed",
+            "result": {
+                "status": "POSITION_MONITORING",
+                "signal": "LONG",
+                "position_id": "demo-position-1",
+                "exchange_order_id": "demo-order-1",
+                "learning_experience_id": "experience-1",
+                "positions": [{"positionId": "demo-position-1"}],
+            },
+        }
+        record = {
+            "signal": "LONG",
+            "challenge1_evidence": {
+                "setup_timeframe": "5m",
+                "completed_candles_only": True,
+                "candles_5m": [],
+                "candles_1h": [],
+            },
+        }
+        with (
+            patch.object(web_app, "_queue_challenge1_observer_events", return_value={
+                "status": "QUEUED", "queued": 0,
+            }),
+            patch.object(web_app, "run_challenge1_observer_reviews") as run_review,
+        ):
+            web_app._run_challenge1_observer_job(
+                "position-audit:demo-position-1:initial",
+                "BTC-USDT", record, job,
+            )
+        run_review.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
