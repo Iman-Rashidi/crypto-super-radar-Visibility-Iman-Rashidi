@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 import requests
 
