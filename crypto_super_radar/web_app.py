@@ -5286,6 +5286,97 @@ def _blofin_demo_profit_exit_decision(
     return "NET_PROFIT_AFTER_FEES" if pnl - entry_fee - close_fee - slip_buffer >= minimum_net else None
 
 
+
+def _start_challenge1_active_position_observer(
+    order: dict, position: dict, instrument_id: str,
+) -> dict:
+    """Audit an already-open robot-linked position once, using its stored decision evidence."""
+    if not isinstance(order, dict) or not isinstance(position, dict):
+        return {"status": "INVALID_POSITION_CONTEXT"}
+    experience_id = str(order.get("experience_id") or "").strip()
+    position_id = str(position.get("positionId") or order.get("position_id") or "").strip()
+    instrument = str(instrument_id or order.get("instrument_id") or "").strip().upper()
+    if not experience_id or not position_id or not instrument:
+        return {"status": "POSITION_LINK_INCOMPLETE"}
+
+    journal = None
+    try:
+        journal = NotionActivityJournal()
+        saved = journal.get_snapshot(experience_id)
+    except Exception as exc:
+        return {"status": "ACTIVITY_EVIDENCE_UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if journal is not None:
+            journal.close()
+    if not isinstance(saved, dict):
+        return {"status": "ACTIVITY_EVIDENCE_NOT_FOUND"}
+
+    evidence = saved.get("evidence")
+    evidence = dict(evidence) if isinstance(evidence, dict) else {}
+    # The normalized journal keeps candle arrays both at top level and inside evidence.
+    evidence.setdefault("setup_timeframe", saved.get("setup_timeframe") or "5m")
+    evidence.setdefault("candles_5m", saved.get("candles_5m") or [])
+    evidence.setdefault("candles_1h", saved.get("candles_1h") or [])
+    evidence.setdefault("detected_patterns", saved.get("patterns") or [])
+    if not evidence.get("chosen_pattern") and evidence.get("detected_patterns"):
+        # Do not invent a selected pattern. Keep it missing when the original snapshot
+        # did not preserve the selected item so reviewers can report insufficient data.
+        pass
+    signal = str(saved.get("signal") or order.get("side") or "UNKNOWN").upper()
+    if signal not in {"LONG", "SHORT", "NO_TRADE"}:
+        signal = "UNKNOWN"
+    challenge_record = {
+        "signal": signal,
+        "instrument_id": instrument,
+        "entry_price_usd": saved.get("entry_price") or order.get("entry_price"),
+        "stop_loss_usd": saved.get("stop_loss") or order.get("stop_loss"),
+        "take_profit_usd": saved.get("take_profit") or order.get("take_profit"),
+        "reason_fa": saved.get("reason_fa") or "بازبینی اولیهٔ پوزیشن باز از روی شواهد ذخیره‌شده.",
+        "challenge1_evidence": evidence,
+    }
+    synthetic_job_id = f"position-audit:{position_id}:initial"
+    position_snapshot = {
+        key: position.get(key)
+        for key in (
+            "positionId", "instId", "positionSide", "positions",
+            "averagePrice", "markPrice", "unrealizedPnl", "leverage",
+            "liquidationPrice", "createTime", "updateTime",
+        )
+        if position.get(key) is not None
+    }
+    initial_job = {
+        "status": "completed",
+        "stage": "POSITION_MONITORING",
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "learning_experience_id": experience_id,
+        "result": {
+            "status": "POSITION_MONITORING",
+            "signal": signal,
+            "learning_experience_id": experience_id,
+            "exchange_order_id": order.get("exchange_order_id"),
+            "order_id": order.get("exchange_order_id"),
+            "position_id": position_id,
+            "positions": [position_snapshot],
+            "average_fill_price": saved.get("actual_entry_price") or order.get("entry_price"),
+            "filled_size": position.get("positions"),
+            "trade_executed": True,
+            "orders_submitted": True,
+            "reason_fa": "بازبینی اولیهٔ فقط‌گزارشی برای پوزیشن باز ربات.",
+        },
+    }
+    _start_challenge1_observer_job(
+        synthetic_job_id, instrument, challenge_record,
+    )
+    return {
+        "status": "OBSERVER_AUDIT_SCHEDULED",
+        "position_id": position_id,
+        "experience_id": experience_id,
+        "audit_job_id": synthetic_job_id,
+    }
+
+
+
 def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
     """Manage only exchange positions linked by exact ID to the robot's Demo orders."""
     store = None
@@ -5394,6 +5485,9 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
 
             position = matching_active[0]
             managed += 1
+            observer_audit = _start_challenge1_active_position_observer(
+                order, position, instrument_id,
+            )
             # A previously accepted/unknown close is not resent blindly.
             prior_events = store.recent_events(client_order_id, limit=100)
             prior_close = [
@@ -5407,6 +5501,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "status": "CLOSE_AWAITING_EXCHANGE_RECONCILIATION",
                     "instrument_id": instrument_id,
                     "position_id": position_id,
+                    "observer_audit": observer_audit,
                 })
                 continue
 
@@ -5457,6 +5552,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "status": "MONITORING_FOR_NET_PROFIT",
                     "instrument_id": instrument_id,
                     "position_id": position_id,
+                    "observer_audit": observer_audit,
                     "order_id": order.get("exchange_order_id") or order.get("order_id") or "",
                     "position_side": position.get("positionSide"),
                     "size_contracts": position.get("positions"),
@@ -9512,9 +9608,13 @@ def _run_challenge1_observer_job(
             "observation_only": True, "entry_gate_enforced": False,
             "execution_effect": "NONE",
         })
-    _queue_challenge1_observer_events(
+    request_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, requested, phase="REQUESTED",
     )
+    # The durable request event is the cross-restart idempotency key. If it
+    # already exists, do not call paid/free provider APIs a second time.
+    if request_queue.get("status") != "QUEUED" or int(request_queue.get("queued") or 0) <= 0:
+        return
     try:
         audit = run_challenge1_observer_reviews(challenge_record, context)
         reviews = audit.get("reviewers") if isinstance(audit.get("reviewers"), list) else []
