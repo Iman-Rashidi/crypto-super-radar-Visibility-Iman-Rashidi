@@ -1379,23 +1379,54 @@ class BloFinDemoEventStore:
 
     def record_closed_position_outcome(
         self, *, instrument_id: str, history_rows: Any,
-        partial_rows: Any = None,
+        partial_rows: Any = None, client_order_id: str | None = None,
+        position_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Record one final Demo outcome only after exact positionId and full-size reconciliation."""
+        """Record a final Demo outcome against the exact local order and exchange position IDs."""
         instrument = str(instrument_id or "").strip().upper()
+        order_key = str(client_order_id or "").strip()
+        position_key = str(position_id or "").strip()
         with self._lock:
-            order_row = self._db.execute(
-                "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
-                "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED') "
-                "ORDER BY created_at DESC LIMIT 1",
-                (instrument,),
-            ).fetchone()
+            if order_key:
+                order_row = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE client_order_id=? AND instrument_id=? "
+                    "AND experience_id IS NOT NULL AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED')",
+                    (order_key, instrument),
+                ).fetchone()
+            elif position_key:
+                order_row = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE position_id=? AND instrument_id=? "
+                    "AND experience_id IS NOT NULL AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED') "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (position_key, instrument),
+                ).fetchone()
+            else:
+                # Backwards-compatible path for legacy offline callers only.
+                order_row = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
+                    "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED') "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (instrument,),
+                ).fetchone()
             if order_row is None:
                 return None
             order = dict(order_row)
             if order.get("outcome_recorded_at") is not None:
-                return {"status": "ALREADY_RECORDED", "experience_id": order.get("experience_id")}
-        position_id = str(order.get("position_id") or "")
+                return {
+                    "status": "ALREADY_RECORDED",
+                    "experience_id": order.get("experience_id"),
+                    "position_id": order.get("position_id"),
+                    "client_order_id": order.get("client_order_id"),
+                    "order_id": order.get("exchange_order_id"),
+                }
+        saved_position_id = str(order.get("position_id") or "")
+        if position_key and saved_position_id != position_key:
+            return {
+                "status": "POSITION_ID_MISMATCH",
+                "experience_id": order.get("experience_id"),
+                "position_id": saved_position_id,
+            }
+        position_id = saved_position_id
         if not position_id:
             return {
                 "status": "WAITING_FOR_EXCHANGE_POSITION_LINK",
@@ -1550,7 +1581,14 @@ class BloFinDemoEventStore:
             "status": "RECORDED",
             "experience_id": experience_id,
             "position_id": position_id,
+            "client_order_id": str(order.get("client_order_id") or ""),
+            "order_id": str(order.get("exchange_order_id") or ""),
+            "side": str(order.get("side") or "").upper(),
+            "entry_price": float(order.get("entry_price") or 0),
+            "quantity": expected_quantity,
             "history_ids": history_ids,
+            "gross_realized_pnl_usdt": realized_pnl,
+            "trading_fees_usdt": trading_fees,
             "realized_result": result,
             "realized_pnl_after_reported_trading_fees": net_before_funding,
             "funding_fee_attribution": "NOT_YET_RECONCILED",

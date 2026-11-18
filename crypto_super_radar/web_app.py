@@ -4167,11 +4167,26 @@ def _run_blofin_demo_execution_job(
                         inst_id=outcome_instrument, state="partially_closed", limit=100,
                     )
                     failed_operation = "event_store.record_closed_position_outcome"
-                    store.record_closed_position_outcome(
+                    outcome_result = store.record_closed_position_outcome(
                         instrument_id=outcome_instrument,
                         history_rows=closed_history if isinstance(closed_history, list) else [],
                         partial_rows=partial_history if isinstance(partial_history, list) else [],
+                        client_order_id=str(pending_order.get("client_order_id") or ""),
+                        position_id=str(pending_order.get("position_id") or ""),
                     )
+                    if isinstance(outcome_result, dict) and outcome_result.get("status") == "RECORDED":
+                        _update_blofin_activity_after_close(
+                            outcome_result, outcome_instrument,
+                            str(pending_order.get("position_id") or ""),
+                            closed_history if isinstance(closed_history, list) else [],
+                            partial_history if isinstance(partial_history, list) else [],
+                            order=pending_order,
+                        )
+                        _queue_blofin_position_closed_event(
+                            pending_order, outcome_result, outcome_instrument,
+                            closed_history if isinstance(closed_history, list) else [],
+                            partial_history if isinstance(partial_history, list) else [],
+                        )
                 except Exception:
                     # Keep the experience pending; the entry guard prevents new exposure.
                     pass
@@ -9166,10 +9181,18 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         instrument_id=instrument_id,
                         history_rows=closed_rows if isinstance(closed_rows, list) else [],
                         partial_rows=partial_rows if isinstance(partial_rows, list) else [],
+                        client_order_id=client_order_id,
+                        position_id=position_id,
                     )
                     if outcome:
                         activity_update = _update_blofin_activity_after_close(
                             outcome, instrument_id, position_id,
+                            closed_rows if isinstance(closed_rows, list) else [],
+                            partial_rows if isinstance(partial_rows, list) else [],
+                            order=order,
+                        )
+                        close_event_update = _queue_blofin_position_closed_event(
+                            order, outcome, instrument_id,
                             closed_rows if isinstance(closed_rows, list) else [],
                             partial_rows if isinstance(partial_rows, list) else [],
                         )
@@ -9182,6 +9205,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                                 "realized_pnl_after_reported_trading_fees"
                             ),
                             "activity_report_sync": activity_update,
+                            "position_closed_event_sync": close_event_update,
                         })
                 except Exception as exc:
                     actions.append({
@@ -9530,69 +9554,258 @@ def _queue_blofin_activity_journal(job_id: str, instrument_id: str, job: dict) -
 
 def _update_blofin_activity_after_close(
     outcome: dict, instrument_id: str, position_id: str,
-    closed_rows: list, partial_rows: list,
+    closed_rows: list, partial_rows: list, order: dict | None = None,
 ) -> dict:
-    """Update the same activity row only after full-size exchange history is reconciled."""
+    """Upsert the same per-experience activity row from exact exchange close history."""
     if not isinstance(outcome, dict) or outcome.get("status") != "RECORDED":
         return {"status": "NOT_FINAL"}
     experience_id = str(outcome.get("experience_id") or "")
+    position_key = str(position_id or outcome.get("position_id") or "")
+    if not experience_id or not position_key:
+        return {"status": "IDENTITY_INCOMPLETE"}
     journal = None
     try:
         journal = NotionActivityJournal()
         snapshot = journal.get_snapshot(experience_id)
-        if not isinstance(snapshot, dict):
-            return {"status": "ACTIVITY_ROW_NOT_FOUND"}
         matching = []
-        def finite_number(value):
+        history_ids = {
+            str(item) for item in (outcome.get("history_ids") or [])
+            if str(item).strip()
+        }
+        for row in list(partial_rows or []) + list(closed_rows or []):
+            if not isinstance(row, dict):
+                continue
+            if (
+                str(row.get("positionId") or "") != position_key
+                or str(row.get("instId") or "").upper() != str(instrument_id).upper()
+            ):
+                continue
+            if history_ids and str(row.get("historyId") or "") not in history_ids:
+                continue
+            try:
+                quantity = float(row.get("closePositions"))
+                open_price = float(row.get("openAveragePrice"))
+                close_price = float(row.get("closeAveragePrice"))
+                open_ms = int(row.get("createTime") or 0)
+                close_ms = int(row.get("updateTime") or row.get("createTime") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (
+                not all(math.isfinite(value) for value in (quantity, open_price, close_price))
+                or quantity <= 0 or open_price <= 0 or close_price <= 0
+            ):
+                continue
+            matching.append((row, quantity, open_price, close_price, open_ms, close_ms))
+        total_quantity = sum(item[1] for item in matching)
+        if not matching or total_quantity <= 0:
+            return {"status": "EXIT_PRICE_UNAVAILABLE"}
+        weighted_entry = sum(qty * price for _, qty, price, _, _, _ in matching) / total_quantity
+        weighted_exit = sum(qty * price for _, qty, _, price, _, _ in matching) / total_quantity
+        entry_ms = min((item[4] for item in matching if item[4] > 0), default=0)
+        exit_ms = max((item[5] for item in matching if item[5] > 0), default=0)
+        def finite_fee(value: Any) -> float | None:
             try:
                 number = float(value)
             except (TypeError, ValueError, OverflowError):
                 return None
             return number if math.isfinite(number) else None
 
-        for row in list(partial_rows or []) + list(closed_rows or []):
-            if not isinstance(row, dict):
-                continue
-            if (
-                str(row.get("positionId") or "") != str(position_id)
-                or str(row.get("instId") or "").upper() != str(instrument_id).upper()
-            ):
-                continue
-            quantity = finite_number(row.get("closePositions"))
-            price = finite_number(row.get("closeAveragePrice"))
-            if quantity is None or quantity <= 0 or price is None or price <= 0:
-                continue
-            matching.append((row, quantity, price))
-        total_quantity = sum(item[1] for item in matching)
-        if not matching or total_quantity <= 0:
-            return {"status": "EXIT_PRICE_UNAVAILABLE"}
-        weighted_exit = sum(quantity * price for _, quantity, price in matching) / total_quantity
-        exit_ms = max(
-            (int(row.get("updateTime") or row.get("createTime") or 0) for row, _, _ in matching),
-            default=0,
-        )
-        fee_total = 0.0
-        fee_values = [_blofin_safe_float(row.get("fee")) for row, _, _ in matching]
-        if fee_values and all(value is not None for value in fee_values):
-            fee_total = sum(value for value in fee_values if value is not None)
+        fee_values = [finite_fee(row.get("fee")) for row, *_ in matching]
+        fee_total = sum(value for value in fee_values if value is not None) if all(
+            value is not None for value in fee_values
+        ) else None
+
+        def utc_from_ms(value: int) -> str | None:
+            return (
+                datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
+                if value > 0 else None
+            )
+
+        if not isinstance(snapshot, dict):
+            local_order = order if isinstance(order, dict) else {}
+            side = str(local_order.get("side") or "").upper()
+            if side not in {"LONG", "SHORT"}:
+                side = "UNKNOWN"
+            snapshot = {
+                "experience_id": experience_id,
+                "job_id": "close-recovery-" + position_key,
+                "symbol": str(instrument_id).upper(),
+                "signal": side,
+                "status": "CLOSED_RECONCILED",
+                "reason_fa": (
+                    "ردیف فعالیت ورود در حافظه ژورنال پیدا نشد؛ این رکورد از تاریخچه نهایی "
+                    "BloFin Demo بازسازی شده و بازبینی مستقل ورود/خروج همچنان لازم است."
+                ),
+                "analysis_time_utc": utc_from_ms(entry_ms) or utc_from_ms(exit_ms),
+                "engine_version": "CHALLENGE_1_EXCHANGE_RECONCILIATION",
+                "patterns": [],
+                "chart_structure": "",
+                "volume_confirmation": {},
+                "evidence": {"recovered_from_exchange_history": True},
+                "candles_5m": [],
+                "entry_price": None,
+                "stop_loss": local_order.get("stop_loss"),
+                "take_profit": local_order.get("take_profit"),
+                "trade_executed": True,
+                "orders_submitted": True,
+                "ai_status": "NEEDS_REVIEW",
+                "ai_reason": "Existing entry-review snapshot was unavailable during close reconciliation.",
+                "reviewer_consensus": "NOT_COMPARABLE",
+                "ai_reviews": [],
+                "ai_consensus": {"status": "NOT_COMPARABLE"},
+            }
         snapshot.update({
+            "actual_entry_price": weighted_entry,
+            "actual_entry_time_utc": utc_from_ms(entry_ms) or snapshot.get("actual_entry_time_utc"),
             "actual_exit_price": weighted_exit,
-            "actual_exit_time_utc": (
-                datetime.fromtimestamp(exit_ms / 1000, tz=timezone.utc).isoformat()
-                if exit_ms > 0 else None
-            ),
+            "actual_exit_time_utc": utc_from_ms(exit_ms),
             "realized_net_pnl_usdt": outcome.get("realized_pnl_after_reported_trading_fees"),
             "reported_trading_fees_usdt": fee_total,
+            "order_id": str(
+                (order or {}).get("exchange_order_id")
+                or outcome.get("order_id")
+                or snapshot.get("order_id")
+                or ""
+            ),
+            "position_id": position_key,
             "closed_confirmed": True,
+            "trade_executed": True,
+            "orders_submitted": True,
             "status": "CLOSED_RECONCILED",
         })
+        evidence = snapshot.get("evidence") if isinstance(snapshot.get("evidence"), dict) else {}
+        evidence.update({
+            "close_source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY",
+            "position_id": position_key,
+            "history_ids": sorted(history_ids),
+            "realized_result_after_reported_trading_fees": outcome.get("realized_result"),
+            "realized_pnl_after_reported_trading_fees": outcome.get(
+                "realized_pnl_after_reported_trading_fees"
+            ),
+            "funding_fee_attribution": outcome.get(
+                "funding_fee_attribution", "NOT_YET_RECONCILED"
+            ),
+            "tp_sl_execution": "NOT_VERIFIED",
+        })
+        snapshot["evidence"] = evidence
         journal.enqueue(snapshot)
-        return {"status": "QUEUED", "experience_id": experience_id}
+        return {
+            "status": "QUEUED",
+            "experience_id": experience_id,
+            "recovered_entry_report": not isinstance(journal.get_snapshot(experience_id), dict),
+        }
     except Exception as exc:
         return {"status": "UNAVAILABLE", "error_type": type(exc).__name__}
     finally:
         if journal is not None:
             journal.close()
+
+
+def _queue_blofin_position_closed_event(
+    order: dict, outcome: dict, instrument_id: str,
+    closed_rows: list, partial_rows: list,
+) -> dict:
+    """Append one idempotent POSITION_CLOSED event after exact full-size reconciliation."""
+    if not isinstance(outcome, dict) or outcome.get("status") != "RECORDED":
+        return {"status": "NOT_FINAL"}
+    position_id = str(order.get("position_id") or outcome.get("position_id") or "")
+    experience_id = str(order.get("experience_id") or outcome.get("experience_id") or "")
+    history_ids = sorted({
+        str(item) for item in (outcome.get("history_ids") or []) if str(item).strip()
+    })
+    if not position_id or not experience_id or not history_ids:
+        return {"status": "IDENTITY_OR_HISTORY_INCOMPLETE"}
+    wanted = set(history_ids)
+    matched = [
+        row for row in list(partial_rows or []) + list(closed_rows or [])
+        if isinstance(row, dict)
+        and str(row.get("positionId") or "") == position_id
+        and str(row.get("instId") or "").upper() == str(instrument_id).upper()
+        and str(row.get("historyId") or "") in wanted
+    ]
+    close_rows = []
+    for row in matched:
+        try:
+            qty = float(row.get("closePositions"))
+            price = float(row.get("closeAveragePrice"))
+            close_ms = int(row.get("updateTime") or row.get("createTime") or 0)
+            fee = float(row.get("fee") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if all(math.isfinite(value) for value in (qty, price, fee)) and qty > 0 and price > 0:
+            close_rows.append((qty, price, close_ms, fee))
+    close_qty = sum(item[0] for item in close_rows)
+    average_exit = (
+        sum(qty * price for qty, price, _, _ in close_rows) / close_qty
+        if close_qty > 0 else None
+    )
+    close_ms = max((item[2] for item in close_rows if item[2] > 0), default=0)
+    close_time = (
+        datetime.fromtimestamp(close_ms / 1000, tz=timezone.utc).isoformat()
+        if close_ms > 0 else datetime.now(timezone.utc).isoformat()
+    )
+    side = str(order.get("side") or "").upper()
+    signal = side if side in {"LONG", "SHORT"} else "UNKNOWN"
+    details = {
+        "close_status": "CLOSED_CONFIRMED",
+        "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY",
+        "position_id": position_id,
+        "client_order_id": str(order.get("client_order_id") or ""),
+        "exchange_order_id": str(order.get("exchange_order_id") or ""),
+        "experience_id": experience_id,
+        "history_ids": history_ids,
+        "matched_history_rows": len(close_rows),
+        "closed_quantity": close_qty,
+        "average_exit_price": average_exit,
+        "close_time_utc": close_time,
+        "realized_result": outcome.get("realized_result"),
+        "gross_realized_pnl_usdt": outcome.get("gross_realized_pnl_usdt"),
+        "trading_fees_usdt": outcome.get("trading_fees_usdt"),
+        "realized_pnl_after_reported_trading_fees_usdt": outcome.get(
+            "realized_pnl_after_reported_trading_fees"
+        ),
+        "funding_fee_attribution": outcome.get(
+            "funding_fee_attribution", "NOT_YET_RECONCILED"
+        ),
+        "tp_sl_execution": "NOT_VERIFIED",
+    }
+    event_id = (
+        "position-closed:" + position_id + ":"
+        + hashlib.sha256("|".join(history_ids).encode("utf-8")).hexdigest()[:20]
+    )
+    event = {
+        "event_id": event_id,
+        "cycle_id": experience_id,
+        "occurred_at_utc": close_time,
+        "event_type": "POSITION_CLOSED",
+        "actor": "BloFin Demo",
+        "status": "SUCCESS",
+        "market": "Futures",
+        "symbol": str(instrument_id).upper(),
+        "timeframe": "5m",
+        "signal": signal,
+        "ai_decision": "NOT_CALLED",
+        "reason": "BloFin Demo closed-position history matched exact positionId, order and full closed quantity. Funding and TP/SL trigger evidence are recorded separately as unverified.",
+        "details": json.dumps(details, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "experience_id": experience_id,
+        "order_id": str(order.get("exchange_order_id") or ""),
+        "position_id": position_id,
+    }
+    outbox = None
+    try:
+        outbox = NotionEventOutbox()
+        queued = outbox.enqueue(event)
+        return {
+            "status": "QUEUED" if queued else "ALREADY_QUEUED",
+            "event_id": event_id,
+            "experience_id": experience_id,
+        }
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if outbox is not None:
+            outbox.close()
+
 
 def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
     """Build one robot record and one independently attributable record per AI reviewer."""

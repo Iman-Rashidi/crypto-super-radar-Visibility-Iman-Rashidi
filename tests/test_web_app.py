@@ -1771,6 +1771,128 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["smoke_test_open_position_count"], 0)
         self.assertEqual(result["smoke_test_open_order_count"], 0)
 
+class BloFinClosedPositionNotionAuditTests(unittest.TestCase):
+    def history_row(self):
+        return {
+            "positionId": "demo-position-42",
+            "instId": "BTC-USDT",
+            "historyId": "history-42-final",
+            "side": "buy",
+            "createTime": 1_800_000_000_000,
+            "updateTime": 1_800_000_060_000,
+            "openAveragePrice": "100.0",
+            "closeAveragePrice": "102.0",
+            "closePositions": "1.0",
+            "maxPositions": "1.0",
+            "realizedPnl": "2.0",
+            "fee": "0.05",
+        }
+
+    def test_position_closed_event_is_queued_with_stable_identity_and_exchange_evidence(self):
+        captured = []
+
+        class FakeOutbox:
+            def enqueue(self, event):
+                captured.append(dict(event))
+                return True
+
+            def close(self):
+                pass
+
+        order = {
+            "client_order_id": "robot-client-42",
+            "exchange_order_id": "blofin-order-42",
+            "experience_id": "experience-42",
+            "position_id": "demo-position-42",
+            "side": "LONG",
+        }
+        outcome = {
+            "status": "RECORDED",
+            "experience_id": "experience-42",
+            "position_id": "demo-position-42",
+            "history_ids": ["history-42-final"],
+            "realized_result": "PROFIT",
+            "gross_realized_pnl_usdt": 2.0,
+            "trading_fees_usdt": 0.05,
+            "realized_pnl_after_reported_trading_fees": 1.95,
+            "funding_fee_attribution": "NOT_YET_RECONCILED",
+        }
+        row = self.history_row()
+        with patch.object(web_app, "NotionEventOutbox", FakeOutbox):
+            first = web_app._queue_blofin_position_closed_event(
+                order, outcome, "BTC-USDT", [row], [],
+            )
+            second = web_app._queue_blofin_position_closed_event(
+                order, outcome, "BTC-USDT", [row], [],
+            )
+
+        self.assertEqual(first["status"], "QUEUED")
+        self.assertEqual(second["event_id"], first["event_id"])
+        self.assertEqual(len(captured), 2)
+        event = captured[0]
+        self.assertEqual(event["event_type"], "POSITION_CLOSED")
+        self.assertEqual(event["position_id"], "demo-position-42")
+        self.assertEqual(event["order_id"], "blofin-order-42")
+        details = json.loads(event["details"])
+        self.assertEqual(details["history_ids"], ["history-42-final"])
+        self.assertEqual(details["realized_pnl_after_reported_trading_fees_usdt"], 1.95)
+        self.assertEqual(details["funding_fee_attribution"], "NOT_YET_RECONCILED")
+        self.assertEqual(details["tp_sl_execution"], "NOT_VERIFIED")
+
+    def test_close_reconciliation_rebuilds_missing_activity_row_from_exchange_history(self):
+        saved = {}
+        queued = []
+
+        class FakeJournal:
+            def get_snapshot(self, experience_id):
+                return saved.get(experience_id)
+
+            def enqueue(self, snapshot):
+                queued.append(dict(snapshot))
+                saved[snapshot["experience_id"]] = dict(snapshot)
+                return True
+
+            def close(self):
+                pass
+
+        order = {
+            "client_order_id": "robot-client-42",
+            "exchange_order_id": "blofin-order-42",
+            "experience_id": "experience-42",
+            "position_id": "demo-position-42",
+            "side": "LONG",
+            "stop_loss": 98.0,
+            "take_profit": 104.0,
+        }
+        outcome = {
+            "status": "RECORDED",
+            "experience_id": "experience-42",
+            "position_id": "demo-position-42",
+            "history_ids": ["history-42-final"],
+            "realized_result": "PROFIT",
+            "realized_pnl_after_reported_trading_fees": 1.95,
+            "funding_fee_attribution": "NOT_YET_RECONCILED",
+        }
+        with patch.object(web_app, "NotionActivityJournal", FakeJournal):
+            result = web_app._update_blofin_activity_after_close(
+                outcome, "BTC-USDT", "demo-position-42",
+                [self.history_row()], [], order=order,
+            )
+
+        self.assertEqual(result["status"], "QUEUED", result)
+        self.assertEqual(len(queued), 1)
+        snapshot = queued[0]
+        self.assertEqual(snapshot["experience_id"], "experience-42")
+        self.assertEqual(snapshot["actual_entry_price"], 100.0)
+        self.assertEqual(snapshot["actual_exit_price"], 102.0)
+        self.assertEqual(snapshot["realized_net_pnl_usdt"], 1.95)
+        self.assertEqual(snapshot["reported_trading_fees_usdt"], 0.05)
+        self.assertEqual(snapshot["position_id"], "demo-position-42")
+        self.assertTrue(snapshot["closed_confirmed"])
+        self.assertEqual(snapshot["reviewer_consensus"], "NOT_COMPARABLE")
+        self.assertEqual(snapshot["evidence"]["tp_sl_execution"], "NOT_VERIFIED")
+
+
 if __name__ == "__main__":
     unittest.main()
 
