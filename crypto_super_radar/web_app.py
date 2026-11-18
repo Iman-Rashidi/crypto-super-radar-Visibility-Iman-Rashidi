@@ -8294,6 +8294,24 @@ def _reconcile_blofin_demo_orders_on_startup() -> dict:
             if result.get("orders_submitted") is not False:
                 result["status"] = "BLOCKED"
                 result["orders_submitted"] = False
+                result["reason"] = "READ_ONLY_RECONCILIATION_REPORTED_UNSAFE_WRITE_STATE"
+            elif (
+                result.get("status") == "RECONCILED"
+                and int(result.get("remaining_unresolved") or 0) == 0
+            ):
+                result["reason"] = (
+                    "DURABLE_TURSO_PROBE_AND_READ_ONLY_RECONCILIATION_PASSED"
+                )
+            else:
+                # Do not retain the pre-probe DURABLE_TURSO_NOT_CONFIGURED
+                # placeholder after a successful durable storage probe.
+                existing_reason = result.get("reason")
+                if existing_reason == "DURABLE_TURSO_NOT_CONFIGURED":
+                    existing_reason = None
+                result["reason"] = existing_reason or (
+                    "DURABLE_TURSO_PROBE_PASSED; "
+                    "READ_ONLY_RECONCILIATION_REQUIRES_ATTENTION"
+                )
     except Exception as exc:
         result.update({
             "status": "UNAVAILABLE",
