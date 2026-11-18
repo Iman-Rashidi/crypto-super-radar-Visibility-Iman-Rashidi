@@ -5121,13 +5121,14 @@ def _blofin_manual_close_position(
         raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
     estimated_close_fee = None
     estimated_net_profit = None
+    effective_minimum_net_profit_usdt = None
     if action_source == "AUTOPILOT":
         if pnl is None or entry_fee_usdt is None:
             raise BloFinDemoExecutionBlocked("PnL یا کارمزد واقعی ورود موجود نیست؛ خروج خودکار ارسال نشد.")
         try:
             fee_rate = float(taker_fee_rate)
             slip_rate = float(slippage_buffer_rate)
-            min_net = float(minimum_net_profit_usdt)
+            configured_min_net = float(minimum_net_profit_usdt)
             entry_fee = abs(float(entry_fee_usdt))
             mark_rows = client.get_mark_price(inst_id=instrument_id)
             mark_row = mark_rows[0] if isinstance(mark_rows, list) and mark_rows and isinstance(mark_rows[0], dict) else mark_rows if isinstance(mark_rows, dict) else None
@@ -5137,9 +5138,11 @@ def _blofin_manual_close_position(
             contracts = abs(float(row.get("positions") or 0))
         except Exception as exc:
             raise BloFinDemoExecutionBlocked("اطلاعات تازه Mark Price یا مشخصات قرارداد قابل تأیید نیست.") from exc
-        values = (fee_rate, slip_rate, min_net, entry_fee, mark_price, contract_value, contracts)
-        if not all(math.isfinite(value) for value in values) or min(fee_rate, slip_rate, min_net, entry_fee) < 0 or min(mark_price, contract_value, contracts) <= 0:
+        values = (fee_rate, slip_rate, configured_min_net, entry_fee, mark_price, contract_value, contracts)
+        if not all(math.isfinite(value) for value in values) or min(fee_rate, slip_rate, entry_fee) < 0 or min(mark_price, contract_value, contracts) <= 0:
             raise BloFinDemoExecutionBlocked("محاسبه سود خالص خروج معتبر نیست.")
+        min_net = max(0.01, configured_min_net)
+        effective_minimum_net_profit_usdt = min_net
         close_notional = contracts * contract_value * mark_price
         estimated_close_fee = close_notional * fee_rate
         estimated_slippage_buffer = close_notional * slip_rate
@@ -5163,6 +5166,7 @@ def _blofin_manual_close_position(
             "unrealized_pnl_usdt": str(pnl) if pnl is not None else None,
             "entry_fee_usdt": entry_fee_usdt, "estimated_close_fee_usdt": estimated_close_fee,
             "estimated_net_profit_usdt": estimated_net_profit,
+            "minimum_net_profit_usdt": effective_minimum_net_profit_usdt,
             "taker_fee_rate": taker_fee_rate if action_source == "AUTOPILOT" else None,
             "slippage_buffer_rate": slippage_buffer_rate if action_source == "AUTOPILOT" else None,
             "loss_making_position": bool(pnl is not None and pnl < 0),
@@ -5196,7 +5200,7 @@ def _blofin_manual_close_position(
         "estimated_close_fee_usdt": estimated_close_fee,
         "estimated_slippage_buffer_usdt": estimated_slippage_buffer if action_source == "AUTOPILOT" else None,
         "estimated_net_profit_usdt": estimated_net_profit,
-        "minimum_net_profit_usdt": minimum_net_profit_usdt if action_source == "AUTOPILOT" else None,
+        "minimum_net_profit_usdt": effective_minimum_net_profit_usdt,
         "loss_making_position": bool(pnl is not None and pnl < 0),
         "exchange_response": response.get("data"),
         "message_fa": "درخواست بستن همین پوزیشن به قیمت بازار به BloFin Demo ارسال شد؛ سود نهایی پس از Fill و تطبیق کارمزدهای واقعی تعیین می‌شود.",
@@ -5283,8 +5287,9 @@ def _blofin_demo_profit_exit_decision(
     values = (quantity, pnl, current_mark, entry_fee, close_fee, slip_buffer, minimum_net)
     if not all(math.isfinite(value) for value in values) or abs(quantity) <= 0 or current_mark <= 0:
         return None
-    if min(entry_fee, close_fee, slip_buffer, minimum_net) < 0:
+    if min(entry_fee, close_fee, slip_buffer) < 0:
         return None
+    minimum_net = max(0.01, minimum_net)
     return "NET_PROFIT_AFTER_FEES" if pnl - entry_fee - close_fee - slip_buffer >= minimum_net else None
 
 
@@ -5379,6 +5384,31 @@ def _start_challenge1_active_position_observer(
 
 
 
+def _blofin_demo_minimum_net_profit_usdt() -> float:
+    """Never let Demo configuration or an internal caller lower the absolute 0.01 USDT floor."""
+    try:
+        configured = float(os.getenv("BLOFIN_DEMO_EXIT_MIN_NET_PROFIT_USDT", "0.01"))
+    except (TypeError, ValueError, OverflowError):
+        return 0.01
+    if not math.isfinite(configured):
+        return 0.01
+    return max(0.01, configured)
+
+
+def _blofin_demo_has_unresolved_close_request(events: list[dict[str, Any]]) -> bool:
+    """Treat REQUESTED as unresolved too; a restart must not submit a duplicate close."""
+    unresolved_types = {
+        "AUTO_POSITION_CLOSE_REQUESTED",
+        "AUTO_POSITION_CLOSE_ACCEPTED",
+        "AUTO_POSITION_CLOSE_UNKNOWN",
+    }
+    return any(
+        isinstance(event, dict)
+        and str(event.get("event_type") or "").upper() in unresolved_types
+        for event in events
+    )
+
+
 def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
     """Manage only exchange positions linked by exact ID to the robot's Demo orders."""
     store = None
@@ -5389,12 +5419,12 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "status": "TRADE_PERMISSION_UNAVAILABLE",
                 "message_fa": "مدیر خروج برای اقدام خودکار به کلید Trade اختصاصی Demo نیاز دارد؛ هیچ پوزیشنی تغییر نکرد.",
             }
+        minimum_net_profit = _blofin_demo_minimum_net_profit_usdt()
         try:
-            minimum_net_profit = max(0.0, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_NET_PROFIT_USDT", "0.01")), 100_000.0))
             taker_fee_rate = max(0.0, min(float(os.getenv("BLOFIN_DEMO_TAKER_FEE_RATE", "0.0006")), 0.01))
             slippage_buffer_rate = max(0.0, min(float(os.getenv("BLOFIN_DEMO_EXIT_SLIPPAGE_BUFFER_RATE", "0.0002")), 0.01))
-        except (TypeError, ValueError):
-            minimum_net_profit, taker_fee_rate, slippage_buffer_rate = 0.01, 0.0006, 0.0002
+        except (TypeError, ValueError, OverflowError):
+            taker_fee_rate, slippage_buffer_rate = 0.0006, 0.0002
 
         store = BloFinDemoEventStore()
         pending_orders = store.orders_pending_learning_outcome(limit=50)
@@ -5492,12 +5522,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             )
             # A previously accepted/unknown close is not resent blindly.
             prior_events = store.recent_events(client_order_id, limit=100)
-            prior_close = [
-                event for event in prior_events
-                if str(event.get("event_type") or "").upper() in {
-                    "AUTO_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_UNKNOWN",
-                }
-            ]
+            prior_close = _blofin_demo_has_unresolved_close_request(prior_events)
             if prior_close:
                 actions.append({
                     "status": "CLOSE_AWAITING_EXCHANGE_RECONCILIATION",
@@ -5615,6 +5640,36 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "minimum_net_profit_usdt": minimum_net_profit,
                     "exit_decision": "CLOSE_REQUEST_BLOCKED",
                     "reason_fa": str(exc),
+                })
+            except BloFinDemoExecutionUnknown as exc:
+                actions.append({
+                    "status": "CLOSE_REQUEST_UNKNOWN",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "entry_fee_usdt": entry_fee,
+                    "estimated_close_fee_usdt": estimated_close_fee,
+                    "slippage_buffer_usdt": slippage_buffer,
+                    "estimated_net_profit_usdt": estimated_net_profit,
+                    "minimum_net_profit_usdt": minimum_net_profit,
+                    "exit_decision": "CLOSE_REQUEST_UNKNOWN",
+                    "error_type": type(exc).__name__,
+                    "reason_fa": "نتیجه ارسال خروج نامشخص است؛ تا تطبیق Position و تاریخچه صرافی هیچ درخواست خروج تکراری ارسال نمی‌شود.",
+                })
+            except Exception as exc:
+                actions.append({
+                    "status": "CLOSE_REQUEST_FAILED",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "entry_fee_usdt": entry_fee,
+                    "estimated_close_fee_usdt": estimated_close_fee,
+                    "slippage_buffer_usdt": slippage_buffer,
+                    "estimated_net_profit_usdt": estimated_net_profit,
+                    "minimum_net_profit_usdt": minimum_net_profit,
+                    "exit_decision": "CLOSE_REQUEST_FAILED",
+                    "error_type": type(exc).__name__,
+                    "reason_fa": "درخواست خروج در BloFin Demo با خطا مواجه شد؛ خطا ثبت می‌شود و هیچ بسته‌شدن موفقی فرض نمی‌شود.",
                 })
 
         return {
