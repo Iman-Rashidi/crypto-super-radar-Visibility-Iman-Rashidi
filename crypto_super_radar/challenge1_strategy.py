@@ -388,7 +388,7 @@ def analyze_blofin_challenge1(
                 if context_data_status != "AVAILABLE":
                     advisory.append("داده زمینه یک‌ساعته در دسترس نبود")
                 suffix = "؛ موارد نظارتی: " + "، ".join(advisory) if advisory else ""
-                reason_fa = f"الگوی {chosen.get('name_en')} با کندل بسته‌شده ۱۵دقیقه‌ای تأیید شد؛ ورود بر اساس همان الگو انجام‌پذیر است{suffix}."
+                reason_fa = f"الگوی {chosen.get('name_en')} با کندل بسته‌شده ۵دقیقه‌ای تأیید شد؛ ورود بر اساس همان الگو انجام‌پذیر است{suffix}."
 
     latest_time = _time_label(frame_5m)
     confirmation_candle = {

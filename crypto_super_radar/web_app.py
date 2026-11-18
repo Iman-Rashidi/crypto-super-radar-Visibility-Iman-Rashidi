@@ -5357,6 +5357,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         instrument_id=instrument_id,
                         history_rows=closed_rows if isinstance(closed_rows, list) else [],
                         partial_rows=partial_rows if isinstance(partial_rows, list) else [],
+                        client_order_id=client_order_id,
+                        position_id=position_id,
                     )
                     if outcome:
                         activity_update = _update_blofin_activity_after_close(
