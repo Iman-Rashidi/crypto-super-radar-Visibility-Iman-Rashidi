@@ -1327,6 +1327,11 @@ def second_ai_connection_status() -> dict[str, Any]:
         }
         if model and model not in free_models:
             reasons.append("GROQ_MODEL_NOT_IN_FREE_PLAN_ALLOWLIST")
+        # Official Groq API keys use the gsk_ prefix. This is a format-only
+        # preflight; a 401 can still mean an expired/revoked/wrong-account key.
+        key_format_valid = key.startswith("gsk_") if key else False
+        if key and not key_format_valid:
+            reasons.append("GROQ_API_KEY_PREFIX_INVALID")
         if endpoint and (
             endpoint_host != "api.groq.com"
             or endpoint_path != "/openai/v1/chat/completions"
@@ -1349,6 +1354,10 @@ def second_ai_connection_status() -> dict[str, Any]:
         "model": model or None,
         "status": "CONFIGURED" if configured else "NOT_CONFIGURED",
         "configured": configured,
+        "credential_format_valid": (
+            key.startswith("gsk_") if key and provider_key in {"groq", "groqcloud"}
+            else bool(key)
+        ),
         "configuration_issues": reasons,
         "secret_sent_to_model": False,
         "paper_entry_eligible": False,
