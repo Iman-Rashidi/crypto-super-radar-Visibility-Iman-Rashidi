@@ -54,6 +54,21 @@ jobs:
           grep -q '۱۲ فیلتر اجباری' /tmp/csr-render/home.html
           curl --connect-timeout 2 -fsS 'http://127.0.0.1:18765/history?asset=cex%3ABTCUSDT' > /tmp/csr-render/history.json
           grep -q 'LOCAL_SQLITE' /tmp/csr-render/history.json
+      - name: Repeat Challenge 1 architecture regression suite three times
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pass in 1 2 3; do
+            echo "===== Challenge 1 regression pass ${pass}/3 ====="
+            for test_file in \
+              test_elliott_waves.py \
+              test_chart_patterns.py \
+              test_challenge1_strategy.py \
+              test_ai_second_opinion.py \
+              test_web_app.py; do
+              python -m unittest discover -s tests -p "${test_file}" -v
+            done
+          done
       - name: Verify extracted full source bundle
         run: |
           mkdir -p /tmp/csr-bundle

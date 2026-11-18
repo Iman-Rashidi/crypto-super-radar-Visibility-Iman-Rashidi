@@ -1548,3 +1548,131 @@ class Challenge1PositionManagerTests(unittest.TestCase):
         finally:
             web_app.BLOFIN_POSITION_MANAGER_THREAD = previous_thread
 
+
+
+class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
+    def review(
+        self, reviewer_id, provider, model, *, status="APPROVED",
+        wave_phase="WAVES_1_AND_2_CONFIRMED", wave_direction="BULLISH",
+        trader_proposal="LONG", paper_entry=True,
+    ):
+        return {
+            "reviewer_id": reviewer_id,
+            "provider": provider,
+            "model": model,
+            "returned_model": model,
+            "status": status,
+            "request_attempted": True,
+            "response_source": "LIVE_API",
+            "response_validated": True,
+            "model_verified": True,
+            "paper_entry_eligible": paper_entry,
+            "expected_side": "LONG",
+            "trader_proposal": trader_proposal,
+            "elliott_wave_phase": wave_phase,
+            "elliott_wave_direction": wave_direction,
+        }
+
+    def analysis(self):
+        return SimpleNamespace(
+            signal="LONG",
+            metrics={
+                "execution_profile": "CHALLENGE_1",
+                "challenge1_evidence": {
+                    "elliott_wave": {
+                        "status": "CANDIDATE",
+                        "pattern": "BULLISH",
+                        "phase": "WAVES_1_AND_2_CONFIRMED",
+                    },
+                },
+            },
+        )
+
+    def test_two_independent_valid_approvals_authorize_demo_executor_only(self):
+        primary = self.review("nemotron", "OpenRouter", "nvidia/nemotron-free")
+        secondary = self.review("second_ai", "Groq", "openai/gpt-oss-120b")
+        with (
+            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
+            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
+        ):
+            result = web_app._run_challenge1_supervisor_reviews(
+                self.analysis(), "perp:BTCUSDT",
+            )
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["status"], "APPROVED_BY_BOTH")
+        self.assertEqual(result["ai_consensus"]["decision"], "AUTHORIZE_DEMO_EXECUTION")
+        self.assertTrue(result["ai_consensus"]["entry_gate_enforced"])
+        self.assertTrue(result["ai_consensus"]["providers_independent"])
+        self.assertTrue(result["ai_consensus"]["models_independent"])
+        self.assertTrue(all(
+            item["review"]["execution_role"] == "ENTRY_APPROVAL_GATE"
+            and item["review"]["entry_gate_enforced"]
+            for item in result["ai_reviews"]
+        ))
+
+    def test_one_veto_blocks_even_when_the_other_reviewer_approves(self):
+        primary = self.review("nemotron", "OpenRouter", "nvidia/nemotron-free")
+        secondary = self.review(
+            "second_ai", "Groq", "openai/gpt-oss-120b",
+            status="VETO", paper_entry=False,
+        )
+        with (
+            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
+            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
+        ):
+            result = web_app._run_challenge1_supervisor_reviews(
+                self.analysis(), "perp:BTCUSDT",
+            )
+        self.assertFalse(result["approved"])
+        self.assertEqual(result["status"], "VETO")
+        self.assertEqual(result["ai_consensus"]["decision"], "BLOCK_DEMO_ENTRY")
+
+    def test_missing_or_unverified_second_review_fails_closed(self):
+        primary = self.review("nemotron", "OpenRouter", "nvidia/nemotron-free")
+        secondary = {
+            "reviewer_id": "second_ai", "provider": "Groq",
+            "model": "openai/gpt-oss-120b", "status": "NOT_CONFIGURED",
+            "request_attempted": False, "response_source": "NONE",
+            "response_validated": False, "model_verified": False,
+            "paper_entry_eligible": False,
+        }
+        with (
+            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
+            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
+        ):
+            result = web_app._run_challenge1_supervisor_reviews(
+                self.analysis(), "perp:BTCUSDT",
+            )
+        self.assertFalse(result["approved"])
+        self.assertNotEqual(result["status"], "APPROVED_BY_BOTH")
+        self.assertEqual(result["ai_consensus"]["decision"], "BLOCK_DEMO_ENTRY")
+
+    def test_duplicate_provider_or_model_cannot_count_as_independent_quorum(self):
+        primary = self.review("nemotron", "OpenRouter", "same-model")
+        secondary = self.review("second_ai", "OpenRouter", "same-model")
+        with (
+            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
+            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
+        ):
+            result = web_app._run_challenge1_supervisor_reviews(
+                self.analysis(), "perp:BTCUSDT",
+            )
+        self.assertFalse(result["approved"])
+        self.assertFalse(result["ai_consensus"]["providers_independent"])
+        self.assertFalse(result["ai_consensus"]["models_independent"])
+
+    def test_wave_phase_mismatch_cannot_be_overridden_by_two_approved_flags(self):
+        primary = self.review(
+            "nemotron", "OpenRouter", "nvidia/nemotron-free",
+            wave_phase="WAVE_3_CONFIRMED",
+        )
+        secondary = self.review("second_ai", "Groq", "openai/gpt-oss-120b")
+        with (
+            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
+            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
+        ):
+            result = web_app._run_challenge1_supervisor_reviews(
+                self.analysis(), "perp:BTCUSDT",
+            )
+        self.assertFalse(result["approved"])
+        self.assertNotEqual(result["status"], "APPROVED_BY_BOTH")
