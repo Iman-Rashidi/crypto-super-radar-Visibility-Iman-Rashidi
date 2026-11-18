@@ -9627,6 +9627,12 @@ def _observer_audit_consensus(reviews: list[dict]) -> str:
     return "NOT_COMPARABLE"
 
 
+def _release_challenge1_observer_retry(job_id: str) -> None:
+    """Release a process-local start marker when durable recovery could not complete."""
+    with BLOFIN_AI_OBSERVER_START_LOCK:
+        BLOFIN_AI_OBSERVER_STARTED.discard(str(job_id or ""))
+
+
 def _run_challenge1_observer_job(
     job_id: str, instrument_id: str, challenge_record: dict, initial_job: dict,
 ) -> None:
@@ -9680,6 +9686,7 @@ def _run_challenge1_observer_job(
             if recovered is not None:
                 existing_reviews[reviewer_id] = recovered
     except Exception:
+        _release_challenge1_observer_retry(job_id)
         return
     finally:
         if outbox is not None:
@@ -9740,6 +9747,7 @@ def _run_challenge1_observer_job(
     # A duplicate REQUESTED event is expected during recovery. Only a storage
     # failure prevents the provider call; queued=0 alone is not a failure.
     if request_queue.get("status") != "QUEUED":
+        _release_challenge1_observer_retry(job_id)
         return
 
     try:
@@ -9792,9 +9800,11 @@ def _run_challenge1_observer_job(
             current["observer_audit_effect"] = "NONE"
             BLOFIN_EXECUTION_JOBS[job_id] = current
     # Queue only newly obtained results. Persisted results are never overwritten.
-    _queue_challenge1_observer_events(
+    result_queue = _queue_challenge1_observer_events(
         job_id, instrument_id, snapshot, new_reviews, phase="RESULT",
     )
+    if result_queue.get("status") != "QUEUED":
+        _release_challenge1_observer_retry(job_id)
 
 
 
