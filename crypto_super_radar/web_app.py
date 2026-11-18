@@ -9561,7 +9561,7 @@ def _challenge1_observer_review_summary(reviewer: dict) -> dict:
         "reason_fa", "request_attempted", "response_source", "response_validated",
         "model_verified", "requested_at_utc", "completed_at_utc", "latency_ms",
         "http_status", "error_code", "error_stage", "finish_reason", "content_length",
-        "configuration_issues", "observations", "risk_flags",
+        "request_attempt_count", "configuration_issues", "observations", "risk_flags",
     )
     summary = {key: reviewer.get(key) for key in keys if reviewer.get(key) is not None}
     summary["reviewer_id"] = str(reviewer.get("reviewer_id") or "").lower()
@@ -9826,6 +9826,7 @@ def _challenge1_observer_durable_result_events(
             "error_stage": reviewer.get("error_stage"),
             "finish_reason": reviewer.get("finish_reason"),
             "content_length": reviewer.get("content_length"),
+            "request_attempt_count": reviewer.get("request_attempt_count"),
             "configuration_issues": reviewer.get("configuration_issues"),
             "observations": reviewer.get("observations", []),
             "risk_flags": reviewer.get("risk_flags", []),
@@ -9938,6 +9939,7 @@ def _blofin_observer_review_from_event(event: dict | None) -> dict | None:
         "error_stage": details.get("error_stage"),
         "finish_reason": details.get("finish_reason"),
         "content_length": details.get("content_length"),
+        "request_attempt_count": details.get("request_attempt_count"),
         "configuration_issues": details.get("configuration_issues"),
         "observation_only": True,
         "entry_gate_enforced": False,
