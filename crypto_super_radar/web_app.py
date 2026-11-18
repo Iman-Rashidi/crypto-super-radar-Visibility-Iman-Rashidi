@@ -5488,6 +5488,13 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             observer_audit = _start_challenge1_active_position_observer(
                 order, position, instrument_id,
             )
+            position_audit_gap = _queue_challenge1_position_audit_gap_event(
+                order, position, instrument_id, observer_audit,
+            )
+            if position_audit_gap.get("status") in {"QUEUED", "ALREADY_QUEUED"}:
+                observer_audit["gap_event"] = position_audit_gap
+            elif position_audit_gap.get("status") == "OUTBOX_UNAVAILABLE":
+                observer_audit["gap_event"] = position_audit_gap
             # A previously accepted/unknown close is not resent blindly.
             prior_events = store.recent_events(client_order_id, limit=100)
             prior_close = [
@@ -9758,6 +9765,76 @@ def _start_challenge1_observer_job(
     return scheduled
 
 
+def _queue_challenge1_position_audit_gap_event(
+    order: dict, position: dict, instrument_id: str, audit_result: dict,
+) -> dict:
+    """Persist an explicit gap when a real robot position has no recoverable decision evidence."""
+    if not isinstance(audit_result, dict):
+        return {"status": "NOT_APPLICABLE"}
+    gap_status = str(audit_result.get("status") or "").upper()
+    gap_codes = {
+        "POSITION_LINK_INCOMPLETE",
+        "ACTIVITY_EVIDENCE_UNAVAILABLE",
+        "ACTIVITY_EVIDENCE_NOT_FOUND",
+    }
+    if gap_status not in gap_codes:
+        return {"status": "NOT_A_GAP"}
+    order = order if isinstance(order, dict) else {}
+    position = position if isinstance(position, dict) else {}
+    position_id = str(
+        position.get("positionId") or order.get("position_id") or ""
+    ).strip()
+    symbol = str(instrument_id or order.get("instrument_id") or "").strip().upper()
+    if not position_id or not symbol:
+        return {"status": "GAP_IDENTITY_INCOMPLETE"}
+    event_id = f"CSR-POSITION-AUDIT-GAP:{position_id}:{gap_status}"
+    details = {
+        "gap_code": gap_status,
+        "position_id": position_id,
+        "order_id": order.get("exchange_order_id") or order.get("order_id") or "",
+        "experience_id": order.get("experience_id") or "",
+        "evidence_status": "MISSING_OR_UNAVAILABLE",
+        "synthetic_evidence_created": False,
+        "reviewer_calls_skipped": True,
+        "execution_effect": "NONE",
+    }
+    payload = {
+        "event_id": event_id,
+        "cycle_id": f"POSITION-AUDIT:{position_id}",
+        "occurred_at_utc": datetime.now(timezone.utc).isoformat(),
+        "event_type": "DATA_ERROR",
+        "actor": "Robot",
+        "status": "WARNING",
+        "market": "Futures",
+        "symbol": symbol,
+        "timeframe": "5m",
+        "signal": "UNKNOWN",
+        "ai_decision": "OBSERVE_ONLY",
+        "reason": (
+            "شواهد تصمیم اصلی این پوزیشن در حافظهٔ پایدار پیدا یا بازیابی نشد؛ "
+            "ربات از ساخت دادهٔ جایگزین خودداری کرد و بازبینی AI بدون شواهد اجرا نشد."
+        ),
+        "details": json.dumps(details, ensure_ascii=False, sort_keys=True, default=str),
+        "order_id": details["order_id"],
+        "position_id": position_id,
+        "experience_id": details["experience_id"],
+        "source_url": "https://crypto-super-radar-blofin-demo.onrender.com/api/blofin/demo/autopilot/status",
+    }
+    outbox = None
+    try:
+        outbox = NotionEventOutbox()
+        inserted = outbox.enqueue(payload)
+        return {
+            "status": "QUEUED" if inserted else "ALREADY_QUEUED",
+            "event_id": event_id,
+        }
+    except Exception as exc:
+        return {"status": "OUTBOX_UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if outbox is not None:
+            outbox.close()
+
+
 def _queue_blofin_position_manager_heartbeats(
     result: dict, occurred_at_utc: str,
 ) -> dict:
@@ -9795,6 +9872,16 @@ def _queue_blofin_position_manager_heartbeats(
                 )
                 if action.get(key) is not None
             }
+            audit = action.get("observer_audit")
+            if isinstance(audit, dict):
+                detail["observer_audit"] = {
+                    key: audit.get(key)
+                    for key in (
+                        "status", "audit_job_id", "experience_id", "error_type",
+                        "gap_event",
+                    )
+                    if audit.get(key) is not None
+                }
             outbox_event = {
                 "event_id": f"CSR-POSITION-MONITOR:{position_id}:{minute_bucket}",
                 "cycle_id": f"POSITION-MANAGER:{minute_bucket}",
