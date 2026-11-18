@@ -158,3 +158,69 @@ class NotionEventOutboxTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_outbox_redacts_credential_values_and_only_accepts_model_identifiers(self):
+        suspicious = event(
+            event_id="cycle-ai:secret:request",
+            event_type="AI_REVIEW_REQUESTED",
+            actor="Nemotron Supervisor",
+            ai_model="sk-or-v1-THISISNOTAREALSECRET000000000000nvidia/nemotron-test:free",
+            ai_provider="OpenRouter",
+            details='{"note":"Bearer EXAMPLE_TOKEN_12345678901234567890"}',
+        )
+        self.assertTrue(self.outbox.enqueue(suspicious))
+        row = self.db.execute(
+            "SELECT payload_json FROM csr_notion_event_outbox WHERE event_id=?",
+            ("cycle-ai:secret:request",),
+        ).fetchone()
+        saved = __import__("json").loads(row["payload_json"])
+        self.assertEqual(saved["ai_model"], "")
+        self.assertEqual(saved["ai_provider"], "OpenRouter")
+        self.assertNotIn("sk-or-v1-", saved["details"])
+        self.assertNotIn("Bearer EXAMPLE_TOKEN", saved["details"])
+        self.assertIn("[REDACTED]", saved["details"])
+
+    def test_outbox_migrates_legacy_secret_from_existing_payload(self):
+        payload = {
+            "event_id": "legacy-ai-secret",
+            "ai_model": "sk-or-v1-THISISNOTAREALSECRET000000000000nvidia/model:free",
+            "ai_provider": "OpenRouter",
+            "ai_analysis": "legacy value",
+            "details": "legacy text",
+        }
+        self.db.execute(
+            """INSERT INTO csr_notion_event_outbox
+               (event_id,payload_json,created_at_utc,attempts,next_attempt_at,sync_status)
+               VALUES (?,?,?,?,?,?)""",
+            ("legacy-ai-secret", __import__("json").dumps(payload), "2026-11-18T00:00:00Z", 0, 0, "PENDING"),
+        )
+        self.db.commit()
+        NotionEventOutbox(self.db)
+        row = self.db.execute(
+            "SELECT payload_json FROM csr_notion_event_outbox WHERE event_id=?",
+            ("legacy-ai-secret",),
+        ).fetchone()
+        saved = __import__("json").loads(row["payload_json"])
+        self.assertEqual(saved["ai_model"], "")
+        self.assertNotIn("sk-or-v1-", row["payload_json"])
+
+    def test_notion_properties_store_provider_separately_from_safe_model(self):
+        payload = self.outbox.normalize_event(event(
+            event_id="cycle-ai:safe-model",
+            event_type="AI_RECOMMENDATION",
+            actor="Nemotron Supervisor",
+            ai_provider="OpenRouter",
+            ai_model="nvidia/nemotron-3-ultra-550b-a55b:free",
+            ai_decision="OBSERVE_ONLY",
+        ))
+        properties = self.outbox._notion_properties(payload, 1)
+        self.assertEqual(
+            properties["Provider ناظر AI"]["rich_text"][0]["text"]["content"],
+            "OpenRouter",
+        )
+        self.assertEqual(
+            properties["مدل ناظر AI"]["rich_text"][0]["text"]["content"],
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        )
+
