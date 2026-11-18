@@ -27,7 +27,7 @@ DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v6-5m-only-pattern-challenge1"
+PROMPT_VERSION = "free-second-opinion-v7-5m-candle-chart-elliott-wave"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
