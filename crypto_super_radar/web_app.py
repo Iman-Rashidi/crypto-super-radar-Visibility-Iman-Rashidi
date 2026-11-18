@@ -5894,6 +5894,7 @@ class Handler(BaseHTTPRequestHandler):
               <h3>AutoPilot · پایش خودکار Challenge 1</h3>
               <p id="blofin-autopilot-status" class="muted" aria-live="polite">در حال خواندن وضعیت AutoPilot...</p>
               <button id="blofin-autopilot-toggle" type="button">فعال‌سازی AutoPilot در BloFin Demo</button>
+              <p class="muted">توقف اضطراری ورودهای جدید و انتخاب حالت دستی در اختیار اپراتور است.</p>
               <p class="muted">برای تغییر به حالت دستی، AutoPilot را متوقف کن. چرخه‌ای که از قبل آغاز شده باشد بدون قطع ناگهانی تمام می‌شود.</p>
             </section>
             <section class="metric" id="blofin-manual-trading-panel" style="margin-top:12px">

@@ -651,6 +651,7 @@ class BloFinDemoEventStore:
         self, instrument_id: str, candle_time: str,
     ) -> tuple[str, dict[str, Any]] | None:
         """Find a previously saved decision for this exact instrument/candle."""
+        instrument = str(instrument_id).strip().upper()
         rows = self._db.execute(
             """SELECT experience_id, payload_json
                FROM learning_experience_events
@@ -658,9 +659,7 @@ class BloFinDemoEventStore:
                  AND challenge_id='CHALLENGE_1_BLOFIN_DEMO'
                  AND environment='BLOFIN_DEMO'
                  AND event_type='DECISION_RECORDED'
-                 AND symbol=? AND timeframe IN ('15M', '5M')
-               ORDER BY sequence ASC LIMIT 2000""",
-            (str(instrument_id).strip().upper(),),
+               ORDER BY sequence DESC LIMIT 10000"""
         ).fetchall()
         expected = str(candle_time or "").strip().replace("Z", "+00:00")
         for row in rows:
@@ -670,6 +669,9 @@ class BloFinDemoEventStore:
                 continue
             input_snapshot = payload.get("input_snapshot") if isinstance(payload, dict) else {}
             if not isinstance(input_snapshot, Mapping):
+                continue
+            saved_instrument = str(input_snapshot.get("instrument_id") or "").strip().upper()
+            if saved_instrument != instrument:
                 continue
             saved_time = str(input_snapshot.get("signal_bar_open_utc") or "").strip().replace("Z", "+00:00")
             if saved_time == expected:

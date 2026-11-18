@@ -281,14 +281,14 @@ class WebAppHttpTests(unittest.TestCase):
     def test_profit_exit_requires_positive_net_after_entry_and_exit_costs(self):
         order = {
             "instrument_id": "BTC-USDT",
-            "position_id": "position-123",
+            "position_id": "position123",
             "side": "LONG",
             "take_profit": 104.0,
             "created_at": 10_000,
         }
         position = {
             "instId": "BTC-USDT",
-            "positionId": "position-123",
+            "positionId": "position123",
             "positions": "0.1",
             "unrealizedPnl": "1.25",
         }
@@ -331,7 +331,7 @@ class WebAppHttpTests(unittest.TestCase):
             def get_positions(self, *, inst_id=None):
                 return [{
                     "instId": "BTC-USDT",
-                    "positionId": "position-789",
+                    "positionId": "position789",
                     "positionSide": "net",
                     "marginMode": "isolated",
                     "positions": "0.1",
@@ -355,9 +355,9 @@ class WebAppHttpTests(unittest.TestCase):
         ):
             result = web_app._blofin_manual_close_position(
                 instrument_id="BTC-USDT",
-                position_id="position-789",
+                position_id="position789",
                 action_source="AUTOPILOT",
-                audit_id="robot-order-789",
+                audit_id="robotorder789",
                 exit_reason="NET_PROFIT_AFTER_FEES",
                 entry_fee_usdt=0.01,
                 taker_fee_rate=0.0006,
@@ -367,7 +367,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["status"], "CLOSE_ACCEPTED")
         self.assertGreater(result["estimated_net_profit_usdt"], 0.01)
         self.assertEqual(len(close_calls), 1)
-        self.assertEqual(close_calls[0]["position_id"], "position-789")
+        self.assertEqual(close_calls[0]["position_id"], "position789")
         self.assertEqual(store.record_manual_action.call_args_list[0].args[1], "AUTO_POSITION_CLOSE_REQUESTED")
 
     def test_automatic_close_refuses_if_fees_erase_unrealized_profit(self):
@@ -377,7 +377,7 @@ class WebAppHttpTests(unittest.TestCase):
             def get_positions(self, *, inst_id=None):
                 return [{
                     "instId": "BTC-USDT",
-                    "positionId": "position-790",
+                    "positionId": "position790",
                     "positionSide": "net",
                     "marginMode": "isolated",
                     "positions": "0.1",
@@ -401,9 +401,9 @@ class WebAppHttpTests(unittest.TestCase):
         ):
             web_app._blofin_manual_close_position(
                 instrument_id="BTC-USDT",
-                position_id="position-790",
+                position_id="position790",
                 action_source="AUTOPILOT",
-                audit_id="robot-order-790",
+                audit_id="robotorder790",
                 exit_reason="NET_PROFIT_AFTER_FEES",
                 entry_fee_usdt=0.02,
                 minimum_net_profit_usdt=0.01,
@@ -414,14 +414,14 @@ class WebAppHttpTests(unittest.TestCase):
     def test_profit_exit_has_no_time_limit_and_uses_net_profit_only(self):
         order = {
             "instrument_id": "ETH-USDT",
-            "position_id": "position-456",
+            "position_id": "position456",
             "side": "SHORT",
             "take_profit": 90.0,
             "created_at": 1_000,
         }
         position = {
             "instId": "ETH-USDT",
-            "positionId": "position-456",
+            "positionId": "position456",
             "positions": "-0.1",
             "unrealizedPnl": "0.75",
         }
@@ -473,7 +473,7 @@ class WebAppHttpTests(unittest.TestCase):
             def get_positions(self, *, inst_id=None):
                 return [{
                     "instId": "BTC-USDT",
-                    "positionId": "position-123",
+                    "positionId": "position123",
                     "positionSide": "net",
                     "marginMode": "isolated",
                     "positions": "0.01",
@@ -489,21 +489,21 @@ class WebAppHttpTests(unittest.TestCase):
             patch.object(web_app, "BloFinDemoEventStore", return_value=store),
         ):
             result = web_app._blofin_manual_close_position(
-                instrument_id="BTC-USDT", position_id="position-123"
+                instrument_id="BTC-USDT", position_id="position123"
             )
 
         self.assertEqual(result["status"], "CLOSE_ACCEPTED")
         self.assertTrue(result["loss_making_position"])
         self.assertEqual(result["unrealized_pnl_usdt_at_confirmation"], "-3.25")
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["position_id"], "position-123")
+        self.assertEqual(calls[0]["position_id"], "position123")
         self.assertEqual(calls[0]["inst_id"], "BTC-USDT")
         store.record_manual_action.assert_any_call(
             calls[0]["client_order_id"],
             "MANUAL_POSITION_CLOSE_REQUESTED",
             {
                 "instrument_id": "BTC-USDT",
-                "position_id": "position-123",
+                "position_id": "position123",
                 "position_side": "net",
                 "margin_mode": "isolated",
                 "unrealized_pnl_usdt": "-3.25",
