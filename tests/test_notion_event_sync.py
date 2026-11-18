@@ -54,6 +54,13 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.env.stop()
         self.db.close()
 
+    def test_has_event_detects_pending_and_synced_outbox_rows(self):
+        self.assertFalse(self.outbox.has_event("cycle-1:result"))
+        self.outbox.enqueue(event(event_id="cycle-1:result"))
+        self.assertTrue(self.outbox.has_event("cycle-1:result"))
+        self.outbox.flush_pending(now=1_800_000_000)
+        self.assertTrue(self.outbox.has_event("cycle-1:result"))
+
     def test_enqueue_is_idempotent(self):
         self.assertTrue(self.outbox.enqueue(event()))
         self.assertFalse(self.outbox.enqueue(event()))
