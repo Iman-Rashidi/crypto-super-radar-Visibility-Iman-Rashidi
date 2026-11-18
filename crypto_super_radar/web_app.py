@@ -5295,7 +5295,17 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/blofin/demo/autopilot/status":
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
-            payload["enabled"] = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+            autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+            payload["enabled"] = autopilot_enabled
+            if not autopilot_enabled:
+                # Do not expose a persisted pre-restart schedule as if another cycle were queued.
+                payload.update({
+                    "status": "DISABLED",
+                    "search_continues": False,
+                    "next_cycle_scheduled": False,
+                    "next_cycle_at_utc": None,
+                    "next_cycle_in_seconds": None,
+                })
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
             payload["execution_profile"] = "CHALLENGE_1"
@@ -8136,6 +8146,10 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": False, "status": "DISABLED",
+                    "search_continues": False,
+                    "next_cycle_scheduled": False,
+                    "next_cycle_at_utc": None,
+                    "next_cycle_in_seconds": None,
                     "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
                 })
             _persist_blofin_autopilot_state()
@@ -8547,6 +8561,10 @@ def _start_blofin_demo_autopilot() -> None:
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
                 "enabled": False, "status": "DISABLED",
+                "search_continues": False,
+                "next_cycle_scheduled": False,
+                "next_cycle_at_utc": None,
+                "next_cycle_in_seconds": None,
                 "last_message_fa": "BLOFIN_DEMO_AUTOPILOT_ENABLED فعال نیست.",
             })
         _persist_blofin_autopilot_state()
