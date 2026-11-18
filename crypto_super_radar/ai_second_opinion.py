@@ -1011,7 +1011,7 @@ def _call_challenge1_observer(
             "execution_effect": "NONE", "http_status": http_status,
             "latency_ms": latency_ms, "requested_at_utc": requested_at,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
-            "error_code": None, "cost_usd": 0.0,
+            "error_code": None,
         }
     except Exception as exc:
         return {
