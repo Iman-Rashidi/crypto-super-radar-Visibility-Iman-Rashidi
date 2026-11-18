@@ -5166,13 +5166,14 @@ def _blofin_manual_close_position(
             "unrealized_pnl_usdt": str(pnl) if pnl is not None else None,
             "entry_fee_usdt": entry_fee_usdt, "estimated_close_fee_usdt": estimated_close_fee,
             "estimated_net_profit_usdt": estimated_net_profit,
-            "minimum_net_profit_usdt": effective_minimum_net_profit_usdt,
             "taker_fee_rate": taker_fee_rate if action_source == "AUTOPILOT" else None,
             "slippage_buffer_rate": slippage_buffer_rate if action_source == "AUTOPILOT" else None,
             "loss_making_position": bool(pnl is not None and pnl < 0),
             "action_source": action_source, "exit_reason": exit_reason,
             "exchange_close_client_order_id": action_id,
         }
+        if action_source == "AUTOPILOT":
+            audit["minimum_net_profit_usdt"] = effective_minimum_net_profit_usdt
         store.record_manual_action(audit_event_id, requested_event, audit)
         try:
             response = client.close_futures_position(
