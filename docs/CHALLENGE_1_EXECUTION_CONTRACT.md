@@ -57,6 +57,6 @@ general twelve-gate CRYPTO SUPER RADAR architecture or change other profiles.
 
 ## Staging runtime validation record
 
-Expected deployed Staging commit: `461716f4f32620ca4e13a349dc68567357cc412d`.
+Expected deployed Staging commit: `3da0a9c1472e3857b09eb235d8caba0a21c96be8`.
 
 A guarded, one-shot CI check reads the Challenge 1 reviewer reports and Demo readiness. Its synthetic AI dry-run is not permitted to submit orders.
