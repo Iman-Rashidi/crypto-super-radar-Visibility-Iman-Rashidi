@@ -4570,33 +4570,6 @@ def _run_blofin_demo_execution_job(
             )
             return
 
-        order_readiness = _blofin_demo_execution_readiness()
-        if order_readiness.get("status") != "READY":
-            reason_fa = (
-                order_readiness.get("message_fa")
-                or "پیش‌نیازهای اجرای سفارش BloFin Demo تأیید نشد."
-            )
-            if learning_experience_id and not store.has_final_experience(learning_experience_id):
-                store.record_experience_not_executed(
-                    experience_id=learning_experience_id,
-                    instrument_id=instrument_id,
-                    signal=learning_signal,
-                    stage="TRADE_READINESS_BLOCKED",
-                    reason=str(reason_fa),
-                )
-            _set_blofin_execution_job(
-                job_id, "completed", stage="TRADE_READINESS_BLOCKED",
-                message_fa=str(reason_fa) + " تحلیل و علت عدم اجرا در حافظه ثبت شد.",
-                analysis=gate_summary, trade_context=trade_context,
-                result={
-                    "status": "BLOCKED", "environment": "BLOFIN_DEMO",
-                    "reason_fa": str(reason_fa),
-                    "learning_experience_id": learning_experience_id,
-                    "orders_submitted": False, "trade_executed": False,
-                },
-            )
-            return
-
         signal_bar = mtf_signal["signal_bar_open_utc"]
         record.update({
             "signal_id": mtf_signal["signal_id"],
@@ -4736,6 +4709,52 @@ def _run_blofin_demo_execution_job(
             "ai_status": ai_status,
             "second_ai_review": second_ai_review,
         })
+        order_readiness = _blofin_demo_execution_readiness()
+        if order_readiness.get("status") != "READY":
+            reason_fa = (
+                order_readiness.get("message_fa")
+                or "پیش‌نیازهای اجرای سفارش BloFin Demo تأیید نشد."
+            )
+            if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                store.record_experience_not_executed(
+                    experience_id=learning_experience_id,
+                    instrument_id=instrument_id,
+                    signal=learning_signal,
+                    stage="TRADE_READINESS_BLOCKED",
+                    reason=str(reason_fa),
+                )
+            _set_blofin_execution_job(
+                job_id, "completed", stage="TRADE_READINESS_BLOCKED",
+                message_fa=(
+                    str(reason_fa)
+                    + " هر دو ناظر مستقل اجرا و نتیجه‌شان ثبت شد؛ هیچ سفارشی ارسال نشد."
+                ),
+                ai_review=ai_review,
+                ai_reviews=ai_reviews,
+                ai_consensus=ai_consensus,
+                ai_status=ai_status,
+                analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
+                result={
+                    **challenge_record,
+                    "status": "BLOCKED",
+                    "environment": "BLOFIN_DEMO",
+                    "learning_experience_id": learning_experience_id,
+                    "ai_review": ai_review,
+                    "ai_reviews": ai_reviews,
+                    "ai_consensus": ai_consensus,
+                    "ai_status": ai_status,
+                    "second_ai_review": second_ai_review,
+                    "reason_fa": str(reason_fa),
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                },
+                completed_at_utc=datetime.now(timezone.utc).isoformat(),
+            )
+            _queue_blofin_completed_job_reports(job_id, instrument_id)
+            return
+
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
             max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),
