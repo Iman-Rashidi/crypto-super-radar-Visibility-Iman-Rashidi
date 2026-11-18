@@ -23,7 +23,7 @@ NOTION_API_VERSION = "2025-09-03"
 
 
 _SECRET_VALUE_RE = re.compile(
-    r"(?i)(?:sk-or-v1-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{24,}|Bearer\\s+[A-Za-z0-9._~-]{16,})"
+    r"(?i)(?:sk-or-v1-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{24,}|Bearer\s+[A-Za-z0-9._~-]{16,})"
 )
 _MODEL_ID_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,50}/[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$"
