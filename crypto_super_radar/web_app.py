@@ -279,7 +279,7 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
         elapsed = now - float(AI_DRY_RUN_STATE.get("last_started") or 0.0)
         if elapsed < AI_DRY_RUN_MIN_INTERVAL_SECONDS:
             return {
-                "provider": "OpenRouter", "model": configured.get("model"),
+                "provider": "OpenRouter", "model": primary_config.get("model"),
                 "status": "DRY_RUN_COOLDOWN",
                 "status_fa": "برای جلوگیری از مصرف سهمیه، فاصله پنج‌دقیقه‌ای تست رعایت شود.",
                 "retry_after_seconds": max(1, int(AI_DRY_RUN_MIN_INTERVAL_SECONDS - elapsed)),
@@ -288,7 +288,7 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
             }
         if int(AI_DRY_RUN_STATE.get("count") or 0) >= AI_DRY_RUN_MAX_PER_UTC_DAY:
             return {
-                "provider": "OpenRouter", "model": configured.get("model"),
+                "provider": "OpenRouter", "model": primary_config.get("model"),
                 "status": "DAILY_DRY_RUN_LIMIT",
                 "status_fa": "سقف دو تست یکپارچگی امروز تکمیل شده است.",
                 "test_passed": False, "paper_entry_eligible": False,
