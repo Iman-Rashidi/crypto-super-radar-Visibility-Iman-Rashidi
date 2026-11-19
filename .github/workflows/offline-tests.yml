@@ -101,6 +101,13 @@ jobs:
           python -m crypto_super_radar --help
           python -m crypto_super_radar.order_flow_service --help
           python scripts/paper_trading_bot.py --help
+      - name: Run 180-day BloFin Challenge 1 out-of-sample validation
+        run: python scripts/challenge1_historical_validation.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: challenge1-profitability-validation
+          path: reports/challenge1_profitability_validation.json
+          if-no-files-found: error
       - name: Publish refreshed Render source archive
         if: github.event_name == 'push'
         shell: bash
