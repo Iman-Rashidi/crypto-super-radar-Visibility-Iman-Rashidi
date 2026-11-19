@@ -5710,9 +5710,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/blofin/demo/position-manager/status":
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
+                payload["supervisor_watchdog"] = copy.deepcopy(BLOFIN_POSITION_SUPERVISOR_STATE)
             payload["thread_alive"] = bool(
                 BLOFIN_POSITION_MANAGER_THREAD is not None
                 and BLOFIN_POSITION_MANAGER_THREAD.is_alive()
+            )
+            payload["supervisor_watchdog_thread_alive"] = bool(
+                BLOFIN_POSITION_SUPERVISOR_THREAD is not None
+                and BLOFIN_POSITION_SUPERVISOR_THREAD.is_alive()
             )
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
@@ -5755,9 +5760,14 @@ class Handler(BaseHTTPRequestHandler):
             payload["readiness"] = _blofin_demo_execution_readiness()
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
+                payload["supervisor_watchdog"] = copy.deepcopy(BLOFIN_POSITION_SUPERVISOR_STATE)
                 payload["position_manager_thread_alive"] = bool(
                     BLOFIN_POSITION_MANAGER_THREAD is not None
                     and BLOFIN_POSITION_MANAGER_THREAD.is_alive()
+                )
+                payload["supervisor_watchdog_thread_alive"] = bool(
+                    BLOFIN_POSITION_SUPERVISOR_THREAD is not None
+                    and BLOFIN_POSITION_SUPERVISOR_THREAD.is_alive()
                 )
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
