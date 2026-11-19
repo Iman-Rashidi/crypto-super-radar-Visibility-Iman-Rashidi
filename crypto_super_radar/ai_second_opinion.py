@@ -2108,6 +2108,10 @@ def run_challenge1_observer_reviews(
     reviewers = [primary_future, second_result]
     for reviewer in reviewers:
         if isinstance(reviewer, dict):
+            reviewer["mandate"] = (
+                "MARKET_TRADE_THESIS" if reviewer.get("reviewer_id") == "nemotron"
+                else "RISK_POSITION_GUARDIAN"
+            )
             reviewer["evidence_hash"] = evidence_hash
             reviewer["observation_only"] = False
             if reviewer.get("status") == "REVIEWED":
