@@ -10420,6 +10420,22 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                             "error_type": type(skip_exc).__name__,
                         })
 
+            _cache_challenge1_supervisor_snapshot(
+                experience_id=experience_id,
+                position_id=audit_position_id,
+                order_id=str(order.get("exchange_order_id") or client_order_id),
+                instrument_id=instrument_id,
+                signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                position=position,
+                mark_price=mark_price_value,
+                unrealized_pnl=pnl_value,
+                stop_loss_price=stop_value if stop_value > 0 else None,
+                stop_loss_threshold_reached=stop_loss_threshold_reached,
+                market_evidence=market_evidence,
+                protective_orders=protective_evidence,
+                reviewer_states=reviewer_states,
+            )
+
             exit_basis = {
                 "instrument_id": instrument_id, "position_id": audit_position_id,
                 "experience_id": experience_id,
@@ -11375,6 +11391,7 @@ def main():
     if role == "WEB":
         _start_notion_sync_worker()
         _start_blofin_demo_position_manager()
+        _start_blofin_demo_position_supervisor_watchdog()
     _start_blofin_demo_autopilot()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
