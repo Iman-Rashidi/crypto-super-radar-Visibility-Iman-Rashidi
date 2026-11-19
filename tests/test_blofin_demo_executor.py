@@ -225,6 +225,7 @@ def signal_record(**overrides):
         "final_round": {
             "reviewer_ids": ["nemotron", "second_ai"],
             "consensus_status": "APPROVED_BY_BOTH",
+            "reviewed_signal_id": signal_id,
         },
     }
     record["entry_evaluation_window"] = evaluation
