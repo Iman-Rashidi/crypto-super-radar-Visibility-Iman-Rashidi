@@ -1714,14 +1714,16 @@ def _challenge1_observer_evidence(
     account_summary["currency_balances"] = [
         {
             "currency": _observer_clean_text(item.get("currency"), 12).upper(),
-            key: _safe_float(item.get(source))
-            for key, source in (
-                ("equity", "equity"), ("available", "available"),
-                ("available_equity", "availableEquity"), ("frozen", "frozen"),
-                ("open_order_margin", "orderFrozen"), ("unrealized_pnl", "unrealizedPnl"),
-                ("margin_ratio", "marginRatio"),
-            )
-            if _safe_float(item.get(source)) is not None
+            **{
+                key: _safe_float(item.get(source))
+                for key, source in (
+                    ("equity", "equity"), ("available", "available"),
+                    ("available_equity", "availableEquity"), ("frozen", "frozen"),
+                    ("open_order_margin", "orderFrozen"), ("unrealized_pnl", "unrealizedPnl"),
+                    ("margin_ratio", "marginRatio"),
+                )
+                if _safe_float(item.get(source)) is not None
+            },
         }
         for item in (account_details or [])[:6]
         if isinstance(item, Mapping)
