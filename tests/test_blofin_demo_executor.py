@@ -388,7 +388,7 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
     def test_stop_loss_amendment_changes_only_sl_leg_and_uses_request_id(self):
         self.client.amend_tpsl_stop_loss(
             inst_id="BTC-USDT",
-            tpsl_id="tpsl-123",
+            tpsl_id="2510128401",
             new_stop_loss="101.25",
             request_id="amend123",
         )
@@ -396,7 +396,7 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         self.assertTrue(args[0].endswith("/api/v1/trade/amend-tpsl"))
         body = json.loads(kwargs["data"])
         self.assertEqual(body["instId"], "BTC-USDT")
-        self.assertEqual(body["tpslId"], "tpsl-123")
+        self.assertEqual(body["tpslId"], "2510128401")
         self.assertEqual(body["requestId"], "amend123")
         self.assertEqual(body["newSlTriggerPrice"], "101.25")
         self.assertNotIn("newTpTriggerPrice", body)
@@ -405,13 +405,18 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
     def test_stop_loss_amendment_rejects_zero_and_invalid_ids_before_post(self):
         with self.assertRaises(ValueError):
             self.client.amend_tpsl_stop_loss(
-                inst_id="BTC-USDT", tpsl_id="tpsl-123",
+                inst_id="BTC-USDT", tpsl_id="2510128401",
                 new_stop_loss="0", request_id="amend123",
             )
         with self.assertRaises(ValueError):
             self.client.amend_tpsl_stop_loss(
-                inst_id="BTC-USDT", tpsl_id="tpsl-123",
+                inst_id="BTC-USDT", tpsl_id="2510128401",
                 new_stop_loss="101", request_id="bad request id",
+            )
+        with self.assertRaises(ValueError):
+            self.client.amend_tpsl_stop_loss(
+                inst_id="BTC-USDT", tpsl_id="invalid-id",
+                new_stop_loss="101", request_id="amend123",
             )
         self.session.post.assert_not_called()
 
