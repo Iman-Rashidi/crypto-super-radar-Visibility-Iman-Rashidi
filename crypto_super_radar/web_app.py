@@ -10019,7 +10019,7 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
         position_id = str(snapshot.get("position_id") or "")
         experience_id = str(snapshot.get("experience_id") or "").strip() or None
         age = max(0.0, now_epoch - float(snapshot.get("updated_at_epoch") or 0))
-        fresh = age <= 20.0
+        fresh = age <= 45.0
         if not fresh:
             stale_count += 1
         flags = []
@@ -10052,14 +10052,21 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
             recorded += 1
         except Exception as exc:
             errors.append({"position_id": position_id, "error_type": type(exc).__name__})
-        if not fresh:
+        critical_flags = {
+            "POSITION_SNAPSHOT_STALE",
+            "EXPERIENCE_LINK_MISSING",
+            "POSITION_ID_MISMATCH",
+            "PROTECTIVE_ORDER_NOT_CONFIRMED",
+            "STOP_LEVEL_CROSSED_CHECK_EXCHANGE_NATIVE_PROTECTION",
+        }
+        if critical_flags.intersection(flags):
             should_persist_halt = False
             with LOCK:
-                if BLOFIN_AUTOPILOT_STATE.get("enabled") and BLOFIN_AUTOPILOT_STATE.get("status") != "SUPERVISOR_DATA_STALE_HALT":
+                if BLOFIN_AUTOPILOT_STATE.get("enabled") and not str(BLOFIN_AUTOPILOT_STATE.get("status") or "").startswith("SUPERVISOR_"):
                     BLOFIN_AUTOPILOT_STATE["enabled"] = False
-                    BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_DATA_STALE_HALT"
+                    BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_POSITION_GUARD_HALT"
                     BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
-                        "داده پوزیشن کهنه شده است؛ ورود خودکار جدید متوقف شد و حفاظت بومی صرافی دست‌نخورده باقی ماند."
+                        "کنترل محلی ناظر نقص حیاتی در داده، هویت پوزیشن یا حفاظت پیدا کرد؛ ورود جدید متوقف شد و پوزیشن باز خودکار دست‌کاری نشد."
                     )
                     BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
                     should_persist_halt = True
