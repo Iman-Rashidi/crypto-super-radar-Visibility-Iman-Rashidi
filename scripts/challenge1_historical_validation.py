@@ -201,14 +201,31 @@ def _wilson_interval(wins: int, count: int) -> tuple[float | None, float | None]
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
-def _bootstrap_mean_ci(values: list[float], seed: int = 20261119) -> tuple[float | None, float | None]:
-    if len(values) < 2:
+def _bootstrap_mean_ci(
+    trades: list[dict], seed: int = 20261119, block_days: int = 3,
+) -> tuple[float | None, float | None]:
+    # Resample contiguous 3-day blocks, not individual trades, to preserve
+    # short-horizon serial dependence and same-day cross-asset clustering.
+    grouped: dict[int, list[float]] = defaultdict(list)
+    for trade in trades:
+        value = trade.get("net_r")
+        if value is None or not math.isfinite(float(value)):
+            continue
+        day = int(trade["exit_time_ms"]) // 86_400_000
+        grouped[day].append(float(value))
+    days = sorted(grouped)
+    if len(days) < 10:
         return None, None
     rng = random.Random(seed)
-    n = len(values)
     means = []
     for _ in range(5000):
-        means.append(sum(values[rng.randrange(n)] for _ in range(n)) / n)
+        sample: list[float] = []
+        while len(sample) < sum(len(grouped[day]) for day in days):
+            start = rng.randrange(len(days))
+            for offset in range(block_days):
+                day = days[(start + offset) % len(days)]
+                sample.extend(grouped[day])
+        means.append(sum(sample) / len(sample))
     means.sort()
     return means[int(0.025 * len(means))], means[int(0.975 * len(means))]
 
@@ -430,7 +447,7 @@ def _metrics(trades: list[dict], initial_equity: float) -> dict:
     gross_losses = abs(sum(t["net_pnl_usd"] for t in losses))
     pf = gross_wins / gross_losses if gross_losses > 0 else None
     r_values = [float(t["net_r"]) for t in trades if t.get("net_r") is not None]
-    ci_low, ci_high = _bootstrap_mean_ci(r_values)
+    ci_low, ci_high = _bootstrap_mean_ci(trades)
     win_low, win_high = _wilson_interval(len(wins), count)
     equity = initial_equity
     peak = initial_equity
@@ -458,6 +475,7 @@ def _metrics(trades: list[dict], initial_equity: float) -> dict:
         "bootstrap_95pct_ci_mean_net_r": [
             round(ci_low, 6), round(ci_high, 6)
         ] if ci_low is not None else None,
+        "bootstrap_method": "5000-resample moving block bootstrap, 3 consecutive UTC exit days per block",
         "realized_close_to_close_max_drawdown_pct": round(max_dd, 4),
         "profitable_instruments": profitable_symbols,
         "total_fees_usd": round(sum(t["entry_fee_usd"] + t["exit_fee_usd"] for t in trades), 4),
