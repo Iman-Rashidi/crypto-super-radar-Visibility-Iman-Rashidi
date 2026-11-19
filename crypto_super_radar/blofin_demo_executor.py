@@ -265,6 +265,36 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     final_pattern_direction = str(evaluation.get("final_pattern_direction") or "").strip().upper()
     initial_pattern_category = str(evaluation.get("initial_pattern_category") or "").strip().upper()
     final_pattern_category = str(evaluation.get("final_pattern_category") or "").strip().upper()
+    final_pattern = evidence.get("chosen_pattern")
+    final_pattern = final_pattern if isinstance(final_pattern, Mapping) else {}
+    final_record_pattern_name = str(final_pattern.get("name_en") or "").strip()
+    final_record_pattern_direction = str(final_pattern.get("direction") or "").strip().upper()
+    final_record_pattern_category = str(final_pattern.get("category") or "").strip().upper()
+    final_signal_bar = str(
+        record.get("signal_bar_open_utc")
+        or (record.get("execution") or {}).get("signal_bar_open_utc")
+        if isinstance(record.get("execution"), Mapping)
+        else record.get("signal_bar_open_utc") or ""
+    ).strip()
+    proof_final_bar = str(evaluation.get("final_signal_bar_open_utc") or "").strip()
+    proof_initial_bar = str(evaluation.get("initial_signal_bar_open_utc") or "").strip()
+    try:
+        window_started = datetime.fromisoformat(
+            str(evaluation.get("window_started_at_utc") or "").replace("Z", "+00:00")
+        )
+        window_completed = datetime.fromisoformat(
+            str(evaluation.get("window_completed_at_utc") or "").replace("Z", "+00:00")
+        )
+        if window_started.tzinfo is None:
+            window_started = window_started.replace(tzinfo=timezone.utc)
+        if window_completed.tzinfo is None:
+            window_completed = window_completed.replace(tzinfo=timezone.utc)
+        wall_window_seconds = (
+            window_completed.astimezone(timezone.utc)
+            - window_started.astimezone(timezone.utc)
+        ).total_seconds()
+    except (TypeError, ValueError):
+        wall_window_seconds = -1.0
     if (
         not initial_pattern_name
         or initial_pattern_name != final_pattern_name
@@ -272,8 +302,26 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         or final_pattern_direction != initial_pattern_direction
         or initial_pattern_category != final_pattern_category
         or not initial_pattern_category
+        or final_record_pattern_name != final_pattern_name
+        or final_record_pattern_direction != final_pattern_direction
+        or final_record_pattern_category != final_pattern_category
+        or proof_final_bar != final_signal_bar
+        or not proof_initial_bar
+        or proof_initial_bar == proof_final_bar
+        or not math.isfinite(wall_window_seconds)
+        or wall_window_seconds < 300
+        or evaluation.get("entry_evaluation_heartbeat_seconds") != 3.0
     ):
-        return False, "The selected candle/chart pattern did not persist through the evaluation window."
+        return False, "The selected pattern, fresh candle, or wall-clock evaluation window did not pass."
+
+    final_round = evaluation.get("final_round")
+    if (
+        not isinstance(final_round, Mapping)
+        or final_round.get("reviewer_ids") != ["nemotron", "second_ai"]
+        or final_round.get("consensus_status") != consensus.get("status")
+        or str(final_round.get("reviewed_signal_id") or "") != str(record.get("signal_id") or "")
+    ):
+        return False, "The final reviewer round is not bound to the refreshed signal."
 
     initial_round = evaluation.get("initial_round")
     if not isinstance(initial_round, Mapping):
