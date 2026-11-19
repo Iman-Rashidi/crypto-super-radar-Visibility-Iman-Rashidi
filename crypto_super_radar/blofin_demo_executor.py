@@ -539,7 +539,9 @@ def apply_demo_execution_cost_gate(
     def round_trip_cost(exit_price: Decimal) -> dict[str, Decimal]:
         turnover = (entry + exit_price) * turnover_multiplier
         fee = turnover * fee_rate
-        spread = turnover * half_spread_fraction
+        # Entry is already priced at the executable ask/bid; only model the
+        # opposite-side spread crossing on the exit fill here.
+        spread = exit_price * turnover_multiplier * half_spread_fraction
         slippage = turnover * slippage_rate
         return {"fee": fee, "spread": spread, "slippage": slippage, "total": fee + spread + slippage}
 
