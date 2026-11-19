@@ -272,21 +272,18 @@ def record_position_monitor_cycle(
                 experience_id=experience_id,
                 position_id=position_id,
             )
-            notion_status = (
-                _queue_notion_projection(
-                    summary_saved,
-                    event_type="POSITION_REVIEW",
-                    details=summary_detail,
-                    experience_id=experience_id,
-                    position_id=position_id,
-                    order_id=order_id,
-                    symbol=symbol,
-                    signal=signal,
-                    call_status="CYCLE_SUMMARY",
-                    validation="NOT_APPLICABLE",
-                    reason=f"{len(minute_events)} position monitor cycles summarized for minute bucket {bucket}.",
-                )
-                if experience_id else "NOT_QUEUED_EXPERIENCE_ID_MISSING"
+            notion_status = _queue_notion_projection(
+                summary_saved,
+                event_type="POSITION_REVIEW",
+                details=summary_detail,
+                experience_id=experience_id or "",
+                position_id=position_id,
+                order_id=order_id,
+                symbol=symbol,
+                signal=signal,
+                call_status="CYCLE_SUMMARY",
+                validation="NOT_APPLICABLE",
+                reason=f"{len(minute_events)} position monitor cycles summarized for minute bucket {bucket}.",
             )
             projection_failure_event = None
             if notion_status.startswith("OUTBOX_FAILED:"):
