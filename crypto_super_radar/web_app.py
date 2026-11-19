@@ -46,6 +46,13 @@ from .blofin_demo_executor import (
 )
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
+from .challenge1_entry_evaluation import (
+    ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+    MIN_ENTRY_EVALUATION_SECONDS,
+    EntryEvaluationCancelled,
+    wait_for_minimum_entry_evaluation_window,
+    validate_challenge1_entry_revalidation,
+)
 from .database import storage_backend
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
@@ -4892,6 +4899,24 @@ def _run_blofin_demo_execution_job(
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
+        entry_evaluation_started_monotonic = time.monotonic()
+        entry_evaluation_started_at_utc = datetime.now(timezone.utc).isoformat()
+        _record_challenge1_audit(
+            job_id, "ENTRY_EVALUATION_WINDOW_STARTED",
+            {
+                "instrument_id": instrument_id,
+                "signal_id": record.get("signal_id"),
+                "direction": record.get("signal"),
+                "minimum_window_seconds": MIN_ENTRY_EVALUATION_SECONDS,
+                "heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                "review_rounds_required": 2,
+                "entry_role": "PRE_ORDER_CHALLENGE1_EVALUATION",
+                "execution_environment": "BLOFIN_DEMO",
+            },
+            event_key="entry-evaluation-window-started",
+            experience_id=learning_experience_id,
+            reason="Challenge 1 started a minimum five-minute evidence and two-round review window before any order.",
+        )
         _record_challenge1_audit(
             job_id, "AI_REVIEW_REQUESTED",
             {
@@ -4899,31 +4924,418 @@ def _run_blofin_demo_execution_job(
                 "signal": str(getattr(getattr(analysis, "signal", None), "value", getattr(analysis, "signal", "UNKNOWN"))),
                 "reviewers": ["nemotron", "second_ai"],
                 "review_contract": "Independent reviews run concurrently; neither receives the other's answer.",
-                "execution_role": "ENTRY_APPROVAL_GATE",
+                "execution_role": "ENTRY_APPROVAL_GATE_INITIAL_ROUND",
             },
-            event_key="ai-review-requested", experience_id=learning_experience_id,
-            reason="Two independent reviewer calls are starting before any Demo order decision.",
+            event_key="ai-review-initial-requested", experience_id=learning_experience_id,
+            reason="Initial independent reviewer round is required before the five-minute wait and revalidation.",
         )
-        failed_operation = "ai_supervisors.request_and_validate_quorum"
-        ai_quorum = _run_challenge1_supervisor_reviews(analysis, asset)
+        failed_operation = "ai_supervisors.initial_request_and_validate_quorum"
+        initial_ai_quorum = _run_challenge1_supervisor_reviews(analysis, asset)
         _record_challenge1_audit(
-            job_id, "AI_REVIEW_RESULT",
+            job_id, "AI_REVIEW_INITIAL_RESULT",
             {
-                "instrument_id": instrument_id, "ai_reviews": ai_quorum.get("ai_reviews"),
-                "ai_consensus": ai_quorum.get("ai_consensus"),
-                "ai_status": ai_quorum.get("ai_status"),
-                "approved": ai_quorum.get("approved"),
-                "reason_fa": ai_quorum.get("reason_fa"),
+                "instrument_id": instrument_id,
+                "ai_reviews": initial_ai_quorum.get("ai_reviews"),
+                "ai_consensus": initial_ai_quorum.get("ai_consensus"),
+                "ai_status": initial_ai_quorum.get("ai_status"),
+                "approved": initial_ai_quorum.get("approved"),
+                "reason_fa": initial_ai_quorum.get("reason_fa"),
             },
-            event_key="ai-review-result", experience_id=learning_experience_id,
-            status="SUCCESS" if ai_quorum.get("approved") else "WARNING",
-            reason=str(ai_quorum.get("reason_fa") or "Independent reviewer results recorded."),
+            event_key="ai-review-initial-result", experience_id=learning_experience_id,
+            status="SUCCESS" if initial_ai_quorum.get("approved") else "WARNING",
+            reason=str(initial_ai_quorum.get("reason_fa") or "Initial independent reviewer results recorded."),
         )
+
+        ai_quorum = initial_ai_quorum
+        entry_evaluation_proof = None
+        if initial_ai_quorum.get("approved") is True:
+            _set_blofin_execution_job(
+                job_id, "running", stage="ENTRY_EVALUATION_WINDOW",
+                message_fa="اجماع اولیه دو ناظر ثبت شد؛ پنجره حداقل پنج‌دقیقه‌ای فعال است. پایش محلی هر ۳ ثانیه انجام می‌شود و در پایان، کندل تازه و رأی مستقل دوباره بررسی خواهد شد.",
+                ai_reviews=initial_ai_quorum.get("ai_reviews"),
+                ai_consensus=initial_ai_quorum.get("ai_consensus"),
+                analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
+                entry_evaluation_started_at_utc=entry_evaluation_started_at_utc,
+                entry_evaluation_minimum_seconds=MIN_ENTRY_EVALUATION_SECONDS,
+            )
+            last_heartbeat_bucket = [0]
+
+            def _entry_window_cancel_requested() -> bool:
+                with LOCK:
+                    current_job = BLOFIN_EXECUTION_JOBS.get(job_id) or {}
+                    current_status = str(current_job.get("status") or "").strip().lower()
+                    return bool(
+                        current_job.get("cancel_requested") is True
+                        or current_status in {"cancelled", "canceled"}
+                    )
+
+            def _entry_window_progress(elapsed: float) -> None:
+                remaining = max(0.0, MIN_ENTRY_EVALUATION_SECONDS - float(elapsed))
+                with LOCK:
+                    current_job = BLOFIN_EXECUTION_JOBS.get(job_id)
+                    if isinstance(current_job, dict):
+                        current_job.update({
+                            "stage": "ENTRY_EVALUATION_WINDOW",
+                            "entry_evaluation_elapsed_seconds": round(float(elapsed), 3),
+                            "entry_evaluation_remaining_seconds": round(remaining, 3),
+                            "entry_evaluation_heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                        })
+                bucket = int(float(elapsed) // 30)
+                if bucket > last_heartbeat_bucket[0] and bucket < 11:
+                    last_heartbeat_bucket[0] = bucket
+                    _record_challenge1_audit(
+                        job_id, "ENTRY_EVALUATION_HEARTBEAT",
+                        {
+                            "instrument_id": instrument_id,
+                            "signal_id": record.get("signal_id"),
+                            "elapsed_seconds": round(float(elapsed), 3),
+                            "remaining_seconds": round(remaining, 3),
+                            "heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                            "llm_request_attempted": False,
+                            "exchange_request_attempted": False,
+                            "exchange_write_attempted": False,
+                        },
+                        event_key=f"entry-evaluation-heartbeat-{bucket}",
+                        experience_id=learning_experience_id,
+                        reason="Local pre-entry evaluation heartbeat; no model or exchange request was made.",
+                    )
+
+            try:
+                entry_evaluation_elapsed = wait_for_minimum_entry_evaluation_window(
+                    entry_evaluation_started_monotonic,
+                    cancel_check=_entry_window_cancel_requested,
+                    progress=_entry_window_progress,
+                )
+            except EntryEvaluationCancelled as cancel_exc:
+                _record_challenge1_audit(
+                    job_id, "ENTRY_EVALUATION_CANCELLED",
+                    {
+                        "instrument_id": instrument_id,
+                        "signal_id": record.get("signal_id"),
+                        "elapsed_seconds": round(max(0.0, time.monotonic() - entry_evaluation_started_monotonic), 3),
+                        "orders_submitted": False,
+                    },
+                    event_key="entry-evaluation-cancelled",
+                    experience_id=learning_experience_id,
+                    status="WARNING",
+                    reason=str(cancel_exc),
+                )
+                if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="ENTRY_EVALUATION_CANCELLED",
+                        reason="پنجره ارزیابی پیش از تأیید نهایی لغو شد.",
+                    )
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="ENTRY_EVALUATION_CANCELLED",
+                    message_fa="ارزیابی ورود لغو شد؛ هیچ سفارشی ارسال نشد.",
+                    result={
+                        "status": "CANCELLED",
+                        "environment": "BLOFIN_DEMO",
+                        "signal_id": record.get("signal_id"),
+                        "learning_experience_id": learning_experience_id,
+                        "orders_submitted": False,
+                        "trade_executed": False,
+                    },
+                    completed_at_utc=datetime.now(timezone.utc).isoformat(),
+                )
+                _queue_blofin_completed_job_reports(job_id, instrument_id)
+                return
+
+            _set_blofin_execution_job(
+                job_id, "running", stage="ENTRY_EVALUATION_REVALIDATION",
+                message_fa="حداقل پنج دقیقه کامل شد؛ داده جدید کندل بسته‌شده ۵ دقیقه‌ای دریافت و سیگنال دوباره محاسبه می‌شود.",
+                entry_evaluation_elapsed_seconds=round(entry_evaluation_elapsed, 3),
+                entry_evaluation_remaining_seconds=0,
+            )
+            try:
+                refreshed_challenge_record = analyze_blofin_challenge1(
+                    read_client, instrument_id,
+                    audit_callback=lambda phase, details, key: _record_challenge1_audit(
+                        job_id, f"ENTRY_WINDOW_{phase}", details,
+                        event_key=f"entry-window-{key}",
+                        experience_id=learning_experience_id,
+                        reason=str(details.get("reason_fa") or phase),
+                    ),
+                )
+            except Exception as refresh_exc:
+                failure_details = {
+                    "status": "BLOCKED",
+                    "reason_codes": ["FRESH_CLOSED_CANDLE_ANALYSIS_FAILED"],
+                    "error_type": type(refresh_exc).__name__,
+                    "minimum_window_seconds": MIN_ENTRY_EVALUATION_SECONDS,
+                    "elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                }
+                _record_challenge1_audit(
+                    job_id, "ENTRY_EVALUATION_REVALIDATION_RESULT",
+                    {"instrument_id": instrument_id, "validation": failure_details, "orders_submitted": False},
+                    event_key="entry-evaluation-revalidation-failed",
+                    experience_id=learning_experience_id,
+                    status="WARNING",
+                    reason="Fresh closed-candle reanalysis failed; entry is blocked.",
+                )
+                if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="ENTRY_EVALUATION_REFRESH_FAILED",
+                        reason="تحلیل مجدد کندل بسته‌شده پس از پنجره پنج‌دقیقه‌ای ناموفق بود.",
+                    )
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="ENTRY_EVALUATION_REFRESH_FAILED",
+                    message_fa="داده تازه و قابل‌اعتبارسنجی دریافت نشد؛ ورود مسدود شد و هیچ سفارشی ارسال نشد.",
+                    result={
+                        "status": "BLOCKED",
+                        "environment": "BLOFIN_DEMO",
+                        "entry_evaluation_validation": failure_details,
+                        "orders_submitted": False,
+                        "trade_executed": False,
+                    },
+                    completed_at_utc=datetime.now(timezone.utc).isoformat(),
+                )
+                _queue_blofin_completed_job_reports(job_id, instrument_id)
+                return
+
+            refreshed_challenge_record["gates"] = gates
+            entry_revalidation = validate_challenge1_entry_revalidation(
+                challenge_record,
+                refreshed_challenge_record,
+                elapsed_seconds=entry_evaluation_elapsed,
+            )
+            refreshed_experience_id = store.record_challenge1_decision(
+                instrument_id=instrument_id,
+                challenge_record=refreshed_challenge_record,
+            )
+            refreshed_challenge_record["learning_experience_id"] = refreshed_experience_id
+            _record_challenge1_audit(
+                job_id, "ENTRY_EVALUATION_REVALIDATION_RESULT",
+                {
+                    "instrument_id": instrument_id,
+                    "initial_signal_id": record.get("signal_id"),
+                    "refreshed_signal_id": refreshed_challenge_record.get("signal_id"),
+                    "validation": entry_revalidation,
+                    "initial_direction": challenge_record.get("signal"),
+                    "refreshed_direction": refreshed_challenge_record.get("signal"),
+                    "initial_entry_price": challenge_record.get("entry_price_usd"),
+                    "refreshed_entry_price": refreshed_challenge_record.get("entry_price_usd"),
+                    "orders_submitted": False,
+                },
+                event_key="entry-evaluation-revalidation-result",
+                experience_id=refreshed_experience_id,
+                status="SUCCESS" if entry_revalidation.get("status") == "PASS" else "WARNING",
+                reason=(
+                    "The same Challenge 1 setup persisted on a newer closed 5m candle."
+                    if entry_revalidation.get("status") == "PASS"
+                    else "The original entry setup did not survive five-minute revalidation."
+                ),
+            )
+
+            def _mark_initial_entry_superseded(reason: str) -> None:
+                if (
+                    learning_experience_id
+                    and learning_experience_id != refreshed_experience_id
+                    and not store.has_final_experience(learning_experience_id)
+                ):
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="SUPERSEDED_BY_FIVE_MINUTE_REVALIDATION",
+                        reason=reason,
+                    )
+
+            if (
+                entry_revalidation.get("status") != "PASS"
+                or store.has_final_experience(refreshed_experience_id)
+                or store.has_signal(str(refreshed_challenge_record.get("signal_id") or ""))
+            ):
+                reason_fa = (
+                    "سیگنال اولیه پس از پنج دقیقه با کندل بسته‌شده جدید تأیید نشد، یا سیگنال/تجربه تکراری است؛ "
+                    "ورود جدید انجام نمی‌شود."
+                )
+                _mark_initial_entry_superseded(reason_fa)
+                if not entry_revalidation.get("reason_codes"):
+                    entry_revalidation["reason_codes"] = ["DUPLICATE_OR_FINALIZED_SIGNAL"]
+                entry_revalidation["status"] = "BLOCKED"
+                _record_challenge1_audit(
+                    job_id, "FINAL_ENTRY_DECISION",
+                    {
+                        "instrument_id": instrument_id,
+                        "decision": "BLOCK_AFTER_FIVE_MINUTE_REVALIDATION",
+                        "reason_fa": reason_fa,
+                        "entry_evaluation_validation": entry_revalidation,
+                        "orders_submitted": False,
+                    },
+                    event_key="final-entry-blocked-after-revalidation",
+                    experience_id=refreshed_experience_id,
+                    status="WARNING",
+                    reason=reason_fa,
+                )
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="ENTRY_EVALUATION_REVALIDATION_BLOCKED",
+                    message_fa=reason_fa,
+                    analysis=gate_summary,
+                    trade_context={
+                        **trade_context,
+                        "entry_evaluation_validation": entry_revalidation,
+                        "entry_evaluation_elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                    },
+                    result={
+                        **refreshed_challenge_record,
+                        "status": "BLOCKED",
+                        "environment": "BLOFIN_DEMO",
+                        "entry_evaluation_validation": entry_revalidation,
+                        "orders_submitted": False,
+                        "trade_executed": False,
+                        "reason_fa": reason_fa,
+                    },
+                    completed_at_utc=datetime.now(timezone.utc).isoformat(),
+                )
+                _queue_blofin_completed_job_reports(job_id, instrument_id)
+                return
+
+            _mark_initial_entry_superseded(
+                "سیگنال اولیه با کندل بسته‌شده جدید و همان الگو دوباره تأیید شد؛ رأی نهایی بر مبنای تجربه تازه گرفته می‌شود."
+            )
+            challenge_record = refreshed_challenge_record
+            learning_experience_id = refreshed_experience_id
+            learning_signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
+            mtf_signal = challenge_record.get("execution") if isinstance(challenge_record.get("execution"), dict) else {}
+            last_candle_time = challenge_record.get("signal_bar_open_utc")
+            last_candle_close = challenge_record.get("entry_price_usd")
+            analysis.signal = Signal.LONG if learning_signal == "LONG" else Signal.SHORT
+            analysis.entry_price = challenge_record.get("entry_price_usd")
+            analysis.stop_loss = challenge_record.get("stop_loss_usd")
+            analysis.take_profit = challenge_record.get("take_profit_usd")
+            analysis.metrics["challenge1_evidence"] = challenge_record.get("challenge1_evidence", {})
+            analysis.metrics["challenge1_execution"] = dict(mtf_signal)
+            analysis.to_record = lambda: challenge_record
+            trade_context.update({
+                "last_completed_candle_time_utc": last_candle_time,
+                "last_candle_close": last_candle_close,
+                "challenge1_execution": mtf_signal,
+                "entry_evaluation_validation": entry_revalidation,
+                "entry_evaluation_started_at_utc": entry_evaluation_started_at_utc,
+                "entry_evaluation_elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                "execution_timeframe": "5m",
+                "higher_timeframes_used": False,
+                "completed_candles_only": True,
+            })
+            gate_summary.update({
+                "signal": learning_signal,
+                "signal_fa": {"LONG": "خرید (LONG)", "SHORT": "فروش استقراضی (SHORT)"}.get(learning_signal, "بدون معامله"),
+                "entry_reference_price": challenge_record.get("entry_price_usd"),
+                "stop_loss": challenge_record.get("stop_loss_usd"),
+                "take_profit": challenge_record.get("take_profit_usd"),
+            })
+            wave_report = _blofin_elliott_wave_report_fa(
+                challenge_record.get("challenge1_evidence", {}).get("elliott_wave"),
+                learning_signal,
+            )
+            record = analysis.to_record()
+            record.update({
+                "signal_id": challenge_record.get("signal_id"),
+                "signal_bar_open_utc": challenge_record.get("signal_bar_open_utc"),
+                "instrument_id": instrument_id,
+                "inst_id": instrument_id,
+                "execution_profile": "CHALLENGE_1",
+            })
+
+            _set_blofin_execution_job(
+                job_id, "running", stage="AI_SUPERVISOR_FINAL_REVIEW",
+                message_fa="کندل جدید و همان الگو تأیید شد؛ اکنون هر دو ناظر مستقل، شواهد تازه را برای رأی نهایی بررسی می‌کنند.",
+                analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
+                entry_evaluation_validation=entry_revalidation,
+            )
+            _record_challenge1_audit(
+                job_id, "AI_REVIEW_FINAL_REQUESTED",
+                {
+                    "instrument_id": instrument_id,
+                    "signal_id": record.get("signal_id"),
+                    "signal": learning_signal,
+                    "reviewers": ["nemotron", "second_ai"],
+                    "review_contract": "Both reviewers are called again independently on refreshed closed-candle evidence.",
+                    "execution_role": "ENTRY_APPROVAL_GATE_FINAL_ROUND",
+                    "entry_evaluation_elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                },
+                event_key="ai-review-final-requested",
+                experience_id=learning_experience_id,
+                reason="Final independent reviewer round is mandatory after the five-minute fresh-candle check.",
+            )
+            failed_operation = "ai_supervisors.final_request_and_validate_quorum"
+            final_ai_quorum = _run_challenge1_supervisor_reviews(analysis, asset)
+            _record_challenge1_audit(
+                job_id, "AI_REVIEW_FINAL_RESULT",
+                {
+                    "instrument_id": instrument_id,
+                    "signal_id": record.get("signal_id"),
+                    "ai_reviews": final_ai_quorum.get("ai_reviews"),
+                    "ai_consensus": final_ai_quorum.get("ai_consensus"),
+                    "ai_status": final_ai_quorum.get("ai_status"),
+                    "approved": final_ai_quorum.get("approved"),
+                    "reason_fa": final_ai_quorum.get("reason_fa"),
+                },
+                event_key="ai-review-final-result",
+                experience_id=learning_experience_id,
+                status="SUCCESS" if final_ai_quorum.get("approved") else "WARNING",
+                reason=str(final_ai_quorum.get("reason_fa") or "Final independent reviewer results recorded."),
+            )
+            ai_quorum = final_ai_quorum
+            if ai_quorum.get("approved") is True:
+                entry_evaluation_proof = {
+                    **entry_revalidation,
+                    "status": "PASS",
+                    "minimum_window_seconds": MIN_ENTRY_EVALUATION_SECONDS,
+                    "elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                    "review_rounds_completed": 2,
+                    "entry_evaluation_heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                    "window_started_at_utc": entry_evaluation_started_at_utc,
+                    "window_completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "initial_round": {
+                        "ai_reviews": initial_ai_quorum.get("ai_reviews"),
+                        "ai_consensus": initial_ai_quorum.get("ai_consensus"),
+                    },
+                    "final_round": {
+                        "reviewer_ids": ["nemotron", "second_ai"],
+                        "consensus_status": ai_quorum.get("ai_consensus", {}).get("status"),
+                        "reviewed_signal_id": record.get("signal_id"),
+                    },
+                }
+                ai_consensus_with_window = dict(ai_quorum.get("ai_consensus") or {})
+                ai_consensus_with_window["entry_evaluation_window"] = copy.deepcopy(entry_evaluation_proof)
+                ai_quorum["ai_consensus"] = ai_consensus_with_window
+                record["entry_evaluation_window"] = entry_evaluation_proof
+                record["ai_reviews"] = ai_quorum.get("ai_reviews")
+                record["ai_consensus"] = ai_consensus_with_window
+
+                _record_challenge1_audit(
+                    job_id, "ENTRY_EVALUATION_WINDOW_PASSED",
+                    {
+                        "instrument_id": instrument_id,
+                        "signal_id": record.get("signal_id"),
+                        "entry_evaluation_window": entry_evaluation_proof,
+                        "decision": "READY_FOR_FINAL_DEMO_EXECUTOR_PREFLIGHT",
+                        "orders_submitted": False,
+                    },
+                    event_key="entry-evaluation-window-passed",
+                    experience_id=learning_experience_id,
+                    status="SUCCESS",
+                    reason="Five-minute revalidation and both independent reviewer rounds passed.",
+                )
+
         ai_review = ai_quorum["ai_review"]
         ai_reviews = ai_quorum["ai_reviews"]
         ai_consensus = ai_quorum["ai_consensus"]
         ai_status = ai_quorum["ai_status"]
         second_ai_review = ai_quorum["second_ai_review"]
+
 
         if not ai_quorum["approved"]:
             reason_fa = str(ai_quorum.get("reason_fa") or "اجماع دو ناظر مستقل تأیید نشد؛ ورود مسدود است.")
