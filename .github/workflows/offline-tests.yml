@@ -106,6 +106,7 @@ jobs:
         if: github.event_name == 'push'
         run: python scripts/challenge1_historical_validation.py
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
           name: challenge1-profitability-validation
           path: reports/challenge1_profitability_validation.json
