@@ -286,10 +286,11 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
             initial_bar_time = initial_bar_time.replace(tzinfo=timezone.utc)
         if final_bar_time.tzinfo is None:
             final_bar_time = final_bar_time.replace(tzinfo=timezone.utc)
-        newer_completed_bar = (
+        candle_advance_seconds = (
             final_bar_time.astimezone(timezone.utc)
-            > initial_bar_time.astimezone(timezone.utc)
-        )
+            - initial_bar_time.astimezone(timezone.utc)
+        ).total_seconds()
+        newer_completed_bar = candle_advance_seconds >= 300
     except (TypeError, ValueError):
         newer_completed_bar = False
     try:
