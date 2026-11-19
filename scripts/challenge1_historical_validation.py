@@ -596,6 +596,8 @@ def main() -> int:
             "exit": "TP/SL OHLC trigger, adverse slippage applied; gap-through-stop fills at worse open",
             "funding": "actual BloFin historical funding rate events; notional held constant at entry price for attribution",
             "open_positions_at_end": "marked and reported separately; not forced closed or counted as realized trades",
+            "dynamic_ai_position_management": "NOT_MODELED; this historical test evaluates entry selection plus initial fixed TP/SL only. AI-driven tighten-stop or close-position interventions require forward Demo evidence.",
+            "partial_fills_and_order_book_impact": "NOT_MODELED; constant adverse slippage is a sensitivity assumption, not a reconstruction of historical fills.",
         },
         "acceptance_thresholds": {
             "minimum_oos_closed_trades": MIN_OOS_TRADES,
