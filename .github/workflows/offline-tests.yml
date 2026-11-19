@@ -8,6 +8,7 @@ on:
       - fix/ch01-analysis-independent-readiness
       - staging/challenge1-integration-2026-11-16
       - feature/github-actions-demo-runner-2026-11-16
+      - feature/challenge1-active-supervisors-2026-11-19
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
@@ -75,9 +76,11 @@ jobs:
               test_elliott_waves.py \
               test_chart_patterns.py \
               test_challenge1_strategy.py \
+              test_challenge1_entry_evaluation.py \
               test_ai_second_opinion.py \
               test_web_app.py \
               test_blofin_demo_executor.py \
+              test_blofin_demo_private_websocket.py \
               test_challenge1_executor.py \
               test_notion_event_sync.py \
               test_notion_activity_journal.py \
