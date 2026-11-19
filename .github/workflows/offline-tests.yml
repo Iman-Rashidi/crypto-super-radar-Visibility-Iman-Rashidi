@@ -82,6 +82,7 @@ jobs:
               test_notion_event_sync.py \
               test_notion_activity_journal.py \
               test_demo_observability.py \
+              test_challenge1_position_observers.py \
               test_database.py \
               test_demo_autopilot_once.py; do
               python -m unittest discover -s tests -p "${test_file}" -v
