@@ -54,7 +54,7 @@ def _record_audit_event(
     phase: str,
     event_key: str,
     details: Mapping[str, Any],
-    experience_id: str,
+    experience_id: str | None,
     position_id: str,
     connection: Any = None,
 ) -> dict[str, Any]:
@@ -146,22 +146,24 @@ def _queue_notion_projection(
 
 def record_position_monitor_cycle(
     *,
-    experience_id: str,
+    experience_id: str | None,
     position_id: str,
     order_id: str,
     symbol: str,
     signal: str,
     cycle_details: Mapping[str, Any],
     cycle_epoch_ms: int | None = None,
+    connection: Any = None,
 ) -> dict[str, Any]:
     """Persist every monitor cycle in the hash chain, then summarize completed minutes to Notion."""
-    if not experience_id or not position_id:
-        raise ValueError("experience_id and position_id are required for a position cycle.")
+    if not position_id:
+        raise ValueError("position_id is required for a position cycle.")
+    audit_reference = experience_id or f"unlinked-position:{position_id}"
     epoch_ms = int(cycle_epoch_ms or time.time() * 1000)
     now_bucket = int(epoch_ms // 60_000)
     cycle_key = f"position-cycle:{position_id}:{epoch_ms}"
     saved = _record_audit_event(
-        cycle_id=experience_id,
+        cycle_id=audit_reference,
         phase="POSITION_EXIT_EVALUATION",
         event_key=cycle_key,
         details={
@@ -172,12 +174,13 @@ def record_position_monitor_cycle(
         },
         experience_id=experience_id,
         position_id=position_id,
+        connection=connection,
     )
 
-    recorder = Challenge1AuditRecorder()
+    recorder = Challenge1AuditRecorder(connection=connection) if connection is not None else Challenge1AuditRecorder()
     summaries: list[dict[str, Any]] = []
     try:
-        report = recorder.list_related(experience_id, limit=_MAX_AUDIT_EVENTS)
+        report = recorder.list_related(audit_reference, limit=_MAX_AUDIT_EVENTS)
         events = report.get("events") if isinstance(report.get("events"), list) else []
         cycles_by_minute: dict[int, list[dict[str, Any]]] = {}
         summarized: set[int] = set()
@@ -221,6 +224,7 @@ def record_position_monitor_cycle(
                 "instrument_id": symbol,
                 "position_id": position_id,
                 "experience_id": experience_id,
+                "experience_link_status": "LINKED" if experience_id else "MISSING",
                 "minute_bucket": bucket,
                 "cycle_count": len(minute_events),
                 "cycle_event_ids": [str(item.get("event_id") or "") for item in minute_events],
@@ -231,7 +235,7 @@ def record_position_monitor_cycle(
                 "source_of_truth": "APPEND_ONLY_CHALLENGE1_AUDIT_CHAIN",
             }
             summary_saved = recorder.append_event(
-                cycle_id=experience_id,
+                cycle_id=audit_reference,
                 phase="POSITION_MANAGER_CYCLE_SUMMARY",
                 event_key=f"position-cycle-summary:{position_id}:{bucket}",
                 details=summary_detail,
@@ -242,7 +246,7 @@ def record_position_monitor_cycle(
                 summary_saved,
                 event_type="POSITION_REVIEW",
                 details=summary_detail,
-                experience_id=experience_id,
+                experience_id=experience_id or "",
                 position_id=position_id,
                 order_id=order_id,
                 symbol=symbol,
@@ -263,6 +267,7 @@ def record_position_monitor_cycle(
         "status": "RECORDED",
         "event_id": saved.get("event_id"),
         "cycle_id": saved.get("cycle_id"),
+        "experience_link_status": "LINKED" if experience_id else "MISSING",
         "event_hash": saved.get("event_hash"),
         "inserted": saved.get("inserted", False),
         "minute_summaries": summaries,
@@ -271,17 +276,19 @@ def record_position_monitor_cycle(
 
 def record_position_observer_skip(
     *,
-    experience_id: str,
+    experience_id: str | None,
     position_id: str,
     reviewer_id: str,
     cycle_id: str,
     reason_code: str,
     reason: str,
     last_result: Mapping[str, Any] | None = None,
+    connection: Any = None,
 ) -> dict[str, Any]:
     """Write a distinct append-only NOT_CALLED event for one reviewer in one manager cycle."""
-    if not experience_id or not position_id or reviewer_id not in {"nemotron", "second_ai"}:
-        raise ValueError("Valid experience, position and reviewer identifiers are required.")
+    if not position_id or reviewer_id not in {"nemotron", "second_ai"}:
+        raise ValueError("Valid position and reviewer identifiers are required.")
+    audit_reference = experience_id or f"unlinked-position:{position_id}"
     details = {
         "reviewer_id": reviewer_id,
         "status": "NOT_CALLED",
@@ -293,12 +300,13 @@ def record_position_observer_skip(
         "last_result": dict(last_result or {}),
     }
     return _record_audit_event(
-        cycle_id=experience_id,
+        cycle_id=audit_reference,
         phase="POSITION_AI_REVIEW_SKIPPED",
         event_key=f"position-review-skip:{position_id}:{cycle_id}:{reviewer_id}",
         details=details,
         experience_id=experience_id,
         position_id=position_id,
+        connection=connection,
     )
 
 
