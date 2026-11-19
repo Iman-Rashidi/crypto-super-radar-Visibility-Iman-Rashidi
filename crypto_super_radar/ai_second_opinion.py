@@ -1682,6 +1682,9 @@ def _challenge1_observer_evidence(
         position_summary["position_side"] = _observer_clean_text(
             position.get("positionSide"), 20,
         ).lower()
+        position_summary["position_id"] = _observer_clean_text(position.get("positionId"), 80)
+        position_summary["instrument_id"] = _observer_clean_text(position.get("instId"), 40).upper()
+        position_summary["margin_mode"] = _observer_clean_text(position.get("marginMode"), 20).lower()
     return {
         "environment": "BLOFIN_DEMO",
         "execution_profile": "CHALLENGE_1",
@@ -1737,14 +1740,20 @@ def _challenge1_observer_evidence(
                 "reason_code": "PROTECTIVE_ORDER_EVIDENCE_NOT_SUPPLIED",
             },
             "risk_change": _observer_clean_text(context.get("risk_change"), 180),
-            "review_scope": "AUDIT_ROBOT_DECISION_ONLY",
+            "review_scope": "ACTIVE_POSITION_SUPERVISION_AND_AUDIT",
         },
         "review_policy": {
-            "role": "POST_DECISION_AUDIT_ONLY",
-            "may_change_orders": False,
-            "may_close_positions": False,
-            "may_change_stop_or_target": False,
-            "may_delay_or_block_entry": False,
+            "role": "TWO_INDEPENDENT_ACTIVE_POSITION_SUPERVISORS",
+            "must_report_all_observations_and_decisions": True,
+            "must_return_structured_action": True,
+            "may_propose_hold_or_close": True,
+            "may_propose_stop_tightening_only": True,
+            "may_increase_size_or_leverage": False,
+            "may_add_to_losing_position": False,
+            "may_widen_or_remove_stop": False,
+            "may_change_target_or_partially_reduce": False,
+            "direct_exchange_tools_or_credentials": False,
+            "all_actions_require_two_reviewer_coordinator_and_demo_guard": True,
             "general_twelve_gate_protocols": "NOT_USED_FOR_CHALLENGE_1",
             "volume_and_1h_context": "ADVISORY_ONLY",
         },
