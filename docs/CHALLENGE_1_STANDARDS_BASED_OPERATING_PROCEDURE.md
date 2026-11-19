@@ -47,9 +47,11 @@ These are different functions and must not be conflated. The release owner must 
 
 The current code sets a three-hour default in `challenge1_position_observers.py` and clamps `BLOFIN_DEMO_POSITION_AI_REVIEW_INTERVAL_SECONDS` to a minimum of 3,600 seconds (one hour). The current position manager itself sleeps for 15 seconds. Therefore, setting the environment variable to 3 does not produce three-second calls.
 
+The position-observer adapter itself sets `_OBSERVER_DAILY_CAP = 35` and `_OBSERVER_MINUTE_CAP = 18` per reviewer ID. Thus an attempted call every three seconds (20/minute per reviewer) already exceeds the application's own per-reviewer minute cap. The 35/day per-reviewer app cap would be consumed in about 105 seconds at that rate. For two reviewers, the app-level maximum is 70 calls/day across the pair, assuming both remain configured and reachable.
+
 The currently documented OpenRouter free `:free` limit is 20 requests/minute and 50 requests/day. One request every three seconds to a single free model would consume 20/minute and 28,800/day, 576 times the published daily allowance. Two reviewer calls each three seconds would mean 40 total provider calls/minute across the pair. The current observer adapter can wait up to 40 seconds for the two results, so a three-second schedule would also create overlapping/in-flight work unless explicitly prevented. A failed request can count against the free daily cap.
 
-The second provider has its own quota and availability policy. Its limit must be obtained from the provider's current official account/model documentation; it must not be guessed or copied from OpenRouter.
+The second provider has its own quota and availability policy. Its limit must be obtained from the provider's current official account/model documentation; it must not be guessed or copied from OpenRouter. The observer's 35/day and 18/minute application counters are held in process memory (`_OBSERVER_REQUESTS`) and reset on process restart; they are not a durable cross-instance quota ledger. Upstream provider limits remain separate, but the application-level counters need durable shared storage before multi-instance or restart-safe quota enforcement can be claimed.
 
 ## 4. Proposed event-driven supervisor procedure
 
