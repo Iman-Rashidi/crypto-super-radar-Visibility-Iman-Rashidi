@@ -9539,6 +9539,16 @@ def _blofin_manual_tighten_stop_position(
     if not tpsl_id or not re.fullmatch(r"[A-Za-z0-9]{1,64}", tpsl_id):
         raise BloFinDemoExecutionBlocked("شناسه سفارش TP/SL برای اصلاح Stop معتبر نیست.")
     old_stop = _blofin_manual_decimal(protective.get("slTriggerPrice"), "current_stop_loss")
+    if requested_stop == old_stop:
+        return {
+            "status": "STOP_ALREADY_AT_PROPOSED_LEVEL",
+            "environment": "BLOFIN_DEMO",
+            "position_id": position_id,
+            "tpsl_id": tpsl_id,
+            "stop_loss": str(old_stop),
+            "readback_verified": True,
+            "exchange_write_attempted": False,
+        }
     if direction == "long":
         if not (requested_stop > old_stop and requested_stop < mark):
             raise BloFinDemoExecutionBlocked("برای LONG، Stop جدید باید فقط به سمت بالا و پایین‌تر از Mark حرکت کند.")
@@ -9552,7 +9562,7 @@ def _blofin_manual_tighten_stop_position(
         raise BloFinDemoExecutionBlocked("قیمت Stop جدید با Tick Size نماد هم‌تراز نیست.")
 
     request_id = "AISTOP" + hashlib.sha256(
-        f"{position_id}:{tpsl_id}:{requested_stop}:{audit_id}".encode("utf-8")
+        f"{position_id}:{tpsl_id}:{requested_stop}".encode("utf-8")
     ).hexdigest()[:20]
     audit = {
         "environment": "BLOFIN_DEMO", "action_source": "AI_SUPERVISOR",
@@ -9568,6 +9578,23 @@ def _blofin_manual_tighten_stop_position(
         store = BloFinDemoEventStore()
         if storage_backend() != "TURSO_CLOUD_SQLITE":
             raise BloFinDemoExecutionBlocked("حافظه پایدار Turso فعال نیست؛ اصلاح Stop انجام نشد.")
+        prior_amendments = store.recent_events(audit_id, limit=100)
+        matching_prior = [
+            event for event in prior_amendments
+            if str(event.get("event_type") or "").startswith("AI_SUPERVISOR_STOP_AMEND_")
+            and str((event.get("payload") or {}).get("request_id") or "") == request_id
+        ]
+        if matching_prior:
+            return {
+                "status": "STOP_AMEND_PREVIOUSLY_RECORDED_RECONCILIATION_REQUIRED",
+                "environment": "BLOFIN_DEMO",
+                "position_id": position_id,
+                "tpsl_id": tpsl_id,
+                "request_id": request_id,
+                "previous_event_types": [str(event.get("event_type") or "") for event in matching_prior],
+                "exchange_write_attempted": False,
+                "retry_allowed": False,
+            }
         store.record_manual_action(audit_id, "AI_SUPERVISOR_STOP_AMEND_REQUESTED", audit)
         try:
             with BLOFIN_ORDER_SUBMISSION_LOCK:
