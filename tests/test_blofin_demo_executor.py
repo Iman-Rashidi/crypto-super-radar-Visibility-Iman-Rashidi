@@ -1350,6 +1350,16 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             item["challenge1_evidence"]["chosen_pattern"]["name_en"] = "Different Pattern"
             sync_evaluation(item)
 
+        def incomplete_candle_advance(item):
+            from datetime import timedelta
+            final_bar = datetime.fromisoformat(
+                item["entry_evaluation_window"]["final_signal_bar_open_utc"]
+            )
+            item["entry_evaluation_window"]["initial_signal_bar_open_utc"] = (
+                final_bar - timedelta(minutes=1)
+            ).isoformat()
+            sync_evaluation(item)
+
         def mismatch_final_round_identity(item):
             item["entry_evaluation_window"]["final_round"]["reviewed_signal_id"] = "stale-signal"
             sync_evaluation(item)
@@ -1362,6 +1372,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             "cached first-round approval": stale_initial_reviewer,
             "review rounds not sequential": collapse_review_rounds,
             "final record pattern differs from evaluation": mismatch_final_pattern,
+            "new candle is less than five minutes later": incomplete_candle_advance,
             "final reviewer round references stale signal": mismatch_final_round_identity,
             "missing consensus": lambda item: item.pop("ai_consensus"),
             "missing second reviewer": lambda item: item["ai_reviews"].pop(),
