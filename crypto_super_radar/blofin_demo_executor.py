@@ -128,11 +128,28 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     consensus = record.get("ai_consensus")
     if not isinstance(consensus, Mapping):
         return False, "The two-reviewer consensus record is missing."
+    signal_id = str(record.get("signal_id") or "").strip()
+    consensus_signal_id = str(consensus.get("reviewed_signal_id") or "").strip()
+    if not signal_id or consensus_signal_id != signal_id:
+        return False, "The two-reviewer approval is not bound to this exact signal_id."
+    try:
+        consensus_reviewed_at = datetime.fromisoformat(
+            str(consensus.get("reviewed_at_utc") or "").replace("Z", "+00:00")
+        )
+        if consensus_reviewed_at.tzinfo is None:
+            return False, "The reviewer approval timestamp has no timezone."
+        approval_age = (datetime.now(timezone.utc) - consensus_reviewed_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return False, "The reviewer approval timestamp is missing or invalid."
+    if approval_age < -30 or approval_age > 300:
+        return False, "The two-reviewer approval is outside the five-minute validity window."
+
     required_consensus = (
         consensus.get("status") == "APPROVED_BY_BOTH"
         and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
         and consensus.get("two_reviewer_approval") is True
         and consensus.get("entry_gate_enforced") is True
+        and consensus.get("reviewed_signal_id") == signal_id
         and consensus.get("primary_verified") is True
         and consensus.get("second_verified") is True
         and consensus.get("primary_approved") is True
@@ -175,6 +192,18 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         returned_model = str(review.get("returned_model") or "").strip()
         returned_identity = returned_model.split(":", 1)[0].casefold()
         configured_identity = model.split(":", 1)[0].casefold()
+        reviewer_signal_id = str(review.get("reviewed_signal_id") or "").strip()
+        try:
+            reviewer_reviewed_at = datetime.fromisoformat(
+                str(review.get("reviewed_at_utc") or "").replace("Z", "+00:00")
+            )
+            reviewer_age = (
+                datetime.now(timezone.utc) - reviewer_reviewed_at.astimezone(timezone.utc)
+            ).total_seconds() if reviewer_reviewed_at.tzinfo is not None else float("inf")
+        except (TypeError, ValueError):
+            reviewer_age = float("inf")
+        if reviewer_signal_id != signal_id or reviewer_age < -30 or reviewer_age > 300:
+            return False, f"{reviewer_id} approval is stale or belongs to a different signal."
         valid = (
             str(review.get("status") or "").strip().upper() == "APPROVED"
             and review.get("paper_entry_eligible") is True
@@ -246,12 +275,15 @@ class BloFinDemoRiskPolicy:
     max_risk_score: float = 45.0
     min_reward_risk: float = 1.8
     max_entry_deviation_pct: float = 0.005
+    taker_fee_rate: float = 0.0006
+    estimated_slippage_bps_per_side: float = 2.0
 
     def __post_init__(self) -> None:
         values = (
             self.risk_per_trade_pct, self.daily_loss_limit_pct, self.max_drawdown_pct,
             self.max_margin_usage_pct, self.max_aggregate_risk_pct, self.min_confirmation_score, self.max_risk_score,
             self.min_reward_risk, self.max_entry_deviation_pct,
+            self.taker_fee_rate, self.estimated_slippage_bps_per_side,
         )
         if not all(math.isfinite(float(v)) for v in values):
             raise ValueError("Risk policy values must be finite")
@@ -278,6 +310,10 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Concurrent positions must be between 1 and 3")
         if self.min_reward_risk < 1.0 or self.max_entry_deviation_pct <= 0:
             raise ValueError("Reward/risk or entry-deviation policy is invalid")
+        if not 0 <= self.taker_fee_rate <= 0.01:
+            raise ValueError("Taker fee rate must be between 0 and 1%.")
+        if not 0 <= self.estimated_slippage_bps_per_side <= 100:
+            raise ValueError("Estimated slippage must be between 0 and 100 bps per side.")
 
 
 def build_demo_order_plan(
@@ -288,6 +324,7 @@ def build_demo_order_plan(
     equity_usdt: float,
     leverage: int = 1,
     policy: BloFinDemoRiskPolicy | None = None,
+    market_quote: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate Challenge 1 evidence and size Demo contracts from stop risk."""
     policy = policy or BloFinDemoRiskPolicy()
@@ -355,7 +392,15 @@ def build_demo_order_plan(
     if instrument.get("settleCurrency") != "USDT":
         raise BloFinDemoExecutionBlocked("Only USDT-settled linear contracts are supported in this phase.")
 
-    entry = _decimal(record.get("entry_price_usd", record.get("entry_price")), "entry")
+    signal_entry = _decimal(record.get("entry_price_usd", record.get("entry_price")), "entry")
+    if market_quote is not None:
+        bid = _decimal(market_quote.get("bidPrice"), "best_bid")
+        ask = _decimal(market_quote.get("askPrice"), "best_ask")
+        if bid <= 0 or ask <= 0 or ask < bid:
+            raise BloFinDemoExecutionBlocked("Fresh best bid/ask quote is invalid.")
+        entry = ask if side == "LONG" else bid
+    else:
+        entry = signal_entry
     stop = _decimal(record.get("stop_loss_usd", record.get("stop_loss")), "stop_loss")
     target = _decimal(record.get("take_profit_usd", record.get("take_profit")), "take_profit")
     if entry <= 0 or stop <= 0 or target <= 0:
@@ -447,6 +492,99 @@ def build_demo_order_plan(
         "position_side_long_short": side.lower(),
     }
 
+
+
+def apply_demo_execution_cost_gate(
+    plan: dict[str, Any],
+    instrument: Mapping[str, Any],
+    market_quote: Mapping[str, Any],
+    *,
+    policy: BloFinDemoRiskPolicy | None = None,
+) -> dict[str, Any]:
+    """Fail closed unless net reward/risk clears the threshold after modelled Taker costs."""
+    policy = policy or BloFinDemoRiskPolicy()
+    if not isinstance(plan, dict) or not isinstance(instrument, Mapping) or not isinstance(market_quote, Mapping):
+        raise BloFinDemoExecutionBlocked("Complete order plan, contract metadata and market quote are required.")
+    try:
+        bid = _decimal(market_quote.get("bidPrice"), "best_bid")
+        ask = _decimal(market_quote.get("askPrice"), "best_ask")
+        entry = _decimal(plan.get("entry_reference_price"), "entry_reference_price")
+        stop = _decimal(plan.get("stop_loss"), "stop_loss")
+        target = _decimal(plan.get("take_profit"), "take_profit")
+        quantity = _decimal(plan.get("quantity"), "quantity")
+        contract_value = _decimal(instrument.get("contractValue"), "contractValue")
+    except Exception as exc:
+        raise BloFinDemoExecutionBlocked("Execution-cost inputs are incomplete or invalid.") from exc
+    if bid <= 0 or ask <= 0 or ask < bid or min(entry, stop, target, quantity, contract_value) <= 0:
+        raise BloFinDemoExecutionBlocked("Execution-cost inputs contain invalid prices or size.")
+
+    side = str(plan.get("side") or "").upper()
+    if side == "LONG":
+        gross_reward = (target - entry) * quantity * contract_value
+        gross_risk = (entry - stop) * quantity * contract_value
+    elif side == "SHORT":
+        gross_reward = (entry - target) * quantity * contract_value
+        gross_risk = (stop - entry) * quantity * contract_value
+    else:
+        raise BloFinDemoExecutionBlocked("Execution-cost gate received an invalid direction.")
+    if gross_reward <= 0 or gross_risk <= 0:
+        raise BloFinDemoExecutionBlocked("Net reward/risk cannot be evaluated from invalid price levels.")
+
+    midpoint = (bid + ask) / Decimal("2")
+    half_spread_fraction = (ask - bid) / (ask + bid) if (ask + bid) > 0 else Decimal("0")
+    fee_rate = Decimal(str(policy.taker_fee_rate))
+    slippage_rate = Decimal(str(policy.estimated_slippage_bps_per_side)) / Decimal("10000")
+    turnover_multiplier = quantity * contract_value
+
+    def round_trip_cost(exit_price: Decimal) -> dict[str, Decimal]:
+        turnover = (entry + exit_price) * turnover_multiplier
+        fee = turnover * fee_rate
+        spread = turnover * half_spread_fraction
+        slippage = turnover * slippage_rate
+        return {"fee": fee, "spread": spread, "slippage": slippage, "total": fee + spread + slippage}
+
+    target_cost = round_trip_cost(target)
+    stop_cost = round_trip_cost(stop)
+    net_reward = gross_reward - target_cost["total"]
+    net_risk = gross_risk + stop_cost["total"]
+    if net_reward <= 0 or net_risk <= 0:
+        raise BloFinDemoExecutionBlocked("Estimated fees, spread and slippage consume the trade's reward.")
+    net_reward_risk = net_reward / net_risk
+    if net_reward_risk < Decimal(str(policy.min_reward_risk)):
+        raise BloFinDemoExecutionBlocked(
+            "Net reward/risk after estimated Taker fees, spread and slippage is below the configured minimum "
+            f"({float(net_reward_risk):.4f} < {policy.min_reward_risk:.4f})."
+        )
+
+    plan["net_reward_risk"] = float(net_reward_risk)
+    plan["execution_cost_estimate"] = {
+        "status": "MODELLED_PRETRADE",
+        "fee_role": "TAKER",
+        "taker_fee_rate_per_side": float(fee_rate),
+        "slippage_bps_per_side": float(policy.estimated_slippage_bps_per_side),
+        "bid": float(bid),
+        "ask": float(ask),
+        "spread_pct": float((ask - bid) / midpoint * Decimal("100")) if midpoint > 0 else None,
+        "target_path": {
+            "gross_reward_usdt": float(gross_reward),
+            "estimated_fee_usdt": float(target_cost["fee"]),
+            "estimated_spread_usdt": float(target_cost["spread"]),
+            "estimated_slippage_usdt": float(target_cost["slippage"]),
+            "estimated_total_cost_usdt": float(target_cost["total"]),
+            "net_reward_usdt": float(net_reward),
+        },
+        "stop_path": {
+            "gross_risk_usdt": float(gross_risk),
+            "estimated_fee_usdt": float(stop_cost["fee"]),
+            "estimated_spread_usdt": float(stop_cost["spread"]),
+            "estimated_slippage_usdt": float(stop_cost["slippage"]),
+            "estimated_total_cost_usdt": float(stop_cost["total"]),
+            "net_risk_usdt": float(net_risk),
+        },
+        "funding_status": "NOT_INCLUDED_HOLD_DURATION_AND_RATE_UNKNOWN",
+        "assumption_note": "2 bps per-side slippage is a configurable model assumption, not an observed guarantee.",
+    }
+    return plan
 
 
 class BloFinDemoTradeClient(BloFinDemoReadOnly):
@@ -1905,6 +2043,14 @@ class BloFinDemoExecutor:
         if not isinstance(ticker_rows, list) or not ticker_rows or not isinstance(ticker_rows[0], Mapping):
             raise BloFinDemoExecutionBlocked("Fresh contract ticker is unavailable.")
         last_price = _finite(ticker_rows[0].get("last"), "last_price", minimum=0.0000001)
+        try:
+            best_bid = _decimal(ticker_rows[0].get("bidPrice"), "best_bid")
+            best_ask = _decimal(ticker_rows[0].get("askPrice"), "best_ask")
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked("BloFin ticker has no valid best bid/ask; cost gate cannot run.") from exc
+        if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
+            raise BloFinDemoExecutionBlocked("BloFin best bid/ask quote is invalid; no order was sent.")
+        market_quote = {"bidPrice": str(best_bid), "askPrice": str(best_ask)}
         signal_entry = _finite(record.get("entry_price_usd", record.get("entry_price")), "entry_price", minimum=0.0000001)
         deviation = abs(last_price - signal_entry) / signal_entry
         if deviation > self.policy.max_entry_deviation_pct:
@@ -1934,7 +2080,7 @@ class BloFinDemoExecutor:
 
         plan = build_demo_order_plan(
             record, instrument, inst_id=inst_id, equity_usdt=equity,
-            leverage=int(leverage), policy=self.policy,
+            leverage=int(leverage), policy=self.policy, market_quote=market_quote,
         )
         if is_challenge1:
             experience_id = str(record.get("learning_experience_id") or "").strip()
@@ -1979,6 +2125,9 @@ class BloFinDemoExecutor:
                     "Minimum-size exposure exceeds the aggregate risk or margin budget."
                 )
             plan["minimum_size_only"] = True
+        plan = apply_demo_execution_cost_gate(
+            plan, instrument, market_quote, policy=self.policy,
+        )
         if not self.store.reserve_order(
             plan,
             max_concurrent_positions=self.policy.max_concurrent_positions,
@@ -2058,6 +2207,9 @@ class BloFinDemoExecutor:
             "exchange_order_id": str(order_id),
             "risk_budget_usdt": plan["risk_budget_usdt"],
             "notional_usdt": plan["notional_usdt"],
+            "entry_reference_price": plan["entry_reference_price"],
+            "net_reward_risk": plan.get("net_reward_risk"),
+            "execution_cost_estimate": plan.get("execution_cost_estimate"),
             "position_mode": position_mode,
             "orders_enabled": True,
         }
