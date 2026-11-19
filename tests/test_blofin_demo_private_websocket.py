@@ -92,16 +92,43 @@ class BloFinDemoPrivateWebSocketTests(unittest.TestCase):
         websocket = FakeWebSocket(messages)
         client = self.make_client()
         client._wait_for_event(websocket, expected_event="login")
-        for channel in PRIVATE_CHANNELS:
-            client._wait_for_event(
-                websocket,
-                expected_event="subscribe",
-                expected_channel=channel,
-            )
+        client._wait_for_subscriptions(websocket)
         self.assertTrue(client.get_snapshot()["authenticated"] is False)
         self.assertEqual(
             set(client.get_snapshot()["subscribed_channels"]),
             set(PRIVATE_CHANNELS),
+        )
+
+    def test_subscription_acknowledgements_may_arrive_out_of_order(self):
+        messages = [
+            json.dumps({"event": "subscribe", "arg": {"channel": channel}, "code": "0"})
+            for channel in ("account", "orders-algo", "orders", "positions")
+        ]
+        websocket = FakeWebSocket(messages)
+        client = self.make_client()
+        client._wait_for_subscriptions(websocket)
+        self.assertEqual(
+            set(client.get_snapshot()["subscribed_channels"]),
+            set(PRIVATE_CHANNELS),
+        )
+
+    def test_subscription_wait_preserves_data_events_before_last_ack(self):
+        websocket = FakeWebSocket([
+            json.dumps({
+                "action": "update",
+                "arg": {"channel": "positions"},
+                "data": [{"positionId": "1001", "instId": "BTC-USDT", "positions": "3"}],
+            }),
+            json.dumps({"event": "subscribe", "arg": {"channel": "account"}, "code": "0"}),
+            json.dumps({"event": "subscribe", "arg": {"channel": "orders"}, "code": "0"}),
+            json.dumps({"event": "subscribe", "arg": {"channel": "positions"}, "code": "0"}),
+            json.dumps({"event": "subscribe", "arg": {"channel": "orders-algo"}, "code": "0"}),
+        ])
+        client = self.make_client()
+        client._wait_for_subscriptions(websocket)
+        self.assertEqual(
+            client.get_snapshot()["positions"]["1001"]["positions"],
+            "3",
         )
 
     def test_login_rejection_fails_closed(self):
