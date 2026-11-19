@@ -92,6 +92,39 @@ def coordinate_position_supervisors(
     a_action = str(first.get("action") or "").strip().upper()
     b_action = str(second.get("action") or "").strip().upper()
 
+    # A model must not pair a benign verdict with a destructive action,
+    # or claim a critical data gap while authorizing execution.
+    for reviewer_id, item in by_id.items():
+        verdict = str(item.get("verdict") or "").strip().upper()
+        action = str(item.get("action") or "").strip().upper()
+        if verdict not in {"SUPPORTS_DECISION", "CONCERNS", "INSUFFICIENT_DATA"}:
+            return {
+                **base,
+                "status": "REJECTED",
+                "reason_code": f"{reviewer_id.upper()}_VERDICT_INVALID",
+            }
+        expected = {
+            "HOLD_POSITION": "SUPPORTS_DECISION",
+            "TIGHTEN_STOP": "CONCERNS",
+            "CLOSE_POSITION": "CONCERNS",
+            "URGENT_RISK_ALERT": "CONCERNS",
+            "REQUEST_DATA": "INSUFFICIENT_DATA",
+        }[action]
+        if verdict != expected:
+            return {
+                **base,
+                "status": "REJECTED",
+                "reason_code": f"{reviewer_id.upper()}_ACTION_VERDICT_CONTRADICTION",
+            }
+        if action in {"TIGHTEN_STOP", "CLOSE_POSITION", "URGENT_RISK_ALERT"}:
+            flags = item.get("risk_flags")
+            if not isinstance(flags, list) or not any(isinstance(flag, str) and flag.strip() for flag in flags):
+                return {
+                    **base,
+                    "status": "REJECTED",
+                    "reason_code": f"{reviewer_id.upper()}_RISK_EVIDENCE_MISSING",
+                }
+
     if a_action == "URGENT_RISK_ALERT" or b_action == "URGENT_RISK_ALERT":
         return {
             **base,
