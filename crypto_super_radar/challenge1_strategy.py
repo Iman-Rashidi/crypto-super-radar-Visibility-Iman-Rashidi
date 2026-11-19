@@ -446,6 +446,7 @@ def analyze_blofin_challenge1(
     inst_id: str,
     *,
     now_ms: int | None = None,
+    audit_callback: Any = None,
 ) -> dict[str, Any]:
     """Build a 5m-only candle-pattern entry decision for Challenge 1."""
     instrument = str(inst_id or "").strip().upper()
@@ -482,6 +483,27 @@ def analyze_blofin_challenge1(
             "detail": str(chart_structure.get("reason") or ""),
             "timeframe": "5m",
         })
+
+    # Capture closed-candle inputs and candidate evidence before choosing LONG,
+    # SHORT or NO_TRADE. A persistence failure must stop the caller before entry.
+    if callable(audit_callback):
+        audit_callback(
+            "MARKET_INPUT_CAPTURED",
+            {
+                "instrument_id": instrument,
+                "timeframe": "5m",
+                "market_source": "BLOFIN_DEMO_READ_ONLY_COMPLETED_CANDLES",
+                "completed_candles_only": True,
+                "higher_timeframes_requested": False,
+                "candle_count": int(len(frame_5m)),
+                "last_completed_candle_utc": _time_label(frame_5m),
+                "candles_5m": _candles_for_report(frame_5m, limit=160),
+                "detected_pattern_candidates": patterns_5m,
+                "elliott_wave_evidence": elliott_wave,
+                "chart_structure_evidence": chart_structure,
+            },
+            "pre-decision-market-input",
+        )
 
     bullish = [item for item in patterns_5m if item.get("direction") == "BULLISH"]
     bearish = [item for item in patterns_5m if item.get("direction") == "BEARISH"]
@@ -611,6 +633,29 @@ def analyze_blofin_challenge1(
         "decision_reason_fa": reason_fa,
         "candles_5m": _candles_for_report(frame_5m, limit=160),
     }
+    if callable(audit_callback):
+        audit_callback(
+            "STRATEGY_REASONING",
+            {
+                "instrument_id": instrument,
+                "decision": signal,
+                "decision_code": decision_code,
+                "reason_fa": reason_fa,
+                "chosen_pattern": chosen,
+                "detected_patterns": patterns_5m,
+                "wave_alignment": wave_alignment,
+                "elliott_wave": elliott_wave,
+                "chart_structure": chart_structure,
+                "volume_confirmation": volume,
+                "execution_plan": execution,
+                "entry_price": entry,
+                "stop_loss": stop,
+                "take_profit": target,
+                "confirmation_candle": confirmation_candle,
+                "completed_candles_only": True,
+            },
+            "pre-return-strategy-reasoning",
+        )
     return {
         "signal": signal,
         "signal_id": signal_id,

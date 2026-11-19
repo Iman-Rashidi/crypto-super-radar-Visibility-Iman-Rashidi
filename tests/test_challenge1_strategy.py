@@ -150,6 +150,31 @@ class Challenge1FiveMinuteOnlyTests(unittest.TestCase):
         self.assertGreaterEqual(len(evidence["candles_5m"]), 30)
         self.assertFalse(evidence["legacy_12_gates_used_for_entry"])
 
+    def test_audit_callback_captures_market_inputs_before_strategy_reasoning(self):
+        now = 2_000_000_000_000
+        client = self.client(now)
+        audit_events = []
+        with patch(
+            "crypto_super_radar.challenge1_strategy._confirmed_pattern_candidates",
+            return_value=[],
+        ):
+            result = analyze_blofin_challenge1(
+                client, "BTC-USDT", now_ms=now,
+                audit_callback=lambda phase, details, key: audit_events.append(
+                    {"phase": phase, "details": details, "event_key": key}
+                ),
+            )
+        self.assertEqual(result["signal"], "NO_TRADE")
+        self.assertEqual(
+            [item["phase"] for item in audit_events],
+            ["MARKET_INPUT_CAPTURED", "STRATEGY_REASONING"],
+        )
+        self.assertGreaterEqual(len(audit_events[0]["details"]["candles_5m"]), 30)
+        self.assertEqual(audit_events[0]["details"]["market_source"],
+                         "BLOFIN_DEMO_READ_ONLY_COMPLETED_CANDLES")
+        self.assertEqual(audit_events[1]["details"]["decision"], "NO_TRADE")
+
+
     def test_conflicting_confirmed_5m_patterns_block_entry(self):
         now = 2_000_000_000_000
         client = self.client(now)

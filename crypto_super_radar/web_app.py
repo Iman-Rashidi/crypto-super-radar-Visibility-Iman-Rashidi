@@ -46,6 +46,7 @@ from .blofin_demo_executor import (
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
 from .database import storage_backend
+from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
 from .notion_event_sync import NotionEventOutbox
 from .notion_activity_journal import NotionActivityJournal
@@ -3067,6 +3068,85 @@ def _blofin_demo_smoke_test_readiness(*, check_account_state: bool = False) -> d
     }
 
 
+def _record_challenge1_audit(
+    cycle_id: str, phase: str, details: dict, *, event_key: str,
+    experience_id: str | None = None, position_id: str | None = None,
+    status: str = "SUCCESS", reason: str = "",
+) -> dict:
+    """Persist full evidence first; then queue a compact Notion projection."""
+    recorder = None
+    try:
+        recorder = Challenge1AuditRecorder()
+        saved = recorder.append_event(
+            cycle_id=cycle_id, phase=phase, event_key=event_key, details=details,
+            experience_id=experience_id, position_id=position_id,
+        )
+    finally:
+        if recorder is not None:
+            recorder.close()
+
+    audit_event_id = str(saved["event_id"])
+    notion_status = "NOT_ATTEMPTED"
+    outbox = None
+    try:
+        outbox = NotionEventOutbox()
+        position_phase = phase.startswith("POSITION_") or phase.startswith("EXIT_")
+        event_type = "POSITION_REVIEW" if position_phase else "CHALLENGE1_DECISION_TRACE"
+        symbol = str(details.get("instrument_id") or details.get("symbol") or details.get("instId") or "").upper()
+        signal = str(details.get("signal") or "UNKNOWN").upper()
+        if signal not in {"LONG", "SHORT", "NO_TRADE"}:
+            signal = "UNKNOWN"
+        decision_value = str(details.get("decision") or "").upper()
+        ai_decision = (
+            "APPROVE" if decision_value in {"APPROVE", "OPEN", "CLOSE", "EXIT"}
+            else "REJECT" if decision_value in {"REJECT", "BLOCK"}
+            else "OBSERVE_ONLY"
+        )
+        outbox.enqueue({
+            "event_id": audit_event_id,
+            "cycle_id": str(saved["cycle_id"]),
+            "occurred_at_utc": saved["occurred_at_utc"],
+            "event_type": event_type,
+            "actor": "Robot",
+            "status": status if status in {"SUCCESS", "WARNING", "FAILED", "UNKNOWN", "PENDING"} else "UNKNOWN",
+            "market": "Futures",
+            "symbol": symbol,
+            "timeframe": "5m",
+            "signal": signal,
+            "ai_decision": ai_decision,
+            "reviewer_consensus": str(details.get("reviewer_consensus") or ""),
+            "input_data_type": "LIVE_MARKET",
+            "reason": str(reason or details.get("reason_fa") or details.get("reason") or phase)[:1600],
+            "experience_id": experience_id or "",
+            "position_id": position_id or "",
+            "details": json.dumps(
+                {"phase": phase, "event_key": event_key, "evidence": details},
+                ensure_ascii=False, sort_keys=True, default=str,
+            )[:1750],
+            "source_url": (
+                os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+                + "/api/blofin/demo/audit/" + str(saved["cycle_id"])
+                if os.getenv("RENDER_EXTERNAL_URL", "").strip() else ""
+            ),
+        })
+        notion_status = "QUEUED"
+    except Exception as exc:
+        notion_status = "UNAVAILABLE:" + type(exc).__name__
+    finally:
+        if outbox is not None:
+            outbox.close()
+
+    return {
+        "status": "RECORDED", "event_id": audit_event_id,
+        "sequence": saved["sequence"], "cycle_id": saved["cycle_id"],
+        "experience_id": saved.get("experience_id"),
+        "position_id": saved.get("position_id"),
+        "event_hash": saved["event_hash"],
+        "inserted": saved.get("inserted", False),
+        "notion_sync_status": notion_status,
+    }
+
+
 def _set_blofin_execution_job(job_id: str, status: str, **values) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with LOCK:
@@ -4106,7 +4186,9 @@ def _blofin_demo_analysis_storage_ready(readiness: dict) -> bool:
 
 
 def _run_blofin_demo_execution_job(
-    job_id: str, instrument_id: str = "BTC-USDT", execution_profile: str = "CHALLENGE_1",
+    job_id: str, instrument_id: str = "BTC-USDT",
+    execution_profile: str = "CHALLENGE_1",
+    selection_context: dict | None = None,
 ) -> None:
     """Analyze a selected BloFin linear USDT perpetual with the selected robot profile."""
     store = None
@@ -4121,6 +4203,10 @@ def _run_blofin_demo_execution_job(
             raise BloFinDemoExecutionBlocked("Invalid BloFin USDT perpetual instrument.")
         if execution_profile != "CHALLENGE_1":
             raise BloFinDemoExecutionBlocked("Invalid execution profile.")
+        selection_context = dict(selection_context) if isinstance(selection_context, dict) else {
+            "selection_method": "NOT_PROVIDED",
+            "selection_reason": "No caller supplied asset-selection evidence; the robot must not invent a ranking.",
+        }
         _set_blofin_execution_job(
             job_id, "running", stage="ANALYSIS_STORAGE_CHECK",
             message_fa="در حال بررسی فقط حافظه پایدار؛ مجوز سفارش در مرحله جداگانه بررسی می‌شود.",
@@ -4147,6 +4233,16 @@ def _run_blofin_demo_execution_job(
         failed_operation = "event_store.initialize"
         store = BloFinDemoEventStore()
         analysis_time_utc = datetime.now(timezone.utc).isoformat()
+        _record_challenge1_audit(
+            job_id, "ASSET_SELECTED",
+            {
+                "instrument_id": instrument_id, "execution_profile": execution_profile,
+                "selection_context": selection_context,
+                "analysis_started_at_utc": analysis_time_utc, "environment": "BLOFIN_DEMO",
+            },
+            event_key="asset-selected",
+            reason=str(selection_context.get("selection_reason") or "Instrument selected for Challenge 1 analysis."),
+        )
         pending_entry_block_reason = None
         # Reconcile previously filled positions before evaluating or entering a new market.
         # This prevents a fresh order from overtaking an exchange-close event that has not
@@ -4227,8 +4323,24 @@ def _run_blofin_demo_execution_job(
                 trade_context={"asset": asset.raw, "instrument_id": instrument_id, "execution_profile": execution_profile},
             )
             try:
+                _record_challenge1_audit(
+                    job_id, "ANALYSIS_STARTED",
+                    {
+                        "instrument_id": instrument_id, "execution_profile": execution_profile,
+                        "selection_context": selection_context, "timeframe": "5m",
+                        "required_input": "CLOSED_CANDLES_ONLY", "environment": "BLOFIN_DEMO",
+                    },
+                    event_key="analysis-started",
+                    reason="The robot is collecting closed 5-minute candles before its own signal decision.",
+                )
                 failed_operation = "challenge1.analyze_closed_5m_candles"
-                challenge_record = analyze_blofin_challenge1(read_client, instrument_id)
+                challenge_record = analyze_blofin_challenge1(
+                    read_client, instrument_id,
+                    audit_callback=lambda phase, details, key: _record_challenge1_audit(
+                        job_id, phase, details, event_key=key,
+                        reason=str(details.get("reason_fa") or phase),
+                    ),
+                )
                 # Persist every closed-candle decision before any execution branch.
                 # The stable candle identity deduplicates repeated five-minute polls.
                 failed_operation = "learning_memory.record_challenge1_decision"
@@ -4238,6 +4350,23 @@ def _run_blofin_demo_execution_job(
                 )
                 learning_signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
                 challenge_record["learning_experience_id"] = learning_experience_id
+                _record_challenge1_audit(
+                    job_id, "STRATEGY_DECISION",
+                    {
+                        "instrument_id": instrument_id, "signal": challenge_record.get("signal"),
+                        "decision_class": challenge_record.get("decision_class"),
+                        "reason_fa": challenge_record.get("reason_fa"),
+                        "entry_price": challenge_record.get("entry_price_usd"),
+                        "stop_loss": challenge_record.get("stop_loss_usd"),
+                        "take_profit": challenge_record.get("take_profit_usd"),
+                        "signal_bar_open_utc": challenge_record.get("signal_bar_open_utc"),
+                        "challenge1_evidence": challenge_record.get("challenge1_evidence", {}),
+                        "execution": challenge_record.get("execution", {}),
+                        "selection_context": selection_context,
+                    },
+                    event_key="strategy-decision", experience_id=learning_experience_id,
+                    reason=str(challenge_record.get("reason_fa") or "Challenge 1 strategy decision recorded."),
+                )
                 failed_operation = "learning_memory.check_final_experience"
                 if store.has_final_experience(learning_experience_id):
                     _set_blofin_execution_job(
@@ -4256,6 +4385,16 @@ def _run_blofin_demo_execution_job(
                 reason_fa = (
                     f"تحلیل Challenge 1 برای {instrument_id} به‌دلیل دادهٔ کندل نامعتبر یا ناکافی متوقف شد: "
                     + str(exc)[:160]
+                )
+                _record_challenge1_audit(
+                    job_id, "ANALYSIS_FAILED",
+                    {
+                        "instrument_id": instrument_id,
+                        "failure_stage": "CHALLENGE_1_MARKET_DATA_ANALYSIS",
+                        "error_type": type(exc).__name__, "reason_fa": str(exc)[:240],
+                        "selection_context": selection_context,
+                    },
+                    event_key="analysis-failed", status="WARNING", reason=str(exc)[:1200],
                 )
                 learning_experience_id = store.record_challenge1_analysis_failure(
                     cycle_id=job_id,
@@ -4333,6 +4472,18 @@ def _run_blofin_demo_execution_job(
                 or mtf_signal.get("status") != "PASS"
             ):
                 reason_fa = str(challenge_record.get("reason_fa") or "الگوی معتبر Challenge 1 پیدا نشد؛ تصمیم صحیح عدم معامله است.")
+                _record_challenge1_audit(
+                    job_id, "FINAL_ENTRY_DECISION",
+                    {
+                        "instrument_id": instrument_id, "decision": "NO_TRADE",
+                        "signal": challenge_record.get("signal"), "reason_fa": reason_fa,
+                        "mtf_confirmation": mtf_signal,
+                        "challenge1_evidence": challenge_record.get("challenge1_evidence", {}),
+                        "reviewers": "NOT_CALLED: strategy produced no eligible directional setup",
+                    },
+                    event_key="final-entry-no-trade", experience_id=learning_experience_id,
+                    status="WARNING", reason=reason_fa,
+                )
                 store.record_experience_not_executed(
                     experience_id=learning_experience_id,
                     instrument_id=instrument_id,
@@ -4549,6 +4700,20 @@ def _run_blofin_demo_execution_job(
                 return
         if pending_entry_block_reason:
             reason_fa = pending_entry_block_reason
+            _record_challenge1_audit(
+                job_id, "FINAL_ENTRY_DECISION",
+                {
+                    "instrument_id": instrument_id,
+                    "decision": "BLOCK_UNRESOLVED_PRIOR_ORDER",
+                    "reason_fa": reason_fa,
+                    "pending_order_reconciliation": prior_budget,
+                    "orders_submitted": False,
+                },
+                event_key="final-entry-blocked-unresolved-order",
+                experience_id=learning_experience_id,
+                status="WARNING",
+                reason=reason_fa,
+            )
             if learning_experience_id and not store.has_final_experience(learning_experience_id):
                 store.record_experience_not_executed(
                     experience_id=learning_experience_id,
@@ -4640,8 +4805,33 @@ def _run_blofin_demo_execution_job(
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
+        _record_challenge1_audit(
+            job_id, "AI_REVIEW_REQUESTED",
+            {
+                "instrument_id": instrument_id,
+                "signal": str(getattr(getattr(analysis, "signal", None), "value", getattr(analysis, "signal", "UNKNOWN"))),
+                "reviewers": ["nemotron", "second_ai"],
+                "review_contract": "Independent reviews run concurrently; neither receives the other's answer.",
+                "execution_role": "ENTRY_APPROVAL_GATE",
+            },
+            event_key="ai-review-requested", experience_id=learning_experience_id,
+            reason="Two independent reviewer calls are starting before any Demo order decision.",
+        )
         failed_operation = "ai_supervisors.request_and_validate_quorum"
         ai_quorum = _run_challenge1_supervisor_reviews(analysis, asset)
+        _record_challenge1_audit(
+            job_id, "AI_REVIEW_RESULT",
+            {
+                "instrument_id": instrument_id, "ai_reviews": ai_quorum.get("ai_reviews"),
+                "ai_consensus": ai_quorum.get("ai_consensus"),
+                "ai_status": ai_quorum.get("ai_status"),
+                "approved": ai_quorum.get("approved"),
+                "reason_fa": ai_quorum.get("reason_fa"),
+            },
+            event_key="ai-review-result", experience_id=learning_experience_id,
+            status="SUCCESS" if ai_quorum.get("approved") else "WARNING",
+            reason=str(ai_quorum.get("reason_fa") or "Independent reviewer results recorded."),
+        )
         ai_review = ai_quorum["ai_review"]
         ai_reviews = ai_quorum["ai_reviews"]
         ai_consensus = ai_quorum["ai_consensus"]
@@ -4650,6 +4840,20 @@ def _run_blofin_demo_execution_job(
 
         if not ai_quorum["approved"]:
             reason_fa = str(ai_quorum.get("reason_fa") or "اجماع دو ناظر مستقل تأیید نشد؛ ورود مسدود است.")
+            _record_challenge1_audit(
+                job_id, "FINAL_ENTRY_DECISION",
+                {
+                    "instrument_id": instrument_id, "decision": "BLOCK",
+                    "reason_fa": reason_fa, "ai_reviews": ai_reviews,
+                    "ai_consensus": ai_consensus,
+                    "entry_price": record.get("entry_price_usd"),
+                    "stop_loss": record.get("stop_loss_usd"),
+                    "take_profit": record.get("take_profit_usd"),
+                    "risk_policy": "NO_ORDER_WITHOUT_TWO_VERIFIED_INDEPENDENT_APPROVALS",
+                },
+                event_key="final-entry-blocked-by-reviewers",
+                experience_id=learning_experience_id, status="WARNING", reason=reason_fa,
+            )
             if learning_experience_id and not store.has_final_experience(learning_experience_id):
                 store.record_experience_not_executed(
                     experience_id=learning_experience_id,
@@ -4715,6 +4919,21 @@ def _run_blofin_demo_execution_job(
                 order_readiness.get("message_fa")
                 or "پیش‌نیازهای اجرای سفارش BloFin Demo تأیید نشد."
             )
+            _record_challenge1_audit(
+                job_id, "FINAL_ENTRY_DECISION",
+                {
+                    "instrument_id": instrument_id, "decision": "BLOCK_BY_DEMO_READINESS",
+                    "reason_fa": str(reason_fa),
+                    "readiness": {
+                        key: value for key, value in order_readiness.items()
+                        if key not in {"api_key", "secret", "passphrase", "token", "authorization"}
+                    },
+                    "ai_consensus": ai_consensus,
+                },
+                event_key="final-entry-blocked-readiness",
+                experience_id=learning_experience_id, status="WARNING",
+                reason=str(reason_fa),
+            )
             if learning_experience_id and not store.has_final_experience(learning_experience_id):
                 store.record_experience_not_executed(
                     experience_id=learning_experience_id,
@@ -4762,12 +4981,46 @@ def _run_blofin_demo_execution_job(
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
         )
+        _record_challenge1_audit(
+            job_id, "ORDER_SUBMISSION_AUTHORIZED",
+            {
+                "instrument_id": instrument_id, "decision": "APPROVE",
+                "reason_fa": "Both reviewers passed, Demo readiness is READY, and executor preflight remains mandatory.",
+                "order_plan": {
+                    key: record.get(key) for key in (
+                        "signal_id", "signal", "entry_price_usd", "stop_loss_usd",
+                        "take_profit_usd", "risk_budget_usdt", "confirmation_score",
+                    ) if key in record
+                },
+                "execution_environment": "BLOFIN_DEMO",
+                "leverage": 1, "minimum_size_only": True,
+            },
+            event_key="order-submission-authorized", experience_id=learning_experience_id,
+            reason="The exact Demo order plan passed the robot and two-reviewer gates.",
+        )
         submission_started = True
         failed_operation = "blofin_demo_executor.reserve_and_submit_order"
         execution = trader.execute(
             record, inst_id=instrument_id, leverage=1,
             allow_demo_orders=True, minimum_size_only=True,
             submission_lock=BLOFIN_ORDER_SUBMISSION_LOCK,
+        )
+        _record_challenge1_audit(
+            job_id, "ORDER_SUBMISSION_RESULT",
+            {
+                "instrument_id": instrument_id,
+                "execution_result": {
+                    key: execution.get(key) for key in (
+                        "status", "side", "quantity_contracts", "entry_reference_price",
+                        "exchange_order_id", "client_order_id", "stop_loss", "take_profit",
+                        "risk_budget_usdt", "leverage",
+                    ) if key in execution
+                },
+                "orders_submitted": True, "environment": "BLOFIN_DEMO",
+            },
+            event_key="order-submission-result", experience_id=learning_experience_id,
+            status="SUCCESS",
+            reason="BloFin Demo returned an order-submission response; fill remains independently unconfirmed.",
         )
         _set_blofin_execution_job(
             job_id, "running", stage="ORDER_SUBMITTED",
@@ -4918,6 +5171,26 @@ def _run_blofin_demo_execution_job(
                     filled_at = datetime.fromtimestamp(int(latest_fill["ts"]) / 1000, tz=timezone.utc).isoformat()
                 except (TypeError, ValueError, OverflowError, OSError):
                     filled_at = None
+        _record_challenge1_audit(
+            job_id, "ENTRY_FILL_RECONCILIATION",
+            {
+                "instrument_id": instrument_id, "trade_executed": trade_executed,
+                "orders_submitted": True, "average_fill_price": average_fill,
+                "filled_size": filled_size, "filled_at_utc": filled_at,
+                "order_detail": safe_detail, "fills": safe_fills, "positions": positions,
+                "position_id": next(
+                    (str(item.get("positionId")) for item in positions if item.get("positionId")),
+                    None,
+                ),
+            },
+            event_key="entry-fill-reconciliation", experience_id=learning_experience_id,
+            position_id=next(
+                (str(item.get("positionId")) for item in positions if item.get("positionId")),
+                None,
+            ),
+            status="SUCCESS" if trade_executed else "WARNING",
+            reason="Fill and position data were checked against BloFin Demo read-only history.",
+        )
         _set_blofin_execution_job(
             job_id, "running", stage="ENTRY_FILL_CONFIRMED" if trade_executed else "ORDER_PENDING",
             message_fa=(
@@ -4974,6 +5247,24 @@ def _run_blofin_demo_execution_job(
             completed_at_utc=datetime.now(timezone.utc).isoformat(),
         )
     except BloFinDemoExecutionUnknown as exc:
+        try:
+            _record_challenge1_audit(
+                job_id, "ORDER_OUTCOME_UNKNOWN",
+                {
+                    "instrument_id": instrument_id,
+                    "failed_operation": failed_operation,
+                    "error_type": type(exc).__name__,
+                    "reason_fa": str(exc)[:1000],
+                    "orders_submitted": "UNKNOWN",
+                    "retry_allowed": False,
+                },
+                event_key="order-outcome-unknown",
+                experience_id=learning_experience_id,
+                status="WARNING",
+                reason=str(exc)[:1200],
+            )
+        except Exception:
+            pass
         _set_blofin_execution_job(
             job_id, "completed", stage="ORDER_OUTCOME_UNKNOWN",
             message_fa="نتیجه ارسال مبهم است؛ برای جلوگیری از سفارش تکراری ارسال مجدد نمی‌شود.",
@@ -4985,6 +5276,24 @@ def _run_blofin_demo_execution_job(
             },
         )
     except BloFinDemoExecutionBlocked as exc:
+        try:
+            _record_challenge1_audit(
+                job_id, "EXECUTION_BLOCKED",
+                {
+                    "instrument_id": instrument_id,
+                    "failed_operation": failed_operation,
+                    "error_type": type(exc).__name__,
+                    "reason_fa": str(exc)[:1000],
+                    "orders_submitted": False,
+                    "trade_executed": False,
+                },
+                event_key="execution-blocked",
+                experience_id=learning_experience_id,
+                status="WARNING",
+                reason=str(exc)[:1200],
+            )
+        except Exception:
+            pass
         if store is not None and not learning_experience_id:
             try:
                 learning_experience_id = store.record_challenge1_analysis_failure(
@@ -5020,6 +5329,26 @@ def _run_blofin_demo_execution_job(
             },
         )
     except Exception as exc:
+        try:
+            with LOCK:
+                audit_job_snapshot = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+            _record_challenge1_audit(
+                job_id, "CYCLE_FAILED",
+                {
+                    "instrument_id": instrument_id,
+                    "failed_operation": failed_operation,
+                    "execution_stage": audit_job_snapshot.get("stage"),
+                    "error_type": type(exc).__name__,
+                    "orders_submitted": "UNKNOWN" if submission_started else False,
+                    "trade_executed": False,
+                },
+                event_key="cycle-failed",
+                experience_id=learning_experience_id,
+                status="FAILED",
+                reason=f"Challenge 1 cycle failed at {failed_operation}: {type(exc).__name__}",
+            )
+        except Exception:
+            pass
         with LOCK:
             failed_job_snapshot = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
         execution_stage = str(failed_job_snapshot.get("stage") or "EXECUTION_ERROR")
@@ -5264,6 +5593,17 @@ class Handler(BaseHTTPRequestHandler):
                         "status": "UNAVAILABLE",
                         "error_type": type(activity_exc).__name__,
                     }
+                audit_recorder = None
+                try:
+                    audit_recorder = Challenge1AuditRecorder()
+                    payload["challenge1_audit"] = audit_recorder.status_snapshot()
+                except Exception as audit_exc:
+                    payload["challenge1_audit"] = {
+                        "status": "UNAVAILABLE", "error_type": type(audit_exc).__name__,
+                    }
+                finally:
+                    if audit_recorder is not None:
+                        audit_recorder.close()
                 return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
             except Exception as exc:
@@ -5358,6 +5698,31 @@ class Handler(BaseHTTPRequestHandler):
                            "message_fa": "مانیتور زنده با خطای کنترل‌شده متوقف شد."}
                 return self._send(502, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
+        if parsed.path.startswith("/api/blofin/demo/audit/"):
+            authorization = self.headers.get("Authorization", "")
+            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+            if not _blofin_dashboard_token_valid(authorization, expected_token):
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            reference = parsed.path.rsplit("/", 1)[-1]
+            recorder = None
+            try:
+                recorder = Challenge1AuditRecorder()
+                payload = recorder.list_related(reference)
+                return self._send(
+                    200 if payload.get("status") != "NOT_FOUND" else 404,
+                    json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                    "application/json; charset=utf-8",
+                )
+            except Exception as exc:
+                payload = {
+                    "status": "UNAVAILABLE", "error_type": type(exc).__name__,
+                    "message_fa": "دفتر شواهد ممیزی در دسترس نیست؛ هیچ موفقیت یا تکمیل گزارشی فرض نمی‌شود.",
+                }
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            finally:
+                if recorder is not None:
+                    recorder.close()
         if parsed.path.startswith("/api/blofin/demo/execution-jobs/"):
             authorization = self.headers.get("Authorization", "")
             dashboard_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
@@ -7882,7 +8247,14 @@ async function loadBlofinInstruments(){
                     )
                     worker = threading.Thread(
                         target=_run_blofin_demo_execution_job,
-                        args=(job_id, instrument_id, execution_profile),
+                        args=(
+                            job_id, instrument_id, execution_profile,
+                            {
+                                "selection_method": "MANUAL_OPERATOR",
+                                "selection_reason": "The operator explicitly selected this instrument for a Challenge 1 Demo cycle.",
+                                "configured_universe": [],
+                            },
+                        ),
                         daemon=True, name="blofin-demo-manual-cycle",
                     )
                     try:
@@ -8196,7 +8568,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
             started = datetime.now(timezone.utc).isoformat()
             batch_results = []
             batch_jobs = []
-            for scan_instrument in instrument_ids:
+            for scan_index, scan_instrument in enumerate(instrument_ids, start=1):
                 instrument_id = scan_instrument
                 job_id = uuid.uuid4().hex
                 with LOCK:
@@ -8217,7 +8589,18 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                     message_fa=f"چرخه خودکار Challenge 1 برای {instrument_id} آغاز شد.",
                     trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
                 )
-                _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
+                _run_blofin_demo_execution_job(
+                    job_id, instrument_id, execution_profile,
+                    {
+                        "selection_method": "CONFIGURED_UNIVERSE_ORDER",
+                        "selection_reason": (
+                            "The scheduler scans the configured instrument list sequentially; "
+                            "this is not a performance-ranked asset selection."
+                        ),
+                        "configured_universe": list(instrument_ids),
+                        "scan_index": scan_index, "scan_count": len(instrument_ids),
+                    },
+                )
                 with LOCK:
                     finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 summary = _blofin_autopilot_cycle_summary(finished_job)
@@ -9228,6 +9611,65 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 minimum_profit_usdt=minimum_profit,
                 maximum_hold_seconds=maximum_hold,
             )
+            experience_id = str(order.get("experience_id") or "").strip() or None
+            audit_position_id = str(position.get("positionId") or position_id)
+            try:
+                mark_price_value = float(mark_row.get("markPrice"))
+            except (TypeError, ValueError, OverflowError):
+                mark_price_value = None
+            try:
+                pnl_value = float(position.get("unrealizedPnl"))
+            except (TypeError, ValueError, OverflowError):
+                pnl_value = None
+            try:
+                opened_epoch = float(order.get("created_at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                opened_epoch = 0.0
+            holding_seconds = max(0, int(time.time() - opened_epoch)) if opened_epoch > 0 else None
+            try:
+                target_value = float(order.get("take_profit") or 0)
+            except (TypeError, ValueError, OverflowError):
+                target_value = 0.0
+            side_value = str(order.get("side") or "").upper()
+            take_profit_reached = (
+                mark_price_value is not None and target_value > 0
+                and ((mark_price_value >= target_value) if side_value == "LONG"
+                     else (mark_price_value <= target_value) if side_value == "SHORT" else False)
+            )
+            exit_basis = {
+                "instrument_id": instrument_id, "position_id": audit_position_id,
+                "experience_id": experience_id,
+                "decision": "EXIT_ELIGIBLE" if reason else "HOLD",
+                "rule_engine": "BLOFIN_DEMO_PROFIT_EXIT_RULES",
+                "exit_reason": reason, "side": side_value,
+                "mark_price": mark_price_value,
+                "unrealized_pnl_usdt": pnl_value,
+                "loss_making_position": pnl_value is not None and pnl_value < 0,
+                "minimum_profit_usdt": minimum_profit,
+                "minimum_profit_passed": pnl_value is not None and pnl_value >= minimum_profit,
+                "take_profit": target_value,
+                "take_profit_reached": take_profit_reached,
+                "holding_seconds": holding_seconds,
+                "maximum_hold_seconds": maximum_hold,
+                "maximum_hold_reached": holding_seconds is not None and holding_seconds >= maximum_hold,
+                "reviewers_exit_status": "NOT_RUN_RULE_BASED_EXIT_MANAGER",
+                "reviewers_exit_note": "AI entry reviewers are not represented as exit reviewers; this cycle is a deterministic rule-manager decision.",
+            }
+            try:
+                _record_challenge1_audit(
+                    experience_id or position_id, "POSITION_EXIT_EVALUATION", exit_basis,
+                    event_key=f"position-evaluation:{audit_position_id}:{int(time.time()) // 60}",
+                    experience_id=experience_id, position_id=audit_position_id,
+                    status="SUCCESS" if reason else "PENDING",
+                    reason=f"Exit rule matched: {reason}" if reason else "Hold decision: exit conditions have not all been met.",
+                )
+            except Exception as audit_exc:
+                actions.append({
+                    "status": "AUDIT_WRITE_FAILED", "instrument_id": instrument_id,
+                    "position_id": position_id, "error_type": type(audit_exc).__name__,
+                    "message_fa": "ثبت شواهد تصمیم مدیر خروج تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
+                })
+                continue
             if not reason:
                 actions.append({
                     "status": "HOLD_UNTIL_PROFIT_EXIT",
@@ -9239,6 +9681,16 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 continue
 
             try:
+                _record_challenge1_audit(
+                    experience_id or position_id, "EXIT_REQUEST_AUTHORIZED",
+                    {
+                        **exit_basis, "decision": "CLOSE_DEMO_POSITION",
+                        "precondition": "Exact linked position ID matched and minimum profit rule passed.",
+                    },
+                    event_key=f"exit-request:{audit_position_id}:{reason}",
+                    experience_id=experience_id, position_id=audit_position_id,
+                    status="SUCCESS", reason=f"Automatic Demo close request authorized by exit rule: {reason}",
+                )
                 close_result = _blofin_manual_close_position(
                     instrument_id=instrument_id,
                     position_id=position_id,
@@ -9257,6 +9709,24 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "exchange_response": close_result.get("exchange_response"),
                 })
             except BloFinDemoExecutionBlocked as exc:
+                try:
+                    _record_challenge1_audit(
+                        experience_id or position_id,
+                        "EXIT_REQUEST_REJECTED",
+                        {
+                            **exit_basis,
+                            "decision": "EXIT_NOT_SUBMITTED",
+                            "rejection_reason_fa": str(exc)[:1000],
+                            "orders_submitted": False,
+                        },
+                        event_key=f"exit-request-rejected:{audit_position_id}:{reason}",
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        status="WARNING",
+                        reason=str(exc)[:1200],
+                    )
+                except Exception:
+                    pass
                 actions.append({
                     "status": "AUTO_EXIT_NOT_SUBMITTED",
                     "instrument_id": instrument_id,
@@ -9586,6 +10056,23 @@ def _update_blofin_activity_after_close(
             "closed_confirmed": True,
             "status": "CLOSED_RECONCILED",
         })
+        _record_challenge1_audit(
+            experience_id, "EXIT_RECONCILED",
+            {
+                "instrument_id": instrument_id, "position_id": position_id,
+                "decision": "CLOSED_CONFIRMED_BY_BLOFIN_DEMO_HISTORY",
+                "actual_exit_price": weighted_exit,
+                "actual_exit_time_utc": snapshot.get("actual_exit_time_utc"),
+                "realized_net_pnl_usdt": snapshot.get("realized_net_pnl_usdt"),
+                "reported_trading_fees_usdt": fee_total,
+                "closed_confirmed": True, "exchange_outcome": outcome,
+                "reviewers_exit_status": "NOT_RUN_RULE_BASED_EXIT_MANAGER",
+            },
+            event_key=f"exit-reconciled:{position_id}:{exit_ms}",
+            experience_id=experience_id, position_id=position_id,
+            status="SUCCESS",
+            reason="Final exit price, exchange history and realized PnL were reconciled.",
+        )
         journal.enqueue(snapshot)
         return {"status": "QUEUED", "experience_id": experience_id}
     except Exception as exc:
