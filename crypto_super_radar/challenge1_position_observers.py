@@ -376,7 +376,7 @@ def _reviewer_result_event(
         "review_batch_id": review_batch_id,
         "reviewer_id": reviewer_id,
         "status": status,
-        "request_attempted": result.get("request_attempted") is True,
+        "request_attempted": result.get("request_attempted") if isinstance(result.get("request_attempted"), bool) else None,
         "provider": str(result.get("provider") or ""),
         "model": str(result.get("model") or ""),
         "returned_model": str(result.get("returned_model") or ""),
@@ -384,8 +384,8 @@ def _reviewer_result_event(
         "response_completed_at_utc": str(result.get("response_completed_at_utc") or result.get("completed_at_utc") or ""),
         "latency_ms": result.get("latency_ms"),
         "http_status": result.get("http_status"),
-        "response_validated": result.get("response_validated") is True,
-        "model_verified": result.get("model_verified") is True,
+        "response_validated": result.get("response_validated") if isinstance(result.get("response_validated"), bool) else None,
+        "model_verified": result.get("model_verified") if isinstance(result.get("model_verified"), bool) else None,
         "verdict": str(result.get("verdict") or ""),
         "reason_fa": str(result.get("reason_fa") or result.get("reason") or "")[:1000],
         "observations": list(result.get("observations") or [])[:10],
@@ -519,9 +519,10 @@ def _position_review_worker(
                     reviewer={
                         "reviewer_id": reviewer_id,
                         "status": "OBSERVER_WORKER_FAILED",
-                        "request_attempted": False,
-                        "skip_reason_code": type(exc).__name__,
-                        "reason": "Observer background worker failed before a validated result was stored.",
+                        "request_attempted": None,
+                        "skip_reason_code": "OBSERVER_WORKER_FAILED",
+                        "error_type": type(exc).__name__,
+                        "reason": "The worker failed; whether a provider request reached the provider is unknown.",
                     },
                     consensus="NOT_COMPARABLE",
                     experience_id=experience_id,
@@ -610,7 +611,11 @@ def schedule_position_observer_review(
             if reviewer_id in {"nemotron", "second_ai"}:
                 latest_results[reviewer_id] = {"event_id": event.get("event_id"), **details}
 
-    if latest_request is not None and len(latest_results) < 2:
+    incomplete_batch = len(latest_results) < 2 or any(
+        str(item.get("status") or "").upper() in {"OBSERVER_WORKER_FAILED", "OBSERVER_RESULT_MISSING"}
+        for item in latest_results.values()
+    )
+    if latest_request is not None and incomplete_batch:
         age = now_epoch - latest_request_time.timestamp() if latest_request_time else float("inf")
         if age < _IN_FLIGHT_TIMEOUT_SECONDS:
             return {
