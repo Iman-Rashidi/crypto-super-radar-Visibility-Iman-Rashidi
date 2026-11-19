@@ -174,6 +174,11 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
 
     def test_completed_review_batch_survives_restart_and_obeys_persisted_cadence(self):
         first_time = datetime(2026, 11, 19, 0, 0, tzinfo=timezone.utc)
+        challenge_record = {"signal": "LONG", "challenge1_evidence": {"candles_5m": []}}
+        cycle_context = {"robot_decision": "HOLD"}
+        material_hash = observers._material_review_event_key(
+            challenge_record, cycle_context, "position-3",
+        )
         with (
             patch.object(
                 observers, "Challenge1AuditRecorder",
@@ -182,8 +187,8 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
             patch.object(observers.threading, "Thread"),
         ):
             requested = observers.schedule_position_observer_review(
-                challenge_record={"signal": "LONG", "challenge1_evidence": {"candles_5m": []}},
-                cycle_context={"robot_decision": "HOLD"},
+                challenge_record=challenge_record,
+                cycle_context=cycle_context,
                 experience_id="experience-3",
                 position_id="position-3",
                 order_id="order-3",
@@ -203,6 +208,7 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
                     event_key=f"result:{batch_id}:{reviewer_id}",
                     details={
                         "review_batch_id": batch_id,
+                        "material_event_hash": material_hash,
                         "reviewer_id": reviewer_id,
                         "status": "REVIEWED",
                         "request_attempted": True,
@@ -237,7 +243,7 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
                 now=first_time + timedelta(minutes=1),
             )
         self.assertTrue(all(state["status"] == "NOT_CALLED" for state in later.values()))
-        self.assertTrue(all(state["reason_code"] == "REVIEW_NOT_DUE" for state in later.values()))
+        self.assertTrue(all(state["reason_code"] == "SCHEDULED_INTERVAL_NOT_REACHED" for state in later.values()))
         thread_class.assert_not_called()
         report = self._events("experience-3")
         self.assertEqual(report["integrity"]["status"], "PASS")
