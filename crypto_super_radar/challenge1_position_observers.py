@@ -659,7 +659,7 @@ def schedule_position_observer_review(
                 for key in ("nemotron", "second_ai")
             }
 
-    if latest_request is not None and latest_request_time is not None and len(latest_results) == 2:
+    if latest_request is not None and not incomplete_batch and latest_request_time is not None and len(latest_results) == 2:
         completed_times = [
             _parse_utc(item.get("response_completed_at_utc"))
             for item in latest_results.values()
