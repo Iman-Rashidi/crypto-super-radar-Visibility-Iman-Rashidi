@@ -261,7 +261,7 @@ class NotionEventOutbox:
         """Retry pending events. Safe to call after restarts; query-before-create avoids duplicates."""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        token = (os.getenv("NOTION_API_TOKEN") or "").strip()
+        token = (os.getenv("NOTION_API_TOKEN") or os.getenv("NOTION_TOKEN") or "").strip()
         if not token:
             return {"status": "NOT_CONFIGURED", "queued": self.pending_count(), "synced": 0, "failed": 0}
         current = int(time.time()) if now is None else int(now)
@@ -344,7 +344,7 @@ class NotionEventOutbox:
             }
             for item in recent_rows
         ]
-        token_configured = bool((os.getenv("NOTION_API_TOKEN") or "").strip())
+        token_configured = bool((os.getenv("NOTION_API_TOKEN") or os.getenv("NOTION_TOKEN") or "").strip())
         retrying = int(row["retrying"] or 0)
         return {
             "status": (

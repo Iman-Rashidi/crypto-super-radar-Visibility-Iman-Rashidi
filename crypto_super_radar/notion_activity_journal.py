@@ -617,7 +617,7 @@ class NotionActivityJournal:
     def flush_pending(self, *, limit: int = 5, now: int | None = None) -> dict[str, Any]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        token = (os.getenv("NOTION_API_TOKEN") or "").strip()
+        token = (os.getenv("NOTION_API_TOKEN") or os.getenv("NOTION_TOKEN") or "").strip()
         if not token:
             return {"status": "NOT_CONFIGURED", "pending": self.pending_count(), "synced": 0, "failed": 0}
         current = int(time.time()) if now is None else int(now)
@@ -714,7 +714,7 @@ class NotionActivityJournal:
                WHERE sync_status='PENDING' AND last_error_type IS NOT NULL"""
         ).fetchone()
         return {
-            "status": "CONFIGURED" if bool((os.getenv("NOTION_API_TOKEN") or "").strip()) else "NOT_CONFIGURED",
+            "status": "CONFIGURED" if bool((os.getenv("NOTION_API_TOKEN") or os.getenv("NOTION_TOKEN") or "").strip()) else "NOT_CONFIGURED",
             "storage_backend": storage_backend(),
             "pending": int(row["pending"] or 0),
             "synced": int(row["synced"] or 0),

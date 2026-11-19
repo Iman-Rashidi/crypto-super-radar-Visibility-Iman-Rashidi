@@ -104,6 +104,17 @@ class NotionActivityJournalTests(unittest.TestCase):
     def tearDown(self):
         self.connection.close()
 
+    def test_legacy_notion_token_alias_is_accepted(self):
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"NOTION_API_TOKEN": "", "NOTION_TOKEN": "legacy-test-secret"}):
+            state = self.journal.status_snapshot()
+            self.assertEqual(state["status"], "CONFIGURED")
+            with patch("crypto_super_radar.notion_activity_journal.requests.post") as post:
+                result = self.journal.flush_pending(now=1_800_000_000)
+        self.assertEqual(result["status"], "CONFIGURED")
+        post.assert_not_called()
+
     def test_enqueue_is_idempotent_and_updates_same_experience(self):
         snapshot = sample_snapshot()
         self.assertTrue(self.journal.enqueue(snapshot))

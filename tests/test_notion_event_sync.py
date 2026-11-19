@@ -67,6 +67,14 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.assertEqual(result["queued"], 0)
         post.assert_not_called()
 
+    def test_legacy_notion_token_alias_is_accepted(self):
+        with patch.dict("os.environ", {"NOTION_API_TOKEN": "", "NOTION_TOKEN": "legacy-test-secret"}):
+            self.assertTrue(self.outbox.status_snapshot()["token_configured"])
+            with patch("crypto_super_radar.notion_event_sync.requests.post") as post:
+                result = self.outbox.flush_pending(now=1_800_000_000)
+        self.assertEqual(result["status"], "CONFIGURED")
+        post.assert_not_called()
+
     def test_existing_notion_page_is_reconciled_without_duplicate_create(self):
         self.outbox.enqueue(event())
         with patch(
