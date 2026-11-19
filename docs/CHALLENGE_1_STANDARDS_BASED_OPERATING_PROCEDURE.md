@@ -156,3 +156,134 @@ These references provide process, architecture, quality, security, and AI-risk g
 - EU RTS 6: https://eur-lex.europa.eu/eli/reg_del/2017/589/oj/eng
 - TradingAgents: https://arxiv.org/abs/2412.20138
 - LLM financial multi-agent evaluation survey: https://arxiv.org/abs/2603.27539
+
+
+---
+
+## 10. Superseding target design — AI supervisors with active trade authority
+
+**This section supersedes any earlier target-design wording that describes both supervisors as report-only.** The existing Staging implementation is still report-only; this section defines the intended next architecture and is not a claim that active intervention is already deployed.
+
+### 10.1 Operating decision
+
+Challenge 1 shall use two independent AI supervisors as active decision participants at three stages:
+
+1. **Before entry:** review and vote on whether the proposed trade may be opened.
+2. **While a position is open:** continuously reassess the live position and issue bounded management decisions.
+3. **At exit and after exit:** decide whether the position should be held, protected, reduced, or closed; then audit the actual fill and realized PnL.
+
+The supervisors are not decorative second opinions. Their structured decisions must feed an explicit decision coordinator. The coordinator converts accepted decisions into a constrained command for the deterministic execution gateway. The models themselves never receive exchange credentials or direct order tools.
+
+### 10.2 Two different supervisor mandates
+
+| Supervisor | Primary mandate | Must independently examine |
+|---|---|---|
+| Supervisor A — Market / Trade Thesis | Is the original LONG/SHORT thesis still valid? | Closed 5m candles, setup pattern, chart structure, momentum, market direction, entry thesis, invalidation level, target progress, evidence freshness |
+| Supervisor B — Risk / Position Guardian | Is the live position still inside the allowed risk envelope? | Exact position ID, side, size, average fill, mark price, net PnL after known costs, margin, liquidation distance where available, exposure, risk budget, exchange-side TP/SL and order state |
+
+The supervisors receive the same versioned evidence snapshot but do not receive each other's answer before making their own decision. They must have distinct system prompts, evaluation checklists and failure tests. Two calls to the same model/provider under different names do not count as independent reviewers.
+
+### 10.3 Allowed decision vocabulary
+
+Each supervisor must return a schema-validated JSON decision with the exact position/experience identifiers, evidence hash, timestamp, reason codes and one action from this set:
+
+- `APPROVE_ENTRY` — approve the proposed entry side and exact risk plan.
+- `REJECT_ENTRY` — veto the proposed new entry.
+- `DEFER_ENTRY` — evidence is incomplete, stale, or contradictory; do not enter.
+- `HOLD_POSITION` — keep the existing position and protection unchanged.
+- `TIGHTEN_STOP` — propose a safer stop; the new stop must never increase the maximum permitted loss.
+- `ADJUST_TARGET` — propose a target adjustment only within the strategy's pre-approved target envelope.
+- `REDUCE_POSITION` — request a partial reduction within the configured allowed size and precision.
+- `CLOSE_POSITION` — request closure of the exact linked position.
+- `URGENT_RISK_ALERT` — report an immediate risk condition requiring the deterministic risk engine to evaluate an emergency response.
+- `REQUEST_DATA` — refuse to make a trade-management decision until specified missing evidence is recovered.
+
+The response schema must reject free-form commands, unknown actions, missing IDs, non-finite prices, invalid side values, and instructions outside the allowed envelope. A numerical confidence field is explanatory metadata only; it is not treated as a calibrated probability.
+
+### 10.4 Decision and execution authority
+
+The target authority model is:
+
+- **New entries:** both supervisors must independently return `APPROVE_ENTRY` for the same side and the same evidence hash. Any `REJECT_ENTRY`, `DEFER_ENTRY`, missing response, timeout, model mismatch, or disagreement blocks that entry.
+- **Ordinary position management:** the coordinator combines both decisions. `HOLD_POSITION` is not assumed when one result is missing. A missing or stale result becomes `SUPERVISOR_QUORUM_UNKNOWN`; no new exposure or risk increase is allowed.
+- **Stop protection:** an AI may propose only a stop move that tightens protection. Widening a stop, removing a protective order, or increasing the maximum loss is prohibited. The executor re-reads the live position and live TP/SL state before an amendment.
+- **Target changes:** target amendments require both supervisors to agree and must remain inside the original approved strategy envelope. A target change cannot weaken a stop or bypass risk limits.
+- **Partial reduction:** requires an exact live-position match, valid exchange quantity/precision, and a risk check. The supervisor cannot select a different position by symbol alone.
+- **Normal AI-directed exit:** both supervisors must agree on `CLOSE_POSITION`, or an explicitly pre-approved deterministic exit rule must independently authorize closure.
+- **Emergency risk:** hard deterministic protection always has priority over AI consensus. A crossed exchange-side stop, invalid position state, or pre-defined hard loss/liquidation guard must not wait for an LLM response. One supervisor's `URGENT_RISK_ALERT` immediately blocks new entries and triggers a fresh deterministic risk evaluation; it does not by itself create an unrestricted market order.
+- **No direct model execution:** the execution gateway alone may submit, amend, reduce, or close a Demo order. It validates the exact `positionId`, current side/size, order state, idempotency key, margin, quantity/price precision, daily risk and protective orders immediately before action. Ambiguous submission results are reconciled before any retry.
+
+No supervisor may increase leverage, increase position size, add to a losing position, widen a stop, remove the final protective stop, change account mode, transfer funds, withdraw funds, or switch from Demo to Production. The hard risk engine can veto any AI proposal. AI agreement cannot override a failed hard gate.
+
+### 10.5 Three-second active supervision cycle
+
+The 3-second requirement applies to the **supervision coordinator**, not to a promise that a remote LLM will finish inference within three seconds.
+
+Every three seconds, using a monotonic clock, the coordinator must:
+
+1. Read the newest already-received, validated WebSocket snapshot from memory.
+2. Verify freshness, exact position linkage, order/TP-SL state, market-data age, account/risk state and last supervisor-decision age.
+3. Recompute deterministic risk flags and the current permitted action envelope.
+4. Re-evaluate the two supervisors' latest accepted decisions against the new snapshot and evidence hash. A decision is invalidated when its evidence version is no longer compatible with the material current state.
+5. Determine whether a new AI inference is due because of a material event, a new closed 5m candle, a price/volatility threshold, a stop/target proximity threshold, an unexpected order/position update, a risk-budget threshold, or an explicit recovery event.
+6. Start a fresh independent review only if the provider is eligible, no same-position/same-evidence request is already in flight, and the per-provider budget allows it.
+7. If no fresh AI result can be obtained, preserve the last known decision only within a configured short validity window. After expiry, move the supervisor state to `STALE`/`UNKNOWN`, block new entries and risk increases, and retain exchange-native protection. Never invent a fresh AI vote.
+8. Persist the watchdog heartbeat, evidence hash, snapshot age, supervisor states, selected action, rejected actions, and reason codes.
+
+**The two external LLM endpoints will not be called unconditionally every three seconds on the current free tiers.** The current observer code has per-reviewer application caps of 35 requests/day and 18 requests/minute. OpenRouter currently documents 20 requests/minute and 50 requests/day for free `:free` models; failed attempts count toward its daily limit. A three-second call cadence would generate 28,800 requests per reviewer per day and exceed the current application cap in roughly 105 seconds. The free-provider quotas therefore cannot support literal two-model inference every tick.
+
+If the requirement is later interpreted as a fresh remote model response from both providers every three seconds, it requires a separately capacity-tested inference service and quota arrangement with measured sub-three-second response latency. It cannot be represented as a free-tier capability or assumed from a timer setting.
+
+### 10.6 BloFin event transport
+
+Use the documented private WebSocket channels for positions, orders, algo/TP-SL orders and account state, plus public channels for mark price/trades/candles as required. The initial position snapshot and event updates feed the local state cache. Order and algo-order channels are event-driven; position updates include snapshots and event/periodic updates.
+
+The implementation must include authentication, subscription acknowledgement, ping/pong, reconnect, duplicate/out-of-order handling, event timestamps, stream health, gap detection and REST reconciliation after a disconnect or uncertain state. REST is a recovery/reconciliation mechanism, not a request issued on every 3-second heartbeat. The exact Demo endpoints and any Demo-specific channel behavior must be verified against BloFin's current API documentation before implementation.
+
+### 10.7 Audit record for every AI intervention
+
+For each position and each decision version, persist:
+
+- `experience_id`, exact `positionId`, instrument, side, order/client-order IDs and environment `BLOFIN_DEMO`.
+- Original entry snapshot hash and current evidence hash.
+- Decision cycle ID, scheduled time, actual request time, response time and latency.
+- Provider, configured model, returned model, prompt/schema version and request status.
+- Each supervisor's action, verdict, reason codes, observations, risk flags, and data requested.
+- The coordinator's quorum result, selected command, rejected proposal(s), and precise reason.
+- Execution gateway pre-checks, command ID, idempotency key, BloFin response, actual order/position update and reconciliation result.
+- Before/after SL, TP, position size, mark, unrealized PnL, fee/funding evidence when available, and realized exit PnL after closure.
+- Whether an event was `REQUESTED`, `REVIEWED`, `APPROVED`, `VETOED`, `EXECUTED`, `REJECTED_BY_GUARD`, `STALE`, `UNKNOWN` or `NOT_CALLED`.
+
+A scheduled heartbeat is not an AI review. A request accepted by an HTTP endpoint is not a response. A valid AI suggestion is not an exchange fill. These must remain separate audit states.
+
+### 10.8 Implementation sequence
+
+- **P0 — Policy and schema:** replace the current open-position report-only contract with the active-supervisor contract; keep entry approval and open-position management as separate workflows. Define JSON schemas, action matrix, quorum logic and prohibited actions.
+- **P1 — Deterministic decision coordinator:** implement a pure function that consumes two validated supervisor outputs plus live state and returns one constrained action or `NO_ACTION`. Add exhaustive tests for every pair of votes and every missing/invalid state.
+- **P2 — WebSocket state layer:** implement BloFin Demo private positions/orders/orders-algo/account streams and public market streams, backed by an initial REST snapshot and periodic/recovery reconciliation. Persist stream health and exact event IDs.
+- **P3 — Three-second watchdog:** implement the non-blocking monotonic loop over cached snapshots. Add a test proving approximately 3-second scheduled ticks, bounded drift, no overlapping cycles, and no per-tick REST or LLM call.
+- **P4 — Active AI orchestration:** call both independent supervisors on material event/evidence versions; add single-flight, evidence hashing, quotas, stale-result invalidation, retries with backoff/jitter, circuit breakers and structured result validation.
+- **P5 — Guarded Demo interventions:** wire the coordinator to the Demo-only execution gateway for approved stop tightening, target adjustment, partial reduction and closure. Keep hard deterministic stops independent of AI availability. Do not permit any Live endpoint or credentials.
+- **P6 — Evidence-based acceptance:** run deterministic replay, unit/integration tests, failure injection, then Demo shadow evaluation followed by bounded active Demo intervention. Compare every recommendation to actual position/order/fill results and realized PnL. Do not accept Challenge 1 until both intervention quality and execution reconciliation are demonstrated.
+
+### 10.9 Mandatory acceptance tests
+
+1. Supervisor A approves and B approves same side/evidence: entry can proceed only after all deterministic guards pass.
+2. Supervisors disagree, one vetoes, one times out, or the evidence hashes differ: no entry.
+3. Open position + both HOLD: retain exact current protection; record both fresh results.
+4. Open position + one TIGHTEN_STOP and one HOLD: no amendment unless the approved policy explicitly defines a safe one-reviewer emergency tighten rule; default is no AI amendment.
+5. Both TIGHTEN_STOP: proposed stop must reduce or preserve maximum loss; live TP/SL is re-read and matched by exact position ID before amendment.
+6. Any request to widen SL, remove protection, add to a losing position, increase leverage/size or act on a different position: reject at schema or execution guard.
+7. Both CLOSE_POSITION: re-read exact position, risk and exchange state; submit one idempotent Demo close request; reconcile actual fill.
+8. One URGENT_RISK_ALERT: block new entries and invoke deterministic risk evaluation; do not blindly submit an order based on free-form model text.
+9. WebSocket disconnect, stale mark, position ID mismatch, duplicate event or sequence gap: supervisor input becomes UNKNOWN; no new risk is allowed until REST reconciliation.
+10. LLM 429, 401, timeout, invalid JSON, model mismatch or daily cap: record exact failure; do not run a tight retry loop; preserve exchange-native protection.
+11. Restart during in-flight review or order submission: recover durable request/command state and reconcile before resending.
+12. Every executed AI intervention must be traceable from evidence hash to both votes to coordinator command to BloFin exchange response and realized outcome.
+
+### 10.10 External references for this active-supervision design
+
+- BloFin API documentation, private WS Positions, WS Orders, WS Algo Orders, account channels and rate limits: https://docs.blofin.com/index.html
+- OpenRouter Free Models and current free-tier rate limits: https://openrouter.ai/collections/free-models
+- NIST AI RMF Playbook — Govern, roles, responsibility, human-AI configurations and documentation: https://airc.nist.gov/airmf-resources/playbook/govern/
+- NIST AI RMF 1.0: https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf
