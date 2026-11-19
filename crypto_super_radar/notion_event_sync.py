@@ -64,6 +64,7 @@ def _record_position_notion_sync_audit(
     attempt: int,
     error_type: str | None = None,
     http_status: int | None = None,
+    notion_page_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Append per-position Notion delivery results to the Challenge 1 audit chain."""
     event_type = _text(event.get("event_type"), 40).upper()
@@ -100,7 +101,7 @@ def _record_position_notion_sync_audit(
                     "attempt": int(attempt),
                     "error_type": error_type or "",
                     "http_status": http_status,
-                    "notion_page_id": "",
+                    "notion_page_id": _text(notion_page_id, 180),
                     "execution_effect": "NONE",
                 },
                 experience_id=experience_id or None,
@@ -385,6 +386,7 @@ class NotionEventOutbox:
                     event,
                     status="SYNCED",
                     attempt=attempts,
+                    notion_page_id=page_id,
                 )
                 if isinstance(audit_result, dict) and audit_result.get("status") == "AUDIT_WRITE_FAILED":
                     position_audit_write_failures += 1
