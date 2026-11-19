@@ -6,6 +6,13 @@ from crypto_super_radar.challenge1_supervisor_policy import coordinate_position_
 
 
 def _review(reviewer_id, action, **extra):
+    verdict_by_action = {
+        "HOLD_POSITION": "SUPPORTS_DECISION",
+        "TIGHTEN_STOP": "CONCERNS",
+        "CLOSE_POSITION": "CONCERNS",
+        "URGENT_RISK_ALERT": "CONCERNS",
+        "REQUEST_DATA": "INSUFFICIENT_DATA",
+    }
     return {
         "reviewer_id": reviewer_id,
         "status": "REVIEWED",
@@ -14,6 +21,10 @@ def _review(reviewer_id, action, **extra):
         "model_verified": True,
         "evidence_hash": "hash-1",
         "action": action,
+        "verdict": verdict_by_action[action],
+        "risk_flags": ["test-risk"] if action in {
+            "TIGHTEN_STOP", "CLOSE_POSITION", "URGENT_RISK_ALERT"
+        } else [],
         **extra,
     }
 
