@@ -455,7 +455,10 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     ORDER_PATH = "/api/v1/trade/order"
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
     CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
-    ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH})
+    AMEND_TPSL_PATH = "/api/v1/trade/amend-tpsl"
+    ALLOWED_POST_PATHS = frozenset({
+        ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH, AMEND_TPSL_PATH,
+    })
 
     def __init__(self, **kwargs: Any) -> None:
         # Prefer a dedicated Demo Trade override. Otherwise use the unified
@@ -613,6 +616,36 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         if position_id:
             body["positionId"] = position_id
         return self._post(self.CLOSE_POSITION_PATH, body)
+
+    def amend_tpsl_stop_loss(
+        self, *, inst_id: str, tpsl_id: str, new_stop_loss: str,
+        request_id: str, ttl_ms: int = 5_000,
+    ) -> dict[str, Any]:
+        """Tighten only the SL leg of one standalone Demo TP/SL order.
+
+        The omitted TP fields are intentionally left untouched. Zero is
+        prohibited because BloFin interprets zero as removing protection.
+        This method sends exactly one POST and never retries an ambiguous write.
+        """
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
+            raise ValueError("Only a USDT linear Demo instrument can be amended.")
+        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", tpsl_id or ""):
+            raise ValueError("tpsl_id is invalid.")
+        if not re.fullmatch(r"[A-Za-z0-9]{1,32}", request_id or ""):
+            raise ValueError("request_id must contain 1-32 alphanumeric characters.")
+        stop = _decimal(new_stop_loss, "new_stop_loss")
+        if stop <= 0:
+            raise ValueError("A protective stop must be strictly positive; zero removes it.")
+        if not isinstance(ttl_ms, int) or isinstance(ttl_ms, bool) or not 1_000 <= ttl_ms <= 10_000:
+            raise ValueError("ttl_ms must be between 1000 and 10000.")
+        body = {
+            "instId": inst_id,
+            "tpslId": tpsl_id,
+            "requestId": request_id,
+            "ttl": ttl_ms,
+            "newSlTriggerPrice": _format_decimal(stop),
+        }
+        return self._post(self.AMEND_TPSL_PATH, body)
 
 
 class BloFinDemoEventStore:
