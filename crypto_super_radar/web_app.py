@@ -9438,6 +9438,23 @@ def _blofin_demo_profit_exit_decision(
     return None
 
 
+def _blofin_demo_stop_loss_triggered(side: Any, mark_price: Any, stop_loss: Any) -> bool:
+    """Report whether mark has crossed the stored SL threshold; never sends an order."""
+    direction = str(side or "").strip().upper()
+    try:
+        mark = float(mark_price)
+        stop = float(stop_loss)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(mark) or not math.isfinite(stop) or mark <= 0 or stop <= 0:
+        return False
+    if direction == "LONG":
+        return mark <= stop
+    if direction == "SHORT":
+        return mark >= stop
+    return False
+
+
 def _blofin_demo_position_market_evidence(reader: Any, instrument_id: str) -> dict[str, Any]:
     """Summarize only recent, exchange-confirmed closed 5m candles for an open Demo position."""
     now_ms = int(time.time() * 1000)
@@ -9860,10 +9877,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 and ((mark_price_value >= target_value) if side_value == "LONG"
                      else (mark_price_value <= target_value) if side_value == "SHORT" else False)
             )
-            stop_loss_threshold_reached = (
-                mark_price_value is not None and stop_value > 0
-                and ((mark_price_value <= stop_value) if side_value == "LONG"
-                     else (mark_price_value >= stop_value) if side_value == "SHORT" else False)
+            stop_loss_threshold_reached = _blofin_demo_stop_loss_triggered(
+                side_value, mark_price_value, stop_value,
             )
             cycle_epoch_ms = int(time.time() * 1000)
             monitor_cycle_id = f"{audit_position_id}:{cycle_epoch_ms}"
