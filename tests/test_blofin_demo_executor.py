@@ -215,6 +215,7 @@ def signal_record(**overrides):
         "pattern_preserved": True,
         "new_closed_candle_confirmed": True,
         "review_rounds_completed": 2,
+        "entry_evaluation_heartbeat_seconds": 3.0,
         "window_started_at_utc": initial_request_time.isoformat(),
         "window_completed_at_utc": final_request_time.isoformat(),
         "initial_round": {
@@ -1344,6 +1345,14 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             ] = final_request
             sync_evaluation(item)
 
+        def mismatch_final_pattern(item):
+            item["challenge1_evidence"]["chosen_pattern"]["name_en"] = "Different Pattern"
+            sync_evaluation(item)
+
+        def mismatch_final_round_identity(item):
+            item["entry_evaluation_window"]["final_round"]["reviewed_signal_id"] = "stale-signal"
+            sync_evaluation(item)
+
         mutations = {
             "missing evaluation proof": lambda item: item.pop("entry_evaluation_window"),
             "window shorter than five minutes": shorten_window,
@@ -1351,6 +1360,8 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             "first round missing reviewer": remove_initial_reviewer,
             "cached first-round approval": stale_initial_reviewer,
             "review rounds not sequential": collapse_review_rounds,
+            "final record pattern differs from evaluation": mismatch_final_pattern,
+            "final reviewer round references stale signal": mismatch_final_round_identity,
             "missing consensus": lambda item: item.pop("ai_consensus"),
             "missing second reviewer": lambda item: item["ai_reviews"].pop(),
             "veto": lambda item: item["ai_reviews"][0]["review"].update(
