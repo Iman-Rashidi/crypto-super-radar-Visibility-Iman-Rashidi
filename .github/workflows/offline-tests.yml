@@ -103,6 +103,7 @@ jobs:
           python -m crypto_super_radar.order_flow_service --help
           python scripts/paper_trading_bot.py --help
       - name: Run 180-day BloFin Challenge 1 out-of-sample validation
+        if: github.event_name == 'push'
         run: python scripts/challenge1_historical_validation.py
       - uses: actions/upload-artifact@v4
         with:
