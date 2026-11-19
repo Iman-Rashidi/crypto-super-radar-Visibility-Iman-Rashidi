@@ -10008,7 +10008,7 @@ def _cache_challenge1_supervisor_snapshot(
 
 
 def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
-    """Three-second local reevaluation only: no REST, LLM, Notion or exchange writes."""
+    """Three-second local reevaluation over cached state; only the audit database is written."""
     now_epoch = time.time()
     with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
         snapshots = [dict(item) for item in BLOFIN_POSITION_SUPERVISOR_CACHE.values()]
@@ -10065,6 +10065,20 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
                     should_persist_halt = True
             if should_persist_halt:
                 _persist_blofin_autopilot_state()
+
+    if errors:
+        should_persist_audit_halt = False
+        with LOCK:
+            if BLOFIN_AUTOPILOT_STATE.get("enabled") and BLOFIN_AUTOPILOT_STATE.get("status") != "SUPERVISOR_AUDIT_FAILURE_HALT":
+                BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_AUDIT_FAILURE_HALT"
+                BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                    "ثبت ممیزی ناظرها شکست خورد؛ ورود خودکار جدید متوقف شد تا هیچ اقدام بدون سابقه باقی نماند."
+                )
+                BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                should_persist_audit_halt = True
+        if should_persist_audit_halt:
+            _persist_blofin_autopilot_state()
 
     state = {
         "status": "ERROR" if errors else "ALIVE",
