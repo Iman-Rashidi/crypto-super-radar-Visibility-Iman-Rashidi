@@ -1265,7 +1265,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call):
+    def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call(self):
         mutations = {
             "missing consensus": lambda item: item.pop("ai_consensus"),
             "missing second reviewer": lambda item: item["ai_reviews"].pop(),
