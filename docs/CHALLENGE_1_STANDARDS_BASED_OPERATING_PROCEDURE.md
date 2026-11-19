@@ -20,7 +20,7 @@ The following authority order applies:
 1. **Exchange facts:** BloFin Demo responses and authenticated stream events are the source of truth for order, fill, position, and protective-order state. A local prediction is not proof of exchange acceptance.
 2. **Durable evidence:** append-only Challenge 1 audit events and the durable event store preserve what was known, when it was known, and which decision used it. Notion is a projection/reporting surface, not the execution source of truth.
 3. **Deterministic risk/execution policy:** code-controlled checks own position limits, order permissions, idempotency, protection reconciliation, and exit authorization.
-4. **LLM supervisors:** models provide bounded, schema-validated analysis of sanitized evidence. A post-decision observer has no order, position, TP/SL, or exit authority. A new-entry approval gate, if retained, must be specified separately and must never override deterministic hard gates.
+4. **LLM supervisors (dual responsibility):** both supervisors are active decision participants and mandatory audit/report producers. They must report their observations and structured decisions before entry, during the open position, at exit, and after exit. Accepted decisions flow through the constrained coordinator and Demo-only execution gateway. The reporting duty is never disabled when intervention is enabled, and no intervention may occur without a linked audit record. Model endpoints never receive exchange credentials or direct order tools. Entry approval and open-position management remain distinct workflows, but both write to the same durable, append-only audit ledger.
 
 ### Policy conflict requiring resolution (P0)
 
@@ -29,7 +29,7 @@ The current repository contains conflicting descriptions:
 - `run_challenge1_observer_reviews()` in `crypto_super_radar/ai_second_opinion.py` describes post-decision, non-operative reviews.
 - `docs/audit/2026-11-19-blofin-position-supervisor-audit.md` states that the open-position reviewers are report-only and identifies the conflicting policy language.
 
-These are different functions and must not be conflated. The release owner must approve one explicit entry-gate policy and one explicit open-position observer policy. Until the documents, call paths, tests, and UI agree, the system must not claim that a position was AI-approved merely because a reviewer was configured or a request was queued.
+The current code path and the target design must be distinguished without discarding either responsibility: the current open-position reviewer is report-only, while the required target is an active supervisor that also preserves and expands reporting. The release baseline must define both (a) the actions a validated AI decision may cause through the guarded coordinator and (b) the complete audit events every supervisor cycle must produce. Until documents, call paths, tests, and UI agree, the system must not claim an intervention occurred merely because a reviewer was configured or a request was queued. Nor may the system suppress reports after active intervention is implemented.
 
 ## 3. Timing policy
 
@@ -53,7 +53,7 @@ The currently documented OpenRouter free `:free` limit is 20 requests/minute and
 
 The second provider has its own quota and availability policy. Its limit must be obtained from the provider's current official account/model documentation; it must not be guessed or copied from OpenRouter. The observer's 35/day and 18/minute application counters are held in process memory (`_OBSERVER_REQUESTS`) and reset on process restart; they are not a durable cross-instance quota ledger. Upstream provider limits remain separate, but the application-level counters need durable shared storage before multi-instance or restart-safe quota enforcement can be claimed.
 
-## 4. Proposed event-driven supervisor procedure
+## 4. Proposed event-driven active-supervisor and mandatory reporting procedure
 
 For every tracked Demo position:
 
@@ -64,9 +64,9 @@ For every tracked Demo position:
 5. Persist a request event before dispatch. Persist each reviewer result separately. Record `NOT_CALLED`, `PENDING`, `RATE_LIMITED`, `TIMEOUT`, `INVALID_RESPONSE`, `REVIEWED`, and `UNKNOWN` explicitly with a stable reason code.
 6. Apply bounded retry with exponential backoff and jitter for retryable failures, honoring `Retry-After`. Do not retry immediately on every three-second watchdog tick. An ambiguous request outcome must be reconciled before resending.
 7. Compare reviewer responses only after schema validation and model/provider identity checks. Agreement is not proof of correctness; disagreement remains visible and is never silently averaged away.
-8. Keep the observer's execution effect equal to `NONE`. The deterministic position manager and exchange-side protective orders remain responsible for risk actions.
+8. Treat each supervisor as both decision-maker and reporter. Each validated decision must be passed to the deterministic coordinator, which may authorize a bounded Demo action. The supervisor itself never sends an exchange order. Record the decision, coordinator result, execution guard checks, exchange response, and final reconciled state as separate linked audit events. The deterministic hard-risk engine and exchange-side protective orders remain authoritative safety controls.
 9. On a new closed candle or a material state change, create a new evidence version and schedule a fresh review if the per-provider budget permits. A stale snapshot is `UNKNOWN`, not permission to reuse an old approval.
-10. After exit, reconcile actual exchange fill history and realized PnL, then run the post-mortem audit against the original entry-time snapshot. Do not rewrite the original decision using future information.
+10. After exit, reconcile actual exchange fill history and realized PnL, then run the post-mortem audit against the original entry-time snapshot. Do not rewrite the original decision using future information. Preserve the full sequence of pre-entry reports, in-position reports, interventions, non-interventions, errors, recovery actions, exit reports, and post-exit findings so defects can be located and corrected.
 
 ## 5. Three-second watchdog contract
 
@@ -78,7 +78,7 @@ The target watchdog should meet all of the following:
 - Idempotency: each state transition has a stable event key; duplicate ticks must not create duplicate actions.
 - Non-blocking: AI calls, Notion sync, and historical reconciliation cannot block the local watchdog.
 - Fail-safe: missing data or watchdog lag disables new entries. Existing exchange-side TP/SL remains active; the watchdog must not fabricate a successful protective order.
-- Separation: the watchdog can emit an alert or make a deterministic state transition, but the post-decision LLM observer cannot submit, cancel, resize, or close an order.
+- Dual responsibility: every watchdog cycle records the state of both supervisors, whether each was called, the age/hash of its last accepted decision, and why a fresh call was or was not due. When a new inference is due, the supervisors report their findings and the coordinator may authorize only a bounded Demo action. Models still cannot directly submit, cancel, resize, or close an exchange order.
 - Observability: expose last heartbeat, last validated market event, snapshot age, loop duration, missed ticks, WebSocket state, reconciliation age, AI request age, and each reviewer's last status.
 
 **Implementation prerequisite:** the Staging branch currently exposes BloFin WebSocket URL/login argument helpers, but the inspected position-manager path uses REST reads and a 15-second sleep. The inspected source tree does not contain an implemented BloFin WebSocket position/order consumer. Therefore the three-second local watchdog is a target design, not a currently verified runtime capability. Implement and test the stream consumer before shortening REST polling.
@@ -103,7 +103,7 @@ Challenge 1 cannot pass based solely on a green offline CI run. The following ev
 3. **Stream correctness:** authenticated BloFin Demo subscription, initial snapshot, position/order/algo-order changes, reconnect, ping/pong, gap detection, and REST reconciliation against exact IDs.
 4. **Provider evidence:** for each reviewer, actual request attempt, provider, model, request/response UTC timestamps, latency, HTTP state, model verification, schema validation, verdict, reason, and evidence hash.
 5. **Quota resilience:** simulated 429, 401, timeout, malformed JSON, slow responses, unavailable provider, daily cap, and process restart. No tight retry loop.
-6. **Execution isolation:** tests proving report-only observers cannot modify position, order, leverage, margin, TP/SL, or exit decision.
+6. **Guarded intervention and complete reporting:** tests proving models have no direct exchange credentials or order tools, while valid decisions can reach only the Demo-only gateway through deterministic checks; every attempted, accepted, rejected, blocked, failed, or completed intervention must have a complete linked audit trail.
 7. **Position reconciliation:** actual BloFin Demo position and TP/SL order IDs, fill history, exit fill, fee, and realized PnL linked to the same experience.
 8. **Durability:** write → restart/deploy → read-back with unchanged event IDs and hashes; Notion outbox retry and projection verified separately.
 9. **Operational acceptance:** sustained Demo observation with measured latency, API request rate, quota consumption, missed ticks, stale-data rate, supervisor coverage, and error/recovery rate.
@@ -115,7 +115,7 @@ Challenge 1 cannot pass based solely on a green offline CI run. The following ev
 - **P1 — Architecture and requirements baseline:** adopt this procedure; add a system context diagram, sequence diagram, state machine, requirements-to-test traceability matrix, provider/API quota registry, and risk register.
 - **P2 — Transport:** implement BloFin Demo WebSocket position, order, algo-order, and market-data consumers with authentication, ping/pong, reconnect, gap detection, and durable event ingestion.
 - **P3 — Three-second local watchdog:** evaluate fresh cached snapshots using deterministic rules and a monotonic scheduler; measure latency and drift. Keep REST reconciliation separate.
-- **P4 — Supervisor orchestration:** implement evidence-version triggers, independent quotas, single-flight, bounded backoff, response validation, explicit failure states, and immutable reviewer reports.
+- **P4 — Supervisor orchestration and reporting:** implement evidence-version triggers, independent quotas, single-flight, bounded backoff, response validation, explicit failure states, immutable reviewer reports, and a durable heartbeat/audit event for every three-second coordinator cycle, including cycles where no LLM request is made.
 - **P5 — Verification:** add unit, integration, fault-injection, replay, concurrency, recovery, and Demo contract tests. Verify no network access in offline CI.
 - **P6 — Demo acceptance:** deploy only to the designated Staging/Demo service after review; validate real provider calls and exchange outcomes, then run sustained observation. Keep Challenge 1 open until all evidence passes.
 
@@ -162,7 +162,7 @@ These references provide process, architecture, quality, security, and AI-risk g
 
 ## 10. Superseding target design — AI supervisors with active trade authority
 
-**This section supersedes any earlier target-design wording that describes both supervisors as report-only.** The existing Staging implementation is still report-only; this section defines the intended next architecture and is not a claim that active intervention is already deployed.
+**This section does not remove or reduce reporting.** It supersedes only the interpretation that supervisors should remain report-only. The target is a dual-function model: both supervisors actively participate in bounded trade decisions **and** continuously produce comprehensive reports/audit evidence. Every intervention, disagreement, non-intervention, missed review, data problem, failure, retry, guard rejection, execution result, and post-exit finding must remain reportable. The existing Staging implementation is still report-only; this section defines the intended next architecture and is not a claim that active intervention is already deployed.
 
 ### 10.1 Operating decision
 
@@ -172,7 +172,7 @@ Challenge 1 shall use two independent AI supervisors as active decision particip
 2. **While a position is open:** continuously reassess the live position and issue bounded management decisions.
 3. **At exit and after exit:** decide whether the position should be held, protected, reduced, or closed; then audit the actual fill and realized PnL.
 
-The supervisors are not decorative second opinions. Their structured decisions must feed an explicit decision coordinator. The coordinator converts accepted decisions into a constrained command for the deterministic execution gateway. The models themselves never receive exchange credentials or direct order tools.
+The supervisors are not decorative second opinions or silent execution agents. Each one must produce both (a) a structured operational decision and (b) a structured report of the evidence reviewed, important observations, risk flags, data gaps, action rationale, and dissent. Their structured decisions must feed an explicit decision coordinator. The coordinator converts accepted decisions into a constrained command for the deterministic execution gateway. The models themselves never receive exchange credentials or direct order tools. Reporting must continue even when the correct operational decision is HOLD, NO_ACTION, VETO, or REQUEST_DATA.
 
 ### 10.2 Two different supervisor mandates
 
@@ -198,7 +198,7 @@ Each supervisor must return a schema-validated JSON decision with the exact posi
 - `URGENT_RISK_ALERT` — report an immediate risk condition requiring the deterministic risk engine to evaluate an emergency response.
 - `REQUEST_DATA` — refuse to make a trade-management decision until specified missing evidence is recovered.
 
-The response schema must reject free-form commands, unknown actions, missing IDs, non-finite prices, invalid side values, and instructions outside the allowed envelope. A numerical confidence field is explanatory metadata only; it is not treated as a calibrated probability.
+The response schema must reject free-form commands, unknown actions, missing IDs, non-finite prices, invalid side values, and instructions outside the allowed envelope. Every response must also include concise rationale, evidence references, material observations, detected risks, uncertainty/data gaps, and explicit reason codes. Record structured explanations rather than hidden chain-of-thought. A numerical confidence field is explanatory metadata only; it is not treated as a calibrated probability.
 
 ### 10.4 Decision and execution authority
 
@@ -240,7 +240,7 @@ Use the documented private WebSocket channels for positions, orders, algo/TP-SL 
 
 The implementation must include authentication, subscription acknowledgement, ping/pong, reconnect, duplicate/out-of-order handling, event timestamps, stream health, gap detection and REST reconciliation after a disconnect or uncertain state. REST is a recovery/reconciliation mechanism, not a request issued on every 3-second heartbeat. The exact Demo endpoints and any Demo-specific channel behavior must be verified against BloFin's current API documentation before implementation.
 
-### 10.7 Audit record for every AI intervention
+### 10.7 Complete reporting and audit record for every supervisor cycle and intervention
 
 For each position and each decision version, persist:
 
@@ -256,9 +256,19 @@ For each position and each decision version, persist:
 
 A scheduled heartbeat is not an AI review. A request accepted by an HTTP endpoint is not a response. A valid AI suggestion is not an exchange fill. These must remain separate audit states.
 
+#### 10.7.1 Mandatory three-second cycle report
+
+Every three-second coordinator cycle must append a durable heartbeat record, including when both models are not called. At minimum record: cycle ID; scheduled and actual timestamps; loop duration and drift; position/experience ID; snapshot age and evidence hash; WebSocket and reconciliation health; deterministic risk state; Supervisor A and B status (`NOT_DUE`, `PENDING`, `REVIEWED`, `STALE`, `UNKNOWN`, `RATE_LIMITED`, `TIMEOUT`, or `ERROR`); last-decision age; whether a new model request was due; the reason it was called or skipped; in-flight/ quota state; coordinator outcome; selected action or `NO_ACTION`; guard result; and any execution command/result reference.
+
+#### 10.7.2 Required report categories
+
+The reporting pipeline must preserve and expose, in chronological order: input/market observations; state changes; each supervisor's independent assessment; agreements and disagreements; approvals and vetoes; HOLD/NO_ACTION decisions and why; missing or stale evidence; requests and responses; timeout, quota, schema, provider and transport failures; retries and circuit-breaker transitions; coordinator decisions; rejected proposals and guard reasons; order submissions/amendments/cancellations; exchange acknowledgements; actual fills and reconciled position changes; protection/TP/SL changes; fees/funding and realized PnL when available; recovery/restart events; and post-exit defect findings.
+
+Reports may be summarized in the dashboard for readability, but the underlying event ledger must retain every cycle and state transition. No heartbeat, failed attempt, disagreement, rejected action, or `NO_ACTION` event may be silently dropped. Use append-only durable storage with stable IDs and evidence hashes; Notion/dashboard remains a report projection, not the authoritative execution ledger.
+
 ### 10.8 Implementation sequence
 
-- **P0 — Policy and schema:** replace the current open-position report-only contract with the active-supervisor contract; keep entry approval and open-position management as separate workflows. Define JSON schemas, action matrix, quorum logic and prohibited actions.
+- **P0 — Policy and schema:** extend the current open-position reporting path into an active-supervisor contract without removing or weakening reporting. Keep entry approval and open-position management as separate workflows. Define JSON schemas, action matrix, quorum logic, required report fields, per-cycle heartbeat events and prohibited actions.
 - **P1 — Deterministic decision coordinator:** implement a pure function that consumes two validated supervisor outputs plus live state and returns one constrained action or `NO_ACTION`. Add exhaustive tests for every pair of votes and every missing/invalid state.
 - **P2 — WebSocket state layer:** implement BloFin Demo private positions/orders/orders-algo/account streams and public market streams, backed by an initial REST snapshot and periodic/recovery reconciliation. Persist stream health and exact event IDs.
 - **P3 — Three-second watchdog:** implement the non-blocking monotonic loop over cached snapshots. Add a test proving approximately 3-second scheduled ticks, bounded drift, no overlapping cycles, and no per-tick REST or LLM call.
@@ -280,6 +290,8 @@ A scheduled heartbeat is not an AI review. A request accepted by an HTTP endpoin
 10. LLM 429, 401, timeout, invalid JSON, model mismatch or daily cap: record exact failure; do not run a tight retry loop; preserve exchange-native protection.
 11. Restart during in-flight review or order submission: recover durable request/command state and reconcile before resending.
 12. Every executed AI intervention must be traceable from evidence hash to both votes to coordinator command to BloFin exchange response and realized outcome.
+13. Every three-second coordinator cycle must produce a durable report even when no model request is due; the report must distinguish `NOT_CALLED` from `REVIEWED` and preserve the exact reason.
+14. Vetoes, disagreements, HOLD/NO_ACTION decisions, stale data, missing inputs, quota limits, provider failures, retries, guard rejections and recovery events must be queryable by position and experience ID, not just visible as aggregate counters.
 
 ### 10.10 External references for this active-supervision design
 
