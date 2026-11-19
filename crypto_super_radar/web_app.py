@@ -242,6 +242,58 @@ AI_DRY_RUN_MAX_PER_UTC_DAY = 2
 AI_DRY_RUN_MIN_INTERVAL_SECONDS = 300
 
 
+def _ai_dry_run_http_status(payload: dict) -> int:
+    """Map dry-run outcomes to HTTP semantics without disguising missing config as 502."""
+    if payload.get("test_passed") is True:
+        return 200
+    status = str(payload.get("status") or "").upper()
+    if status in {"RATE_LIMITED", "DRY_RUN_COOLDOWN", "DAILY_DRY_RUN_LIMIT"}:
+        return 429
+    if status in {"MISSING_API_KEY", "PROVIDERS_INSUFFICIENT", "NOT_CONFIGURED"}:
+        return 503
+    return 502
+
+
+def _ai_dry_run_safe_diagnostic(payload: dict) -> dict:
+    """Return provider failure metadata safe for logs; never include keys or raw prompts."""
+    reviewers = payload.get("ai_reviews")
+    safe_reviewers = []
+    if isinstance(reviewers, list):
+        for item in reviewers[:2]:
+            if not isinstance(item, dict):
+                continue
+            review = item.get("review") if isinstance(item.get("review"), dict) else item
+            safe_reviewers.append({
+                key: review.get(key)
+                for key in (
+                    "reviewer_id", "status", "provider", "model", "returned_model",
+                    "request_attempted", "response_source", "response_validated",
+                    "model_verified", "http_status", "latency_ms",
+                    "skip_reason_code", "error_type",
+                )
+                if review.get(key) is not None
+            })
+    consensus = payload.get("ai_consensus")
+    consensus = consensus if isinstance(consensus, dict) else {}
+    safe_consensus = {
+        key: consensus.get(key)
+        for key in (
+            "status", "decision", "primary_status", "second_status",
+            "primary_verified", "second_verified", "providers_independent",
+            "models_independent",
+        )
+        if consensus.get(key) is not None
+    }
+    return {
+        "status": str(payload.get("status") or "UNKNOWN"),
+        "test_passed": payload.get("test_passed") is True,
+        "consensus": safe_consensus,
+        "reviewers": safe_reviewers,
+        "orders_submitted": payload.get("orders_submitted") is True,
+        "trade_executed": payload.get("trade_executed") is True,
+    }
+
+
 def _run_ai_synthetic_dry_run_limited() -> dict:
     """Call the real configured LLM on synthetic evidence, with no bot or ledger access."""
     primary_config = ai_connection_status()
@@ -8294,10 +8346,15 @@ async function loadBlofinInstruments(){
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}',
                                       "application/json; charset=utf-8")
                 payload = _run_ai_synthetic_dry_run_limited()
-                status_code = 200 if payload.get("test_passed") is True else (
-                    429 if payload.get("status") in {"RATE_LIMITED", "DRY_RUN_COOLDOWN", "DAILY_DRY_RUN_LIMIT"} else
-                    503 if payload.get("status") == "MISSING_API_KEY" else 502
-                )
+                status_code = _ai_dry_run_http_status(payload)
+                if status_code >= 400:
+                    # Structured, secret-free diagnostics make provider/configuration failures
+                    # distinguishable in Render logs without persisting prompts or credentials.
+                    print(
+                        "CSR_AI_DRY_RUN_DIAGNOSTIC "
+                        + json.dumps(_ai_dry_run_safe_diagnostic(payload), ensure_ascii=False, sort_keys=True),
+                        flush=True,
+                    )
                 return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
 
