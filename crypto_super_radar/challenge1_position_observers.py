@@ -510,6 +510,10 @@ def _position_review_worker(
 
         position = cycle_context.get("position")
         position = position if isinstance(position, Mapping) else {}
+        cycle_context = {
+            **dict(cycle_context),
+            "supervisor_reviews": [dict(item) for item in reviewers if isinstance(item, Mapping)],
+        }
         evidence_hash = str(result.get("evidence_hash") or "")
         coordinator = coordinate_position_supervisors(
             reviewers,
