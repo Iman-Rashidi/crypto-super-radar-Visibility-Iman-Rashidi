@@ -2403,3 +2403,81 @@ class BloFinOpenPositionObserverIntegrationTests(unittest.TestCase):
         )
         close_position.assert_not_called()
 
+
+
+class AiDryRunHttpDiagnosticsTests(unittest.TestCase):
+    def test_provider_configuration_absence_is_service_unavailable_not_bad_gateway(self):
+        self.assertEqual(
+            web_app._ai_dry_run_http_status({"status": "PROVIDERS_INSUFFICIENT", "test_passed": False}),
+            503,
+        )
+        self.assertEqual(
+            web_app._ai_dry_run_http_status({"status": "MISSING_API_KEY", "test_passed": False}),
+            503,
+        )
+        self.assertEqual(
+            web_app._ai_dry_run_http_status({"status": "UNKNOWN", "test_passed": False}),
+            502,
+        )
+
+    def test_rate_limits_keep_their_explicit_http_status(self):
+        for status in ("RATE_LIMITED", "DRY_RUN_COOLDOWN", "DAILY_DRY_RUN_LIMIT"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    web_app._ai_dry_run_http_status({"status": status, "test_passed": False}),
+                    429,
+                )
+
+    def test_safe_diagnostic_keeps_reviewer_failure_metadata_but_excludes_secret_fields(self):
+        payload = {
+            "status": "PROVIDERS_INSUFFICIENT",
+            "test_passed": False,
+            "api_key": "never-log-this",
+            "prompt": "never-log-this-either",
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron",
+                    "review": {
+                        "status": "NOT_CONFIGURED",
+                        "provider": "OpenRouter",
+                        "model": "example-model",
+                        "request_attempted": False,
+                        "skip_reason_code": "OPENROUTER_NOT_CONFIGURED",
+                        "api_key": "secret",
+                    },
+                },
+                {
+                    "reviewer_id": "second_ai",
+                    "review": {
+                        "status": "ERROR",
+                        "provider": "Groq",
+                        "model": "example-free-model",
+                        "request_attempted": True,
+                        "http_status": 401,
+                        "latency_ms": 123,
+                        "error_type": "AuthenticationError",
+                        "raw_response": "sensitive response",
+                    },
+                },
+            ],
+            "ai_consensus": {
+                "status": "UNKNOWN",
+                "decision": "BLOCK_DEMO_ENTRY",
+                "primary_verified": False,
+                "second_verified": False,
+                "api_key": "secret",
+            },
+            "orders_submitted": False,
+            "trade_executed": False,
+        }
+        diagnostic = web_app._ai_dry_run_safe_diagnostic(payload)
+        serialized = json.dumps(diagnostic)
+        self.assertIn("OPENROUTER_NOT_CONFIGURED", serialized)
+        self.assertIn("AuthenticationError", serialized)
+        self.assertIn('"http_status": 401', serialized)
+        self.assertNotIn("never-log-this", serialized)
+        self.assertNotIn("sensitive response", serialized)
+        self.assertNotIn('"api_key"', serialized)
+        self.assertNotIn('"prompt"', serialized)
+
+
