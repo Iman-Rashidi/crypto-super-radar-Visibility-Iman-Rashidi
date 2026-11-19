@@ -2522,7 +2522,7 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
             "experience_id": "experience-stale",
             "position_id": "position-stale",
             "position": {"positionId": "position-stale"},
-            "updated_at_epoch": time.time() - 40,
+            "updated_at_epoch": time.time() - 60,
             "source": "REST_MANAGER_CACHE",
             "protective_orders": {"status": "BOTH_TP_AND_SL_VISIBLE"},
             "reviewer_states": {},
@@ -2538,7 +2538,7 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
                 result = web_app._blofin_demo_position_supervisor_watchdog_cycle()
             self.assertEqual(result["stale_positions"], 1)
             self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["enabled"])
-            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SUPERVISOR_DATA_STALE_HALT")
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SUPERVISOR_POSITION_GUARD_HALT")
             persist.assert_called_once()
             record.assert_called_once()
             self.assertIn("POSITION_SNAPSHOT_STALE", record.call_args.kwargs["deterministic_flags"])
