@@ -470,8 +470,9 @@ class WebAppHttpTests(unittest.TestCase):
         execution_job = source[start:end]
 
         reviewer_call = execution_job.index(
-            "_run_challenge1_supervisor_reviews(analysis, asset)"
+            "_run_challenge1_supervisor_reviews("
         )
+        self.assertIn('signal_id=str(record.get("signal_id") or "")', execution_job)
         order_readiness_check = execution_job.index(
             "_blofin_demo_execution_readiness()",
             reviewer_call,
@@ -2512,7 +2513,7 @@ class BloFinRiskOverrideCloseTests(unittest.TestCase):
                 instrument_id="BTC-USDT",
                 position_id="pos-1",
                 action_source="RISK_OVERRIDE",
-                audit_id="client-1",
+                audit_id="client1",
                 exit_reason="STOP_LOSS_CROSSED_WITHOUT_VERIFIED_SL",
             )
 
