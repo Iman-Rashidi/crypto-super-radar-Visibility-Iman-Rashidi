@@ -144,6 +144,36 @@ def _queue_notion_projection(
             outbox.close()
 
 
+def _record_notion_projection_failure(
+    *,
+    saved: Mapping[str, Any],
+    status: str,
+    event_type: str,
+    experience_id: str | None,
+    position_id: str,
+    connection: Any = None,
+) -> dict[str, Any]:
+    """Record failed outbox enqueue separately from the original audit event."""
+    error_type = status.partition(":")[2] or "UNKNOWN"
+    audit_reference = experience_id or f"unlinked-position:{position_id}"
+    return _record_audit_event(
+        cycle_id=audit_reference,
+        phase="POSITION_NOTION_OUTBOX_FAILED",
+        event_key=f"position-notion-outbox-failed:{saved.get('event_id')}:{event_type}",
+        details={
+            "source_event_id": str(saved.get("event_id") or ""),
+            "event_type": event_type,
+            "outbox_status": status,
+            "error_type": error_type,
+            "sync_status": "NOT_ENQUEUED",
+            "execution_effect": "NONE",
+        },
+        experience_id=experience_id,
+        position_id=position_id,
+        connection=connection,
+    )
+
+
 def record_position_monitor_cycle(
     *,
     experience_id: str | None,
@@ -258,10 +288,25 @@ def record_position_monitor_cycle(
                 )
                 if experience_id else "NOT_QUEUED_EXPERIENCE_ID_MISSING"
             )
+            projection_failure_event = None
+            if notion_status.startswith("OUTBOX_FAILED:"):
+                try:
+                    failed_event = _record_notion_projection_failure(
+                        saved=summary_saved,
+                        status=notion_status,
+                        event_type="POSITION_REVIEW",
+                        experience_id=experience_id,
+                        position_id=position_id,
+                        connection=connection,
+                    )
+                    projection_failure_event = failed_event.get("event_id")
+                except Exception as audit_exc:
+                    projection_failure_event = "AUDIT_FAILURE:" + type(audit_exc).__name__
             summaries.append({
                 "minute_bucket": bucket,
                 "event_id": summary_saved.get("event_id"),
                 "notion_sync_status": notion_status,
+                "notion_failure_audit_event_id": projection_failure_event,
             })
     finally:
         recorder.close()
@@ -380,7 +425,25 @@ def _reviewer_result_event(
         consensus=consensus,
         reason=details["reason_fa"] or details["skip_reason_code"],
     )
-    return {"event_id": saved.get("event_id"), "notion_sync_status": notion_status, **details}
+    notion_failure_event_id = None
+    if notion_status.startswith("OUTBOX_FAILED:"):
+        try:
+            failed_event = _record_notion_projection_failure(
+                saved=saved,
+                status=notion_status,
+                event_type="POSITION_REVIEW",
+                experience_id=experience_id,
+                position_id=position_id,
+            )
+            notion_failure_event_id = failed_event.get("event_id")
+        except Exception as audit_exc:
+            notion_failure_event_id = "AUDIT_FAILURE:" + type(audit_exc).__name__
+    return {
+        "event_id": saved.get("event_id"),
+        "notion_sync_status": notion_status,
+        "notion_failure_audit_event_id": notion_failure_event_id,
+        **details,
+    }
 
 
 def _position_review_worker(
