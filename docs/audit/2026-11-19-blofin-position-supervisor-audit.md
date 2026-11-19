@@ -151,3 +151,7 @@ The same route maps any completed dry-run where `test_passed` is false (unless i
 - Latest Staging branch head after automated source-archive refresh: `391ee293f710b6d910f727b87e383c555c22b06a`.
 
 **Important:** These CI results are still offline/automated evidence. They do not prove that the newly changed code is active on Render or that either AI provider has reviewed any currently open BloFin Demo position.
+
+
+## 8.10 Reviewer cadence acceptance caveat
+The manager records a reviewer state for every 15-second monitoring cycle, but actual external AI calls are not currently made every 15 seconds. The durable scheduler default is 10,800 seconds (3 hours), with a minimum configurable interval of 3,600 seconds (1 hour); cycles between scheduled calls explicitly record `NOT_CALLED / REVIEW_NOT_DUE`. This protects provider quota but does **not** satisfy a strict interpretation that both AI models must return a fresh opinion on every manager cycle. If the acceptance requirement means a fresh dual-provider response every 15-second cycle, that remains an open requirement and must be resolved before acceptance; no cadence change was made in this audit.
