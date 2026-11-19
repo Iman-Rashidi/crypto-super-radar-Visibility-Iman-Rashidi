@@ -9983,7 +9983,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "request_attempted": False,
                 }
                 reviewer_states[reviewer_id] = state
-                if str(state.get("status") or "").upper() == "NOT_CALLED":
+                if str(state.get("status") or "").upper() in {"NOT_CALLED", "PENDING"}:
                     try:
                         record_position_observer_skip(
                             experience_id=experience_id,
