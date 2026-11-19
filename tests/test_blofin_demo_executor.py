@@ -945,6 +945,8 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
     def test_closed_position_outcome_targets_exact_order_when_multiple_orders_share_symbol(self):
         challenge_a = signal_record(bar_offset_minutes=0)
         challenge_b = signal_record(bar_offset_minutes=5)
+        challenge_a["signal_id"] = "challenge1-test:BTC-USDT:5m:2026-11-13T18:00:00+00:00"
+        challenge_b["signal_id"] = "challenge1-test:BTC-USDT:5m:2026-11-13T18:05:00+00:00"
         experience_a = self.store.record_challenge1_decision(
             instrument_id="BTC-USDT", challenge_record=challenge_a,
         )
