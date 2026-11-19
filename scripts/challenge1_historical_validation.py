@@ -19,6 +19,9 @@ from typing import Any
 
 import requests
 
+# Running this file as a script places /scripts, not the repository root, on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from crypto_super_radar.challenge1_entry_evaluation import (
     validate_challenge1_entry_revalidation,
 )
