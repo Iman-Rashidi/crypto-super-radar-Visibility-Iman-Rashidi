@@ -270,14 +270,28 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     final_record_pattern_name = str(final_pattern.get("name_en") or "").strip()
     final_record_pattern_direction = str(final_pattern.get("direction") or "").strip().upper()
     final_record_pattern_category = str(final_pattern.get("category") or "").strip().upper()
+    execution_evidence = record.get("execution")
+    execution_evidence = execution_evidence if isinstance(execution_evidence, Mapping) else {}
     final_signal_bar = str(
         record.get("signal_bar_open_utc")
-        or (record.get("execution") or {}).get("signal_bar_open_utc")
-        if isinstance(record.get("execution"), Mapping)
-        else record.get("signal_bar_open_utc") or ""
+        or execution_evidence.get("signal_bar_open_utc")
+        or ""
     ).strip()
     proof_final_bar = str(evaluation.get("final_signal_bar_open_utc") or "").strip()
     proof_initial_bar = str(evaluation.get("initial_signal_bar_open_utc") or "").strip()
+    try:
+        initial_bar_time = datetime.fromisoformat(proof_initial_bar.replace("Z", "+00:00"))
+        final_bar_time = datetime.fromisoformat(proof_final_bar.replace("Z", "+00:00"))
+        if initial_bar_time.tzinfo is None:
+            initial_bar_time = initial_bar_time.replace(tzinfo=timezone.utc)
+        if final_bar_time.tzinfo is None:
+            final_bar_time = final_bar_time.replace(tzinfo=timezone.utc)
+        newer_completed_bar = (
+            final_bar_time.astimezone(timezone.utc)
+            > initial_bar_time.astimezone(timezone.utc)
+        )
+    except (TypeError, ValueError):
+        newer_completed_bar = False
     try:
         window_started = datetime.fromisoformat(
             str(evaluation.get("window_started_at_utc") or "").replace("Z", "+00:00")
@@ -307,7 +321,7 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         or final_record_pattern_category != final_pattern_category
         or proof_final_bar != final_signal_bar
         or not proof_initial_bar
-        or proof_initial_bar == proof_final_bar
+        or not newer_completed_bar
         or not math.isfinite(wall_window_seconds)
         or wall_window_seconds < 300
         or evaluation.get("entry_evaluation_heartbeat_seconds") != 3.0
