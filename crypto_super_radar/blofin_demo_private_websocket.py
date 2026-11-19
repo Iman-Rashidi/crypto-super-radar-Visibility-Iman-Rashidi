@@ -46,6 +46,7 @@ class BloFinDemoPrivateWebSocket:
         *,
         reconcile_callback: Callable[[], Mapping[str, Any]] | None = None,
         connect_factory: Callable[..., Any] | None = None,
+        event_callback: Callable[[str, Mapping[str, Any]], None] | None = None,
         heartbeat_seconds: float = 20.0,
         pong_timeout_seconds: float = 6.0,
         reconnect_min_seconds: float = 2.0,
@@ -61,6 +62,7 @@ class BloFinDemoPrivateWebSocket:
         self.reader = reader
         self.reconcile_callback = reconcile_callback
         self.connect_factory = connect_factory
+        self.event_callback = event_callback
         self.heartbeat_seconds = float(heartbeat_seconds)
         self.pong_timeout_seconds = float(pong_timeout_seconds)
         self.reconnect_min_seconds = float(reconnect_min_seconds)
@@ -287,6 +289,11 @@ class BloFinDemoPrivateWebSocket:
             message.get("data", []),
             str(message.get("action") or "update").lower(),
         )
+        if self.event_callback is not None:
+            try:
+                self.event_callback(channel, copy.deepcopy(dict(message)))
+            except Exception as exc:
+                self._update(last_event_callback_error_type=type(exc).__name__)
 
     def _process_raw(self, websocket: Any, raw: Any) -> None:
         message = self._decode_message(raw)
