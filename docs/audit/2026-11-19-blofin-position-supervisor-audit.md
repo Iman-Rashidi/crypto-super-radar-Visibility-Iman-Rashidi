@@ -132,3 +132,22 @@ The same route maps any completed dry-run where `test_passed` is false (unless i
 
 ### 8.7 Acceptance decision
 **Challenge 1 remains NOT ACCEPTED.** Offline CI success proves the tested code paths on the Staging branch, not successful live BloFin Demo supervision. The Staging changes are not deployed because Render auto-deploy is disabled and no deployment authorization was given. Open positions remain untouched. Next acceptance work must use a separately authorized deployment, then observe real open Demo positions without changing or closing them, recover both reviewers' request/response records, and reconcile eventual exchange close history and realized PnL.
+
+
+## 8.8 Dry-Run 502 classification and safe diagnostics
+- Read-only inspection established that `/api/ai/dry-run` maps a failed dual-review test to HTTP 502 by default, including the explicit `PROVIDERS_INSUFFICIENT` configuration outcome. Thus historical 502 access logs alone do not identify an upstream HTTP failure or Python exception.
+- Staging now maps `PROVIDERS_INSUFFICIENT`, `NOT_CONFIGURED`, and `MISSING_API_KEY` to HTTP 503; explicit rate-limit/cooldown outcomes remain HTTP 429; a genuine unclassified unsuccessful provider result remains HTTP 502.
+- Staging now emits a structured `CSR_AI_DRY_RUN_DIAGNOSTIC` line for failed Dry-Runs, containing only safe provider/model/status/request-attempt/HTTP/latency/validation metadata and consensus flags. It excludes API keys, prompts, raw response bodies, and other secret-bearing fields.
+- Regression tests cover HTTP status mapping and secret-free diagnostic output.
+- GitHub Actions run [#44442784336](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/44442784336) passed both `test` and `streamlit-smoke` jobs for this change set.
+
+## 8.9 Observer failure-state and restart-retry correction
+- A regression test exposed that a batch with two `OBSERVER_WORKER_FAILED` result events could still enter the ordinary three-hour review-cadence branch after its recovery-delay branch, preventing the intended retry.
+- The scheduler now excludes incomplete/failed batches from the normal completed-batch cadence calculation. After the durable timeout/recovery delay, a new review batch is scheduled.
+- When the background worker fails outside the provider adapter, `request_attempted` is now preserved as UNKNOWN (`null`), not falsely recorded as `false`. The audit also preserves UNKNOWN for response validation and model verification when no validated result exists.
+- Added tests verify UNKNOWN call state and retry after restart/recovery delay.
+- The first CI attempt for this retry test failed on the cadence fall-through; the condition was corrected in commit `41426c6dc2e8227dd2312e123186cb49808caae5`.
+- Final GitHub Actions run [#44443091027](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/44443091027) passed both `test` and `streamlit-smoke` jobs.
+- Latest Staging branch head after automated source-archive refresh: `391ee293f710b6d910f727b87e383c555c22b06a`.
+
+**Important:** These CI results are still offline/automated evidence. They do not prove that the newly changed code is active on Render or that either AI provider has reviewed any currently open BloFin Demo position.
