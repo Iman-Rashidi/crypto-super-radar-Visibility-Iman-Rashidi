@@ -233,22 +233,20 @@ def _bootstrap_mean_ci(
     return means[int(0.025 * len(means))], means[int(0.975 * len(means))]
 
 
-def _entry_candidate(candles: list[list], index: int, instrument: str) -> dict | None:
+def _entry_candidate_from_records(
+    initial: dict, refreshed: dict, index: int, instrument: str,
+) -> dict | None:
     """Require initial signal, a full new 5m candle, and unchanged selected setup."""
-    if index + 2 >= len(candles):
+    if initial.get("signal") not in {"LONG", "SHORT"}:
+        return None
+    if refreshed.get("signal") not in {"LONG", "SHORT"}:
+        return None
+    proof = validate_challenge1_entry_revalidation(
+        initial, refreshed, elapsed_seconds=300.0,
+    )
+    if proof.get("status") != "PASS":
         return None
     try:
-        initial = _analyse_at(candles, index, instrument)
-        if initial.get("signal") not in {"LONG", "SHORT"}:
-            return None
-        refreshed = _analyse_at(candles, index + 1, instrument)
-        if refreshed.get("signal") not in {"LONG", "SHORT"}:
-            return None
-        proof = validate_challenge1_entry_revalidation(
-            initial, refreshed, elapsed_seconds=300.0,
-        )
-        if proof.get("status") != "PASS":
-            return None
         return {
             "instrument": instrument,
             "direction": refreshed["signal"],
@@ -290,11 +288,23 @@ def _simulate_symbol(
 ) -> tuple[list[dict], dict]:
     candidates: dict[int, dict] = {}
     analysis_errors = 0
+    previous_record = None
     for index in range(oos_start, len(candles) - 2):
         try:
-            candidate = _entry_candidate(candles, index, instrument)
+            # The refreshed record at t+1 is reused as the initial record at t+1.
+            # This preserves exact bar-by-bar semantics while halving expensive
+            # full strategy evaluations.
+            initial = previous_record
+            if initial is None:
+                initial = _analyse_at(candles, index, instrument)
+            refreshed = _analyse_at(candles, index + 1, instrument)
+            previous_record = refreshed
+            candidate = _entry_candidate_from_records(
+                initial, refreshed, index, instrument,
+            )
         except Exception:
             analysis_errors += 1
+            previous_record = None
             candidate = None
         if candidate is not None:
             candidates[candidate["entry_index"]] = candidate
@@ -498,6 +508,7 @@ def main() -> int:
     quality: dict[str, dict] = {}
 
     for instrument in DEFAULT_CHALLENGE1_INSTRUMENTS:
+        print(f"Fetching 180-day BloFin history: {instrument}", flush=True)
         candles = fetch_candles(session, instrument, cutoff_ms)
         funding = fetch_funding(session, instrument, cutoff_ms)
         contract_meta = fetch_instrument_meta(session, instrument)
@@ -531,6 +542,7 @@ def main() -> int:
     stress_trades: list[dict] = []
     per_symbol = {}
     for instrument in DEFAULT_CHALLENGE1_INSTRUMENTS:
+        print(f"Replaying exact Challenge 1 rules on OOS candles: {instrument}", flush=True)
         trades, detail = _simulate_symbol(
             instrument, all_candles[instrument], all_funding[instrument], oos_start,
             fee_bps=TAKER_FEE_BPS, slippage_bps=SLIPPAGE_BPS, allocation=allocation,
@@ -544,6 +556,11 @@ def main() -> int:
         base_trades.extend(trades)
         stress_trades.extend(stress)
         per_symbol[instrument] = detail
+        print(
+            f"Completed {instrument}: {detail['closed_trades']} closed trades; "
+            f"{detail['oos_candles']} OOS candles; {detail['analysis_errors']} analysis errors",
+            flush=True,
+        )
 
     base_trades.sort(key=lambda t: (t["exit_time_ms"], t["instrument"]))
     stress_trades.sort(key=lambda t: (t["exit_time_ms"], t["instrument"]))
