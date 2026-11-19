@@ -891,10 +891,18 @@ class BloFinDemoEventStore:
                 evidence=evidence,
             )
 
-    def _append_event(self, client_order_id: str, event_type: str, details: Mapping[str, Any]) -> None:
+    def _append_event(
+        self, client_order_id: str, event_type: str, details: Mapping[str, Any],
+        *, idempotency_suffix: str | None = None,
+    ) -> None:
         now = int(time.time())
         key = f"{client_order_id}:{event_type}"
-        payload = json.dumps(dict(details), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if idempotency_suffix:
+            key += ":" + str(idempotency_suffix)[:160]
+        payload = json.dumps(
+            dict(details), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
         event_id = hashlib.sha256(key.encode("utf-8")).hexdigest()
         self._db.execute(
             """INSERT OR IGNORE INTO blofin_demo_execution_events
@@ -902,6 +910,40 @@ class BloFinDemoEventStore:
             VALUES (?, ?, ?, ?, ?, ?)""",
             (event_id, key, client_order_id, event_type, now, payload),
         )
+
+    def record_manual_action(
+        self, client_order_id: str, event_type: str, details: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Durably append a manual/AI Demo intervention to the original order timeline."""
+        order_key = str(client_order_id or "").strip()
+        event_name = str(event_type or "").strip().upper()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", order_key):
+            raise ValueError("A valid linked Demo client_order_id is required for manual action audit.")
+        if not re.fullmatch(r"[A-Z0-9_:-]{3,120}", event_name):
+            raise ValueError("Manual action event_type is invalid.")
+        if not isinstance(details, Mapping):
+            raise TypeError("Manual action details must be a mapping.")
+        payload = dict(details)
+        # A distinct request ID gives each intervention its own lifecycle while
+        # preserving idempotency for a replay of the same action request.
+        suffix_value = (
+            payload.get("request_id")
+            or payload.get("exchange_close_client_order_id")
+            or hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()[:24]
+        )
+        with self._lock, self._db:
+            self._append_event(
+                order_key, event_name, payload,
+                idempotency_suffix=str(suffix_value),
+            )
+        return {
+            "client_order_id": order_key,
+            "event_type": event_name,
+            "idempotency_suffix": str(suffix_value)[:160],
+            "status": "RECORDED",
+        }
 
     def reserve_order(
         self,
