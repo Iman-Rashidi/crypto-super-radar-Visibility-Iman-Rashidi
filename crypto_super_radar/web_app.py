@@ -9959,6 +9959,12 @@ def _is_positive_finite_number(value: Any) -> bool:
     return math.isfinite(number) and number > 0
 
 
+def _clear_challenge1_supervisor_snapshot(position_id: str) -> None:
+    """Remove a cache entry only after the exact exchange position is reconciled closed."""
+    with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+        BLOFIN_POSITION_SUPERVISOR_CACHE.pop(str(position_id or ""), None)
+
+
 def _cache_challenge1_supervisor_snapshot(
     *,
     experience_id: str | None,
@@ -10246,6 +10252,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         position_id=position_id,
                     )
                     if outcome:
+                        _clear_challenge1_supervisor_snapshot(position_id)
                         activity_update = _update_blofin_activity_after_close(
                             outcome, instrument_id, position_id,
                             closed_rows if isinstance(closed_rows, list) else [],
