@@ -1247,7 +1247,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
         client = FakeExecutorClient()
-        client.ticker_quote = {"bidPrice": "80", "askPrice": "120"}
+        client.ticker_quote = {"bidPrice": "80", "askPrice": "105"}
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
         try:
             with self.assertRaises(BloFinDemoExecutionBlocked):
