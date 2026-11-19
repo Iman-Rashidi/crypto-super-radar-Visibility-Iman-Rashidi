@@ -5045,7 +5045,12 @@ def _run_blofin_demo_execution_job(
 
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
-            max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),
+            max_leverage=1,
+            min_confirmation_score=float(profile_rule["min_score"]),
+            taker_fee_rate=float(os.getenv("BLOFIN_DEMO_TAKER_FEE_RATE", "0.0006")),
+            estimated_slippage_bps_per_side=float(
+                os.getenv("BLOFIN_DEMO_ESTIMATED_SLIPPAGE_BPS_PER_SIDE", "2.0")
+            ),
         )
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
