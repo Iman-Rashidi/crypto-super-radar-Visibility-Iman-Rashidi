@@ -253,6 +253,82 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
         )
 
 
+class Challenge1SupervisorWatchdogAuditTests(unittest.TestCase):
+    def setUp(self):
+        self.connection = sqlite3.connect(":memory:", check_same_thread=False)
+        self.connection.row_factory = sqlite3.Row
+        recorder = Challenge1AuditRecorder(connection=self.connection)
+        recorder.close()
+
+    def tearDown(self):
+        self.connection.close()
+
+    def test_three_second_watchdog_cycle_is_durably_hash_chained_without_llm_or_exchange_calls(self):
+        result = observers.record_position_supervisor_watchdog_cycle(
+            experience_id="experience-watchdog",
+            position_id="position-watchdog",
+            cycle_epoch_ms=1_795_000_000_000,
+            snapshot_age_seconds=2.5,
+            snapshot_source="REST_MANAGER_CACHE",
+            snapshot_status="FRESH_CACHED_SNAPSHOT",
+            reviewer_states={
+                "nemotron": {
+                    "status": "REVIEWED",
+                    "last_action": "HOLD_POSITION",
+                    "last_result_age_seconds": 4,
+                },
+                "second_ai": {
+                    "status": "NOT_CALLED",
+                    "reason_code": "SCHEDULED_INTERVAL_NOT_REACHED",
+                },
+            },
+            deterministic_flags=[],
+            loop_drift_ms=12,
+            connection=self.connection,
+        )
+        self.assertEqual(result["phase"], "POSITION_SUPERVISOR_WATCHDOG_CYCLE")
+        report_recorder = Challenge1AuditRecorder(connection=self.connection)
+        try:
+            report = report_recorder.list_related("experience-watchdog", limit=20)
+        finally:
+            report_recorder.close()
+        event = report["events"][0]
+        details = event["payload"]["details"]
+        self.assertEqual(details["watchdog_interval_seconds"], 3)
+        self.assertEqual(details["snapshot_source"], "REST_MANAGER_CACHE")
+        self.assertFalse(details["llm_request_attempted"])
+        self.assertFalse(details["rest_request_attempted"])
+        self.assertFalse(details["exchange_write_attempted"])
+        self.assertEqual(report["integrity"]["status"], "PASS")
+
+    def test_material_review_hash_ignores_mark_price_jitter_but_changes_on_new_candle(self):
+        record = {"instrument_id": "BTC-USDT", "challenge1_evidence": {"chosen_pattern": "BREAKOUT"}}
+        context = {
+            "robot_decision": "HOLD",
+            "position": {
+                "positionId": "p-1", "instId": "BTC-USDT", "positionSide": "long",
+                "positions": "1", "averagePrice": "100", "markPrice": "101",
+                "unrealizedPnl": "1.0", "liquidationPrice": "80",
+            },
+            "market_direction": "UP",
+            "market_direction_evidence": [{"timestamp": 1000, "close": "101"}],
+            "protective_orders": {"status": "BOTH_TP_AND_SL_VISIBLE", "orders": []},
+        }
+        first = observers._material_review_event_key(record, context, "p-1")
+        jittered = {
+            **context,
+            "position": {**context["position"], "markPrice": "101.2", "unrealizedPnl": "1.1"},
+        }
+        second = observers._material_review_event_key(record, jittered, "p-1")
+        self.assertEqual(first, second)
+        new_candle = {
+            **context,
+            "market_direction_evidence": [{"timestamp": 2000, "close": "102"}],
+        }
+        third = observers._material_review_event_key(record, new_candle, "p-1")
+        self.assertNotEqual(first, third)
+
+
 if __name__ == "__main__":
     unittest.main()
 
