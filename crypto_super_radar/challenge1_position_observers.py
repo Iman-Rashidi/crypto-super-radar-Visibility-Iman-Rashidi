@@ -7,6 +7,7 @@ including explicit NOT_CALLED reasons.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -47,6 +48,138 @@ def _audit_details(event: Mapping[str, Any]) -> dict[str, Any]:
     payload = payload if isinstance(payload, Mapping) else {}
     details = payload.get("details")
     return dict(details) if isinstance(details, Mapping) else {}
+
+def _material_review_event_key(
+    challenge_record: Mapping[str, Any],
+    cycle_context: Mapping[str, Any],
+    position_id: str,
+) -> str:
+    """Hash material state changes without reacting to every mark-price tick."""
+    position = cycle_context.get("position")
+    position = position if isinstance(position, Mapping) else {}
+    protective = cycle_context.get("protective_orders")
+    protective = protective if isinstance(protective, Mapping) else {}
+    candles = cycle_context.get("market_direction_evidence")
+    candles = candles if isinstance(candles, list) else []
+    last_candle = candles[-1] if candles else None
+    if isinstance(last_candle, Mapping):
+        candle_marker = next(
+            (last_candle.get(key) for key in ("ts", "timestamp", "time", "open_time", "openTime")
+             if last_candle.get(key) not in (None, "")),
+            None,
+        )
+    elif isinstance(last_candle, (list, tuple)) and last_candle:
+        candle_marker = last_candle[0]
+    else:
+        candle_marker = None
+    raw_evidence = challenge_record.get("challenge1_evidence")
+    raw_evidence = raw_evidence if isinstance(raw_evidence, Mapping) else {}
+    protective_orders = protective.get("orders")
+    protective_orders = protective_orders if isinstance(protective_orders, list) else []
+    protection_signature = [
+        {
+            "tpsl_id": item.get("tpsl_id"),
+            "position_id": item.get("position_id"),
+            "state": item.get("state"),
+            "sl_trigger_price": item.get("sl_trigger_price"),
+            "tp_trigger_price": item.get("tp_trigger_price"),
+        }
+        for item in protective_orders if isinstance(item, Mapping)
+    ]
+    position_signature = {
+        "position_id": str(position.get("positionId") or position_id),
+        "instrument_id": str(position.get("instId") or challenge_record.get("instrument_id") or ""),
+        "side": str(position.get("positionSide") or ""),
+        "size": str(position.get("positions") or ""),
+        "average_price": str(position.get("averagePrice") or ""),
+        "liquidation_price": str(position.get("liquidationPrice") or ""),
+        "unrealized_pnl_sign": (
+            "NEGATIVE" if _is_negative_number(position.get("unrealizedPnl"))
+            else "NON_NEGATIVE" if _is_finite_number(position.get("unrealizedPnl"))
+            else "UNKNOWN"
+        ),
+    }
+    material = {
+        "position": position_signature,
+        "robot_decision": str(cycle_context.get("robot_decision") or "UNKNOWN"),
+        "market_direction": str(cycle_context.get("market_direction") or "UNKNOWN"),
+        "last_closed_candle_marker": candle_marker,
+        "setup_pattern": raw_evidence.get("chosen_pattern"),
+        "chart_structure": raw_evidence.get("chart_structure"),
+        "protection_status": protective.get("status"),
+        "protection_orders": protection_signature,
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        number = float(value)
+        return number == number and number not in (float("inf"), float("-inf"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _is_negative_number(value: Any) -> bool:
+    try:
+        return _is_finite_number(value) and float(value) < 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def record_position_supervisor_watchdog_cycle(
+    *,
+    experience_id: str | None,
+    position_id: str,
+    cycle_epoch_ms: int,
+    snapshot_age_seconds: float,
+    snapshot_source: str,
+    snapshot_status: str,
+    reviewer_states: Mapping[str, Any],
+    deterministic_flags: list[str] | None = None,
+    loop_drift_ms: int | None = None,
+    connection: Any = None,
+) -> dict[str, Any]:
+    """Persist one compact 3-second local supervisor-coordinator heartbeat.
+
+    This function makes no network, LLM, Notion, or exchange calls.
+    """
+    if not position_id:
+        raise ValueError("position_id is required for supervisor watchdog audit.")
+    cycle_id = f"{position_id}:{int(cycle_epoch_ms)}"
+    details = {
+        "environment": "BLOFIN_DEMO",
+        "watchdog_interval_seconds": 3,
+        "cycle_epoch_ms": int(cycle_epoch_ms),
+        "snapshot_age_seconds": round(max(0.0, float(snapshot_age_seconds)), 3),
+        "snapshot_source": str(snapshot_source or "UNKNOWN")[:80],
+        "snapshot_status": str(snapshot_status or "UNKNOWN")[:80],
+        "reviewer_states": {
+            reviewer_id: {
+                "status": str((reviewer_states.get(reviewer_id) or {}).get("status") or "UNKNOWN"),
+                "last_result_age_seconds": (reviewer_states.get(reviewer_id) or {}).get("last_result_age_seconds"),
+                "reason_code": str((reviewer_states.get(reviewer_id) or {}).get("reason_code") or "")[:100],
+            }
+            for reviewer_id in ("nemotron", "second_ai")
+            if isinstance(reviewer_states.get(reviewer_id), Mapping)
+        },
+        "deterministic_flags": [str(flag)[:100] for flag in (deterministic_flags or [])[:12]],
+        "loop_drift_ms": int(loop_drift_ms) if loop_drift_ms is not None else None,
+        "llm_request_attempted": False,
+        "rest_request_attempted": False,
+        "exchange_write_attempted": False,
+        "execution_effect": "NONE",
+    }
+    return _record_audit_event(
+        cycle_id=experience_id or f"unlinked-position:{position_id}",
+        phase="POSITION_SUPERVISOR_WATCHDOG_CYCLE",
+        event_key=f"position-supervisor-watchdog:{position_id}:{cycle_id}",
+        details=details,
+        experience_id=experience_id,
+        position_id=position_id,
+        connection=connection,
+    )
 
 
 def _record_audit_event(
