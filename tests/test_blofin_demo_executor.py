@@ -491,6 +491,46 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             equity_usdt=1000,
         )
 
+    def test_manual_action_events_are_linked_idempotent_and_append_multiple_requests(self):
+        plan = self._plan()
+        self.store.reserve_order(plan)
+        client_order_id = plan["client_order_id"]
+        first = self.store.record_manual_action(
+            client_order_id,
+            "AI_SUPERVISOR_STOP_AMEND_REQUESTED",
+            {"request_id": "req-1", "position_id": "pos-1", "stop": "101"},
+        )
+        replay = self.store.record_manual_action(
+            client_order_id,
+            "AI_SUPERVISOR_STOP_AMEND_REQUESTED",
+            {"request_id": "req-1", "position_id": "pos-1", "stop": "101"},
+        )
+        second = self.store.record_manual_action(
+            client_order_id,
+            "AI_SUPERVISOR_STOP_AMEND_REQUESTED",
+            {"request_id": "req-2", "position_id": "pos-1", "stop": "102"},
+        )
+        self.assertEqual(first["status"], "RECORDED")
+        self.assertEqual(replay["idempotency_suffix"], first["idempotency_suffix"])
+        self.assertNotEqual(second["idempotency_suffix"], first["idempotency_suffix"])
+        events = self.store.recent_events(client_order_id, limit=20)
+        requests = [event for event in events if event["event_type"] == "AI_SUPERVISOR_STOP_AMEND_REQUESTED"]
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            {event["payload"]["request_id"] for event in requests},
+            {"req-1", "req-2"},
+        )
+
+    def test_manual_action_audit_rejects_unlinked_or_invalid_events(self):
+        with self.assertRaises(ValueError):
+            self.store.record_manual_action(
+                "", "AI_SUPERVISOR_CLOSE_REQUESTED", {"request_id": "req-1"},
+            )
+        with self.assertRaises(ValueError):
+            self.store.record_manual_action(
+                "client123", "not valid", {"request_id": "req-1"},
+            )
+
     def test_reservation_is_atomic_and_duplicate_safe(self):
         plan = self._plan()
         self.assertTrue(self.store.reserve_order(plan))
