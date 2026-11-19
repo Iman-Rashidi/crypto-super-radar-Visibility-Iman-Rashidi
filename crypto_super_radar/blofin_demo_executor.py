@@ -104,6 +104,109 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
     return record
 
 
+def _challenge1_review_round_ready(
+    raw_reviews: Any,
+    consensus: Any,
+    *,
+    side: str,
+    wave_phase: str,
+    wave_direction: str,
+) -> tuple[bool, str, list[datetime], list[datetime]]:
+    """Validate one complete, independent, uncached two-reviewer round."""
+    if not isinstance(consensus, Mapping):
+        return False, "The reviewer-round consensus record is missing.", [], []
+    required = (
+        consensus.get("status") == "APPROVED_BY_BOTH"
+        and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
+        and consensus.get("two_reviewer_approval") is True
+        and consensus.get("entry_gate_enforced") is True
+        and consensus.get("primary_verified") is True
+        and consensus.get("second_verified") is True
+        and consensus.get("primary_approved") is True
+        and consensus.get("second_approved") is True
+        and consensus.get("providers_independent") is True
+        and consensus.get("models_independent") is True
+        and str(consensus.get("expected_side") or "").upper() == side
+        and str(consensus.get("elliott_wave_phase") or "").upper() == wave_phase
+        and str(consensus.get("elliott_wave_direction") or "").upper() == wave_direction
+        and str(consensus.get("primary_status") or "").upper() == "APPROVED"
+        and str(consensus.get("second_status") or "").upper() == "APPROVED"
+    )
+    if not required:
+        return False, "The reviewer round does not contain a complete, matching two-reviewer approval.", [], []
+    if not isinstance(raw_reviews, list) or len(raw_reviews) != 2:
+        return False, "Exactly two reviewer responses are required in each round.", [], []
+
+    verified: dict[str, Mapping[str, Any]] = {}
+    providers: set[str] = set()
+    models: set[str] = set()
+    returned_models: set[str] = set()
+    requested_times: list[datetime] = []
+    completed_times: list[datetime] = []
+
+    def parse_time(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    for item in raw_reviews:
+        if not isinstance(item, Mapping):
+            return False, "A reviewer record is malformed.", [], []
+        review = item.get("review")
+        if not isinstance(review, Mapping):
+            return False, "A reviewer response is missing.", [], []
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or "").strip().lower()
+        if reviewer_id not in {"nemotron", "second_ai"} or reviewer_id in verified:
+            return False, "Reviewer identities must be exactly Nemotron and the independent second reviewer.", [], []
+
+        provider = str(review.get("provider") or "").strip().casefold()
+        model = str(review.get("model") or review.get("configured_model") or "").strip()
+        returned_model = str(review.get("returned_model") or "").strip()
+        configured_identity = model.split(":", 1)[0].casefold()
+        returned_identity = returned_model.split(":", 1)[0].casefold()
+        requested_at = parse_time(
+            review.get("request_started_at_utc") or review.get("requested_at_utc")
+        )
+        completed_at = parse_time(review.get("completed_at_utc"))
+        valid = (
+            str(review.get("status") or "").strip().upper() == "APPROVED"
+            and review.get("paper_entry_eligible") is True
+            and review.get("request_attempted") is True
+            and str(review.get("response_source") or "").strip().upper() == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and bool(provider and model and returned_model)
+            and configured_identity == returned_identity
+            and str(review.get("expected_side") or "").strip().upper() == side
+            and str(review.get("trader_proposal") or "").strip().upper() == side
+            and str(review.get("elliott_wave_phase") or "").strip().upper() == wave_phase
+            and str(review.get("elliott_wave_direction") or "").strip().upper() == wave_direction
+            and requested_at is not None
+            and completed_at is not None
+            and completed_at >= requested_at
+        )
+        if not valid:
+            return False, f"{reviewer_id} did not provide a timestamped, verified live approval for this signal.", [], []
+        verified[reviewer_id] = review
+        providers.add(provider)
+        models.add(configured_identity)
+        returned_models.add(returned_identity)
+        requested_times.append(requested_at)
+        completed_times.append(completed_at)
+
+    if set(verified) != {"nemotron", "second_ai"}:
+        return False, "One of the two required reviewers is missing.", [], []
+    if len(providers) != 2 or len(models) != 2 or len(returned_models) != 2:
+        return False, "Both reviewers must use distinct verified providers and models.", [], []
+    return True, "Both independent reviewers approved this round.", requested_times, completed_times
+
+
 def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
     """Require two independent, live, verified AI approvals before Demo writes."""
     evidence = record.get("challenge1_evidence")
@@ -128,6 +231,90 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     consensus = record.get("ai_consensus")
     if not isinstance(consensus, Mapping):
         return False, "The two-reviewer consensus record is missing."
+
+    # The executor is the final fail-closed boundary. A caller cannot bypass
+    # the five-minute evaluation by fabricating only the latest reviewer quorum.
+    evaluation = record.get("entry_evaluation_window")
+    if not isinstance(evaluation, Mapping):
+        return False, "The five-minute Challenge 1 entry evaluation proof is missing."
+    if consensus.get("entry_evaluation_window") != dict(evaluation):
+        return False, "The evaluator proof is not bound to the final reviewer consensus."
+    try:
+        elapsed_seconds = float(evaluation.get("elapsed_seconds"))
+        minimum_seconds = int(evaluation.get("minimum_window_seconds"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "The five-minute entry evaluation timing proof is invalid."
+    if (
+        evaluation.get("status") != "PASS"
+        or minimum_seconds < 300
+        or not math.isfinite(elapsed_seconds)
+        or elapsed_seconds < 300
+        or evaluation.get("review_rounds_completed") != 2
+        or evaluation.get("direction_preserved") is not True
+        or evaluation.get("pattern_preserved") is not True
+        or evaluation.get("new_closed_candle_confirmed") is not True
+        or str(evaluation.get("final_signal_id") or "") != str(record.get("signal_id") or "")
+        or str(evaluation.get("initial_signal_id") or "") == str(evaluation.get("final_signal_id") or "")
+        or str(evaluation.get("initial_direction") or "").upper() != side
+        or str(evaluation.get("final_direction") or "").upper() != side
+    ):
+        return False, "The five-minute window, fresh candle, or persistent signal proof did not pass."
+    initial_pattern_name = str(evaluation.get("initial_pattern_name") or "").strip()
+    final_pattern_name = str(evaluation.get("final_pattern_name") or "").strip()
+    initial_pattern_direction = str(evaluation.get("initial_pattern_direction") or "").strip().upper()
+    final_pattern_direction = str(evaluation.get("final_pattern_direction") or "").strip().upper()
+    initial_pattern_category = str(evaluation.get("initial_pattern_category") or "").strip().upper()
+    final_pattern_category = str(evaluation.get("final_pattern_category") or "").strip().upper()
+    if (
+        not initial_pattern_name
+        or initial_pattern_name != final_pattern_name
+        or initial_pattern_direction != expected_direction
+        or final_pattern_direction != initial_pattern_direction
+        or initial_pattern_category != final_pattern_category
+        or not initial_pattern_category
+    ):
+        return False, "The selected candle/chart pattern did not persist through the evaluation window."
+
+    initial_round = evaluation.get("initial_round")
+    if not isinstance(initial_round, Mapping):
+        return False, "The first independent reviewer round is missing."
+    initial_ok, initial_reason, initial_requested, initial_completed = _challenge1_review_round_ready(
+        initial_round.get("ai_reviews"),
+        initial_round.get("ai_consensus"),
+        side=side,
+        wave_phase=wave_phase,
+        wave_direction=wave_direction,
+    )
+    if not initial_ok:
+        return False, "Initial reviewer round failed: " + initial_reason
+    final_requested = []
+    final_completed = []
+    final_reviews_for_timing = record.get("ai_reviews")
+    if isinstance(final_reviews_for_timing, list):
+        for item in final_reviews_for_timing:
+            review = item.get("review") if isinstance(item, Mapping) else None
+            if not isinstance(review, Mapping):
+                return False, "A final reviewer response is missing."
+            request_text = review.get("request_started_at_utc") or review.get("requested_at_utc")
+            completed_text = review.get("completed_at_utc")
+            try:
+                request_time = datetime.fromisoformat(str(request_text).replace("Z", "+00:00"))
+                completed_time = datetime.fromisoformat(str(completed_text).replace("Z", "+00:00"))
+                if request_time.tzinfo is None:
+                    request_time = request_time.replace(tzinfo=timezone.utc)
+                if completed_time.tzinfo is None:
+                    completed_time = completed_time.replace(tzinfo=timezone.utc)
+                final_requested.append(request_time.astimezone(timezone.utc))
+                final_completed.append(completed_time.astimezone(timezone.utc))
+            except (TypeError, ValueError):
+                return False, "Final reviewer round timestamps are missing or invalid."
+    if (
+        len(final_requested) != 2
+        or len(final_completed) != 2
+        or max(initial_completed) >= min(final_requested)
+    ):
+        return False, "The final reviewer round must be a separate call after the initial round."
+
     required_consensus = (
         consensus.get("status") == "APPROVED_BY_BOTH"
         and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
