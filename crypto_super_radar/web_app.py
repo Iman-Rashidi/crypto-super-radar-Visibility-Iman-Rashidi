@@ -10432,9 +10432,48 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             }
 
         reader = BloFinDemoReadOnly(timeout=8.0)
-        positions = reader.get_positions()
-        if not isinstance(positions, list):
-            raise BloFinDemoResponseError("BloFin positions response is not a list.")
+        private_ws_snapshot = None
+        available_tpsl_rows = None
+        if BLOFIN_PRIVATE_WS_CLIENT is not None:
+            private_ws_snapshot = BLOFIN_PRIVATE_WS_CLIENT.get_snapshot()
+            channel_set = set(private_ws_snapshot.get("subscribed_channels") or [])
+            try:
+                ws_message_age = max(
+                    0.0,
+                    time.time() - float(private_ws_snapshot.get("last_message_epoch") or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                ws_message_age = float("inf")
+            if (
+                private_ws_snapshot.get("status") != "READY"
+                or not private_ws_snapshot.get("connected")
+                or not private_ws_snapshot.get("authenticated")
+                or not private_ws_snapshot.get("reconciled")
+                or channel_set != {"positions", "orders", "orders-algo", "account"}
+                or ws_message_age > 45.0
+            ):
+                return {
+                    "status": "PRIVATE_WEBSOCKET_NOT_READY",
+                    "environment": "BLOFIN_DEMO",
+                    "message_fa": "جریان خصوصی BloFin Demo هنوز متصل، احراز هویت و با REST تطبیق نشده است؛ چرخه مدیریت متوقف شد و هیچ اقدام معاملاتی ارسال نشد.",
+                    "private_websocket": _blofin_demo_private_ws_public_status(),
+                    "exchange_writes_performed": 0,
+                }
+            positions_map = private_ws_snapshot.get("positions")
+            orders_map = private_ws_snapshot.get("orders")
+            algo_orders_map = private_ws_snapshot.get("algo_orders")
+            if not all(isinstance(item, dict) for item in (positions_map, orders_map, algo_orders_map)):
+                raise BloFinDemoResponseError("BloFin private WebSocket snapshot maps are invalid.")
+            positions = list(positions_map.values())
+            available_tpsl_rows = list(algo_orders_map.values())
+            private_ws_orders = list(orders_map.values())
+            private_ws_account = private_ws_snapshot.get("account")
+        else:
+            positions = reader.get_positions()
+            private_ws_orders = []
+            private_ws_account = None
+        if not isinstance(positions, list) or any(not isinstance(row, dict) for row in positions):
+            raise BloFinDemoResponseError("BloFin positions snapshot is not a valid list.")
 
         active_rows = []
         for row in positions:
@@ -10587,6 +10626,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             market_evidence = _blofin_demo_position_market_evidence(reader, instrument_id)
             protective_evidence = _blofin_demo_protective_order_evidence(
                 reader, instrument_id, order, position,
+                available_tpsl_rows=available_tpsl_rows,
             )
 
             entry_snapshot = None
@@ -10649,6 +10689,12 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "market_direction_source": market_evidence.get("source", "UNKNOWN"),
                     "market_direction_evidence": market_evidence.get("candles", []),
                     "protective_orders": protective_evidence,
+                    "account_snapshot": private_ws_account,
+                    "open_orders_snapshot": [
+                        item for item in private_ws_orders
+                        if isinstance(item, dict)
+                        and str(item.get("instId") or "").strip().upper() == instrument_id
+                    ][:20],
                     "risk_change": "NONE_BY_POSITION_MANAGER_CYCLE",
                 }
                 try:
