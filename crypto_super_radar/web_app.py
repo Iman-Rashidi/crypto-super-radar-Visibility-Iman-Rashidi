@@ -54,6 +54,7 @@ from .challenge1_position_observers import (
     schedule_position_observer_review,
     record_position_monitor_cycle,
     record_position_observer_skip,
+    record_position_supervisor_watchdog_cycle,
 )
 from .ai_supervisor import ai_supervisor_status, run_ai_supervisor
 from .execution_diagnostics import build_execution_error_diagnostic
@@ -79,6 +80,22 @@ BLOFIN_EXECUTION_GUARD = threading.Lock()
 BLOFIN_ORDER_SUBMISSION_LOCK = threading.Lock()
 BLOFIN_POSITION_MANAGER_START_LOCK = threading.Lock()
 BLOFIN_POSITION_MANAGER_THREAD = None
+BLOFIN_POSITION_SUPERVISOR_START_LOCK = threading.Lock()
+BLOFIN_POSITION_SUPERVISOR_THREAD = None
+BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK = threading.RLock()
+BLOFIN_POSITION_SUPERVISOR_CACHE: dict[str, dict[str, Any]] = {}
+BLOFIN_POSITION_SUPERVISOR_STATE = {
+    "status": "STARTING",
+    "interval_seconds": 3,
+    "source": "REST_MANAGER_CACHE",
+    "last_cycle_at_utc": None,
+    "last_error_type": None,
+    "tracked_positions": 0,
+    "stale_positions": 0,
+    "llm_calls_performed": 0,
+    "rest_calls_performed": 0,
+    "exchange_writes_performed": 0,
+}
 BLOFIN_POSITION_MANAGER_STATE = {
     "status": "STARTING",
     "last_check_at_utc": None,
@@ -9901,6 +9918,160 @@ def _is_positive_finite_number(value: Any) -> bool:
     except (TypeError, ValueError, OverflowError):
         return False
     return math.isfinite(number) and number > 0
+
+
+def _cache_challenge1_supervisor_snapshot(
+    *,
+    experience_id: str | None,
+    position_id: str,
+    order_id: str,
+    instrument_id: str,
+    signal: str,
+    position: dict[str, Any],
+    mark_price: float | None,
+    unrealized_pnl: float | None,
+    stop_loss_price: float | None,
+    stop_loss_threshold_reached: bool,
+    market_evidence: dict[str, Any],
+    protective_orders: dict[str, Any],
+    reviewer_states: dict[str, dict[str, Any]],
+) -> None:
+    """Publish the latest validated 15-second manager snapshot for the 3-second local loop."""
+    snapshot = {
+        "experience_id": experience_id,
+        "position_id": str(position_id),
+        "order_id": str(order_id),
+        "instrument_id": str(instrument_id),
+        "signal": str(signal),
+        "position": dict(position),
+        "mark_price": mark_price,
+        "unrealized_pnl": unrealized_pnl,
+        "stop_loss_price": stop_loss_price,
+        "stop_loss_threshold_reached": bool(stop_loss_threshold_reached),
+        "market_direction": str(market_evidence.get("direction") or "UNKNOWN"),
+        "protective_orders": dict(protective_orders),
+        "reviewer_states": {
+            key: dict(value) for key, value in reviewer_states.items()
+            if isinstance(value, dict)
+        },
+        "source": "REST_MANAGER_CACHE",
+        "updated_at_epoch": time.time(),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+        BLOFIN_POSITION_SUPERVISOR_CACHE[str(position_id)] = snapshot
+
+
+def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
+    """Three-second local reevaluation only: no REST, LLM, Notion or exchange writes."""
+    now_epoch = time.time()
+    with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+        snapshots = [dict(item) for item in BLOFIN_POSITION_SUPERVISOR_CACHE.values()]
+    stale_count = 0
+    recorded = 0
+    errors = []
+    for snapshot in snapshots:
+        position_id = str(snapshot.get("position_id") or "")
+        experience_id = str(snapshot.get("experience_id") or "").strip() or None
+        age = max(0.0, now_epoch - float(snapshot.get("updated_at_epoch") or 0))
+        fresh = age <= 20.0
+        if not fresh:
+            stale_count += 1
+        flags = []
+        if not fresh:
+            flags.append("POSITION_SNAPSHOT_STALE")
+        if not experience_id:
+            flags.append("EXPERIENCE_LINK_MISSING")
+        if not position_id or str((snapshot.get("position") or {}).get("positionId") or "") != position_id:
+            flags.append("POSITION_ID_MISMATCH")
+        protective = snapshot.get("protective_orders")
+        protective = protective if isinstance(protective, dict) else {}
+        protection_status = str(protective.get("status") or "UNKNOWN")
+        if protection_status not in {"BOTH_TP_AND_SL_VISIBLE", "SL_ONLY_VISIBLE"}:
+            flags.append("PROTECTIVE_ORDER_NOT_CONFIRMED")
+        if snapshot.get("stop_loss_threshold_reached") is True:
+            flags.append("STOP_LEVEL_CROSSED_CHECK_EXCHANGE_NATIVE_PROTECTION")
+        reviewer_states = snapshot.get("reviewer_states")
+        reviewer_states = reviewer_states if isinstance(reviewer_states, dict) else {}
+        try:
+            record_position_supervisor_watchdog_cycle(
+                experience_id=experience_id,
+                position_id=position_id,
+                cycle_epoch_ms=int(now_epoch * 1000),
+                snapshot_age_seconds=age,
+                snapshot_source=str(snapshot.get("source") or "UNKNOWN"),
+                snapshot_status="FRESH_CACHED_SNAPSHOT" if fresh else "STALE_INPUT_BLOCKED",
+                reviewer_states=reviewer_states,
+                deterministic_flags=flags,
+            )
+            recorded += 1
+        except Exception as exc:
+            errors.append({"position_id": position_id, "error_type": type(exc).__name__})
+        if not fresh:
+            should_persist_halt = False
+            with LOCK:
+                if BLOFIN_AUTOPILOT_STATE.get("enabled") and BLOFIN_AUTOPILOT_STATE.get("status") != "SUPERVISOR_DATA_STALE_HALT":
+                    BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                    BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_DATA_STALE_HALT"
+                    BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                        "داده پوزیشن کهنه شده است؛ ورود خودکار جدید متوقف شد و حفاظت بومی صرافی دست‌نخورده باقی ماند."
+                    )
+                    BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                    should_persist_halt = True
+            if should_persist_halt:
+                _persist_blofin_autopilot_state()
+
+    state = {
+        "status": "ERROR" if errors else "ALIVE",
+        "interval_seconds": 3,
+        "source": "REST_MANAGER_CACHE",
+        "last_cycle_at_utc": datetime.now(timezone.utc).isoformat(),
+        "tracked_positions": len(snapshots),
+        "stale_positions": stale_count,
+        "audit_events_recorded": recorded,
+        "llm_calls_performed": 0,
+        "rest_calls_performed": 0,
+        "exchange_writes_performed": 0,
+        "errors": errors[:10],
+    }
+    with LOCK:
+        BLOFIN_POSITION_SUPERVISOR_STATE.update(state)
+    return state
+
+
+def _blofin_demo_position_supervisor_watchdog_worker() -> None:
+    """Monotonic 3-second local coordinator loop over the latest validated cache."""
+    deadline = time.monotonic()
+    while True:
+        deadline += 3.0
+        try:
+            _blofin_demo_position_supervisor_watchdog_cycle()
+        except Exception as exc:
+            with LOCK:
+                BLOFIN_POSITION_SUPERVISOR_STATE.update({
+                    "status": "ERROR",
+                    "last_cycle_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "last_error_type": type(exc).__name__,
+                    "llm_calls_performed": 0,
+                    "rest_calls_performed": 0,
+                    "exchange_writes_performed": 0,
+                })
+        delay = max(0.0, deadline - time.monotonic())
+        time.sleep(delay)
+
+
+def _start_blofin_demo_position_supervisor_watchdog() -> None:
+    """Start at most one local three-second supervisor coordinator per web process."""
+    global BLOFIN_POSITION_SUPERVISOR_THREAD
+    with BLOFIN_POSITION_SUPERVISOR_START_LOCK:
+        if BLOFIN_POSITION_SUPERVISOR_THREAD is not None and BLOFIN_POSITION_SUPERVISOR_THREAD.is_alive():
+            return
+        BLOFIN_POSITION_SUPERVISOR_THREAD = threading.Thread(
+            target=_blofin_demo_position_supervisor_watchdog_worker,
+            daemon=True,
+            name="blofin-demo-supervisor-watchdog-3s",
+        )
+        BLOFIN_POSITION_SUPERVISOR_THREAD.start()
 
 
 def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
