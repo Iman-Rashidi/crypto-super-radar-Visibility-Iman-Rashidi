@@ -16,12 +16,13 @@ from typing import Any, Mapping
 
 from .ai_second_opinion import run_challenge1_observer_reviews
 from .challenge1_audit import Challenge1AuditRecorder
+from .challenge1_supervisor_policy import coordinate_position_supervisors
 from .notion_event_sync import NotionEventOutbox
 
 
 _REVIEW_THREADS: dict[str, threading.Thread] = {}
 _REVIEW_LOCK = threading.RLock()
-_DEFAULT_INTERVAL_SECONDS = 10_800
+_DEFAULT_INTERVAL_SECONDS = 3_600
 _IN_FLIGHT_TIMEOUT_SECONDS = 90
 _RETRY_AFTER_INTERRUPTED_SECONDS = 900
 _MAX_AUDIT_EVENTS = 2_000
@@ -106,7 +107,7 @@ def _queue_notion_projection(
             "symbol": symbol,
             "timeframe": "5m",
             "signal": signal,
-            "ai_decision": "OBSERVE_ONLY",
+            "ai_decision": str(details.get("action") or "ACTIVE_SUPERVISION"),
             "reviewer_id": reviewer_id,
             "ai_provider": provider,
             "ai_model": model,
@@ -121,6 +122,9 @@ def _queue_notion_projection(
                 {
                     "observations": details.get("observations", []),
                     "risk_flags": details.get("risk_flags", []),
+                    "action": details.get("action"),
+                    "proposed_stop_loss_price": details.get("proposed_stop_loss_price"),
+                    "data_gaps": details.get("data_gaps", []),
                 },
                 ensure_ascii=False,
                 default=str,
@@ -387,13 +391,18 @@ def _reviewer_result_event(
         "response_validated": result.get("response_validated") if isinstance(result.get("response_validated"), bool) else None,
         "model_verified": result.get("model_verified") if isinstance(result.get("model_verified"), bool) else None,
         "verdict": str(result.get("verdict") or ""),
+        "action": str(result.get("action") or ""),
+        "proposed_stop_loss_price": result.get("proposed_stop_loss_price"),
+        "data_gaps": list(result.get("data_gaps") or [])[:10],
+        "evidence_hash": str(result.get("evidence_hash") or ""),
+        "mandate": str(result.get("mandate") or ""),
         "reason_fa": str(result.get("reason_fa") or result.get("reason") or "")[:1000],
         "observations": list(result.get("observations") or [])[:10],
         "risk_flags": list(result.get("risk_flags") or [])[:10],
         "skip_reason_code": str(result.get("skip_reason_code") or result.get("error_code") or ""),
         "configuration_issues": list(result.get("configuration_issues") or [])[:10],
-        "execution_effect": "NONE",
-        "observation_only": True,
+        "execution_effect": str(result.get("execution_effect") or "NONE"),
+        "observation_only": False,
     }
     phase = "POSITION_AI_REVIEW_RESULT"
     event_key = f"position-review-result:{position_id}:{review_batch_id}:{reviewer_id}"
@@ -456,6 +465,7 @@ def _position_review_worker(
     order_id: str,
     symbol: str,
     signal: str,
+    action_executor: Any = None,
 ) -> None:
     try:
         from .ai_second_opinion import run_challenge1_observer_reviews
@@ -497,6 +507,95 @@ def _position_review_worker(
                 symbol=symbol,
                 signal=signal,
             )
+
+        position = cycle_context.get("position")
+        position = position if isinstance(position, Mapping) else {}
+        evidence_hash = str(result.get("evidence_hash") or "")
+        coordinator = coordinate_position_supervisors(
+            reviewers,
+            evidence_hash=evidence_hash,
+            experience_id=experience_id,
+            position_id=position_id,
+            current_position_id=str(position.get("positionId") or ""),
+        )
+        coordinator_event = _record_audit_event(
+            cycle_id=experience_id,
+            phase="POSITION_AI_COORDINATOR_DECISION",
+            event_key=f"position-supervisor-coordinator:{position_id}:{review_batch_id}",
+            details={
+                **coordinator,
+                "review_batch_id": review_batch_id,
+                "reviewer_consensus": consensus,
+                "supervisor_actions": {
+                    str(item.get("reviewer_id") or ""): str(item.get("action") or "")
+                    for item in reviewers if isinstance(item, Mapping)
+                },
+                "decided_at_utc": _now_utc().isoformat(),
+            },
+            experience_id=experience_id,
+            position_id=position_id,
+        )
+        execution_result: dict[str, Any] = {
+            "status": "NOT_EXECUTED",
+            "reason_code": "NO_AUTHORIZED_ACTION",
+        }
+        if coordinator.get("execution_authorized") is True:
+            if callable(action_executor):
+                try:
+                    raw_execution = action_executor(
+                        action=str(coordinator.get("action") or ""),
+                        challenge_record=dict(challenge_record),
+                        cycle_context=dict(cycle_context),
+                        coordinator_decision=dict(coordinator),
+                    )
+                    execution_result = (
+                        dict(raw_execution) if isinstance(raw_execution, Mapping)
+                        else {"status": "UNKNOWN", "reason_code": "EXECUTOR_RETURN_NOT_MAPPING"}
+                    )
+                except Exception as action_exc:
+                    execution_result = {
+                        "status": "EXECUTION_ERROR",
+                        "reason_code": type(action_exc).__name__,
+                    }
+            else:
+                execution_result = {
+                    "status": "BLOCKED",
+                    "reason_code": "DEMO_ACTION_EXECUTOR_NOT_CONFIGURED",
+                }
+        elif coordinator.get("status") == "RISK_ALERT":
+            if callable(action_executor):
+                try:
+                    raw_execution = action_executor(
+                        action="URGENT_RISK_ALERT",
+                        challenge_record=dict(challenge_record),
+                        cycle_context=dict(cycle_context),
+                        coordinator_decision=dict(coordinator),
+                    )
+                    execution_result = (
+                        dict(raw_execution) if isinstance(raw_execution, Mapping)
+                        else {"status": "ALERT_RECORDED", "reason_code": "NO_ACTION_EXECUTOR_RESULT"}
+                    )
+                except Exception as action_exc:
+                    execution_result = {"status": "ALERT_EXECUTION_ERROR", "reason_code": type(action_exc).__name__}
+            else:
+                execution_result = {"status": "ALERT_RECORDED", "reason_code": "NO_ALERT_HANDLER_CONFIGURED"}
+        _record_audit_event(
+            cycle_id=experience_id,
+            phase="POSITION_AI_INTERVENTION_EXECUTION",
+            event_key=f"position-supervisor-execution:{position_id}:{review_batch_id}",
+            details={
+                "review_batch_id": review_batch_id,
+                "coordinator_event_id": coordinator_event.get("event_id"),
+                "coordinator_status": coordinator.get("status"),
+                "action": coordinator.get("action"),
+                "execution_authorized": coordinator.get("execution_authorized") is True,
+                "execution_result": execution_result,
+                "execution_effect": execution_result.get("status", "UNKNOWN"),
+                "recorded_at_utc": _now_utc().isoformat(),
+            },
+            experience_id=experience_id,
+            position_id=position_id,
+        )
         _record_audit_event(
             cycle_id=experience_id,
             phase="POSITION_AI_REVIEW_BATCH_COMPLETE",
@@ -505,7 +604,8 @@ def _position_review_worker(
                 "review_batch_id": review_batch_id,
                 "consensus": consensus,
                 "reviewers_recorded": sorted(seen),
-                "execution_effect": "NONE",
+                "execution_effect": str(execution_result.get("status") or "UNKNOWN"),
+                "coordinator_status": coordinator.get("status"),
                 "completed_at_utc": _now_utc().isoformat(),
             },
             experience_id=experience_id,
@@ -548,8 +648,9 @@ def schedule_position_observer_review(
     symbol: str,
     signal: str,
     now: datetime | None = None,
+    action_executor: Any = None,
 ) -> dict[str, Any]:
-    """Start two independent reviewers on a durable per-position schedule, never as an exit gate."""
+    """Start two independent active reviewers; every result and execution is durably audited."""
     current = (now or _now_utc()).astimezone(timezone.utc)
     now_epoch = current.timestamp()
     try:
@@ -711,6 +812,7 @@ def schedule_position_observer_review(
             "order_id": order_id,
             "symbol": symbol,
             "signal": signal,
+            "action_executor": action_executor,
         },
         name=f"position-ai-review-{position_id[:12]}",
         daemon=True,
