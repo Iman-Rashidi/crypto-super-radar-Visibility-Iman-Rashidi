@@ -66,3 +66,69 @@ There is a policy wording mismatch across open PRs: older #42/#46 describe a dua
 **Finding:** Three likely screenshot-to-journal matches have filled entries, but their supervisor review is recorded as `NOT_CALLED` and pending. Exact position-ID, exchange-side TP/SL, and current Render log reconciliation remain open.  
 **Severity:** High-priority audit gap (P0 for evidence/observability).  
 **Conclusion:** The three entries must not be described as reviewed or approved by the two AI supervisors until actual per-reviewer evidence is recovered and read back.
+
+
+## 8. Follow-up engineering and deployment reconciliation — 2026-11-19 17:00 Europe/Berlin
+
+### 8.1 PR branch/base verification
+| PR | State | Base | Head | Audit conclusion |
+|---|---|---|---|---|
+| #57 | Merged | `feature/blofin-demo-adapter` | `fix/challenge1-observer-only-2026-11-18` | Merged into Feature only; not proof of Staging inclusion |
+| #60 | Open | `feature/blofin-demo-adapter` | `fix/observer-outbox-status-and-position-gaps-2026-11-18` | Not part of Staging merely by being open |
+| #63 | Open, Draft | `feature/blofin-demo-adapter` | `fix/observer-recovery-profit-exit-audit-2026-11-18` | Post-decision reporting does not establish continuous live-position supervision |
+| #64 | Open | `staging/challenge1-integration-2026-11-16` | `fix/staging-position-closed-notion-audit-2026-11-19` | Targets Staging but remains unmerged; no merge performed |
+
+### 8.2 Staging-only changes made
+Changes were committed directly to `staging/challenge1-integration-2026-11-16`; no PR was merged and no Render deploy was triggered.
+
+- Connected the BloFin Demo Position Manager's open-position cycle to the independent observer scheduler.
+- Each manager cycle now captures a millisecond-unique cycle key, UTC heartbeat, mark price, unrealized PnL, holding duration, robot HOLD/EXIT_ELIGIBLE decision, market-direction evidence, and protective-order evidence.
+- The observer scheduler is invoked only when a persisted entry journal snapshot contains non-empty Challenge 1 evidence. Missing experience IDs, missing snapshots, snapshot-read failures, and scheduler exceptions are represented as explicit per-reviewer NOT_CALLED events.
+- The two reviewers' output remains observation-only and cannot alter an order, position, TP/SL, or exit decision.
+- Market direction is derived only from recent, confirmed, closed BloFin 5-minute candles; stale, incomplete, invalid, or discontinuous candle evidence yields UNKNOWN.
+- Protective TP/SL visibility is reported only when the returned order is linked by exact position ID or exact originating client order ID. No exact link means NOT_VERIFIED.
+- Stop-loss threshold crossing is exposed as auditable state. This change does not send a manual close order or alter any open position.
+- Position cycles lacking a linked experience ID are retained in the append-only audit chain under an explicit unlinked-position reference; they are not projected into the Notion activity outbox as if they had a real experience ID.
+- Added regression tests for unique cycle events, hash-chain integrity, explicit per-reviewer NOT_CALLED records, restart/cadence recovery, confirmed candle direction, exact protective-order matching, and long/short SL threshold crossing.
+
+### 8.3 CI evidence
+- Commit `b4c3ab85949c9a3ba912e14dccecce85f8555cb5`: GitHub Actions run [#44442310919](https://github.com/Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi/actions/runs/44442310919) completed **success** on 2026-11-19 02:11 UTC.
+- Both workflow jobs passed: `test` and `streamlit-smoke`.
+- The test job ran compile checks, the repeated Challenge 1 regression suite, extracted Render source-bundle verification, full unittest discovery, and CLI smoke checks before publishing the refreshed source archive.
+- GitHub Actions then created archive-refresh commit `e6218889a0398b5a04f6d4ca7349701a37055e35` on the Staging branch. This is a source-bundle refresh, not a Render deployment.
+
+### 8.4 Render Staging read-only reconciliation
+- Service: `srv-dbsidmbbc2fs73blhblg`, `crypto-super-radar-unlimited-demo-staging`.
+- Configured branch: `staging/challenge1-integration-2026-11-16`.
+- `autoDeploy=no`; no deployment was triggered during this work.
+- Latest Render deployment remains `dep-dbv3vlutlv9c73fo3shg`, status `live`, running commit `153b1fc50eddff2e8414199f09ba8fa95ff9ec30`.
+- Staging branch has advanced beyond that deployed commit. The code changes in this follow-up are therefore **not deployed and have no live-runtime evidence yet**.
+- No order, open position, protective order, API key, Secret, or production service was changed.
+
+### 8.5 HTTP 502 investigation
+Read-only Render application logs show POST `/api/ai/dry-run` responses with HTTP 502 at:
+- 2026-11-18 01:54:03 UTC
+- 2026-11-18 02:44:35 UTC
+- 2026-11-18 03:49:35 UTC
+- 2026-11-18 03:58:56 UTC
+- 2026-11-19 00:12:20 UTC
+- 2026-11-19 00:18:29 UTC
+
+The same route maps any completed dry-run where `test_passed` is false (unless it is a configured 429 or missing-key 503) to HTTP 502. Consequently, the access-log status alone does **not** prove an uncaught server exception. The route does not log the response payload or per-reviewer failure detail, and no traceback/error-level application log was returned for the selected window. Exact cause remains UNKNOWN until the corresponding response payload or provider request/response evidence is captured. Earlier 429 responses are consistent with the route's explicit rate-limit/cooldown statuses, but the access log alone does not identify which one.
+
+### 8.6 Current requirement matrix
+| Requirement | Code exists | Tests pass | On Staging branch | Deployed | Runtime evidence | Missing |
+|---|---|---|---|---|---|---|
+| Per-cycle open-position audit event | Yes | CI green; targeted regression included | Yes | No | No | Verify live event stream after separately approved deployment |
+| Independent reviewer scheduling while position open | Yes, scheduled cadence | CI green; scheduler/restart tests included | Yes | No | No | Confirm both real provider calls and saved results on an open Demo position |
+| Explicit NOT_CALLED per reviewer | Yes | CI green | Yes | No | No | Verify runtime skip reasons are durably stored |
+| Mark/PnL/holding/heartbeat evidence | Yes | Compile/full CI green | Yes | No | No | Live BloFin values and exchange reconciliation |
+| Market-direction evidence | Yes, confirmed closed 5m candles only | Regression tests included | Yes | No | No | Live candle response and timestamp freshness |
+| TP/SL protective-order identity | Exact position/client-order match only | Regression tests included | Yes | No | No | Confirm actual open protective orders on BloFin Demo |
+| Stop-loss threshold visibility | Yes, observation only | Long/short threshold tests included | Yes | No | No | Verify actual exchange SL behavior; no manual close tested |
+| Notion projection of linked minute summaries | Yes; unlinked summaries are not queued | CI green | Yes | No | No | Verify outbox delivery and Notion page sync in live runtime |
+| Exit fill and realized PnL reconciliation | Existing close reconciliation path; not re-proven here | Not established by this follow-up alone | PR #64 remains unmerged; inspect current Staging implementation separately | No new deployment | No | Full BloFin history-to-journal match for each closed position |
+| HTTP 502 root cause | Route mapping identified; no exact provider cause | Not applicable | Existing route inspected | Deployed old route | Access-log only | Capture response body and structured per-reviewer diagnostics |
+
+### 8.7 Acceptance decision
+**Challenge 1 remains NOT ACCEPTED.** Offline CI success proves the tested code paths on the Staging branch, not successful live BloFin Demo supervision. The Staging changes are not deployed because Render auto-deploy is disabled and no deployment authorization was given. Open positions remain untouched. Next acceptance work must use a separately authorized deployment, then observe real open Demo positions without changing or closing them, recover both reviewers' request/response records, and reconcile eventual exchange close history and realized PnL.
