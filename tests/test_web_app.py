@@ -2481,3 +2481,52 @@ class AiDryRunHttpDiagnosticsTests(unittest.TestCase):
         self.assertNotIn('"prompt"', serialized)
 
 
+
+
+class BloFinRiskOverrideCloseTests(unittest.TestCase):
+    def test_risk_override_closes_only_exact_negative_pnl_position(self):
+        fake_client = __import__("unittest").mock.Mock()
+        fake_client.base_url = web_app.DEMO_REST_URL
+        fake_client.get_positions.return_value = [{
+            "instId": "BTC-USDT",
+            "positionId": "pos-1",
+            "positions": "1",
+            "positionSide": "long",
+            "marginMode": "isolated",
+            "unrealizedPnl": "-0.75",
+        }]
+        fake_client.close_futures_position.return_value = {
+            "data": {"orderId": "risk-close-order"},
+        }
+        fake_store = __import__("unittest").mock.Mock()
+
+        with (
+            patch.object(
+                web_app, "_blofin_demo_execution_readiness",
+                return_value={"status": "READY"},
+            ),
+            patch.object(web_app, "BloFinDemoTradeClient", return_value=fake_client),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=fake_store),
+        ):
+            result = web_app._blofin_manual_close_position(
+                instrument_id="BTC-USDT",
+                position_id="pos-1",
+                action_source="RISK_OVERRIDE",
+                audit_id="client-1",
+                exit_reason="STOP_LOSS_CROSSED_WITHOUT_VERIFIED_SL",
+            )
+
+        self.assertEqual(result["status"], "CLOSE_ACCEPTED")
+        self.assertTrue(result["loss_making_position"])
+        fake_client.close_futures_position.assert_called_once_with(
+            inst_id="BTC-USDT",
+            margin_mode="isolated",
+            position_side="long",
+            client_order_id=unittest.mock.ANY,
+            position_id="pos-1",
+        )
+        self.assertEqual(fake_store.record_manual_action.call_count, 2)
+        self.assertEqual(
+            fake_store.record_manual_action.call_args_list[-1].args[1],
+            "RISK_OVERRIDE_POSITION_CLOSE_ACCEPTED",
+        )
