@@ -42,32 +42,29 @@ class FakeWebSocket:
 
 class BloFinDemoPrivateWebSocketTests(unittest.TestCase):
     def make_client(self, **kwargs):
-        return BloFinDemoPrivateWebSocket(
-            FakeReader(),
-            reconcile_callback=lambda: {
-                "positions": [{
-                    "positionId": "1001",
-                    "instId": "BTC-USDT",
-                    "positions": "2",
-                    "unrealizedPnl": "1.5",
-                }],
-                "orders": [{
-                    "orderId": "2001",
-                    "clientOrderId": "entry001",
-                    "state": "live",
-                }],
-                "algo_orders": [{
-                    "tpslId": "3001",
-                    "positionId": "1001",
-                    "instId": "BTC-USDT",
-                    "state": "live",
-                    "slTriggerPrice": "98",
-                    "tpTriggerPrice": "105",
-                }],
-                "account": [{"equity": "1000", "available": "800"}],
-            },
-            **kwargs,
-        )
+        kwargs.setdefault("reconcile_callback", lambda: {
+            "positions": [{
+                "positionId": "1001",
+                "instId": "BTC-USDT",
+                "positions": "2",
+                "unrealizedPnl": "1.5",
+            }],
+            "orders": [{
+                "orderId": "2001",
+                "clientOrderId": "entry001",
+                "state": "live",
+            }],
+            "algo_orders": [{
+                "tpslId": "3001",
+                "positionId": "1001",
+                "instId": "BTC-USDT",
+                "state": "live",
+                "slTriggerPrice": "98",
+                "tpTriggerPrice": "105",
+            }],
+            "account": [{"equity": "1000", "available": "800"}],
+        })
+        return BloFinDemoPrivateWebSocket(FakeReader(), **kwargs)
 
     def test_only_private_demo_channels_are_declared(self):
         self.assertEqual(
