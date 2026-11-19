@@ -385,6 +385,36 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         with self.assertRaises(BloFinDemoExecutionBlocked):
             self.client._post("/api/v1/account/set-position-mode", {"positionMode": "net_mode"})
 
+    def test_stop_loss_amendment_changes_only_sl_leg_and_uses_request_id(self):
+        self.client.amend_tpsl_stop_loss(
+            inst_id="BTC-USDT",
+            tpsl_id="tpsl-123",
+            new_stop_loss="101.25",
+            request_id="amend123",
+        )
+        args, kwargs = self.session.post.call_args
+        self.assertTrue(args[0].endswith("/api/v1/trade/amend-tpsl"))
+        body = json.loads(kwargs["data"])
+        self.assertEqual(body["instId"], "BTC-USDT")
+        self.assertEqual(body["tpslId"], "tpsl-123")
+        self.assertEqual(body["requestId"], "amend123")
+        self.assertEqual(body["newSlTriggerPrice"], "101.25")
+        self.assertNotIn("newTpTriggerPrice", body)
+        self.assertGreater(body["ttl"], 0)
+
+    def test_stop_loss_amendment_rejects_zero_and_invalid_ids_before_post(self):
+        with self.assertRaises(ValueError):
+            self.client.amend_tpsl_stop_loss(
+                inst_id="BTC-USDT", tpsl_id="tpsl-123",
+                new_stop_loss="0", request_id="amend123",
+            )
+        with self.assertRaises(ValueError):
+            self.client.amend_tpsl_stop_loss(
+                inst_id="BTC-USDT", tpsl_id="tpsl-123",
+                new_stop_loss="101", request_id="bad request id",
+            )
+        self.session.post.assert_not_called()
+
     def test_trade_post_refuses_redirects_and_never_follows_location(self):
         self.session.post.return_value = FakeResponse(
             {"code": "0", "data": {"orderId": "unused"}}, status=302,
