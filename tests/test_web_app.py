@@ -2132,3 +2132,115 @@ class BloFinPositionManagerReadinessReportingTests(unittest.TestCase):
         self.assertNotIn("کلید Trade اختصاصی", result["message_fa"])
         self.assertIn("فعال‌سازی معاملات Demo خاموش است", result["message_fa"])
         self.assertIn("توکن پنل تنظیم نشده است", result["message_fa"])
+
+
+class BloFinDemoPositionEvidenceTests(unittest.TestCase):
+    class FakeReadOnly:
+        def __init__(self, candles=None, tpsl=None, candle_error=None, tpsl_error=None):
+            self.candles = candles if candles is not None else []
+            self.tpsl = tpsl if tpsl is not None else []
+            self.candle_error = candle_error
+            self.tpsl_error = tpsl_error
+
+        def get_candles(self, **kwargs):
+            if self.candle_error:
+                raise self.candle_error
+            return self.candles
+
+        def get_open_tpsl_orders(self, **kwargs):
+            if self.tpsl_error:
+                raise self.tpsl_error
+            return self.tpsl
+
+    def test_market_direction_uses_only_recent_confirmed_closed_candles(self):
+        now_ms = 1_800_000_000_000
+        interval = 300_000
+        first_stamp = now_ms - 3 * interval - 1_000
+        closes = [100.0, 101.0, 102.0]
+        rows = []
+        previous = 99.5
+        for index, close in enumerate(closes):
+            rows.append([
+                str(first_stamp + index * interval),
+                str(previous),
+                str(close + 0.5),
+                str(previous - 0.5),
+                str(close),
+                "10",
+                "1000",
+                "0",
+                "1",
+            ])
+            previous = close
+
+        reader = self.FakeReadOnly(candles=rows)
+        with patch.object(web_app.time, "time", return_value=now_ms / 1000):
+            result = web_app._blofin_demo_position_market_evidence(reader, "BTC-USDT")
+
+        self.assertEqual(result["status"], "VERIFIED")
+        self.assertEqual(result["direction"], "UP")
+        self.assertEqual(result["source"], "BLOFIN_CONFIRMED_5M_CANDLES")
+        self.assertEqual(len(result["candles"]), 3)
+
+    def test_market_direction_is_unknown_for_stale_or_unconfirmed_candles(self):
+        now_ms = 1_800_000_000_000
+        stale_stamp = now_ms - 12 * 300_000
+        stale = [[str(stale_stamp + i * 300_000), "100", "102", "99", "101", "1", "1", "0", "1"] for i in range(3)]
+        reader = self.FakeReadOnly(candles=stale)
+        with patch.object(web_app.time, "time", return_value=now_ms / 1000):
+            stale_result = web_app._blofin_demo_position_market_evidence(reader, "BTC-USDT")
+        self.assertEqual(stale_result["status"], "STALE_CANDLES")
+        self.assertEqual(stale_result["direction"], "UNKNOWN")
+
+        fresh_unconfirmed = [
+            [str(now_ms - 4 * 300_000 + i * 300_000), "100", "102", "99", "101", "1", "1", "0", "0"]
+            for i in range(3)
+        ]
+        reader = self.FakeReadOnly(candles=fresh_unconfirmed)
+        with patch.object(web_app.time, "time", return_value=now_ms / 1000):
+            unconfirmed_result = web_app._blofin_demo_position_market_evidence(reader, "BTC-USDT")
+        self.assertEqual(unconfirmed_result["status"], "NO_CONFIRMED_CANDLES")
+        self.assertEqual(unconfirmed_result["direction"], "UNKNOWN")
+
+    def test_protective_orders_require_exact_position_or_order_identity(self):
+        row = {
+            "tpslId": "tpsl-1",
+            "clientOrderId": "client-1",
+            "positionId": "position-1",
+            "instId": "BTC-USDT",
+            "positionSide": "long",
+            "state": "live",
+            "tpTriggerPrice": "110",
+            "slTriggerPrice": "95",
+            "tpOrderPrice": "-1",
+            "slOrderPrice": "-1",
+        }
+        order = {"client_order_id": "client-1", "side": "LONG"}
+        position = {"positionId": "position-1"}
+        reader = self.FakeReadOnly(tpsl=[row])
+        result = web_app._blofin_demo_protective_order_evidence(reader, "BTC-USDT", order, position)
+        self.assertEqual(result["status"], "BOTH_TP_AND_SL_VISIBLE")
+        self.assertEqual(result["matched_by"], ["EXACT_POSITION_ID"])
+
+        order_only = dict(row)
+        order_only.pop("positionId")
+        reader = self.FakeReadOnly(tpsl=[order_only])
+        result = web_app._blofin_demo_protective_order_evidence(reader, "BTC-USDT", order, position)
+        self.assertEqual(result["status"], "BOTH_TP_AND_SL_VISIBLE")
+        self.assertEqual(result["matched_by"], ["EXACT_CLIENT_ORDER_ID"])
+
+        unrelated = dict(row, clientOrderId="some-other-order", positionId="some-other-position")
+        reader = self.FakeReadOnly(tpsl=[unrelated])
+        result = web_app._blofin_demo_protective_order_evidence(reader, "BTC-USDT", order, position)
+        self.assertEqual(result["status"], "NOT_VERIFIED_NO_EXACT_POSITION_LINK")
+        self.assertEqual(result["orders"], [])
+
+    def test_stop_loss_threshold_crossings_are_detected_for_both_sides_without_order_side_effects(self):
+        self.assertTrue(web_app._blofin_demo_stop_loss_triggered("LONG", 94.9, 95.0))
+        self.assertFalse(web_app._blofin_demo_stop_loss_triggered("LONG", 95.1, 95.0))
+        self.assertTrue(web_app._blofin_demo_stop_loss_triggered("SHORT", 105.1, 105.0))
+        self.assertFalse(web_app._blofin_demo_stop_loss_triggered("SHORT", 104.9, 105.0))
+        self.assertFalse(web_app._blofin_demo_stop_loss_triggered("LONG", float("nan"), 95.0))
+        self.assertFalse(web_app._blofin_demo_stop_loss_triggered("UNKNOWN", 94.0, 95.0))
+
+
