@@ -9367,7 +9367,7 @@ def _blofin_manual_close_position(
         pnl = None
 
     action_source = str(action_source or "MANUAL").strip().upper()
-    if action_source not in {"MANUAL", "AUTOPILOT"}:
+    if action_source not in {"MANUAL", "AUTOPILOT", "AI_SUPERVISOR"}:
         raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
     if action_source == "AUTOPILOT":
         try:
@@ -9384,18 +9384,12 @@ def _blofin_manual_close_position(
     audit_event_id = str(audit_id or action_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_event_id):
         raise BloFinDemoExecutionBlocked("شناسه ثبت گزارش بستن پوزیشن معتبر نیست.")
-    requested_event = (
-        "AUTO_POSITION_CLOSE_REQUESTED" if action_source == "AUTOPILOT"
-        else "MANUAL_POSITION_CLOSE_REQUESTED"
+    event_prefix = "AI_SUPERVISOR" if action_source == "AI_SUPERVISOR" else (
+        "AUTO" if action_source == "AUTOPILOT" else "MANUAL"
     )
-    accepted_event = (
-        "AUTO_POSITION_CLOSE_ACCEPTED" if action_source == "AUTOPILOT"
-        else "MANUAL_POSITION_CLOSE_ACCEPTED"
-    )
-    unknown_event = (
-        "AUTO_POSITION_CLOSE_UNKNOWN" if action_source == "AUTOPILOT"
-        else "MANUAL_POSITION_CLOSE_REQUESTED"
-    )
+    requested_event = f"{event_prefix}_POSITION_CLOSE_REQUESTED"
+    accepted_event = f"{event_prefix}_POSITION_CLOSE_ACCEPTED"
+    unknown_event = f"{event_prefix}_POSITION_CLOSE_UNKNOWN"
     store = None
     try:
         store = BloFinDemoEventStore()
@@ -9449,6 +9443,203 @@ def _blofin_manual_close_position(
             "منفی بودن PnL مانع بستن نبود؛ قیمت اجرای واقعی و PnL نهایی پس از Fill مشخص می‌شود."
         ),
     }
+
+def _blofin_manual_tighten_stop_position(
+    *, instrument_id: str, position_id: str, new_stop_loss: Any,
+    audit_id: str, experience_id: str, reason_fa: str = "",
+) -> dict[str, Any]:
+    """Revalidate one exact Demo position and tighten only its linked native SL."""
+    instrument_id = str(instrument_id or "").strip().upper()
+    position_id = str(position_id or "").strip()
+    audit_id = str(audit_id or "").strip()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+        raise BloFinDemoExecutionBlocked("نماد پوزیشن برای اصلاح Stop معتبر نیست.")
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", position_id):
+        raise BloFinDemoExecutionBlocked("Position ID برای اصلاح Stop معتبر نیست.")
+    if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_id):
+        raise BloFinDemoExecutionBlocked("شناسه ممیزی Stop معتبر نیست.")
+    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise BloFinDemoExecutionBlocked("مداخله فعال ناظرهای هوش مصنوعی در تنظیمات Demo غیرفعال است.")
+
+    requested_stop = _blofin_manual_decimal(new_stop_loss, "new_stop_loss")
+    if requested_stop <= 0:
+        raise BloFinDemoExecutionBlocked("Stop جدید باید مثبت باشد و نمی‌تواند حفاظت را حذف کند.")
+
+    client = _blofin_manual_write_client()
+    positions = client.get_positions(inst_id=instrument_id)
+    if not isinstance(positions, list):
+        raise BloFinDemoExecutionBlocked("بازخوانی تازه پوزیشن برای اصلاح Stop معتبر نیست.")
+    matches = [
+        row for row in positions
+        if isinstance(row, dict)
+        and str(row.get("instId") or "").strip().upper() == instrument_id
+        and str(row.get("positionId") or "").strip() == position_id
+        and _blofin_manual_decimal(row.get("positions") or "0", "position_size") != 0
+    ]
+    if len(matches) != 1:
+        raise BloFinDemoExecutionBlocked("پوزیشن زنده با Position ID دقیق پیدا نشد یا یکتا نیست.")
+    position = matches[0]
+    quantity = _blofin_manual_decimal(position.get("positions"), "position_size")
+    raw_side = str(position.get("positionSide") or "").strip().lower()
+    direction = raw_side if raw_side in {"long", "short"} else ("long" if quantity > 0 else "short")
+    margin_mode = str(position.get("marginMode") or "").strip().lower()
+    if margin_mode not in {"isolated", "cross"} or direction not in {"long", "short"}:
+        raise BloFinDemoExecutionBlocked("جهت یا Margin Mode پوزیشن قابل تأیید نیست.")
+
+    mark_rows = client.get_mark_price(inst_id=instrument_id)
+    mark_row = (
+        mark_rows[0] if isinstance(mark_rows, list) and mark_rows and isinstance(mark_rows[0], dict)
+        else mark_rows if isinstance(mark_rows, dict) else None
+    )
+    if not isinstance(mark_row, dict):
+        raise BloFinDemoExecutionBlocked("قیمت Mark تازه برای اصلاح Stop در دسترس نیست.")
+    mark = _blofin_manual_decimal(mark_row.get("markPrice"), "mark_price")
+
+    tpsl_rows = client.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+    if not isinstance(tpsl_rows, list):
+        raise BloFinDemoExecutionBlocked("فهرست TP/SL فعال قابل تفسیر نیست.")
+    tpsl_matches = [
+        row for row in tpsl_rows
+        if isinstance(row, dict)
+        and str(row.get("instId") or "").strip().upper() == instrument_id
+        and str(row.get("positionId") or "").strip() == position_id
+        and str(row.get("state") or "").strip().lower() == "live"
+    ]
+    if len(tpsl_matches) != 1:
+        raise BloFinDemoExecutionBlocked("یک TP/SL زنده و متصل به همین Position ID پیدا نشد؛ Stop تغییر نکرد.")
+    protective = tpsl_matches[0]
+    tpsl_id = str(protective.get("tpslId") or "").strip()
+    if not tpsl_id or not re.fullmatch(r"[A-Za-z0-9]{1,64}", tpsl_id):
+        raise BloFinDemoExecutionBlocked("شناسه سفارش TP/SL برای اصلاح Stop معتبر نیست.")
+    old_stop = _blofin_manual_decimal(protective.get("slTriggerPrice"), "current_stop_loss")
+    if direction == "long":
+        if not (requested_stop > old_stop and requested_stop < mark):
+            raise BloFinDemoExecutionBlocked("برای LONG، Stop جدید باید فقط به سمت بالا و پایین‌تر از Mark حرکت کند.")
+    else:
+        if not (requested_stop < old_stop and requested_stop > mark):
+            raise BloFinDemoExecutionBlocked("برای SHORT، Stop جدید باید فقط به سمت پایین و بالاتر از Mark حرکت کند.")
+
+    instrument = client.get_tradable_instrument(instrument_id)
+    tick_size = _blofin_manual_decimal(instrument.get("tickSize"), "tick_size")
+    if requested_stop / tick_size != (requested_stop / tick_size).to_integral_value():
+        raise BloFinDemoExecutionBlocked("قیمت Stop جدید با Tick Size نماد هم‌تراز نیست.")
+
+    request_id = "AISTOP" + hashlib.sha256(
+        f"{position_id}:{tpsl_id}:{requested_stop}:{audit_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    audit = {
+        "environment": "BLOFIN_DEMO", "action_source": "AI_SUPERVISOR",
+        "experience_id": experience_id, "position_id": position_id,
+        "instrument_id": instrument_id, "direction": direction.upper(),
+        "tpsl_id": tpsl_id, "previous_stop_loss": str(old_stop),
+        "proposed_stop_loss": str(requested_stop), "mark_price_at_confirmation": str(mark),
+        "take_profit_before": protective.get("tpTriggerPrice"),
+        "request_id": request_id, "reason_fa": str(reason_fa or "")[:1000],
+    }
+    store = None
+    try:
+        store = BloFinDemoEventStore()
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise BloFinDemoExecutionBlocked("حافظه پایدار Turso فعال نیست؛ اصلاح Stop انجام نشد.")
+        store.record_manual_action(audit_id, "AI_SUPERVISOR_STOP_AMEND_REQUESTED", audit)
+        try:
+            with BLOFIN_ORDER_SUBMISSION_LOCK:
+                response = client.amend_tpsl_stop_loss(
+                    inst_id=instrument_id, tpsl_id=tpsl_id,
+                    new_stop_loss=str(requested_stop), request_id=request_id, ttl_ms=5_000,
+                )
+        except Exception as exc:
+            store.record_manual_action(audit_id, "AI_SUPERVISOR_STOP_AMEND_UNKNOWN", {
+                **audit, "submission_outcome": "UNKNOWN",
+                "error_type": type(exc).__name__, "retry_allowed": False,
+            })
+            raise
+
+        try:
+            refreshed = client.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+            readback = [
+                row for row in refreshed if isinstance(row, dict)
+                and str(row.get("tpslId") or "").strip() == tpsl_id
+                and str(row.get("positionId") or "").strip() == position_id
+                and str(row.get("state") or "").strip().lower() == "live"
+            ] if isinstance(refreshed, list) else []
+            verified = (
+                len(readback) == 1
+                and _blofin_manual_decimal(readback[0].get("slTriggerPrice"), "readback_stop") == requested_stop
+                and str(readback[0].get("tpTriggerPrice") or "") == str(protective.get("tpTriggerPrice") or "")
+            )
+        except Exception:
+            verified, readback = False, []
+        event_type = "AI_SUPERVISOR_STOP_AMEND_VERIFIED" if verified else "AI_SUPERVISOR_STOP_AMEND_ACCEPTED_UNVERIFIED"
+        store.record_manual_action(audit_id, event_type, {
+            **audit, "submission_outcome": "ACCEPTED",
+            "exchange_response": response.get("data") if isinstance(response, dict) else None,
+            "readback_verified": verified,
+            "stop_loss_after_readback": readback[0].get("slTriggerPrice") if verified else None,
+            "retry_allowed": False,
+        })
+        return {
+            "status": "STOP_AMEND_VERIFIED" if verified else "STOP_AMEND_ACCEPTED_UNVERIFIED",
+            "environment": "BLOFIN_DEMO", "position_id": position_id, "tpsl_id": tpsl_id,
+            "old_stop_loss": str(old_stop), "new_stop_loss": str(requested_stop),
+            "exchange_response": response.get("data") if isinstance(response, dict) else None,
+            "readback_verified": verified, "retry_allowed": False,
+        }
+    finally:
+        if store is not None:
+            store.close()
+
+
+def _execute_challenge1_supervisor_action(
+    *, action: str, challenge_record: dict, cycle_context: dict,
+    coordinator_decision: dict,
+) -> dict[str, Any]:
+    """Execute only a two-reviewer-authorized, guarded action on BloFin Demo."""
+    action = str(action or "").strip().upper()
+    position = cycle_context.get("position")
+    position = position if isinstance(position, dict) else {}
+    instrument_id = str(cycle_context.get("instrument_id") or challenge_record.get("instrument_id") or "").strip().upper()
+    position_id = str(coordinator_decision.get("position_id") or position.get("positionId") or "").strip()
+    experience_id = str(coordinator_decision.get("experience_id") or "").strip()
+    if action == "URGENT_RISK_ALERT":
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE["enabled"] = False
+            BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_RISK_HALT"
+            BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                "یکی از ناظرهای مستقل هشدار ریسک فوری داده است؛ ورود خودکار جدید متوقف شد و پوزیشن باز دست‌کاری نشد."
+            )
+            BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        _persist_blofin_autopilot_state()
+        return {"status": "NEW_ENTRIES_HALTED", "reason_code": "SUPERVISOR_URGENT_RISK_ALERT", "position_id": position_id, "exchange_order_sent": False}
+    if action == "HOLD_POSITION":
+        return {"status": "NO_ACTION", "reason_code": "BOTH_SUPERVISORS_AGREE_HOLD"}
+    if action not in {"CLOSE_POSITION", "TIGHTEN_STOP"}:
+        return {"status": "BLOCKED", "reason_code": "ACTION_NOT_IMPLEMENTED"}
+    if coordinator_decision.get("execution_authorized") is not True:
+        return {"status": "BLOCKED", "reason_code": "COORDINATOR_QUORUM_NOT_AUTHORIZED"}
+    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return {"status": "BLOCKED", "reason_code": "AI_SUPERVISOR_INTERVENTIONS_DISABLED"}
+    if not position_id or str(position.get("positionId") or "").strip() != position_id:
+        return {"status": "BLOCKED", "reason_code": "LIVE_POSITION_ID_MISMATCH"}
+    decision_id = "AISUP" + uuid.uuid4().hex[:24]
+    reason_fa = "; ".join(
+        str(item.get("reason_fa") or "")[:400]
+        for item in cycle_context.get("supervisor_reviews", [])
+        if isinstance(item, dict)
+    )[:1200]
+    if action == "CLOSE_POSITION":
+        return _blofin_manual_close_position(
+            instrument_id=instrument_id, position_id=position_id,
+            position_side_hint=str(position.get("positionSide") or ""),
+            action_source="AI_SUPERVISOR", audit_id=decision_id,
+            exit_reason="AI_SUPERVISOR_DUAL_QUORUM",
+        )
+    return _blofin_manual_tighten_stop_position(
+        instrument_id=instrument_id, position_id=position_id,
+        new_stop_loss=coordinator_decision.get("proposed_stop_loss_price"),
+        audit_id=decision_id, experience_id=experience_id, reason_fa=reason_fa,
+    )
+
 
 def _blofin_demo_profit_exit_decision(
     order: dict[str, Any], position: dict[str, Any], mark_price: Any,
