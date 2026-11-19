@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, Mock, patch
 from http.server import ThreadingHTTPServer
 from http.client import HTTPConnection
 from urllib.parse import quote
@@ -2485,7 +2485,7 @@ class AiDryRunHttpDiagnosticsTests(unittest.TestCase):
 
 class BloFinRiskOverrideCloseTests(unittest.TestCase):
     def test_risk_override_closes_only_exact_negative_pnl_position(self):
-        fake_client = __import__("unittest").mock.Mock()
+        fake_client = Mock()
         fake_client.base_url = web_app.DEMO_REST_URL
         fake_client.get_positions.return_value = [{
             "instId": "BTC-USDT",
@@ -2498,7 +2498,7 @@ class BloFinRiskOverrideCloseTests(unittest.TestCase):
         fake_client.close_futures_position.return_value = {
             "data": {"orderId": "risk-close-order"},
         }
-        fake_store = __import__("unittest").mock.Mock()
+        fake_store = Mock()
 
         with (
             patch.object(
@@ -2522,7 +2522,7 @@ class BloFinRiskOverrideCloseTests(unittest.TestCase):
             inst_id="BTC-USDT",
             margin_mode="isolated",
             position_side="long",
-            client_order_id=unittest.mock.ANY,
+            client_order_id=ANY,
             position_id="pos-1",
         )
         self.assertEqual(fake_store.record_manual_action.call_count, 2)
