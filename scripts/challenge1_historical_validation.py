@@ -70,6 +70,39 @@ def _request(session: requests.Session, path: str, params: dict[str, Any]) -> li
     raise RuntimeError(f"BloFin public API retry limit reached for {path}")
 
 
+def fetch_instrument_meta(session: requests.Session, instrument: str) -> dict:
+    rows = _request(session, "/api/v1/market/instruments", {"instId": instrument})
+    selected = next((item for item in rows if item.get("instId") == instrument), None)
+    if not isinstance(selected, dict):
+        raise RuntimeError(f"{instrument}: BloFin contract metadata is unavailable")
+    try:
+        meta = {
+            "contract_value": float(selected["contractValue"]),
+            "lot_size": float(selected["lotSize"]),
+            "min_size": float(selected["minSize"]),
+            "tick_size": float(selected["tickSize"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"{instrument}: invalid BloFin contract metadata") from exc
+    if any(not math.isfinite(v) or v <= 0 for v in meta.values()):
+        raise RuntimeError(f"{instrument}: non-positive BloFin contract metadata")
+    return meta
+
+
+def _floor_to_step(value: float, step: float) -> float:
+    return math.floor((value / step) + 1e-10) * step
+
+
+def _round_protective_price(value: float, tick: float, direction: str, role: str) -> float:
+    # Round protective levels away from entry to avoid optimistic price rounding.
+    round_up = (direction == "LONG" and role == "TARGET") or (
+        direction == "SHORT" and role == "STOP"
+    )
+    units = value / tick
+    rounded = math.ceil(units - 1e-10) if round_up else math.floor(units + 1e-10)
+    return rounded * tick
+
+
 def fetch_candles(session: requests.Session, instrument: str, cutoff_ms: int) -> list[list]:
     rows: dict[int, list] = {}
     cursor = None
@@ -233,6 +266,7 @@ def _simulate_symbol(
     fee_bps: float,
     slippage_bps: float,
     allocation: float,
+    contract_meta: dict,
 ) -> tuple[list[dict], dict]:
     candidates: dict[int, dict] = {}
     analysis_errors = 0
@@ -299,7 +333,9 @@ def _simulate_symbol(
                     "raw_entry": p["raw_entry"], "entry_fill": p["entry_fill"],
                     "raw_exit": raw_exit, "exit_fill": exit_fill,
                     "stop": p["stop"], "target": p["target"],
-                    "quantity": p["quantity"], "risk_budget_usd": p["risk_budget"],
+                    "quantity_base": p["quantity"], "contracts": p["contracts"],
+                    "contract_value_base": contract_value,
+                    "risk_budget_usd": p["risk_budget"],
                     "gross_pnl_usd": gross,
                     "entry_fee_usd": p["entry_fee"], "exit_fee_usd": exit_fee,
                     "funding_cost_usd": funding_cost, "slippage_cost_usd": slippage_cost,
@@ -316,7 +352,12 @@ def _simulate_symbol(
             direction = candidate["direction"]
             raw_entry = op
             entry_fill = raw_entry * (1 + slip_rate if direction == "LONG" else 1 - slip_rate)
-            stop, target = candidate["stop"], candidate["target"]
+            stop = _round_protective_price(
+                candidate["stop"], contract_meta["tick_size"], direction, "STOP",
+            )
+            target = _round_protective_price(
+                candidate["target"], contract_meta["tick_size"], direction, "TARGET",
+            )
             valid = (
                 entry_fill > stop and target > entry_fill
                 if direction == "LONG"
@@ -327,7 +368,14 @@ def _simulate_symbol(
                 continue
             stop_distance = abs(entry_fill - stop)
             risk_budget = equity * RISK_PER_TRADE
-            quantity = min(risk_budget / stop_distance, equity / entry_fill / MAX_LEVERAGE)
+            base_quantity = min(risk_budget / stop_distance, equity / entry_fill / MAX_LEVERAGE)
+            contract_value = contract_meta["contract_value"]
+            lot_size = contract_meta["lot_size"]
+            contracts = _floor_to_step(base_quantity / contract_value, lot_size)
+            if contracts < contract_meta["min_size"]:
+                skipped_invalid_plan += 1
+                continue
+            quantity = contracts * contract_value
             if not math.isfinite(quantity) or quantity <= 0:
                 skipped_invalid_plan += 1
                 continue
@@ -337,7 +385,7 @@ def _simulate_symbol(
                 "pattern": candidate["pattern"], "entry_time_ms": ts,
                 "raw_entry": raw_entry, "entry_fill": entry_fill,
                 "stop": stop, "target": target, "quantity": quantity,
-                "entry_fee": entry_fee, "risk_budget": risk_budget,
+                "contracts": contracts, "entry_fee": entry_fee, "risk_budget": risk_budget,
             }
 
     open_position = None
@@ -425,11 +473,13 @@ def main() -> int:
     session.headers.update({"User-Agent": "CRYPTO-SUPER-RADAR-Challenge1-Validation/1.0"})
     all_candles: dict[str, list[list]] = {}
     all_funding: dict[str, list[dict]] = {}
+    contract_metadata: dict[str, dict] = {}
     quality: dict[str, dict] = {}
 
     for instrument in DEFAULT_CHALLENGE1_INSTRUMENTS:
         candles = fetch_candles(session, instrument, cutoff_ms)
         funding = fetch_funding(session, instrument, cutoff_ms)
+        contract_meta = fetch_instrument_meta(session, instrument)
         stamps = [int(row[0]) for row in candles]
         gaps = sum(1 for a, b in zip(stamps, stamps[1:]) if b - a != BAR_MS)
         expected = max(1, int((now_ms - cutoff_ms) / BAR_MS))
@@ -440,7 +490,9 @@ def main() -> int:
             raise RuntimeError(f"{instrument}: only {coverage:.2%} candle coverage; refusing biased backtest.")
         all_candles[instrument] = candles
         all_funding[instrument] = funding
+        contract_metadata[instrument] = contract_meta
         quality[instrument] = {
+            "blofin_contract_metadata": contract_meta,
             "closed_5m_candles": len(candles),
             "missing_5m_intervals": gaps,
             "estimated_candle_coverage_pct": round(coverage * 100, 3),
@@ -461,10 +513,12 @@ def main() -> int:
         trades, detail = _simulate_symbol(
             instrument, all_candles[instrument], all_funding[instrument], oos_start,
             fee_bps=TAKER_FEE_BPS, slippage_bps=SLIPPAGE_BPS, allocation=allocation,
+            contract_meta=contract_metadata[instrument],
         )
         stress, _ = _simulate_symbol(
             instrument, all_candles[instrument], all_funding[instrument], oos_start,
             fee_bps=STRESS_FEE_BPS, slippage_bps=STRESS_SLIPPAGE_BPS, allocation=allocation,
+            contract_meta=contract_metadata[instrument],
         )
         base_trades.extend(trades)
         stress_trades.extend(stress)
