@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from crypto_super_radar.challenge1_supervisor_policy import coordinate_position_supervisors
 
@@ -20,6 +21,7 @@ def _review(reviewer_id, action, **extra):
         "response_validated": True,
         "model_verified": True,
         "evidence_hash": "hash-1",
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "action": action,
         "verdict": verdict_by_action[action],
         "risk_flags": ["test-risk"] if action in {
@@ -83,6 +85,16 @@ class Challenge1SupervisorPolicyTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "RISK_ALERT")
         self.assertTrue(result["block_new_entries"])
+        self.assertFalse(result["execution_authorized"])
+
+    def test_stale_ai_votes_cannot_authorize_position_management(self):
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        result = self.coordinate(
+            _review("nemotron", "CLOSE_POSITION", completed_at_utc=stale),
+            _review("second_ai", "CLOSE_POSITION"),
+        )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["reason_code"], "NEMOTRON_RESULT_STALE")
         self.assertFalse(result["execution_authorized"])
 
     def test_stop_requires_same_positive_level_from_both(self):
