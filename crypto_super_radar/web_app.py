@@ -10062,6 +10062,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         "stop_loss_price": stop_value,
                         "mark_price": mark_price_value,
                         "protective_orders": protective_evidence,
+                        "position_cycle_audit": audit_result,
                     })
                     continue
                 actions.append({
@@ -10070,6 +10071,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "position_id": position_id,
                     "unrealized_pnl_usdt": position.get("unrealizedPnl"),
                     "minimum_profit_usdt": minimum_profit,
+                    "position_cycle_audit": audit_result,
                 })
                 continue
 
@@ -10100,6 +10102,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         "unrealized_pnl_usdt_at_confirmation"
                     ),
                     "exchange_response": close_result.get("exchange_response"),
+                    "position_cycle_audit": audit_result,
                 })
             except BloFinDemoExecutionBlocked as exc:
                 try:
