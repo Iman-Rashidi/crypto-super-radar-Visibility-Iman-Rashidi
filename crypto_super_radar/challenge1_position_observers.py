@@ -834,7 +834,11 @@ def schedule_position_observer_review(
 
     latest_batch_id = ""
     latest_request_time = None
+    latest_details: dict[str, Any] = {}
     latest_results: dict[str, dict[str, Any]] = {}
+    current_material_hash = _material_review_event_key(
+        challenge_record, cycle_context, position_id,
+    )
     if latest_request is not None:
         latest_details = _audit_details(latest_request)
         latest_batch_id = str(latest_details.get("review_batch_id") or "")
@@ -897,6 +901,13 @@ def schedule_position_observer_review(
                 for key in ("nemotron", "second_ai")
             }
 
+    previous_material_hash = str(latest_details.get("material_event_hash") or "")
+    material_event_changed = (
+        latest_request is None
+        or not previous_material_hash
+        or previous_material_hash != current_material_hash
+    )
+    trigger_reason = "MATERIAL_POSITION_EVENT" if material_event_changed else "SCHEDULED_INTERVAL"
     if latest_request is not None and not incomplete_batch and latest_request_time is not None and len(latest_results) == 2:
         completed_times = [
             _parse_utc(item.get("response_completed_at_utc"))
@@ -904,18 +915,20 @@ def schedule_position_observer_review(
         ]
         completed_times = [item for item in completed_times if item is not None]
         anchor = max(completed_times).timestamp() if completed_times else latest_request_time.timestamp()
-        if now_epoch - anchor < interval_seconds:
+        if now_epoch - anchor < interval_seconds and not material_event_changed:
             output: dict[str, Any] = {}
             for reviewer_id in ("nemotron", "second_ai"):
                 previous = latest_results.get(reviewer_id, {})
                 output[reviewer_id] = {
                     "status": "NOT_CALLED",
-                    "reason_code": "REVIEW_NOT_DUE",
+                    "reason_code": "SCHEDULED_INTERVAL_NOT_REACHED",
                     "request_attempted": False,
                     "last_result_status": previous.get("status"),
                     "last_verdict": previous.get("verdict"),
+                    "last_action": previous.get("action"),
                     "last_result_event_id": previous.get("event_id"),
                     "last_result_age_seconds": max(0, int(now_epoch - anchor)),
+                    "material_event_hash": current_material_hash,
                 }
             return output
 
@@ -930,9 +943,11 @@ def schedule_position_observer_review(
             "request_attempted": True,
             "request_started_at_utc": current.isoformat(),
             "schedule_interval_seconds": interval_seconds,
+            "material_event_hash": current_material_hash,
+            "trigger_reason": trigger_reason,
             "robot_decision": str(cycle_context.get("robot_decision") or "UNKNOWN"),
-            "execution_effect": "NONE",
-            "observation_only": True,
+            "execution_effect": "PENDING_COORDINATOR",
+            "observation_only": False,
         },
         experience_id=experience_id,
         position_id=position_id,
