@@ -179,7 +179,7 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
                 observers, "Challenge1AuditRecorder",
                 side_effect=lambda: Challenge1AuditRecorder(connection=self.connection),
             ),
-            patch.object(observers.threading, "Thread", _FakeThread),
+            patch.object(observers.threading, "Thread"),
         ):
             requested = observers.schedule_position_observer_review(
                 challenge_record={"signal": "LONG", "challenge1_evidence": {"candles_5m": []}},
@@ -224,7 +224,7 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
                 observers, "Challenge1AuditRecorder",
                 side_effect=lambda: Challenge1AuditRecorder(connection=self.connection),
             ),
-            patch.object(observers.threading, "Thread", _FakeThread) as thread_class,
+            patch.object(observers.threading, "Thread") as thread_class,
         ):
             later = observers.schedule_position_observer_review(
                 challenge_record={"signal": "LONG", "challenge1_evidence": {"candles_5m": []}},
