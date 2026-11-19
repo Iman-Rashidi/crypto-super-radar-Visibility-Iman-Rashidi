@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sqlite3
@@ -161,6 +162,16 @@ def signal_record(**overrides):
             },
         },
     ]
+    final_request_time = last_time + timedelta(minutes=5)
+    initial_request_time = last_time
+    for row in reviewers:
+        review = row["review"]
+        if row["reviewer_id"] == "nemotron":
+            review["request_started_at_utc"] = final_request_time.isoformat()
+        else:
+            review["requested_at_utc"] = final_request_time.isoformat()
+        review["completed_at_utc"] = (final_request_time + timedelta(seconds=2)).isoformat()
+
     record["ai_reviews"] = reviewers
     record["ai_consensus"] = {
         "status": "APPROVED_BY_BOTH",
@@ -174,6 +185,49 @@ def signal_record(**overrides):
         "decision": "AUTHORIZE_DEMO_EXECUTION",
         "entry_gate_enforced": True,
     }
+    initial_reviews = copy.deepcopy(reviewers)
+    for row in initial_reviews:
+        review = row["review"]
+        if row["reviewer_id"] == "nemotron":
+            review["request_started_at_utc"] = initial_request_time.isoformat()
+        else:
+            review["requested_at_utc"] = initial_request_time.isoformat()
+        review["completed_at_utc"] = (initial_request_time + timedelta(seconds=2)).isoformat()
+    initial_bar = last_time - timedelta(minutes=5)
+    initial_signal_id = f"challenge1-v4:BTC-USDT:5m:{initial_bar.isoformat()}"
+    evaluation = {
+        "status": "PASS",
+        "minimum_window_seconds": 300,
+        "elapsed_seconds": 300.5,
+        "initial_signal_id": initial_signal_id,
+        "final_signal_id": signal_id,
+        "initial_signal_bar_open_utc": initial_bar.isoformat(),
+        "final_signal_bar_open_utc": signal_bar,
+        "initial_direction": side,
+        "final_direction": side,
+        "initial_pattern_name": pattern_name,
+        "final_pattern_name": pattern_name,
+        "initial_pattern_direction": pattern_direction,
+        "final_pattern_direction": pattern_direction,
+        "initial_pattern_category": "CANDLESTICK",
+        "final_pattern_category": "CANDLESTICK",
+        "direction_preserved": True,
+        "pattern_preserved": True,
+        "new_closed_candle_confirmed": True,
+        "review_rounds_completed": 2,
+        "window_started_at_utc": initial_request_time.isoformat(),
+        "window_completed_at_utc": final_request_time.isoformat(),
+        "initial_round": {
+            "ai_reviews": initial_reviews,
+            "ai_consensus": copy.deepcopy(record["ai_consensus"]),
+        },
+        "final_round": {
+            "reviewer_ids": ["nemotron", "second_ai"],
+            "consensus_status": "APPROVED_BY_BOTH",
+        },
+    }
+    record["entry_evaluation_window"] = evaluation
+    record["ai_consensus"]["entry_evaluation_window"] = copy.deepcopy(evaluation)
     return record
 
 
@@ -1257,7 +1311,46 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             store.close()
 
     def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call(self):
+        def sync_evaluation(item):
+            item["ai_consensus"]["entry_evaluation_window"] = copy.deepcopy(
+                item["entry_evaluation_window"]
+            )
+
+        def shorten_window(item):
+            item["entry_evaluation_window"]["elapsed_seconds"] = 299.9
+            sync_evaluation(item)
+
+        def reuse_initial_signal(item):
+            item["entry_evaluation_window"]["final_signal_id"] = (
+                item["entry_evaluation_window"]["initial_signal_id"]
+            )
+            item["entry_evaluation_window"]["new_closed_candle_confirmed"] = False
+            sync_evaluation(item)
+
+        def remove_initial_reviewer(item):
+            item["entry_evaluation_window"]["initial_round"]["ai_reviews"].pop()
+            sync_evaluation(item)
+
+        def stale_initial_reviewer(item):
+            review = item["entry_evaluation_window"]["initial_round"]["ai_reviews"][0]["review"]
+            review["response_source"] = "CACHE"
+            review["request_attempted"] = False
+            sync_evaluation(item)
+
+        def collapse_review_rounds(item):
+            final_request = item["ai_reviews"][0]["review"]["request_started_at_utc"]
+            item["entry_evaluation_window"]["initial_round"]["ai_reviews"][0]["review"][
+                "completed_at_utc"
+            ] = final_request
+            sync_evaluation(item)
+
         mutations = {
+            "missing evaluation proof": lambda item: item.pop("entry_evaluation_window"),
+            "window shorter than five minutes": shorten_window,
+            "same signal candle after revalidation": reuse_initial_signal,
+            "first round missing reviewer": remove_initial_reviewer,
+            "cached first-round approval": stale_initial_reviewer,
+            "review rounds not sequential": collapse_review_rounds,
             "missing consensus": lambda item: item.pop("ai_consensus"),
             "missing second reviewer": lambda item: item["ai_reviews"].pop(),
             "veto": lambda item: item["ai_reviews"][0]["review"].update(
