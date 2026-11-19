@@ -143,6 +143,95 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.assertEqual(row["last_error_type"], "HTTPError")
         self.assertEqual(row["last_http_status"], 503)
 
+    def test_position_sync_success_is_written_to_challenge1_audit_chain(self):
+        position_event = event(
+            event_id="position-review-success",
+            cycle_id="experience-1",
+            event_type="POSITION_REVIEW",
+            experience_id="experience-1",
+            position_id="position-1",
+        )
+        self.outbox.enqueue(position_event)
+        with (
+            patch(
+                "crypto_super_radar.notion_event_sync.requests.post",
+                return_value=FakeResponse({"id": "notion-position-page-1"}),
+            ),
+            patch(
+                "crypto_super_radar.notion_event_sync._record_position_notion_sync_audit",
+                return_value={"status": "RECORDED"},
+            ) as audit,
+        ):
+            result = self.outbox.flush_pending(now=1_800_000_000)
+        self.assertEqual(result["synced_this_run"], 1)
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.args[0]["event_id"], "position-review-success")
+        self.assertEqual(audit.call_args.kwargs["status"], "SYNCED")
+        self.assertEqual(audit.call_args.kwargs["attempt"], 1)
+        state = self.outbox.get_event_status("position-review-success")
+        self.assertEqual(state["status"], "SYNCED")
+        self.assertEqual(state["notion_page_id"], "notion-position-page-1")
+        self.assertIsNotNone(state["synced_at_utc"])
+
+    def test_position_sync_http_failure_is_written_to_challenge1_audit_chain(self):
+        position_event = event(
+            event_id="position-review-failed",
+            cycle_id="experience-2",
+            event_type="POSITION_REVIEW",
+            experience_id="experience-2",
+            position_id="position-2",
+        )
+        self.outbox.enqueue(position_event)
+        error = requests.HTTPError("Notion unavailable")
+        error.response = SimpleNamespace(status_code=503, headers={})
+        with (
+            patch(
+                "crypto_super_radar.notion_event_sync.requests.post",
+                side_effect=error,
+            ),
+            patch(
+                "crypto_super_radar.notion_event_sync._record_position_notion_sync_audit",
+                return_value={"status": "RECORDED"},
+            ) as audit,
+        ):
+            result = self.outbox.flush_pending(now=1_800_000_000)
+        self.assertEqual(result["failed_this_run"], 1)
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.kwargs["status"], "PENDING_RETRY")
+        self.assertEqual(audit.call_args.kwargs["error_type"], "HTTPError")
+        self.assertEqual(audit.call_args.kwargs["http_status"], 503)
+        state = self.outbox.get_event_status("position-review-failed")
+        self.assertEqual(state["status"], "PENDING")
+        self.assertEqual(state["last_error_type"], "HTTPError")
+        self.assertEqual(state["last_http_status"], 503)
+
+    def test_missing_notion_token_is_an_explicit_position_sync_state(self):
+        position_event = event(
+            event_id="position-review-no-token",
+            cycle_id="experience-3",
+            event_type="POSITION_REVIEW",
+            experience_id="experience-3",
+            position_id="position-3",
+        )
+        self.outbox.enqueue(position_event)
+        with (
+            patch.dict("os.environ", {"NOTION_API_TOKEN": "", "NOTION_TOKEN": ""}),
+            patch(
+                "crypto_super_radar.notion_event_sync._record_position_notion_sync_audit",
+                return_value={"status": "RECORDED"},
+            ) as audit,
+        ):
+            result = self.outbox.flush_pending(now=1_800_000_000)
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
+        self.assertEqual(result["position_audit_events"], 1)
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.kwargs["status"], "NOT_CONFIGURED")
+        self.assertEqual(audit.call_args.kwargs["error_type"], "NOTION_TOKEN_MISSING")
+
+    def test_missing_outbox_event_status_is_reported(self):
+        result = self.outbox.get_event_status("missing-event")
+        self.assertEqual(result["status"], "NOT_FOUND")
+
     def test_invalid_event_type_is_rejected_before_persistence(self):
         with self.assertRaises(ValueError):
             self.outbox.enqueue(event(event_type="FAKE_EVENT"))
