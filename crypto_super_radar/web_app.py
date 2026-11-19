@@ -9382,7 +9382,7 @@ def _blofin_manual_close_position(
     if action_source == "AUTOPILOT":
         try:
             minimum_profit = max(
-                0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")), 100_000.0)
+                0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")), 100_000.0)
             )
         except (TypeError, ValueError):
             minimum_profit = 0.50
@@ -9773,7 +9773,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "event_store_readable": bool(readiness.get("event_store_readable")),
                 "message_fa": message_fa,
             }
-        raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")
+        raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")
         raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
         try:
             minimum_profit = max(0.01, min(float(raw_min_profit), 100_000.0))
