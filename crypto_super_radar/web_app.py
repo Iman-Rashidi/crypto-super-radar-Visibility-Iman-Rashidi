@@ -5714,6 +5714,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
                 payload["supervisor_watchdog"] = copy.deepcopy(BLOFIN_POSITION_SUPERVISOR_STATE)
+            payload["private_websocket"] = _blofin_demo_private_ws_public_status()
             payload["thread_alive"] = bool(
                 BLOFIN_POSITION_MANAGER_THREAD is not None
                 and BLOFIN_POSITION_MANAGER_THREAD.is_alive()
@@ -5764,6 +5765,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
                 payload["supervisor_watchdog"] = copy.deepcopy(BLOFIN_POSITION_SUPERVISOR_STATE)
+                payload["private_websocket"] = _blofin_demo_private_ws_public_status()
                 payload["position_manager_thread_alive"] = bool(
                     BLOFIN_POSITION_MANAGER_THREAD is not None
                     and BLOFIN_POSITION_MANAGER_THREAD.is_alive()
@@ -9871,25 +9873,31 @@ def _blofin_demo_position_market_evidence(reader: Any, instrument_id: str) -> di
 
 def _blofin_demo_protective_order_evidence(
     reader: Any, instrument_id: str, order: dict[str, Any], position: dict[str, Any],
+    *, available_tpsl_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify pending exchange TP/SL only by exact positionId or exact originating clientOrderId."""
     position_id = str(position.get("positionId") or "").strip()
     client_order_id = str(order.get("client_order_id") or "").strip()
     side = str(order.get("side") or "").strip().lower()
-    try:
-        rows = reader.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
-    except Exception as exc:
-        return {
-            "status": "READ_FAILED",
-            "error_type": type(exc).__name__,
-            "source": "BLOFIN_PENDING_TPSL",
-            "matched_by": None,
-            "orders": [],
-        }
+    if available_tpsl_rows is not None:
+        rows = available_tpsl_rows
+        source = "BLOFIN_PRIVATE_WEBSOCKET_RECONCILED_AND_STREAMED"
+    else:
+        try:
+            rows = reader.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+            source = "BLOFIN_PENDING_TPSL"
+        except Exception as exc:
+            return {
+                "status": "READ_FAILED",
+                "error_type": type(exc).__name__,
+                "source": "BLOFIN_PENDING_TPSL",
+                "matched_by": None,
+                "orders": [],
+            }
     if not isinstance(rows, list):
         return {
             "status": "INVALID_RESPONSE",
-            "source": "BLOFIN_PENDING_TPSL",
+            "source": source,
             "matched_by": None,
             "orders": [],
         }
@@ -9898,6 +9906,8 @@ def _blofin_demo_protective_order_evidence(
         if not isinstance(row, dict):
             continue
         if str(row.get("instId") or "").strip().upper() != instrument_id:
+            continue
+        if str(row.get("state") or "").strip().lower() != "live":
             continue
         row_position_id = str(row.get("positionId") or "").strip()
         row_client_id = str(row.get("clientOrderId") or "").strip()
@@ -9928,7 +9938,7 @@ def _blofin_demo_protective_order_evidence(
     if not matched:
         return {
             "status": "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
-            "source": "BLOFIN_PENDING_TPSL",
+            "source": source,
             "matched_by": None,
             "orders": [],
         }
@@ -9948,7 +9958,7 @@ def _blofin_demo_protective_order_evidence(
         status = "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES"
     return {
         "status": status,
-        "source": "BLOFIN_PENDING_TPSL",
+        "source": source,
         "matched_by": sorted({item["matched_by"] for item in matched}),
         "orders": matched,
     }
@@ -10098,10 +10108,17 @@ def _blofin_demo_private_ws_event(channel: str, message: dict[str, Any]) -> None
         client = BLOFIN_PRIVATE_WS_CLIENT
         if client is None:
             return
+        affected_ids = {
+            str(row.get("positionId") or "").strip()
+            for row in rows if isinstance(row, dict) and str(row.get("positionId") or "").strip()
+        }
+        if not affected_ids:
+            return
         ws_snapshot = client.get_snapshot()
         algo_orders = list((ws_snapshot.get("algo_orders") or {}).values())
         with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
-            for position_id, cached in BLOFIN_POSITION_SUPERVISOR_CACHE.items():
+            for position_id in affected_ids:
+                cached = BLOFIN_POSITION_SUPERVISOR_CACHE.get(position_id)
                 if not isinstance(cached, dict):
                     continue
                 instrument_id = str(cached.get("instrument_id") or "").strip().upper()
@@ -10169,6 +10186,24 @@ def _start_blofin_demo_private_websocket() -> None:
 def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
     """Three-second local reevaluation over cached state; only the audit database is written."""
     now_epoch = time.time()
+    private_ws = _blofin_demo_private_ws_public_status()
+    private_ws_required = BLOFIN_PRIVATE_WS_CLIENT is not None
+    private_ws_age = None
+    if private_ws_required:
+        raw_ws = BLOFIN_PRIVATE_WS_CLIENT.get_snapshot()
+        try:
+            private_ws_age = max(0.0, now_epoch - float(raw_ws.get("last_message_epoch") or 0))
+        except (TypeError, ValueError, OverflowError):
+            private_ws_age = float("inf")
+    private_ws_not_ready = private_ws_required and (
+        private_ws.get("status") != "READY"
+        or not private_ws.get("connected")
+        or not private_ws.get("authenticated")
+        or not private_ws.get("reconciled")
+        or set(private_ws.get("subscribed_channels") or []) != {"positions", "orders", "orders-algo", "account"}
+        or private_ws_age is None
+        or private_ws_age > 45.0
+    )
     with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
         snapshots = [dict(item) for item in BLOFIN_POSITION_SUPERVISOR_CACHE.values()]
     stale_count = 0
@@ -10182,6 +10217,8 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
         if not fresh:
             stale_count += 1
         flags = []
+        if private_ws_not_ready:
+            flags.append("PRIVATE_WS_NOT_READY")
         if not fresh:
             flags.append("POSITION_SNAPSHOT_STALE")
         if not experience_id:
@@ -10217,6 +10254,7 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
             "POSITION_ID_MISMATCH",
             "PROTECTIVE_ORDER_NOT_CONFIRMED",
             "STOP_LEVEL_CROSSED_CHECK_EXCHANGE_NATIVE_PROTECTION",
+            "PRIVATE_WS_NOT_READY",
         }
         if critical_flags.intersection(flags):
             should_persist_halt = False
@@ -10246,10 +10284,27 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
         if should_persist_audit_halt:
             _persist_blofin_autopilot_state()
 
+    if private_ws_not_ready:
+        should_persist_ws_halt = False
+        with LOCK:
+            if BLOFIN_AUTOPILOT_STATE.get("enabled") and BLOFIN_AUTOPILOT_STATE.get("status") != "SUPERVISOR_PRIVATE_WS_HALT":
+                BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_PRIVATE_WS_HALT"
+                BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                    "اتصال خصوصی BloFin Demo یا تطبیق Snapshot معتبر نیست؛ ورود جدید متوقف شد و هیچ پوزیشن بازی خودکار بسته نشد."
+                )
+                BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                should_persist_ws_halt = True
+        if should_persist_ws_halt:
+            _persist_blofin_autopilot_state()
+
     state = {
-        "status": "ERROR" if errors else "ALIVE",
+        "status": "ERROR" if errors else "HALTED" if private_ws_not_ready else "ALIVE",
         "interval_seconds": 3,
-        "source": "REST_MANAGER_CACHE",
+        "source": "BLOFIN_PRIVATE_WEBSOCKET_AND_LOCAL_CACHE" if private_ws_required else "REST_MANAGER_CACHE",
+        "private_websocket": private_ws,
+        "private_websocket_last_message_age_seconds": private_ws_age,
+        "private_websocket_ready": not private_ws_not_ready if private_ws_required else None,
         "last_cycle_at_utc": datetime.now(timezone.utc).isoformat(),
         "tracked_positions": len(snapshots),
         "stale_positions": stale_count,
@@ -11619,6 +11674,7 @@ def main():
     role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
     if role == "WEB":
         _start_notion_sync_worker()
+        _start_blofin_demo_private_websocket()
         _start_blofin_demo_position_manager()
         _start_blofin_demo_position_supervisor_watchdog()
     _start_blofin_demo_autopilot()
