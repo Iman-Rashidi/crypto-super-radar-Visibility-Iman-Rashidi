@@ -5158,6 +5158,14 @@ def _run_blofin_demo_execution_job(
                     "سیگنال اولیه پس از پنج دقیقه با کندل بسته‌شده جدید تأیید نشد، یا سیگنال/تجربه تکراری است؛ "
                     "ورود جدید انجام نمی‌شود."
                 )
+                if not store.has_final_experience(refreshed_experience_id):
+                    store.record_experience_not_executed(
+                        experience_id=refreshed_experience_id,
+                        instrument_id=instrument_id,
+                        signal=str(refreshed_challenge_record.get("signal") or "NO_TRADE").strip().upper(),
+                        stage="FIVE_MINUTE_REVALIDATION_BLOCKED",
+                        reason=reason_fa,
+                    )
                 _mark_initial_entry_superseded(reason_fa)
                 if not entry_revalidation.get("reason_codes"):
                     entry_revalidation["reason_codes"] = ["DUPLICATE_OR_FINALIZED_SIGNAL"]
