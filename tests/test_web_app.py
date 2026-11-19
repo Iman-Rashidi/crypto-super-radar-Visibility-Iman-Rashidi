@@ -2244,3 +2244,162 @@ class BloFinDemoPositionEvidenceTests(unittest.TestCase):
         self.assertFalse(web_app._blofin_demo_stop_loss_triggered("UNKNOWN", 94.0, 95.0))
 
 
+class BloFinOpenPositionObserverIntegrationTests(unittest.TestCase):
+    def test_position_manager_records_pending_reviewer_skips_without_closing_position(self):
+        now_ms = int(time.time() * 1000)
+        interval_ms = 300_000
+        latest_closed = (now_ms // interval_ms) * interval_ms - interval_ms
+        candles = []
+        previous = 100.0
+        for index, close in enumerate((100.1, 100.2, 100.3)):
+            candles.append([
+                str(latest_closed - 2 * interval_ms + index * interval_ms),
+                str(previous),
+                str(close + 0.2),
+                str(previous - 0.2),
+                str(close),
+                "12",
+                "1200",
+                "0",
+                "1",
+            ])
+            previous = close
+
+        order = {
+            "client_order_id": "client-order-1",
+            "exchange_order_id": "exchange-order-1",
+            "instrument_id": "BTC-USDT",
+            "position_id": "position-1",
+            "experience_id": "experience-1",
+            "side": "LONG",
+            "created_at": int(time.time()) - 120,
+            "entry_price": 100.0,
+            "stop_loss": 95.0,
+            "take_profit": 110.0,
+        }
+        position = {
+            "positionId": "position-1",
+            "instId": "BTC-USDT",
+            "positions": "1",
+            "positionSide": "long",
+            "averagePrice": "100",
+            "markPrice": "100.3",
+            "unrealizedPnl": "0.20",
+            "leverage": "2",
+            "liquidationPrice": "50",
+        }
+        tpsl = {
+            "tpslId": "tpsl-1",
+            "clientOrderId": "client-order-1",
+            "positionId": "position-1",
+            "instId": "BTC-USDT",
+            "positionSide": "long",
+            "state": "live",
+            "tpTriggerPrice": "110",
+            "slTriggerPrice": "95",
+            "tpOrderPrice": "-1",
+            "slOrderPrice": "-1",
+            "actualSize": "1",
+        }
+        snapshot = {
+            "experience_id": "experience-1",
+            "reason_fa": "Test entry snapshot",
+            "actual_entry_price": 100.0,
+            "evidence": {
+                "setup_timeframe": "5m",
+                "context_timeframe": "1H",
+                "completed_candles_only": True,
+                "decision_engine_version": "TEST",
+                "detected_patterns": ["TEST_PATTERN"],
+                "chart_structure": {"status": "VALID"},
+                "candles_5m": [],
+            },
+        }
+        fake_store = SimpleNamespace(
+            orders_pending_learning_outcome=lambda **kwargs: [order],
+            recent_events=lambda *args, **kwargs: [],
+            close=lambda: None,
+        )
+        fake_reader = SimpleNamespace(
+            get_positions=lambda: [position],
+            get_mark_price=lambda **kwargs: [{"markPrice": "100.3"}],
+            get_candles=lambda **kwargs: candles,
+            get_open_tpsl_orders=lambda **kwargs: [tpsl],
+        )
+        fake_journal = SimpleNamespace(
+            get_snapshot=lambda experience_id: snapshot,
+            close=lambda: None,
+        )
+        reviewer_states = {
+            reviewer_id: {
+                "status": "PENDING",
+                "reason_code": "REVIEW_BATCH_IN_FLIGHT",
+                "request_attempted": False,
+                "reason": "An earlier observer batch is still running.",
+            }
+            for reviewer_id in ("nemotron", "second_ai")
+        }
+
+        with (
+            patch.object(
+                web_app, "_blofin_demo_execution_readiness",
+                return_value={"status": "READY"},
+            ),
+            patch.object(web_app, "BloFinDemoEventStore", return_value=fake_store),
+            patch.object(web_app, "BloFinDemoReadOnly", return_value=fake_reader),
+            patch.object(web_app, "NotionActivityJournal", return_value=fake_journal),
+            patch.object(
+                web_app, "schedule_position_observer_review",
+                return_value=reviewer_states,
+            ) as schedule,
+            patch.object(
+                web_app, "record_position_observer_skip",
+                return_value={"status": "RECORDED"},
+            ) as skip_event,
+            patch.object(
+                web_app, "record_position_monitor_cycle",
+                return_value={
+                    "status": "RECORDED",
+                    "event_id": "monitor-cycle-event-1",
+                    "minute_summaries": [],
+                },
+            ) as cycle_event,
+            patch.object(web_app, "_blofin_manual_close_position") as close_position,
+        ):
+            result = web_app._blofin_demo_position_manager_cycle()
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["managed_positions"], 1)
+        schedule.assert_called_once()
+        self.assertEqual(skip_event.call_count, 2)
+        self.assertEqual(
+            {call.kwargs["reviewer_id"] for call in skip_event.call_args_list},
+            {"nemotron", "second_ai"},
+        )
+        self.assertTrue(all(
+            call.kwargs["reason_code"] == "REVIEW_BATCH_IN_FLIGHT"
+            for call in skip_event.call_args_list
+        ))
+        cycle_event.assert_called_once()
+        cycle_details = cycle_event.call_args.kwargs["cycle_details"]
+        self.assertEqual(cycle_details["decision"], "HOLD")
+        self.assertEqual(cycle_details["heartbeat_status"], "ALIVE")
+        self.assertEqual(cycle_details["market_direction"], "UP")
+        self.assertEqual(
+            cycle_details["protective_orders"]["status"],
+            "BOTH_TP_AND_SL_VISIBLE",
+        )
+        self.assertEqual(
+            cycle_details["reviewer_states"]["nemotron"]["status"],
+            "PENDING",
+        )
+        self.assertEqual(
+            cycle_details["reviewer_states"]["second_ai"]["status"],
+            "PENDING",
+        )
+        self.assertEqual(
+            result["actions"][0]["status"],
+            "HOLD_UNTIL_PROFIT_EXIT",
+        )
+        close_position.assert_not_called()
+
