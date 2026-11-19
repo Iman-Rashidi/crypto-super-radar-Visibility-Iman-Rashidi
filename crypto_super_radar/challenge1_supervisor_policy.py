@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
@@ -34,6 +35,8 @@ def coordinate_position_supervisors(
     experience_id: str,
     position_id: str,
     current_position_id: str,
+    now_utc: datetime | None = None,
+    max_result_age_seconds: float = 30.0,
 ) -> dict[str, Any]:
     """Authorize only exact, fresh, independently validated two-reviewer votes.
 
@@ -66,6 +69,9 @@ def coordinate_position_supervisors(
     if set(by_id) != {"nemotron", "second_ai"}:
         return {**base, "status": "UNKNOWN", "reason_code": "TWO_DISTINCT_REVIEWERS_REQUIRED"}
 
+    sampled_at = now_utc or datetime.now(timezone.utc)
+    if sampled_at.tzinfo is None:
+        sampled_at = sampled_at.replace(tzinfo=timezone.utc)
     for reviewer_id, item in by_id.items():
         if (
             str(item.get("status") or "").upper() != "REVIEWED"
@@ -78,6 +84,21 @@ def coordinate_position_supervisors(
                 **base,
                 "status": "UNKNOWN",
                 "reason_code": f"{reviewer_id.upper()}_RESULT_NOT_FRESH_AND_VALID",
+            }
+        completed_raw = item.get("completed_at_utc")
+        try:
+            completed_at = datetime.fromisoformat(str(completed_raw).replace("Z", "+00:00"))
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=timezone.utc)
+            age_seconds = (sampled_at - completed_at.astimezone(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            age_seconds = float("inf")
+        if age_seconds < -5.0 or age_seconds > max_result_age_seconds:
+            return {
+                **base,
+                "status": "UNKNOWN",
+                "reason_code": f"{reviewer_id.upper()}_RESULT_STALE",
+                "result_age_seconds": age_seconds if age_seconds != float("inf") else None,
             }
         action = str(item.get("action") or "").strip().upper()
         if action not in _ALLOWED_ACTIONS:
