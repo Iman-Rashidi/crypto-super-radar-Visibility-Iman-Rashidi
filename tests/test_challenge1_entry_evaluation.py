@@ -144,6 +144,14 @@ class EntryEvaluationRevalidationTests(unittest.TestCase):
         self.assertIn("NEW_SIGNAL_ID_REQUIRED", result["reason_codes"])
         self.assertIn("NEWER_CLOSED_5M_CANDLE_NOT_CONFIRMED", result["reason_codes"])
 
+    def test_blocks_when_timestamp_advances_without_a_full_five_minute_candle(self):
+        self.refreshed = candidate_record(
+            bar_time=self.initial_time + timedelta(minutes=1),
+        )
+        result = self.validate()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("NEWER_CLOSED_5M_CANDLE_NOT_CONFIRMED", result["reason_codes"])
+
     def test_blocks_when_either_round_is_not_a_closed_five_minute_setup(self):
         self.refreshed["challenge1_evidence"]["completed_candles_only"] = False
         result = self.validate()
