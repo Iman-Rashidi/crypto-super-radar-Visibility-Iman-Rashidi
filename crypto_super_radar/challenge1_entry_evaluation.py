@@ -127,7 +127,12 @@ def validate_challenge1_entry_revalidation(
         reasons.append("NEW_SIGNAL_ID_REQUIRED")
     if initial_execution.get("status") != "PASS" or final_execution.get("status") != "PASS":
         reasons.append("ENTRY_SETUP_NOT_VALID_ON_BOTH_ROUNDS")
-    if not initial_bar or not final_bar or final_bar <= initial_bar:
+    candle_advance_seconds = (
+        (final_bar - initial_bar).total_seconds()
+        if initial_bar is not None and final_bar is not None
+        else None
+    )
+    if candle_advance_seconds is None or candle_advance_seconds < 300:
         reasons.append("NEWER_CLOSED_5M_CANDLE_NOT_CONFIRMED")
     if (
         initial_evidence.get("setup_timeframe") != "5m"
@@ -179,7 +184,8 @@ def validate_challenge1_entry_revalidation(
             and final_pattern_category == initial_pattern_category
         ),
         "new_closed_candle_confirmed": bool(
-            initial_bar and final_bar and final_bar > initial_bar
+            candle_advance_seconds is not None and candle_advance_seconds >= 300
             and initial_signal_id and final_signal_id and final_signal_id != initial_signal_id
         ),
+        "candle_advance_seconds": candle_advance_seconds,
     }
