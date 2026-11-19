@@ -945,8 +945,6 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
     def test_closed_position_outcome_targets_exact_order_when_multiple_orders_share_symbol(self):
         challenge_a = signal_record(bar_offset_minutes=0)
         challenge_b = signal_record(bar_offset_minutes=5)
-        challenge_a["signal_id"] = "challenge1-test:BTC-USDT:5m:2026-11-13T18:00:00+00:00"
-        challenge_b["signal_id"] = "challenge1-test:BTC-USDT:5m:2026-11-13T18:05:00+00:00"
         experience_a = self.store.record_challenge1_decision(
             instrument_id="BTC-USDT", challenge_record=challenge_a,
         )
@@ -961,6 +959,13 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         )
         plan_a["experience_id"] = experience_a
         plan_b["experience_id"] = experience_b
+        # This test targets identity reconciliation, not risk capacity. Keep the
+        # synthetic reservations well inside the aggregate guard while preserving
+        # the valid Challenge 1 signal/candle identity produced by the fixture.
+        for plan in (plan_a, plan_b):
+            plan["reserved_risk_usdt"] = "1"
+            plan["reserved_margin_usdt"] = "10"
+        self.assertNotEqual(plan_a["signal_id"], plan_b["signal_id"])
         self.assertTrue(self.store.reserve_order(plan_a, max_concurrent_positions=2))
         self.assertTrue(self.store.reserve_order(plan_b, max_concurrent_positions=2))
         self.store.update_order(
