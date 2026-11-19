@@ -4275,6 +4275,8 @@ def _run_blofin_demo_execution_job(
                         instrument_id=outcome_instrument,
                         history_rows=closed_history if isinstance(closed_history, list) else [],
                         partial_rows=partial_history if isinstance(partial_history, list) else [],
+                        client_order_id=str(pending_order.get("client_order_id") or ""),
+                        position_id=str(pending_order.get("position_id") or ""),
                     )
                 except Exception:
                     # Keep the experience pending; the entry guard prevents new exposure.
@@ -8663,10 +8665,16 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                         latest_realized_pnl = None
                 except (TypeError, ValueError, OverflowError):
                     latest_realized_pnl = None
-                learning_outcome_update = monitor_store.record_closed_position_outcome(
-                    instrument_id=monitor_instrument_id,
-                    history_rows=closed_rows,
-                    partial_rows=snapshot.get("partially_closed_positions", []),
+                latest_closed_position_id = str(latest_closed.get("positionId") or "").strip()
+                learning_outcome_update = (
+                    monitor_store.record_closed_position_outcome(
+                        instrument_id=monitor_instrument_id,
+                        history_rows=closed_rows,
+                        partial_rows=snapshot.get("partially_closed_positions", []),
+                        position_id=latest_closed_position_id,
+                    )
+                    if latest_closed_position_id else
+                    {"status": "NO_CLOSED_POSITION_ID_IN_HISTORY"}
                 )
                 learning_integrity = monitor_store.learning_memory.integrity_report()
                 exchange_monitor = {
@@ -9553,6 +9561,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         instrument_id=instrument_id,
                         history_rows=closed_rows if isinstance(closed_rows, list) else [],
                         partial_rows=partial_rows if isinstance(partial_rows, list) else [],
+                        client_order_id=client_order_id,
+                        position_id=position_id,
                     )
                     if outcome:
                         activity_update = _update_blofin_activity_after_close(

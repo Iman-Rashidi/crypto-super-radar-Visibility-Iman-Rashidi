@@ -1380,26 +1380,77 @@ class BloFinDemoEventStore:
     def record_closed_position_outcome(
         self, *, instrument_id: str, history_rows: Any,
         partial_rows: Any = None,
+        client_order_id: str | None = None,
+        position_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Record one final Demo outcome only after exact positionId and full-size reconciliation."""
+        """Record a final Demo outcome only when the exact local order/position identity is supplied."""
         instrument = str(instrument_id or "").strip().upper()
+        client_order_key = str(client_order_id or "").strip()
+        requested_position_id = str(position_id or "").strip()
+        if not instrument:
+            return {"status": "INVALID_INSTRUMENT_ID"}
+        if not client_order_key and not requested_position_id:
+            return {
+                "status": "IDENTITY_REQUIRED",
+                "reason_code": "CLIENT_ORDER_ID_OR_POSITION_ID_REQUIRED",
+            }
+
         with self._lock:
-            order_row = self._db.execute(
-                "SELECT * FROM blofin_demo_orders WHERE instrument_id=? AND experience_id IS NOT NULL "
-                "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED') "
-                "ORDER BY created_at DESC LIMIT 1",
-                (instrument,),
-            ).fetchone()
+            if client_order_key:
+                order_row = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE client_order_id=? AND instrument_id=? "
+                    "AND experience_id IS NOT NULL "
+                    "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED')",
+                    (client_order_key, instrument),
+                ).fetchone()
+            else:
+                matched_orders = self._db.execute(
+                    "SELECT * FROM blofin_demo_orders WHERE position_id=? AND instrument_id=? "
+                    "AND experience_id IS NOT NULL "
+                    "AND status IN ('ACCEPTED','PARTIALLY_FILLED','FILLED','CLOSED') "
+                    "ORDER BY created_at DESC LIMIT 2",
+                    (requested_position_id, instrument),
+                ).fetchall()
+                if len(matched_orders) > 1:
+                    return {
+                        "status": "AMBIGUOUS_LOCAL_POSITION_ID",
+                        "position_id": requested_position_id,
+                        "match_count_at_least": 2,
+                    }
+                order_row = matched_orders[0] if matched_orders else None
+
             if order_row is None:
-                return None
+                return {
+                    "status": "LOCAL_ORDER_NOT_FOUND",
+                    "instrument_id": instrument,
+                    "client_order_id": client_order_key or None,
+                    "position_id": requested_position_id or None,
+                }
             order = dict(order_row)
+            saved_position_id = str(order.get("position_id") or "").strip()
+            if requested_position_id and saved_position_id != requested_position_id:
+                return {
+                    "status": "POSITION_ID_MISMATCH",
+                    "experience_id": order.get("experience_id"),
+                    "client_order_id": order.get("client_order_id"),
+                    "expected_position_id": saved_position_id or None,
+                    "received_position_id": requested_position_id,
+                }
             if order.get("outcome_recorded_at") is not None:
-                return {"status": "ALREADY_RECORDED", "experience_id": order.get("experience_id")}
-        position_id = str(order.get("position_id") or "")
+                return {
+                    "status": "ALREADY_RECORDED",
+                    "experience_id": order.get("experience_id"),
+                    "position_id": saved_position_id or None,
+                    "client_order_id": order.get("client_order_id"),
+                    "order_id": order.get("exchange_order_id"),
+                }
+
+        position_id = str(order.get("position_id") or "").strip()
         if not position_id:
             return {
                 "status": "WAITING_FOR_EXCHANGE_POSITION_LINK",
                 "experience_id": order.get("experience_id"),
+                "client_order_id": order.get("client_order_id"),
             }
         expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
         try:
@@ -1414,7 +1465,7 @@ class BloFinDemoEventStore:
             return {"status": "WAITING_FOR_VALID_LOCAL_ORDER"}
 
         # The final close record alone may represent only the last partial fill.
-        # Sum partial-close and full-close history for the same exchange positionId.
+        # Sum partial-close and full-close history for this exact exchange positionId.
         combined_rows = []
         for state, source_rows in (
             ("PARTIALLY_CLOSED", partial_rows or []),
@@ -1435,12 +1486,18 @@ class BloFinDemoEventStore:
                     close_quantity = float(row.get("closePositions"))
                     total_quantity = float(row.get("maxPositions"))
                     pnl = float(row.get("realizedPnl"))
-                    fee = float(row.get("fee") or 0.0)
-                    history_id = str(row.get("historyId") or "")
-                    values = (open_price, close_quantity, total_quantity, pnl, fee)
-                    if not all(math.isfinite(value) for value in values):
-                        continue
+                    history_id = str(row.get("historyId") or "").strip()
                 except (TypeError, ValueError, OverflowError):
+                    continue
+                raw_fee = row.get("fee")
+                try:
+                    fee = float(raw_fee) if raw_fee is not None and str(raw_fee).strip() else None
+                except (TypeError, ValueError, OverflowError):
+                    fee = None
+                if fee is not None and not math.isfinite(fee):
+                    fee = None
+                values = (open_price, close_quantity, total_quantity, pnl)
+                if not all(math.isfinite(value) for value in values):
                     continue
                 if (
                     opened_ms < order_created_ms - 60_000
@@ -1463,6 +1520,8 @@ class BloFinDemoEventStore:
             return {
                 "status": "WAITING_FOR_FINAL_CLOSED_POSITION",
                 "experience_id": order.get("experience_id"),
+                "client_order_id": order.get("client_order_id"),
+                "position_id": position_id,
                 "matched_partial_rows": len(combined_rows),
             }
         quantity_tolerance = max(1e-9, abs(expected_quantity) * 1e-6)
@@ -1471,12 +1530,27 @@ class BloFinDemoEventStore:
             return {
                 "status": "WAITING_FOR_FULL_POSITION_SIZE_RECONCILIATION",
                 "experience_id": order.get("experience_id"),
+                "client_order_id": order.get("client_order_id"),
+                "position_id": position_id,
                 "expected_quantity": expected_quantity,
                 "observed_closed_quantity": total_closed,
             }
+        missing_fee_history_ids = sorted({
+            item["history_id"] for item in combined_rows
+            if item["trading_fee"] is None
+        })
+        if missing_fee_history_ids:
+            return {
+                "status": "WAITING_FOR_EXCHANGE_FEE_DATA",
+                "experience_id": order.get("experience_id"),
+                "client_order_id": order.get("client_order_id"),
+                "position_id": position_id,
+                "missing_fee_history_ids": missing_fee_history_ids,
+                "message": "Realized PnL after fees is not calculated when any matched exchange fee is missing.",
+            }
         history_ids = sorted({item["history_id"] for item in combined_rows})
         realized_pnl = sum(item["realized_pnl"] for item in combined_rows)
-        trading_fees = sum(item["trading_fee"] for item in combined_rows)
+        trading_fees = sum(float(item["trading_fee"]) for item in combined_rows)
         net_before_funding = realized_pnl - trading_fees
         if not math.isfinite(net_before_funding):
             raise ValueError("Closed-position PnL after reported trading fees is not finite.")
@@ -1489,6 +1563,7 @@ class BloFinDemoEventStore:
             "source": "BLOFIN_DEMO_POSITION_ID_LINKED_HISTORY",
             "instrument_id": instrument,
             "position_id": position_id,
+            "client_order_id": str(order.get("client_order_id") or ""),
             "history_ids": history_ids,
             "closed_history_ids": [
                 item["history_id"] for item in combined_rows if item["state"] == "CLOSED"
@@ -1517,7 +1592,12 @@ class BloFinDemoEventStore:
                 (order["client_order_id"],),
             ).fetchone()
             if latest is None or latest["outcome_recorded_at"] is not None:
-                return {"status": "ALREADY_RECORDED", "experience_id": experience_id}
+                return {
+                    "status": "ALREADY_RECORDED",
+                    "experience_id": experience_id,
+                    "position_id": position_id,
+                    "client_order_id": order.get("client_order_id"),
+                }
             saved = self.learning_memory.record_outcome(
                 experience_id=experience_id,
                 event_id=experience_id + "-outcome",
@@ -1550,6 +1630,8 @@ class BloFinDemoEventStore:
             "status": "RECORDED",
             "experience_id": experience_id,
             "position_id": position_id,
+            "client_order_id": str(order.get("client_order_id") or ""),
+            "order_id": str(order.get("exchange_order_id") or ""),
             "history_ids": history_ids,
             "realized_result": result,
             "realized_pnl_after_reported_trading_fees": net_before_funding,
