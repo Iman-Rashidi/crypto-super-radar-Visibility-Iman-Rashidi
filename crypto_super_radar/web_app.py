@@ -9648,7 +9648,9 @@ def _execute_challenge1_supervisor_action(
         return {"status": "BLOCKED", "reason_code": "AI_SUPERVISOR_INTERVENTIONS_DISABLED"}
     if not position_id or str(position.get("positionId") or "").strip() != position_id:
         return {"status": "BLOCKED", "reason_code": "LIVE_POSITION_ID_MISMATCH"}
-    decision_id = "AISUP" + uuid.uuid4().hex[:24]
+    decision_id = str(cycle_context.get("client_order_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{1,32}", decision_id):
+        return {"status": "BLOCKED", "reason_code": "ORIGINAL_CLIENT_ORDER_ID_MISSING"}
     reason_fa = "; ".join(
         str(item.get("reason_fa") or "")[:400]
         for item in cycle_context.get("supervisor_reviews", [])
@@ -10249,6 +10251,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 event for event in prior_events
                 if str(event.get("event_type") or "").upper() in {
                     "AUTO_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_UNKNOWN",
+                    "AI_SUPERVISOR_POSITION_CLOSE_ACCEPTED",
+                    "AI_SUPERVISOR_POSITION_CLOSE_UNKNOWN",
                 }
             ]
             if prior_close:
@@ -10360,6 +10364,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 cycle_context = {
                     "cycle_id": monitor_cycle_id,
                     "instrument_id": instrument_id,
+                    "client_order_id": client_order_id,
                     "position": position,
                     "average_fill_price": (
                         entry_snapshot.get("actual_entry_price")
