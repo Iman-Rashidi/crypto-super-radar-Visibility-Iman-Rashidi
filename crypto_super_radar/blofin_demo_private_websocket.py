@@ -209,6 +209,50 @@ class BloFinDemoPrivateWebSocket:
                     return
             self._process_json_message(message)
 
+    def _wait_for_subscriptions(
+        self,
+        websocket: Any,
+        *,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        """Accept subscription acknowledgements in any order without discarding early ACKs."""
+        pending = set(PRIVATE_CHANNELS)
+        deadline = time.monotonic() + timeout_seconds
+        while pending and not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "BloFin WebSocket subscription acknowledgements timed out: "
+                    + ",".join(sorted(pending))
+                )
+            raw = websocket.recv(timeout=min(2.0, remaining))
+            message = self._decode_message(raw)
+            if message is None:
+                self._handle_control_message(websocket, raw)
+                continue
+            event = str(message.get("event") or "").lower()
+            if event == "error":
+                raise RuntimeError("BloFin WebSocket rejected a private subscription.")
+            if event == "subscribe":
+                arg = message.get("arg") if isinstance(message.get("arg"), Mapping) else {}
+                channel = str(arg.get("channel") or "")
+                if channel in pending:
+                    if str(message.get("code") or "0") != "0":
+                        raise RuntimeError(
+                            f"BloFin WebSocket subscription was rejected for {channel}."
+                        )
+                    pending.remove(channel)
+                    with self._lock:
+                        subscribed = set(self._snapshot.get("subscribed_channels") or [])
+                        subscribed.add(channel)
+                        self._snapshot["subscribed_channels"] = sorted(subscribed)
+                continue
+            # Data can arrive before every subscription ACK. Preserve it rather than
+            # dropping it while the remaining channels are being acknowledged.
+            self._process_json_message(message)
+        if pending and self._stop.is_set():
+            raise RuntimeError("BloFin WebSocket stopped before all subscriptions were acknowledged.")
+
     @staticmethod
     def _decode_message(raw: Any) -> dict[str, Any] | None:
         if isinstance(raw, bytes):
@@ -351,12 +395,7 @@ class BloFinDemoPrivateWebSocket:
                 "args": [{"channel": channel} for channel in PRIVATE_CHANNELS],
             }
             websocket.send(json.dumps(subscribe, separators=(",", ":")))
-            for channel in PRIVATE_CHANNELS:
-                self._wait_for_event(
-                    websocket,
-                    expected_event="subscribe",
-                    expected_channel=channel,
-                )
+            self._wait_for_subscriptions(websocket)
             baseline = (
                 self.reconcile_callback() if self.reconcile_callback is not None
                 else self._default_reconcile()
