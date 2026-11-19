@@ -50,6 +50,11 @@ from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
 from .notion_event_sync import NotionEventOutbox
 from .notion_activity_journal import NotionActivityJournal
+from .challenge1_position_observers import (
+    schedule_position_observer_review,
+    record_position_monitor_cycle,
+    record_position_observer_skip,
+)
 from .ai_supervisor import ai_supervisor_status, run_ai_supervisor
 from .execution_diagnostics import build_execution_error_diagnostic
 
@@ -9432,6 +9437,207 @@ def _blofin_demo_profit_exit_decision(
         return "MAX_HOLD_PROFIT_ONLY"
     return None
 
+
+def _blofin_demo_position_market_evidence(reader: Any, instrument_id: str) -> dict[str, Any]:
+    """Summarize only recent, exchange-confirmed closed 5m candles for an open Demo position."""
+    now_ms = int(time.time() * 1000)
+    interval_ms = 300_000
+    try:
+        raw = reader.get_candles(inst_id=instrument_id, bar="5m", limit=8)
+    except Exception as exc:
+        return {
+            "status": "READ_FAILED",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "error_type": type(exc).__name__,
+            "candles": [],
+        }
+    if not isinstance(raw, list):
+        return {
+            "status": "INVALID_RESPONSE",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "candles": [],
+        }
+    parsed = []
+    for item in raw:
+        try:
+            if isinstance(item, dict):
+                stamp = int(float(item.get("ts", item.get("timestamp"))))
+                opened, high, low, close = (
+                    float(item.get("open", item.get("o"))),
+                    float(item.get("high", item.get("h"))),
+                    float(item.get("low", item.get("l"))),
+                    float(item.get("close", item.get("c"))),
+                )
+                confirmed = str(item.get("confirm", item.get("confirmed", ""))).strip().lower()
+                volume = float(item.get("volume", item.get("vol", item.get("v", 0))) or 0)
+            elif isinstance(item, (list, tuple)) and len(item) >= 9:
+                stamp = int(float(item[0]))
+                opened, high, low, close = (float(item[1]), float(item[2]), float(item[3]), float(item[4]))
+                volume = float(item[5] or 0)
+                confirmed = str(item[8]).strip().lower()
+            else:
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        values = (opened, high, low, close, volume)
+        if not all(math.isfinite(value) for value in values):
+            continue
+        if min(opened, high, low, close) <= 0 or volume < 0 or high < max(opened, close, low) or low > min(opened, close, high):
+            continue
+        if confirmed not in {"1", "true", "yes"}:
+            continue
+        if stamp <= 0 or stamp + interval_ms > now_ms:
+            continue
+        parsed.append({
+            "timestamp_ms": stamp,
+            "open": opened,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        })
+    parsed.sort(key=lambda row: row["timestamp_ms"])
+    deduped = {}
+    for row in parsed:
+        deduped[row["timestamp_ms"]] = row
+    rows = list(deduped.values())[-4:]
+    if not rows:
+        return {
+            "status": "NO_CONFIRMED_CANDLES",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "candles": [],
+        }
+    if now_ms - (rows[-1]["timestamp_ms"] + interval_ms) > interval_ms + 60_000:
+        return {
+            "status": "STALE_CANDLES",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "latest_closed_candle_timestamp_ms": rows[-1]["timestamp_ms"],
+            "candles": rows,
+        }
+    if len(rows) < 3 or any(
+        rows[index]["timestamp_ms"] - rows[index - 1]["timestamp_ms"] != interval_ms
+        for index in range(1, len(rows))
+    ):
+        return {
+            "status": "INSUFFICIENT_OR_DISCONTINUOUS_CANDLES",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "latest_closed_candle_timestamp_ms": rows[-1]["timestamp_ms"],
+            "candles": rows,
+        }
+    closes = [float(row["close"]) for row in rows[-3:]]
+    if closes[0] < closes[1] < closes[2]:
+        direction = "UP"
+    elif closes[0] > closes[1] > closes[2]:
+        direction = "DOWN"
+    else:
+        direction = "SIDEWAYS"
+    return {
+        "status": "VERIFIED",
+        "direction": direction,
+        "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+        "latest_closed_candle_timestamp_ms": rows[-1]["timestamp_ms"],
+        "candles": rows[-3:],
+    }
+
+
+def _blofin_demo_protective_order_evidence(
+    reader: Any, instrument_id: str, order: dict[str, Any], position: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify pending exchange TP/SL only by exact positionId or exact originating clientOrderId."""
+    position_id = str(position.get("positionId") or "").strip()
+    client_order_id = str(order.get("client_order_id") or "").strip()
+    side = str(order.get("side") or "").strip().lower()
+    try:
+        rows = reader.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+    except Exception as exc:
+        return {
+            "status": "READ_FAILED",
+            "error_type": type(exc).__name__,
+            "source": "BLOFIN_PENDING_TPSL",
+            "matched_by": None,
+            "orders": [],
+        }
+    if not isinstance(rows, list):
+        return {
+            "status": "INVALID_RESPONSE",
+            "source": "BLOFIN_PENDING_TPSL",
+            "matched_by": None,
+            "orders": [],
+        }
+    matched = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("instId") or "").strip().upper() != instrument_id:
+            continue
+        row_position_id = str(row.get("positionId") or "").strip()
+        row_client_id = str(row.get("clientOrderId") or "").strip()
+        row_position_side = str(row.get("positionSide") or "").strip().lower()
+        if row_position_side and row_position_side not in {side, "net"}:
+            continue
+        if position_id and row_position_id == position_id:
+            matched_by = "EXACT_POSITION_ID"
+        elif client_order_id and row_client_id == client_order_id:
+            matched_by = "EXACT_CLIENT_ORDER_ID"
+        else:
+            continue
+        matched.append({
+            "matched_by": matched_by,
+            "tpsl_id": str(row.get("tpslId") or ""),
+            "client_order_id": row_client_id,
+            "position_id": row_position_id,
+            "inst_id": str(row.get("instId") or ""),
+            "position_side": row_position_side,
+            "state": str(row.get("state") or ""),
+            "tp_trigger_price": row.get("tpTriggerPrice"),
+            "sl_trigger_price": row.get("slTriggerPrice"),
+            "tp_order_price": row.get("tpOrderPrice"),
+            "sl_order_price": row.get("slOrderPrice"),
+            "actual_size": row.get("actualSize"),
+            "size": row.get("size"),
+        })
+    if not matched:
+        return {
+            "status": "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+            "source": "BLOFIN_PENDING_TPSL",
+            "matched_by": None,
+            "orders": [],
+        }
+    has_sl = any(
+        _is_positive_finite_number(item.get("sl_trigger_price")) for item in matched
+    )
+    has_tp = any(
+        _is_positive_finite_number(item.get("tp_trigger_price")) for item in matched
+    )
+    if has_sl and has_tp:
+        status = "BOTH_TP_AND_SL_VISIBLE"
+    elif has_sl:
+        status = "SL_ONLY_VISIBLE"
+    elif has_tp:
+        status = "TP_ONLY_VISIBLE"
+    else:
+        status = "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES"
+    return {
+        "status": status,
+        "source": "BLOFIN_PENDING_TPSL",
+        "matched_by": sorted({item["matched_by"] for item in matched}),
+        "orders": matched,
+    }
+
+
+def _is_positive_finite_number(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(number) and number > 0
+
+
 def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
     """Manage only exchange positions linked by exact ID to the robot's Demo orders."""
     store = None
@@ -9644,15 +9850,148 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 target_value = float(order.get("take_profit") or 0)
             except (TypeError, ValueError, OverflowError):
                 target_value = 0.0
+            try:
+                stop_value = float(order.get("stop_loss") or 0)
+            except (TypeError, ValueError, OverflowError):
+                stop_value = 0.0
             side_value = str(order.get("side") or "").upper()
             take_profit_reached = (
                 mark_price_value is not None and target_value > 0
                 and ((mark_price_value >= target_value) if side_value == "LONG"
                      else (mark_price_value <= target_value) if side_value == "SHORT" else False)
             )
+            stop_loss_threshold_reached = (
+                mark_price_value is not None and stop_value > 0
+                and ((mark_price_value <= stop_value) if side_value == "LONG"
+                     else (mark_price_value >= stop_value) if side_value == "SHORT" else False)
+            )
+            cycle_epoch_ms = int(time.time() * 1000)
+            monitor_cycle_id = f"{audit_position_id}:{cycle_epoch_ms}"
+            market_evidence = _blofin_demo_position_market_evidence(reader, instrument_id)
+            protective_evidence = _blofin_demo_protective_order_evidence(
+                reader, instrument_id, order, position,
+            )
+
+            entry_snapshot = None
+            snapshot_read_error = None
+            if experience_id:
+                activity_journal = None
+                try:
+                    activity_journal = NotionActivityJournal()
+                    entry_snapshot = activity_journal.get_snapshot(experience_id)
+                except Exception as snapshot_exc:
+                    snapshot_read_error = type(snapshot_exc).__name__
+                finally:
+                    if activity_journal is not None:
+                        activity_journal.close()
+
+            snapshot_evidence = (
+                entry_snapshot.get("evidence")
+                if isinstance(entry_snapshot, dict) and isinstance(entry_snapshot.get("evidence"), dict)
+                else None
+            )
+            reviewer_states: dict[str, dict[str, Any]] = {}
+            review_record = None
+            if not experience_id:
+                skip_code = "EXPERIENCE_ID_MISSING"
+                skip_reason = "The local Demo order is not linked to a verified Challenge 1 experience."
+            elif snapshot_read_error:
+                skip_code = "ENTRY_SNAPSHOT_READ_FAILED"
+                skip_reason = f"Could not read the persisted entry evidence: {snapshot_read_error}"
+            elif not isinstance(snapshot_evidence, dict) or not snapshot_evidence:
+                skip_code = "ENTRY_SNAPSHOT_EVIDENCE_MISSING"
+                skip_reason = "The persisted entry journal has no Challenge 1 evidence for this experience."
+            else:
+                skip_code = ""
+                skip_reason = ""
+                review_record = {
+                    "instrument_id": instrument_id,
+                    "signal": side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                    "reason_fa": str(entry_snapshot.get("reason_fa") or ""),
+                    "entry_price_usd": order.get("entry_price"),
+                    "stop_loss_usd": order.get("stop_loss"),
+                    "take_profit_usd": order.get("take_profit"),
+                    "challenge1_evidence": snapshot_evidence,
+                }
+                cycle_context = {
+                    "cycle_id": monitor_cycle_id,
+                    "instrument_id": instrument_id,
+                    "position": position,
+                    "average_fill_price": (
+                        entry_snapshot.get("actual_entry_price")
+                        if isinstance(entry_snapshot, dict) and entry_snapshot.get("actual_entry_price") is not None
+                        else position.get("averagePrice")
+                    ),
+                    "filled_size": position.get("positions"),
+                    "execution_status": "OPEN_POSITION_MATCHED",
+                    "robot_decision": "EXIT_ELIGIBLE" if reason else "HOLD",
+                    "robot_reason": reason or "Profit exit conditions are not met.",
+                    "holding_seconds": holding_seconds,
+                    "market_direction": market_evidence.get("direction", "UNKNOWN"),
+                    "market_direction_source": market_evidence.get("source", "UNKNOWN"),
+                    "market_direction_evidence": market_evidence.get("candles", []),
+                    "protective_orders": protective_evidence,
+                    "risk_change": "NONE_BY_POSITION_MANAGER_CYCLE",
+                }
+                try:
+                    reviewer_states = schedule_position_observer_review(
+                        challenge_record=review_record,
+                        cycle_context=cycle_context,
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        order_id=str(order.get("exchange_order_id") or client_order_id),
+                        symbol=instrument_id,
+                        signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                    )
+                except Exception as observer_exc:
+                    skip_code = "OBSERVER_SCHEDULER_FAILED"
+                    skip_reason = f"Observer scheduler failed: {type(observer_exc).__name__}"
+                    reviewer_states = {}
+
+            if skip_code:
+                reviewer_states = {
+                    reviewer_id: {
+                        "status": "NOT_CALLED",
+                        "reason_code": skip_code,
+                        "request_attempted": False,
+                        "reason": skip_reason,
+                    }
+                    for reviewer_id in ("nemotron", "second_ai")
+                }
+
+            skip_audit_errors = []
+            for reviewer_id in ("nemotron", "second_ai"):
+                state = reviewer_states.get(reviewer_id)
+                state = state if isinstance(state, dict) else {
+                    "status": "NOT_CALLED",
+                    "reason_code": "REVIEWER_STATE_MISSING",
+                    "request_attempted": False,
+                }
+                reviewer_states[reviewer_id] = state
+                if str(state.get("status") or "").upper() == "NOT_CALLED":
+                    try:
+                        record_position_observer_skip(
+                            experience_id=experience_id,
+                            position_id=audit_position_id,
+                            reviewer_id=reviewer_id,
+                            cycle_id=monitor_cycle_id,
+                            reason_code=str(state.get("reason_code") or "NOT_CALLED"),
+                            reason=str(state.get("reason") or state.get("reason_code") or "Observer was not called this cycle."),
+                            last_result=state,
+                        )
+                    except Exception as skip_exc:
+                        skip_audit_errors.append({
+                            "reviewer_id": reviewer_id,
+                            "error_type": type(skip_exc).__name__,
+                        })
+
             exit_basis = {
                 "instrument_id": instrument_id, "position_id": audit_position_id,
                 "experience_id": experience_id,
+                "monitor_cycle_id": monitor_cycle_id,
+                "heartbeat_at_utc": datetime.now(timezone.utc).isoformat(),
+                "heartbeat_status": "ALIVE",
+                "manager_interval_seconds": 15,
                 "decision": "EXIT_ELIGIBLE" if reason else "HOLD",
                 "rule_engine": "BLOFIN_DEMO_PROFIT_EXIT_RULES",
                 "exit_reason": reason, "side": side_value,
@@ -9661,30 +10000,55 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "loss_making_position": pnl_value is not None and pnl_value < 0,
                 "minimum_profit_usdt": minimum_profit,
                 "minimum_profit_passed": pnl_value is not None and pnl_value >= minimum_profit,
+                "stop_loss_price": stop_value,
+                "stop_loss_threshold_reached": stop_loss_threshold_reached,
+                "stop_loss_management": "EXCHANGE_PROTECTION_RECONCILIATION_ONLY_NO_MANUAL_CLOSE",
                 "take_profit": target_value,
                 "take_profit_reached": take_profit_reached,
                 "holding_seconds": holding_seconds,
                 "maximum_hold_seconds": maximum_hold,
                 "maximum_hold_reached": holding_seconds is not None and holding_seconds >= maximum_hold,
-                "reviewers_exit_status": "NOT_RUN_RULE_BASED_EXIT_MANAGER",
-                "reviewers_exit_note": "AI entry reviewers are not represented as exit reviewers; this cycle is a deterministic rule-manager decision.",
+                "market_direction": market_evidence.get("direction", "UNKNOWN"),
+                "market_evidence": market_evidence,
+                "protective_orders": protective_evidence,
+                "reviewer_states": reviewer_states,
+                "reviewer_skip_audit_errors": skip_audit_errors,
+                "observer_review_policy": "TWO_INDEPENDENT_POST_DECISION_AUDIT_REVIEWERS",
+                "observer_execution_effect": "NONE",
+                "observer_evidence_source": "PERSISTED_NOTION_ACTIVITY_JOURNAL",
             }
             try:
-                _record_challenge1_audit(
-                    experience_id or position_id, "POSITION_EXIT_EVALUATION", exit_basis,
-                    event_key=f"position-evaluation:{audit_position_id}:{int(time.time()) // 60}",
-                    experience_id=experience_id, position_id=audit_position_id,
-                    status="SUCCESS" if reason else "PENDING",
-                    reason=f"Exit rule matched: {reason}" if reason else "Hold decision: exit conditions have not all been met.",
+                audit_result = record_position_monitor_cycle(
+                    experience_id=experience_id,
+                    position_id=audit_position_id,
+                    order_id=str(order.get("exchange_order_id") or client_order_id),
+                    symbol=instrument_id,
+                    signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                    cycle_details=exit_basis,
+                    cycle_epoch_ms=cycle_epoch_ms,
                 )
+                if audit_result.get("status") != "RECORDED":
+                    raise RuntimeError("POSITION_CYCLE_AUDIT_NOT_RECORDED")
+                if skip_audit_errors:
+                    raise RuntimeError("POSITION_OBSERVER_SKIP_AUDIT_INCOMPLETE")
             except Exception as audit_exc:
                 actions.append({
                     "status": "AUDIT_WRITE_FAILED", "instrument_id": instrument_id,
                     "position_id": position_id, "error_type": type(audit_exc).__name__,
-                    "message_fa": "ثبت شواهد تصمیم مدیر خروج تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
+                    "message_fa": "ثبت کامل چرخه پایش یا وضعیت عدم فراخوانی ناظرها تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
                 })
                 continue
             if not reason:
+                if stop_loss_threshold_reached:
+                    actions.append({
+                        "status": "STOP_LOSS_LEVEL_CROSSED_NO_MANUAL_CLOSE_SENT",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "stop_loss_price": stop_value,
+                        "mark_price": mark_price_value,
+                        "protective_orders": protective_evidence,
+                    })
+                    continue
                 actions.append({
                     "status": "HOLD_UNTIL_PROFIT_EXIT",
                     "instrument_id": instrument_id,
