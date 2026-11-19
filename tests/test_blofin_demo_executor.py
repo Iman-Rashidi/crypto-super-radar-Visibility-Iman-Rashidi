@@ -1252,7 +1252,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         try:
             with self.assertRaises(BloFinDemoExecutionBlocked):
                 executor.execute(
-                    signal_record(), inst_id="BTC-USDT",
+                    signal_record(take_profit_usd=120.0), inst_id="BTC-USDT",
                     leverage=1, allow_demo_orders=True,
                 )
             self.assertFalse(any(
@@ -1265,7 +1265,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call(self):
+    def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call):
         mutations = {
             "missing consensus": lambda item: item.pop("ai_consensus"),
             "missing second reviewer": lambda item: item["ai_reviews"].pop(),
