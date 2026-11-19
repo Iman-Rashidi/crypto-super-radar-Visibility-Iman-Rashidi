@@ -9385,7 +9385,7 @@ def _blofin_manual_close_position(
                 0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")), 100_000.0)
             )
         except (TypeError, ValueError):
-            minimum_profit = 0.50
+            minimum_profit = 0.02
         if pnl is None or pnl < Decimal(str(minimum_profit)):
             raise BloFinDemoExecutionBlocked(
                 "سود شناور پوزیشن در بازبینی نهایی به حداقل محافظه‌کارانه نرسید؛ خروج خودکار ارسال نشد."
@@ -9778,7 +9778,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
         try:
             minimum_profit = max(0.01, min(float(raw_min_profit), 100_000.0))
         except (TypeError, ValueError):
-            minimum_profit = 0.50
+            minimum_profit = 0.02
         try:
             maximum_hold = max(900, min(int(raw_max_hold), 604_800))
         except (TypeError, ValueError):
