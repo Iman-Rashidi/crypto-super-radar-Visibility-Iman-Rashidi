@@ -1672,9 +1672,14 @@ def _challenge1_observer_evidence(
     position_summary = {
         key: finite(position, source)
         for key, source in (
-            ("size", "positions"), ("average_entry_price", "averagePrice"),
-            ("mark_price", "markPrice"), ("unrealized_pnl_usdt", "unrealizedPnl"),
+            ("size", "positions"), ("available_size_to_close", "availablePositions"),
+            ("average_entry_price", "averagePrice"), ("mark_price", "markPrice"),
+            ("unrealized_pnl_usdt", "unrealizedPnl"),
+            ("unrealized_pnl_ratio", "unrealizedPnlRatio"),
             ("leverage", "leverage"), ("liquidation_price", "liquidationPrice"),
+            ("initial_margin", "initialMargin"), ("position_margin", "margin"),
+            ("margin_ratio", "marginRatio"), ("maintenance_margin", "maintenanceMargin"),
+            ("funding_fee_if_supplied", "fundingFee"),
         )
         if finite(position, source) is not None
     }
@@ -1685,6 +1690,68 @@ def _challenge1_observer_evidence(
         position_summary["position_id"] = _observer_clean_text(position.get("positionId"), 80)
         position_summary["instrument_id"] = _observer_clean_text(position.get("instId"), 40).upper()
         position_summary["margin_mode"] = _observer_clean_text(position.get("marginMode"), 20).lower()
+        position_summary["adl_level"] = _observer_clean_text(position.get("adl"), 8)
+
+    account_raw = context.get("account_snapshot")
+    if isinstance(account_raw, list):
+        account_root = next((item for item in account_raw if isinstance(item, Mapping)), {})
+    elif isinstance(account_raw, Mapping):
+        account_root = account_raw
+    else:
+        account_root = {}
+    account_summary = {
+        key: finite(account_root, source)
+        for key, source in (
+            ("total_equity_usd", "totalEquity"),
+            ("isolated_equity_usd", "isolatedEquity"),
+            ("account_timestamp_ms", "ts"),
+        )
+        if finite(account_root, source) is not None
+    }
+    account_details = account_root.get("details")
+    if not isinstance(account_details, list) and isinstance(account_raw, list):
+        account_details = account_raw
+    account_summary["currency_balances"] = [
+        {
+            "currency": _observer_clean_text(item.get("currency"), 12).upper(),
+            key: _safe_float(item.get(source))
+            for key, source in (
+                ("equity", "equity"), ("available", "available"),
+                ("available_equity", "availableEquity"), ("frozen", "frozen"),
+                ("open_order_margin", "orderFrozen"), ("unrealized_pnl", "unrealizedPnl"),
+                ("margin_ratio", "marginRatio"),
+            )
+            if _safe_float(item.get(source)) is not None
+        }
+        for item in (account_details or [])[:6]
+        if isinstance(item, Mapping)
+    ] if isinstance(account_details, list) else []
+
+    raw_open_orders = context.get("open_orders_snapshot")
+    open_order_summary = []
+    if isinstance(raw_open_orders, list):
+        for item in raw_open_orders[:12]:
+            if not isinstance(item, Mapping):
+                continue
+            summary = {
+                "instrument_id": _observer_clean_text(item.get("instId"), 40).upper(),
+                "order_id": _observer_clean_text(item.get("orderId"), 80),
+                "client_order_id": _observer_clean_text(item.get("clientOrderId"), 80),
+                "position_id": _observer_clean_text(item.get("positionId"), 80),
+                "side": _observer_clean_text(item.get("side"), 12).lower(),
+                "position_side": _observer_clean_text(item.get("positionSide"), 12).lower(),
+                "state": _observer_clean_text(item.get("state"), 24).lower(),
+                "reduce_only": _observer_clean_text(item.get("reduceOnly"), 8).lower(),
+            }
+            for key, source in (
+                ("price", "price"), ("size", "size"),
+                ("filled_size", "filledSize"), ("average_price", "averagePrice"),
+                ("leverage", "leverage"),
+            ):
+                value = _safe_float(item.get(source))
+                if value is not None:
+                    summary[key] = value
+            open_order_summary.append(summary)
     return {
         "environment": "BLOFIN_DEMO",
         "execution_profile": "CHALLENGE_1",
@@ -1739,6 +1806,8 @@ def _challenge1_observer_evidence(
                 "status": "NOT_VERIFIED",
                 "reason_code": "PROTECTIVE_ORDER_EVIDENCE_NOT_SUPPLIED",
             },
+            "account_risk_snapshot": account_summary,
+            "open_orders_snapshot": open_order_summary,
             "risk_change": _observer_clean_text(context.get("risk_change"), 180),
             "review_scope": "ACTIVE_POSITION_SUPERVISION_AND_AUDIT",
         },
@@ -1824,8 +1893,11 @@ def _call_challenge1_observer(
         "patterns, structure, momentum, original invalidation and target progress. Do not invent data."
         if reviewer_id == "nemotron" else
         "ROLE B — RISK / POSITION GUARDIAN. Independently assess exact live position identity, "
-        "size, average fill, mark, net PnL, leverage/liquidation fields when supplied, margin, "
-        "native TP/SL order identity/state, and whether protection remains intact. Be conservative."
+        "size and available close size, average fill, mark, net PnL and ratio, leverage, liquidation "
+        "price, initial/position/maintenance margin, margin ratio, ADL level, account equity/available "
+        "balance, frozen and open-order margin, active orders, and native TP/SL identity/state. "
+        "Funding fee is usable only when an actual supplied funding value exists; never infer it. "
+        "Treat missing or stale risk fields as data gaps and be conservative."
     )
     system = (
         "You are an active but tightly constrained AI position supervisor for CRYPTO SUPER RADAR "
