@@ -23,7 +23,7 @@ permissions:
 # while pushing the generated Render source bundle to the same Git ref.
 concurrency:
   group: csr-render-source-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
