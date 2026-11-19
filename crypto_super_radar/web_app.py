@@ -38,6 +38,7 @@ from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_TRADE_CREDENTIAL_ENV, DEMO_REST_URL, _resolve_env_credential
+from .blofin_demo_private_websocket import BloFinDemoPrivateWebSocket
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
@@ -84,6 +85,8 @@ BLOFIN_POSITION_SUPERVISOR_START_LOCK = threading.Lock()
 BLOFIN_POSITION_SUPERVISOR_THREAD = None
 BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK = threading.RLock()
 BLOFIN_POSITION_SUPERVISOR_CACHE: dict[str, dict[str, Any]] = {}
+BLOFIN_PRIVATE_WS_START_LOCK = threading.Lock()
+BLOFIN_PRIVATE_WS_CLIENT: BloFinDemoPrivateWebSocket | None = None
 BLOFIN_POSITION_SUPERVISOR_STATE = {
     "status": "STARTING",
     "interval_seconds": 3,
@@ -10005,6 +10008,162 @@ def _cache_challenge1_supervisor_snapshot(
     }
     with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
         BLOFIN_POSITION_SUPERVISOR_CACHE[str(position_id)] = snapshot
+
+
+def _blofin_demo_private_ws_reconcile() -> dict[str, Any]:
+    """Fetch one read-only baseline after each private WebSocket connect/reconnect."""
+    reader = BloFinDemoReadOnly(timeout=8.0)
+    positions = reader.get_positions()
+    orders = reader.get_open_orders()
+    algo_orders = reader.get_open_tpsl_orders(limit=100)
+    account = reader.get_futures_balance()
+    if not isinstance(positions, list) or not isinstance(orders, list):
+        raise BloFinDemoResponseError("Private WebSocket REST reconciliation returned invalid positions/orders.")
+    if not isinstance(algo_orders, list) or not isinstance(account, (dict, list)):
+        raise BloFinDemoResponseError("Private WebSocket REST reconciliation returned invalid algo/account data.")
+    return {
+        "positions": positions,
+        "orders": orders,
+        "algo_orders": algo_orders,
+        "account": account,
+    }
+
+
+def _blofin_demo_private_ws_public_status() -> dict[str, Any]:
+    """Expose connection health and counts without returning balances or account rows."""
+    client = BLOFIN_PRIVATE_WS_CLIENT
+    if client is None:
+        return {
+            "status": "NOT_STARTED",
+            "required_for_position_supervision": False,
+            "connected": False,
+            "authenticated": False,
+            "reconciled": False,
+        }
+    snapshot = client.get_snapshot()
+    return {
+        "status": snapshot.get("status", "UNKNOWN"),
+        "environment": "BLOFIN_DEMO",
+        "source": snapshot.get("source", "BLOFIN_DEMO_PRIVATE_WEBSOCKET"),
+        "required_for_position_supervision": True,
+        "connected": bool(snapshot.get("connected")),
+        "authenticated": bool(snapshot.get("authenticated")),
+        "reconciled": bool(snapshot.get("reconciled")),
+        "subscribed_channels": list(snapshot.get("subscribed_channels") or []),
+        "last_message_at_utc": snapshot.get("last_message_at_utc"),
+        "reconciled_at_utc": snapshot.get("reconciled_at_utc"),
+        "reconnect_count": int(snapshot.get("reconnect_count") or 0),
+        "events_received": int(snapshot.get("events_received") or 0),
+        "last_error_type": snapshot.get("last_error_type"),
+        "channels": copy.deepcopy(snapshot.get("channels") or {}),
+        "positions_count": len(snapshot.get("positions") or {}),
+        "orders_count": len(snapshot.get("orders") or {}),
+        "algo_orders_count": len(snapshot.get("algo_orders") or {}),
+        "account_snapshot_available": snapshot.get("account") is not None,
+    }
+
+
+def _blofin_demo_private_ws_event(channel: str, message: dict[str, Any]) -> None:
+    """Refresh the local 3-second supervisor cache from exact-ID Demo WS events."""
+    data = message.get("data")
+    rows = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+    if channel == "positions":
+        with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                position_id = str(row.get("positionId") or "").strip()
+                cached = BLOFIN_POSITION_SUPERVISOR_CACHE.get(position_id)
+                if not position_id or not isinstance(cached, dict):
+                    continue
+                if str(row.get("instId") or "").strip().upper() != str(cached.get("instrument_id") or "").strip().upper():
+                    continue
+                previous = cached.get("position") if isinstance(cached.get("position"), dict) else {}
+                cached["position"] = {**previous, **row}
+                for source, target in (
+                    ("markPrice", "mark_price"),
+                    ("unrealizedPnl", "unrealized_pnl"),
+                ):
+                    value = row.get(source)
+                    if value not in (None, ""):
+                        try:
+                            number = float(value)
+                            if math.isfinite(number):
+                                cached[target] = number
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                cached["updated_at_epoch"] = time.time()
+                cached["source"] = "BLOFIN_PRIVATE_WEBSOCKET"
+    elif channel == "orders-algo":
+        client = BLOFIN_PRIVATE_WS_CLIENT
+        if client is None:
+            return
+        ws_snapshot = client.get_snapshot()
+        algo_orders = list((ws_snapshot.get("algo_orders") or {}).values())
+        with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            for position_id, cached in BLOFIN_POSITION_SUPERVISOR_CACHE.items():
+                if not isinstance(cached, dict):
+                    continue
+                instrument_id = str(cached.get("instrument_id") or "").strip().upper()
+                matched = []
+                for row in algo_orders:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("instId") or "").strip().upper() != instrument_id:
+                        continue
+                    if str(row.get("positionId") or "").strip() != str(position_id):
+                        continue
+                    if str(row.get("state") or "").strip().lower() != "live":
+                        continue
+                    matched.append({
+                        "matched_by": "EXACT_POSITION_ID",
+                        "tpsl_id": str(row.get("tpslId") or ""),
+                        "client_order_id": str(row.get("clientOrderId") or ""),
+                        "position_id": str(row.get("positionId") or ""),
+                        "inst_id": str(row.get("instId") or ""),
+                        "position_side": str(row.get("positionSide") or "").lower(),
+                        "state": str(row.get("state") or ""),
+                        "tp_trigger_price": row.get("tpTriggerPrice"),
+                        "sl_trigger_price": row.get("slTriggerPrice"),
+                        "tp_order_price": row.get("tpOrderPrice"),
+                        "sl_order_price": row.get("slOrderPrice"),
+                        "actual_size": row.get("actualSize"),
+                        "size": row.get("size"),
+                    })
+                has_sl = any(_is_positive_finite_number(item.get("sl_trigger_price")) for item in matched)
+                has_tp = any(_is_positive_finite_number(item.get("tp_trigger_price")) for item in matched)
+                status = (
+                    "BOTH_TP_AND_SL_VISIBLE" if has_sl and has_tp else
+                    "SL_ONLY_VISIBLE" if has_sl else
+                    "TP_ONLY_VISIBLE" if has_tp else
+                    "NOT_VERIFIED_NO_EXACT_POSITION_LINK"
+                )
+                cached["protective_orders"] = {
+                    "status": status,
+                    "source": "BLOFIN_PRIVATE_WEBSOCKET_RECONCILED_AND_STREAMED",
+                    "matched_by": ["EXACT_POSITION_ID"] if matched else None,
+                    "orders": matched,
+                }
+                cached["updated_at_epoch"] = time.time()
+                cached["source"] = "BLOFIN_PRIVATE_WEBSOCKET"
+
+
+def _start_blofin_demo_private_websocket() -> None:
+    """Start one authenticated, read-only BloFin Demo private WebSocket per WEB process."""
+    global BLOFIN_PRIVATE_WS_CLIENT
+    enabled = os.getenv("BLOFIN_DEMO_PRIVATE_WS_ENABLED", "true").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    with BLOFIN_PRIVATE_WS_START_LOCK:
+        if BLOFIN_PRIVATE_WS_CLIENT is not None and BLOFIN_PRIVATE_WS_CLIENT.is_alive():
+            return
+        reader = BloFinDemoReadOnly(timeout=8.0)
+        BLOFIN_PRIVATE_WS_CLIENT = BloFinDemoPrivateWebSocket(
+            reader,
+            reconcile_callback=_blofin_demo_private_ws_reconcile,
+            event_callback=_blofin_demo_private_ws_event,
+        )
+        BLOFIN_PRIVATE_WS_CLIENT.start()
 
 
 def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
