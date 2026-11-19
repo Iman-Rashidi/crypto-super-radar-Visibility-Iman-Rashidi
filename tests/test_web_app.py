@@ -2481,3 +2481,102 @@ class AiDryRunHttpDiagnosticsTests(unittest.TestCase):
         self.assertNotIn('"prompt"', serialized)
 
 
+
+
+class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
+    def tearDown(self):
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE.clear()
+
+    def test_three_second_watchdog_uses_cached_state_and_never_calls_network_or_models(self):
+        snapshot = {
+            "experience_id": "experience-watchdog",
+            "position_id": "position-watchdog",
+            "position": {"positionId": "position-watchdog"},
+            "updated_at_epoch": time.time(),
+            "source": "REST_MANAGER_CACHE",
+            "protective_orders": {"status": "BOTH_TP_AND_SL_VISIBLE"},
+            "reviewer_states": {
+                "nemotron": {"status": "REVIEWED", "last_action": "HOLD_POSITION"},
+                "second_ai": {"status": "NOT_CALLED", "reason_code": "SCHEDULED_INTERVAL_NOT_REACHED"},
+            },
+            "stop_loss_threshold_reached": False,
+        }
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE["position-watchdog"] = snapshot
+        with patch.object(web_app, "record_position_supervisor_watchdog_cycle") as record:
+            result = web_app._blofin_demo_position_supervisor_watchdog_cycle()
+        self.assertEqual(result["status"], "ALIVE")
+        self.assertEqual(result["interval_seconds"], 3)
+        self.assertEqual(result["source"], "REST_MANAGER_CACHE")
+        self.assertEqual(result["llm_calls_performed"], 0)
+        self.assertEqual(result["rest_calls_performed"], 0)
+        self.assertEqual(result["exchange_writes_performed"], 0)
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs["snapshot_status"], "FRESH_CACHED_SNAPSHOT")
+
+    def test_stale_cached_position_halts_new_autopilot_entries_without_closing_position(self):
+        previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        web_app.BLOFIN_AUTOPILOT_STATE.update({"enabled": True, "status": "RUNNING"})
+        snapshot = {
+            "experience_id": "experience-stale",
+            "position_id": "position-stale",
+            "position": {"positionId": "position-stale"},
+            "updated_at_epoch": time.time() - 40,
+            "source": "REST_MANAGER_CACHE",
+            "protective_orders": {"status": "BOTH_TP_AND_SL_VISIBLE"},
+            "reviewer_states": {},
+            "stop_loss_threshold_reached": False,
+        }
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE["position-stale"] = snapshot
+        try:
+            with (
+                patch.object(web_app, "record_position_supervisor_watchdog_cycle") as record,
+                patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True) as persist,
+            ):
+                result = web_app._blofin_demo_position_supervisor_watchdog_cycle()
+            self.assertEqual(result["stale_positions"], 1)
+            self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["enabled"])
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SUPERVISOR_DATA_STALE_HALT")
+            persist.assert_called_once()
+            record.assert_called_once()
+            self.assertIn("POSITION_SNAPSHOT_STALE", record.call_args.kwargs["deterministic_flags"])
+        finally:
+            web_app.BLOFIN_AUTOPILOT_STATE.clear()
+            web_app.BLOFIN_AUTOPILOT_STATE.update(previous)
+
+    def test_ai_close_requires_explicit_demo_supervisor_flag_and_links_to_entry_order(self):
+        context = {
+            "instrument_id": "BTC-USDT",
+            "client_order_id": "entryClient123",
+            "position": {"positionId": "position-1", "positionSide": "long"},
+            "supervisor_reviews": [],
+        }
+        decision = {
+            "execution_authorized": True,
+            "position_id": "position-1",
+            "experience_id": "experience-1",
+            "action": "CLOSE_POSITION",
+        }
+        with patch.dict(os.environ, {"BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED": "false"}):
+            blocked = web_app._execute_challenge1_supervisor_action(
+                action="CLOSE_POSITION", challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context=context, coordinator_decision=decision,
+            )
+        self.assertEqual(blocked["reason_code"], "AI_SUPERVISOR_INTERVENTIONS_DISABLED")
+
+        with (
+            patch.dict(os.environ, {"BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED": "true"}),
+            patch.object(web_app, "_blofin_manual_close_position", return_value={"status": "ACCEPTED"}) as close,
+        ):
+            result = web_app._execute_challenge1_supervisor_action(
+                action="CLOSE_POSITION", challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context=context, coordinator_decision=decision,
+            )
+        self.assertEqual(result["status"], "ACCEPTED")
+        self.assertEqual(close.call_args.kwargs["position_id"], "position-1")
+        self.assertEqual(close.call_args.kwargs["audit_id"], "entryClient123")
+        self.assertEqual(close.call_args.kwargs["action_source"], "AI_SUPERVISOR")
+
+
