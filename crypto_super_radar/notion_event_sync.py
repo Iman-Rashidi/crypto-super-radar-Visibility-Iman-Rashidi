@@ -57,6 +57,65 @@ def _text(value: Any, limit: int = 1800) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _record_position_notion_sync_audit(
+    event: Mapping[str, Any],
+    *,
+    status: str,
+    attempt: int,
+    error_type: str | None = None,
+    http_status: int | None = None,
+) -> dict[str, Any] | None:
+    """Append per-position Notion delivery results to the Challenge 1 audit chain."""
+    event_type = _text(event.get("event_type"), 40).upper()
+    position_id = _text(event.get("position_id"), 180)
+    experience_id = _text(event.get("experience_id"), 180)
+    if not position_id and event_type not in {"POSITION_REVIEW", "POSITION_CLOSED"}:
+        return None
+    event_id = _text(event.get("event_id"), 180)
+    if not event_id:
+        return None
+    cycle_id = (
+        _text(event.get("cycle_id"), 180)
+        or experience_id
+        or f"notion-event:{event_id}"
+    )
+    phase = (
+        "POSITION_NOTION_SYNCED" if status == "SYNCED"
+        else "POSITION_NOTION_SYNC_FAILED" if status in {"PENDING_RETRY", "FAILED"}
+        else "POSITION_NOTION_SYNC_PENDING"
+    )
+    try:
+        from .challenge1_audit import Challenge1AuditRecorder
+
+        recorder = Challenge1AuditRecorder()
+        try:
+            return recorder.append_event(
+                cycle_id=cycle_id,
+                phase=phase,
+                event_key=f"position-notion-sync:{event_id}:{int(attempt)}:{status}",
+                details={
+                    "notion_event_id": event_id,
+                    "event_type": event_type,
+                    "sync_status": status,
+                    "attempt": int(attempt),
+                    "error_type": error_type or "",
+                    "http_status": http_status,
+                    "notion_page_id": "",
+                    "execution_effect": "NONE",
+                },
+                experience_id=experience_id or None,
+                position_id=position_id or None,
+            )
+        finally:
+            recorder.close()
+    except Exception as exc:
+        return {
+            "status": "AUDIT_WRITE_FAILED",
+            "notion_event_id": event_id,
+            "error_type": type(exc).__name__,
+        }
+
+
 class NotionEventOutbox:
     """Persist operational events first, then sync them to Notion with retries."""
 
@@ -263,7 +322,39 @@ class NotionEventOutbox:
             raise ValueError("limit must be a positive integer")
         token = (os.getenv("NOTION_API_TOKEN") or os.getenv("NOTION_TOKEN") or "").strip()
         if not token:
-            return {"status": "NOT_CONFIGURED", "queued": self.pending_count(), "synced": 0, "failed": 0}
+            queued_rows = self._db.execute(
+                """SELECT event_id, payload_json, attempts FROM csr_notion_event_outbox
+                   WHERE sync_status='PENDING'
+                   ORDER BY created_at_utc ASC LIMIT ?""",
+                (min(limit, 50),),
+            ).fetchall()
+            audit_results = []
+            for queued_row in queued_rows:
+                try:
+                    queued_event = json.loads(queued_row["payload_json"])
+                    audit_result = _record_position_notion_sync_audit(
+                        queued_event,
+                        status="NOT_CONFIGURED",
+                        attempt=int(queued_row["attempts"] or 0),
+                        error_type="NOTION_TOKEN_MISSING",
+                    )
+                    if audit_result is not None:
+                        audit_results.append(audit_result)
+                except Exception as exc:
+                    audit_results.append({
+                        "status": "AUDIT_WRITE_FAILED",
+                        "error_type": type(exc).__name__,
+                    })
+            return {
+                "status": "NOT_CONFIGURED",
+                "queued": self.pending_count(),
+                "synced": 0,
+                "failed": 0,
+                "position_audit_events": len(audit_results),
+                "position_audit_write_failures": sum(
+                    item.get("status") == "AUDIT_WRITE_FAILED" for item in audit_results
+                ),
+            }
         current = int(time.time()) if now is None else int(now)
         rows = self._db.execute(
             """SELECT event_id, payload_json, attempts FROM csr_notion_event_outbox
@@ -272,9 +363,11 @@ class NotionEventOutbox:
             (current, min(limit, 50)),
         ).fetchall()
         synced = failed = 0
+        position_audit_write_failures = 0
         for row in rows:
             event_id = str(row["event_id"])
             attempts = int(row["attempts"] or 0) + 1
+            event: dict[str, Any] = {}
             try:
                 event = json.loads(row["payload_json"])
                 page_id = self._find_existing_page(token, event_id)
@@ -288,6 +381,13 @@ class NotionEventOutbox:
                            WHERE event_id=?""",
                         (attempts, page_id, _utc(), event_id),
                     )
+                audit_result = _record_position_notion_sync_audit(
+                    event,
+                    status="SYNCED",
+                    attempt=attempts,
+                )
+                if isinstance(audit_result, dict) and audit_result.get("status") == "AUDIT_WRITE_FAILED":
+                    position_audit_write_failures += 1
                 synced += 1
             except requests.HTTPError as exc:
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -298,6 +398,15 @@ class NotionEventOutbox:
                            last_error_type=?, last_http_status=? WHERE event_id=?""",
                         (attempts, current + delay, type(exc).__name__, status_code, event_id),
                     )
+                audit_result = _record_position_notion_sync_audit(
+                    event,
+                    status="PENDING_RETRY",
+                    attempt=attempts,
+                    error_type=type(exc).__name__,
+                    http_status=status_code,
+                ) if event else None
+                if isinstance(audit_result, dict) and audit_result.get("status") == "AUDIT_WRITE_FAILED":
+                    position_audit_write_failures += 1
                 failed += 1
             except Exception as exc:
                 delay = min(3600, 5 * (2 ** min(attempts - 1, 9)))
@@ -307,10 +416,39 @@ class NotionEventOutbox:
                            last_error_type=? WHERE event_id=?""",
                         (attempts, current + delay, type(exc).__name__, event_id),
                     )
+                audit_result = _record_position_notion_sync_audit(
+                    event,
+                    status="PENDING_RETRY",
+                    attempt=attempts,
+                    error_type=type(exc).__name__,
+                ) if event else None
+                if isinstance(audit_result, dict) and audit_result.get("status") == "AUDIT_WRITE_FAILED":
+                    position_audit_write_failures += 1
                 failed += 1
         snapshot = self.status_snapshot()
-        snapshot.update({"synced_this_run": synced, "failed_this_run": failed})
+        snapshot.update({
+            "synced_this_run": synced,
+            "failed_this_run": failed,
+            "position_audit_write_failures": position_audit_write_failures,
+        })
         return snapshot
+
+    def get_event_status(self, event_id: str) -> dict[str, Any]:
+        """Return the durable delivery state for one exact Notion outbox event."""
+        key = _text(event_id, 180)
+        if not key:
+            raise ValueError("event_id is required")
+        row = self._db.execute(
+            """SELECT event_id, attempts, next_attempt_at, sync_status,
+                      last_error_type, last_http_status, notion_page_id, synced_at_utc
+               FROM csr_notion_event_outbox WHERE event_id=?""",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return {"status": "NOT_FOUND", "event_id": key}
+        result = dict(row)
+        result["status"] = str(result.get("sync_status") or "UNKNOWN")
+        return result
 
     def pending_count(self) -> int:
         row = self._db.execute(
