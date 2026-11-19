@@ -604,7 +604,6 @@ def schedule_position_observer_review(
 
     review_batch_id = f"{position_id}:{int(now_epoch * 1000)}"
     _record_audit_event(
-        cycle_id=experience_id,
         phase="POSITION_AI_REVIEW_BATCH_REQUESTED",
         event_key=f"position-review-batch-requested:{position_id}:{review_batch_id}",
         details={
