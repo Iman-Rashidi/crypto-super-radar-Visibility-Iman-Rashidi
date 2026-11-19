@@ -158,6 +158,8 @@ def record_position_supervisor_watchdog_cycle(
         "reviewer_states": {
             reviewer_id: {
                 "status": str((reviewer_states.get(reviewer_id) or {}).get("status") or "UNKNOWN"),
+                "action": str((reviewer_states.get(reviewer_id) or {}).get("action") or ""),
+                "last_action": str((reviewer_states.get(reviewer_id) or {}).get("last_action") or ""),
                 "last_result_age_seconds": (reviewer_states.get(reviewer_id) or {}).get("last_result_age_seconds"),
                 "reason_code": str((reviewer_states.get(reviewer_id) or {}).get("reason_code") or "")[:100],
             }
