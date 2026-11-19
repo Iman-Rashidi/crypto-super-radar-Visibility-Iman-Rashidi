@@ -58,7 +58,7 @@ def signal_record(**overrides):
         "gates": [{"gate_id": gate_id, "status": statuses[gate_id - 1]} for gate_id in range(1, 13)],
         "entry_price_usd": 100.0,
         "stop_loss_usd": 98.0,
-        "take_profit_usd": 104.0,
+        "take_profit_usd": 106.0,
     }
     record.update(overrides)
     side = str(record["signal"]).upper()
@@ -161,6 +161,10 @@ def signal_record(**overrides):
             },
         },
     ]
+    reviewed_at_utc = datetime.now(timezone.utc).isoformat()
+    for item in reviewers:
+        item["review"]["reviewed_signal_id"] = record["signal_id"]
+        item["review"]["reviewed_at_utc"] = reviewed_at_utc
     record["ai_reviews"] = reviewers
     record["ai_consensus"] = {
         "status": "APPROVED_BY_BOTH",
@@ -173,6 +177,8 @@ def signal_record(**overrides):
         "two_reviewer_approval": True,
         "decision": "AUTHORIZE_DEMO_EXECUTION",
         "entry_gate_enforced": True,
+        "reviewed_signal_id": record["signal_id"],
+        "reviewed_at_utc": reviewed_at_utc,
     }
     return record
 
@@ -1059,6 +1065,7 @@ class FakeExecutorClient:
 
     def __init__(self):
         self.calls = []
+        self.ticker_quote = {"bidPrice": "99.99", "askPrice": "100.01"}
         self.order_response = {"code": "0", "data": [{"code": "0", "orderId": "simulated-demo-id"}]}
 
     def verify_trade_permission(self):
@@ -1071,7 +1078,7 @@ class FakeExecutorClient:
 
     def get_tickers(self, *, inst_id=None):
         self.calls.append("ticker")
-        return [{"instId": inst_id, "last": "100", "ts": "1800000000000"}]
+        return [{"instId": inst_id, "last": "100", "ts": "1800000000000", **self.ticker_quote}]
 
     def get_position_mode(self):
         self.calls.append("position_mode")
@@ -1181,6 +1188,83 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_net_cost_gate_blocks_two_to_one_gross_rr_when_net_rr_falls_below_policy(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                executor.execute(
+                    signal_record(take_profit_usd=104.0), inst_id="BTC-USDT",
+                    leverage=1, allow_demo_orders=True,
+                )
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
+            self.assertEqual(store._db.execute(
+                "SELECT COUNT(*) FROM blofin_demo_orders"
+            ).fetchone()[0], 0)
+        finally:
+            store.close()
+
+    def test_net_cost_gate_requires_bid_and_ask_before_any_write(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.ticker_quote = {}
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT",
+                    leverage=1, allow_demo_orders=True,
+                )
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
+            self.assertEqual(store._db.execute(
+                "SELECT COUNT(*) FROM blofin_demo_orders"
+            ).fetchone()[0], 0)
+        finally:
+            store.close()
+
+    def test_net_cost_gate_rejects_excessive_spread_before_reserving_order(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.ticker_quote = {"bidPrice": "80", "askPrice": "120"}
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT",
+                    leverage=1, allow_demo_orders=True,
+                )
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
+            self.assertEqual(store._db.execute(
+                "SELECT COUNT(*) FROM blofin_demo_orders"
+            ).fetchone()[0], 0)
+        finally:
+            store.close()
+
     def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call(self):
         mutations = {
             "missing consensus": lambda item: item.pop("ai_consensus"),
@@ -1206,6 +1290,12 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             ),
             "cached response": lambda item: item["ai_reviews"][1]["review"].update(
                 response_source="CACHE", request_attempted=False,
+            ),
+            "stale approval": lambda item: item["ai_reviews"][0]["review"].update(
+                reviewed_at_utc=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+            ),
+            "approval for another signal": lambda item: item["ai_reviews"][1]["review"].update(
+                reviewed_signal_id="different-signal-id",
             ),
         }
         for label, mutate in mutations.items():
