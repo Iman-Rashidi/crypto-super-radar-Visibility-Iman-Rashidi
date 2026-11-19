@@ -4203,10 +4203,18 @@ def _run_blofin_demo_execution_job(
             raise BloFinDemoExecutionBlocked("Invalid BloFin USDT perpetual instrument.")
         if execution_profile != "CHALLENGE_1":
             raise BloFinDemoExecutionBlocked("Invalid execution profile.")
-        selection_context = dict(selection_context) if isinstance(selection_context, dict) else {
-            "selection_method": "NOT_PROVIDED",
-            "selection_reason": "No caller supplied asset-selection evidence; the robot must not invent a ranking.",
-        }
+        if not isinstance(selection_context, dict):
+            with LOCK:
+                queued_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+            stored_selection = queued_job.get("selection_context")
+            selection_context = (
+                dict(stored_selection) if isinstance(stored_selection, dict) else {
+                    "selection_method": "NOT_PROVIDED",
+                    "selection_reason": "No caller supplied asset-selection evidence; the robot must not invent a ranking.",
+                }
+            )
+        else:
+            selection_context = dict(selection_context)
         _set_blofin_execution_job(
             job_id, "running", stage="ANALYSIS_STORAGE_CHECK",
             message_fa="در حال بررسی فقط حافظه پایدار؛ مجوز سفارش در مرحله جداگانه بررسی می‌شود.",
@@ -8244,17 +8252,15 @@ async function loadBlofinInstruments(){
                         job_id, "queued", stage="QUEUED",
                         message_fa=f"چرخه Demo برای {instrument_id} با ربات {execution_profile} ثبت شد؛ هنوز سفارشی ارسال نشده است.",
                         trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
+                        selection_context={
+                            "selection_method": "MANUAL_OPERATOR",
+                            "selection_reason": "The operator explicitly selected this instrument for a Challenge 1 Demo cycle.",
+                            "configured_universe": [],
+                        },
                     )
                     worker = threading.Thread(
                         target=_run_blofin_demo_execution_job,
-                        args=(
-                            job_id, instrument_id, execution_profile,
-                            {
-                                "selection_method": "MANUAL_OPERATOR",
-                                "selection_reason": "The operator explicitly selected this instrument for a Challenge 1 Demo cycle.",
-                                "configured_universe": [],
-                            },
-                        ),
+                        args=(job_id, instrument_id, execution_profile),
                         daemon=True, name="blofin-demo-manual-cycle",
                     )
                     try:
@@ -8588,10 +8594,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                     job_id, "queued", stage="AUTOPILOT_CYCLE",
                     message_fa=f"چرخه خودکار Challenge 1 برای {instrument_id} آغاز شد.",
                     trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
-                )
-                _run_blofin_demo_execution_job(
-                    job_id, instrument_id, execution_profile,
-                    {
+                    selection_context={
                         "selection_method": "CONFIGURED_UNIVERSE_ORDER",
                         "selection_reason": (
                             "The scheduler scans the configured instrument list sequentially; "
@@ -8601,6 +8604,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                         "scan_index": scan_index, "scan_count": len(instrument_ids),
                     },
                 )
+                _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
                 with LOCK:
                     finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
                 summary = _blofin_autopilot_cycle_summary(finished_job)
