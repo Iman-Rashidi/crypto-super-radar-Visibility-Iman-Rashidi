@@ -168,6 +168,9 @@ class NotionEventOutboxTests(unittest.TestCase):
         self.assertEqual(audit.call_args.args[0]["event_id"], "position-review-success")
         self.assertEqual(audit.call_args.kwargs["status"], "SYNCED")
         self.assertEqual(audit.call_args.kwargs["attempt"], 1)
+        self.assertEqual(
+            audit.call_args.kwargs["notion_page_id"], "notion-position-page-1",
+        )
         state = self.outbox.get_event_status("position-review-success")
         self.assertEqual(state["status"], "SYNCED")
         self.assertEqual(state["notion_page_id"], "notion-position-page-1")
