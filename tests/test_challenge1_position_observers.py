@@ -249,3 +249,101 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Challenge1ObserverUnknownStateRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.connection = sqlite3.connect(":memory:", check_same_thread=False)
+        self.connection.row_factory = sqlite3.Row
+        recorder = Challenge1AuditRecorder(connection=self.connection)
+        recorder.close()
+        observers._REVIEW_THREADS.clear()
+
+    def tearDown(self):
+        observers._REVIEW_THREADS.clear()
+        self.connection.close()
+
+    def test_worker_failure_preserves_unknown_request_attempt_state(self):
+        with (
+            patch.object(
+                observers, "_record_audit_event",
+                return_value={"event_id": "event-1", "cycle_id": "experience-unknown"},
+            ) as save_event,
+            patch.object(observers, "_queue_notion_projection", return_value="QUEUED"),
+        ):
+            observers._reviewer_result_event(
+                review_batch_id="batch-1",
+                reviewer={
+                    "reviewer_id": "nemotron",
+                    "status": "OBSERVER_WORKER_FAILED",
+                    "request_attempted": None,
+                    "error_type": "RuntimeError",
+                },
+                consensus="NOT_COMPARABLE",
+                experience_id="experience-unknown",
+                position_id="position-unknown",
+                order_id="order-unknown",
+                symbol="BTC-USDT",
+                signal="LONG",
+            )
+        details = save_event.call_args.kwargs["details"]
+        self.assertIsNone(details["request_attempted"])
+        self.assertIsNone(details["response_validated"])
+        self.assertIsNone(details["model_verified"])
+        self.assertEqual(details["status"], "OBSERVER_WORKER_FAILED")
+
+    def test_failed_worker_batch_is_retried_after_durable_recovery_delay(self):
+        first_time = datetime.now(timezone.utc) - timedelta(minutes=17)
+        batch_id = "position-recovery:old-batch"
+        recorder = Challenge1AuditRecorder(connection=self.connection)
+        try:
+            recorder.append_event(
+                cycle_id="experience-recovery",
+                phase="POSITION_AI_REVIEW_BATCH_REQUESTED",
+                event_key="requested:old-batch",
+                details={"review_batch_id": batch_id, "status": "REQUESTED"},
+                experience_id="experience-recovery",
+                position_id="position-recovery",
+                occurred_at_utc=first_time.isoformat(),
+            )
+            for reviewer_id in ("nemotron", "second_ai"):
+                recorder.append_event(
+                    cycle_id="experience-recovery",
+                    phase="POSITION_AI_REVIEW_RESULT",
+                    event_key=f"failed:{reviewer_id}",
+                    details={
+                        "review_batch_id": batch_id,
+                        "reviewer_id": reviewer_id,
+                        "status": "OBSERVER_WORKER_FAILED",
+                        "request_attempted": None,
+                    },
+                    experience_id="experience-recovery",
+                    position_id="position-recovery",
+                    occurred_at_utc=(first_time + timedelta(seconds=2)).isoformat(),
+                )
+        finally:
+            recorder.close()
+
+        with (
+            patch.object(
+                observers, "Challenge1AuditRecorder",
+                side_effect=lambda: Challenge1AuditRecorder(connection=self.connection),
+            ),
+            patch.object(observers.threading, "Thread") as thread_class,
+        ):
+            result = observers.schedule_position_observer_review(
+                challenge_record={"challenge1_evidence": {"candles_5m": []}},
+                cycle_context={"robot_decision": "HOLD"},
+                experience_id="experience-recovery",
+                position_id="position-recovery",
+                order_id="order-recovery",
+                symbol="BTC-USDT",
+                signal="LONG",
+                now=first_time + timedelta(minutes=17),
+            )
+        self.assertTrue(all(item["status"] == "REQUESTED" for item in result.values()))
+        self.assertNotEqual(result["nemotron"]["review_batch_id"], batch_id)
+        thread_class.assert_called_once()
+        thread_class.return_value.start.assert_called_once()
+
+
