@@ -10205,6 +10205,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         order_id=str(order.get("exchange_order_id") or client_order_id),
                         symbol=instrument_id,
                         signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                        action_executor=_execute_challenge1_supervisor_action,
                     )
                 except Exception as observer_exc:
                     skip_code = "OBSERVER_SCHEDULER_FAILED"
