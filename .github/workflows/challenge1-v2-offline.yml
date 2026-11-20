@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
           cache: "pip"
       - name: Install offline test dependencies
-        run: python -m pip install --disable-pip-version-check numpy pandas
+        run: python -m pip install --disable-pip-version-check numpy pandas requests
       - name: Compile modified modules and tests
         run: |
           python -m compileall -q \
