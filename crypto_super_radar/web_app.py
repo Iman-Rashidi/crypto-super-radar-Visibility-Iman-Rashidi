@@ -10538,7 +10538,7 @@ def _blofin_demo_protection_requires_emergency_close(
     protective_evidence: Mapping[str, Any] | None,
 ) -> bool:
     """Require a guarded exact-position close when a successful read proves no SL exists."""
-    evidence = protective_evidence if isinstance(protective_evidence, Mapping) else {}
+    evidence = protective_evidence if isinstance(protective_evidence, dict) else {}
     status = str(evidence.get("status") or "UNKNOWN").strip().upper()
     return status in {
         "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
@@ -10551,7 +10551,7 @@ def _blofin_demo_protection_fully_confirmed(
     protective_evidence: Mapping[str, Any] | None,
 ) -> bool:
     """A position is fully protected only when both native exchange legs are visible."""
-    evidence = protective_evidence if isinstance(protective_evidence, Mapping) else {}
+    evidence = protective_evidence if isinstance(protective_evidence, dict) else {}
     return str(evidence.get("status") or "").strip().upper() == "BOTH_TP_AND_SL_VISIBLE"
 
 
