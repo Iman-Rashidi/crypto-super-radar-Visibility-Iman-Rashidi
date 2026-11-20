@@ -71,6 +71,8 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
             with self.subTest(side=side):
                 result = self._simulate(side, self._bars(side, 14))
                 self.assertEqual(result.status, "OPEN")
+                self.assertIsNone(result.net_pnl_usdt, "an open position cannot have finalized Net PnL")
+                self.assertIsNone(result.diagnostics["net_pnl_usdt"])
                 self.assertEqual(result.exit_reason, "TIME_EXIT_LIMIT_PENDING")
                 self.assertEqual(result.bars_held, 12)
                 self.assertEqual(result.diagnostics["time_exit_order_type"], "LIMIT")
