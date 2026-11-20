@@ -219,6 +219,12 @@ class FakeResponse:
 
 
 class BloFinDemoOrderPlanTests(unittest.TestCase):
+    def test_approved_four_position_policy_is_allowed_but_five_is_rejected(self):
+        policy = BloFinDemoRiskPolicy(max_concurrent_positions=4)
+        self.assertEqual(policy.max_concurrent_positions, 4)
+        with self.assertRaisesRegex(ValueError, "between 1 and 4"):
+            BloFinDemoRiskPolicy(max_concurrent_positions=5)
+
     def test_contract_size_is_sized_from_risk_and_contract_value(self):
         plan = build_demo_order_plan(
             signal_record(), instrument_record(), inst_id="BTC-USDT",
@@ -466,6 +472,34 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             signal_record(), instrument_record(), inst_id="BTC-USDT",
             equity_usdt=1000,
         )
+
+    def test_four_position_capacity_is_supported_and_fifth_position_is_blocked(self):
+        plans = []
+        for index in range(4):
+            plan = build_demo_order_plan(
+                signal_record(bar_offset_minutes=index * 5),
+                instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
+            )
+            # Isolate slot-count coverage while keeping each reservation within the
+            # same aggregate exposure envelope.
+            plan["reserved_risk_usdt"] = "1"
+            plan["reserved_margin_usdt"] = "10"
+            plans.append(plan)
+
+        for plan in plans:
+            self.assertTrue(self.store.reserve_order(plan, max_concurrent_positions=4))
+
+        fifth = build_demo_order_plan(
+            signal_record(bar_offset_minutes=20),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000, leverage=3,
+        )
+        fifth["reserved_risk_usdt"] = "1"
+        fifth["reserved_margin_usdt"] = "10"
+        self.assertFalse(self.store.reserve_order(fifth, max_concurrent_positions=4))
+
+    def test_reservation_rejects_capacity_above_four(self):
+        with self.assertRaisesRegex(ValueError, "between 1 and 4"):
+            self.store.reserve_order(self._plan(), max_concurrent_positions=5)
 
     def test_reservation_is_atomic_and_duplicate_safe(self):
         plan = self._plan()
