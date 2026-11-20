@@ -1137,6 +1137,45 @@ class BloFinDemoEventStore:
                 self._db.rollback()
                 raise
 
+    def record_protection_status(
+        self,
+        client_order_id: str,
+        *,
+        status: str,
+        position_id: str | None = None,
+        tpsl_id: str | None = None,
+        reason_code: str | None = None,
+    ) -> None:
+        """Persist read-only TP/SL reconciliation evidence without changing order state."""
+        if status not in {"VERIFIED", "UNKNOWN", "FAIL"}:
+            raise ValueError("Unsupported protection verification status.")
+        position_key = str(position_id or "").strip() or None
+        tpsl_key = str(tpsl_id or "").strip() or None
+        with self._lock, self._db:
+            order = self.get_order(client_order_id)
+            if order is None:
+                raise BloFinDemoExecutionBlocked("No local order exists for protection verification.")
+            existing_position = str(order.get("position_id") or "").strip()
+            if position_key and existing_position and existing_position != position_key:
+                raise BloFinDemoExecutionBlocked(
+                    "Protection evidence references a different exchange position ID."
+                )
+            if position_key:
+                self._db.execute(
+                    "UPDATE blofin_demo_orders SET position_id=?, updated_at=? WHERE client_order_id=?",
+                    (position_key, int(time.time()), client_order_id),
+                )
+            self._append_event(
+                client_order_id,
+                "PROTECTION_" + status,
+                {
+                    "position_id": position_key,
+                    "tpsl_id": tpsl_key,
+                    "reason_code": reason_code,
+                    "read_only": True,
+                },
+            )
+
     def update_order(self, client_order_id: str, status: str, *, exchange_order_id: str | None = None) -> None:
         allowed = {
             "LEVERAGE_SET", "PENDING_RECONCILE", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
@@ -1889,6 +1928,231 @@ class BloFinDemoExecutor:
         configured = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
         self.trading_enabled = configured if trading_enabled is None else bool(trading_enabled)
 
+    def verify_attached_protection(
+        self,
+        *,
+        inst_id: str,
+        client_order_id: str,
+        exchange_order_id: str,
+        side: str,
+        position_mode: str,
+        multi_position: bool,
+        quantity: str,
+        take_profit: str,
+        stop_loss: str,
+    ) -> dict[str, Any]:
+        """Read back the exact filled position and its active TP/SL bracket.
+
+        This method is read-only. Missing, delayed or ambiguous exchange evidence
+        never becomes VERIFIED and never triggers an order retry or emergency write.
+        """
+        expected_position_side = (
+            "net" if position_mode == "net_mode"
+            else "long" if side == "LONG"
+            else "short"
+        )
+        expected_tpsl_side = "sell" if side == "LONG" else "buy"
+        try:
+            detail = self.client.get_order_detail(
+                inst_id, client_order_id=client_order_id
+            )
+            if isinstance(detail, list):
+                detail = next((row for row in detail if isinstance(row, Mapping)), None)
+            if not isinstance(detail, Mapping):
+                return {
+                    "status": "UNKNOWN",
+                    "reason_code": "ORDER_DETAIL_NOT_AVAILABLE",
+                    "reason": "Order detail is not yet available for protection reconciliation.",
+                    "position_id": None,
+                    "tpsl_id": None,
+                }
+            if (
+                str(detail.get("clientOrderId") or "") != client_order_id
+                or str(detail.get("orderId") or "") != exchange_order_id
+                or str(detail.get("instId") or "") != inst_id
+            ):
+                return {
+                    "status": "FAIL",
+                    "reason_code": "ORDER_DETAIL_IDENTITY_MISMATCH",
+                    "reason": "Order detail did not match the exact local client order, exchange order and instrument.",
+                    "position_id": None,
+                    "tpsl_id": None,
+                }
+            order_state = str(detail.get("state") or "").lower()
+            if order_state not in {"filled", "partially_filled"}:
+                return {
+                    "status": "UNKNOWN",
+                    "reason_code": "ORDER_NOT_FILLED_YET",
+                    "reason": "The exchange order is not yet reported as filled; position protection cannot be confirmed.",
+                    "position_id": str(detail.get("positionId") or "") or None,
+                    "tpsl_id": None,
+                }
+
+            position_id = str(detail.get("positionId") or "").strip() or None
+            if multi_position and not position_id:
+                return {
+                    "status": "UNKNOWN",
+                    "reason_code": "MULTI_POSITION_ID_NOT_RETURNED",
+                    "reason": "BloFin Multi-Position mode did not return the filled order's positionId.",
+                    "position_id": None,
+                    "tpsl_id": None,
+                }
+
+            positions = self.client.get_positions(inst_id=inst_id)
+            if not isinstance(positions, list):
+                return {
+                    "status": "UNKNOWN",
+                    "reason_code": "POSITIONS_SCHEMA_INVALID",
+                    "reason": "BloFin positions response is not a list.",
+                    "position_id": position_id,
+                    "tpsl_id": None,
+                }
+            live_positions = []
+            for row in positions:
+                if not isinstance(row, Mapping):
+                    continue
+                if str(row.get("instId") or "") != inst_id:
+                    continue
+                if str(row.get("marginMode") or "").lower() != "isolated":
+                    continue
+                if str(row.get("positionSide") or "").lower() != expected_position_side:
+                    continue
+                raw_size = next(
+                    (row.get(key) for key in ("positions", "pos", "positionSize", "positionAmt") if row.get(key) not in (None, "")),
+                    None,
+                )
+                if raw_size is None:
+                    continue
+                try:
+                    signed_size = float(raw_size)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not math.isfinite(signed_size) or abs(signed_size) <= 1e-12:
+                    continue
+                if position_mode == "net_mode":
+                    if (side == "LONG" and signed_size <= 0) or (side == "SHORT" and signed_size >= 0):
+                        continue
+                row_position_id = str(row.get("positionId") or "").strip() or None
+                if position_id and row_position_id != position_id:
+                    continue
+                live_positions.append((row, abs(signed_size), row_position_id))
+            if len(live_positions) != 1:
+                return {
+                    "status": "UNKNOWN",
+                    "reason_code": "POSITION_IDENTITY_NOT_UNIQUE",
+                    "reason": "The exact live position could not be uniquely linked to the filled order.",
+                    "position_id": position_id,
+                    "tpsl_id": None,
+                }
+            position_row, position_size, matched_position_id = live_positions[0]
+            if multi_position and matched_position_id != position_id:
+                return {
+                    "status": "FAIL",
+                    "reason_code": "POSITION_ID_MISMATCH",
+                    "reason": "Live positionId did not match the positionId returned by the filled order.",
+                    "position_id": position_id,
+                    "tpsl_id": None,
+                }
+
+            tpsl_rows = self.client.get_open_tpsl_orders(inst_id=inst_id, limit=100)
+            if not isinstance(tpsl_rows, list):
+                return {
+                    "status": "UNKNOWN",
+                    "reason_code": "TPSL_SCHEMA_INVALID",
+                    "reason": "BloFin active TP/SL response is not a list.",
+                    "position_id": matched_position_id,
+                    "tpsl_id": None,
+                }
+            candidates = []
+            mismatched_position_seen = False
+            for row in tpsl_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                if str(row.get("instId") or "") != inst_id:
+                    continue
+                row_position_id = str(row.get("positionId") or "").strip() or None
+                if matched_position_id:
+                    if row_position_id != matched_position_id:
+                        if row_position_id:
+                            mismatched_position_seen = True
+                        continue
+                elif row_position_id:
+                    continue
+                if str(row.get("state") or "").lower() not in {"live", "effective"}:
+                    continue
+                if str(row.get("marginMode") or "").lower() != "isolated":
+                    continue
+                if str(row.get("positionSide") or "").lower() != expected_position_side:
+                    continue
+                if str(row.get("side") or "").lower() != expected_tpsl_side:
+                    continue
+                candidates.append(row)
+            if len(candidates) != 1:
+                return {
+                    "status": "UNKNOWN",
+                    "reason_code": "ACTIVE_TPSL_NOT_UNIQUELY_LINKED",
+                    "reason": (
+                        "No single active TP/SL bracket was linked to the exact live position."
+                        if len(candidates) == 0
+                        else "More than one active TP/SL bracket matched the exact position."
+                    ),
+                    "position_id": matched_position_id,
+                    "tpsl_id": None,
+                    "mismatched_position_rows_seen": mismatched_position_seen,
+                }
+            tpsl = candidates[0]
+            expected_tp = _decimal(take_profit, "expected_take_profit")
+            expected_sl = _decimal(stop_loss, "expected_stop_loss")
+            observed_tp = _decimal(tpsl.get("tpTriggerPrice"), "observed_take_profit")
+            observed_sl = _decimal(tpsl.get("slTriggerPrice"), "observed_stop_loss")
+            tp_type = str(tpsl.get("tpTriggerPriceType") or "").lower()
+            sl_type = str(tpsl.get("slTriggerPriceType") or "").lower()
+            observed_size = tpsl.get("actualSize")
+            if observed_size in (None, ""):
+                observed_size = tpsl.get("size")
+            if str(observed_size).strip() != "-1":
+                observed_size_decimal = _decimal(observed_size, "observed_tpsl_size")
+                if observed_size_decimal != _decimal(str(position_size), "live_position_size"):
+                    return {
+                        "status": "FAIL",
+                        "reason_code": "TPSL_SIZE_MISMATCH",
+                        "reason": "Active TP/SL quantity did not cover the full live position size.",
+                        "position_id": matched_position_id,
+                        "tpsl_id": str(tpsl.get("tpslId") or "") or None,
+                    }
+            if observed_tp != expected_tp or observed_sl != expected_sl:
+                return {
+                    "status": "FAIL",
+                    "reason_code": "TPSL_TRIGGER_PRICE_MISMATCH",
+                    "reason": "Active TP/SL trigger prices did not match the approved entry plan.",
+                    "position_id": matched_position_id,
+                    "tpsl_id": str(tpsl.get("tpslId") or "") or None,
+                }
+            if tp_type != "mark" or sl_type != "mark":
+                return {
+                    "status": "FAIL",
+                    "reason_code": "TPSL_TRIGGER_TYPE_MISMATCH",
+                    "reason": "Active TP/SL trigger types were not both the approved mark-price type.",
+                    "position_id": matched_position_id,
+                    "tpsl_id": str(tpsl.get("tpslId") or "") or None,
+                }
+            return {
+                "status": "VERIFIED",
+                "reason_code": "EXACT_POSITION_TPSL_READBACK",
+                "reason": "A live exchange-managed TP/SL bracket matched the exact BloFin positionId, side, size and approved mark-price triggers.",
+                "position_id": matched_position_id,
+                "tpsl_id": str(tpsl.get("tpslId") or "") or None,
+                "position_size": str(position_size),
+            }
+        except Exception as exc:
+            return {
+                "status": "UNKNOWN",
+                "reason_code": "PROTECTION_READBACK_ERROR",
+                "reason": f"Read-only TP/SL verification failed: {type(exc).__name__}",
+                "position_id": None,
+                "tpsl_id": None,
+            }
+
     def reconcile_unknown_order(self, *, inst_id: str, client_order_id: str) -> dict[str, Any]:
         """Read order state by client id. This method never places or retries an order."""
         order = self.store.get_order(client_order_id)
@@ -2196,6 +2460,33 @@ class BloFinDemoExecutor:
             self.store.update_order(plan["client_order_id"], "UNKNOWN")
             raise BloFinDemoExecutionUnknown("Order ID is missing; reconcile before retrying.")
         self.store.update_order(plan["client_order_id"], "ACCEPTED", exchange_order_id=str(order_id))
+        protection = self.verify_attached_protection(
+            inst_id=inst_id,
+            client_order_id=plan["client_order_id"],
+            exchange_order_id=str(order_id),
+            side=plan["side"],
+            position_mode=position_mode,
+            multi_position=mode.get("multiPosition") is True or str(mode.get("multiPosition") or "").lower() == "true",
+            quantity=plan["quantity"],
+            take_profit=plan["take_profit"],
+            stop_loss=plan["stop_loss"],
+        )
+        try:
+            self.store.record_protection_status(
+                plan["client_order_id"],
+                status=str(protection.get("status") or "UNKNOWN"),
+                position_id=protection.get("position_id"),
+                tpsl_id=protection.get("tpsl_id"),
+                reason_code=protection.get("reason_code"),
+            )
+        except Exception:
+            # An audit persistence failure cannot make exchange-side protection VERIFIED.
+            protection = {
+                **protection,
+                "status": "UNKNOWN",
+                "reason_code": "PROTECTION_AUDIT_PERSISTENCE_FAILED",
+                "reason": "TP/SL readback could not be durably linked to the local order event store.",
+            }
         return {
             "status": "ACCEPTED",
             "environment": "BLOFIN_DEMO",
@@ -2214,4 +2505,10 @@ class BloFinDemoExecutor:
             "execution_cost_estimate": plan.get("execution_cost_estimate"),
             "position_mode": position_mode,
             "orders_enabled": True,
+            "protection_status": protection.get("status", "UNKNOWN"),
+            "entry_protected": protection.get("status") == "VERIFIED",
+            "protection_position_id": protection.get("position_id"),
+            "protection_tpsl_id": protection.get("tpsl_id"),
+            "protection_reason_code": protection.get("reason_code"),
+            "protection_reason": protection.get("reason"),
         }

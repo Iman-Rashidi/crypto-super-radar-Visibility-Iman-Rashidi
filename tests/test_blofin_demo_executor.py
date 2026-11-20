@@ -1099,6 +1099,10 @@ class FakeExecutorClient:
 
     def __init__(self):
         self.calls = []
+        self.position_reads = 0
+        self.last_order_kwargs = None
+        self.tpsl_position_id = "simulated-position-id"
+        self.multi_position = False
         self.ticker_quote = {"bidPrice": "99.99", "askPrice": "100.01"}
         self.order_response = {"code": "0", "data": [{"code": "0", "orderId": "simulated-demo-id"}]}
 
@@ -1116,7 +1120,7 @@ class FakeExecutorClient:
 
     def get_position_mode(self):
         self.calls.append("position_mode")
-        return {"positionMode": "net_mode"}
+        return {"positionMode": "net_mode", "multiPosition": self.multi_position}
 
     def get_tradable_instrument(self, inst_id):
         self.calls.append("instrument")
@@ -1126,9 +1130,56 @@ class FakeExecutorClient:
         self.calls.append("balance")
         return {"totalEquity": "1000"}
 
-    def get_positions(self):
-        self.calls.append("positions")
-        return []
+    def get_positions(self, *, inst_id=None):
+        self.calls.append(("positions", inst_id))
+        self.position_reads += 1
+        if self.position_reads == 1:
+            return []
+        if self.last_order_kwargs is None:
+            return []
+        size = self.last_order_kwargs["size"]
+        return [{
+            "instId": inst_id,
+            "positionId": self.tpsl_position_id,
+            "marginMode": "isolated",
+            "positionSide": "net",
+            "positions": size if self.last_order_kwargs["side"] == "buy" else "-" + size,
+        }]
+
+    def get_order_detail(self, inst_id, *, client_order_id):
+        self.calls.append(("order_detail", inst_id, client_order_id))
+        if self.last_order_kwargs is None:
+            return None
+        return {
+            "orderId": "simulated-demo-id",
+            "clientOrderId": client_order_id,
+            "instId": inst_id,
+            "positionId": self.tpsl_position_id,
+            "state": "filled",
+        }
+
+    def get_open_tpsl_orders(self, *, inst_id=None, limit=100):
+        self.calls.append(("open_tpsl", inst_id, limit))
+        if self.last_order_kwargs is None:
+            return []
+        kwargs = self.last_order_kwargs
+        return [{
+            "tpslId": "simulated-tpsl-id",
+            "instId": inst_id,
+            "positionId": self.tpsl_position_id,
+            "marginMode": "isolated",
+            "positionSide": "net",
+            "side": "sell" if kwargs["side"] == "buy" else "buy",
+            "size": kwargs["size"],
+            "state": "live",
+            "tpTriggerPrice": kwargs["take_profit"],
+            "tpOrderPrice": "-1",
+            "tpTriggerPriceType": "mark",
+            "slTriggerPrice": kwargs["stop_loss"],
+            "slOrderPrice": "-1",
+            "slTriggerPriceType": "mark",
+        }]
+
 
     def get_open_orders(self):
         self.calls.append("pending_orders")
@@ -1140,6 +1191,7 @@ class FakeExecutorClient:
 
     def place_futures_order(self, **kwargs):
         self.calls.append(("place_order", kwargs))
+        self.last_order_kwargs = kwargs
         return self.order_response
 
 
@@ -1219,6 +1271,91 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             self.assertEqual(
                 store._db.execute("SELECT COUNT(*) FROM blofin_demo_orders").fetchone()[0], 1
             )
+        finally:
+            store.close()
+
+    def test_demo_pipeline_marks_entry_protected_only_after_exact_tpsl_readback(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            result = executor.execute(
+                signal_record(), inst_id="BTC-USDT", leverage=1,
+                allow_demo_orders=True,
+            )
+            self.assertEqual(result["status"], "ACCEPTED")
+            self.assertEqual(result["protection_status"], "VERIFIED")
+            self.assertTrue(result["entry_protected"])
+            self.assertEqual(result["protection_position_id"], "simulated-position-id")
+            self.assertEqual(result["protection_tpsl_id"], "simulated-tpsl-id")
+            order = store.get_order(result["client_order_id"])
+            self.assertEqual(order["position_id"], "simulated-position-id")
+            events = store.recent_events(result["client_order_id"])
+            self.assertEqual(events[-1]["event_type"], "PROTECTION_VERIFIED")
+            self.assertTrue(any(
+                isinstance(call, tuple) and call[0] == "order_detail"
+                for call in client.calls
+            ))
+            self.assertTrue(any(
+                isinstance(call, tuple) and call[0] == "open_tpsl"
+                for call in client.calls
+            ))
+        finally:
+            store.close()
+
+    def test_demo_pipeline_does_not_mark_a_different_position_bracket_as_protected(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        original_get_tpsl = client.get_open_tpsl_orders
+        def wrong_position_tpsl(**kwargs):
+            rows = original_get_tpsl(**kwargs)
+            rows[0]["positionId"] = "different-position"
+            return rows
+        client.get_open_tpsl_orders = wrong_position_tpsl
+        try:
+            result = executor.execute(
+                signal_record(), inst_id="BTC-USDT", leverage=1,
+                allow_demo_orders=True,
+            )
+            self.assertEqual(result["status"], "ACCEPTED")
+            self.assertEqual(result["protection_status"], "UNKNOWN")
+            self.assertFalse(result["entry_protected"])
+            self.assertEqual(result["protection_reason_code"], "ACTIVE_TPSL_NOT_UNIQUELY_LINKED")
+            events = store.recent_events(result["client_order_id"])
+            self.assertEqual(events[-1]["event_type"], "PROTECTION_UNKNOWN")
+        finally:
+            store.close()
+
+    def test_multi_position_mode_requires_position_id_from_filled_order(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.multi_position = True
+        client.tpsl_position_id = ""
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            result = executor.execute(
+                signal_record(), inst_id="BTC-USDT", leverage=1,
+                allow_demo_orders=True,
+            )
+            self.assertEqual(result["protection_status"], "UNKNOWN")
+            self.assertFalse(result["entry_protected"])
+            self.assertEqual(result["protection_reason_code"], "MULTI_POSITION_ID_NOT_RETURNED")
         finally:
             store.close()
 
