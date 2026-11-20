@@ -9,6 +9,7 @@ from typing import Any
 import math
 import numpy as np
 import pandas as pd
+from .elliott_waves import monitor_elliott_waves
 
 
 def _validate(frame: pd.DataFrame, label: str, minimum: int) -> pd.DataFrame:
@@ -148,6 +149,42 @@ def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) 
     }
 
 
+def _elliott_wave_1h_evidence(frame_1h: pd.DataFrame, asof: pd.Timestamp) -> dict[str, Any]:
+    """Capture structural wave evidence from completed 1H candles only.
+
+    This is evidence metadata, not a direction/probability override. The V2
+    strategy's existing signal gates and score remain unchanged.
+    """
+    closed = _closed(
+        _validate(frame_1h, "1H", 205),
+        asof,
+        pd.Timedelta(hours=1),
+    )
+    wave = monitor_elliott_waves(closed)
+    pattern = str(wave.get("pattern") or "AMBIGUOUS").upper()
+    phase = str(wave.get("phase") or "INSUFFICIENT_DATA").upper()
+    allowed_phases = {
+        "WAVES_1_AND_2_CONFIRMED",
+        "WAVE_3_CONFIRMED",
+        "WAVE_4_CONFIRMED",
+        "FIVE_WAVE_IMPULSE_CONFIRMED",
+    }
+    return {
+        **wave,
+        "timeframe": "1H",
+        "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+        "latest_closed_candle_open_utc": (
+            closed.index[-1].isoformat() if not closed.empty else None
+        ),
+        "data_asof_utc": asof.isoformat(),
+        "wave_alignment": (
+            "ALIGNED"
+            if pattern in {"BULLISH", "BEARISH"} and phase in allowed_phases
+            else "UNCONFIRMED"
+        ),
+    }
+
+
 def analyze_signal(
     *, instrument_id: str, frame_1h: pd.DataFrame, frame_4h: pd.DataFrame,
     frame_15m: pd.DataFrame, btc_15m: pd.DataFrame, asof: pd.Timestamp,
@@ -258,12 +295,28 @@ def analyze_signal(
     }
     signal_time = m15.index[-1].isoformat()
     signal_id = f"challenge1-v2:{symbol}:15m:{signal_time}:{direction}"
+    wave_evidence = _elliott_wave_1h_evidence(frame_1h, asof)
+    v2_evidence = {
+        "decision_engine_version": "CHALLENGE_1_V2_1H_4H_15M",
+        "signal_id": signal_id,
+        "instrument_id": symbol,
+        "setup_timeframe": "15m",
+        "context_timeframes": ["1H", "4H"],
+        "higher_timeframes_used": True,
+        "completed_candles_only": True,
+        "signal_candle_open_utc": signal_time,
+        "data_asof_utc": asof.isoformat(),
+        "elliott_wave": wave_evidence,
+        "wave_alignment": wave_evidence["wave_alignment"],
+    }
     return {
         "signal": direction, "signal_id": signal_id, "instrument_id": symbol,
         "entry": entry, "stop_loss": stop, "take_profit": target,
         "atr_15m": current_atr, "gross_rr": abs(target - entry) / abs(entry - stop),
         "confidence_score": confidence_score, "score_parts": score_parts,
         "regime": regime, "volume_ratio": volume_ratio, "rsi_15m": rsi_value,
+        "elliott_wave_1h": wave_evidence,
+        "challenge1_v2_evidence": v2_evidence,
         "funding_rate": funding, "spread_fraction": spread,
         "signal_candle_open_utc": signal_time, "features": features,
         "orders_submitted": False,
