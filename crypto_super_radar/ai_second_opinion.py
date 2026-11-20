@@ -220,12 +220,15 @@ def _challenge1_result_record(result: Any) -> dict[str, Any]:
     return record
 
 
-def _is_challenge1_result(result: Any) -> bool:
+def _challenge1_result_profile(result: Any) -> str:
     metrics = getattr(result, "metrics", {})
     metrics = metrics if isinstance(metrics, Mapping) else {}
     record = _challenge1_result_record(result)
-    profile = str(record.get("execution_profile") or metrics.get("execution_profile") or "").upper()
-    return profile == "CHALLENGE_1"
+    return str(record.get("execution_profile") or metrics.get("execution_profile") or "").strip().upper()
+
+
+def _is_challenge1_result(result: Any) -> bool:
+    return _challenge1_result_profile(result) in {"CHALLENGE_1", "CHALLENGE_1_V2"}
 
 
 def _challenge1_native_review(result: Any) -> dict[str, Any]:
@@ -311,10 +314,84 @@ def _challenge1_native_review(result: Any) -> dict[str, Any]:
     }
 
 
+def _challenge1_v2_native_review(result: Any) -> dict[str, Any]:
+    """Validate V2 evidence natively without calling an LLM or authorizing an order."""
+    from .challenge1_v2 import challenge1_v2_execution_evidence_ready
+
+    record = _challenge1_result_record(result)
+    ready, reason = challenge1_v2_execution_evidence_ready(record)
+    side = str(record.get("signal") or "").strip().upper()
+    entry = _safe_float(record.get("entry"))
+    stop = _safe_float(record.get("stop_loss"))
+    target = _safe_float(record.get("take_profit"))
+    score = _safe_float(record.get("confidence_score"))
+    gross_rr = _safe_float(record.get("gross_rr"))
+    checks: list[dict[str, str]] = []
+
+    def add_check(name: str, status: str, detail: str) -> None:
+        checks.append({"check": name, "status": status, "detail": detail})
+
+    add_check(
+        "Validated closed 15m/1h/4h candle packet",
+        "PASS" if ready else "UNKNOWN",
+        reason,
+    )
+    if entry is None or stop is None or target is None:
+        add_check("V2 protective price geometry", "UNKNOWN",
+                  "Finite positive entry, stop-loss and take-profit are required.")
+    elif (
+        (side == "LONG" and not 0 < stop < entry < target)
+        or (side == "SHORT" and not 0 < target < entry < stop)
+    ):
+        add_check("V2 protective price geometry", "FAIL",
+                  "Stop/entry/target ordering does not match the V2 signal direction.")
+    else:
+        add_check("V2 protective price geometry", "PASS",
+                  "V2 stop-loss and take-profit are correctly ordered for the signal side.")
+    if score is None or gross_rr is None:
+        add_check("V2 confluence and reward-to-risk", "UNKNOWN",
+                  "Finite confluence score and gross reward-to-risk are required.")
+    elif score < 70 or gross_rr < 1.8:
+        add_check("V2 confluence and reward-to-risk", "FAIL",
+                  "V2 confluence must be at least 70 and gross reward-to-risk at least 1.8.")
+    else:
+        add_check("V2 confluence and reward-to-risk", "PASS",
+                  "V2 confluence and gross reward-to-risk meet the native minimums.")
+    statuses = [item["status"] for item in checks]
+    status = "VETO" if "FAIL" in statuses else "UNKNOWN" if "UNKNOWN" in statuses else "APPROVED"
+    return {
+        "version": "challenge1-v2-native-review-v1",
+        "mode": "CLOSED_15M_1H_4H_OHLCV_AND_FUNDING_PROOF",
+        "execution_profile": "CHALLENGE_1_V2",
+        "review_basis": "COMPLETED_15M_1H_4H_CANDLES_1H_ELLIOTT_AND_FUNDING_KIND_0",
+        "review_mode": "V2_MULTI_TIMEFRAME_REVIEW",
+        "status": status,
+        "status_fa": (
+            "بستهٔ کندل‌های بسته‌شدهٔ چندتایم‌فریمی و برنامهٔ ریسک V2 معتبر است."
+            if status == "APPROVED"
+            else "شواهد چندتایم‌فریمی یا برنامهٔ ریسک V2 کامل/سازگار نیست؛ بررسی بیرونی و ورود متوقف شد."
+        ),
+        "paper_entry_eligible": status == "APPROVED",
+        "proposed_signal": side or "UNKNOWN",
+        "signal_id": str(record.get("signal_id") or ""),
+        "risk_manager": {"status": status, "checks": checks},
+        "reason_fa": "؛ ".join(item["detail"] for item in checks if item["status"] != "PASS"),
+        "safety": {
+            "general_twelve_gate_evaluation": False,
+            "legacy_five_minute_evidence_used": False,
+            "llm_calls": 0,
+            "orders_submitted": False,
+        },
+    }
+
+
 def _native_review_for_result(result: Any) -> dict[str, Any]:
-    """Use the isolated pattern review only for BloFin Demo Challenge 1."""
-    if _is_challenge1_result(result):
+    """Keep legacy 5m review separate from the V2 multi-timeframe evidence contract."""
+    profile = _challenge1_result_profile(result)
+    if profile == "CHALLENGE_1":
         return _challenge1_native_review(result)
+    if profile == "CHALLENGE_1_V2":
+        return _challenge1_v2_native_review(result)
     return build_native_agent_council_review(result)
 
 
