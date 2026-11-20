@@ -447,10 +447,22 @@ def run_sandbox(
                 shadow_trades.append({
                     "signal_id": order["signal_id"],
                     "instrument_id": order["symbol"],
+                    "direction": order["direction"],
                     "phase": order["phase"],
                     "phase_boundary_crossed": bool(order.get("phase_boundary_crossed")),
+                    "model_decision": order["model_decision"],
                     "model_probability": order.get("model_probability"),
+                    "features": dict(order["features"]),
+                    "entry_ts_ms": int(result.diagnostics["entry_ts_ms"]),
                     "exit_ts_ms": exit_ts_ms,
+                    "exit_reason": result.exit_reason,
+                    "quantity_contracts": result.quantity_contracts,
+                    "bars_held": result.bars_held,
+                    "tp1_filled": result.tp1_filled,
+                    "net_rr_at_entry": result.net_rr_at_entry,
+                    "gross_pnl_before_execution_costs_usdt": float(
+                        result.diagnostics.get("gross_realized_pnl_usdt", 0.0)
+                    ),
                     "net_pnl_usdt": result.net_pnl_usdt,
                     "fees_usdt": result.fees_usdt,
                     "funding_usdt": result.funding_usdt,
@@ -681,6 +693,19 @@ def run_sandbox(
         }
         for item in active_orders
     ]
+    unresolved_shadow_positions = [
+        {
+            "signal_id": item["signal_id"],
+            "instrument_id": item["symbol"],
+            "direction": item["direction"],
+            "phase": item["phase"],
+            "status": item.get("last_status", "ENTRY_PENDING"),
+            "phase_boundary_crossed": bool(item.get("phase_boundary_crossed")),
+            "model_probability": item.get("model_probability"),
+            "last_observed_through_ts_ms": item.get("last_observed_through_ts_ms"),
+        }
+        for item in shadow_orders
+    ]
     if brain.trained:
         brain.save_json(brain_path)
 
@@ -751,6 +776,7 @@ def run_sandbox(
         "trade_ledger": sorted(actual_trades, key=lambda x: x["exit_ts_ms"]),
         "shadow_ledger": sorted(shadow_trades, key=lambda x: x["exit_ts_ms"]),
         "open_positions_at_dataset_end": unresolved_positions,
+        "open_shadow_positions_at_dataset_end": unresolved_shadow_positions,
         "walk_forward_audit": {
             "train_start_utc": start_time.isoformat(),
             "train_end_utc": train_end.isoformat(),
