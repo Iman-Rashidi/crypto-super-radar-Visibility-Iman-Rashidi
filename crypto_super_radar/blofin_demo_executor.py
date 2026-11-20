@@ -604,6 +604,7 @@ class BloFinDemoRiskPolicy:
 
 
 def build_demo_order_plan(
+    signal: Any,
     instrument: Mapping[str, Any],
     *,
     inst_id: str,
@@ -614,6 +615,7 @@ def build_demo_order_plan(
 ) -> dict[str, Any]:
     """Validate Challenge 1 evidence and size Demo contracts from stop risk."""
     policy = policy or BloFinDemoRiskPolicy()
+    record = _analysis_record(signal)
     side = str(record.get("signal", "")).upper()
     if side not in {"LONG", "SHORT"}:
         raise BloFinDemoExecutionBlocked("Only LONG or SHORT signals may enter Demo execution.")
