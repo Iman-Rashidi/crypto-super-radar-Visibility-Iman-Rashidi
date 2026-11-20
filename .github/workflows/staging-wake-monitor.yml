@@ -1,0 +1,42 @@
+name: Wake Crypto Super Radar Staging
+
+on:
+  schedule:
+    # Stay below Render Free's 15-minute idle threshold.
+    # Offset from minute zero because GitHub documents schedule delays at peak load.
+    - cron: "4,9,14,19,24,29,34,39,44,49,54,59 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: csr-staging-wake-monitor
+  cancel-in-progress: true
+
+jobs:
+  wake-staging:
+    name: Wake and verify Staging health
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send a read-only health request to Staging
+        shell: bash
+        env:
+          HEALTH_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com/health
+        run: |
+          set -euo pipefail
+          echo "Checking only the Crypto Super Radar Staging health endpoint."
+          response="$(curl \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 2 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 15 \
+            --max-time 70 \
+            --user-agent "CSR-Staging-Wake-Monitor/1.0" \
+            "$HEALTH_URL")"
+          printf '%s\n' "$response"
+          python -c 'import json,sys; data=json.load(sys.stdin); assert data.get("status") == "ok", f"Unexpected health response: {data!r}"; print("Staging health check: PASS")' <<< "$response"
