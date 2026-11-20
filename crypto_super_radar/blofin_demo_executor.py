@@ -2416,7 +2416,12 @@ class BloFinDemoExecutor:
         minimum_size_only: bool = False,
         cancel_check: Any | None = None,
         submission_lock: Any | None = None,
+        single_shot: bool | None = None,
     ) -> dict[str, Any]:
+        single_shot_enabled = (
+            single_shot is True
+            or os.getenv("SINGLE_SHOT_DEMO_TEST", "").strip().lower() == "true"
+        )
         if not allow_demo_orders or not self.trading_enabled:
             raise BloFinDemoExecutionBlocked("Demo order execution is disabled by the two-key safety gate.")
         if self.client.base_url != DEMO_REST_URL:
@@ -2445,6 +2450,11 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
+        single_shot_status = self.store.single_shot_lock_status()
+        if single_shot_status.get("locked"):
+            raise BloFinDemoExecutionBlocked(
+                "Single-shot Demo lifetime order allowance is already consumed; manual reset is required."
+            )
         # A pending realized-outcome label is an audit/learning task, not proof of
         # current exchange exposure. Do not let an incomplete history record freeze
         # every market indefinitely. The fresh account-wide positions and open-orders
@@ -2500,8 +2510,10 @@ class BloFinDemoExecutor:
 
         mode = self.client.get_position_mode()
         position_mode = mode.get("positionMode")
-        if position_mode not in {"net_mode", "long_short_mode"}:
-            raise BloFinDemoExecutionBlocked("Position mode could not be confirmed.")
+        if position_mode != "net_mode":
+            raise BloFinDemoExecutionBlocked(
+                "Demo order execution requires explicit One-Way net_mode; Hedge mode is rejected."
+            )
         instrument = self.client.get_tradable_instrument(inst_id)
         balance = self.client.get_futures_balance(product_type="USDT-FUTURES")
         equity = _equity_from_balance(balance)
@@ -2515,7 +2527,8 @@ class BloFinDemoExecutor:
         # Account-wide pending orders can fill on another symbol and consume the
         # concurrency/margin budget, so the safety check is intentionally global.
         pending = self.client.get_open_orders()
-        if _active_position_count(positions) >= self.policy.max_concurrent_positions:
+        effective_position_limit = 1 if single_shot_enabled else self.policy.max_concurrent_positions
+        if _active_position_count(positions) >= effective_position_limit:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")
         if _active_order_count(pending) > 0:
             raise BloFinDemoExecutionBlocked("Pending orders exist; reconcile them before a new entry.")
@@ -2578,9 +2591,11 @@ class BloFinDemoExecutor:
         plan["position_side"] = position_side
         if not self.store.reserve_order(
             plan,
-            max_concurrent_positions=self.policy.max_concurrent_positions,
+            max_concurrent_positions=effective_position_limit,
             external_open_positions=_active_position_count(positions),
             external_pending_orders=_active_order_count(pending),
+            single_shot=single_shot_enabled,
+            max_lifetime_orders=1,
         ):
             raise BloFinDemoExecutionBlocked(
                 "Duplicate signal, unresolved legacy exposure, external exposure, or aggregate risk/margin budget is already reserved; entry blocked."
