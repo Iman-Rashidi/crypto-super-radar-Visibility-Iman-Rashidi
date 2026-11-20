@@ -1944,10 +1944,11 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=False)
             result = executor.reconcile_unresolved_orders(limit=50)
 
-            self.assertEqual(result["status"], "RECONCILED")
+            # Active exchange orders remain unresolved until a fill/terminal state is verified.
+            self.assertEqual(result["status"], "UNRESOLVED")
             self.assertEqual(result["reconciliation"], "READ_ONLY")
             self.assertEqual(result["attempted"], 2)
-            self.assertEqual(result["remaining_unresolved"], 0)
+            self.assertEqual(result["remaining_unresolved"], 2)
             self.assertFalse(result["orders_submitted"])
             self.assertEqual(set(checked_ids), {p["client_order_id"] for p in plans})
             self.assertTrue(all(
@@ -1989,7 +1990,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             self.assertEqual(budget["orders_today"], 2)
             self.assertIsNone(budget["max_orders_per_utc_day"])
             self.assertEqual(store.get_order(first["client_order_id"])["status"], "CLOSED")
-            self.assertEqual(store.get_order(second["client_order_id"])["status"], "ACCEPTED")
+            self.assertEqual(store.get_order(second["client_order_id"])["status"], "FILLED")
             self.assertEqual(store.pending_learning_outcome_count(), 1)
         finally:
             store.close()
