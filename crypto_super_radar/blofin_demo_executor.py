@@ -924,9 +924,13 @@ class BloFinDemoEventStore:
         ready, reason = challenge1_v2_execution_evidence_ready(challenge_record)
         if not ready:
             raise ValueError("Challenge 1 V2 evidence cannot be journalled as a qualified decision: " + reason)
+        quorum_ready, quorum_reason = _challenge1_two_reviewer_approval_ready(challenge_record)
+        if not quorum_ready:
+            raise ValueError("Challenge 1 V2 decision lacks two independent live approvals: " + quorum_reason)
         experience_id = _challenge1_v2_experience_id(instrument_id, challenge_record)
         evidence = challenge_record.get("challenge1_v2_evidence")
-        assert isinstance(evidence, Mapping)
+        if not isinstance(evidence, Mapping):
+            raise ValueError("Challenge 1 V2 evidence mapping is missing.")
         signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
         signal_bar = str(evidence.get("signal_candle_open_utc") or "")
         decision = {
@@ -948,6 +952,15 @@ class BloFinDemoEventStore:
             "data_asof_utc": evidence.get("data_asof_utc"),
             "future_data_in_input": False,
             "challenge1_v2_evidence": dict(evidence),
+            "ai_consensus": dict(challenge_record.get("ai_consensus") or {}),
+            "ai_reviews": [
+                {
+                    "reviewer_id": str(item.get("reviewer_id") or ""),
+                    "review": dict(item.get("review") or {}),
+                }
+                for item in challenge_record.get("ai_reviews", [])
+                if isinstance(item, Mapping) and isinstance(item.get("review"), Mapping)
+            ],
             "funding_rate": challenge_record.get("funding_rate"),
             "funding_kind": challenge_record.get("funding_kind"),
             "funding_event_time_ms": challenge_record.get("funding_event_time_ms"),
