@@ -4524,6 +4524,130 @@ def _run_blofin_demo_v2_readonly_job(
         )
         record["learning_experience_id"] = experience_id
         record["orders_submitted"] = False
+
+        # V2 remains read-only unless all independent, explicit Demo-only switches agree.
+        write_enabled = (
+            os.getenv("CHALLENGE_1_V2_SINGLE_SHOT_WRITE", "").strip().lower() == "true"
+        )
+        if write_enabled:
+            single_shot_enabled = (
+                os.getenv("SINGLE_SHOT_DEMO_TEST", "").strip().lower() == "true"
+            )
+            demo_trading_enabled = (
+                os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
+            )
+            autopilot_env = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower()
+            if not single_shot_enabled:
+                raise BloFinDemoExecutionBlocked(
+                    "V2 single-shot Order Write requires SINGLE_SHOT_DEMO_TEST=true."
+                )
+            if not demo_trading_enabled:
+                raise BloFinDemoExecutionBlocked(
+                    "V2 single-shot Order Write requires BLOFIN_DEMO_TRADING_ENABLED=true."
+                )
+            if autopilot_env != "false" or _blofin_demo_autopilot_enabled():
+                raise BloFinDemoExecutionBlocked(
+                    "V2 single-shot Order Write requires AutoPilot explicitly set to false."
+                )
+            lock_status = store.single_shot_lock_status()
+            if lock_status.get("locked"):
+                raise BloFinDemoExecutionBlocked(
+                    "The durable Single-Shot lifetime allowance has already been consumed; manual reset is required."
+                )
+
+            write_policy = BloFinDemoRiskPolicy(
+                max_concurrent_positions=1,
+                max_margin_usage_pct=0.10,
+                max_aggregate_risk_pct=0.005,
+                risk_per_trade_pct=0.0025,
+                max_leverage=1,
+            )
+            trade_client = BloFinDemoTradeClient(timeout=10.0)
+            executor = BloFinDemoExecutor(
+                client=trade_client, store=store, policy=write_policy,
+                trading_enabled=True,
+            )
+            _set_blofin_execution_job(
+                job_id, "running", stage="V2_SINGLE_SHOT_EXECUTOR_PREFLIGHT",
+                message_fa="همه کلیدهای مستقل Demo فعال‌اند؛ Executor با One-Way، اهرم 1x، حداقل حجم و قفل یک‌بارمصرف پیش‌بررسی می‌کند.",
+                analysis=record, ai_reviews=record["ai_reviews"],
+                ai_consensus=record["ai_consensus"],
+                trade_context={
+                    "instrument_id": instrument_id,
+                    "execution_profile": "CHALLENGE_1_V2",
+                    "single_shot_demo_test": True,
+                    "max_lifetime_orders": 1,
+                    "autopilot_enabled": False,
+                },
+            )
+            try:
+                execution = executor.execute(
+                    record, inst_id=instrument_id, leverage=1,
+                    allow_demo_orders=True, minimum_size_only=True,
+                    single_shot=True,
+                    submission_lock=BLOFIN_ORDER_SUBMISSION_LOCK,
+                )
+            except BloFinDemoExecutionUnknown as exc:
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="V2_SINGLE_SHOT_PENDING_RECONCILE",
+                    message_fa="نتیجه POST مبهم است؛ سهم یک‌بارمصرف مصرف شده و فقط Reconciliation خواندنی مجاز است. هیچ Retry ارسال نمی‌شود.",
+                    analysis=record, ai_reviews=record["ai_reviews"],
+                    ai_consensus=record["ai_consensus"],
+                    result={
+                        "status": "PENDING_RECONCILE",
+                        "environment": "BLOFIN_DEMO",
+                        "execution_profile": "CHALLENGE_1_V2",
+                        "error_type": type(exc).__name__,
+                        "orders_submitted": True,
+                        "submission_outcome": "UNKNOWN",
+                        "trade_executed": False,
+                        "retry_allowed": False,
+                        "single_shot_lock": store.single_shot_lock_status(),
+                    },
+                )
+                return
+
+            execution_status = str(execution.get("status") or "UNKNOWN").upper()
+            protection = execution.get("protection") if isinstance(execution.get("protection"), dict) else {}
+            critical = execution_status == "CRITICAL_UNPROTECTED"
+            filled = execution_status in {"FILLED", "PARTIALLY_FILLED", "CRITICAL_UNPROTECTED"}
+            if critical:
+                stage = "V2_SINGLE_SHOT_CRITICAL_UNPROTECTED"
+            elif execution_status in {"FILLED", "PARTIALLY_FILLED"} and protection.get("verified") is True:
+                stage = "V2_SINGLE_SHOT_POST_FILL_VERIFIED"
+            else:
+                stage = "V2_SINGLE_SHOT_RECONCILIATION_PENDING"
+            _set_blofin_execution_job(
+                job_id, "completed", stage=stage,
+                message_fa=(
+                    "سفارش Demo فقط یک‌بار ارسال شد؛ Fill، شناسه پوزیشن و TP/SL پس از Fill از API خواندنی تطبیق داده شدند."
+                    if stage == "V2_SINGLE_SHOT_POST_FILL_VERIFIED"
+                    else "وضعیت اجرای تک‌معامله Demo نیازمند بررسی است؛ سفارش مجدد یا Retry خودکار انجام نمی‌شود."
+                ),
+                analysis=record, ai_reviews=record["ai_reviews"],
+                ai_consensus=record["ai_consensus"],
+                trade_context={
+                    "instrument_id": instrument_id,
+                    "execution_profile": "CHALLENGE_1_V2",
+                    "single_shot_demo_test": True,
+                    "max_lifetime_orders": 1,
+                    "autopilot_enabled": False,
+                    "aggregate_risk_preview": aggregate,
+                },
+                result={
+                    **execution,
+                    "status": execution_status,
+                    "environment": "BLOFIN_DEMO",
+                    "execution_profile": "CHALLENGE_1_V2",
+                    "orders_submitted": True,
+                    "trade_executed": filled,
+                    "post_fill_tp_sl_verified": protection.get("verified") is True,
+                    "single_shot_lock": store.single_shot_lock_status(),
+                    "retry_allowed": False,
+                },
+            )
+            return
+
         _set_blofin_execution_job(
             job_id, "completed", stage="V2_DRY_RUN_ORDER_PLAN_READY",
             message_fa="مسیر V2 از دریافت داده تا دو Reviewer و ساخت Order Plan عبور کرد؛ ارسال سفارش عمداً انجام نشد.",
