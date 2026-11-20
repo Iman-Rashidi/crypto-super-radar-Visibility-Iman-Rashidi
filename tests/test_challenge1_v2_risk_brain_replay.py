@@ -571,33 +571,51 @@ class ReplayFundingScheduleInferenceTests(unittest.TestCase):
             int(pd.Timestamp("2026-06-25T16:00:00Z").timestamp() * 1000),
             int(pd.Timestamp("2026-06-26T16:00:00Z").timestamp() * 1000),
             int(pd.Timestamp("2026-06-27T00:00:00Z").timestamp() * 1000),
-            int(pd.Timestamp("2026-06-27T04:00:00Z").timestamp() * 1000),
-            int(pd.Timestamp("2026-06-27T05:00:00Z").timestamp() * 1000),
+            int(pd.Timestamp("2026-06-27T08:00:00Z").timestamp() * 1000),
         ]
         return [("BTC-USDT", stamp, 0.0001, "MISSING", "MISSING_API_FIELD") for stamp in stamps]
 
-    def test_missing_kind_is_inferred_from_observed_dynamic_cadence(self):
-        result = _classify_funding_schedule_events(self._rows(), symbol="BTC-USDT")
-        self.assertTrue(all(row[3] == "0" for row in result))
-        self.assertTrue(all(row[4] == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL" for row in result))
-        self.assertEqual({row[5] for row in result}, {60 * 60_000, 4 * 60 * 60_000, 8 * 60 * 60_000})
-
-    def test_event_outside_ten_second_boundary_tolerance_is_rejected(self):
+    def test_missing_kind_uses_only_fixed_utc_schedule_and_preserves_blackout(self):
         rows = self._rows()
-        rows[1] = (rows[1][0], rows[1][1] + 11_000, rows[1][2], rows[1][3], rows[1][4])
-        with self.assertRaisesRegex(ReplayDownloadError, "supported observed"):
+        result = _classify_funding_schedule_events(rows, symbol="BTC-USDT")
+        self.assertTrue(all(row[3] == "0" for row in result))
+        self.assertTrue(all(row[4] == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY" for row in result))
+        self.assertEqual({row[5] for row in result}, {8 * 60 * 60_000})
+        self.assertTrue(_is_observed_blackout_gap(rows[2][1], rows[3][1]))
+
+    def test_missing_kind_at_utc_boundary_plus_nine_seconds_is_accepted(self):
+        rows = self._rows()
+        rows[0] = (rows[0][0], rows[0][1] + 9_000, rows[0][2], rows[0][3], rows[0][4])
+        result = _classify_funding_schedule_events(rows, symbol="BTC-USDT")
+        self.assertEqual(result[0][4], "SCHEDULE_INFERRED_UTC_8H_BOUNDARY")
+
+    def test_missing_kind_at_utc_boundary_plus_eleven_seconds_is_rejected(self):
+        rows = self._rows()
+        rows[0] = (rows[0][0], rows[0][1] + 11_000, rows[0][2], rows[0][3], rows[0][4])
+        with self.assertRaisesRegex(ReplayDownloadError, "00:00/08:00/16:00 UTC"):
+            _classify_funding_schedule_events(rows, symbol="BTC-USDT")
+
+    def test_missing_kind_at_four_am_is_rejected_even_if_neighboring_deltas_look_regular(self):
+        rows = self._rows()
+        rows[0] = (
+            rows[0][0],
+            int(pd.Timestamp("2026-06-25T04:00:00Z").timestamp() * 1000),
+            rows[0][2], rows[0][3], rows[0][4],
+        )
+        with self.assertRaisesRegex(ReplayDownloadError, "outside the 00:00/08:00/16:00 UTC"):
+            _classify_funding_schedule_events(rows, symbol="BTC-USDT")
+
+    def test_explicit_nonzero_funding_kind_is_rejected(self):
+        rows = self._rows()
+        rows[1] = (rows[1][0], rows[1][1], rows[1][2], "1", "EXPLICIT_API")
+        with self.assertRaisesRegex(ReplayDownloadError, "fundingKind"):
             _classify_funding_schedule_events(rows, symbol="BTC-USDT")
 
     def test_unregistered_long_gap_is_not_promoted_to_blackout(self):
         rows = self._rows()
         rows[3] = (rows[3][0], rows[3][1] + 60 * 60_000, rows[3][2], rows[3][3], rows[3][4])
+        self.assertFalse(_is_observed_blackout_gap(rows[2][1], rows[3][1]))
         with self.assertRaises(ReplayDownloadError):
-            _classify_funding_schedule_events(rows, symbol="BTC-USDT")
-
-    def test_explicit_stock_dividend_is_never_relabelled_regular(self):
-        rows = self._rows()
-        rows[2] = (rows[2][0], rows[2][1], rows[2][2], "1", "EXPLICIT_API")
-        with self.assertRaisesRegex(ReplayDownloadError, "stock-dividend"):
             _classify_funding_schedule_events(rows, symbol="BTC-USDT")
 
 

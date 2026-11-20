@@ -26,8 +26,10 @@ INSTRUMENTS_PATH = "/api/v1/market/instruments"
 DEFAULT_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 BAR_MS = {"15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
 
-# BloFin has publicly documented dynamic 1/2/4/8-hour funding intervals.
-FUNDING_INTERVAL_HOURS = (1, 2, 4, 8)
+# Challenge 1 accepts missing fundingKind only on the fixed UTC
+# 00:00 / 08:00 / 16:00 regular schedule. Never infer a dynamic cadence.
+REGULAR_FUNDING_INTERVAL_MS = 8 * 60 * 60_000
+UTC_DAY_MS = 24 * 60 * 60_000
 FUNDING_SCHEDULE_TOLERANCE_MS = 10_000
 OBSERVED_FUNDING_BLACKOUTS = ({
     "start_ms": 1782403200000,  # 2026-06-25T16:00:00Z
@@ -38,12 +40,15 @@ OBSERVED_FUNDING_BLACKOUTS = ({
 },)
 
 
-def _funding_interval_for_delta(delta_ms: int) -> int | None:
-    for hours in FUNDING_INTERVAL_HOURS:
-        interval_ms = hours * 60 * 60_000
-        if abs(int(delta_ms) - interval_ms) <= FUNDING_SCHEDULE_TOLERANCE_MS:
-            return interval_ms
-    return None
+def _is_regular_utc_funding_boundary(timestamp_ms: int) -> bool:
+    """Return True only within ±10s of 00:00, 08:00 or 16:00 UTC."""
+    day_offset = int(timestamp_ms) % UTC_DAY_MS
+    boundaries = (0, 8 * 60 * 60_000, 16 * 60 * 60_000)
+    return min(
+        min((day_offset - boundary) % UTC_DAY_MS,
+            (boundary - day_offset) % UTC_DAY_MS)
+        for boundary in boundaries
+    ) <= FUNDING_SCHEDULE_TOLERANCE_MS
 
 
 def _is_observed_blackout_gap(left_ms: int, right_ms: int) -> bool:
@@ -275,11 +280,11 @@ def _parse_funding_event(row: Any, *, symbol: str) -> tuple[str, int, float, str
 def _classify_funding_schedule_events(
     events: list[tuple[str, int, float, str, str]], *, symbol: str,
 ) -> list[tuple[str, int, float, str, str, int]]:
-    """Infer only when adjacent observed settlement timestamps prove a supported cadence.
+    """Classify regular funding without inferring unsupported dynamic schedules.
 
-    Missing-Kind events retain SCHEDULE_INFERRED_DYNAMIC_INTERVAL provenance. Supported
-    observed cadences are 1/2/4/8 hours within 10 seconds; the registered common
-    24-hour funding-data gap is excluded from cadence estimation.
+    Explicit non-zero fundingKind is rejected. When fundingKind is absent, only
+    00:00:00, 08:00:00 and 16:00:00 UTC (±10 seconds) are accepted. The known
+    24-hour observed data gap is preserved as a blackout, not treated as cadence.
     """
     ordered = sorted(events, key=lambda item: int(item[1]))
     if len(ordered) < 3:
@@ -287,47 +292,45 @@ def _classify_funding_schedule_events(
     timestamps = [int(item[1]) for item in ordered]
     if len(set(timestamps)) != len(timestamps):
         raise ReplayDownloadError(f"funding history contains duplicate timestamps for {symbol}")
-    gap_intervals: list[int | None] = []
+
     for left, right in zip(timestamps, timestamps[1:]):
         if _is_observed_blackout_gap(left, right):
-            gap_intervals.append(None)
             continue
-        interval_ms = _funding_interval_for_delta(right - left)
-        if interval_ms is None:
-            raise ReplayDownloadError(
-                f"funding cadence for {symbol} is not a supported observed 1/2/4/8-hour "
-                f"interval or the registered blackout (delta_ms={right-left})"
-            )
-        gap_intervals.append(interval_ms)
+        if right <= left:
+            raise ReplayDownloadError(f"funding timestamps are not strictly increasing for {symbol}")
 
     classified = []
-    for index, (event_symbol, timestamp, rate, raw_kind, raw_source) in enumerate(ordered):
-        previous_interval = gap_intervals[index - 1] if index > 0 else None
-        next_interval = gap_intervals[index] if index < len(gap_intervals) else None
-        interval_ms = next_interval or previous_interval
-        if interval_ms is None:
-            raise ReplayDownloadError(f"funding cadence around blackout is unprovable for {symbol}")
-        remainder = int(timestamp) % int(interval_ms)
-        if min(remainder, interval_ms - remainder) > FUNDING_SCHEDULE_TOLERANCE_MS:
+    for event_symbol, timestamp, rate, raw_kind, raw_source in ordered:
+        if raw_kind not in {"0", "1", "MISSING"}:
+            raise ReplayDownloadError(f"funding kind provenance is invalid for {symbol}")
+        if raw_kind != "MISSING" and raw_kind != "0":
             raise ReplayDownloadError(
-                f"fundingTime for {symbol} is outside the observed "
-                f"{interval_ms // 3_600_000}-hour settlement boundary tolerance"
-            )
-        if raw_kind == "1":
-            raise ReplayDownloadError(
-                f"stock-dividend fundingKind=1 is not supported by Challenge 1 replay for {symbol}"
+                f"stock-dividend or non-regular fundingKind={raw_kind!r} "
+                f"is not supported by Challenge 1 replay for {symbol}"
             )
         if raw_kind == "0" and raw_source == "EXPLICIT_API":
             kind, source = "0", "EXPLICIT_API"
         elif raw_kind == "MISSING" and raw_source == "MISSING_API_FIELD":
-            kind, source = "0", "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
-        elif raw_kind == "0" and raw_source == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL":
-            kind, source = "0", "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
+            if not _is_regular_utc_funding_boundary(int(timestamp)):
+                raise ReplayDownloadError(
+                    f"missing fundingKind timestamp for {symbol} is outside "
+                    "the 00:00/08:00/16:00 UTC schedule tolerance"
+                )
+            kind, source = "0", "SCHEDULE_INFERRED_UTC_8H_BOUNDARY"
+        elif raw_kind == "0" and raw_source == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY":
+            if not _is_regular_utc_funding_boundary(int(timestamp)):
+                raise ReplayDownloadError(
+                    f"inferred funding timestamp for {symbol} is outside "
+                    "the 00:00/08:00/16:00 UTC schedule tolerance"
+                )
+            kind, source = "0", "SCHEDULE_INFERRED_UTC_8H_BOUNDARY"
         else:
             raise ReplayDownloadError(f"funding kind provenance is invalid for {symbol}")
-        classified.append((event_symbol, int(timestamp), float(rate), kind, source, int(interval_ms)))
+        classified.append((
+            event_symbol, int(timestamp), float(rate), kind, source,
+            REGULAR_FUNDING_INTERVAL_MS,
+        ))
     return classified
-
 
 def download_funding_rates(
     inst_id: str,
