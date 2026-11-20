@@ -300,8 +300,8 @@ class OnlineMetaBrain:
                 "label": label_value,
                 "source": str(row.get("source") or "EXECUTED").upper(),
             })
-        if restored != sorted(restored, key=lambda item: item["candle_time_utc"]):
-            raise MetaBrainError("stored training examples are not chronological")
+        # Examples are appended when labels mature, not necessarily in entry-time
+        # order. Preserve append order: it is the chronology used for SGD age decay.
         model.examples = restored
         expected_hash = payload.get("model_sha256")
         if expected_hash is not None and expected_hash != model.model_sha256():
