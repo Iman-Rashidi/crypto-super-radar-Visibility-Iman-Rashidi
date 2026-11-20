@@ -60,6 +60,9 @@ def _require_regular_funding_events(funding: list[Mapping[str, Any]], symbol: st
     for item in funding:
         kind = str(item.get("fundingKind") or "").strip()
         source = str(item.get("fundingKindSource") or "").strip()
+        if kind == "0" and not source:
+            # Compatibility for callers carrying an explicit API Kind=0.
+            source = "EXPLICIT_API"
         if kind != "0":
             unsupported.append(kind or "MISSING")
         elif source == "EXPLICIT_API":
@@ -82,7 +85,10 @@ def _require_regular_funding_events(funding: list[Mapping[str, Any]], symbol: st
         else:
             unsupported.append(source or "PROVENANCE_MISSING")
     if unsupported:
-        raise SandboxDataError(f"unsupported funding classification for {symbol}: {sorted(set(unsupported))}")
+        raise SandboxDataError(
+            f"only models regular fundingKind=0 or verified schedule-inferred regular funding "
+            f"for {symbol}; unsupported classification={sorted(set(unsupported))}"
+        )
 
 
 def _funding_blackout_for_timestamp(timestamp_ms: int) -> dict[str, Any] | None:
