@@ -1546,6 +1546,8 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             self.assertEqual(order_call[1]["size"], "0.1")
             self.assertEqual(result["leverage"], 1)
             self.assertEqual(result["quantity_contracts"], "0.1")
+            self.assertEqual(result["sizing_mode"], "EXCHANGE_MINIMUM_SIZE_ONLY")
+            self.assertFalse(result["risk_based_sizing_validated"])
         finally:
             store.close()
 

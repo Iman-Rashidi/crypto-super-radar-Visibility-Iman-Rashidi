@@ -2575,6 +2575,8 @@ class BloFinDemoExecutor:
             "instrument_id": inst_id,
             "side": plan["side"],
             "quantity_contracts": plan["quantity"],
+            "sizing_mode": "EXCHANGE_MINIMUM_SIZE_ONLY" if minimum_size_only else "RISK_BUDGET_SIZED",
+            "risk_based_sizing_validated": not minimum_size_only,
             "leverage": int(leverage),
             "stop_loss": plan["stop_loss"],
             "take_profit": plan["take_profit"],

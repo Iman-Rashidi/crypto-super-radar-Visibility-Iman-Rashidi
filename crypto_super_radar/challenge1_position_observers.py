@@ -23,7 +23,7 @@ from .notion_event_sync import NotionEventOutbox
 
 _REVIEW_THREADS: dict[str, threading.Thread] = {}
 _REVIEW_LOCK = threading.RLock()
-_DEFAULT_INTERVAL_SECONDS = 3_600
+_DEFAULT_INTERVAL_SECONDS = 300
 _IN_FLIGHT_TIMEOUT_SECONDS = 90
 _RETRY_AFTER_INTERRUPTED_SECONDS = 900
 _MAX_AUDIT_EVENTS = 2_000
@@ -882,7 +882,7 @@ def schedule_position_observer_review(
         ))
     except (TypeError, ValueError):
         interval_seconds = _DEFAULT_INTERVAL_SECONDS
-    interval_seconds = max(3_600, min(interval_seconds, 86_400))
+    interval_seconds = max(300, min(interval_seconds, 3_600))
 
     if not experience_id or not position_id:
         return {

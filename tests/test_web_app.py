@@ -2248,6 +2248,38 @@ class BloFinDemoPositionEvidenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "NOT_VERIFIED_NO_EXACT_POSITION_LINK")
         self.assertEqual(result["orders"], [])
 
+    def test_exchange_protection_guard_distinguishes_missing_stop_from_partial_read(self):
+        for status in (
+            "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+            "TP_ONLY_VISIBLE",
+            "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
+        ):
+            self.assertTrue(
+                web_app._blofin_demo_protection_requires_emergency_close({"status": status}),
+                status,
+            )
+        for status in (
+            "BOTH_TP_AND_SL_VISIBLE",
+            "SL_ONLY_VISIBLE",
+            "READ_FAILED",
+            "INVALID_RESPONSE",
+            "UNKNOWN",
+        ):
+            self.assertFalse(
+                web_app._blofin_demo_protection_requires_emergency_close({"status": status}),
+                status,
+            )
+        self.assertTrue(
+            web_app._blofin_demo_protection_fully_confirmed(
+                {"status": "BOTH_TP_AND_SL_VISIBLE"}
+            )
+        )
+        self.assertFalse(
+            web_app._blofin_demo_protection_fully_confirmed(
+                {"status": "SL_ONLY_VISIBLE"}
+            )
+        )
+
     def test_stop_loss_threshold_crossings_are_detected_for_both_sides_without_order_side_effects(self):
         self.assertTrue(web_app._blofin_demo_stop_loss_triggered("LONG", 94.9, 95.0))
         self.assertFalse(web_app._blofin_demo_stop_loss_triggered("LONG", 95.1, 95.0))
@@ -2588,6 +2620,52 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
         self.assertEqual(result["exchange_writes_performed"], 0)
         record.assert_called_once()
         self.assertEqual(record.call_args.kwargs["snapshot_status"], "FRESH_CACHED_SNAPSHOT")
+
+    def test_watchdog_reports_halted_when_native_stop_protection_is_partial(self):
+        snapshot = {
+            "experience_id": "experience-partial-protection",
+            "position_id": "position-partial-protection",
+            "position": {"positionId": "position-partial-protection"},
+            "updated_at_epoch": time.time(),
+            "source": "REST_MANAGER_CACHE",
+            "protective_orders": {"status": "SL_ONLY_VISIBLE"},
+            "reviewer_states": {},
+            "stop_loss_threshold_reached": False,
+        }
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE["position-partial-protection"] = snapshot
+        state_keys = (
+            "enabled", "status", "last_message_fa", "last_cycle_finished_at_utc",
+        )
+        previous = {key: web_app.BLOFIN_AUTOPILOT_STATE.get(key) for key in state_keys}
+        try:
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE["enabled"] = True
+                web_app.BLOFIN_AUTOPILOT_STATE["status"] = "RUNNING"
+            with (
+                patch.object(web_app, "BLOFIN_PRIVATE_WS_CLIENT", None),
+                patch.object(web_app, "record_position_supervisor_watchdog_cycle") as record,
+                patch.object(web_app, "_persist_blofin_autopilot_state") as persist,
+            ):
+                result = web_app._blofin_demo_position_supervisor_watchdog_cycle()
+            self.assertEqual(result["status"], "HALTED")
+            self.assertEqual(result["guard_halt_positions"], 1)
+            self.assertEqual(
+                web_app.BLOFIN_AUTOPILOT_STATE["status"],
+                "SUPERVISOR_POSITION_GUARD_HALT",
+            )
+            self.assertIn(
+                "PROTECTIVE_ORDER_NOT_CONFIRMED",
+                record.call_args.kwargs["deterministic_flags"],
+            )
+            persist.assert_called_once()
+        finally:
+            with web_app.LOCK:
+                for key, value in previous.items():
+                    if value is None and key in web_app.BLOFIN_AUTOPILOT_STATE:
+                        web_app.BLOFIN_AUTOPILOT_STATE.pop(key, None)
+                    else:
+                        web_app.BLOFIN_AUTOPILOT_STATE[key] = value
 
     def test_stale_cached_position_halts_new_autopilot_entries_without_closing_position(self):
         previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
