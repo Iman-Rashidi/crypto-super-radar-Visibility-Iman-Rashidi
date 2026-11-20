@@ -37,6 +37,20 @@ class SandboxDataError(RuntimeError):
     pass
 
 
+def _record_block_reason(
+    global_counts: dict[str, int],
+    by_symbol: dict[str, dict[str, int]],
+    symbol: str,
+    reason: Any,
+) -> None:
+    """Keep every skipped/rejected opportunity auditable without changing decisions."""
+    label = str(reason or "UNSPECIFIED_BLOCK_REASON").strip()[:240]
+    symbol_key = str(symbol).strip().upper()
+    global_counts[label] = int(global_counts.get(label, 0)) + 1
+    bucket = by_symbol.setdefault(symbol_key, {})
+    bucket[label] = int(bucket.get(label, 0)) + 1
+
+
 def _load_candles(connection: sqlite3.Connection, symbol: str, bar: str, source: str = "LAST") -> pd.DataFrame:
     rows = connection.execute(
         """SELECT ts,open,high,low,close,volume FROM replay_candles
@@ -520,6 +534,8 @@ def run_sandbox(
     counts = defaultdict(int)
     model_decisions = defaultdict(int)
     strategy_error_reasons: dict[str, int] = defaultdict(int)
+    block_reasons: dict[str, int] = defaultdict(int)
+    block_reasons_by_symbol: dict[str, dict[str, int]] = defaultdict(dict)
     model_freeze_train_count: int | None = None
     calibration_observations: dict[str, list[dict[str, Any]]] = {
         "VALIDATION": [],
@@ -575,6 +591,10 @@ def run_sandbox(
                         counts["min_qty_rejections"] += 1
                         if not is_shadow:
                             counts["order_rejections"] += 1
+                            _record_block_reason(
+                                block_reasons, block_reasons_by_symbol, symbol,
+                                "INSUFFICIENT_EQUITY_FOR_ALL_IN_STOP_RISK",
+                            )
                     continue
                 except SimulationError as exc:
                     if order.get("entry_checked"):
@@ -585,6 +605,10 @@ def run_sandbox(
                         counts["simulation_data_rejections"] += 1
                         if not is_shadow:
                             counts["order_rejections"] += 1
+                            _record_block_reason(
+                                block_reasons, block_reasons_by_symbol, symbol,
+                                f"SIMULATION_DATA_REJECTION: {str(exc)}",
+                            )
                     continue
 
                 if result.status == "UNFILLED":
@@ -594,6 +618,10 @@ def run_sandbox(
                         survivors.append(order)
                     elif not is_shadow:
                         counts["unfilled_limits"] += 1
+                        _record_block_reason(
+                            block_reasons, block_reasons_by_symbol, symbol,
+                            f"POST_ONLY_LIMIT_UNFILLED: {result.exit_reason}",
+                        )
                     continue
                 if result.status == "REJECTED":
                     if order.get("entry_checked"):
@@ -604,6 +632,10 @@ def run_sandbox(
                         counts["order_rejections"] += 1
                         if result.exit_reason == "FUNDING_DATA_GAP_BLACKOUT":
                             counts["funding_blackout_fill_entry_blocks"] += 1
+                        _record_block_reason(
+                            block_reasons, block_reasons_by_symbol, symbol,
+                            f"SIMULATOR_REJECTED: {result.exit_reason}",
+                        )
                     continue
 
                 if not order.get("entry_checked"):
@@ -828,11 +860,19 @@ def run_sandbox(
             )
             if _funding_blackout_for_timestamp(asof_ms) is not None:
                 counts["funding_blackout_new_entry_blocks"] += 1
+                _record_block_reason(
+                    block_reasons, block_reasons_by_symbol, symbol,
+                    "EXCHANGE_DATA_GAP_BLACKOUT: NEW_ENTRY_BLOCKED",
+                )
                 continue
             if phase_boundary_ms is not None and _within_purge_window(
                 asof_ms, phase_boundary_ms, max_holding_bars=12
             ):
                 counts["purged_boundary_signal_blocks"] += 1
+                _record_block_reason(
+                    block_reasons, block_reasons_by_symbol, symbol,
+                    "PURGED_WALK_FORWARD_195_MINUTE_BOUNDARY",
+                )
                 continue
             frame_1h = _visible_frame(item["frames"]["1H"], asof, pd.Timedelta(hours=1))
             frame_4h = _visible_frame(item["frames"]["4H"], asof, pd.Timedelta(hours=4))
@@ -842,6 +882,10 @@ def run_sandbox(
             )
             if not _strategy_history_ready(frame_1h, frame_4h, frame_15m, btc_15m):
                 counts["indicator_warmup_blocks"] += 1
+                _record_block_reason(
+                    block_reasons, block_reasons_by_symbol, symbol,
+                    "INDICATOR_WARMUP_MINIMUM_CLOSED_HISTORY",
+                )
                 continue
             counts["strategy_checks"] += 1
             latest_interval = next((
@@ -883,6 +927,10 @@ def run_sandbox(
                 continue
             if signal.get("signal") not in {"LONG", "SHORT"}:
                 counts["no_trade_decisions"] += 1
+                _record_block_reason(
+                    block_reasons, block_reasons_by_symbol, symbol,
+                    f"STRATEGY_NO_TRADE: {signal.get('reason')}",
+                )
                 continue
             counts["qualified_signals"] += 1
             features = dict(signal["features"])
@@ -905,10 +953,25 @@ def run_sandbox(
             if veto:
                 if any(x["symbol"] == symbol for x in shadow_orders):
                     counts["shadow_duplicate_blocks"] += 1
+                    _record_block_reason(
+                        block_reasons, block_reasons_by_symbol, symbol,
+                        "SHADOW_DUPLICATE_PENDING_OR_ACTIVE_SIGNAL",
+                    )
                     continue
             else:
-                if any(x["symbol"] == symbol for x in active_orders) or len(active_orders) >= 2:
+                if any(x["symbol"] == symbol for x in active_orders):
                     counts["portfolio_or_duplicate_blocks"] += 1
+                    _record_block_reason(
+                        block_reasons, block_reasons_by_symbol, symbol,
+                        "DUPLICATE_SYMBOL_ALREADY_PENDING_OR_ACTIVE",
+                    )
+                    continue
+                if len(active_orders) >= 2:
+                    counts["portfolio_or_duplicate_blocks"] += 1
+                    _record_block_reason(
+                        block_reasons, block_reasons_by_symbol, symbol,
+                        "MAX_TWO_CONCURRENT_SIMULATED_POSITIONS",
+                    )
                     continue
 
             order = {
@@ -1065,6 +1128,14 @@ def run_sandbox(
             "feature_importance_interpretation": "Associational model coefficients only; not causal attribution.",
         },
         "diagnostics": dict(counts),
+        "block_reasons": {
+            "total": sum(block_reasons.values()),
+            "by_reason": dict(block_reasons),
+            "by_symbol": {
+                symbol: dict(reasons) for symbol, reasons in block_reasons_by_symbol.items()
+            },
+            "semantics": "Counts skipped signals, rejected simulated entries and blocked portfolio opportunities; these are not necessarily unique signal IDs.",
+        },
         "strategy_data_quality": {
             "indicator_warmup_blocks": counts["indicator_warmup_blocks"],
             "strategy_data_errors": counts["strategy_data_errors"],
