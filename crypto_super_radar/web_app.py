@@ -9587,6 +9587,7 @@ def _run_challenge1_supervisor_reviews(
 ) -> dict[str, Any]:
     """Run two independent AI reviews and return a fail-closed Demo entry quorum."""
     signal_value = getattr(analysis, "signal", "UNKNOWN")
+    expected_side = str(getattr(signal_value, "value", signal_value) or "UNKNOWN").upper()
     metrics = getattr(analysis, "metrics", {})
     metrics = metrics if isinstance(metrics, dict) else {}
     evidence = metrics.get("challenge1_evidence")
@@ -9649,6 +9650,7 @@ def _run_challenge1_supervisor_reviews(
     primary_verified, second_verified = verified(primary), verified(second)
     primary_wave_match = (
         primary.get("elliott_wave_phase") == expected_wave_phase
+        and primary.get("elliott_wave_direction") == expected_wave_direction
     )
     second_wave_match = (
         second.get("elliott_wave_phase") == expected_wave_phase
@@ -9748,6 +9750,7 @@ def _run_challenge1_supervisor_reviews(
         "status_fa": status_fa,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    ai_status = "APPROVED_BY_BOTH" if two_approvals else consensus_status
     return {
         "approved": two_approvals, "status": ai_status, "ai_status": ai_status,
         "ai_review": primary, "second_ai_review": second,
