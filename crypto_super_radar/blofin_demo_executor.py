@@ -1216,6 +1216,12 @@ class BloFinDemoEventStore:
                 raise ValueError(f"{field} must be a non-negative integer.")
         if not 1 <= max_concurrent_positions <= 4:
             raise ValueError("max_concurrent_positions must be between 1 and 4.")
+        if single_shot and (
+            isinstance(max_lifetime_orders, bool)
+            or not isinstance(max_lifetime_orders, int)
+            or max_lifetime_orders != 1
+        ):
+            raise ValueError("Single-shot Demo execution is restricted to max_lifetime_orders=1.")
 
         now = int(time.time())
         order_id = str(plan["client_order_id"])
@@ -1260,6 +1266,41 @@ class BloFinDemoEventStore:
                 if existing is not None:
                     self._db.rollback()
                     return False
+
+                lock_row = self._db.execute(
+                    "SELECT max_lifetime_orders, consumed_orders FROM "
+                    "blofin_demo_single_shot_lock WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
+                ).fetchone()
+                if lock_row is not None:
+                    try:
+                        lock_maximum = int(lock_row["max_lifetime_orders"])
+                        lock_consumed = int(lock_row["consumed_orders"])
+                    except (TypeError, ValueError, OverflowError):
+                        self._db.rollback()
+                        return False
+                    if lock_maximum != 1 or lock_consumed >= lock_maximum or lock_consumed < 0:
+                        self._db.rollback()
+                        return False
+                if single_shot:
+                    if lock_row is None:
+                        self._db.execute(
+                            """INSERT INTO blofin_demo_single_shot_lock
+                               (lock_name, max_lifetime_orders, consumed_orders, client_order_id, updated_at)
+                               VALUES ('SINGLE_SHOT_DEMO_TEST', 1, 1, ?, ?)""",
+                            (order_id, now),
+                        )
+                    else:
+                        self._db.execute(
+                            """UPDATE blofin_demo_single_shot_lock
+                               SET consumed_orders=consumed_orders+1,
+                                   client_order_id=?, updated_at=?
+                               WHERE lock_name='SINGLE_SHOT_DEMO_TEST'
+                                 AND consumed_orders=0 AND max_lifetime_orders=1""",
+                            (order_id, now),
+                        )
+                        if self._db.execute("SELECT changes()").fetchone()[0] != 1:
+                            self._db.rollback()
+                            return False
 
                 active_rows = self._db.execute(
                     f"""SELECT client_order_id, reserved_risk_usdt, reserved_margin_usdt
@@ -1320,6 +1361,8 @@ class BloFinDemoEventStore:
                     "aggregate_risk_limit_usdt": _format_decimal(risk_cap),
                     "aggregate_margin_limit_usdt": _format_decimal(margin_cap),
                     "learning_experience_id_present": bool(plan.get("experience_id")),
+                    "single_shot_lock_claimed": bool(single_shot),
+                    "single_shot_max_lifetime_orders": 1 if single_shot else None,
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,
                         "exchange_open_positions": external_open_positions,
