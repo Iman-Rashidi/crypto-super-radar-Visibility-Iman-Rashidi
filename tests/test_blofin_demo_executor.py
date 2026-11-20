@@ -1314,6 +1314,12 @@ class FakeExecutorClient:
         self.calls = []
         self.ticker_quote = {"bidPrice": "99.99", "askPrice": "100.01"}
         self.order_response = {"code": "0", "data": [{"code": "0", "orderId": "simulated-demo-id"}]}
+        self.order_args = None
+        self.fill_fraction = Decimal("1")
+        self.fill_state = "filled"
+        self.position_id = "demo-position-123"
+        self.protection_rows_override = None
+        self.position_rows_override = None
 
     def verify_trade_permission(self):
         self.calls.append("trade_permission")
@@ -1339,13 +1345,69 @@ class FakeExecutorClient:
         self.calls.append("balance")
         return {"totalEquity": "1000"}
 
-    def get_positions(self):
-        self.calls.append("positions")
-        return []
+    def get_positions(self, *, inst_id=None):
+        self.calls.append(("positions_read", inst_id))
+        if self.position_rows_override is not None:
+            return self.position_rows_override
+        if self.order_args is None:
+            return []
+        filled = self._filled_size()
+        if filled <= 0:
+            return []
+        signed = filled if self.order_args["side"] == "buy" else -filled
+        return [{
+            "positionId": self.position_id,
+            "instId": self.order_args["inst_id"],
+            "marginMode": "isolated",
+            "positionSide": self.order_args["position_side"],
+            "positions": str(signed),
+        }]
 
     def get_open_orders(self):
         self.calls.append("pending_orders")
         return []
+
+    def get_order_detail(self, inst_id, *, client_order_id):
+        self.calls.append(("order_detail_read", inst_id, client_order_id))
+        if self.order_args is None:
+            return None
+        filled = self._filled_size()
+        state = self.fill_state
+        if self.fill_fraction == 0:
+            state = "live"
+        elif self.fill_fraction < 1 and state == "filled":
+            state = "partially_filled"
+        return {
+            "clientOrderId": client_order_id, "orderId": "simulated-demo-id",
+            "instId": inst_id, "side": self.order_args["side"],
+            "size": self.order_args["size"], "filledSize": str(filled),
+            "state": state, "positionId": self.position_id,
+        }
+
+    def get_open_tpsl_orders(self, *, inst_id=None, client_order_id=None, limit=100):
+        self.calls.append(("tpsl_read", inst_id, client_order_id))
+        if self.protection_rows_override is not None:
+            return self.protection_rows_override
+        if self.order_args is None:
+            return []
+        filled = self._filled_size()
+        if filled <= 0:
+            return []
+        return [{
+            "tpslId": "simulated-tpsl-123", "clientOrderId": client_order_id,
+            "positionId": self.position_id, "instId": inst_id,
+            "marginMode": "isolated", "positionSide": self.order_args["position_side"],
+            "side": "sell" if self.order_args["side"] == "buy" else "buy",
+            "size": str(filled), "actualSize": str(filled), "state": "live",
+            "tpTriggerPrice": self.order_args["take_profit"],
+            "slTriggerPrice": self.order_args["stop_loss"],
+            "tpTriggerPriceType": "mark", "slTriggerPriceType": "mark",
+        }]
+
+    def _filled_size(self):
+        if self.order_args is None:
+            return Decimal("0")
+        return Decimal(self.order_args["size"]) * self.fill_fraction
 
     def set_futures_leverage(self, inst_id, leverage, *, margin_mode, position_side=None):
         self.calls.append(("set_leverage", leverage, position_side))
@@ -1353,6 +1415,7 @@ class FakeExecutorClient:
 
     def place_futures_order(self, **kwargs):
         self.calls.append(("place_order", kwargs))
+        self.order_args = dict(kwargs)
         return self.order_response
 
 
@@ -1446,11 +1509,16 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 signal_record(), inst_id="BTC-USDT", leverage=1,
                 allow_demo_orders=True,
             )
-            self.assertEqual(result["status"], "ACCEPTED")
+            self.assertEqual(result["status"], "FILLED")
             self.assertEqual(result["environment"], "BLOFIN_DEMO")
+            self.assertEqual(result["position_id"], "demo-position-123")
+            self.assertTrue(result["protection"]["tp_verified"])
+            self.assertTrue(result["protection"]["sl_verified"])
             self.assertEqual(result["exchange_order_id"], "simulated-demo-id")
             self.assertIn(("set_leverage", 1, None), client.calls)
             self.assertTrue(any(isinstance(x, tuple) and x[0] == "place_order" for x in client.calls))
+            self.assertTrue(any(isinstance(x, tuple) and x[0] == "order_detail_read" for x in client.calls))
+            self.assertTrue(any(isinstance(x, tuple) and x[0] == "tpsl_read" for x in client.calls))
             self.assertEqual(
                 store._db.execute("SELECT COUNT(*) FROM blofin_demo_orders").fetchone()[0], 1
             )
@@ -1597,6 +1665,106 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 finally:
                     store.close()
 
+    def test_partial_fill_uses_actual_filled_size_for_position_and_protection(self):
+        with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.fill_fraction = Decimal("0.4")
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            result = executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+            self.assertEqual(result["status"], "PARTIALLY_FILLED")
+            self.assertEqual(Decimal(result["filled_size"]), Decimal(result["quantity_contracts"]) * Decimal("0.4"))
+            self.assertTrue(result["protection"]["tp_verified"])
+            self.assertTrue(result["protection"]["sl_verified"])
+            self.assertEqual(store.get_order(result["client_order_id"])["status"], "PARTIALLY_FILLED")
+            self.assertEqual(store.trade_budget_status()["unresolved_orders"], 1)
+        finally:
+            store.close()
+
+    def test_filled_order_without_exact_tp_sl_protection_is_critical_and_blocks_new_entries(self):
+        with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.protection_rows_override = []
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            result = executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+            self.assertEqual(result["status"], "CRITICAL_UNPROTECTED")
+            self.assertTrue(result["new_entries_blocked"])
+            self.assertEqual(store.get_order(result["client_order_id"])["status"], "CRITICAL_UNPROTECTED")
+            self.assertEqual(store.trade_budget_status()["unresolved_orders"], 1)
+            with self.assertRaisesRegex(BloFinDemoExecutionBlocked, "unresolved outcome"):
+                executor.execute(signal_record(bar_offset_minutes=5), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+        finally:
+            store.close()
+
+    def test_position_id_mismatch_is_not_accepted_as_protection(self):
+        with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.position_rows_override = [{
+            "positionId": "different-position", "instId": "BTC-USDT",
+            "marginMode": "isolated", "positionSide": "net", "positions": "1",
+        }]
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            result = executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+            self.assertEqual(result["status"], "CRITICAL_UNPROTECTED")
+            self.assertIsNone(result["position_id"])
+            self.assertEqual(result["protection"]["reason"], "EXACT_POSITION_ID_NOT_PROVEN")
+        finally:
+            store.close()
+
+    def test_restart_recovery_reads_durable_journal_and_verifies_position_tp_sl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "blofin-demo-journal.sqlite3")
+            with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
+                first_store = BloFinDemoEventStore(database_path)
+            plan = build_demo_order_plan(signal_record(), instrument_record(), inst_id="BTC-USDT", equity_usdt=1000)
+            plan["position_side"] = "net"
+            self.assertTrue(first_store.reserve_order(plan))
+            first_store.update_order(plan["client_order_id"], "PENDING_RECONCILE", exchange_order_id="simulated-demo-id")
+            first_store.close()
+            with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
+                recovered_store = BloFinDemoEventStore(database_path)
+            recovered_store.backend = "TURSO_CLOUD_SQLITE"
+            client = FakeExecutorClient()
+            client.order_args = {
+                "inst_id": "BTC-USDT", "side": "buy", "position_side": "net",
+                "size": plan["quantity"], "take_profit": plan["take_profit"],
+                "stop_loss": plan["stop_loss"], "client_order_id": plan["client_order_id"],
+            }
+            executor = BloFinDemoExecutor(client=client, store=recovered_store, trading_enabled=False)
+            try:
+                result = executor.recover_unresolved_orders_from_journal(limit=10)
+                self.assertEqual(result["status"], "RECONCILED")
+                self.assertEqual(result["attempted"], 1)
+                self.assertEqual(recovered_store.get_order(plan["client_order_id"])["status"], "FILLED")
+                self.assertEqual(recovered_store.get_order(plan["client_order_id"])["position_id"], "demo-position-123")
+                self.assertFalse(any(isinstance(call, tuple) and call[0] == "place_order" for call in client.calls))
+            finally:
+                recovered_store.close()
+
+    def test_definitive_exchange_rejection_is_rejected_not_pending_timeout(self):
+        with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        def reject(**kwargs):
+            raise BloFinDemoResponseError("BloFin rejected order code=51000")
+        client.place_futures_order = reject
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
+            self.assertEqual(store.latest_order()["status"], "REJECTED")
+        finally:
+            store.close()
+
     def test_timeout_keeps_unknown_order_reserved_without_resubmission(self):
         with patch.dict(os.environ, {
             "TURSO_DATABASE_URL": "",
@@ -1620,7 +1788,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                     allow_demo_orders=True,
                 )
             order = store.latest_order()
-            self.assertEqual(order["status"], "UNKNOWN")
+            self.assertEqual(order["status"], "PENDING_RECONCILE")
             self.assertEqual(len(attempts), 1)
             event_types = [
                 event["event_type"]
@@ -1677,7 +1845,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 # This quota test models each Demo position as closed before the
                 # next cycle; it does not weaken the concurrent-position limit.
                 store.update_order(result["client_order_id"], "CLOSED")
-            self.assertTrue(all(row["status"] == "ACCEPTED" for row in results))
+            self.assertTrue(all(row["status"] == "FILLED" for row in results))
             budget = store.trade_budget_status()
             self.assertEqual(budget["orders_today"], 7)
             self.assertEqual(budget["orders_total"], 7)
@@ -1718,9 +1886,9 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
         client = FakeExecutorClient()
         client.get_order_detail = lambda inst_id, *, client_order_id: {
-            "clientOrderId": client_order_id,
-            "orderId": "exchange-order-after-reconcile",
-            "state": "live",
+            "clientOrderId": client_order_id, "orderId": "exchange-order-after-reconcile",
+            "instId": inst_id, "side": "buy", "size": plan["quantity"],
+            "filledSize": "0", "state": "live",
         }
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=False)
         try:
@@ -1765,10 +1933,11 @@ class BloFinDemoExecutorTests(unittest.TestCase):
 
             def read_order_detail(inst_id, *, client_order_id):
                 checked_ids.append(client_order_id)
+                local = store.get_order(client_order_id)
                 return {
-                    "clientOrderId": client_order_id,
-                    "orderId": "exchange-" + client_order_id[:8],
-                    "state": "live",
+                    "clientOrderId": client_order_id, "orderId": "exchange-" + client_order_id[:8],
+                    "instId": inst_id, "side": "buy" if local["side"] == "LONG" else "sell",
+                    "size": local["quantity"], "filledSize": "0", "state": "live",
                 }
 
             client.get_order_detail = read_order_detail
@@ -1814,8 +1983,8 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 signal_record(bar_offset_minutes=25),
                 inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
             )
-            self.assertEqual(first["status"], "ACCEPTED")
-            self.assertEqual(second["status"], "ACCEPTED")
+            self.assertEqual(first["status"], "FILLED")
+            self.assertEqual(second["status"], "FILLED")
             budget = store.trade_budget_status()
             self.assertEqual(budget["orders_today"], 2)
             self.assertIsNone(budget["max_orders_per_utc_day"])

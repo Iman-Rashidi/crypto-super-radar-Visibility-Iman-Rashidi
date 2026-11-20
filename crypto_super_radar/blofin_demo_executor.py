@@ -801,6 +801,9 @@ class BloFinDemoEventStore:
                     outcome_recorded_at INTEGER,
                     position_history_id TEXT,
                     position_id TEXT,
+                    position_side TEXT,
+                    filled_size TEXT,
+                    critical_reason TEXT,
                     reserved_risk_usdt TEXT,
                     reserved_margin_usdt TEXT,
                     created_at INTEGER NOT NULL,
@@ -816,6 +819,9 @@ class BloFinDemoEventStore:
                 ("outcome_recorded_at", "INTEGER"),
                 ("position_history_id", "TEXT"),
                 ("position_id", "TEXT"),
+                ("position_side", "TEXT"),
+                ("filled_size", "TEXT"),
+                ("critical_reason", "TEXT"),
                 ("reserved_risk_usdt", "TEXT"),
                 ("reserved_margin_usdt", "TEXT"),
             ):
@@ -1148,7 +1154,7 @@ class BloFinDemoEventStore:
 
         active_statuses = (
             "'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',"
-            "'ACCEPTED','PARTIALLY_FILLED','FILLED'"
+            "'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'"
         )
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
@@ -1197,13 +1203,15 @@ class BloFinDemoEventStore:
                     """INSERT INTO blofin_demo_orders
                     (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
                      stop_loss, take_profit, leverage, status, exchange_order_id, experience_id,
+                     position_side, filled_size, critical_reason,
                      reserved_risk_usdt, reserved_margin_usdt, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, NULL, NULL, ?, ?, ?, ?)""",
                     (
                         order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
                         str(plan["quantity"]), float(plan["entry_reference_price"]),
                         float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
                         str(plan.get("experience_id") or "") or None,
+                        str(plan.get("position_side") or plan.get("position_side_long_short") or "net"),
                         _format_decimal(new_risk), _format_decimal(new_margin), now, now,
                     ),
                 )
@@ -1230,21 +1238,41 @@ class BloFinDemoEventStore:
                 self._db.rollback()
                 raise
 
-    def update_order(self, client_order_id: str, status: str, *, exchange_order_id: str | None = None) -> None:
+    def update_order(
+        self, client_order_id: str, status: str, *,
+        exchange_order_id: str | None = None,
+        position_id: str | None = None,
+        filled_size: str | None = None,
+        critical_reason: str | None = None,
+    ) -> None:
         allowed = {
-            "LEVERAGE_SET", "PENDING_RECONCILE", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
-            "CANCELED", "REJECTED", "UNKNOWN", "CLOSED",
+            "LEVERAGE_SET", "PENDING_RECONCILE", "ACCEPTED", "PARTIALLY_FILLED",
+            "FILLED", "CRITICAL_UNPROTECTED", "CANCELED", "REJECTED",
+            "UNKNOWN", "CLOSED",
         }
         if status not in allowed:
             raise ValueError("Unsupported order status update.")
+        if filled_size is not None:
+            filled_size = _format_decimal(_decimal(filled_size, "filled_size"))
         now = int(time.time())
         with self._lock, self._db:
             self._db.execute(
-                """UPDATE blofin_demo_orders SET status=?, exchange_order_id=COALESCE(?, exchange_order_id),
-                updated_at=? WHERE client_order_id=?""",
-                (status, exchange_order_id, now, client_order_id),
+                """UPDATE blofin_demo_orders
+                   SET status=?,
+                       exchange_order_id=COALESCE(?, exchange_order_id),
+                       position_id=COALESCE(?, position_id),
+                       filled_size=COALESCE(?, filled_size),
+                       critical_reason=COALESCE(?, critical_reason),
+                       updated_at=?
+                   WHERE client_order_id=?""",
+                (status, exchange_order_id, position_id, filled_size, critical_reason, now, client_order_id),
             )
-            self._append_event(client_order_id, status, {"exchange_order_id_present": bool(exchange_order_id)})
+            self._append_event(client_order_id, status, {
+                "exchange_order_id_present": bool(exchange_order_id),
+                "position_id_present": bool(position_id),
+                "filled_size": filled_size,
+                "critical_reason": critical_reason,
+            })
 
     def equity_guard(self, equity_usdt: float, *, now: int | None = None) -> dict[str, float]:
         equity = _finite(equity_usdt, "equity_usdt", minimum=0.0000001)
@@ -1457,14 +1485,15 @@ class BloFinDemoEventStore:
             ).fetchone()
             unresolved_row = self._db.execute(
                 "SELECT COUNT(*) FROM blofin_demo_orders "
-                "WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')"
+                "WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE',"
+                "'ACCEPTED','PARTIALLY_FILLED','CRITICAL_UNPROTECTED')"
             ).fetchone()
             active_exposure_rows = self._db.execute(
                 """SELECT reserved_risk_usdt, reserved_margin_usdt
                    FROM blofin_demo_orders
                    WHERE status IN (
                        'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',
-                       'ACCEPTED','PARTIALLY_FILLED','FILLED'
+                       'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'
                    )"""
             ).fetchall()
         orders_today = int(today_row[0] or 0)
@@ -1582,7 +1611,10 @@ class BloFinDemoEventStore:
         with self._lock:
             rows = self._db.execute(
                 """SELECT * FROM blofin_demo_orders
-                   WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')
+                   WHERE status IN (
+                       'UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE',
+                       'ACCEPTED','PARTIALLY_FILLED','CRITICAL_UNPROTECTED'
+                   )
                    ORDER BY created_at ASC, client_order_id ASC
                    LIMIT ?""",
                 (bounded,),
@@ -1982,46 +2014,213 @@ class BloFinDemoExecutor:
         configured = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
         self.trading_enabled = configured if trading_enabled is None else bool(trading_enabled)
 
-    def reconcile_unknown_order(self, *, inst_id: str, client_order_id: str) -> dict[str, Any]:
-        """Read order state by client id. This method never places or retries an order."""
-        order = self.store.get_order(client_order_id)
-        if order is None or order.get("instrument_id") != inst_id:
-            raise BloFinDemoExecutionBlocked("No matching locally reserved order exists.")
-        if order.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET", "PENDING_RECONCILE"}:
-            return {"status": order["status"], "client_order_id": client_order_id}
-        detail = self.client.get_order_detail(inst_id, client_order_id=client_order_id)
-        if isinstance(detail, list):
-            detail = next((row for row in detail if isinstance(row, Mapping)), None)
-        if not isinstance(detail, Mapping):
-            return {"status": "UNKNOWN", "client_order_id": client_order_id,
-                    "reconciliation": "NO_MATCH; no retry was sent"}
-        echoed_id = str(detail.get("clientOrderId") or "")
-        exchange_order_id = str(detail.get("orderId") or "")
-        state = str(detail.get("state") or "").lower()
-        if echoed_id != client_order_id or not exchange_order_id:
-            return {"status": "UNKNOWN", "client_order_id": client_order_id,
-                    "reconciliation": "INCOMPLETE_RECEIPT; no retry was sent"}
-        state_map = {
-            "live": "ACCEPTED",
-            "partially_filled": "PARTIALLY_FILLED",
-            "filled": "FILLED",
-            "canceled": "CANCELED",
-            "order_failed": "REJECTED",
-        }
-        mapped = state_map.get(state)
-        if mapped is None:
-            return {"status": "UNKNOWN", "client_order_id": client_order_id,
-                    "reconciliation": "UNRECOGNIZED_EXCHANGE_STATE; no retry was sent"}
-        self.store.update_order(
-            client_order_id, mapped, exchange_order_id=exchange_order_id
-        )
+    @staticmethod
+    def _response_rows(value: Any) -> list[Mapping[str, Any]]:
+        if isinstance(value, Mapping):
+            if isinstance(value.get("data"), list):
+                value = value["data"]
+            elif isinstance(value.get("data"), Mapping):
+                value = [value["data"]]
+            else:
+                value = [value]
+        if not isinstance(value, list):
+            return []
+        return [row for row in value if isinstance(row, Mapping)]
+
+    @staticmethod
+    def _same_decimal(left: Any, right: Any, field: str) -> bool:
+        try:
+            return _decimal(left, field) == _decimal(right, field)
+        except Exception:
+            return False
+
+    def _verify_filled_position_and_protection(
+        self, *, order: Mapping[str, Any], detail: Mapping[str, Any],
+        filled_size: Decimal, client_order_id: str,
+    ) -> dict[str, Any]:
+        """Read-only exact-position and TP/SL verification; never repairs by writing."""
+        inst_id = str(order.get("instrument_id") or "").upper()
+        side = str(order.get("side") or "").upper()
+        expected_position_side = str(order.get("position_side") or "net").lower()
+        expected_tp = str(order.get("take_profit") or "")
+        expected_sl = str(order.get("stop_loss") or "")
+        detail_position_id = str(detail.get("positionId") or "").strip()
+        try:
+            position_rows = self._response_rows(self.client.get_positions(inst_id=inst_id))
+        except Exception as exc:
+            return {"verified": False, "reason": "POSITION_READ_FAILED",
+                    "error_type": type(exc).__name__, "position_id": None}
+        matching_positions = []
+        for row in position_rows:
+            if str(row.get("instId") or "").upper() != inst_id:
+                continue
+            if str(row.get("positionSide") or "").lower() != expected_position_side:
+                continue
+            position_id = str(row.get("positionId") or "").strip()
+            if not position_id or position_id == "0":
+                continue
+            if detail_position_id and position_id != detail_position_id:
+                continue
+            try:
+                signed_size = _decimal(row.get("positions"), "position_size")
+            except Exception:
+                continue
+            if signed_size == 0 or abs(signed_size) != filled_size:
+                continue
+            if expected_position_side == "net":
+                if (side == "LONG" and signed_size <= 0) or (side == "SHORT" and signed_size >= 0):
+                    continue
+            elif expected_position_side != side.lower():
+                continue
+            matching_positions.append(position_id)
+        if len(matching_positions) != 1:
+            return {"verified": False, "reason": "EXACT_POSITION_ID_NOT_PROVEN",
+                    "position_id": None, "matching_position_count": len(matching_positions)}
+        position_id = matching_positions[0]
+        close_side = "sell" if side == "LONG" else "buy"
+        try:
+            tpsl_rows = self._response_rows(self.client.get_open_tpsl_orders(
+                inst_id=inst_id, client_order_id=client_order_id, limit=100,
+            ))
+        except Exception as exc:
+            return {"verified": False, "reason": "TPSL_READ_FAILED",
+                    "error_type": type(exc).__name__, "position_id": position_id}
+        tp_verified = False
+        sl_verified = False
+        matched_rows = 0
+        for row in tpsl_rows:
+            if str(row.get("instId") or "").upper() != inst_id:
+                continue
+            if str(row.get("positionId") or "").strip() != position_id:
+                continue
+            if str(row.get("positionSide") or "").lower() != expected_position_side:
+                continue
+            if str(row.get("side") or "").lower() != close_side:
+                continue
+            if str(row.get("state") or "").lower() != "live":
+                continue
+            returned_client_id = str(row.get("clientOrderId") or "").strip()
+            if returned_client_id and returned_client_id != client_order_id:
+                continue
+            raw_sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
+            if not raw_sizes or any(not self._same_decimal(v, filled_size, "tpsl_size") for v in raw_sizes):
+                continue
+            row_tp, row_sl = row.get("tpTriggerPrice"), row.get("slTriggerPrice")
+            category, generic = str(row.get("orderCategory") or "").lower(), row.get("triggerPrice")
+            tp_type = str(row.get("tpTriggerPriceType") or row.get("triggerPriceType") or "").lower()
+            sl_type = str(row.get("slTriggerPriceType") or row.get("triggerPriceType") or "").lower()
+            if row_tp not in (None, ""):
+                if self._same_decimal(row_tp, expected_tp, "tp_trigger") and tp_type == "mark":
+                    tp_verified = True
+            elif category == "tp" and generic not in (None, ""):
+                if self._same_decimal(generic, expected_tp, "tp_trigger") and tp_type == "mark":
+                    tp_verified = True
+            if row_sl not in (None, ""):
+                if self._same_decimal(row_sl, expected_sl, "sl_trigger") and sl_type == "mark":
+                    sl_verified = True
+            elif category == "sl" and generic not in (None, ""):
+                if self._same_decimal(generic, expected_sl, "sl_trigger") and sl_type == "mark":
+                    sl_verified = True
+            if tp_verified or sl_verified:
+                matched_rows += 1
         return {
-            "status": mapped,
-            "environment": "BLOFIN_DEMO",
-            "client_order_id": client_order_id,
-            "exchange_order_id": exchange_order_id,
-            "reconciliation": "READ_ONLY",
+            "verified": tp_verified and sl_verified,
+            "reason": "VERIFIED" if tp_verified and sl_verified else "TP_OR_SL_MISSING_OR_MISMATCHED",
+            "position_id": position_id, "tp_verified": tp_verified,
+            "sl_verified": sl_verified, "matched_tpsl_rows": matched_rows,
+            "filled_size": _format_decimal(filled_size),
         }
+
+    def reconcile_unknown_order(self, *, inst_id: str, client_order_id: str) -> dict[str, Any]:
+        """Read-only order reconciliation, including fill, exact position and both protective triggers."""
+        order = self.store.get_order(client_order_id)
+        if order is None or str(order.get("instrument_id") or "").upper() != inst_id.upper():
+            raise BloFinDemoExecutionBlocked("No matching locally reserved order exists.")
+        if order.get("status") in {"REJECTED", "CANCELED", "CLOSED"}:
+            return {"status": order["status"], "client_order_id": client_order_id}
+        try:
+            detail_value = self.client.get_order_detail(inst_id, client_order_id=client_order_id)
+        except Exception as exc:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "ORDER_DETAIL_READ_FAILED",
+                    "error_type": type(exc).__name__, "orders_submitted": False}
+        detail_rows = self._response_rows(detail_value)
+        detail = next((row for row in detail_rows if str(row.get("clientOrderId") or "") == client_order_id), None)
+        if detail is None:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "NO_EXACT_ORDER_DETAIL_MATCH", "orders_submitted": False}
+        exchange_order_id = str(detail.get("orderId") or "").strip()
+        state = str(detail.get("state") or "").lower()
+        expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
+        if (not exchange_order_id
+            or str(detail.get("instId") or "").upper() != inst_id.upper()
+            or str(detail.get("side") or "").lower() != expected_side):
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "ORDER_IDENTITY_MISMATCH", "orders_submitted": False}
+        known_exchange_id = str(order.get("exchange_order_id") or "").strip()
+        if known_exchange_id and known_exchange_id != exchange_order_id:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "EXCHANGE_ORDER_ID_MISMATCH", "orders_submitted": False}
+        try:
+            requested_size = _decimal(order.get("quantity"), "requested_size")
+            raw_filled = detail.get("filledSize")
+            if raw_filled in (None, ""):
+                raise ValueError("filledSize is missing")
+            filled_size = _decimal(raw_filled, "filledSize")
+        except Exception:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE", exchange_order_id=exchange_order_id)
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "exchange_order_id": exchange_order_id,
+                    "reconciliation": "FILL_QUANTITY_UNAVAILABLE", "orders_submitted": False}
+        if filled_size < 0 or requested_size <= 0 or filled_size > requested_size:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE", exchange_order_id=exchange_order_id)
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "exchange_order_id": exchange_order_id,
+                    "reconciliation": "INVALID_FILL_QUANTITY", "orders_submitted": False}
+        if filled_size == 0:
+            if state in {"order_failed", "rejected", "failed"}:
+                mapped = "REJECTED"
+            elif state == "canceled":
+                mapped = "CANCELED"
+            elif state == "live":
+                mapped = "ACCEPTED"
+            else:
+                mapped = "PENDING_RECONCILE"
+            self.store.update_order(client_order_id, mapped, exchange_order_id=exchange_order_id, filled_size="0")
+            return {"status": mapped, "environment": "BLOFIN_DEMO",
+                    "client_order_id": client_order_id, "exchange_order_id": exchange_order_id,
+                    "filled_size": "0", "reconciliation": "READ_ONLY", "orders_submitted": False}
+        verification = self._verify_filled_position_and_protection(
+            order=order, detail=detail, filled_size=filled_size,
+            client_order_id=client_order_id,
+        )
+        if not verification.get("verified"):
+            reason = str(verification.get("reason") or "POST_FILL_VERIFICATION_FAILED")
+            self.store.update_order(
+                client_order_id, "CRITICAL_UNPROTECTED",
+                exchange_order_id=exchange_order_id, position_id=verification.get("position_id"),
+                filled_size=_format_decimal(filled_size), critical_reason=reason,
+            )
+            return {"status": "CRITICAL_UNPROTECTED", "environment": "BLOFIN_DEMO",
+                    "client_order_id": client_order_id, "exchange_order_id": exchange_order_id,
+                    "filled_size": _format_decimal(filled_size), "position_id": verification.get("position_id"),
+                    "protection": verification, "reconciliation": "READ_ONLY_FAIL_CLOSED",
+                    "new_entries_blocked": True, "orders_submitted": False}
+        mapped = "FILLED" if filled_size == requested_size else "PARTIALLY_FILLED"
+        self.store.update_order(
+            client_order_id, mapped, exchange_order_id=exchange_order_id,
+            position_id=verification["position_id"], filled_size=_format_decimal(filled_size),
+            critical_reason="",
+        )
+        return {"status": mapped, "environment": "BLOFIN_DEMO",
+                "client_order_id": client_order_id, "exchange_order_id": exchange_order_id,
+                "filled_size": _format_decimal(filled_size), "requested_size": _format_decimal(requested_size),
+                "position_id": verification["position_id"], "protection": verification,
+                "reconciliation": "READ_ONLY_VERIFIED", "orders_submitted": False}
 
     def reconcile_unresolved_orders(self, *, limit: int = 50) -> dict[str, Any]:
         """Read-only sweep of every locally unresolved order; never creates or retries orders."""
@@ -2064,6 +2263,10 @@ class BloFinDemoExecutor:
             "orders_submitted": False,
             "results": results,
         }
+
+    def recover_unresolved_orders_from_journal(self, *, limit: int = 50) -> dict[str, Any]:
+        """Startup hook: reconcile unresolved durable journal entries using GET-only calls."""
+        return self.reconcile_unresolved_orders(limit=limit)
 
     def execute(
         self,
@@ -2233,6 +2436,8 @@ class BloFinDemoExecutor:
         plan = apply_demo_execution_cost_gate(
             plan, instrument, market_quote, policy=self.policy,
         )
+        position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
+        plan["position_side"] = position_side
         if not self.store.reserve_order(
             plan,
             max_concurrent_positions=self.policy.max_concurrent_positions,
@@ -2243,7 +2448,6 @@ class BloFinDemoExecutor:
                 "Duplicate signal, unresolved legacy exposure, external exposure, or aggregate risk/margin budget is already reserved; entry blocked."
             )
 
-        position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
         exchange_side = "buy" if plan["side"] == "LONG" else "sell"
         try:
             self.client.set_futures_leverage(
@@ -2276,10 +2480,15 @@ class BloFinDemoExecutor:
                     stop_loss=plan["stop_loss"],
                     margin_mode="isolated",
                 )
+            except BloFinDemoResponseError as exc:
+                self.store.update_order(plan["client_order_id"], "REJECTED")
+                raise BloFinDemoExecutionBlocked(
+                    "BloFin explicitly rejected the Demo order; no retry was sent."
+                ) from exc
             except Exception as exc:
-                self.store.update_order(plan["client_order_id"], "UNKNOWN")
+                self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
                 raise BloFinDemoExecutionUnknown(
-                    "Order outcome is unknown. Do not retry; reconcile with BloFin using clientOrderId."
+                    "Order outcome is unknown after POST. Do not retry; reconcile by clientOrderId."
                 ) from exc
 
         if submission_lock is None:
@@ -2292,24 +2501,30 @@ class BloFinDemoExecutor:
         if isinstance(data, list):
             data = data[0] if data and isinstance(data[0], Mapping) else {}
         if not isinstance(data, Mapping):
-            self.store.update_order(plan["client_order_id"], "UNKNOWN")
-            raise BloFinDemoExecutionUnknown("BloFin accepted a response without a usable order receipt.")
+            self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
+            raise BloFinDemoExecutionUnknown("BloFin response had no usable receipt; reconcile before retry.")
         order_id = data.get("orderId")
         if not order_id:
-            self.store.update_order(plan["client_order_id"], "UNKNOWN")
+            self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
             raise BloFinDemoExecutionUnknown("Order ID is missing; reconcile before retrying.")
-        self.store.update_order(plan["client_order_id"], "ACCEPTED", exchange_order_id=str(order_id))
+        self.store.update_order(
+            plan["client_order_id"], "PENDING_RECONCILE", exchange_order_id=str(order_id),
+        )
+        reconciliation = self.reconcile_unknown_order(
+            inst_id=inst_id, client_order_id=plan["client_order_id"],
+        )
+        if reconciliation["status"] == "PENDING_RECONCILE":
+            raise BloFinDemoExecutionUnknown(
+                "Post-submit exchange state is not conclusive; journal remains PENDING_RECONCILE."
+            )
         return {
-            "status": "ACCEPTED",
-            "environment": "BLOFIN_DEMO",
+            **reconciliation,
             "instrument_id": inst_id,
             "side": plan["side"],
             "quantity_contracts": plan["quantity"],
             "leverage": int(leverage),
             "stop_loss": plan["stop_loss"],
             "take_profit": plan["take_profit"],
-            "client_order_id": plan["client_order_id"],
-            "exchange_order_id": str(order_id),
             "risk_budget_usdt": plan["risk_budget_usdt"],
             "notional_usdt": plan["notional_usdt"],
             "entry_reference_price": plan["entry_reference_price"],
