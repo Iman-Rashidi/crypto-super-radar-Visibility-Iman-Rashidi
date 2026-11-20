@@ -15,6 +15,10 @@ from crypto_super_radar.challenge1_v2 import (
     analyze_signal,
     challenge1_v2_execution_evidence_ready,
 )
+from crypto_super_radar.funding_schema_probe import (
+    summarize_current_payload,
+    summarize_history_payload,
+)
 from crypto_super_radar.ai_sandbox import (
     SandboxDataError,
     _strategy_history_ready,
@@ -42,6 +46,46 @@ from crypto_super_radar.virtual_blofin import (
     _snap_trade_prices,
     size_position,
 )
+class BloFinFundingSchemaProbeTests(unittest.TestCase):
+    def test_history_probe_counts_explicit_and_missing_kind_separately(self):
+        report = summarize_history_payload({
+            "code": "0",
+            "data": [
+                {"fundingTime": "1782403200000", "fundingRate": "0.0001", "fundingKind": "0"},
+                {"fundingTime": "1782432000000", "fundingRate": "0.0002", "fundingKind": "1"},
+                {"fundingTime": "1782460800000", "fundingRate": "0.0003"},
+            ],
+        })
+        self.assertEqual(report["sample_count"], 3)
+        self.assertEqual(report["kind_present_count"], 2)
+        self.assertEqual(report["kind_missing_count"], 1)
+        self.assertEqual(report["kind_values"], {"0": 1, "1": 1})
+
+    def test_current_interval_probe_accepts_eight_hour_utc_boundary(self):
+        report = summarize_current_payload({
+            "code": "0",
+            "data": [{
+                "fundingInterval": "8",
+                "fundingIntervalUnit": "hour",
+                "fundingTime": "1782403200000",
+            }],
+        })
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(report["funding_interval_ms"], 8 * 60 * 60_000)
+        self.assertTrue(report["utc_boundary_verified"])
+
+    def test_current_interval_probe_rejects_off_schedule_timestamp(self):
+        report = summarize_current_payload({
+            "code": "0",
+            "data": [{
+                "fundingInterval": "8",
+                "fundingIntervalUnit": "hour",
+                "fundingTime": "1782406800000",
+            }],
+        })
+        self.assertEqual(report["status"], "OFF_SCHEDULE")
+        self.assertFalse(report["utc_boundary_verified"])
+
 
 class BlockReasonLedgerTests(unittest.TestCase):
     def test_global_and_per_symbol_block_reasons_reconcile(self):
