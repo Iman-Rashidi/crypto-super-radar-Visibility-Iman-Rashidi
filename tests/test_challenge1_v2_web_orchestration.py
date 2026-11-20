@@ -453,6 +453,8 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
     def test_gated_v2_single_shot_runs_real_executor_and_post_fill_tpsl_verification(self):
         store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
+        close_store = store.close
+        store.close = lambda: None
         trade_client = FakeBloFinDemoTradeClient(now_ms=self.client.now_ms)
         with patch.dict(os.environ, {
             "BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED": "true",
@@ -503,7 +505,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         self.assertEqual(order["status"], "FILLED")
         self.assertEqual(order["position_id"], trade_client.position_id)
         self.assertTrue(store.single_shot_lock_status()["locked"])
-        store.close()
+        close_store()
 
     def test_v2_write_flag_without_all_independent_safety_switches_stays_blocked(self):
         with patch.dict(os.environ, {
