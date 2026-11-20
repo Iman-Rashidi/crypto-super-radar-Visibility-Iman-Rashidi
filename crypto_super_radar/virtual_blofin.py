@@ -274,6 +274,69 @@ def _net_breakeven_limit_price(
     return float(limit_price)
 
 
+def _net_breakeven_stop_price(
+    *,
+    entry: float,
+    quantity: float,
+    contract_value: float,
+    side: str,
+    accumulated_fees: float,
+    funding_paid: float,
+    spread_cost_usdt: float,
+    realized_gross_pnl_usdt: float,
+    stop_slippage: float,
+    stop_fee_rate: float,
+    tick_size: Decimal,
+) -> float:
+    """Solve the Mark-trigger price whose slipped Stop-Market fill is net break-even.
+
+    Fees, funding, and spread already incurred are included, as is any gross
+    profit realized at TP1. Stop slippage and the taker exit fee are modeled
+    on the remaining quantity. LONG stops round upward; SHORT stops downward.
+    """
+    entry_d = _dec(entry, "entry", positive=True)
+    quantity_d = _dec(quantity, "quantity", positive=True)
+    contract_d = _dec(contract_value, "contract_value", positive=True)
+    tick_d = _dec(tick_size, "tick_size", positive=True)
+    fees_d = _dec(accumulated_fees, "accumulated_fees")
+    funding_d = _dec(funding_paid, "funding_paid")
+    spread_d = _dec(spread_cost_usdt, "spread_cost_usdt")
+    realized_d = _dec(realized_gross_pnl_usdt, "realized_gross_pnl_usdt")
+    slip_d = _dec(stop_slippage, "stop_slippage")
+    fee_d = _dec(stop_fee_rate, "stop_fee_rate")
+    if side not in {"LONG", "SHORT"}:
+        raise SimulationError("side must be LONG or SHORT")
+    if not 0 <= slip_d < Decimal("1") or not 0 <= fee_d < Decimal("1"):
+        raise SimulationError("stop execution cost inputs are outside safe bounds")
+
+    qty_value = quantity_d * contract_d
+    accrued_cost_balance = fees_d + funding_d + spread_d - realized_d
+    if side == "LONG":
+        numerator = entry_d * qty_value + accrued_cost_balance
+        if numerator <= 0:
+            raw_trigger = entry_d
+        else:
+            denominator = qty_value * (Decimal("1") - slip_d) * (Decimal("1") - fee_d)
+            raw_trigger = numerator / denominator
+        rounding = ROUND_CEILING
+    else:
+        numerator = entry_d * qty_value - accrued_cost_balance
+        if numerator <= 0:
+            raw_trigger = entry_d
+        else:
+            denominator = qty_value * (Decimal("1") + slip_d) * (Decimal("1") + fee_d)
+            raw_trigger = numerator / denominator
+        rounding = ROUND_FLOOR
+
+    if not raw_trigger.is_finite() or raw_trigger <= 0:
+        raise SimulationError("net break-even stop trigger is invalid")
+    rounded_ticks = (raw_trigger / tick_d).to_integral_value(rounding=rounding)
+    trigger = rounded_ticks * tick_d
+    if trigger <= 0:
+        raise SimulationError("net break-even stop trigger is invalid after tick rounding")
+    return float(trigger)
+
+
 @dataclass
 class TradeResult:
     status: str
@@ -313,7 +376,11 @@ class VirtualBloFin:
             raise SimulationError("not enough future candles to simulate an entry")
         if spread_fraction is None:
             spread_fraction = self.costs.spread_fraction
-        if not math.isfinite(spread_fraction) or spread_fraction > self.costs.max_spread_fraction:
+        if (
+            not math.isfinite(spread_fraction)
+            or spread_fraction < 0
+            or spread_fraction > self.costs.max_spread_fraction
+        ):
             return TradeResult("REJECTED", "WIDE_SPREAD", 0, None, None, 0, 0, 0, 0, False, None,
                                {"spread_fraction": spread_fraction, "max_spread_fraction": self.costs.max_spread_fraction})
         entry, stop, target = _snap_trade_prices(
@@ -369,13 +436,9 @@ class VirtualBloFin:
         net_risk_per_unit = initial_risk_per_unit + entry * (cc.maker_fee + cc.taker_fee + cc.stop_slippage + cc.spread_fraction + cc.funding_reserve)
         tp1_net_reward_distance = 1.2 * net_risk_per_unit + entry * (cc.maker_fee + cc.maker_fee + cc.spread_fraction + cc.funding_reserve)
         tp1_price = entry + tp1_net_reward_distance * (1 if side == "LONG" else -1)
-        # Net break-even stop is a Stop-Market exit: use taker fee and
-        # adverse trigger slippage, not the maker fee of a resting TP limit.
-        risk_free_buffer = entry * (
-            cc.maker_fee + cc.taker_fee + cc.stop_slippage
-            + cc.spread_fraction + cc.funding_reserve
-        )
-        be_stop = entry + risk_free_buffer if side == "LONG" else entry - risk_free_buffer
+        # The exact TP1 break-even stop is calculated at the partial fill,
+        # after its maker fee and every funding event observed so far are known.
+        be_stop = None
         funding = sorted((dict(item) for item in funding_events), key=lambda x: _timestamp_ms(x.get("fundingTime")))
         if cc.require_funding_history and not funding:
             raise SimulationError("funding history is unavailable; funding cannot be assumed zero")
@@ -469,6 +532,19 @@ class VirtualBloFin:
                 fees += tp1_price * close_qty * cv * cc.maker_fee
                 qty_left -= close_qty
                 tp1 = True
+                be_stop = _net_breakeven_stop_price(
+                    entry=entry,
+                    quantity=qty_left,
+                    contract_value=cv,
+                    side=side,
+                    accumulated_fees=fees,
+                    funding_paid=funding_total,
+                    spread_cost_usdt=spread_cost,
+                    realized_gross_pnl_usdt=realized_gross,
+                    stop_slippage=cc.stop_slippage,
+                    stop_fee_rate=cc.taker_fee,
+                    tick_size=rules.tick_size,
+                )
                 current_stop = max(current_stop, be_stop) if side == "LONG" else min(current_stop, be_stop)
 
             favourable_1_5r = (last_high >= entry + 1.5 * initial_risk_per_unit) if side == "LONG" else (last_low <= entry - 1.5 * initial_risk_per_unit)
@@ -478,6 +554,12 @@ class VirtualBloFin:
                 if atr_value is not None:
                     atr_v = _float(atr_value, "atr_15m")
                     candidate = close - 1.8 * atr_v if side == "LONG" else close + 1.8 * atr_v
+                    candidate = _snap_price(
+                        candidate,
+                        rules.tick_size,
+                        "CEILING" if side == "LONG" else "FLOOR",
+                        "atr_trailing_stop",
+                    )
                     current_stop = max(current_stop, candidate) if side == "LONG" else min(current_stop, candidate)
             if target_hit and qty_left > 0:
                 exit_price, exit_reason, exit_ts = target, "TP", close_ts
