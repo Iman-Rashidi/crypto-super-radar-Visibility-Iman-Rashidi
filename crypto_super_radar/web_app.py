@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
