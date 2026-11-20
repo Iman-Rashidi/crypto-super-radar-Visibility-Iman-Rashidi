@@ -1666,5 +1666,31 @@ class BloFinDemoUnifiedCredentialEnvironmentTests(unittest.TestCase):
         self.assertFalse(client._trade_permission_verified)
 
 
+    def test_challenge1_v2_multitimeframe_signal_is_not_silently_adapted_to_legacy_demo_executor(self):
+        # V2 analysis returns 1H/4H regime + 15M entry evidence. The current
+        # Demo executor intentionally requires the separate 5M-only contract.
+        v2_signal = {
+            "signal": "LONG",
+            "signal_id": "challenge1-v2:BTC-USDT:15m:2026-11-20T17:00:00+00:00:LONG",
+            "instrument_id": "BTC-USDT",
+            "entry": 100.0,
+            "stop_loss": 98.0,
+            "take_profit": 104.8,
+            "atr_15m": 1.2,
+            "gross_rr": 2.4,
+            "confidence_score": 85,
+            "orders_submitted": False,
+        }
+        with self.assertRaisesRegex(
+            BloFinDemoExecutionBlocked,
+            "Only Challenge 1 strategy evidence",
+        ):
+            build_demo_order_plan(
+                v2_signal,
+                {},
+                inst_id="BTC-USDT",
+                equity_usdt=1000.0,
+            )
+
 if __name__ == "__main__":
     unittest.main()
