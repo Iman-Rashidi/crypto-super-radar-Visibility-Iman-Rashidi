@@ -522,6 +522,7 @@ def analyze_signal(
     }
     return {
         "signal": direction, "signal_id": signal_id, "instrument_id": symbol,
+        "execution_profile": "CHALLENGE_1_V2",
         "entry": entry, "stop_loss": stop, "take_profit": target,
         "atr_15m": current_atr, "gross_rr": abs(target - entry) / abs(entry - stop),
         "confidence_score": confidence_score, "score_parts": score_parts,
