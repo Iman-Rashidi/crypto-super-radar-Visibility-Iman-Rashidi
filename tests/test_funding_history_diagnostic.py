@@ -37,7 +37,7 @@ class FundingHistorySchemaDiagnosticTests(unittest.TestCase):
             [{"fundingTime": "1000", "fundingRate": "999", "fundingKind": "0"}],
             environment="BLOFIN_DEMO_REPLAY_SOURCE", query="latest_page",
         )
-        self.assertNotIn("fundingRate", str(result))
+        # Field names are retained for schema diagnosis; raw rate values are not.
         self.assertNotIn("999", str(result))
 
 
