@@ -8,6 +8,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_executor import (
