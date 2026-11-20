@@ -1521,6 +1521,9 @@ def run_independent_ai_supervisor(
                 "prompt_version": PROMPT_VERSION + "-second-ai",
             }
         body = response.json()
+        body_request_id = (body.get("id") or body.get("request_id")) if isinstance(body, dict) else None
+        if isinstance(body_request_id, str) and body_request_id.strip():
+            provider_request_id = body_request_id.strip()[:200]
         choices = body.get("choices") if isinstance(body, dict) else None
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ValueError("Missing second AI response choices")
@@ -1890,6 +1893,13 @@ def _call_challenge1_observer(
         )
         latency_ms = int((time.monotonic() - started) * 1000)
         http_status = int(getattr(response, "status_code", 0) or 0)
+        response_headers = getattr(response, "headers", {}) or {}
+        if isinstance(response_headers, Mapping):
+            for header_name in ("x-request-id", "request-id", "x-correlation-id"):
+                header_value = response_headers.get(header_name)
+                if header_value not in (None, ""):
+                    provider_request_id = str(header_value).strip()[:200] or None
+                    break
         if http_status != 200:
             code = {
                 401: "PROVIDER_AUTH_REJECTED",
