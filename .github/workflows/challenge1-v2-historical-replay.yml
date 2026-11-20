@@ -43,6 +43,23 @@ jobs:
           python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
           python -m unittest discover -s tests -p 'test_market_replay_duplicates.py' -v
 
+      - name: Diagnose public BTC funding-history intervals
+        id: funding-diagnostic
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p artifacts
+          python -m scripts.diagnose_blofin_funding_history --symbol BTC-USDT --months 7 \
+            > artifacts/funding_diagnostic.json 2> artifacts/funding_diagnostic.stderr
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -ne 0 ]; then
+            tail -n 100 artifacts/funding_diagnostic.stderr >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            cat artifacts/funding_diagnostic.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
       - name: Download seven months of public BloFin data
         id: download
         continue-on-error: true
