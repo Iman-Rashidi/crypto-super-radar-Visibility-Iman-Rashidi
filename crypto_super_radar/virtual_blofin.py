@@ -8,7 +8,7 @@ are deliberately conservative approximations.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Iterable, Mapping
 import math
 
@@ -171,6 +171,54 @@ def _timestamp_ms(value: Any) -> int:
         raise SimulationError("candle timestamp is invalid") from exc
 
 
+def _net_breakeven_limit_price(
+    *,
+    entry: float,
+    quantity: float,
+    contract_value: float,
+    side: str,
+    accumulated_fees: float,
+    funding_paid: float,
+    spread_fraction: float,
+    maker_fee: float,
+    tick_size: float,
+) -> float:
+    """Solve the exit limit price that covers accrued costs plus the maker exit fee.
+
+    A long closes with a sell limit rounded upward; a short closes with a buy
+    limit rounded downward. Rounding therefore never makes the modeled exit
+    less protective than the calculated net break-even.
+    """
+    entry_d = _dec(entry, "entry", positive=True)
+    quantity_d = _dec(quantity, "quantity", positive=True)
+    contract_d = _dec(contract_value, "contract_value", positive=True)
+    tick_d = _dec(tick_size, "tick_size", positive=True)
+    fee_d = _dec(accumulated_fees, "accumulated_fees")
+    funding_d = _dec(funding_paid, "funding_paid")
+    spread_d = _dec(spread_fraction, "spread_fraction")
+    maker_d = _dec(maker_fee, "maker_fee")
+    if side not in {"LONG", "SHORT"}:
+        raise SimulationError("side must be LONG or SHORT")
+    if not 0 <= spread_d <= Decimal("0.05") or not 0 <= maker_d < Decimal("1"):
+        raise SimulationError("time-exit cost inputs are outside safe bounds")
+    signed = Decimal("1") if side == "LONG" else Decimal("-1")
+    position_value = quantity_d * contract_d
+    spread_cost = entry_d * position_value * spread_d
+    numerator = entry_d * position_value * signed + fee_d + funding_d + spread_cost
+    denominator = position_value * (signed - maker_d)
+    if denominator == 0:
+        raise SimulationError("net break-even denominator is zero")
+    raw_price = numerator / denominator
+    if not raw_price.is_finite() or raw_price <= 0:
+        raise SimulationError("net break-even limit price is invalid")
+    rounding = ROUND_CEILING if side == "LONG" else ROUND_FLOOR
+    rounded_ticks = (raw_price / tick_d).to_integral_value(rounding=rounding)
+    limit_price = rounded_ticks * tick_d
+    if limit_price <= 0:
+        raise SimulationError("rounded net break-even limit price is invalid")
+    return float(limit_price)
+
+
 @dataclass
 class TradeResult:
     status: str
@@ -284,10 +332,12 @@ class VirtualBloFin:
                                    "entry_ts_ms": entry_ts, "exit_ts_ms": fill_bar_close_ts,
                                })
         exit_price = None
-        exit_reason = "TIME_EXIT"
-        exit_ts = entry_ts
+        exit_reason = None
+        exit_ts = None
         held = 0
-        for idx in range(start_index + 2, min(len(rows), start_index + 2 + self.max_holding_bars)):
+        time_exit_limit_price = None
+        time_exit_submitted_ts = None
+        for idx in range(start_index + 2, len(rows)):
             bar = rows[idx]
             held += 1
             ts = _timestamp_ms(bar.get("ts"))
@@ -303,18 +353,36 @@ class VirtualBloFin:
                     if event.get("fundingRate") is None:
                         raise SimulationError("fundingRate is missing; funding cannot be assumed zero")
                     rate = _float(event.get("fundingRate"), "fundingRate")
-                    notional_now = entry * qty_total * cv
+                    notional_now = entry * qty_left * cv
                     funding_total += notional_now * rate * (1 if side == "LONG" else -1)
                     event["_applied"] = True
+
+            # Exchange stop protection has priority over every limit exit when
+            # OHLC data cannot establish the intrabar event sequence.
             stop_hit = (ml <= current_stop) if side == "LONG" else (mh >= current_stop)
-            tp1_hit = tp1_qty > 0 and not tp1 and (
-                last_high >= tp1_price + tick if side == "LONG" else last_low <= tp1_price - tick
-            )
-            target_hit = (last_high >= target + tick) if side == "LONG" else (last_low <= target - tick)
             if stop_hit:
                 exit_price = current_stop * (1 - cc.stop_slippage if side == "LONG" else 1 + cc.stop_slippage)
                 exit_reason, exit_ts = "SL", close_ts
                 break
+
+            # TIME_EXIT is a resting limit submitted only after the twelfth
+            # completed holding candle. It cannot fill on its submission bar.
+            if time_exit_limit_price is not None:
+                time_exit_filled = (
+                    last_high >= time_exit_limit_price + tick
+                    if side == "LONG"
+                    else last_low <= time_exit_limit_price - tick
+                )
+                if time_exit_filled:
+                    exit_price = time_exit_limit_price
+                    exit_reason, exit_ts = "TIME_EXIT", close_ts
+                    break
+                continue
+
+            tp1_hit = tp1_qty > 0 and not tp1 and (
+                last_high >= tp1_price + tick if side == "LONG" else last_low <= tp1_price - tick
+            )
+            target_hit = (last_high >= target + tick) if side == "LONG" else (last_low <= target - tick)
             if not tp1 and tp1_hit:
                 close_qty = min(tp1_qty, qty_left)
                 realized_gross += (tp1_price - entry) * close_qty * cv * (1 if side == "LONG" else -1)
@@ -322,6 +390,7 @@ class VirtualBloFin:
                 qty_left -= close_qty
                 tp1 = True
                 current_stop = max(current_stop, be_stop) if side == "LONG" else min(current_stop, be_stop)
+
             favourable_1_5r = (last_high >= entry + 1.5 * initial_risk_per_unit) if side == "LONG" else (last_low <= entry - 1.5 * initial_risk_per_unit)
             if tp1 and favourable_1_5r:
                 close = _float(bar.get("close"), "close")
@@ -333,15 +402,53 @@ class VirtualBloFin:
             if target_hit and qty_left > 0:
                 exit_price, exit_reason, exit_ts = target, "TP", close_ts
                 break
+
+            if not tp1 and held >= self.max_holding_bars:
+                time_exit_limit_price = _net_breakeven_limit_price(
+                    entry=entry,
+                    quantity=qty_left,
+                    contract_value=cv,
+                    side=side,
+                    accumulated_fees=fees,
+                    funding_paid=funding_total,
+                    spread_fraction=cc.spread_fraction,
+                    maker_fee=cc.maker_fee,
+                    tick_size=tick,
+                )
+                time_exit_submitted_ts = close_ts
+
         if exit_price is None:
-            last = rows[min(start_index + 1 + self.max_holding_bars, len(rows) - 1)]
-            exit_price = _float(last.get("close"), "time_exit_close")
-            exit_price *= (1 - cc.stop_slippage if side == "LONG" else 1 + cc.stop_slippage)
-            exit_reason = "TIME_EXIT_MARKET_FALLBACK"
-            exit_ts = int(last.get("close_ts") or (_timestamp_ms(last.get("ts")) + 15 * 60_000))
-            held = min(self.max_holding_bars, len(rows) - start_index - 2)
+            last = rows[-1]
+            observed_through_ts = int(last.get("close_ts") or (_timestamp_ms(last.get("ts")) + 15 * 60_000))
+            diagnostics = {
+                **rr_items,
+                "entry_order_type": "post_only_limit",
+                "entry_fill_model": "one_tick_trade_through",
+                "exit_reason": "TIME_EXIT_LIMIT_PENDING" if time_exit_limit_price is not None else "POSITION_OPEN",
+                "mark_price_trigger_model": "OHLC_MARK_STOP_FIRST",
+                "same_bar_tp_sl_precedence": "SL_FIRST",
+                "funding_event_count": sum(1 for x in funding if x.get("_applied") is True),
+                "gross_realized_pnl_usdt": realized_gross,
+                "total_fees_usdt": fees,
+                "funding_paid_usdt": funding_total,
+                "net_pnl_usdt": realized_gross - fees - funding_total,
+                "remaining_qty": qty_left,
+                "entry_ts_ms": entry_ts,
+                "observed_through_ts_ms": observed_through_ts,
+                "time_exit_order_type": "LIMIT" if time_exit_limit_price is not None else None,
+                "time_exit_limit_price": time_exit_limit_price,
+                "time_exit_submitted_ts_ms": time_exit_submitted_ts,
+                "time_exit_fill_model": "one_tick_trade_through_after_submission",
+            }
+            return TradeResult(
+                "OPEN",
+                "TIME_EXIT_LIMIT_PENDING" if time_exit_limit_price is not None else "POSITION_OPEN",
+                qty_total, entry, None, realized_gross - fees - funding_total,
+                fees, funding_total, held, tp1, rr_items["net_rr"], diagnostics,
+            )
+
         realized_gross += (exit_price - entry) * qty_left * cv * (1 if side == "LONG" else -1)
-        exit_fee_rate = cc.maker_fee if exit_reason == "TP" else cc.taker_fee
+        exit_fee_rate = cc.maker_fee if exit_reason in {"TP", "TIME_EXIT"} else cc.taker_fee
         fees += exit_price * qty_left * cv * exit_fee_rate
         net = realized_gross - fees - funding_total
         diagnostics = {
@@ -349,6 +456,10 @@ class VirtualBloFin:
             "entry_order_type": "post_only_limit",
             "entry_fill_model": "one_tick_trade_through",
             "exit_reason": exit_reason,
+            "time_exit_order_type": "LIMIT" if exit_reason == "TIME_EXIT" else None,
+            "time_exit_limit_price": time_exit_limit_price,
+            "time_exit_submitted_ts_ms": time_exit_submitted_ts,
+            "time_exit_fill_model": "one_tick_trade_through_after_submission" if exit_reason == "TIME_EXIT" else None,
             "mark_price_trigger_model": "OHLC_MARK_STOP_FIRST",
             "same_bar_tp_sl_precedence": "SL_FIRST",
             "funding_event_count": sum(1 for x in funding if x.get("_applied") is True),
