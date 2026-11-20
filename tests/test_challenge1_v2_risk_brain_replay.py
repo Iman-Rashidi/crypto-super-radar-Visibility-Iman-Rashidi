@@ -447,6 +447,17 @@ class VirtualBloFinFundingKindTests(unittest.TestCase):
 
 class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
     @staticmethod
+    def _closed_rows(last_open: pd.Timestamp, duration: pd.Timedelta) -> list[dict]:
+        return [
+            {
+                "open_time_utc": (last_open - duration * (29 - index)).isoformat(),
+                "open": 100.0, "high": 101.0, "low": 99.0,
+                "close": 100.5, "volume": 100.0,
+            }
+            for index in range(30)
+        ]
+
+    @staticmethod
     def _valid_signal_record():
         frame = V2HigherTimeframeWaveEvidenceTests._wave_frame()
         asof = frame.index[-1] + pd.Timedelta(hours=1)
@@ -501,6 +512,15 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
                 "funding_kind": "0",
                 "funding_event_time_ms": int(asof.timestamp() * 1000) - 60_000,
                 "funding_max_age_ms": 900_000,
+                "candles_15m": V2HigherTimeframeWaveEvidenceTests._closed_rows(
+                    signal_open, pd.Timedelta(minutes=15),
+                ),
+                "candles_1h": V2HigherTimeframeWaveEvidenceTests._closed_rows(
+                    h1_open, pd.Timedelta(hours=1),
+                ),
+                "candles_4h": V2HigherTimeframeWaveEvidenceTests._closed_rows(
+                    h4_open, pd.Timedelta(hours=4),
+                ),
                 "elliott_wave": wave,
                 "wave_alignment": "ALIGNED",
             },
@@ -604,6 +624,33 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
     def test_v2_execution_preflight_rejects_missing_4h_context(self):
         record = self._valid_signal_record()
         record["challenge1_v2_evidence"]["context_4h_candle_open_utc"] = None
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_missing_multitimeframe_candles(self):
+        record = self._valid_signal_record()
+        record["challenge1_v2_evidence"].pop("candles_4h")
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_future_multitimeframe_candle(self):
+        record = self._valid_signal_record()
+        evidence = record["challenge1_v2_evidence"]
+        evidence["candles_1h"][-1]["open_time_utc"] = (
+            pd.Timestamp(evidence["data_asof_utc"]) + pd.Timedelta(hours=1)
+        ).isoformat()
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_multitimeframe_candle_gap(self):
+        record = self._valid_signal_record()
+        evidence = record["challenge1_v2_evidence"]
+        evidence["candles_15m"][12]["open_time_utc"] = (
+            pd.Timestamp(evidence["candles_15m"][12]["open_time_utc"])
+            + pd.Timedelta(minutes=15)
+        ).isoformat()
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_invalid_ohlcv_geometry(self):
+        record = self._valid_signal_record()
+        record["challenge1_v2_evidence"]["candles_4h"][-1]["high"] = 90.0
         self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
 
     def test_v2_execution_preflight_rejects_order_side_effect_flag(self):
