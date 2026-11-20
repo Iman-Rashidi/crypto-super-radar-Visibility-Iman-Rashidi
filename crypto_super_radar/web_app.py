@@ -6090,7 +6090,10 @@ class Handler(BaseHTTPRequestHandler):
                 "primary_supervisor": ai_connection_status(),
                 "second_supervisor": second_ai_connection_status(),
                 "two_reviewer_gate": "REQUIRES_BOTH_VERIFIED_APPROVALS",
-                "execution_role": "REPORT_ONLY",
+                "execution_role": "ACTIVE_ENTRY_APPROVAL_AND_POSITION_SUPERVISION",
+                "position_intervention_switch_enabled": os.getenv(
+                    "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", ""
+                ).strip().lower() in {"1", "true", "yes", "on"},
             }
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
@@ -10854,7 +10857,6 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "dashboard_auth_configured": bool(readiness.get("dashboard_auth_configured")),
                 "durable_storage": bool(readiness.get("durable_storage")),
                 "event_store_readable": bool(readiness.get("event_store_readable")),
-                "event_store_readable": bool(readiness.get("event_store_readable")),
                 "message_fa": message_fa,
             }
         raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")
@@ -10866,6 +10868,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
         try:
             maximum_hold = max(900, min(int(raw_max_hold), 604_800))
         except (TypeError, ValueError):
+            maximum_hold = 86_400
 
         store = BloFinDemoEventStore()
         pending_orders = store.orders_pending_learning_outcome(limit=50)

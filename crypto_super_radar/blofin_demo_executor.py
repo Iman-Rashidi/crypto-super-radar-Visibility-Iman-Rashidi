@@ -678,7 +678,6 @@ def build_demo_order_plan(
     if instrument.get("state") != "live" or instrument.get("contractType") != "linear":
         raise BloFinDemoExecutionBlocked("Only live linear contracts are supported.")
     if instrument.get("settleCurrency") != "USDT":
-    if instrument.get("settleCurrency") != "USDT":
         raise BloFinDemoExecutionBlocked("Only USDT-settled linear contracts are supported in this phase.")
 
     signal_entry = _decimal(record.get("entry_price_usd", record.get("entry_price")), "entry")
