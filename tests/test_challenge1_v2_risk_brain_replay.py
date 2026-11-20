@@ -480,7 +480,7 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
         changed.loc[future, ["open", "high", "low", "close", "volume"]] = [
             [999.0, 1000.0, 998.0, 999.5, 100.0]
         ] * int(future.sum())
-        mutated = _elliott_wave_1h_evidence(changed, asof)
+        mutated = _elliott_wave_1h_evidence(changed, asof, expected_direction="LONG")
         self.assertEqual(original, mutated)
 
     def test_opposite_wave_direction_is_reported_as_opposed(self):
