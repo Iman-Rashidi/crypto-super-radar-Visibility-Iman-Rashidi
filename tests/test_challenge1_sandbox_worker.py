@@ -28,7 +28,7 @@ class Challenge1SandboxWorkerTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["producer"], "AI_SANDBOX")
         self.assertEqual(first["event_type"], "REPLAY_REPORT")
-        self.assertEqual(first["payload"]["network_order_writes"], True)
+        self.assertEqual(first["payload"]["network_order_writes"], False)
         self.assertEqual(first["payload"]["trade_metrics"]["closed_trades"], 3)
         self.assertNotIn("trade_ledger", first["payload"])
 
