@@ -2406,7 +2406,6 @@ class BloFinDemoExecutor:
 
         ticker_rows = self.client.get_tickers(inst_id=inst_id)
         if not isinstance(ticker_rows, list) or not ticker_rows or not isinstance(ticker_rows[0], Mapping):
-        if not isinstance(ticker_rows, list) or not ticker_rows or not isinstance(ticker_rows[0], Mapping):
             raise BloFinDemoExecutionBlocked("Fresh contract ticker is unavailable.")
         last_price = _finite(ticker_rows[0].get("last"), "last_price", minimum=0.0000001)
         try:
