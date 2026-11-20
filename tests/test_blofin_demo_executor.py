@@ -1531,9 +1531,12 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
         client = FakeExecutorClient()
-        client.get_position_mode = lambda: {
-            "positionMode": "long_short_mode",
-        }
+
+        def return_hedge_mode():
+            client.calls.append("position_mode")
+            return {"positionMode": "long_short_mode"}
+
+        client.get_position_mode = return_hedge_mode
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
         try:
             with self.assertRaisesRegex(BloFinDemoExecutionBlocked, "One-Way net_mode"):
