@@ -527,6 +527,7 @@ class BloFinDemoFuturesPublicWorker:
         self.max_attempts = max_attempts
         self._counts: Counter[str] = Counter()
         self._channel_counts: Counter[str] = Counter()
+        self._ack_counts: Counter[str] = Counter()
         self._last_error: str | None = None
 
     @staticmethod
@@ -565,6 +566,8 @@ class BloFinDemoFuturesPublicWorker:
                     self._counts["messages"] += 1
                     if normalized["type"] in {"heartbeat", "control"}:
                         self._counts["control_messages"] += 1
+                        if normalized["type"] == "control" and normalized.get("event") == "subscribe":
+                            self._ack_counts[str(normalized.get("channel") or "")] += 1
                         continue
                     events = normalized["events"]
                     if not events:
@@ -609,6 +612,7 @@ class BloFinDemoFuturesPublicWorker:
             "observations": self._counts["observations"],
             "duplicates": self._counts["duplicates"],
             "channel_observation_counts": dict(self._channel_counts),
+            "subscription_ack_counts": dict(self._ack_counts),
             "last_error": self._last_error,
             "socket_status": "DISCONNECTED",
             "authentication": "NOT_USED_PUBLIC_CHANNELS_ONLY",

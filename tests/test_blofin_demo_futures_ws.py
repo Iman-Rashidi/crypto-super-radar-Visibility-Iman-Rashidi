@@ -175,6 +175,7 @@ class BloFinDemoPublicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["orders_submitted"])
         self.assertEqual(result["observations"], 2)
         self.assertEqual(result["channel_observation_counts"], {"trades": 1, "funding-rate": 1})
+        self.assertEqual(result["subscription_ack_counts"], {"trades": 1})
         rows = store.read_recent(inst_id="BTC-USDT", channel="trades")
         self.assertEqual(rows[0]["payload"]["base_quantity"], 0.1)
         db.close()
