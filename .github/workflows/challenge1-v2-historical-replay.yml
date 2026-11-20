@@ -60,6 +60,26 @@ jobs:
           fi
           exit 0
 
+      - name: Validate and persist real market data for all five symbols
+        id: market-data-diagnostic
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p artifacts
+          python -m scripts.diagnose_blofin_market_data \
+            --months 7 \
+            --db artifacts/market_data_diagnostic.sqlite3 \
+            --report artifacts/market_data_diagnostic.json \
+            > artifacts/market_data_diagnostic.log 2>&1
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ -f artifacts/market_data_diagnostic.json ]; then
+            cat artifacts/market_data_diagnostic.json >> "$GITHUB_STEP_SUMMARY"
+          else
+            tail -n 100 artifacts/market_data_diagnostic.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          exit 0
+
       - name: Download seven months of public BloFin data
         id: download
         continue-on-error: true
