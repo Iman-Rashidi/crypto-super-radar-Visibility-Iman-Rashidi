@@ -112,6 +112,16 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     ]
     if len(funding) < 3:
         raise SandboxDataError(f"funding history is incomplete for {symbol}")
+    unsupported_kinds = sorted({
+        str(item.get("fundingKind") or "").strip() or "MISSING"
+        for item in funding
+        if str(item.get("fundingKind") or "").strip() != "0"
+    })
+    if unsupported_kinds:
+        raise SandboxDataError(
+            f"unsupported fundingKind for {symbol}; Challenge 1 only models regular "
+            f"fundingKind=0, observed={unsupported_kinds}"
+        )
     funding_times = np.asarray([int(item["fundingTime"]) for item in funding], dtype=np.int64)
     funding_rates = np.asarray([float(item["fundingRate"]) for item in funding], dtype=float)
     if (
@@ -182,6 +192,8 @@ def _known_funding_rate(
     if not eligible:
         return None
     latest = eligible[-1]
+    if str(latest.get("fundingKind") or "").strip() != "0":
+        return None
     if max_age_ms is not None and asof_ms - int(latest["fundingTime"]) > max_age_ms:
         return None
     rate = float(latest["fundingRate"])
