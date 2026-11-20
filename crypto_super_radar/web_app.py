@@ -100,6 +100,25 @@ BLOFIN_STARTUP_RECONCILE_LOCK = threading.Lock()
 BLOFIN_STARTUP_RECONCILE_DONE = False
 BLOFIN_STARTUP_RECONCILE_THREAD = None
 BLOFIN_AUTOPILOT_THREAD = None
+# A dashboard operator may start/stop AutoPilot for this process without editing
+# Render environment variables. None means use the configured Render value.
+BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE: bool | None = None
+
+
+def _blofin_demo_autopilot_enabled() -> bool:
+    with LOCK:
+        override = BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE
+    if override is not None:
+        return bool(override)
+    return os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+
+
+def _set_blofin_demo_autopilot_runtime_override(enabled: bool | None) -> None:
+    global BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE
+    with LOCK:
+        BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE = enabled
+
+
 BLOFIN_AUTOPILOT_STATE = {
     "enabled": False,
     "status": "DISABLED",
@@ -2920,7 +2939,7 @@ def _blofin_demo_execution_readiness() -> dict:
             trade_permission_status = "CHECK_FAILED"
 
     trading_enabled = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
-    autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+    autopilot_enabled = _blofin_demo_autopilot_enabled()
     dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
     budget = None
     try:
@@ -2941,26 +2960,45 @@ def _blofin_demo_execution_readiness() -> dict:
     orders_total = budget.get("orders_total") if isinstance(budget, dict) else None
     unresolved_orders = budget.get("unresolved_orders") if isinstance(budget, dict) else None
     event_store_readable = isinstance(budget, dict)
-    ready = bool(
-        trade_credentials_configured and trade_permission_verified
-        and trading_enabled and dashboard_auth_configured
-        and durable_storage and event_store_readable
-    )
+    blockers = []
     if not trade_credentials_configured:
-        message_fa = "کلید، Secret و Passphrase مربوط به BloFin Demo Trade کامل نیستند."
-    elif trade_permission_status == "READ_ONLY":
-        message_fa = "کلید API به‌صورت readOnly=1 فقط‌خواندنی است؛ در BloFin مجوز Read/Write یا Trade را برای همین کلید فعال کن. هیچ سفارشی ارسال نمی‌شود."
+        blockers.append("TRADE_CREDENTIALS_MISSING")
     elif not trade_permission_verified:
-        message_fa = "مجوز Trade با query-apikey تأیید نشد؛ وضعیت کلید نامشخص است و اجرای سفارش مسدود می‌ماند."
-    elif not trading_enabled or not dashboard_auth_configured or not durable_storage or not event_store_readable:
-        message_fa = "اجرای سفارش مسدود است؛ فعال‌سازی Demo، توکن پنل و حافظه پایدار Turso باید در دسترس باشند."
+        blockers.append("TRADE_PERMISSION_NOT_VERIFIED")
+    if not trading_enabled:
+        blockers.append("DEMO_TRADING_DISABLED")
+    if not dashboard_auth_configured:
+        blockers.append("DASHBOARD_TOKEN_NOT_CONFIGURED")
+    if not durable_storage:
+        blockers.append("DURABLE_TURSO_NOT_CONFIGURED")
+    if not event_store_readable:
+        blockers.append("EVENT_STORE_UNAVAILABLE")
+    ready = not blockers
+    blocker_messages = {
+        "TRADE_CREDENTIALS_MISSING": "کلید، Secret و Passphrase مربوط به BloFin Demo Trade کامل نیستند",
+        "TRADE_PERMISSION_NOT_VERIFIED": (
+            "مجوز Read/Write یا Trade کلید Demo با query-apikey تأیید نشد"
+            if trade_permission_status != "READ_ONLY"
+            else "کلید API فقط‌خواندنی است؛ مجوز Trade باید برای همان کلید Demo فعال باشد"
+        ),
+        "DEMO_TRADING_DISABLED": "کلید ایمنی BLOFIN_DEMO_TRADING_ENABLED در Render فعال نیست",
+        "DASHBOARD_TOKEN_NOT_CONFIGURED": "توکن دسترسی پنل BLOFIN_DASHBOARD_TOKEN در Render تنظیم نشده است",
+        "DURABLE_TURSO_NOT_CONFIGURED": "ذخیره‌سازی پایدار Turso برای ثبت و تطبیق سفارش‌ها آماده نیست",
+        "EVENT_STORE_UNAVAILABLE": "دفتر رویداد معامله قابل خواندن نیست",
+    }
+    blockers_fa = [blocker_messages[item] for item in blockers]
+    if blockers:
+        message_fa = "اجرای سفارش Demo مسدود است: " + "؛ ".join(blockers_fa) + "."
     else:
         message_fa = (
             "پیش‌نیازهای BloFin Demo آماده‌اند؛ مجوز Read/Write کلید واقعی با query-apikey تأیید شد. "
-            "در پروفایل Challenge 1، کندل‌های بسته‌شده، فقط کندل بسته‌شده ۵دقیقه‌ای و الگوهای کندلی/نموداری همراه کنترل‌های ضروری حساب و ریسک بررسی می‌شوند؛ ۱۲ فیلتر عمومی فقط نظارتی‌اند و Nemotron شرط ورود این پروفایل نیست."
+            "در پروفایل Challenge 1، کندل‌های بسته‌شدهٔ ۵دقیقه‌ای، الگوهای کندلی/نموداری، "
+            "موج الیوت، دو تأیید مستقل AI و کنترل‌های حساب و ریسک بررسی می‌شوند."
         )
     return {
         "status": "READY" if ready else "BLOCKED",
+        "blockers": blockers,
+        "blockers_fa": blockers_fa,
         "environment": "BLOFIN_DEMO",
         "trade_credentials_configured": trade_credentials_configured,
         "credential_source": credential_source,
@@ -5734,7 +5772,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/blofin/demo/autopilot/status":
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_AUTOPILOT_STATE)
-            autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+            autopilot_enabled = _blofin_demo_autopilot_enabled()
             payload["enabled"] = autopilot_enabled
             if not autopilot_enabled:
                 # Do not expose a stale persisted schedule as if another cycle were queued.
@@ -5748,6 +5786,8 @@ class Handler(BaseHTTPRequestHandler):
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
             payload["execution_profile"] = "CHALLENGE_1"
+            with LOCK:
+                payload["runtime_controlled_by_dashboard"] = BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE is not None
             payload["readiness"] = _blofin_demo_execution_readiness()
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
@@ -5992,7 +6032,16 @@ class Handler(BaseHTTPRequestHandler):
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
             <p class="muted">استراتژی اصلی Challenge 1: تحلیل کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای شامل الگوهای تک‌کندلی و چندکندلی، ساختار نمودار و شکست معتبر؛ سپس تحلیل موج الیوت، فاز/جهت موج و سطح ابطال و تطبیق موج با ساختار قیمت، حجم و شواهد مکمل. ورود فقط پس از دریافت پاسخ معتبر APPROVED از هر دو ناظر مستقل AI با Provider و Model متفاوت، توافق بر جهت و فاز موج و عبور از کنترل ریسک مجاز است. VETO، UNKNOWN، ERROR، قطع ارتباط یا اختلاف ناظران ورود را مسدود می‌کند. تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. سفارش فقط در BloFin Demo اجرا می‌شود؛ کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
-            <button id="blofin-demo-execute-once" type="button" disabled>اجرای چرخه جدید در BloFin Demo</button>
+            <button id="blofin-demo-execute-once" type="button" disabled>درخواست اجرای دستی ربات در BloFin Demo</button>
+            <div class="metric" id="blofin-autopilot-panel" style="margin-top:14px;border-color:#2d6470">
+              <h3>حالت اتوماتیک · Challenge 1</h3>
+              <p class="muted">پس از فعال‌سازی، ربات بازارهای تنظیم‌شده را در هر کندل بسته‌شدهٔ ۵ دقیقه‌ای بررسی می‌کند. ورود همچنان به دو تأیید مستقل AI، مجوز Demo، حد ضرر/سود و کنترل ریسک وابسته است. توقف، چرخه جاری را قطع نمی‌کند و فقط از شروع چرخه‌های بعدی جلوگیری می‌کند. کنترل داشبورد تا راه‌اندازی مجدد همین سرویس معتبر است.</p>
+              <div class="grid" style="margin:10px 0">
+                <button id="blofin-autopilot-start" type="button" disabled>شروع پایش و معامله اتوماتیک</button>
+                <button id="blofin-autopilot-stop" type="button" disabled>توقف چرخه‌های اتوماتیک</button>
+              </div>
+              <p id="blofin-autopilot-status" class="muted" aria-live="polite">در حال دریافت وضعیت اتوپایلوت...</p>
+            </div>
             <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
               <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
             </div>
@@ -6026,6 +6075,9 @@ class Handler(BaseHTTPRequestHandler):
             const accountView=document.getElementById('blofin-demo-account-view');
             const safety=document.getElementById('blofin-demo-safety');
             const executeButton=document.getElementById('blofin-demo-execute-once');
+            const autopilotStartButton=document.getElementById('blofin-autopilot-start');
+            const autopilotStopButton=document.getElementById('blofin-autopilot-stop');
+            const autopilotStatus=document.getElementById('blofin-autopilot-status');
             const smokeButton=document.getElementById('blofin-smoke-test-run');
             const smokeRefreshButton=document.getElementById('blofin-smoke-test-refresh');
             const smokeReadiness=document.getElementById('blofin-smoke-test-readiness');
@@ -6040,7 +6092,7 @@ class Handler(BaseHTTPRequestHandler):
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!smokeButton||!smokeRefreshButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!autopilotStartButton||!autopilotStopButton||!autopilotStatus||!smokeButton||!smokeRefreshButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -6371,10 +6423,60 @@ async function loadBlofinInstruments(){
                 executionReadiness.textContent=result.message_fa||'وضعیت پیش‌نیازهای Demo مشخص نیست.';
                 if(result.status==='READY'&&result.order_quota_unlimited===true&&instrumentSelect.value){
                   executeButton.disabled=false;
-                  executionReadiness.textContent+=' آماده اجرای چرخه جدید است؛ سهمیه تعداد سفارش وجود ندارد.';
+                  executionReadiness.textContent+=' آماده ثبت درخواست دستی ربات است؛ جهت معامله فقط از سیگنال معتبر می‌آید.';
                 }
+                refreshAutopilotStatus();
               }catch(error){executionReadiness.textContent='بررسی پیش‌نیازهای سفارش Demo ممکن نشد.';}
             }
+            async function refreshAutopilotStatus(){
+              autopilotStartButton.disabled=true;
+              autopilotStopButton.disabled=true;
+              try{
+                const response=await fetch('/api/blofin/demo/autopilot/status',{cache:'no-store'});
+                const state=await response.json();
+                const enabled=state.enabled===true;
+                const ready=state.readiness&&state.readiness.status==='READY';
+                autopilotStartButton.disabled=!ready||enabled;
+                autopilotStopButton.disabled=!enabled;
+                const runtime=state.runtime_controlled_by_dashboard?'کنترل‌شده از همین داشبورد':'بر اساس تنظیم Render';
+                const message=state.last_message_fa|| (enabled?'اتوپایلوت فعال است.':'اتوپایلوت خاموش است.');
+                const blockers=(state.readiness&&Array.isArray(state.readiness.blockers_fa))
+                  ?state.readiness.blockers_fa:[];
+                autopilotStatus.textContent=(enabled?'وضعیت: فعال':'وضعیت: خاموش')
+                  +' · '+runtime+' · '+message
+                  +(blockers.length?' · موانع: '+blockers.join('؛ '):'');
+              }catch(error){
+                autopilotStatus.textContent='وضعیت اتوپایلوت دریافت نشد؛ شروع یا توقف تا بازیابی وضعیت غیرفعال است.';
+              }
+            }
+            async function controlAutopilot(action){
+              const token=tokenInput.value.trim();
+              if(!token){autopilotStatus.textContent='ابتدا توکن پنل را در کادر بالاتر وارد کن.';return;}
+              const prompt=action==='start'
+                ?'پایش اتوماتیک Challenge 1 در BloFin DEMO فعال شود؟ ربات فقط در Demo و با تمام گیت‌های دو ناظر، SL/TP و کنترل ریسک مجاز است.'
+                :'چرخه‌های جدید اتوماتیک متوقف شوند؟ چرخه در حال اجرا و مدیریت پوزیشن باز قطع نخواهد شد.';
+              if(!window.confirm(prompt))return;
+              autopilotStartButton.disabled=true;
+              autopilotStopButton.disabled=true;
+              autopilotStatus.textContent='درخواست '+(action==='start'?'شروع':'توقف')+' اتوپایلوت به سرویس Staging ارسال شد...';
+              try{
+                const response=await fetch('/api/blofin/demo/autopilot/control',{
+                  method:'POST',cache:'no-store',
+                  headers:{'Authorization':'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
+                  body:new URLSearchParams({confirm:'1',action})
+                });
+                const result=await response.json();
+                autopilotStatus.textContent=result.message_fa||'پاسخ کنترل اتوپایلوت دریافت شد.';
+                await refreshAutopilotStatus();
+                if(!response.ok)autopilotStatus.textContent=(result.message_fa||'درخواست پذیرفته نشد.')
+                  +(Array.isArray(result.blockers_fa)?' · '+result.blockers_fa.join('؛ '):'');
+              }catch(error){
+                autopilotStatus.textContent='نتیجه درخواست کنترل اتوپایلوت نامشخص است؛ وضعیت را دوباره دریافت کن.';
+                await refreshAutopilotStatus();
+              }
+            }
+            autopilotStartButton.addEventListener('click',()=>controlAutopilot('start'));
+            autopilotStopButton.addEventListener('click',()=>controlAutopilot('stop'));
             instrumentSelect.addEventListener('change',()=>{
               instrumentStatus.textContent='قرارداد انتخابی: '+instrumentSelect.value+' · جهت خرید/فروش از سیگنال زنده می‌آید.';
             });
@@ -6686,6 +6788,7 @@ async function loadBlofinInstruments(){
             });
             loadBlofinInstruments().then(refreshExecutionReadiness);
             refreshExecutionReadiness();
+            refreshAutopilotStatus();
              refreshSmokeTestReadiness();
             clearButton.addEventListener('click',function(){
               tokenInput.value='';
@@ -8214,7 +8317,7 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/blofin/demo/autopilot/control"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -8228,6 +8331,94 @@ async function loadBlofinInstruments(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/blofin/demo/autopilot/control":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({
+                        "status": "UNAUTHORIZED",
+                        "message_fa": "توکن پنل معتبر نیست یا در Environment سرویس تنظیم نشده است.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                action = str(form.get("action", [""])[0] or "").strip().lower()
+                if action not in {"start", "stop"}:
+                    return self._send(400, json.dumps({
+                        "status": "INVALID_ACTION",
+                        "message_fa": "فرمان اتوپایلوت باید start یا stop باشد.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+                if action == "stop":
+                    _set_blofin_demo_autopilot_runtime_override(False)
+                    with LOCK:
+                        BLOFIN_AUTOPILOT_STATE.update({
+                            "enabled": False,
+                            "status": "STOPPING",
+                            "search_continues": False,
+                            "next_cycle_scheduled": False,
+                            "next_cycle_at_utc": None,
+                            "next_cycle_in_seconds": None,
+                            "last_message_fa": "فرمان توقف دریافت شد؛ چرخه جاری تکمیل می‌شود و چرخه جدیدی شروع نخواهد شد.",
+                        })
+                    _persist_blofin_autopilot_state()
+                    return self._send(200, json.dumps({
+                        "status": "STOPPING",
+                        "message_fa": "توقف ثبت شد؛ چرخه جاری قطع نمی‌شود و پس از پایان آن چرخه جدیدی آغاز نخواهد شد.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+                readiness = _blofin_demo_execution_readiness()
+                if readiness.get("status") != "READY":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED",
+                        "message_fa": readiness.get("message_fa"),
+                        "blockers": readiness.get("blockers") or [],
+                        "blockers_fa": readiness.get("blockers_fa") or [],
+                        "readiness": readiness,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
+                if role != "WEB":
+                    return self._send(409, json.dumps({
+                        "status": "ROLE_BLOCKED",
+                        "message_fa": "این سرویس در نقش WEB نیست؛ اتوپایلوت از این پردازش شروع نمی‌شود.",
+                        "runtime_role": role,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with LOCK:
+                    active_jobs = [
+                        item for item in BLOFIN_EXECUTION_JOBS.values()
+                        if item.get("status") in {"queued", "running"}
+                    ]
+                    worker_alive = bool(
+                        BLOFIN_AUTOPILOT_THREAD is not None
+                        and BLOFIN_AUTOPILOT_THREAD.is_alive()
+                    )
+                if active_jobs and not worker_alive:
+                    return self._send(409, json.dumps({
+                        "status": "EXECUTION_ALREADY_RUNNING",
+                        "message_fa": "یک چرخه معامله در حال اجراست؛ پس از تعیین‌تکلیف همان چرخه اتوپایلوت را شروع کن.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                _set_blofin_demo_autopilot_runtime_override(True)
+                _start_blofin_demo_autopilot()
+                with LOCK:
+                    worker_alive = bool(
+                        BLOFIN_AUTOPILOT_THREAD is not None
+                        and BLOFIN_AUTOPILOT_THREAD.is_alive()
+                    )
+                if not worker_alive:
+                    _set_blofin_demo_autopilot_runtime_override(False)
+                    return self._send(503, json.dumps({
+                        "status": "WORKER_START_FAILED",
+                        "message_fa": "کارگر اتوپایلوت شروع نشد؛ نقش سرویس و لاگ‌های Staging را بررسی کن.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "STARTING",
+                    "message_fa": "اتوپایلوت Challenge 1 فعال شد؛ پایش از چرخه بعدی و پس از تکمیل کندل ۵ دقیقه‌ای ادامه می‌یابد.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
             if route == "/api/blofin/demo/smoke-test":
                 if (
                     not origin
@@ -8616,7 +8807,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
         })
     _persist_blofin_autopilot_state()
     while True:
-        if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
+        if not _blofin_demo_autopilot_enabled():
             with LOCK:
                 BLOFIN_AUTOPILOT_STATE.update({
                     "enabled": False, "status": "DISABLED",
@@ -8829,7 +9020,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
                 # The scheduler keeps running even when a candle was already finalized,
                 # a signal was rejected, or a position is being managed. Reflect that fact
                 # instead of showing a false stopped state for duplicate-candle cycles.
-                autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+                autopilot_enabled = _blofin_demo_autopilot_enabled()
                 continue_search = bool(autopilot_enabled)
                 autopilot_status = "SEARCHING_FOR_SIGNAL" if continue_search else "DISABLED"
                 autopilot_message = (
@@ -8890,7 +9081,7 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
             next_delay_seconds, next_cycle_at_utc = _blofin_demo_next_scan_after_cycle(cycle_started)
         except Exception:
             next_delay_seconds, next_cycle_at_utc = _blofin_demo_next_5m_scan_window()
-        autopilot_enabled = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+        autopilot_enabled = _blofin_demo_autopilot_enabled()
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
                 "status": "WAITING_FOR_NEXT_5M_CANDLE" if autopilot_enabled else "DISABLED",
@@ -9049,7 +9240,7 @@ def _start_blofin_demo_autopilot() -> None:
     # Schedule it off the HTTP listener thread so a slow Turso network never
     # prevents the dashboard from binding and serving /health.
     _schedule_blofin_demo_startup_recovery()
-    if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
+    if not _blofin_demo_autopilot_enabled():
         with LOCK:
             BLOFIN_AUTOPILOT_STATE.update({
                 "enabled": False, "status": "DISABLED",
