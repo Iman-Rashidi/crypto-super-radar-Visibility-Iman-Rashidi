@@ -50,6 +50,19 @@ def _load_candles(connection: sqlite3.Connection, symbol: str, bar: str, source:
     return df.set_index("timestamp").sort_index()
 
 
+def _require_regular_funding_events(funding: list[Mapping[str, Any]], symbol: str) -> None:
+    unsupported = sorted({
+        str(item.get("fundingKind") or "").strip() or "MISSING"
+        for item in funding
+        if str(item.get("fundingKind") or "").strip() != "0"
+    })
+    if unsupported:
+        raise SandboxDataError(
+            f"unsupported fundingKind for {symbol}; Challenge 1 only models regular "
+            f"fundingKind=0, observed={unsupported}"
+        )
+
+
 def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     frames = {
         "15m": _load_candles(connection, symbol, "15m", "LAST"),
@@ -112,16 +125,7 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     ]
     if len(funding) < 3:
         raise SandboxDataError(f"funding history is incomplete for {symbol}")
-    unsupported_kinds = sorted({
-        str(item.get("fundingKind") or "").strip() or "MISSING"
-        for item in funding
-        if str(item.get("fundingKind") or "").strip() != "0"
-    })
-    if unsupported_kinds:
-        raise SandboxDataError(
-            f"unsupported fundingKind for {symbol}; Challenge 1 only models regular "
-            f"fundingKind=0, observed={unsupported_kinds}"
-        )
+    _require_regular_funding_events(funding, symbol)
     funding_times = np.asarray([int(item["fundingTime"]) for item in funding], dtype=np.int64)
     funding_rates = np.asarray([float(item["fundingRate"]) for item in funding], dtype=float)
     if (
