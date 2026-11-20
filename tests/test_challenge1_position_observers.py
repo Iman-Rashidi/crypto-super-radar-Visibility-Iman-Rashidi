@@ -172,6 +172,39 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
             for state in states.values()
         ))
 
+    def test_review_cadence_is_five_minutes_and_shorter_values_are_clamped(self):
+        fixed_now = datetime(2026, 11, 19, 0, 0, tzinfo=timezone.utc)
+        with (
+            patch.dict("os.environ", {"BLOFIN_DEMO_POSITION_AI_REVIEW_INTERVAL_SECONDS": "60"}),
+            patch.object(
+                observers, "Challenge1AuditRecorder",
+                side_effect=lambda: Challenge1AuditRecorder(connection=self.connection),
+            ),
+            patch.object(observers.threading, "Thread", _FakeThread),
+        ):
+            states = observers.schedule_position_observer_review(
+                challenge_record={"signal": "LONG"},
+                cycle_context={"robot_decision": "HOLD"},
+                experience_id="experience-cadence",
+                position_id="position-cadence",
+                order_id="order-cadence",
+                symbol="ETH-USDT",
+                signal="LONG",
+                now=fixed_now,
+            )
+        self.assertTrue(all(item["status"] == "REQUESTED" for item in states.values()))
+        report = self._events("experience-cadence")
+        requested = [
+            item for item in report["events"]
+            if item["phase"] == "POSITION_AI_REVIEW_BATCH_REQUESTED"
+        ]
+        self.assertEqual(len(requested), 1)
+        self.assertEqual(
+            requested[0]["payload"]["details"]["schedule_interval_seconds"],
+            300,
+        )
+        self.assertEqual(report["integrity"]["status"], "PASS")
+
     def test_completed_review_batch_survives_restart_and_obeys_persisted_cadence(self):
         first_time = datetime(2026, 11, 19, 0, 0, tzinfo=timezone.utc)
         challenge_record = {"signal": "LONG", "challenge1_evidence": {"candles_5m": []}}
