@@ -54,12 +54,56 @@ def summarize_schema_rows(rows: list, *, environment: str, query: str) -> dict:
     }
 
 
+def summarize_cursor_semantics(rows: list, *, cursor_ms: int, direction: str) -> dict:
+    """Check documented strict before/after pagination without exposing funding rates."""
+    if direction not in {"after", "before"}:
+        raise ValueError("direction must be 'after' or 'before'")
+    timestamps = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            timestamp = int(row.get("fundingTime"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if timestamp > 0:
+            timestamps.append(timestamp)
+    if not timestamps:
+        return {
+            "status": "INCONCLUSIVE",
+            "direction": direction,
+            "cursor_ms": int(cursor_ms),
+            "row_count_with_timestamp": 0,
+            "returned_min_ms": None,
+            "returned_max_ms": None,
+        }
+    passed = (
+        max(timestamps) < cursor_ms
+        if direction == "after"
+        else min(timestamps) > cursor_ms
+    )
+    return {
+        "status": "PASS" if passed else "FAIL",
+        "direction": direction,
+        "cursor_ms": int(cursor_ms),
+        "row_count_with_timestamp": len(timestamps),
+        "returned_min_ms": min(timestamps),
+        "returned_max_ms": max(timestamps),
+    }
+
+
 def _probe_environment_schema(session: requests.Session, *, base_url: str, environment: str,
                               symbol: str, query_name: str, cursor_params: dict) -> dict:
     params = {"instId": symbol, "limit": 5, **cursor_params}
     try:
         payload = _json_get(session, base_url.rstrip("/") + FUNDING_PATH, params)
-        summary = summarize_schema_rows(payload.get("data"), environment=environment, query=query_name)
+        rows = payload.get("data")
+        summary = summarize_schema_rows(rows, environment=environment, query=query_name)
+        direction = next((key for key in ("after", "before") if key in cursor_params), None)
+        if direction is not None:
+            summary["pagination_contract"] = summarize_cursor_semantics(
+                rows, cursor_ms=int(cursor_params[direction]), direction=direction
+            )
         summary.update({"symbol": symbol, "status": "OK"})
         return summary
     except Exception as exc:
@@ -111,6 +155,16 @@ def compare_environment_schemas(symbols: tuple[str, ...]) -> dict:
         "purpose": "SCHEMA_DIAGNOSTIC_ONLY_NOT_A_REPLAY_DATASET",
         "symbols": list(symbols),
         "finding": finding,
+        "documented_pagination_contract": {
+            "after": "returns records with fundingTime earlier than the cursor",
+            "before": "returns records with fundingTime later than the cursor",
+            "cursor_checks_are_strict": True,
+        },
+        "pagination_contract_summary": {
+            "pass": sum(1 for item in probes if item.get("pagination_contract", {}).get("status") == "PASS"),
+            "fail": sum(1 for item in probes if item.get("pagination_contract", {}).get("status") == "FAIL"),
+            "inconclusive": sum(1 for item in probes if item.get("pagination_contract", {}).get("status") == "INCONCLUSIVE"),
+        },
         "production_rows_may_be_used_for_demo_replay": False,
         "gap_interval_utc": {"start": _utc(OBSERVED_GAP_START_MS), "end": _utc(OBSERVED_GAP_END_MS)},
         "probes": probes,
