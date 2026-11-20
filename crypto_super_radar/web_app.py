@@ -10131,6 +10131,13 @@ def _execute_challenge1_supervisor_action(
         return {"status": "BLOCKED", "reason_code": "COORDINATOR_QUORUM_NOT_AUTHORIZED"}
     if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
         return {"status": "BLOCKED", "reason_code": "AI_SUPERVISOR_INTERVENTIONS_DISABLED"}
+    execution_readiness = _blofin_demo_execution_readiness()
+    if execution_readiness.get("status") != "READY":
+        return {
+            "status": "BLOCKED",
+            "reason_code": "DEMO_EXECUTION_READINESS_NOT_READY",
+            "exchange_write_attempted": False,
+        }
     if not position_id or str(position.get("positionId") or "").strip() != position_id:
         return {"status": "BLOCKED", "reason_code": "LIVE_POSITION_ID_MISMATCH"}
     decision_id = str(cycle_context.get("client_order_id") or "").strip()
@@ -10807,63 +10814,94 @@ def _start_blofin_demo_position_supervisor_watchdog() -> None:
         BLOFIN_POSITION_SUPERVISOR_THREAD.start()
 
 
+def _blofin_demo_position_supervision_readiness(
+    readiness: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Allow audited Demo position reviews without enabling exchange writes."""
+    if not isinstance(readiness, Mapping):
+        return {
+            "status": "BLOCKED",
+            "supervision_mode": "BLOCKED",
+            "execution_enabled": False,
+            "blockers": ["EXECUTION_READINESS_NOT_AVAILABLE"],
+            "execution_blockers": [],
+        }
+    if str(readiness.get("status") or "").upper() == "READY":
+        return {
+            "status": "READY",
+            "supervision_mode": "ACTIVE_DEMO_EXECUTION",
+            "execution_enabled": True,
+            "blockers": [],
+            "execution_blockers": [],
+        }
+
+    blockers: list[str] = []
+    permission_status = str(readiness.get("trade_permission_status") or "").strip().upper()
+    if not readiness.get("trade_credentials_configured"):
+        blockers.append("TRADE_CREDENTIALS_NOT_CONFIGURED")
+    if permission_status not in {"READ_ONLY", "READ_WRITE_CONFIRMED"}:
+        blockers.append("TRADE_PERMISSION_NOT_CONFIRMED")
+    elif permission_status == "READ_WRITE_CONFIRMED" and readiness.get("trade_permission_verified") is not True:
+        blockers.append("TRADE_PERMISSION_NOT_VERIFIED")
+    if not readiness.get("durable_storage"):
+        blockers.append("DURABLE_STORAGE_UNAVAILABLE")
+    if not readiness.get("event_store_readable"):
+        blockers.append("EVENT_STORE_UNREADABLE")
+
+    execution_blockers: list[str] = []
+    if permission_status == "READ_ONLY":
+        execution_blockers.append("TRADE_PERMISSION_READ_ONLY")
+    if readiness.get("trading_enabled") is not True:
+        execution_blockers.append("DEMO_TRADING_DISABLED")
+    if readiness.get("dashboard_auth_configured") is not True:
+        execution_blockers.append("DASHBOARD_TOKEN_NOT_CONFIGURED")
+    if not execution_blockers:
+        blockers.append("EXECUTION_READINESS_NOT_READY")
+
+    if blockers:
+        return {
+            "status": "BLOCKED",
+            "supervision_mode": "BLOCKED",
+            "execution_enabled": False,
+            "blockers": blockers,
+            "execution_blockers": execution_blockers,
+        }
+    return {
+        "status": "READY",
+        "supervision_mode": "READ_ONLY",
+        "execution_enabled": False,
+        "blockers": [],
+        "execution_blockers": execution_blockers,
+    }
+
+
 def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
     """Manage only exchange positions linked by exact ID to the robot's Demo orders."""
     store = None
     try:
         readiness = _blofin_demo_execution_readiness()
-        if readiness.get("status") != "READY":
-            readiness_blockers: list[str] = []
-            if not readiness.get("trade_credentials_configured"):
-                readiness_blockers.append("TRADE_CREDENTIALS_NOT_CONFIGURED")
-            if readiness.get("trade_permission_status") == "READ_ONLY":
-                readiness_blockers.append("TRADE_PERMISSION_READ_ONLY")
-            elif not readiness.get("trade_permission_verified"):
-                readiness_blockers.append("TRADE_PERMISSION_NOT_VERIFIED")
-            if not readiness.get("trading_enabled"):
-                readiness_blockers.append("DEMO_TRADING_DISABLED")
-            if not readiness.get("dashboard_auth_configured"):
-                readiness_blockers.append("DASHBOARD_TOKEN_NOT_CONFIGURED")
-            if not readiness.get("durable_storage"):
-                readiness_blockers.append("DURABLE_STORAGE_UNAVAILABLE")
-            if not readiness.get("event_store_readable"):
-                readiness_blockers.append("EVENT_STORE_UNREADABLE")
-            if not readiness_blockers:
-                readiness_blockers.append("EXECUTION_READINESS_NOT_READY")
-
-            if "TRADE_CREDENTIALS_NOT_CONFIGURED" in readiness_blockers:
-                message_fa = "اعتبارنامه‌های Trade در Environment کامل نیستند؛ مدیر خروج هیچ اقدامی انجام نداد."
-            elif "TRADE_PERMISSION_READ_ONLY" in readiness_blockers:
-                message_fa = "مجوز API فقط‌خواندنی است؛ مدیر خروج مجوز تغییر پوزیشن ندارد و هیچ اقدامی انجام نداد."
-            elif "TRADE_PERMISSION_NOT_VERIFIED" in readiness_blockers:
-                message_fa = "مجوز Trade تأیید نشد؛ مدیر خروج متوقف ماند و هیچ پوزیشنی تغییر نکرد."
-            else:
-                reasons = []
-                if "DEMO_TRADING_DISABLED" in readiness_blockers:
-                    reasons.append("فعال‌سازی معاملات Demo خاموش است")
-                if "DASHBOARD_TOKEN_NOT_CONFIGURED" in readiness_blockers:
-                    reasons.append("توکن پنل تنظیم نشده است")
-                if "DURABLE_STORAGE_UNAVAILABLE" in readiness_blockers:
-                    reasons.append("حافظه پایدار در دسترس نیست")
-                if "EVENT_STORE_UNREADABLE" in readiness_blockers:
-                    reasons.append("دفتر رویداد قابل خواندن نیست")
-                message_fa = (
-                    "مدیر خروج به‌دلیل پیش‌نیازهای مسدودشده اقدام نکرد: "
-                    + "؛ ".join(reasons or ["آمادگی اجرای Demo تأیید نشده است"])
-                    + ". هیچ پوزیشنی تغییر نکرد."
-                )
+        supervision_readiness = _blofin_demo_position_supervision_readiness(readiness)
+        if supervision_readiness.get("status") != "READY":
+            blockers = list(supervision_readiness.get("blockers") or ["SUPERVISION_READINESS_BLOCKED"])
             return {
-                "status": "EXECUTION_READINESS_BLOCKED",
+                "status": "POSITION_SUPERVISION_READINESS_BLOCKED",
                 "readiness_status": readiness.get("status"),
-                "readiness_blockers": readiness_blockers,
+                "readiness_blockers": blockers,
                 "trade_permission_status": readiness.get("trade_permission_status"),
                 "credential_source": readiness.get("credential_source"),
                 "trading_enabled": bool(readiness.get("trading_enabled")),
                 "dashboard_auth_configured": bool(readiness.get("dashboard_auth_configured")),
                 "durable_storage": bool(readiness.get("durable_storage")),
                 "event_store_readable": bool(readiness.get("event_store_readable")),
-                "message_fa": message_fa,
+                "supervision_mode": "BLOCKED",
+                "exchange_writes_performed": 0,
+                "message_fa": (
+                    "نظارت پوزیشن آغاز نشد؛ اعتبارنامهٔ خواندن، وضعیت مجوز حساب و دفتر ممیزی پایدار "
+                    "باید قابل تأیید باشند. هیچ پوزیشن یا سفارشی تغییر نکرد."
+                ),
             }
+        read_only_supervision = supervision_readiness.get("execution_enabled") is not True
+        execution_blockers = list(supervision_readiness.get("execution_blockers") or [])
         raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")
         raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
         try:
@@ -10879,9 +10917,17 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
         pending_orders = store.orders_pending_learning_outcome(limit=50)
         if not pending_orders:
             return {
-                "status": "IDLE",
+                "status": "READ_ONLY_SUPERVISION" if read_only_supervision else "IDLE",
                 "managed_positions": 0,
-                "message_fa": "پوزیشن رباتیِ لینک‌شده‌ای برای مدیریت خروج وجود ندارد.",
+                "supervision_mode": "READ_ONLY" if read_only_supervision else "ACTIVE_DEMO_EXECUTION",
+                "execution_enabled": not read_only_supervision,
+                "execution_blockers": execution_blockers,
+                "exchange_writes_performed": 0,
+                "message_fa": (
+                    "نظارت فقط‌خواندنی فعال است؛ پوزیشن لینک‌شده‌ای در دفتر ربات نیست و هیچ سفارش یا پوزیشنی تغییر نکرد."
+                    if read_only_supervision else
+                    "پوزیشن رباتیِ لینک‌شده‌ای برای مدیریت خروج وجود ندارد."
+                ),
             }
 
         reader = BloFinDemoReadOnly(timeout=8.0)
@@ -11152,6 +11198,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         and str(item.get("instId") or "").strip().upper() == instrument_id
                     ][:20],
                     "risk_change": "NONE_BY_POSITION_MANAGER_CYCLE",
+                    "supervision_mode": "READ_ONLY" if read_only_supervision else "ACTIVE_DEMO_EXECUTION",
+                    "exchange_writes_permitted": not read_only_supervision,
                 }
                 try:
                     reviewer_states = schedule_position_observer_review(
@@ -11287,6 +11335,30 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
                     }
                     if verified_sl_absent:
+                        if read_only_supervision:
+                            _record_challenge1_audit(
+                                experience_id or position_id, "RISK_OVERRIDE_EXIT_BLOCKED_READ_ONLY",
+                                {
+                                    **exit_basis,
+                                    "decision": "EXIT_NOT_SUBMITTED",
+                                    "reason_code": "DEMO_TRADING_DISABLED_READ_ONLY_SUPERVISION",
+                                    "protective_order_status": protection_status,
+                                    "exchange_write_attempted": False,
+                                },
+                                event_key=f"risk-override-exit-read-only:{audit_position_id}:{cycle_epoch_ms}",
+                                experience_id=experience_id, position_id=audit_position_id,
+                                status="WARNING",
+                                reason="The supervisor manager is in read-only mode; risk override was not submitted.",
+                            )
+                            actions.append({
+                                "status": "RISK_OVERRIDE_CLOSE_BLOCKED_READ_ONLY",
+                                "instrument_id": instrument_id,
+                                "position_id": position_id,
+                                "stop_loss_price": stop_value,
+                                "mark_price": mark_price_value,
+                                "exchange_write_attempted": False,
+                            })
+                            continue
                         try:
                             _record_challenge1_audit(
                                 experience_id or position_id, "RISK_OVERRIDE_EXIT_AUTHORIZED",
@@ -11355,6 +11427,17 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 })
                 continue
 
+            if read_only_supervision:
+                actions.append({
+                    "status": "AUTO_EXIT_BLOCKED_READ_ONLY",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "exchange_write_attempted": False,
+                    "reason_code": "DEMO_TRADING_DISABLED_READ_ONLY_SUPERVISION",
+                })
+                continue
+
             try:
                 _record_challenge1_audit(
                     experience_id or position_id, "EXIT_REQUEST_AUTHORIZED",
@@ -11412,12 +11495,19 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 })
 
         return {
-            "status": "PASS",
+            "status": "READ_ONLY_SUPERVISION" if read_only_supervision else "PASS",
+            "supervision_mode": "READ_ONLY" if read_only_supervision else "ACTIVE_DEMO_EXECUTION",
+            "execution_enabled": not read_only_supervision,
+            "execution_blockers": execution_blockers,
+            "exchange_writes_performed": 0 if read_only_supervision else None,
             "managed_positions": managed,
             "actions": actions,
             "minimum_profit_usdt": minimum_profit,
             "maximum_hold_seconds": maximum_hold,
             "message_fa": (
+                "دو ناظر و مدیر پوزیشن در حالت فقط‌خواندنی فعال‌اند؛ بررسی و ممیزی انجام می‌شود، "
+                "اما تا آماده‌شدن مجوز اجرای Demo هیچ سفارش یا تغییری روی پوزیشن ارسال نمی‌شود."
+                if read_only_supervision else
                 "مدیر خروج فقط پوزیشن‌های دقیقاً لینک‌شده به سفارش ربات را بررسی می‌کند؛ "
                 "خروج خودکار فقط با رسیدن به حد سود یا پایان زمان نگهداری و سود شناور کافی انجام می‌شود."
             ),
@@ -11443,6 +11533,10 @@ def _blofin_demo_position_manager_worker() -> None:
                     "last_message_fa": result.get("message_fa", "مدیر خروج بررسی را انجام داد."),
                     "readiness_status": result.get("readiness_status"),
                     "readiness_blockers": list(result.get("readiness_blockers") or []),
+                    "supervision_mode": result.get("supervision_mode", "UNKNOWN"),
+                    "execution_enabled": result.get("execution_enabled", False),
+                    "execution_blockers": list(result.get("execution_blockers") or []),
+                    "exchange_writes_performed": result.get("exchange_writes_performed"),
                     "trade_permission_status": result.get("trade_permission_status", "UNKNOWN"),
                     "credential_source": result.get("credential_source"),
                     "trading_enabled": result.get("trading_enabled"),

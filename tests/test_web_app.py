@@ -2100,11 +2100,36 @@ class BloFinUnifiedReadinessTests(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED")
 
 class BloFinPositionManagerReadinessReportingTests(unittest.TestCase):
-    def test_position_manager_reports_actual_readiness_blockers_without_false_key_diagnosis(self):
+    def test_position_manager_blocks_when_read_only_supervision_prerequisites_are_missing(self):
+        readiness = {
+            "status": "BLOCKED",
+            "trade_credentials_configured": False,
+            "credential_source": "MISSING",
+            "trade_permission_status": "UNKNOWN",
+            "trade_permission_verified": False,
+            "trading_enabled": False,
+            "dashboard_auth_configured": False,
+            "durable_storage": False,
+            "event_store_readable": False,
+        }
+        with patch.object(
+            web_app, "_blofin_demo_execution_readiness", return_value=readiness,
+        ):
+            result = web_app._blofin_demo_position_manager_cycle()
+
+        self.assertEqual(result["status"], "POSITION_SUPERVISION_READINESS_BLOCKED")
+        self.assertIn("TRADE_CREDENTIALS_NOT_CONFIGURED", result["readiness_blockers"])
+        self.assertIn("TRADE_PERMISSION_NOT_CONFIRMED", result["readiness_blockers"])
+        self.assertIn("DURABLE_STORAGE_UNAVAILABLE", result["readiness_blockers"])
+        self.assertIn("EVENT_STORE_UNREADABLE", result["readiness_blockers"])
+        self.assertFalse(result["trading_enabled"])
+        self.assertEqual(result["supervision_mode"], "BLOCKED")
+        self.assertEqual(result["exchange_writes_performed"], 0)
+
+    def test_read_only_supervision_gate_allows_verified_demo_reads_without_enabling_execution(self):
         readiness = {
             "status": "BLOCKED",
             "trade_credentials_configured": True,
-            "credential_source": "UNIFIED_ACCOUNT_KEY",
             "trade_permission_status": "READ_WRITE_CONFIRMED",
             "trade_permission_verified": True,
             "trading_enabled": False,
@@ -2112,26 +2137,14 @@ class BloFinPositionManagerReadinessReportingTests(unittest.TestCase):
             "durable_storage": True,
             "event_store_readable": True,
         }
-        with patch.object(
-            web_app, "_blofin_demo_execution_readiness", return_value=readiness,
-        ):
-            result = web_app._blofin_demo_position_manager_cycle()
-
-        self.assertEqual(result["status"], "EXECUTION_READINESS_BLOCKED")
-        self.assertEqual(result["readiness_status"], "BLOCKED")
+        result = web_app._blofin_demo_position_supervision_readiness(readiness)
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["supervision_mode"], "READ_ONLY")
+        self.assertFalse(result["execution_enabled"])
         self.assertEqual(
-            result["readiness_blockers"],
-            ["DEMO_TRADING_DISABLED", "DASHBOARD_TOKEN_NOT_CONFIGURED"],
+            set(result["execution_blockers"]),
+            {"DEMO_TRADING_DISABLED", "DASHBOARD_TOKEN_NOT_CONFIGURED"},
         )
-        self.assertEqual(result["trade_permission_status"], "READ_WRITE_CONFIRMED")
-        self.assertEqual(result["credential_source"], "UNIFIED_ACCOUNT_KEY")
-        self.assertFalse(result["trading_enabled"])
-        self.assertFalse(result["dashboard_auth_configured"])
-        self.assertTrue(result["durable_storage"])
-        self.assertTrue(result["event_store_readable"])
-        self.assertNotIn("کلید Trade اختصاصی", result["message_fa"])
-        self.assertIn("فعال‌سازی معاملات Demo خاموش است", result["message_fa"])
-        self.assertIn("توکن پنل تنظیم نشده است", result["message_fa"])
 
 
 class BloFinDemoPositionEvidenceTests(unittest.TestCase):
@@ -2343,7 +2356,17 @@ class BloFinOpenPositionObserverIntegrationTests(unittest.TestCase):
         with (
             patch.object(
                 web_app, "_blofin_demo_execution_readiness",
-                return_value={"status": "READY"},
+                return_value={
+                    "status": "BLOCKED",
+                    "trade_credentials_configured": True,
+                    "credential_source": "UNIFIED_ACCOUNT_KEY",
+                    "trade_permission_status": "READ_WRITE_CONFIRMED",
+                    "trade_permission_verified": True,
+                    "trading_enabled": False,
+                    "dashboard_auth_configured": False,
+                    "durable_storage": True,
+                    "event_store_readable": True,
+                },
             ),
             patch.object(web_app, "BloFinDemoEventStore", return_value=fake_store),
             patch.object(web_app, "BloFinDemoReadOnly", return_value=fake_reader),
@@ -2368,7 +2391,10 @@ class BloFinOpenPositionObserverIntegrationTests(unittest.TestCase):
         ):
             result = web_app._blofin_demo_position_manager_cycle()
 
-        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["status"], "READ_ONLY_SUPERVISION")
+        self.assertEqual(result["supervision_mode"], "READ_ONLY")
+        self.assertFalse(result["execution_enabled"])
+        self.assertEqual(result["exchange_writes_performed"], 0)
         self.assertEqual(result["managed_positions"], 1)
         schedule.assert_called_once()
         self.assertEqual(skip_event.call_count, 2)
@@ -2628,6 +2654,37 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
                 cycle_context=context, coordinator_decision=decision,
             )
         self.assertEqual(blocked["reason_code"], "AI_SUPERVISOR_INTERVENTIONS_DISABLED")
+
+    def test_supervisor_gateway_blocks_exchange_write_when_demo_is_read_only(self):
+        decision = {
+            "status": "AUTHORIZED",
+            "execution_authorized": True,
+            "position_id": "position-1",
+            "experience_id": "experience-1",
+            "evidence_hash": "evidence-123",
+            "action": "CLOSE_POSITION",
+        }
+        with (
+            patch.object(
+                web_app, "_blofin_demo_execution_readiness",
+                return_value={"status": "BLOCKED", "trading_enabled": False},
+            ),
+            patch.object(web_app, "_blofin_manual_close_position") as close,
+        ):
+            result = web_app._execute_challenge1_supervisor_action(
+                action="CLOSE_POSITION",
+                challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context={
+                    "instrument_id": "BTC-USDT",
+                    "client_order_id": "entryClient123",
+                    "position": {"positionId": "position-1", "positionSide": "long"},
+                    "supervisor_reviews": [],
+                },
+                coordinator_decision=decision,
+            )
+        self.assertEqual(result["reason_code"], "DEMO_EXECUTION_READINESS_NOT_READY")
+        self.assertFalse(result["exchange_write_attempted"])
+        close.assert_not_called()
 
     def test_supervisor_gateway_rejects_unapproved_coordinator_action(self):
         decision = {
