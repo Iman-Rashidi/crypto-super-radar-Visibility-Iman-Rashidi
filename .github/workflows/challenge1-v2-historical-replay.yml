@@ -41,7 +41,8 @@ jobs:
             scripts/diagnose_blofin_funding_history.py \
             scripts/diagnose_blofin_market_data.py \
             tests/test_challenge1_event_queue.py \
-            tests/test_challenge1_sandbox_worker.py
+            tests/test_challenge1_sandbox_worker.py \
+            tests/test_blofin_demo_executor.py
 
       - name: Run V2 regression and duplicate-timestamp tests
         run: |
@@ -50,6 +51,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_market_replay_duplicates.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_event_queue.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_sandbox_worker.py' -v
+          python -m unittest discover -s tests -p 'test_blofin_demo_executor.py' -v
 
       - name: Diagnose public BTC funding-history intervals
         id: funding-diagnostic
