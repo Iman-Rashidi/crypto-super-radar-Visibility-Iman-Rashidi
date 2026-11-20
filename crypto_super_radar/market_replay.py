@@ -293,13 +293,30 @@ def _classify_funding_schedule_events(
     if len(set(timestamps)) != len(timestamps):
         raise ReplayDownloadError(f"funding history contains duplicate timestamps for {symbol}")
 
-    for left, right in zip(timestamps, timestamps[1:]):
+    # Validate each missing-Kind timestamp before pairwise cadence checks, so an
+    # off-boundary record reports the actual schedule violation (e.g. 04:00 UTC).
+    for _event_symbol, timestamp, _rate, raw_kind, raw_source in ordered:
+        if raw_kind == "MISSING" and raw_source == "MISSING_API_FIELD":
+            if not _is_regular_utc_funding_boundary(int(timestamp)):
+                raise ReplayDownloadError(
+                    f"missing fundingKind timestamp for {symbol} is outside "
+                    "the 00:00/08:00/16:00 UTC schedule tolerance"
+                )
+
+    for index, (left, right) in enumerate(zip(timestamps, timestamps[1:])):
         if _is_observed_blackout_gap(left, right):
             continue
         delta_ms = right - left
         if delta_ms <= 0:
             raise ReplayDownloadError(f"funding timestamps are not strictly increasing for {symbol}")
-        if abs(delta_ms - REGULAR_FUNDING_INTERVAL_MS) > 2 * FUNDING_SCHEDULE_TOLERANCE_MS:
+        # Only infer cadence across a pair where both records lack the API kind.
+        # Explicit API Kind=0 remains authoritative and may follow a dynamic venue cadence.
+        left_event, right_event = ordered[index], ordered[index + 1]
+        both_missing = (
+            left_event[3] == "MISSING" and left_event[4] == "MISSING_API_FIELD"
+            and right_event[3] == "MISSING" and right_event[4] == "MISSING_API_FIELD"
+        )
+        if both_missing and abs(delta_ms - REGULAR_FUNDING_INTERVAL_MS) > 2 * FUNDING_SCHEDULE_TOLERANCE_MS:
             raise ReplayDownloadError(
                 f"funding history for {symbol} skips or breaks the fixed 8-hour UTC cadence "
                 f"(delta_ms={delta_ms})"

@@ -31,6 +31,7 @@ from crypto_super_radar.ai_sandbox import (
 from crypto_super_radar.market_replay import (
     ReplayDownloadError,
     _classify_funding_schedule_events,
+    _is_observed_blackout_gap,
     _parse_funding_event,
     _record_unique_timestamp,
     _subtract_calendar_months,
