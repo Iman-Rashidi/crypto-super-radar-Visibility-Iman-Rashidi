@@ -203,7 +203,7 @@ class NetBreakEvenStopTests(unittest.TestCase):
             equity_usdt=1000,
             risk_fraction=0.0025,
             rules=rules,
-            funding_events=[{"fundingTime": 1_699_999_999_999, "fundingRate": 0.0}],
+            funding_events=[{"fundingTime": 1_699_999_999_999, "fundingRate": 0.0, "fundingKind": "0"}],
             spread_fraction=-0.0001,
         )
         self.assertEqual(result.status, "REJECTED")
@@ -368,6 +368,49 @@ class ReplayFundingSchemaTests(unittest.TestCase):
         )
         self.assertEqual(regular, ("BTC-USDT", 1000, 0.0001, "0"))
         self.assertEqual(dividend, ("BTC-USDT", 2000, 0.0002, "1"))
+
+
+class VirtualBloFinFundingKindTests(unittest.TestCase):
+    @staticmethod
+    def _simulate(funding_event):
+        engine = VirtualBloFin()
+        rules = InstrumentRules(
+            inst_id="BTC-USDT",
+            contract_value=Decimal("1"),
+            min_size=Decimal("1"),
+            lot_size=Decimal("1"),
+            tick_size=Decimal("0.01"),
+        )
+        bars = [
+            {"ts": 1_700_000_000_000, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
+            {"ts": 1_700_000_900_000, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
+        ]
+        return engine.simulate_post_only_trade(
+            bars=bars, start_index=0, direction="LONG", limit_price=100,
+            stop_price=99, target_price=104, equity_usdt=1000,
+            risk_fraction=0.0025, rules=rules, funding_events=[funding_event],
+            spread_fraction=0.0002,
+        )
+
+    def test_stock_dividend_event_is_not_applied_as_regular_funding(self):
+        with self.assertRaisesRegex(SimulationError, "only fundingKind=0"):
+            self._simulate({
+                "fundingTime": "1700000000001",
+                "fundingRate": "0.0001",
+                "fundingKind": "1",
+            })
+
+    def test_missing_funding_kind_is_not_assumed_regular_by_simulator(self):
+        with self.assertRaisesRegex(SimulationError, "only fundingKind=0"):
+            self._simulate({"fundingTime": "1700000000001", "fundingRate": "0.0001"})
+
+    def test_explicit_regular_funding_kind_is_accepted(self):
+        result = self._simulate({
+            "fundingTime": "1699999999999",
+            "fundingRate": "0.0001",
+            "fundingKind": "0",
+        })
+        self.assertNotEqual(result.status, "REJECTED")
 
 
 if __name__ == "__main__":
