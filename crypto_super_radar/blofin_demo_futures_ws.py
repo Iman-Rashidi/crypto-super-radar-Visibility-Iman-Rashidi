@@ -439,8 +439,13 @@ async def demo_futures_public_websocket_stream(
 ) -> AsyncIterable[Any]:
     """Open BloFin Demo's public futures WS; heartbeat uses text ping/pong."""
     subscription = build_public_subscription(inst_id, channels)
-    if not (1 <= heartbeat_interval_seconds < 30 and 0 < pong_timeout_seconds < 30):
-        raise ValueError("Heartbeat and pong timeout must be positive and below 30 seconds.")
+    if not (
+        math.isfinite(float(heartbeat_interval_seconds))
+        and math.isfinite(float(pong_timeout_seconds))
+        and 0 < heartbeat_interval_seconds < 30
+        and 0 < pong_timeout_seconds < 30
+    ):
+        raise ValueError("Heartbeat and pong timeout must be finite, positive and below 30 seconds.")
     try:
         import websockets
     except ImportError as exc:  # pragma: no cover
@@ -585,7 +590,7 @@ class BloFinDemoFuturesPublicWorker:
                     self._counts["observations"] += int(persisted.get("inserted", 0))
                     self._counts["duplicates"] += int(persisted.get("duplicates", 0))
                     self._channel_counts[normalized["channel"]] += expected
-                self._last_error = "STREAM_ENDED"
+                self._last_error = "STOP_REQUESTED" if stop_event.is_set() else "STREAM_ENDED"
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

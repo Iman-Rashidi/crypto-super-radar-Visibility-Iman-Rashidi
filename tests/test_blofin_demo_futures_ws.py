@@ -270,7 +270,9 @@ class BloFinDemoPublicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["channel_observation_counts"], {"trades": 1, "funding-rate": 1})
         self.assertEqual(result["subscription_ack_counts"], {"trades": 1})
         rows = store.read_recent(inst_id="BTC-USDT", channel="trades")
-        self.assertEqual(rows[0]["payload"]["base_quantity"], 0.1)
+        self.assertAlmostEqual(rows[0]["payload"]["base_quantity_estimate"], 0.1)
+        self.assertEqual(rows[0]["payload"]["aggressor_side_semantics"], "NOT_ESTABLISHED_DO_NOT_USE_FOR_CVD")
+        self.assertNotIn("aggressor_side", rows[0]["payload"])
         db.close()
 
     async def test_worker_fails_closed_when_persistence_is_not_confirmed(self):
