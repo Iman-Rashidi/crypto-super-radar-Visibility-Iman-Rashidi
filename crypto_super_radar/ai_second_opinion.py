@@ -750,6 +750,167 @@ def _validated_pattern_review(
     }
 
 
+def _clean_v2_ohlcv_rows(value: Any, *, limit: int = 30) -> list[dict[str, Any]]:
+    """Preserve finite source precision while whitelisting completed OHLCV fields."""
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[-max(1, min(int(limit), 30)):]:
+        if not isinstance(item, Mapping):
+            continue
+        timestamp = str(item.get("open_time_utc") or "").strip()[:64]
+        try:
+            values = {
+                key: float(item.get(key))
+                for key in ("open", "high", "low", "close", "volume")
+            }
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (
+            not timestamp
+            or not all(math.isfinite(number) for number in values.values())
+            or min(values["open"], values["high"], values["low"], values["close"]) <= 0
+            or values["volume"] < 0
+            or values["high"] < max(values["open"], values["close"], values["low"])
+            or values["low"] > min(values["open"], values["close"], values["high"])
+        ):
+            continue
+        rows.append({"open_time_utc": timestamp, **values})
+    return rows
+
+
+def _build_v2_review_input(result: Any, asset: Any) -> dict[str, Any]:
+    """Build a compact, strict 15m/1h/4h reviewer payload from the V2 signal packet."""
+    record = _challenge1_result_record(result)
+    ready, reason = _challenge1_v2_native_review(result)["status"], ""
+    if ready != "APPROVED":
+        raise ValueError("V2 native review did not approve the evidence packet.")
+    raw = record.get("challenge1_v2_evidence")
+    if not isinstance(raw, Mapping):
+        raise ValueError("V2 evidence packet is missing.")
+
+    candles_15m = _clean_v2_ohlcv_rows(raw.get("candles_15m"))
+    candles_1h = _clean_v2_ohlcv_rows(raw.get("candles_1h"))
+    candles_4h = _clean_v2_ohlcv_rows(raw.get("candles_4h"))
+    if any(len(rows) != 30 for rows in (candles_15m, candles_1h, candles_4h)):
+        raise ValueError("V2 reviewer requires exactly 30 validated candles per timeframe.")
+
+    def exact_number(value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def numeric_map(value: Any, allowed: set[str]) -> dict[str, float]:
+        if not isinstance(value, Mapping):
+            return {}
+        cleaned: dict[str, float] = {}
+        for key, item in value.items():
+            name = str(key)
+            number = exact_number(item)
+            if name in allowed and number is not None:
+                cleaned[name] = number
+        return cleaned
+
+    regime_raw = record.get("regime")
+    regime_raw = regime_raw if isinstance(regime_raw, Mapping) else {}
+    regime: dict[str, Any] = {}
+    for key in ("status", "direction", "candle_open_utc", "candle_open_utc_4h"):
+        regime[key] = str(regime_raw.get(key) or "")[:80]
+    for key in (
+        "adx_1h", "close_1h", "ema21_1h", "ema55_1h", "ema200_1h",
+        "ema21_slope_1h", "ema55_slope_1h",
+    ):
+        number = exact_number(regime_raw.get(key))
+        if number is not None:
+            regime[key] = number
+
+    raw_wave = raw.get("elliott_wave")
+    if not isinstance(raw_wave, Mapping):
+        raise ValueError("V2 1H Elliott evidence is missing.")
+    wave = _clean_elliott_wave(raw_wave)
+    if (
+        wave.get("phase") != raw_wave.get("phase")
+        or wave.get("direction") != raw_wave.get("pattern")
+        or wave.get("confirmed_pivot_count", 0) < 3
+    ):
+        raise ValueError("V2 1H Elliott evidence could not be sanitized consistently.")
+
+    funding = {
+        "funding_rate": exact_number(record.get("funding_rate")),
+        "funding_kind": str(record.get("funding_kind") or "")[:8],
+        "funding_event_time_ms": record.get("funding_event_time_ms")
+            if isinstance(record.get("funding_event_time_ms"), int)
+            and not isinstance(record.get("funding_event_time_ms"), bool) else None,
+        "funding_max_age_ms": record.get("funding_max_age_ms")
+            if isinstance(record.get("funding_max_age_ms"), int)
+            and not isinstance(record.get("funding_max_age_ms"), bool) else None,
+    }
+    if funding["funding_kind"] != "0" or funding["funding_rate"] is None:
+        raise ValueError("V2 reviewer requires classified regular Funding kind 0.")
+
+    asset_name = str(
+        getattr(asset, "raw", asset)
+        or record.get("instrument_id")
+        or getattr(result, "asset", "unknown")
+    )
+    return {
+        "asset": asset_name[:40],
+        "market_type": "perpetual",
+        "execution_profile": "CHALLENGE_1_V2",
+        "review_mode": "V2_MULTI_TIMEFRAME_REVIEW",
+        "expected_side": str(record.get("signal") or "").upper(),
+        "signal_id": str(record.get("signal_id") or "")[:180],
+        "decision_engine_version": str(raw.get("decision_engine_version") or "")[:80],
+        "completed_candles_only": raw.get("completed_candles_only") is True,
+        "setup_timeframe": "15m",
+        "context_timeframes": ["1H", "4H"],
+        "data_asof_utc": str(raw.get("data_asof_utc") or "")[:64],
+        "signal_candle_open_utc": str(raw.get("signal_candle_open_utc") or "")[:64],
+        "context_1h_candle_open_utc": str(raw.get("context_1h_candle_open_utc") or "")[:64],
+        "context_4h_candle_open_utc": str(raw.get("context_4h_candle_open_utc") or "")[:64],
+        "candles_15m": candles_15m,
+        "candles_1h": candles_1h,
+        "candles_4h": candles_4h,
+        "regime_1h_4h": regime,
+        "elliott_wave_1h": wave,
+        "wave_alignment": str(raw.get("wave_alignment") or "")[:24],
+        "confluence_score": exact_number(record.get("confidence_score")),
+        "score_parts": numeric_map(
+            record.get("score_parts"),
+            {"h1_h4_alignment", "adx_gt_28", "value_zone_rejection",
+             "volume_gt_1_5x", "btc_alignment"},
+        ),
+        "features": numeric_map(
+            record.get("features"),
+            {"adx_1h", "rsi_15m", "ema200_distance_pct", "funding_rate_pct",
+             "spread_pct", "volume_ratio", "utc_hour_sin", "utc_hour_cos",
+             "last_trade_1_win", "last_trade_2_win", "last_trade_3_win"},
+        ),
+        "volume_ratio": exact_number(record.get("volume_ratio")),
+        "rsi_15m": exact_number(record.get("rsi_15m")),
+        "funding": funding,
+        "risk_plan": {
+            "entry": exact_number(record.get("entry")),
+            "stop_loss": exact_number(record.get("stop_loss")),
+            "take_profit": exact_number(record.get("take_profit")),
+            "gross_reward_risk": exact_number(record.get("gross_rr")),
+            "minimum_reward_risk": 1.8,
+        },
+        "policy": {
+            "higher_timeframes": "1H_REGIME_AND_ELLIOTT_4H_CONTEXT_15M_SETUP",
+            "general_radar_protocols": "NOT_APPLIED_TO_CHALLENGE_1_V2",
+            "account_risk_limits_remain_active": True,
+            "funding_rule": "ONLY_EXPLICIT_KIND_0_REGULAR_FUNDING",
+            "supervisor_role": "INDEPENDENT_REVIEW_AND_RECOMMENDATION_ONLY",
+            "orders_submitted": False,
+        },
+    }
+
+
 def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     asset_name = getattr(asset, "raw", asset)
     market_type = (
@@ -759,9 +920,12 @@ def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     expected_side = str(
         getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "UNKNOWN"))
     ).upper().replace(" ", "_")
+    profile = _challenge1_result_profile(result)
     metrics = getattr(result, "metrics", {})
-    metrics = metrics if isinstance(metrics, dict) else {}
-    if str(metrics.get("execution_profile") or "").upper() == "CHALLENGE_1":
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    if profile == "CHALLENGE_1_V2":
+        return _build_v2_review_input(result, asset)
+    if profile == "CHALLENGE_1":
         return _build_pattern_review_input(result, asset, metrics)
     gates = []
     for gate in getattr(result, "gates", []) or []:
