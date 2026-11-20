@@ -183,7 +183,7 @@ def _net_breakeven_limit_price(
     exit_fee_rate: float,
     tick_size: float,
 ) -> float:
-    """Solve the exit limit price that covers accrued costs plus the maker exit fee.
+    """Solve a conservative net break-even limit including the selected exit fee.
 
     A long closes with a sell limit rounded upward; a short closes with a buy
     limit rounded downward. Rounding therefore never makes the modeled exit
