@@ -71,6 +71,9 @@ class StrategyAsOfIntegrationTests(unittest.TestCase):
             btc_15m=btc_15m,
             asof=asof,
             funding_rate=0.0,
+            funding_kind="0",
+            funding_event_time_ms=int(asof.timestamp() * 1000) - 60_000,
+            funding_max_age_ms=900_000,
             spread_fraction=0.0002,
         )
 
@@ -90,6 +93,9 @@ class StrategyAsOfIntegrationTests(unittest.TestCase):
             btc_15m=mutate_future(btc_15m, pd.Timedelta(minutes=15)),
             asof=asof,
             funding_rate=0.0,
+            funding_kind="0",
+            funding_event_time_ms=int(asof.timestamp() * 1000) - 60_000,
+            funding_max_age_ms=900_000,
             spread_fraction=0.0002,
         )
         self.assertEqual(original, changed)
@@ -468,6 +474,9 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
                 "btc_alignment": 10,
             },
             "funding_rate": 0.0001,
+            "funding_kind": "0",
+            "funding_event_time_ms": int(asof.timestamp() * 1000) - 60_000,
+            "funding_max_age_ms": 900_000,
             "spread_fraction": 0.0002,
             "signal_candle_open_utc": signal_open.isoformat(),
             "orders_submitted": False,
@@ -488,6 +497,10 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
                 "context_1h_candle_open_utc": h1_open.isoformat(),
                 "context_4h_candle_open_utc": h4_open.isoformat(),
                 "data_asof_utc": asof.isoformat(),
+                "funding_rate": 0.0001,
+                "funding_kind": "0",
+                "funding_event_time_ms": int(asof.timestamp() * 1000) - 60_000,
+                "funding_max_age_ms": 900_000,
                 "elliott_wave": wave,
                 "wave_alignment": "ALIGNED",
             },
@@ -545,6 +558,29 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
         ready, reason = challenge1_v2_execution_evidence_ready(record)
         self.assertTrue(ready, reason)
         self.assertIn("independent AI consensus", reason)
+
+    def test_v2_execution_preflight_rejects_missing_funding_kind(self):
+        record = self._valid_signal_record()
+        record.pop("funding_kind")
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_stock_dividend_funding_kind(self):
+        record = self._valid_signal_record()
+        record["funding_kind"] = "1"
+        record["challenge1_v2_evidence"]["funding_kind"] = "1"
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_future_funding_event(self):
+        record = self._valid_signal_record()
+        record["funding_event_time_ms"] += 120_000
+        record["challenge1_v2_evidence"]["funding_event_time_ms"] += 120_000
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_stale_funding_event(self):
+        record = self._valid_signal_record()
+        record["funding_max_age_ms"] = 1_000
+        record["challenge1_v2_evidence"]["funding_max_age_ms"] = 1_000
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
 
     def test_v2_execution_preflight_rejects_signal_id_mismatch(self):
         record = self._valid_signal_record()
