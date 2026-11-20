@@ -99,6 +99,21 @@ def _funding_blackout_for_timestamp(timestamp_ms: int) -> dict[str, Any] | None:
     ), None)
 
 
+def _strategy_history_ready(
+    frame_1h: pd.DataFrame,
+    frame_4h: pd.DataFrame,
+    frame_15m: pd.DataFrame,
+    btc_15m: pd.DataFrame,
+) -> bool:
+    """Mirror analyze_signal's minimum closed-history requirements before invoking it."""
+    return (
+        len(frame_1h) >= 205
+        and len(frame_4h) >= 205
+        and len(frame_15m) >= 70
+        and len(btc_15m) >= 40
+    )
+
+
 def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     frames = {
         "15m": _load_candles(connection, symbol, "15m", "LAST"),
@@ -504,6 +519,7 @@ def run_sandbox(
     totals = defaultdict(float)
     counts = defaultdict(int)
     model_decisions = defaultdict(int)
+    strategy_error_reasons: dict[str, int] = defaultdict(int)
     model_freeze_train_count: int | None = None
     calibration_observations: dict[str, list[dict[str, Any]]] = {
         "VALIDATION": [],
@@ -818,6 +834,15 @@ def run_sandbox(
             ):
                 counts["purged_boundary_signal_blocks"] += 1
                 continue
+            frame_1h = _visible_frame(item["frames"]["1H"], asof, pd.Timedelta(hours=1))
+            frame_4h = _visible_frame(item["frames"]["4H"], asof, pd.Timedelta(hours=4))
+            frame_15m = _visible_frame(item["frames"]["15m"], asof, pd.Timedelta(minutes=15))
+            btc_15m = _visible_frame(
+                market["BTC-USDT"]["frames"]["15m"], asof, pd.Timedelta(minutes=15)
+            )
+            if not _strategy_history_ready(frame_1h, frame_4h, frame_15m, btc_15m):
+                counts["indicator_warmup_blocks"] += 1
+                continue
             counts["strategy_checks"] += 1
             latest_interval = next((
                 int(event["fundingIntervalMs"])
@@ -838,12 +863,10 @@ def run_sandbox(
             try:
                 signal = analyze_signal(
                     instrument_id=symbol,
-                    frame_1h=_visible_frame(item["frames"]["1H"], asof, pd.Timedelta(hours=1)),
-                    frame_4h=_visible_frame(item["frames"]["4H"], asof, pd.Timedelta(hours=4)),
-                    frame_15m=_visible_frame(item["frames"]["15m"], asof, pd.Timedelta(minutes=15)),
-                    btc_15m=_visible_frame(
-                        market["BTC-USDT"]["frames"]["15m"], asof, pd.Timedelta(minutes=15)
-                    ),
+                    frame_1h=frame_1h,
+                    frame_4h=frame_4h,
+                    frame_15m=frame_15m,
+                    btc_15m=btc_15m,
                     asof=asof,
                     funding_rate=funding_rate,
                     funding_kind=funding_kind,
@@ -853,8 +876,10 @@ def run_sandbox(
                     last_three_results=tuple(last_results[symbol]),
                     tp_r=2.4,
                 )
-            except (ValueError, KeyError, IndexError):
+            except (ValueError, KeyError, IndexError) as exc:
                 counts["strategy_data_errors"] += 1
+                reason = f"{type(exc).__name__}: {str(exc)}"[:240]
+                strategy_error_reasons[reason] += 1
                 continue
             if signal.get("signal") not in {"LONG", "SHORT"}:
                 counts["no_trade_decisions"] += 1
@@ -1040,6 +1065,13 @@ def run_sandbox(
             "feature_importance_interpretation": "Associational model coefficients only; not causal attribution.",
         },
         "diagnostics": dict(counts),
+        "strategy_data_quality": {
+            "indicator_warmup_blocks": counts["indicator_warmup_blocks"],
+            "strategy_data_errors": counts["strategy_data_errors"],
+            "strategy_error_reasons": dict(strategy_error_reasons),
+            "minimum_closed_history_rows": {"1H": 205, "4H": 205, "15m": 70, "BTC_15m": 40},
+            "warmup_blocks_are_not_market_data_corruption": True,
+        },
         "trade_ledger": sorted(actual_trades, key=lambda x: x["exit_ts_ms"]),
         "shadow_ledger": sorted(shadow_trades, key=lambda x: x["exit_ts_ms"]),
         "open_positions_at_dataset_end": unresolved_positions,
