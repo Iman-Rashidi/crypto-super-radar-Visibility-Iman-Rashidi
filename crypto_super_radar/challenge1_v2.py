@@ -108,8 +108,24 @@ def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) 
     strength = float(adx14.iloc[-1])
     if strength < 22:
         return {"status": "RANGE", "direction": "NONE", "adx": strength, "reason": "ADX(14) below 22"}
-    long_ok = row["close"] > e200.iloc[-1] and e21.iloc[-1] > e55.iloc[-1] and _swing_structure(h1, "LONG")
-    short_ok = row["close"] < e200.iloc[-1] and e21.iloc[-1] < e55.iloc[-1] and _swing_structure(h1, "SHORT")
+    # Require both fast and slow trend EMAs to slope with the regime.
+    # Their ordering alone can persist after momentum has already rolled over.
+    ema21_slope = float(e21.iloc[-1] - e21.iloc[-4])
+    ema55_slope = float(e55.iloc[-1] - e55.iloc[-4])
+    long_ok = (
+        row["close"] > e200.iloc[-1]
+        and e21.iloc[-1] > e55.iloc[-1]
+        and ema21_slope > 0
+        and ema55_slope > 0
+        and _swing_structure(h1, "LONG")
+    )
+    short_ok = (
+        row["close"] < e200.iloc[-1]
+        and e21.iloc[-1] < e55.iloc[-1]
+        and ema21_slope < 0
+        and ema55_slope < 0
+        and _swing_structure(h1, "SHORT")
+    )
     direction = "LONG" if long_ok else "SHORT" if short_ok else "NONE"
     aligned_4h = False
     if len(h4) >= 205:
@@ -123,7 +139,10 @@ def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) 
         "status": "TREND" if direction != "NONE" else "NEUTRAL", "direction": direction,
         "adx_1h": strength, "close_1h": float(row["close"]),
         "ema21_1h": float(e21.iloc[-1]), "ema55_1h": float(e55.iloc[-1]),
-        "ema200_1h": float(e200.iloc[-1]), "aligned_4h": bool(aligned_4h),
+        "ema200_1h": float(e200.iloc[-1]),
+        "ema21_slope_1h": ema21_slope,
+        "ema55_slope_1h": ema55_slope,
+        "aligned_4h": bool(aligned_4h),
         "candle_open_utc": h1.index[-1].isoformat(),
         "reason": "1H trend, EMA structure and HH/HL or LL/LH hard gate",
     }
