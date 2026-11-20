@@ -49,7 +49,7 @@ jobs:
         run: |
           set +e
           mkdir -p artifacts
-          python -m scripts.diagnose_blofin_funding_history --symbol BTC-USDT --months 7 \
+          python -m scripts.diagnose_blofin_funding_history --all --months 7 \
             > artifacts/funding_diagnostic.json 2> artifacts/funding_diagnostic.stderr
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
