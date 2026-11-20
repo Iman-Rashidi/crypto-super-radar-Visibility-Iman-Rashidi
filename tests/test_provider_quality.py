@@ -113,6 +113,17 @@ class HttpRetryTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
 
 
+class PublicHostRateLimitConfigTests(unittest.TestCase):
+    def test_gate_and_okx_public_hosts_are_spaced_below_documented_limits(self):
+        intervals = AppConfig().rate_limits.host_intervals
+        self.assertEqual(intervals["api.gateio.ws"], 0.25)
+        self.assertEqual(intervals["www.okx.com"], 0.25)
+        # Shared host-wide spacing is four requests/second, below the narrowest
+        # documented OKX public endpoint rate used by the fallback path.
+        self.assertLessEqual(1.0 / intervals["api.gateio.ws"], 4.0)
+        self.assertLessEqual(1.0 / intervals["www.okx.com"], 4.0)
+
+
 class PerpetualProviderTests(unittest.TestCase):
     def test_binance_ticker_preserves_negative_funding(self):
         fake_http = MagicMock()

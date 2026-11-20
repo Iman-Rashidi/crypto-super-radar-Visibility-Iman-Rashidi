@@ -20,6 +20,12 @@ class RateLimitConfig:
         "api.binance.com": 0.25,
         "data-api.binance.vision": 0.25,
         "api.bybit.com": 0.25,
+        # Gate public endpoints are documented at 200 requests/10s per endpoint.
+        # A 250ms host-wide spacing is only 4 requests/s across all Gate endpoints.
+        "api.gateio.ws": 0.25,
+        # OKX public mark/funding endpoints have a documented minimum of 10/2s
+        # per IP + instrument. A 250ms host-wide spacing remains below that cap.
+        "www.okx.com": 0.25,
         # Twelve Data Basic allows up to 8 API credits/minute; stay below the cap.
         "api.twelvedata.com": 7.6,
         "api.mainnet-beta.solana.com": 1.0,
