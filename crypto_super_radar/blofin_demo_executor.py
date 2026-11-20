@@ -555,7 +555,7 @@ class BloFinDemoRiskPolicy:
     max_margin_usage_pct: float = 0.10
     max_aggregate_risk_pct: float = 0.005
     max_leverage: int = 3
-    max_concurrent_positions: int = 1
+    max_concurrent_positions: int = 4
     max_orders_per_utc_day: int | None = None
     min_seconds_between_orders: int = 0
     min_confirmation_score: float = 75.0
@@ -593,8 +593,8 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Minimum seconds between Demo orders must be between 0 and 86400")
         if isinstance(self.max_leverage, bool) or not 1 <= int(self.max_leverage) <= 3:
             raise ValueError("Demo test leverage is restricted to 1x through 3x")
-        if not 1 <= int(self.max_concurrent_positions) <= 3:
-            raise ValueError("Concurrent positions must be between 1 and 3")
+        if not 1 <= int(self.max_concurrent_positions) <= 4:
+            raise ValueError("Concurrent positions must be between 1 and 4")
         if self.min_reward_risk < 1.0 or self.max_entry_deviation_pct <= 0:
             raise ValueError("Reward/risk or entry-deviation policy is invalid")
         if not 0 <= self.taker_fee_rate <= 0.01:
@@ -1377,7 +1377,7 @@ class BloFinDemoEventStore:
         self,
         plan: Mapping[str, Any],
         *,
-        max_concurrent_positions: int = 1,
+        max_concurrent_positions: int = 4,
         external_open_positions: int = 0,
         external_pending_orders: int = 0,
     ) -> bool:
@@ -1394,8 +1394,8 @@ class BloFinDemoEventStore:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field} must be a non-negative integer.")
-        if not 1 <= max_concurrent_positions <= 3:
-            raise ValueError("max_concurrent_positions must be between 1 and 3.")
+        if not 1 <= max_concurrent_positions <= 4:
+            raise ValueError("max_concurrent_positions must be between 1 and 4.")
 
         now = int(time.time())
         order_id = str(plan["client_order_id"])
@@ -1411,9 +1411,10 @@ class BloFinDemoEventStore:
         if min(new_risk, new_margin, risk_cap, margin_cap) <= 0:
             raise BloFinDemoExecutionBlocked("Aggregate risk and margin reservations must be positive.")
 
-        # External positions/orders have no trusted local stop-risk and margin ledger.
-        # Fail closed rather than undercounting exposure when those are present.
-        if external_open_positions > 0 or external_pending_orders > 0:
+        # Pending exchange orders are always a blocker. Exchange positions may be
+        # counted only when all of them are represented by durable local reservations.
+        # An untracked/manual position has no trusted stop-risk or margin ledger.
+        if external_pending_orders > 0:
             return False
 
         active_statuses = (
@@ -1437,7 +1438,11 @@ class BloFinDemoEventStore:
                         FROM blofin_demo_orders WHERE status IN ({active_statuses})"""
                 ).fetchall()
                 local_active = len(active_rows)
-                observed_total = local_active + external_open_positions + external_pending_orders
+                if external_open_positions > local_active:
+                    self._db.rollback()
+                    return False
+                effective_open_positions = max(local_active, external_open_positions)
+                observed_total = effective_open_positions + external_pending_orders
                 if observed_total >= max_concurrent_positions:
                     self._db.rollback()
                     return False
@@ -1490,6 +1495,7 @@ class BloFinDemoEventStore:
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,
                         "exchange_open_positions": external_open_positions,
+                        "effective_open_positions": effective_open_positions,
                         "exchange_pending_orders": external_pending_orders,
                         "max_concurrent_positions": max_concurrent_positions,
                     },
@@ -2440,7 +2446,8 @@ class BloFinDemoExecutor:
         # Account-wide pending orders can fill on another symbol and consume the
         # concurrency/margin budget, so the safety check is intentionally global.
         pending = self.client.get_open_orders()
-        if _active_position_count(positions) >= self.policy.max_concurrent_positions:
+        exchange_open_positions = _active_position_count(positions)
+        if exchange_open_positions >= self.policy.max_concurrent_positions:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")
         if _active_order_count(pending) > 0:
             raise BloFinDemoExecutionBlocked("Pending orders exist; reconcile them before a new entry.")
@@ -2499,6 +2506,7 @@ class BloFinDemoExecutor:
         if not self.store.reserve_order(
             plan,
             max_concurrent_positions=self.policy.max_concurrent_positions,
+            external_open_positions=exchange_open_positions,
             external_pending_orders=_active_order_count(pending),
         ):
             raise BloFinDemoExecutionBlocked(

@@ -1,4 +1,4 @@
-"""Durable, observation-only AI review scheduling for open BloFin Demo positions.
+"""Durable active AI review scheduling for open BloFin Demo positions.
 
 The position manager keeps its 15-second deterministic risk loop. Independent AI
 reviews are scheduled at a much slower, configurable cadence so free-provider
@@ -49,12 +49,27 @@ def _audit_details(event: Mapping[str, Any]) -> dict[str, Any]:
     details = payload.get("details")
     return dict(details) if isinstance(details, Mapping) else {}
 
+def _risk_fingerprint(value: Any, decimals: int = 3) -> float | str | None:
+    """Normalize risk values without retriggering on every tiny exchange tick."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return "INVALID"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "INVALID"
+    if not _is_finite_number(number):
+        return "INVALID"
+    return round(number, decimals)
+
+
 def _material_review_event_key(
     challenge_record: Mapping[str, Any],
     cycle_context: Mapping[str, Any],
     position_id: str,
 ) -> str:
-    """Hash material state changes without reacting to every mark-price tick."""
+    """Hash material market, protection, account and position-risk changes."""
     position = cycle_context.get("position")
     position = position if isinstance(position, Mapping) else {}
     protective = cycle_context.get("protective_orders")
@@ -72,6 +87,7 @@ def _material_review_event_key(
         candle_marker = last_candle[0]
     else:
         candle_marker = None
+
     raw_evidence = challenge_record.get("challenge1_evidence")
     raw_evidence = raw_evidence if isinstance(raw_evidence, Mapping) else {}
     protective_orders = protective.get("orders")
@@ -81,26 +97,94 @@ def _material_review_event_key(
             "tpsl_id": item.get("tpsl_id"),
             "position_id": item.get("position_id"),
             "state": item.get("state"),
-            "sl_trigger_price": item.get("sl_trigger_price"),
-            "tp_trigger_price": item.get("tp_trigger_price"),
+            "sl_trigger_price": _risk_fingerprint(item.get("sl_trigger_price"), 8),
+            "tp_trigger_price": _risk_fingerprint(item.get("tp_trigger_price"), 8),
         }
         for item in protective_orders if isinstance(item, Mapping)
     ]
+
     position_signature = {
         "position_id": str(position.get("positionId") or position_id),
         "instrument_id": str(position.get("instId") or challenge_record.get("instrument_id") or ""),
         "side": str(position.get("positionSide") or ""),
-        "size": str(position.get("positions") or ""),
-        "average_price": str(position.get("averagePrice") or ""),
-        "liquidation_price": str(position.get("liquidationPrice") or ""),
+        "size": _risk_fingerprint(position.get("positions"), 8),
+        "available_size_to_close": _risk_fingerprint(position.get("availablePositions"), 8),
+        "average_price": _risk_fingerprint(position.get("averagePrice"), 8),
+        "liquidation_price": _risk_fingerprint(position.get("liquidationPrice"), 4),
+        "leverage": _risk_fingerprint(position.get("leverage"), 3),
+        "margin_mode": str(position.get("marginMode") or ""),
+        "initial_margin": _risk_fingerprint(position.get("initialMargin"), 2),
+        "position_margin": _risk_fingerprint(position.get("margin"), 2),
+        "margin_ratio": _risk_fingerprint(position.get("marginRatio"), 4),
+        "maintenance_margin": _risk_fingerprint(position.get("maintenanceMargin"), 2),
+        "unrealized_pnl_ratio": _risk_fingerprint(position.get("unrealizedPnlRatio"), 4),
+        "adl_level": str(position.get("adl") or ""),
         "unrealized_pnl_sign": (
             "NEGATIVE" if _is_negative_number(position.get("unrealizedPnl"))
             else "NON_NEGATIVE" if _is_finite_number(position.get("unrealizedPnl"))
             else "UNKNOWN"
         ),
     }
+
+    account_raw = cycle_context.get("account_snapshot")
+    if isinstance(account_raw, list):
+        account_root = next((item for item in account_raw if isinstance(item, Mapping)), {})
+        account_details = account_root.get("details")
+        if not isinstance(account_details, list):
+            account_details = account_raw
+    elif isinstance(account_raw, Mapping):
+        account_root = account_raw
+        account_details = account_root.get("details")
+    else:
+        account_root, account_details = {}, []
+    account_signature = {
+        "total_equity": _risk_fingerprint(account_root.get("totalEquity"), 0),
+        "isolated_equity": _risk_fingerprint(account_root.get("isolatedEquity"), 0),
+        "balances": [],
+    }
+    if isinstance(account_details, list):
+        for item in account_details[:12]:
+            if not isinstance(item, Mapping):
+                continue
+            account_signature["balances"].append({
+                "currency": str(item.get("currency") or "").upper(),
+                "equity": _risk_fingerprint(item.get("equity"), 0),
+                "available": _risk_fingerprint(item.get("available"), 0),
+                "available_equity": _risk_fingerprint(item.get("availableEquity"), 0),
+                "frozen": _risk_fingerprint(item.get("frozen"), 0),
+                "open_order_margin": _risk_fingerprint(item.get("orderFrozen"), 0),
+                "margin_ratio": _risk_fingerprint(item.get("marginRatio"), 4),
+            })
+    account_signature["balances"].sort(key=lambda item: item["currency"])
+
+    open_order_signature = []
+    raw_open_orders = cycle_context.get("open_orders_snapshot")
+    if isinstance(raw_open_orders, list):
+        for item in raw_open_orders[:30]:
+            if not isinstance(item, Mapping):
+                continue
+            open_order_signature.append({
+                "instrument_id": str(item.get("instId") or "").upper(),
+                "order_id": str(item.get("orderId") or ""),
+                "client_order_id": str(item.get("clientOrderId") or ""),
+                "position_id": str(item.get("positionId") or ""),
+                "side": str(item.get("side") or "").lower(),
+                "position_side": str(item.get("positionSide") or "").lower(),
+                "state": str(item.get("state") or "").lower(),
+                "reduce_only": str(item.get("reduceOnly") or "").lower(),
+                "price": _risk_fingerprint(item.get("price"), 8),
+                "size": _risk_fingerprint(item.get("size"), 8),
+                "filled_size": _risk_fingerprint(item.get("filledSize"), 8),
+                "leverage": _risk_fingerprint(item.get("leverage"), 3),
+            })
+    open_order_signature.sort(
+        key=lambda item: (item["instrument_id"], item["order_id"], item["client_order_id"])
+    )
+
     material = {
         "position": position_signature,
+        "account_risk": account_signature,
+        "open_orders": open_order_signature,
         "robot_decision": str(cycle_context.get("robot_decision") or "UNKNOWN"),
         "market_direction": str(cycle_context.get("market_direction") or "UNKNOWN"),
         "last_closed_candle_marker": candle_marker,
@@ -111,7 +195,6 @@ def _material_review_event_key(
     }
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
 
 def _is_finite_number(value: Any) -> bool:
     try:

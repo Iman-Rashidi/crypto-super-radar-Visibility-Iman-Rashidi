@@ -3013,7 +3013,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "daily_loss_limit_pct": 1.0,
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
-        "max_concurrent_positions": 1,
+        "max_concurrent_positions": 4,
         "signal_deduplication": "ONE_ORDER_PER_COMPLETED_5M_CANDLE",
         "message_fa": message_fa,
     }
@@ -6092,7 +6092,7 @@ class Handler(BaseHTTPRequestHandler):
                 "two_reviewer_gate": "REQUIRES_BOTH_VERIFIED_APPROVALS",
                 "execution_role": "ACTIVE_ENTRY_APPROVAL_AND_POSITION_SUPERVISION",
                 "position_intervention_switch_enabled": os.getenv(
-                    "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", ""
+                    "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true"
                 ).strip().lower() in {"1", "true", "yes", "on"},
             }
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
@@ -9843,7 +9843,7 @@ def _blofin_manual_close_position(
     if action_source not in {"MANUAL", "AUTOPILOT", "AI_SUPERVISOR", "RISK_OVERRIDE"}:
         raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
     if action_source == "AI_SUPERVISOR" and os.getenv(
-        "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", ""
+        "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true"
     ).strip().lower() not in {"1", "true", "yes", "on"}:
         raise BloFinDemoExecutionBlocked("AI supervisor interventions are disabled for BloFin Demo.")
     if action_source == "AUTOPILOT":
@@ -9938,7 +9938,7 @@ def _blofin_manual_tighten_stop_position(
         raise BloFinDemoExecutionBlocked("Position ID برای اصلاح Stop معتبر نیست.")
     if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_id):
         raise BloFinDemoExecutionBlocked("شناسه ممیزی Stop معتبر نیست.")
-    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
         raise BloFinDemoExecutionBlocked("مداخله فعال ناظرهای هوش مصنوعی در تنظیمات Demo غیرفعال است.")
 
     requested_stop = _blofin_manual_decimal(new_stop_loss, "new_stop_loss")
@@ -10122,9 +10122,14 @@ def _execute_challenge1_supervisor_action(
         return {"status": "NO_ACTION", "reason_code": "BOTH_SUPERVISORS_AGREE_HOLD"}
     if action not in {"CLOSE_POSITION", "TIGHTEN_STOP"}:
         return {"status": "BLOCKED", "reason_code": "ACTION_NOT_IMPLEMENTED"}
-    if coordinator_decision.get("execution_authorized") is not True:
+    if (
+        coordinator_decision.get("status") != "AUTHORIZED"
+        or coordinator_decision.get("execution_authorized") is not True
+        or str(coordinator_decision.get("action") or "").strip().upper() != action
+        or not str(coordinator_decision.get("evidence_hash") or "").strip()
+    ):
         return {"status": "BLOCKED", "reason_code": "COORDINATOR_QUORUM_NOT_AUTHORIZED"}
-    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
         return {"status": "BLOCKED", "reason_code": "AI_SUPERVISOR_INTERVENTIONS_DISABLED"}
     if not position_id or str(position.get("positionId") or "").strip() != position_id:
         return {"status": "BLOCKED", "reason_code": "LIVE_POSITION_ID_MISMATCH"}
@@ -11245,8 +11250,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "protective_orders": protective_evidence,
                 "reviewer_states": reviewer_states,
                 "reviewer_skip_audit_errors": skip_audit_errors,
-                "observer_review_policy": "TWO_INDEPENDENT_POST_DECISION_AUDIT_REVIEWERS",
-                "observer_execution_effect": "NONE",
+                 "observer_review_policy": "TWO_INDEPENDENT_ACTIVE_POSITION_SUPERVISORS",
+                "observer_execution_effect": "DUAL_QUORUM_COORDINATOR_GATED",
                 "observer_evidence_source": "PERSISTED_NOTION_ACTIVITY_JOURNAL",
             }
             try:

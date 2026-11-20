@@ -245,6 +245,36 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
         self.assertTrue(all(state["status"] == "NOT_CALLED" for state in later.values()))
         self.assertTrue(all(state["reason_code"] == "SCHEDULED_INTERVAL_NOT_REACHED" for state in later.values()))
         thread_class.assert_not_called()
+
+        changed_risk_context = {
+            "robot_decision": "HOLD",
+            "position": {
+                "positionId": "position-3", "instId": "BTC-USDT",
+                "positionSide": "long", "positions": "1",
+                "averagePrice": "100", "liquidationPrice": "80",
+                "leverage": "3", "marginRatio": "0.45",
+                "unrealizedPnl": "1.0",
+            },
+        }
+        with (
+            patch.object(
+                observers, "Challenge1AuditRecorder",
+                side_effect=lambda: Challenge1AuditRecorder(connection=self.connection),
+            ),
+            patch.object(observers.threading, "Thread") as risk_thread,
+        ):
+            risk_change = observers.schedule_position_observer_review(
+                challenge_record={"signal": "LONG", "challenge1_evidence": {"candles_5m": []}},
+                cycle_context=changed_risk_context,
+                experience_id="experience-3",
+                position_id="position-3",
+                order_id="order-3",
+                symbol="BTC-USDT",
+                signal="LONG",
+                now=first_time + timedelta(minutes=2),
+            )
+        self.assertTrue(all(state["status"] == "REQUESTED" for state in risk_change.values()))
+        risk_thread.assert_called_once()
         report = self._events("experience-3")
         self.assertEqual(report["integrity"]["status"], "PASS")
         self.assertEqual(
@@ -327,6 +357,64 @@ class Challenge1SupervisorWatchdogAuditTests(unittest.TestCase):
         }
         third = observers._material_review_event_key(record, new_candle, "p-1")
         self.assertNotEqual(first, third)
+
+    def test_material_risk_changes_and_open_orders_change_review_hash(self):
+        record = {"instrument_id": "BTC-USDT", "challenge1_evidence": {"chosen_pattern": "BREAKOUT"}}
+        context = {
+            "robot_decision": "HOLD",
+            "position": {
+                "positionId": "p-1", "instId": "BTC-USDT", "positionSide": "long",
+                "positions": "1", "averagePrice": "100", "liquidationPrice": "80",
+                "leverage": "3", "marginRatio": "0.125", "initialMargin": "20",
+                "unrealizedPnl": "1.0",
+            },
+            "account_snapshot": {
+                "totalEquity": "1000",
+                "details": [{
+                    "currency": "USDT", "equity": "1000",
+                    "available": "800", "availableEquity": "800",
+                    "frozen": "0", "orderFrozen": "0", "marginRatio": "0.125",
+                }],
+            },
+            "open_orders_snapshot": [],
+            "market_direction": "UP",
+            "market_direction_evidence": [{"timestamp": 1000, "close": "101"}],
+            "protective_orders": {"status": "BOTH_TP_AND_SL_VISIBLE", "orders": []},
+        }
+        baseline = observers._material_review_event_key(record, context, "p-1")
+        changed_margin = {
+            **context,
+            "position": {**context["position"], "marginRatio": "0.275"},
+        }
+        self.assertNotEqual(
+            baseline,
+            observers._material_review_event_key(record, changed_margin, "p-1"),
+        )
+        changed_account = {
+            **context,
+            "account_snapshot": {
+                **context["account_snapshot"],
+                "details": [{
+                    **context["account_snapshot"]["details"][0],
+                    "availableEquity": "700",
+                }],
+            },
+        }
+        self.assertNotEqual(
+            baseline,
+            observers._material_review_event_key(record, changed_account, "p-1"),
+        )
+        changed_orders = {
+            **context,
+            "open_orders_snapshot": [{
+                "instId": "BTC-USDT", "orderId": "o-1", "positionId": "p-1",
+                "state": "live", "side": "sell", "reduceOnly": "true", "size": "1",
+            }],
+        }
+        self.assertNotEqual(
+            baseline,
+            observers._material_review_event_key(record, changed_orders, "p-1"),
+        )
 
 
 if __name__ == "__main__":
@@ -429,3 +517,63 @@ class Challenge1ObserverUnknownStateRecoveryTests(unittest.TestCase):
         thread_class.return_value.start.assert_called_once()
 
 
+
+
+
+class Challenge1ActiveSupervisorExecutionTests(unittest.TestCase):
+    def test_two_fresh_matching_supervisors_dispatch_close_to_demo_action_executor(self):
+        completed = datetime.now(timezone.utc).isoformat()
+
+        def reviewer(reviewer_id):
+            return {
+                "reviewer_id": reviewer_id,
+                "provider": "provider-" + reviewer_id,
+                "model": "model-" + reviewer_id,
+                "returned_model": "model-" + reviewer_id,
+                "status": "REVIEWED",
+                "request_attempted": True,
+                "response_validated": True,
+                "model_verified": True,
+                "evidence_hash": "evidence-123",
+                "completed_at_utc": completed,
+                "action": "CLOSE_POSITION",
+                "verdict": "CONCERNS",
+                "risk_flags": ["position-thesis-invalidated"],
+                "reason_fa": "شواهد ورود دیگر معتبر نیست.",
+            }
+
+        calls = []
+        def action_executor(**kwargs):
+            calls.append(kwargs)
+            return {"status": "CLOSE_ACCEPTED", "environment": "BLOFIN_DEMO"}
+
+        result = {
+            "reviewers": [reviewer("nemotron"), reviewer("second_ai")],
+            "evidence_hash": "evidence-123",
+            "consensus": "AGREEMENT",
+        }
+        with (
+            patch("crypto_super_radar.ai_second_opinion.run_challenge1_observer_reviews", return_value=result),
+            patch.object(observers, "_reviewer_result_event", return_value={"event_id": "review-event"}),
+            patch.object(observers, "_record_audit_event", return_value={"event_id": "audit-event"}),
+        ):
+            observers._position_review_worker(
+                review_batch_id="batch-1",
+                challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context={
+                    "instrument_id": "BTC-USDT",
+                    "client_order_id": "entryClient123",
+                    "position": {"positionId": "position-1"},
+                },
+                experience_id="experience-1",
+                position_id="position-1",
+                order_id="entry-order-1",
+                symbol="BTC-USDT",
+                signal="LONG",
+                action_executor=action_executor,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["action"], "CLOSE_POSITION")
+        self.assertTrue(calls[0]["coordinator_decision"]["execution_authorized"])
+        self.assertEqual(calls[0]["coordinator_decision"]["position_id"], "position-1")

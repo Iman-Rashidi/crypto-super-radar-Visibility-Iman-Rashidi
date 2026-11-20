@@ -2594,7 +2594,7 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
             web_app.BLOFIN_AUTOPILOT_STATE.clear()
             web_app.BLOFIN_AUTOPILOT_STATE.update(previous)
 
-    def test_ai_close_requires_explicit_demo_supervisor_flag_and_links_to_entry_order(self):
+    def test_ai_close_is_enabled_by_default_and_explicit_kill_switch_blocks(self):
         context = {
             "instrument_id": "BTC-USDT",
             "client_order_id": "entryClient123",
@@ -2602,20 +2602,15 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
             "supervisor_reviews": [],
         }
         decision = {
+            "status": "AUTHORIZED",
             "execution_authorized": True,
             "position_id": "position-1",
             "experience_id": "experience-1",
+            "evidence_hash": "evidence-123",
             "action": "CLOSE_POSITION",
         }
-        with patch.dict(os.environ, {"BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED": "false"}):
-            blocked = web_app._execute_challenge1_supervisor_action(
-                action="CLOSE_POSITION", challenge_record={"instrument_id": "BTC-USDT"},
-                cycle_context=context, coordinator_decision=decision,
-            )
-        self.assertEqual(blocked["reason_code"], "AI_SUPERVISOR_INTERVENTIONS_DISABLED")
-
         with (
-            patch.dict(os.environ, {"BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED": "true"}),
+            patch.dict(os.environ, {}, clear=True),
             patch.object(web_app, "_blofin_manual_close_position", return_value={"status": "ACCEPTED"}) as close,
         ):
             result = web_app._execute_challenge1_supervisor_action(
@@ -2627,4 +2622,32 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
         self.assertEqual(close.call_args.kwargs["audit_id"], "entryClient123")
         self.assertEqual(close.call_args.kwargs["action_source"], "AI_SUPERVISOR")
 
+        with patch.dict(os.environ, {"BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED": "false"}):
+            blocked = web_app._execute_challenge1_supervisor_action(
+                action="CLOSE_POSITION", challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context=context, coordinator_decision=decision,
+            )
+        self.assertEqual(blocked["reason_code"], "AI_SUPERVISOR_INTERVENTIONS_DISABLED")
+
+    def test_supervisor_gateway_rejects_unapproved_coordinator_action(self):
+        decision = {
+            "status": "DISAGREEMENT",
+            "execution_authorized": False,
+            "position_id": "position-1",
+            "experience_id": "experience-1",
+            "evidence_hash": "evidence-123",
+            "action": "CLOSE_POSITION",
+        }
+        result = web_app._execute_challenge1_supervisor_action(
+            action="CLOSE_POSITION",
+            challenge_record={"instrument_id": "BTC-USDT"},
+            cycle_context={
+                "instrument_id": "BTC-USDT",
+                "client_order_id": "entryClient123",
+                "position": {"positionId": "position-1", "positionSide": "long"},
+                "supervisor_reviews": [],
+            },
+            coordinator_decision=decision,
+        )
+        self.assertEqual(result["reason_code"], "COORDINATOR_QUORUM_NOT_AUTHORIZED")
 

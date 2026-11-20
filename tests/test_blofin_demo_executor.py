@@ -618,6 +618,36 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual([row[0] for row in events], ["RESERVED"])
 
+    def test_default_capacity_is_four_and_counts_linked_exchange_positions(self):
+        policy = BloFinDemoRiskPolicy(risk_per_trade_pct=0.001)
+        self.assertEqual(BloFinDemoRiskPolicy().max_concurrent_positions, 4)
+        plans = [
+            build_demo_order_plan(
+                signal_record(bar_offset_minutes=index * 5),
+                instrument_record(),
+                inst_id="BTC-USDT",
+                equity_usdt=1000,
+                leverage=3,
+                policy=policy,
+            )
+            for index in range(5)
+        ]
+
+        for index, plan in enumerate(plans):
+            reserved = self.store.reserve_order(
+                plan,
+                max_concurrent_positions=policy.max_concurrent_positions,
+                external_open_positions=index,
+            )
+            self.assertEqual(reserved, index < 4)
+            if reserved:
+                self.store.update_order(plan["client_order_id"], "FILLED")
+
+        active = self.store._db.execute(
+            "SELECT COUNT(*) FROM blofin_demo_orders WHERE status='FILLED'"
+        ).fetchone()[0]
+        self.assertEqual(active, 4)
+
     def test_has_any_orders_tracks_reserved_order_history(self):
         self.assertFalse(self.store.has_any_orders())
         self.store.reserve_order(self._plan())
