@@ -1234,6 +1234,9 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         for plan in (plan_a, plan_b):
             plan["reserved_risk_usdt"] = "1"
             plan["reserved_margin_usdt"] = "10"
+            plan["notional_usdt"] = float(
+                Decimal(plan["reserved_margin_usdt"]) * Decimal(str(plan["leverage"]))
+            )
         self.assertNotEqual(plan_a["signal_id"], plan_b["signal_id"])
         self.assertTrue(self.store.reserve_order(plan_a, max_concurrent_positions=2))
         self.assertTrue(self.store.reserve_order(plan_b, max_concurrent_positions=2))
