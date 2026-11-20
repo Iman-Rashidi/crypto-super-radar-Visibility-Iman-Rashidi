@@ -322,6 +322,7 @@ class VirtualBloFin:
             fill_gross = (fill_exit - entry) * qty_total * cv * (1 if side == "LONG" else -1)
             fill_fees = entry_fee + fill_exit_fee
             fill_spread_cost = entry_notional * cc.spread_fraction
+            fill_slippage_cost = abs(fill_exit - stop) * qty_total * cv
             fill_net = fill_gross - fill_fees - fill_funding - fill_spread_cost
             return TradeResult("CLOSED", "SL", qty_total, entry, fill_exit, fill_net, fill_fees,
                                fill_funding, 0, False, rr_items["net_rr"], {
@@ -330,7 +331,8 @@ class VirtualBloFin:
                                    "exit_reason": "SL", "mark_price_trigger_model": "OHLC_MARK_STOP_FIRST",
                                    "same_bar_tp_sl_precedence": "SL_FIRST_FILL_CANDLE",
                                    "gross_realized_pnl_usdt": fill_gross, "total_fees_usdt": fill_fees,
-                                   "funding_paid_usdt": fill_funding, "spread_cost_usdt": fill_spread_cost, "net_pnl_usdt": fill_net,
+                                   "funding_paid_usdt": fill_funding, "spread_cost_usdt": fill_spread_cost,
+                                   "slippage_cost_usdt": fill_slippage_cost, "net_pnl_usdt": fill_net,
                                    "entry_ts_ms": entry_ts, "exit_ts_ms": fill_bar_close_ts,
                                })
         exit_price = None
@@ -433,6 +435,8 @@ class VirtualBloFin:
                 "gross_realized_pnl_usdt": realized_gross,
                 "total_fees_usdt": fees,
                 "funding_paid_usdt": funding_total,
+                "spread_cost_usdt": spread_cost,
+                "slippage_cost_usdt": 0.0,
                 "net_pnl_usdt": realized_gross - fees - funding_total - spread_cost,
                 "remaining_qty": qty_left,
                 "entry_ts_ms": entry_ts,
@@ -440,19 +444,20 @@ class VirtualBloFin:
                 "time_exit_order_type": "LIMIT" if time_exit_limit_price is not None else None,
                 "time_exit_limit_price": time_exit_limit_price,
                 "time_exit_submitted_ts_ms": time_exit_submitted_ts,
-                "time_exit_fill_model": "one_tick_trade_through_after_submission",
-                "time_exit_fee_class": "TAKER_CONSERVATIVE",
+                "time_exit_fill_model": "one_tick_trade_through_after_submission" if time_exit_limit_price is not None else None,
+                "time_exit_fee_class": "TAKER_CONSERVATIVE" if time_exit_limit_price is not None else None,
             }
             return TradeResult(
                 "OPEN",
                 "TIME_EXIT_LIMIT_PENDING" if time_exit_limit_price is not None else "POSITION_OPEN",
-                qty_total, entry, None, realized_gross - fees - funding_total,
+                qty_total, entry, None, realized_gross - fees - funding_total - spread_cost,
                 fees, funding_total, held, tp1, rr_items["net_rr"], diagnostics,
             )
 
         realized_gross += (exit_price - entry) * qty_left * cv * (1 if side == "LONG" else -1)
         exit_fee_rate = cc.taker_fee if exit_reason == "TIME_EXIT" else (cc.maker_fee if exit_reason == "TP" else cc.taker_fee)
         fees += exit_price * qty_left * cv * exit_fee_rate
+        slippage_cost = abs(exit_price - current_stop) * qty_left * cv if exit_reason == "SL" else 0.0
         net = realized_gross - fees - funding_total - spread_cost
         diagnostics = {
             **rr_items,
@@ -471,6 +476,7 @@ class VirtualBloFin:
             "total_fees_usdt": fees,
             "funding_paid_usdt": funding_total,
             "spread_cost_usdt": spread_cost,
+            "slippage_cost_usdt": slippage_cost,
             "net_pnl_usdt": net,
             "remaining_qty": qty_left,
             "entry_ts_ms": entry_ts,
