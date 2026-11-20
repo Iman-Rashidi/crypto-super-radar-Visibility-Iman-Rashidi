@@ -826,6 +826,7 @@ class BloFinDemoEventStore:
                     critical_reason TEXT,
                     reserved_risk_usdt TEXT,
                     reserved_margin_usdt TEXT,
+                    notional_usdt TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
@@ -844,6 +845,7 @@ class BloFinDemoEventStore:
                 ("critical_reason", "TEXT"),
                 ("reserved_risk_usdt", "TEXT"),
                 ("reserved_margin_usdt", "TEXT"),
+                ("notional_usdt", "TEXT"),
             ):
                 if column_name not in order_columns:
                     self._db.execute(
@@ -1158,14 +1160,23 @@ class BloFinDemoEventStore:
         try:
             new_risk = _decimal(plan.get("reserved_risk_usdt"), "reserved_risk_usdt")
             new_margin = _decimal(plan.get("reserved_margin_usdt"), "reserved_margin_usdt")
+            leverage_value = _decimal(plan.get("leverage"), "leverage")
+            if leverage_value != leverage_value.to_integral_value() or leverage_value <= 0:
+                raise ValueError("leverage must be a positive integer")
+            expected_notional = new_margin * leverage_value
+            notional_value = _decimal(
+                plan.get("notional_usdt", expected_notional), "notional_usdt"
+            )
             risk_cap = _decimal(plan.get("aggregate_risk_limit_usdt"), "aggregate_risk_limit_usdt")
             margin_cap = _decimal(plan.get("aggregate_margin_limit_usdt"), "aggregate_margin_limit_usdt")
         except Exception as exc:
             raise BloFinDemoExecutionBlocked(
                 "Validated aggregate risk and margin reservations are required."
             ) from exc
-        if min(new_risk, new_margin, risk_cap, margin_cap) <= 0:
-            raise BloFinDemoExecutionBlocked("Aggregate risk and margin reservations must be positive.")
+        if min(new_risk, new_margin, notional_value, risk_cap, margin_cap) <= 0:
+            raise BloFinDemoExecutionBlocked("Aggregate risk, margin and notional reservations must be positive.")
+        if abs(notional_value - expected_notional) > max(expected_notional, Decimal("1")) * Decimal("0.00000001"):
+            raise BloFinDemoExecutionBlocked("Notional does not reconcile to reserved margin multiplied by leverage.")
 
         # External positions/orders have no trusted local stop-risk and margin ledger.
         # Fail closed rather than undercounting exposure when those are present.
@@ -1224,15 +1235,16 @@ class BloFinDemoEventStore:
                     (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
                      stop_loss, take_profit, leverage, status, exchange_order_id, experience_id,
                      position_side, filled_size, critical_reason,
-                     reserved_risk_usdt, reserved_margin_usdt, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, NULL, NULL, ?, ?, ?, ?)""",
+                     reserved_risk_usdt, reserved_margin_usdt, notional_usdt, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)""",
                     (
                         order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
                         str(plan["quantity"]), float(plan["entry_reference_price"]),
                         float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
                         str(plan.get("experience_id") or "") or None,
                         str(plan.get("position_side") or plan.get("position_side_long_short") or "net"),
-                        _format_decimal(new_risk), _format_decimal(new_margin), now, now,
+                        _format_decimal(new_risk), _format_decimal(new_margin),
+                        _format_decimal(notional_value), now, now,
                     ),
                 )
                 self._append_event(order_id, "RESERVED", {
@@ -1240,6 +1252,7 @@ class BloFinDemoEventStore:
                     "quantity": plan["quantity"], "leverage": plan["leverage"],
                     "reserved_risk_usdt": _format_decimal(new_risk),
                     "reserved_margin_usdt": _format_decimal(new_margin),
+                    "notional_usdt": _format_decimal(notional_value),
                     "aggregate_reserved_risk_usdt_after": _format_decimal(reserved_risk + new_risk),
                     "aggregate_reserved_margin_usdt_after": _format_decimal(reserved_margin + new_margin),
                     "aggregate_risk_limit_usdt": _format_decimal(risk_cap),
