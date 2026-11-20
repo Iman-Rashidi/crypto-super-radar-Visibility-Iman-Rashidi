@@ -1192,6 +1192,42 @@ class BloFinDemoEventStore:
             )
             self._append_event(client_order_id, status, {"exchange_order_id_present": bool(exchange_order_id)})
 
+    def list_unverified_protection_orders(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """List active orders whose newest TP/SL readback is not VERIFIED."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer between 1 and 500.")
+        active_statuses = ("ACCEPTED", "PARTIALLY_FILLED", "FILLED")
+        placeholders = ",".join("?" for _ in active_statuses)
+        with self._lock:
+            rows = self._db.execute(
+                f"""SELECT client_order_id, instrument_id, status
+                    FROM blofin_demo_orders
+                    WHERE status IN ({placeholders})
+                    ORDER BY created_at DESC LIMIT ?""",
+                (*active_statuses, limit),
+            ).fetchall()
+            result = []
+            for row in rows:
+                latest = self._db.execute(
+                    """SELECT event_type, payload_json
+                       FROM blofin_demo_execution_events
+                       WHERE client_order_id=? AND event_type LIKE 'PROTECTION_%'
+                       ORDER BY sequence DESC LIMIT 1""",
+                    (row["client_order_id"],),
+                ).fetchone()
+                if latest is None or latest["event_type"] != "PROTECTION_VERIFIED":
+                    protection_status = (
+                        str(latest["event_type"]).removeprefix("PROTECTION_")
+                        if latest is not None else "NOT_CHECKED"
+                    )
+                    result.append({
+                        "client_order_id": str(row["client_order_id"]),
+                        "instrument_id": str(row["instrument_id"]),
+                        "order_status": str(row["status"]),
+                        "protection_status": protection_status,
+                    })
+        return result
+
     def equity_guard(self, equity_usdt: float, *, now: int | None = None) -> dict[str, float]:
         equity = _finite(equity_usdt, "equity_usdt", minimum=0.0000001)
         sampled_at = int(time.time()) if now is None else int(now)
@@ -2273,6 +2309,17 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
+        unverified_protection = self.store.list_unverified_protection_orders()
+        if unverified_protection:
+            identities = ", ".join(
+                f"{row['instrument_id']}:{row['client_order_id']}"
+                for row in unverified_protection[:5]
+            )
+            raise BloFinDemoExecutionBlocked(
+                "A prior active Demo order has no VERIFIED TP/SL readback; "
+                "new entries are blocked until exact protection is reconciled. "
+                f"Unverified order(s): {identities}"
+            )
         # A pending realized-outcome label is an audit/learning task, not proof of
         # current exchange exposure. Do not let an incomplete history record freeze
         # every market indefinitely. The fresh account-wide positions and open-orders

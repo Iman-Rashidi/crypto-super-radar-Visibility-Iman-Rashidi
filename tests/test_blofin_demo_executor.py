@@ -1277,6 +1277,31 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_legacy_active_order_without_protection_event_blocks_new_entries(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        try:
+            plan = build_demo_order_plan(
+                signal_record(),
+                instrument_record(),
+                inst_id="BTC-USDT",
+                equity_usdt=1000,
+            )
+            self.assertTrue(store.reserve_order(plan))
+            store.update_order(
+                plan["client_order_id"],
+                "ACCEPTED",
+                exchange_order_id="legacy-active-order",
+            )
+            unverified = store.list_unverified_protection_orders()
+            self.assertEqual(len(unverified), 1)
+            self.assertEqual(unverified[0]["protection_status"], "NOT_CHECKED")
+        finally:
+            store.close()
+
     def test_demo_pipeline_marks_entry_protected_only_after_exact_tpsl_readback(self):
         with patch.dict(os.environ, {
             "TURSO_DATABASE_URL": "",
@@ -1337,6 +1362,22 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             self.assertEqual(result["protection_reason_code"], "ACTIVE_TPSL_NOT_UNIQUELY_LINKED")
             events = store.recent_events(result["client_order_id"])
             self.assertEqual(events[-1]["event_type"], "PROTECTION_UNKNOWN")
+            calls_before_second_entry = len(client.calls)
+            with self.assertRaisesRegex(
+                BloFinDemoExecutionBlocked,
+                "no VERIFIED TP/SL readback",
+            ):
+                executor.execute(
+                    signal_record(bar_offset_minutes=5),
+                    inst_id="BTC-USDT",
+                    leverage=1,
+                    allow_demo_orders=True,
+                )
+            self.assertEqual(len(client.calls), calls_before_second_entry)
+            self.assertEqual(
+                len(store.list_unverified_protection_orders()),
+                1,
+            )
         finally:
             store.close()
 
