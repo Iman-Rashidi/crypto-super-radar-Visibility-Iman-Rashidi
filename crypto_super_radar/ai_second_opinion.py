@@ -1497,9 +1497,21 @@ def run_free_ai_second_opinion(
             "cost_usd": 0.0,
         }
 
-    asset_name = str(getattr(asset, "raw", asset) or getattr(result, "asset", "unknown"))
-    market_type = "perpetual" if getattr(asset, "market_type", None) == "perp" or asset_name.lower().startswith("perp:") else "spot"
-    expected_side = str(getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "LONG"))).upper().replace(" ", "_")
+    normalized_record = _challenge1_result_record(result)
+    asset_name = str(
+        getattr(asset, "raw", asset)
+        or normalized_record.get("asset")
+        or normalized_record.get("instrument_id")
+        or getattr(result, "asset", "unknown")
+    )
+    market_type = (
+        "perpetual" if getattr(asset, "market_type", None) == "perp"
+        or asset_name.lower().startswith(("perp:", "perp")) else "spot"
+    )
+    expected_side = str(
+        normalized_record.get("signal")
+        or getattr(getattr(result, "signal", None), "value", getattr(result, "signal", ""))
+    ).upper().replace(" ", "_")
     if expected_side not in {"LONG", "SHORT"}:
         return {"provider": "OpenRouter", "model": _model(), "status": "VETO",
                 "request_attempted": False, "skip_reason_code": "NO_DIRECTIONAL_SIGNAL",
@@ -1507,7 +1519,7 @@ def run_free_ai_second_opinion(
                 "reason": "No directional signal to review."}
     native_review = _native_review_for_result(result)
     if native_review.get("status") != "APPROVED":
-        pattern_mode = native_review.get("execution_profile") == "CHALLENGE_1"
+        pattern_mode = native_review.get("execution_profile") in {"CHALLENGE_1", "CHALLENGE_1_V2"}
         return {
             "provider": "OpenRouter",
             "model": _model(),
@@ -1533,7 +1545,9 @@ def run_free_ai_second_opinion(
     # Challenge 1 is an always-on Demo challenge: do not impose a local
     # per-UTC-day request quota on its real reviewer calls. Provider-side 429s,
     # the short-window safety throttle, and fail-closed response validation remain.
-    challenge1_review = evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
+    challenge1_review = evidence.get("review_mode") in {
+        "CANDLE_CHART_ELLIOTT_WAVE_REVIEW", "V2_MULTI_TIMEFRAME_REVIEW",
+    }
     model = _model()
     cache_material = {
         "prompt_version": PROMPT_VERSION,
@@ -1670,7 +1684,9 @@ def run_free_ai_second_opinion(
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
         review = (
-            _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
+            _validated_v2_review(parsed, model, asset_name, evidence=evidence)
+            if evidence.get("review_mode") == "V2_MULTI_TIMEFRAME_REVIEW"
+            else _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
             if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
             else _validated_review(
                 parsed, model, asset_name, expected_side=expected_side, market_type=market_type
@@ -1826,13 +1842,20 @@ def run_independent_ai_supervisor(
             "cost_usd": 0.0,
         }
 
-    asset_name = str(getattr(asset, "raw", asset) or getattr(result, "asset", "unknown"))
+    normalized_record = _challenge1_result_record(result)
+    asset_name = str(
+        getattr(asset, "raw", asset)
+        or normalized_record.get("asset")
+        or normalized_record.get("instrument_id")
+        or getattr(result, "asset", "unknown")
+    )
     market_type = (
         "perpetual" if getattr(asset, "market_type", None) == "perp"
-        or asset_name.lower().startswith("perp:") else "spot"
+        or asset_name.lower().startswith(("perp:", "perp")) else "spot"
     )
     expected_side = str(
-        getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "UNKNOWN"))
+        normalized_record.get("signal")
+        or getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "UNKNOWN"))
     ).upper().replace(" ", "_")
     if expected_side not in {"LONG", "SHORT"}:
         return {
@@ -1847,7 +1870,7 @@ def run_independent_ai_supervisor(
         }
     native_review = _native_review_for_result(result)
     if native_review.get("status") != "APPROVED":
-        pattern_mode = native_review.get("execution_profile") == "CHALLENGE_1"
+        pattern_mode = native_review.get("execution_profile") in {"CHALLENGE_1", "CHALLENGE_1_V2"}
         return {
             "reviewer_id": "second_ai", "provider": provider, "model": model,
             "status": "NOT_CALLED",
@@ -1963,7 +1986,9 @@ def run_independent_ai_supervisor(
                 "prompt_version": PROMPT_VERSION + "-second-ai",
             }
         review = (
-            _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
+            _validated_v2_review(parsed, model, asset_name, evidence=evidence)
+            if evidence.get("review_mode") == "V2_MULTI_TIMEFRAME_REVIEW"
+            else _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
             if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
             else _validated_review(
                 parsed, model, asset_name, expected_side=expected_side, market_type=market_type,
