@@ -878,6 +878,7 @@ def apply_demo_execution_cost_gate(
 class BloFinDemoTradeClient(BloFinDemoReadOnly):
     """Demo-only write adapter with allow-listed leverage, open-order and targeted close-position methods."""
 
+    ORDER_PATH = "/api/v1/trade/order"
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
     CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
     AMEND_TPSL_PATH = "/api/v1/trade/amend-tpsl"
