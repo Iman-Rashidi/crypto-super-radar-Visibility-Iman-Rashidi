@@ -9581,7 +9581,6 @@ def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict
     notion = _queue_blofin_job_notion_events(job_id, instrument_id, job)
     activity = _queue_blofin_activity_journal(job_id, instrument_id, job)
     return {"status": "QUEUED", "notion": notion, "activity": activity}
-    return {"status": "QUEUED", "notion": notion, "activity": activity}
 
 def _run_challenge1_supervisor_reviews(
     analysis: Any, asset: AssetSpec, *, signal_id: str | None = None,
@@ -9638,7 +9637,6 @@ def _run_challenge1_supervisor_reviews(
     if not isinstance(second, dict):
         second = unavailable("second_ai", "InvalidReviewPayload")
     primary, second = dict(primary), dict(second)
-    primary.setdefault("reviewer_id", "nemotron")
     primary.setdefault("reviewer_id", "nemotron")
     second.setdefault("reviewer_id", "second_ai")
 
@@ -9742,7 +9740,6 @@ def _run_challenge1_supervisor_reviews(
         "expected_side": expected_side,
         "elliott_wave_phase": expected_wave_phase,
         "elliott_wave_direction": expected_wave_direction,
-        "two_reviewer_approval": two_approvals,
         "two_reviewer_approval": two_approvals,
         "decision": decision,
         "entry_gate_enforced": True,
@@ -11269,7 +11266,6 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "position_id": position_id, "error_type": type(audit_exc).__name__,
                     "message_fa": "ثبت کامل چرخه پایش یا وضعیت عدم فراخوانی ناظرها تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
                 })
-                continue
                 continue
             if not reason:
                 if stop_loss_threshold_reached:

@@ -2480,7 +2480,6 @@ class AiDryRunHttpDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("sensitive response", serialized)
         self.assertNotIn('"api_key"', serialized)
         self.assertNotIn('"prompt"', serialized)
-        self.assertNotIn('"prompt"', serialized)
 
 
 

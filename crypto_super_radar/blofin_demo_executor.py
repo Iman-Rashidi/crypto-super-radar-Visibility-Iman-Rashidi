@@ -478,7 +478,6 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         provider = str(review.get("provider") or "").strip().casefold()
         model = str(review.get("model") or "").strip()
         returned_model = str(review.get("returned_model") or "").strip()
-        returned_model = str(review.get("returned_model") or "").strip()
         returned_identity = returned_model.split(":", 1)[0].casefold()
         configured_identity = model.split(":", 1)[0].casefold()
         reviewer_signal_id = str(review.get("reviewed_signal_id") or "").strip()
@@ -561,7 +560,6 @@ class BloFinDemoRiskPolicy:
     min_seconds_between_orders: int = 0
     min_confirmation_score: float = 75.0
     max_risk_score: float = 45.0
-    max_risk_score: float = 45.0
     min_reward_risk: float = 1.8
     max_entry_deviation_pct: float = 0.005
     taker_fee_rate: float = 0.0006
@@ -576,6 +574,7 @@ class BloFinDemoRiskPolicy:
         )
         if not all(math.isfinite(float(v)) for v in values):
             raise ValueError("Risk policy values must be finite")
+        if not 0 < self.risk_per_trade_pct <= 0.005:
             raise ValueError("Per-trade risk must be in (0, 0.5%]")
         if not 0 < self.daily_loss_limit_pct <= 0.03:
             raise ValueError("Daily loss limit must be in (0, 3%]")
@@ -596,7 +595,6 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Demo test leverage is restricted to 1x through 3x")
         if not 1 <= int(self.max_concurrent_positions) <= 3:
             raise ValueError("Concurrent positions must be between 1 and 3")
-            raise ValueError("Concurrent positions must be between 1 and 3")
         if self.min_reward_risk < 1.0 or self.max_entry_deviation_pct <= 0:
             raise ValueError("Reward/risk or entry-deviation policy is invalid")
         if not 0 <= self.taker_fee_rate <= 0.01:
@@ -609,7 +607,6 @@ def build_demo_order_plan(
     instrument: Mapping[str, Any],
     *,
     inst_id: str,
-    equity_usdt: float,
     equity_usdt: float,
     leverage: int = 1,
     policy: BloFinDemoRiskPolicy | None = None,
@@ -2419,6 +2416,9 @@ class BloFinDemoExecutor:
         signal_entry = _finite(record.get("entry_price_usd", record.get("entry_price")), "entry_price", minimum=0.0000001)
         deviation = abs(last_price - signal_entry) / signal_entry
         if deviation > self.policy.max_entry_deviation_pct:
+            raise BloFinDemoExecutionBlocked(
+                "Market entry price deviates beyond the configured maximum from the reviewed signal."
+            )
 
         mode = self.client.get_position_mode()
         position_mode = mode.get("positionMode")
@@ -2486,7 +2486,6 @@ class BloFinDemoExecutor:
                 or quantity_margin > _decimal(plan["aggregate_margin_limit_usdt"], "aggregate_margin_limit_usdt")
             ):
                 raise BloFinDemoExecutionBlocked(
-                    "Minimum-size exposure exceeds the aggregate risk or margin budget."
                     "Minimum-size exposure exceeds the aggregate risk or margin budget."
                 )
             plan["minimum_size_only"] = True
@@ -2568,7 +2567,6 @@ class BloFinDemoExecutor:
             "stop_loss": plan["stop_loss"],
             "take_profit": plan["take_profit"],
             "client_order_id": plan["client_order_id"],
-            "exchange_order_id": str(order_id),
             "exchange_order_id": str(order_id),
             "risk_budget_usdt": plan["risk_budget_usdt"],
             "notional_usdt": plan["notional_usdt"],
