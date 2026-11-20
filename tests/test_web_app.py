@@ -2637,6 +2637,7 @@ class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, {}, clear=True),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}),
             patch.object(web_app, "_blofin_manual_close_position", return_value={"status": "ACCEPTED"}) as close,
         ):
             result = web_app._execute_challenge1_supervisor_action(
