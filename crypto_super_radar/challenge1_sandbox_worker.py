@@ -60,7 +60,7 @@ def build_sandbox_event(report: Mapping[str, Any], *, now_ms: int | None = None)
             "report_sha256": digest,
             "replay_status": phase_status,
             "data_source": str(report.get("data_source") or "UNKNOWN"),
-            "network_order_writes": report.get("network_order_writes") is False,
+            "network_order_writes": report.get("network_order_writes") is True,
             "periods": {
                 "start_utc": periods.get("start_utc"),
                 "end_utc": periods.get("end_utc"),
@@ -106,7 +106,8 @@ def build_sandbox_event(report: Mapping[str, Any], *, now_ms: int | None = None)
 def build_blocked_event(error_type: str, *, now_ms: int | None = None) -> dict[str, Any]:
     """Publish a safe BLOCKED marker without copying raw exception text or secrets."""
     timestamp = int(now_ms if now_ms is not None else time.time() * 1000)
-    safe_type = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(error_type))[:80]
+    raw_type = str(error_type or "UNKNOWN").split(":", 1)[0].split()[0]
+    safe_type = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in raw_type)[:80]
     identity = hashlib.sha256(f"{timestamp}:{safe_type}".encode("utf-8")).hexdigest()
     return {
         "event_id": f"csr-replay-blocked-{identity}",
