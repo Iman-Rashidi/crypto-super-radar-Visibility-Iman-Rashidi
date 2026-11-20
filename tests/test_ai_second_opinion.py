@@ -11,6 +11,7 @@ from crypto_super_radar.ai_second_opinion import (
     MAX_REQUESTS_PER_MINUTE,
     ai_connection_status,
     second_ai_connection_status,
+    _call_challenge1_observer,
     run_free_ai_second_opinion,
     run_independent_ai_supervisor,
     run_openrouter_connection_diagnostic,
@@ -1043,3 +1044,82 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(calls["count"], 0)
         self.assertFalse(result["request_attempted"])
         self.assertEqual(result["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
+
+
+    def test_challenge1_observer_records_provider_request_id_raw_response_hash_and_confidence(self):
+        import hashlib
+        document = {
+            "verdict": "SUPPORTS_DECISION",
+            "confidence": 91.5,
+            "reason_fa": "شواهد ثبت‌شده با تصمیم قبلی هم‌خوان‌اند.",
+            "observations": ["دادهٔ کندل بسته‌شده بررسی شد."],
+            "risk_flags": [],
+        }
+        raw = json.dumps(document, ensure_ascii=False)
+        response = SimpleNamespace(
+            status_code=200,
+            headers={"x-request-id": "provider-header-456"},
+            json=lambda: {
+                "id": "provider-request-123",
+                "model": "independent/auditor-model",
+                "choices": [{"message": {"content": raw}}],
+            },
+        )
+        with patch("crypto_super_radar.ai_second_opinion._observer_rate_limit", return_value=True):
+            result = _call_challenge1_observer(
+                reviewer_id="nemotron",
+                provider="OpenRouter",
+                model="independent/auditor-model",
+                endpoint="https://observer.example/v1/chat/completions",
+                key="local-mock-key",
+                evidence={"symbol": "BTC-USDT", "position_id": "position-mock"},
+                http_post=lambda *args, **kwargs: response,
+            )
+        self.assertEqual(result["status"], "REVIEWED")
+        self.assertEqual(result["provider_request_id"], "provider-request-123")
+        self.assertEqual(result["confidence"], 91.5)
+        self.assertEqual(result["raw_response"], raw)
+        self.assertEqual(
+            result["raw_response_sha256"],
+            hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(result["execution_effect"], "NONE")
+        self.assertTrue(result["observation_only"])
+
+    def test_challenge1_observer_rejects_missing_or_out_of_range_confidence(self):
+        for confidence in (None, -1, 101, True, "high"):
+            with self.subTest(confidence=confidence):
+                document = {
+                    "verdict": "SUPPORTS_DECISION",
+                    "reason_fa": "شواهد بررسی شدند.",
+                    "observations": [],
+                    "risk_flags": [],
+                }
+                if confidence is not None:
+                    document["confidence"] = confidence
+                raw = json.dumps(document, ensure_ascii=False)
+                response = SimpleNamespace(
+                    status_code=200,
+                    headers={"request-id": "req-invalid-confidence"},
+                    json=lambda: {
+                        "id": "body-request-invalid",
+                        "model": "independent/auditor-model",
+                        "choices": [{"message": {"content": raw}}],
+                    },
+                )
+                with patch("crypto_super_radar.ai_second_opinion._observer_rate_limit", return_value=True):
+                    result = _call_challenge1_observer(
+                        reviewer_id="second_ai",
+                        provider="Independent Provider",
+                        model="independent/auditor-model",
+                        endpoint="https://observer.example/v1/chat/completions",
+                        key="local-mock-key",
+                        evidence={"symbol": "BTC-USDT"},
+                        http_post=lambda *args, **kwargs: response,
+                    )
+                self.assertEqual(result["status"], "ERROR")
+                self.assertEqual(result["error_code"], "OBSERVER_CONFIDENCE_INVALID")
+                self.assertEqual(result["provider_request_id"], "body-request-invalid")
+                self.assertEqual(result["raw_response"], raw)
+                self.assertFalse(result["response_validated"])
+                self.assertEqual(result["execution_effect"], "NONE")
