@@ -62,7 +62,7 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
             rules=self.rules,
             # Explicit zero-rate event before entry: this test does not infer
             # missing funding to be zero.
-            funding_events=[{"fundingTime": self.start_ms - 1, "fundingRate": 0.0}],
+            funding_events=[{"fundingTime": self.start_ms - 1, "fundingRate": 0.0, "fundingKind": "0"}],
             spread_fraction=0.0002,
         )
 
@@ -148,12 +148,26 @@ class SandboxAsOfLeakageTests(unittest.TestCase):
     def test_future_funding_rates_do_not_change_rate_known_at_cutoff(self) -> None:
         cutoff = 1_700_000_000_000
         events = [
-            {"fundingTime": cutoff - 1, "fundingRate": 0.0001},
-            {"fundingTime": cutoff + 8 * 60 * 60_000, "fundingRate": -0.75},
+            {"fundingTime": cutoff - 1, "fundingRate": 0.0001, "fundingKind": "0"},
+            {"fundingTime": cutoff + 8 * 60 * 60_000, "fundingRate": -0.75, "fundingKind": "0"},
         ]
         self.assertEqual(_known_funding_rate(events, cutoff), 0.0001)
         events[1]["fundingRate"] = 0.99
         self.assertEqual(_known_funding_rate(events, cutoff), 0.0001)
+
+
+    def test_stock_dividend_is_not_exposed_as_known_regular_funding_rate(self) -> None:
+        cutoff = 1_700_000_000_000
+        events = [
+            {"fundingTime": cutoff - 1, "fundingRate": 0.0001, "fundingKind": "0"},
+            {"fundingTime": cutoff, "fundingRate": 0.25, "fundingKind": "1"},
+        ]
+        self.assertIsNone(_known_funding_rate(events, cutoff))
+
+    def test_missing_funding_kind_is_not_exposed_as_regular_funding_rate(self) -> None:
+        cutoff = 1_700_000_000_000
+        events = [{"fundingTime": cutoff, "fundingRate": 0.0001}]
+        self.assertIsNone(_known_funding_rate(events, cutoff))
 
 
 if __name__ == "__main__":
