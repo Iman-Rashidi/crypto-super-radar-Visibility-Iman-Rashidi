@@ -7,8 +7,10 @@ and no Live account endpoint is included. The public candle API allows up to
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import sqlite3
+import statistics
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +35,15 @@ def _utc_ms(value: datetime) -> int:
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")
     return int(value.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def _subtract_calendar_months(value: datetime, months: int) -> datetime:
+    """Subtract calendar months without turning six months into 180 days."""
+    month_index = value.year * 12 + value.month - 1 - months
+    year, zero_based_month = divmod(month_index, 12)
+    month = zero_based_month + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
 
 
 def _json_get(session: requests.Session, url: str, params: Mapping[str, Any], *, timeout: float = 15.0) -> dict[str, Any]:
@@ -74,7 +85,11 @@ def _parse_candle(row: Any, *, inst_id: str, bar: str, source: str) -> tuple[Any
     except (TypeError, ValueError, OverflowError):
         return None
     open_, high, low, close = values
-    if confirm != "1" or ts <= 0 or min(open_, high, low, close) <= 0 or volume < 0:
+    if (
+        confirm != "1" or ts <= 0
+        or any(not math_is_finite(value) for value in (*values, volume))
+        or min(open_, high, low, close) <= 0 or volume < 0
+    ):
         return None
     if high < max(open_, close, low) or low > min(open_, close, high):
         return None
@@ -103,7 +118,9 @@ def download_candles(
     if bar not in BAR_MS or not 1 <= months <= 12 or not 1 <= page_size <= 1440:
         raise ValueError("unsupported bar/months/page_size")
     sess = session or requests.Session()
-    start_ms = _utc_ms(datetime.now(timezone.utc) - timedelta(days=30 * months))
+    now = datetime.now(timezone.utc)
+    now_ms = _utc_ms(now)
+    start_ms = _utc_ms(_subtract_calendar_months(now, months))
     path = MARK_CANDLE_PATH if mark_price else CANDLE_PATH
     url = base_url.rstrip("/") + path
     cursor: int | None = None
@@ -141,6 +158,15 @@ def download_candles(
     gaps = [b[2] - a[2] for a, b in zip(result, result[1:]) if b[2] - a[2] != interval]
     if gaps:
         raise ReplayDownloadError(f"historical candle series contains {len(gaps)} missing {bar} intervals")
+    if result[0][2] > start_ms + interval:
+        raise ReplayDownloadError(
+            f"historical candle series for {symbol} {bar} does not cover the requested start"
+        )
+    latest_close_ms = int(result[-1][2]) + interval
+    if latest_close_ms < now_ms - 2 * interval:
+        raise ReplayDownloadError(
+            f"historical candle series for {symbol} {bar} is stale at the end of the requested window"
+        )
     return result
 
 
@@ -178,7 +204,9 @@ def download_funding_rates(
     if symbol not in DEFAULT_SYMBOLS or not 1 <= months <= 12 or not 1 <= page_size <= 100:
         raise ValueError("unsupported symbol/months/page_size")
     sess = session or requests.Session()
-    start_ms = _utc_ms(datetime.now(timezone.utc) - timedelta(days=30 * months))
+    now = datetime.now(timezone.utc)
+    now_ms = _utc_ms(now)
+    start_ms = _utc_ms(_subtract_calendar_months(now, months))
     url = base_url.rstrip("/") + FUNDING_PATH
     cursor: int | None = None
     seen: dict[int, tuple[Any, ...]] = {}
@@ -216,7 +244,22 @@ def download_funding_rates(
             break
     else:
         raise ReplayDownloadError("funding pagination exceeded the safety page limit")
-    return [seen[key] for key in sorted(seen)]
+    result = [seen[key] for key in sorted(seen)]
+    if len(result) < 3:
+        raise ReplayDownloadError(f"funding history is too short for {symbol}")
+    funding_times = [int(item[1]) for item in result]
+    deltas = [right - left for left, right in zip(funding_times, funding_times[1:])]
+    if any(delta <= 0 for delta in deltas):
+        raise ReplayDownloadError(f"funding history timestamps are duplicated or unordered for {symbol}")
+    median_interval = int(statistics.median(deltas))
+    if median_interval <= 0 or any(delta > median_interval * 1.5 for delta in deltas):
+        raise ReplayDownloadError(f"funding history has missing settlement intervals for {symbol}")
+    if (
+        funding_times[0] - start_ms > median_interval * 1.5
+        or now_ms - funding_times[-1] > median_interval * 1.5
+    ):
+        raise ReplayDownloadError(f"funding history does not cover the requested six-month window for {symbol}")
+    return result
 
 
 def math_is_finite(value: float) -> bool:
