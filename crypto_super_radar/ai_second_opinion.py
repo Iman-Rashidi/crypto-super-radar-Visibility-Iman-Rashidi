@@ -896,6 +896,10 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
 
     try:
         body = response.json()
+        if isinstance(body, dict):
+            body_request_id = body.get("id") or body.get("request_id")
+            if isinstance(body_request_id, str) and body_request_id.strip():
+                provider_request_id = body_request_id.strip()[:200]
         choices = body.get("choices") if isinstance(body, dict) else None
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ValueError("MISSING_CHOICES")
@@ -1181,6 +1185,16 @@ def run_free_ai_second_opinion(
         )
         latency_ms = int((time.monotonic() - started) * 1000)
         http_status = int(getattr(response, "status_code", 0) or 0)
+        response_headers = getattr(response, "headers", {}) or {}
+        if isinstance(response_headers, Mapping):
+            provider_request_id = next(
+                (
+                    str(response_headers.get(name)).strip()
+                    for name in ("x-request-id", "request-id", "x-correlation-id")
+                    if response_headers.get(name) not in (None, "")
+                ),
+                None,
+            )
         if http_status != 200:
             status = "RATE_LIMITED" if http_status == 429 else "UNKNOWN"
             detail = "Free AI quota or provider limit reached." if http_status == 429 else (
@@ -1519,6 +1533,9 @@ def run_independent_ai_supervisor(
                 "response_source": "LIVE_API", "response_validated": False,
                 "model_verified": False, "paper_entry_eligible": False,
                 "http_status": http_status, "latency_ms": latency_ms,
+                "provider_request_id": provider_request_id,
+                "confidence": None, "raw_response": raw_response,
+                "raw_response_sha256": raw_response_sha256,
                 "requested_at_utc": requested_at,
                 "response_started_at_utc": response_started_at,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1788,6 +1805,8 @@ def _observer_not_called(
         "response_source": "NONE", "response_validated": False,
         "model_verified": False, "observation_only": True,
         "entry_gate_enforced": False, "execution_effect": "NONE",
+        "provider_request_id": None, "confidence": None,
+        "raw_response": None, "raw_response_sha256": None,
         "requested_at_utc": now, "completed_at_utc": now,
         "error_code": code, "error_message": message,
     }
@@ -1823,7 +1842,10 @@ def _call_challenge1_observer(
         "supported, concerning, or cannot be assessed. This is an audit finding only, not an "
         "alternative action. Return only JSON with schema: "
         '{"verdict":"SUPPORTS_DECISION|CONCERNS|INSUFFICIENT_DATA",'
+        '"confidence":0,'
         '"reason_fa":"short Persian explanation",'
+        "Confidence must be a number from 0 to 100 describing confidence in this audit finding, "
+        "not in a trading outcome. "
         '"observations":["short factual observation"],'
         '"risk_flags":["specific concern"]}. '
         "No trade instruction, no entry/exit recommendation, no price target, no guarantee of profit."
@@ -1847,6 +1869,9 @@ def _call_challenge1_observer(
     }
     started = time.monotonic()
     http_status = None
+    provider_request_id = None
+    raw_response = None
+    raw_response_sha256 = None
     try:
         response = (http_post or requests.post)(
             endpoint, headers=headers, json=payload, timeout=(8, 28),
@@ -1868,6 +1893,8 @@ def _call_challenge1_observer(
                 "response_validated": False, "model_verified": False,
                 "observation_only": True, "entry_gate_enforced": False,
                 "execution_effect": "NONE", "http_status": http_status,
+                "provider_request_id": provider_request_id,
+                "confidence": None, "raw_response": None, "raw_response_sha256": None,
                 "latency_ms": latency_ms, "requested_at_utc": requested_at,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "error_code": code,
@@ -1886,6 +1913,8 @@ def _call_challenge1_observer(
             )
         if not isinstance(content, str) or len(content) > 8000:
             raise ValueError("OBSERVER_CONTENT_INVALID")
+        raw_response = content
+        raw_response_sha256 = hashlib.sha256(raw_response.encode("utf-8")).hexdigest()
         document = _extract_json(content)
         returned_model = body.get("model") if isinstance(body, dict) else None
         if not isinstance(returned_model, str) or not returned_model.strip():
@@ -1908,6 +1937,9 @@ def _call_challenge1_observer(
                 "response_validated": False, "model_verified": False,
                 "observation_only": True, "entry_gate_enforced": False,
                 "execution_effect": "NONE", "http_status": http_status,
+                "provider_request_id": provider_request_id,
+                "confidence": None, "raw_response": raw_response,
+                "raw_response_sha256": raw_response_sha256,
                 "latency_ms": latency_ms, "requested_at_utc": requested_at,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "error_code": "RETURNED_MODEL_MISMATCH",
@@ -1915,6 +1947,12 @@ def _call_challenge1_observer(
         verdict = str(document.get("verdict") or "").strip().upper()
         if verdict not in {"SUPPORTS_DECISION", "CONCERNS", "INSUFFICIENT_DATA"}:
             raise ValueError("OBSERVER_VERDICT_INVALID")
+        confidence = document.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise ValueError("OBSERVER_CONFIDENCE_INVALID")
+        confidence = float(confidence)
+        if not math.isfinite(confidence) or not 0 <= confidence <= 100:
+            raise ValueError("OBSERVER_CONFIDENCE_INVALID")
         reason = document.get("reason_fa")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("OBSERVER_REASON_MISSING")
@@ -1929,7 +1967,11 @@ def _call_challenge1_observer(
         return {
             "reviewer_id": reviewer_id, "provider": provider, "model": model,
             "returned_model": returned_model[:160], "status": "REVIEWED",
-            "verdict": verdict, "reason_fa": reason.strip()[:1200],
+            "verdict": verdict, "confidence": round(confidence, 2),
+            "reason_fa": reason.strip()[:1200],
+            "provider_request_id": provider_request_id,
+            "raw_response": raw_response,
+            "raw_response_sha256": raw_response_sha256,
             "observations": [item.strip()[:240] for item in observations if item.strip()],
             "risk_flags": [item.strip()[:240] for item in risk_flags if item.strip()],
             "request_attempted": True, "response_source": "LIVE_API",
@@ -1949,6 +1991,9 @@ def _call_challenge1_observer(
             "entry_gate_enforced": False, "execution_effect": "NONE",
             "http_status": http_status,
             "latency_ms": int((time.monotonic() - started) * 1000),
+            "provider_request_id": provider_request_id,
+            "confidence": None, "raw_response": raw_response,
+            "raw_response_sha256": raw_response_sha256,
             "requested_at_utc": requested_at,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "error_code": str(exc)[:80] if isinstance(exc, ValueError) else type(exc).__name__,
