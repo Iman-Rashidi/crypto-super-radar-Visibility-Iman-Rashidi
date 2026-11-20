@@ -253,6 +253,7 @@ class BinanceProvider:
             "bid_price": _positive_float(stats.get("bidPrice")),
             "ask_price": _positive_float(stats.get("askPrice")),
             "quote_timestamp_ms": _safe_float(stats.get("closeTime")),
+            "returned_symbol": stats.get("symbol") or price.get("symbol"),
             "raw": stats,
         }
 
@@ -423,6 +424,7 @@ class BybitProvider:
             "bid_price": _positive_float(item.get("bid1Price")),
             "ask_price": _positive_float(item.get("ask1Price")),
             "quote_timestamp_ms": _safe_float(payload.get("time")),
+            "returned_symbol": returned_symbol,
             "raw": item,
         }
 
@@ -742,8 +744,14 @@ class PerpetualMarketProvider:
             interval = _positive_float(meta.get("funding_interval"))
             if interval is None or any(v is None for v in values.values()):
                 raise DataProviderError(f"Gate.io fallback returned incomplete data for {symbol}") from exc
-            return {**values, "funding_interval_hours": interval / 3600.0,
-                    "raw": row, "provider": "Gate.io USDT Perpetual"}
+            return {
+                **values,
+                "funding_interval_hours": interval / 3600.0,
+                "quote_timestamp_ms": _positive_float(row.get("time")) * 1000.0 if _positive_float(row.get("time")) is not None else None,
+                "returned_symbol": row.get("contract"),
+                "raw": row,
+                "provider": "Gate.io USDT Perpetual",
+            }
 
     def _binance_ticker(self, symbol: str) -> Dict[str, Any]:
         price = self.http.get(f"{self.BINANCE}/fapi/v1/ticker/price", {"symbol": symbol})
@@ -758,7 +766,12 @@ class PerpetualMarketProvider:
         }
         if any(values[k] is None for k in values):
             raise DataProviderError(f"Binance Futures returned incomplete ticker for {symbol}")
-        return {**values, "raw": {"ticker": stats, "premium": premium, "open_interest": oi}}
+        return {
+            **values,
+            "quote_timestamp_ms": _positive_float(stats.get("closeTime")),
+            "returned_symbol": stats.get("symbol") or price.get("symbol"),
+            "raw": {"ticker": stats, "premium": premium, "open_interest": oi},
+        }
 
     def bybit_ticker(self, symbol: str) -> Dict[str, Any]:
         try:
@@ -785,8 +798,13 @@ class PerpetualMarketProvider:
             }
             if any(v is None for v in values.values()):
                 raise DataProviderError(f"OKX perpetual fallback returned invalid values for {symbol}") from exc
-            return {**values, "raw": {"ticker": t, "funding": f, "open_interest": o},
-                    "provider": "OKX USDT Swap"}
+            return {
+                **values,
+                "quote_timestamp_ms": _positive_float(t.get("ts")),
+                "returned_symbol": t.get("instId"),
+                "raw": {"ticker": t, "funding": f, "open_interest": o},
+                "provider": "OKX USDT Swap",
+            }
 
     def _bybit_ticker(self, symbol: str) -> Dict[str, Any]:
         payload = self.http.get(f"{self.BYBIT}/v5/market/tickers", {"category": "linear", "symbol": symbol})
@@ -804,7 +822,12 @@ class PerpetualMarketProvider:
         }
         if any(values[k] is None for k in values):
             raise DataProviderError(f"Bybit Linear returned incomplete ticker for {symbol}")
-        return {**values, "raw": item}
+        return {
+            **values,
+            "quote_timestamp_ms": _positive_float(payload.get("time")),
+            "returned_symbol": item.get("symbol"),
+            "raw": item,
+        }
 
     def _gate_okx_execution_snapshot(
         self, symbol: str, *, fallback_reason: str
