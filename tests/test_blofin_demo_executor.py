@@ -1901,5 +1901,40 @@ class BloFinDemoUnifiedCredentialEnvironmentTests(unittest.TestCase):
         self.assertFalse(client._trade_permission_verified)
 
 
+
+
+class Challenge1V2DemoAdapterContractTests(unittest.TestCase):
+    def test_v2_profile_fails_closed_without_v2_multitimeframe_evidence(self):
+        record = {
+            "signal": "LONG",
+            "signal_id": "challenge1-v2:BTC-USDT:15m:2026-11-20T10:00:00+00:00:LONG",
+            "instrument_id": "BTC-USDT",
+            "execution_profile": "CHALLENGE_1_V2",
+            "orders_submitted": False,
+        }
+        ready, reason = _challenge1_two_reviewer_approval_ready(record)
+        self.assertFalse(ready)
+        self.assertIn("V2 analysis evidence is incomplete", reason)
+
+    def test_v2_order_plan_never_falls_back_to_legacy_five_minute_evidence(self):
+        record = {
+            "signal": "LONG",
+            "signal_id": "challenge1-v2:BTC-USDT:15m:2026-11-20T10:00:00+00:00:LONG",
+            "instrument_id": "BTC-USDT",
+            "execution_profile": "CHALLENGE_1_V2",
+            "orders_submitted": False,
+        }
+        with self.assertRaisesRegex(
+            BloFinDemoExecutionBlocked,
+            "Challenge 1 V2 multi-timeframe evidence is incomplete",
+        ):
+            build_demo_order_plan(
+                record,
+                instrument_record(),
+                inst_id="BTC-USDT",
+                equity_usdt=1000,
+                leverage=1,
+            )
+
 if __name__ == "__main__":
     unittest.main()
