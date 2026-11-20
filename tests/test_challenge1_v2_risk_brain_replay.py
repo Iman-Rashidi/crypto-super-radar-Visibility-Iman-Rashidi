@@ -405,6 +405,33 @@ class SandboxFundingKindTests(unittest.TestCase):
                 "BTC-USDT",
             )
 
+    def test_verified_schedule_inferred_regular_funding_is_accepted(self):
+        timestamp = int(pd.Timestamp("2026-06-25T16:00:00Z").timestamp() * 1000)
+        _require_regular_funding_events(
+            [{
+                "fundingTime": timestamp, "fundingRate": 0.0001,
+                "fundingKind": "0",
+                "fundingKindSource": "SCHEDULE_INFERRED_DYNAMIC_INTERVAL",
+                "fundingIntervalMs": 8 * 60 * 60_000,
+                "fundingScheduleVerified": True,
+            }],
+            "BTC-USDT",
+        )
+
+    def test_schedule_inference_without_verification_is_blocked(self):
+        timestamp = int(pd.Timestamp("2026-06-25T16:00:00Z").timestamp() * 1000)
+        with self.assertRaisesRegex(SandboxDataError, "only models regular fundingKind=0"):
+            _require_regular_funding_events(
+                [{
+                    "fundingTime": timestamp, "fundingRate": 0.0001,
+                    "fundingKind": "0",
+                    "fundingKindSource": "SCHEDULE_INFERRED_DYNAMIC_INTERVAL",
+                    "fundingIntervalMs": 8 * 60 * 60_000,
+                    "fundingScheduleVerified": False,
+                }],
+                "BTC-USDT",
+            )
+
 class VirtualBloFinFundingKindTests(unittest.TestCase):
     @staticmethod
     def _simulate(funding_event):
