@@ -516,37 +516,94 @@ class ReplayFundingScheduleInferenceTests(unittest.TestCase):
 
 
 class VirtualBloFinFundingBlackoutTests(unittest.TestCase):
-    def test_position_overlapping_blackout_keeps_net_pnl_unknown(self):
-        engine = VirtualBloFin()
-        rules = InstrumentRules(
+    @staticmethod
+    def _setup():
+        return VirtualBloFin(), InstrumentRules(
             inst_id="BTC-USDT", contract_value=Decimal("1"),
             min_size=Decimal("1"), lot_size=Decimal("1"), tick_size=Decimal("0.01"),
         )
+
+    @staticmethod
+    def _funding(base):
+        return [{
+            "fundingTime": base - 1, "fundingRate": 0.0001,
+            "fundingKind": "0", "fundingKindSource": "EXPLICIT_API",
+        }]
+
+    def test_position_crossing_blackout_keeps_funding_unknown_but_remains_open(self):
+        engine, rules = self._setup()
         base = 1_700_000_000_000
         bars = [
-            {"ts": base, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
-            {"ts": base + 900_000, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
-            {"ts": base + 1_800_000, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
+            {"ts": base, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": base + 900_000, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": base + 1_800_000, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
         ]
         result = engine.simulate_post_only_trade(
             bars=bars, start_index=0, direction="LONG", limit_price=100,
             stop_price=99, target_price=104, equity_usdt=1000,
-            risk_fraction=0.0025, rules=rules,
-            funding_events=[{
-                "fundingTime": base - 1, "fundingRate": 0.0001,
-                "fundingKind": "0", "fundingKindSource": "EXPLICIT_API",
+            risk_fraction=0.0025, rules=rules, funding_events=self._funding(base),
+            funding_blackouts=[{
+                "start_ms": base + 1_800_000, "end_ms": base + 24 * 60 * 60_000,
+                "label": "EXCHANGE_DATA_GAP_BLACKOUT",
             }],
+            spread_fraction=0.0002,
+        )
+        self.assertEqual(result.status, "OPEN")
+        self.assertIsNone(result.net_pnl_usdt)
+        self.assertFalse(result.diagnostics["funding_complete"])
+        self.assertEqual(len(result.diagnostics["funding_blackouts"]), 1)
+
+    def test_price_exit_after_blackout_closes_position_but_pnl_remains_unknown(self):
+        engine, rules = self._setup()
+        base = 1_700_000_000_000
+        blackout_start, blackout_end = base + 1_800_000, base + 24 * 60 * 60_000
+        bars = [
+            {"ts": base, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": base + 900_000, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": blackout_start, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": blackout_end, "low": 98.5, "high": 100.5, "mark_high": 100.5, "mark_low": 98.5},
+        ]
+        result = engine.simulate_post_only_trade(
+            bars=bars, start_index=0, direction="LONG", limit_price=100,
+            stop_price=99, target_price=104, equity_usdt=1000,
+            risk_fraction=0.0025, rules=rules, funding_events=self._funding(base),
+            funding_blackouts=[{
+                "start_ms": blackout_start, "end_ms": blackout_end,
+                "label": "EXCHANGE_DATA_GAP_BLACKOUT",
+            }],
+            spread_fraction=0.0002,
+        )
+        self.assertEqual(result.status, "UNKNOWN")
+        self.assertEqual(result.exit_reason, "FUNDING_DATA_GAP_PNL_UNKNOWN")
+        self.assertTrue(result.diagnostics["position_closed"])
+        self.assertEqual(result.diagnostics["market_exit_reason"], "SL")
+        self.assertIsNotNone(result.diagnostics["exit_ts_ms"])
+        self.assertIsNone(result.net_pnl_usdt)
+        self.assertFalse(result.diagnostics["funding_complete"])
+
+    def test_fill_inside_blackout_is_rejected_without_position_or_fees(self):
+        engine, rules = self._setup()
+        base = 1_700_000_000_000
+        bars = [
+            {"ts": base, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": base + 900_000, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": base + 1_800_000, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+        ]
+        result = engine.simulate_post_only_trade(
+            bars=bars, start_index=0, direction="LONG", limit_price=100,
+            stop_price=99, target_price=104, equity_usdt=1000,
+            risk_fraction=0.0025, rules=rules, funding_events=self._funding(base),
             funding_blackouts=[{
                 "start_ms": base + 900_000, "end_ms": base + 24 * 60 * 60_000,
                 "label": "EXCHANGE_DATA_GAP_BLACKOUT",
             }],
             spread_fraction=0.0002,
         )
-        self.assertEqual(result.status, "UNKNOWN")
+        self.assertEqual(result.status, "REJECTED")
         self.assertEqual(result.exit_reason, "FUNDING_DATA_GAP_BLACKOUT")
-        self.assertIsNone(result.net_pnl_usdt)
-        self.assertFalse(result.diagnostics["funding_complete"])
+        self.assertFalse(result.diagnostics["entry_filled"])
         self.assertFalse(result.diagnostics["orders_submitted"])
+        self.assertEqual(result.fees_usdt, 0.0)
 
 
 class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
