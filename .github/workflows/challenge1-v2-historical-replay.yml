@@ -47,6 +47,7 @@ jobs:
         id: download
         continue-on-error: true
         run: |
+          set +e
           mkdir -p artifacts
           python -m crypto_super_radar.market_replay \
             --months 7 \
@@ -67,6 +68,7 @@ jobs:
         if: steps.download.outputs.exit_code == '0'
         continue-on-error: true
         run: |
+          set +e
           python -m crypto_super_radar.ai_sandbox \
             --db artifacts/blofin_replay.sqlite3 \
             --equity 1000 \
@@ -88,7 +90,7 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts
-          cat > artifacts/execution_status.json <<'JSON'
+          cat > artifacts/execution_status.json <<JSON
           {
             "workflow": "challenge1-v2-historical-replay",
             "branch": "${GITHUB_REF_NAME}",
