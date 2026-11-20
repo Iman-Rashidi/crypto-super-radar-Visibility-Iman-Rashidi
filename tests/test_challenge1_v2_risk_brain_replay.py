@@ -497,12 +497,28 @@ class SandboxFundingKindTests(unittest.TestCase):
             [{
                 "fundingTime": timestamp, "fundingRate": 0.0001,
                 "fundingKind": "0",
-                "fundingKindSource": "SCHEDULE_INFERRED_DYNAMIC_INTERVAL",
+                "fundingKindSource": "SCHEDULE_INFERRED_UTC_8H_BOUNDARY",
                 "fundingIntervalMs": 8 * 60 * 60_000,
                 "fundingScheduleVerified": True,
             }],
             "BTC-USDT",
         )
+
+    def test_verified_schedule_inferred_funding_rejects_non_boundary_and_outside_tolerance(self):
+        boundary = int(pd.Timestamp("2026-06-25T16:00:00Z").timestamp() * 1000)
+        base = {
+            "fundingRate": 0.0001,
+            "fundingKind": "0",
+            "fundingKindSource": "SCHEDULE_INFERRED_UTC_8H_BOUNDARY",
+            "fundingIntervalMs": 8 * 60 * 60_000,
+            "fundingScheduleVerified": True,
+        }
+        for offset in (11_000, 4 * 60 * 60_000):
+            with self.subTest(offset_ms=offset), self.assertRaises(SandboxDataError):
+                _require_regular_funding_events(
+                    [{**base, "fundingTime": boundary + offset}],
+                    "BTC-USDT",
+                )
 
     def test_schedule_inference_without_verification_is_blocked(self):
         timestamp = int(pd.Timestamp("2026-06-25T16:00:00Z").timestamp() * 1000)
@@ -511,7 +527,7 @@ class SandboxFundingKindTests(unittest.TestCase):
                 [{
                     "fundingTime": timestamp, "fundingRate": 0.0001,
                     "fundingKind": "0",
-                    "fundingKindSource": "SCHEDULE_INFERRED_DYNAMIC_INTERVAL",
+                    "fundingKindSource": "SCHEDULE_INFERRED_UTC_8H_BOUNDARY",
                     "fundingIntervalMs": 8 * 60 * 60_000,
                     "fundingScheduleVerified": False,
                 }],

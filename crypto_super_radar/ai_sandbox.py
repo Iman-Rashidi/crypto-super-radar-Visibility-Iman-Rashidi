@@ -24,9 +24,9 @@ from .adaptive_brain import OnlineMetaBrain
 from .challenge1_v2 import analyze_signal, atr
 from .virtual_blofin import CostModel, InstrumentRules, InsufficientEquityForRisk, SimulationError, VirtualBloFin
 from .market_replay import (
-    FUNDING_INTERVAL_HOURS, FUNDING_SCHEDULE_TOLERANCE_MS,
+    REGULAR_FUNDING_INTERVAL_MS, FUNDING_SCHEDULE_TOLERANCE_MS,
     OBSERVED_FUNDING_BLACKOUTS, _classify_funding_schedule_events,
-    _is_observed_blackout_gap, _funding_interval_for_delta,
+    _is_observed_blackout_gap, _is_regular_utc_funding_boundary,
 )
 
 DEFAULT_WATCHLIST = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
@@ -81,19 +81,17 @@ def _require_regular_funding_events(funding: list[Mapping[str, Any]], symbol: st
             unsupported.append(kind or "MISSING")
         elif source == "EXPLICIT_API":
             continue
-        elif source == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL":
+        elif source == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY":
             try:
                 interval_ms = int(item.get("fundingIntervalMs"))
                 timestamp = int(item.get("fundingTime"))
             except (TypeError, ValueError, OverflowError):
                 unsupported.append("INFERENCE_METADATA_MISSING")
                 continue
-            allowed = {hours * 60 * 60_000 for hours in FUNDING_INTERVAL_HOURS}
-            remainder = timestamp % interval_ms if interval_ms > 0 else -1
             if not (
                 item.get("fundingScheduleVerified") is True
-                and interval_ms in allowed
-                and min(remainder, interval_ms - remainder) <= FUNDING_SCHEDULE_TOLERANCE_MS
+                and interval_ms == REGULAR_FUNDING_INTERVAL_MS
+                and _is_regular_utc_funding_boundary(timestamp)
             ):
                 unsupported.append("INFERENCE_NOT_VERIFIED")
         else:
@@ -198,7 +196,7 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         funding.append({
             "fundingTime": int(ts), "fundingRate": float(rate), "fundingKind": str(kind),
             "fundingKindSource": str(source), "fundingIntervalMs": int(interval_ms),
-            "fundingScheduleVerified": str(source) == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL",
+            "fundingScheduleVerified": str(source) == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY",
         })
     if len(funding) < 3:
         raise SandboxDataError(f"funding history is incomplete for {symbol}")
@@ -215,12 +213,11 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     for left, right, delta in zip(funding_times[:-1], funding_times[1:], funding_deltas):
         if _is_observed_blackout_gap(int(left), int(right)):
             continue
-        interval_ms = _funding_interval_for_delta(int(delta))
-        if interval_ms is None:
+        if abs(int(delta) - REGULAR_FUNDING_INTERVAL_MS) > 2 * FUNDING_SCHEDULE_TOLERANCE_MS:
             raise SandboxDataError(
-                f"funding history contains an unverified cadence gap for {symbol}: {int(delta)} ms"
+                f"funding history skips or breaks the fixed 8-hour UTC cadence for {symbol}: {int(delta)} ms"
             )
-        verified_intervals.append(interval_ms)
+        verified_intervals.append(REGULAR_FUNDING_INTERVAL_MS)
     if not verified_intervals:
         raise SandboxDataError(f"funding history has no verified cadence for {symbol}")
     median_funding_interval = int(np.median(np.asarray(verified_intervals, dtype=np.int64)))
@@ -1100,15 +1097,15 @@ def run_sandbox(
             ),
             "schedule_inferred_events": sum(
                 1 for item in market.values() for event in item["funding"]
-                if event.get("fundingKindSource") == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
+                if event.get("fundingKindSource") == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY"
             ),
             "schedule_inference_is_not_explicit_exchange_kind": True,
-            "supported_observed_intervals_hours": list(FUNDING_INTERVAL_HOURS),
+            "supported_observed_intervals_hours": [REGULAR_FUNDING_INTERVAL_MS // 3_600_000],
             "blackout_windows": [dict(window) for window in OBSERVED_FUNDING_BLACKOUTS],
             "new_entries_blocked_inside_blackout": True,
             "positions_overlapping_blackout_keep_unknown_net_pnl": True,
             "classification_note": (
-                "Absent Kind is inferred from observed 1/2/4/8-hour cadence within 10 seconds; "
+                "Absent Kind is accepted only on UTC 00:00/08:00/16:00 boundaries within 10 seconds; "
                 "inferred labels remain distinct from explicit API kind."
             ),
         },

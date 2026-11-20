@@ -296,8 +296,14 @@ def _classify_funding_schedule_events(
     for left, right in zip(timestamps, timestamps[1:]):
         if _is_observed_blackout_gap(left, right):
             continue
-        if right <= left:
+        delta_ms = right - left
+        if delta_ms <= 0:
             raise ReplayDownloadError(f"funding timestamps are not strictly increasing for {symbol}")
+        if abs(delta_ms - REGULAR_FUNDING_INTERVAL_MS) > 2 * FUNDING_SCHEDULE_TOLERANCE_MS:
+            raise ReplayDownloadError(
+                f"funding history for {symbol} skips or breaks the fixed 8-hour UTC cadence "
+                f"(delta_ms={delta_ms})"
+            )
 
     classified = []
     for event_symbol, timestamp, rate, raw_kind, raw_source in ordered:
