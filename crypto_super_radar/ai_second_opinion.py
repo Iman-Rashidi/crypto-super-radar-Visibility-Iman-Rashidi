@@ -210,6 +210,11 @@ def _challenge1_result_record(result: Any) -> dict[str, Any]:
         evidence = metrics.get("challenge1_evidence")
     if isinstance(evidence, Mapping):
         record["challenge1_evidence"] = dict(evidence)
+    v2_evidence = record.get("challenge1_v2_evidence")
+    if not isinstance(v2_evidence, Mapping):
+        v2_evidence = metrics.get("challenge1_v2_evidence")
+    if isinstance(v2_evidence, Mapping):
+        record["challenge1_v2_evidence"] = dict(v2_evidence)
     if not record.get("signal"):
         signal = getattr(result, "signal", "")
         record["signal"] = str(getattr(signal, "value", signal) or "").upper()
@@ -226,6 +231,54 @@ def _is_challenge1_result(result: Any) -> bool:
     record = _challenge1_result_record(result)
     profile = str(record.get("execution_profile") or metrics.get("execution_profile") or "").upper()
     return profile == "CHALLENGE_1"
+
+
+def _is_challenge1_v2_result(result: Any) -> bool:
+    metrics = getattr(result, "metrics", {})
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    record = _challenge1_result_record(result)
+    profile = str(record.get("execution_profile") or metrics.get("execution_profile") or "").upper()
+    return profile == "CHALLENGE_1_V2"
+
+
+def _challenge1_v2_native_review(result: Any) -> dict[str, Any]:
+    """Validate the V2-only multi-timeframe/funding contract before any LLM call."""
+    from .challenge1_v2 import challenge1_v2_execution_evidence_ready
+
+    record = _challenge1_result_record(result)
+    ready, reason = challenge1_v2_execution_evidence_ready(record)
+    regime = record.get("regime")
+    aligned = isinstance(regime, Mapping) and regime.get("aligned_4h") is True
+    if not aligned:
+        ready, reason = False, "V2 1H/4H directional alignment is not confirmed"
+    side = str(record.get("signal") or "").strip().upper()
+    entry = _safe_float(record.get("entry", record.get("entry_price")))
+    stop = _safe_float(record.get("stop_loss"))
+    target = _safe_float(record.get("take_profit"))
+    geometry = (
+        entry is not None and stop is not None and target is not None
+        and min(entry, stop, target) > 0
+        and ((side == "LONG" and stop < entry < target)
+             or (side == "SHORT" and target < entry < stop))
+    )
+    if not geometry:
+        ready, reason = False, "V2 protective entry/stop/target geometry is invalid"
+    status = "APPROVED" if ready else "UNKNOWN"
+    return {
+        "version": "challenge1-v2-closed-mtf-funding-native-review-v1",
+        "execution_profile": "CHALLENGE_1_V2",
+        "review_basis": "CLOSED_1H_4H_15M_CANDLES_AND_REGULAR_FUNDING_KIND_0",
+        "required_timeframes": ["1H", "4H", "15m"],
+        "status": status,
+        "paper_entry_eligible": ready,
+        "proposed_signal": side or "UNKNOWN",
+        "elliott_wave": (
+            dict((record.get("challenge1_v2_evidence") or {}).get("elliott_wave") or {})
+            if isinstance(record.get("challenge1_v2_evidence"), Mapping) else {}
+        ),
+        "reason": reason,
+        "orders_submitted": False,
+    }
 
 
 def _challenge1_native_review(result: Any) -> dict[str, Any]:
@@ -312,7 +365,9 @@ def _challenge1_native_review(result: Any) -> dict[str, Any]:
 
 
 def _native_review_for_result(result: Any) -> dict[str, Any]:
-    """Use the isolated pattern review only for BloFin Demo Challenge 1."""
+    """Use profile-specific fail-closed native review for both Challenge 1 engines."""
+    if _is_challenge1_v2_result(result):
+        return _challenge1_v2_native_review(result)
     if _is_challenge1_result(result):
         return _challenge1_native_review(result)
     return build_native_agent_council_review(result)
@@ -673,6 +728,48 @@ def _validated_pattern_review(
     }
 
 
+def _build_v2_review_input(result: Any, asset: Any, metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose only validated V2 multi-timeframe, funding and risk evidence to reviewers."""
+    record = _challenge1_result_record(result)
+    evidence = record.get("challenge1_v2_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    market_proof = record.get("market_data_proof")
+    market_proof = market_proof if isinstance(market_proof, Mapping) else {}
+    wave = evidence.get("elliott_wave")
+    wave = wave if isinstance(wave, Mapping) else {}
+    return {
+        "asset": str(getattr(asset, "raw", asset))[:40],
+        "market_type": "perpetual",
+        "expected_side": str(record.get("signal") or "UNKNOWN").upper(),
+        "execution_profile": "CHALLENGE_1_V2",
+        "review_mode": "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW",
+        "signal_id": str(record.get("signal_id") or ""),
+        "entry_price": _safe_float(record.get("entry")),
+        "stop_loss": _safe_float(record.get("stop_loss")),
+        "take_profit": _safe_float(record.get("take_profit")),
+        "confidence_score": _safe_float(record.get("confidence_score")),
+        "gross_reward_risk": _safe_float(record.get("gross_rr")),
+        "regime": _public_evidence(record.get("regime") or {}),
+        "v2_evidence": _public_evidence(evidence),
+        "market_data_proof": _public_evidence(market_proof),
+        "funding": {
+            "rate": _safe_float(record.get("funding_rate")),
+            "kind": record.get("funding_kind"),
+            "event_time_ms": record.get("funding_event_time_ms"),
+            "max_age_ms": record.get("funding_max_age_ms"),
+        },
+        "elliott_wave": _public_evidence(wave),
+        "policy": {
+            "completed_candles_only": True,
+            "common_asof_required": True,
+            "regular_funding_kind_only": "0",
+            "no_5m_fallback": True,
+            "orders_submitted": False,
+        },
+        "metrics": _public_evidence(dict(metrics)),
+    }
+
+
 def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     asset_name = getattr(asset, "raw", asset)
     market_type = (
@@ -684,6 +781,8 @@ def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     ).upper().replace(" ", "_")
     metrics = getattr(result, "metrics", {})
     metrics = metrics if isinstance(metrics, dict) else {}
+    if str(metrics.get("execution_profile") or "").upper() == "CHALLENGE_1_V2":
+        return _build_v2_review_input(result, asset, metrics)
     if str(metrics.get("execution_profile") or "").upper() == "CHALLENGE_1":
         return _build_pattern_review_input(result, asset, metrics)
     gates = []
@@ -720,10 +819,48 @@ def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     }
 
 
+def _v2_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
+    side = str(evidence.get("expected_side") or "UNKNOWN").upper()
+    wave = evidence.get("elliott_wave") or {}
+    phase = str(wave.get("phase") or "UNKNOWN")
+    direction = str(wave.get("pattern") or "UNKNOWN")
+    system = (
+        "You are an independent technical and risk supervisor for a BloFin Demo V2 research system. "
+        "This is CHALLENGE_1_V2, not the legacy 5m strategy. Use only the supplied completed 1H, 4H and 15m candles, "
+        "one common UTC as-of timestamp, exact funding evidence and the confirmed 1H Elliott evidence. "
+        "Never ask for or infer 5m data, never fall back to the legacy path, and do not invent missing candles, "
+        "funding events, account facts, prices or wave pivots. The latest funding event must be regular fundingKind=0. "
+        "Any missing/stale timeframe, missing 4H alignment, invalid funding proof, unconfirmed/contradictory wave, "
+        "bad protective levels, or disagreement means no approval. Echo the exact supplied Elliott phase and direction. "
+        "Expected side: " + side + ". Supplied wave phase: " + phase + ". Supplied wave direction: " + direction + ". "
+        "Return exactly one JSON object, no markdown, using this schema: "
+        '{"specialist_views":{'
+        '"market_regime":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+        '"technical":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+        '"news_sentiment":{"view":"BULLISH|BEARISH|NEUTRAL|UNKNOWN","reason_fa":"..."},'
+        '"bull_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"bear_researcher":{"view":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"trader":{"proposal":"LONG|SHORT|NO_TRADE","reason_fa":"..."},'
+        '"risk_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
+        '"portfolio_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."}},'
+        '"wave_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","phase":"exact supplied phase","direction":"exact supplied direction","reason_fa":"..."},'
+        '"final_rating":"Buy|Overweight|Hold|Underweight|Sell|REVIEW",'
+        '"risk_flags":["..."],"rationale_fa":"..."} '
+        "Approve only when every required V2 input is internally consistent, the higher-timeframe regime aligns, "
+        "the exact Elliott phase/direction is confirmed and matches the intended side, and the protective plan is valid."
+    )
+    user = "Review only this sanitized completed-candle V2 evidence:\\n" + json.dumps(
+        evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     perpetual = evidence.get("market_type") == "perpetual"
     expected_side = str(evidence.get("expected_side") or "LONG").upper()
     execution_profile = str(evidence.get("execution_profile") or "STRICT").upper()
+    if execution_profile == "CHALLENGE_1_V2" and evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW":
+        return _v2_prompt_messages(evidence)
     if execution_profile == "CHALLENGE_1" and evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW":
         return _pattern_prompt_messages(evidence)
     required_gate_ids = {
@@ -965,6 +1102,40 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
         }
 
 
+def _validated_v2_review(
+    document: dict[str, Any], model: str, asset: str, *,
+    expected_side: str, evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate generic specialist approvals plus an exact V2 Elliott echo."""
+    result = _validated_review(
+        document, model, asset, expected_side=expected_side, market_type="perpetual",
+    )
+    expected_wave = evidence.get("elliott_wave")
+    expected_wave = expected_wave if isinstance(expected_wave, Mapping) else {}
+    expected_phase = str(expected_wave.get("phase") or "").strip().upper()
+    expected_direction = str(expected_wave.get("pattern") or "").strip().upper()
+    wave_review = document.get("wave_analyst")
+    if not isinstance(wave_review, Mapping):
+        raise ValueError("V2 Elliott reviewer evidence is missing")
+    if (
+        str(wave_review.get("verdict") or "").strip().upper() != "SUPPORT"
+        or str(wave_review.get("phase") or "").strip().upper() != expected_phase
+        or str(wave_review.get("direction") or "").strip().upper() != expected_direction
+        or expected_phase not in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH")
+    ):
+        raise ValueError("V2 Elliott phase/direction was not independently confirmed")
+    result.update({
+        "elliott_wave_phase": expected_phase,
+        "elliott_wave_direction": expected_direction,
+        "execution_profile": "CHALLENGE_1_V2",
+    })
+    return result
+
+
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
     rating = str(document.get("final_rating") or "REVIEW").strip()
     if rating.casefold() not in ALLOWED_RATINGS:
@@ -1107,7 +1278,10 @@ def run_free_ai_second_opinion(
     # Challenge 1 is an always-on Demo challenge: do not impose a local
     # per-UTC-day request quota on its real reviewer calls. Provider-side 429s,
     # the short-window safety throttle, and fail-closed response validation remain.
-    challenge1_review = evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
+    challenge1_review = evidence.get("review_mode") in {
+        "CANDLE_CHART_ELLIOTT_WAVE_REVIEW",
+        "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW",
+    }
     model = _model()
     cache_material = {
         "prompt_version": PROMPT_VERSION,
@@ -1244,7 +1418,11 @@ def run_free_ai_second_opinion(
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
         review = (
-            _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
+            _validated_v2_review(
+                parsed, model, asset_name, expected_side=expected_side, evidence=evidence,
+            )
+            if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
+            else _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
             if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
             else _validated_review(
                 parsed, model, asset_name, expected_side=expected_side, market_type=market_type
@@ -1537,7 +1715,11 @@ def run_independent_ai_supervisor(
                 "prompt_version": PROMPT_VERSION + "-second-ai",
             }
         review = (
-            _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
+            _validated_v2_review(
+                parsed, model, asset_name, expected_side=expected_side, evidence=evidence,
+            )
+            if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
+            else _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
             if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
             else _validated_review(
                 parsed, model, asset_name, expected_side=expected_side, market_type=market_type,
