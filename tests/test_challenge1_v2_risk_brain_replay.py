@@ -17,6 +17,7 @@ from crypto_super_radar.challenge1_v2 import (
 )
 from crypto_super_radar.ai_sandbox import (
     SandboxDataError,
+    _strategy_history_ready,
     _calibration_report,
     _require_regular_funding_events,
     _required_replay_end,
@@ -40,6 +41,32 @@ from crypto_super_radar.virtual_blofin import (
     _snap_trade_prices,
     size_position,
 )
+
+
+class StrategyWarmupAccountingTests(unittest.TestCase):
+    def test_minimum_closed_history_requirements_are_exact(self):
+        self.assertTrue(_strategy_history_ready(
+            pd.DataFrame(index=range(205)),
+            pd.DataFrame(index=range(205)),
+            pd.DataFrame(index=range(70)),
+            pd.DataFrame(index=range(40)),
+        ))
+
+    def test_short_4h_history_is_a_warmup_block_not_a_strategy_error(self):
+        self.assertFalse(_strategy_history_ready(
+            pd.DataFrame(index=range(205)),
+            pd.DataFrame(index=range(204)),
+            pd.DataFrame(index=range(70)),
+            pd.DataFrame(index=range(40)),
+        ))
+
+    def test_short_15m_history_is_a_warmup_block(self):
+        self.assertFalse(_strategy_history_ready(
+            pd.DataFrame(index=range(205)),
+            pd.DataFrame(index=range(205)),
+            pd.DataFrame(index=range(69)),
+            pd.DataFrame(index=range(40)),
+        ))
 
 
 class StrategyAsOfIntegrationTests(unittest.TestCase):
