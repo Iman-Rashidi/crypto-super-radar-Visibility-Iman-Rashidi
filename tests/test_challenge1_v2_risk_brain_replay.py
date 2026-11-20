@@ -20,6 +20,7 @@ from crypto_super_radar.ai_sandbox import (
     _strategy_history_ready,
     _calibration_report,
     _require_regular_funding_events,
+    _record_block_reason,
     _required_replay_end,
     _within_purge_window,
 )
@@ -41,6 +42,20 @@ from crypto_super_radar.virtual_blofin import (
     _snap_trade_prices,
     size_position,
 )
+
+class BlockReasonLedgerTests(unittest.TestCase):
+    def test_global_and_per_symbol_block_reasons_reconcile(self):
+        overall = {}
+        by_symbol = {}
+        _record_block_reason(overall, by_symbol, "BTC-USDT", "NO_TRADE: ADX below threshold")
+        _record_block_reason(overall, by_symbol, "BTC-USDT", "NO_TRADE: ADX below threshold")
+        _record_block_reason(overall, by_symbol, "ETH-USDT", "MAX_TWO_CONCURRENT_SIMULATED_POSITIONS")
+        self.assertEqual(overall["NO_TRADE: ADX below threshold"], 2)
+        self.assertEqual(by_symbol["BTC-USDT"]["NO_TRADE: ADX below threshold"], 2)
+        self.assertEqual(by_symbol["ETH-USDT"]["MAX_TWO_CONCURRENT_SIMULATED_POSITIONS"], 1)
+        self.assertEqual(sum(overall.values()), sum(sum(x.values()) for x in by_symbol.values()))
+
+
 
 
 class StrategyWarmupAccountingTests(unittest.TestCase):
