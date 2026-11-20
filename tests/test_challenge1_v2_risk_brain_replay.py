@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from crypto_super_radar.adaptive_brain import OnlineMetaBrain
-from crypto_super_radar.challenge1_v2 import analyze_signal
+from crypto_super_radar.challenge1_v2 import _elliott_wave_1h_evidence, analyze_signal
 from crypto_super_radar.ai_sandbox import (
     SandboxDataError,
     _calibration_report,
@@ -433,6 +433,53 @@ class VirtualBloFinFundingKindTests(unittest.TestCase):
             "fundingKind": "0",
         })
         self.assertNotEqual(result.status, "REJECTED")
+
+
+class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def _wave_frame() -> pd.DataFrame:
+        values = [
+            100, 100, 120, 120, 110, 110, 140, 140,
+            125, 125, 150, 150, 140,
+        ]
+        values += [140] * (220 - len(values))
+        index = pd.date_range(
+            "2026-01-01T00:00:00Z", periods=len(values), freq="1h"
+        )
+        return pd.DataFrame({"close": values}, index=index)
+
+    def test_wave_evidence_uses_only_closed_one_hour_candles(self):
+        frame = self._wave_frame()
+        asof = frame.index[-1] + pd.Timedelta(hours=1)
+        evidence = _elliott_wave_1h_evidence(frame, asof)
+        self.assertEqual(evidence["timeframe"], "1H")
+        self.assertLessEqual(
+            pd.Timestamp(evidence["latest_closed_candle_open_utc"]) + pd.Timedelta(hours=1),
+            asof,
+        )
+        self.assertEqual(evidence["data_asof_utc"], asof.isoformat())
+        for pivot in evidence["pivots"]:
+            self.assertLessEqual(pd.Timestamp(pivot["confirmed_at"]), asof)
+
+    def test_future_one_hour_candle_mutations_do_not_change_wave_evidence(self):
+        frame = self._wave_frame()
+        asof = frame.index[-3] + pd.Timedelta(hours=1)
+        original = _elliott_wave_1h_evidence(frame, asof)
+        changed = frame.copy()
+        future = changed.index + pd.Timedelta(hours=1) > asof
+        changed.loc[future, "close"] = 999.0
+        mutated = _elliott_wave_1h_evidence(changed, asof)
+        self.assertEqual(original, mutated)
+
+    def test_wave_metadata_does_not_promote_ambiguous_history_to_alignment(self):
+        frame = pd.DataFrame(
+            {"close": [100.0] * 220},
+            index=pd.date_range("2026-01-01T00:00:00Z", periods=220, freq="1h"),
+        )
+        asof = frame.index[-1] + pd.Timedelta(hours=1)
+        evidence = _elliott_wave_1h_evidence(frame, asof)
+        self.assertIn(evidence["status"], {"UNKNOWN", "AMBIGUOUS"})
+        self.assertEqual(evidence["wave_alignment"], "UNCONFIRMED")
 
 
 if __name__ == "__main__":
