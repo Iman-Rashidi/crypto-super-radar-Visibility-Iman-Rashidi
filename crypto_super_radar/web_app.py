@@ -5640,6 +5640,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(health, separators=(",", ":")).encode(), "application/json")
         if parsed.path == "/api/ai/status":
             payload = ai_supervisor_status()
+            payload["status_scope"] = "OPTIONAL_MULTI_PROVIDER_CONFIGURATION_ONLY"
+            payload["used_for_challenge1_entry_gate"] = False
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
         if parsed.path == "/api/ai/challenge1-status":
@@ -5647,7 +5649,11 @@ class Handler(BaseHTTPRequestHandler):
                 "primary_supervisor": ai_connection_status(),
                 "second_supervisor": second_ai_connection_status(),
                 "two_reviewer_gate": "REQUIRES_BOTH_VERIFIED_APPROVALS",
-                "execution_role": "REPORT_ONLY",
+                "required_verified_approvals": 2,
+                "execution_role": "ENTRY_APPROVAL_GATE",
+                "entry_gate_enforced": True,
+                "status_scope": "NON_SECRET_CONFIGURATION_PREFLIGHT_ONLY",
+                "connectivity_probe_performed": False,
             }
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
