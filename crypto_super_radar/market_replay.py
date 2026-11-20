@@ -31,6 +31,19 @@ class ReplayDownloadError(RuntimeError):
     pass
 
 
+def _record_unique_timestamp(
+    seen: dict[int, tuple[Any, ...]],
+    timestamp: int,
+    item: tuple[Any, ...],
+    *,
+    series: str,
+) -> None:
+    """Reject duplicate source timestamps instead of silently overwriting them."""
+    if timestamp in seen:
+        raise ReplayDownloadError(f"duplicate timestamp in {series}: {timestamp}")
+    seen[timestamp] = item
+
+
 def _utc_ms(value: datetime) -> int:
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")
@@ -139,7 +152,7 @@ def download_candles(
             break
         for item in parsed:
             if item[2] >= start_ms:
-                seen[int(item[2])] = item
+                _record_unique_timestamp(seen, int(item[2]), item, series=f"{symbol} {bar}")
         oldest = min(int(item[2]) for item in parsed)
         if oldest <= start_ms:
             break
@@ -233,7 +246,7 @@ def download_funding_rates(
             break
         for item in valid:
             if item[1] >= start_ms:
-                seen[item[1]] = item
+                _record_unique_timestamp(seen, int(item[1]), item, series=f"{symbol} funding")
         oldest = min(item[1] for item in valid)
         if oldest <= start_ms:
             break
