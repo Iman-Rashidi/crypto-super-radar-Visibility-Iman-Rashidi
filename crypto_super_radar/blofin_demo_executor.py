@@ -2370,9 +2370,28 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("Market price moved too far from the signal entry reference.")
 
         mode = self.client.get_position_mode()
+        if not isinstance(mode, Mapping):
+            raise BloFinDemoExecutionBlocked("Position-mode response is not interpretable.")
         position_mode = mode.get("positionMode")
         if position_mode not in {"net_mode", "long_short_mode"}:
             raise BloFinDemoExecutionBlocked("Position mode could not be confirmed.")
+        raw_multi_position = mode.get("multiPosition")
+        if position_mode == "net_mode":
+            # BloFin documents Multi-Position as available only in Hedge Mode.
+            if raw_multi_position is True or str(raw_multi_position or "").strip().lower() == "true":
+                raise BloFinDemoExecutionBlocked(
+                    "BloFin returned an inconsistent Multi-Position flag for net_mode."
+                )
+            multi_position = False
+        else:
+            if isinstance(raw_multi_position, bool):
+                multi_position = raw_multi_position
+            elif isinstance(raw_multi_position, str) and raw_multi_position.strip().lower() in {"true", "false"}:
+                multi_position = raw_multi_position.strip().lower() == "true"
+            else:
+                raise BloFinDemoExecutionBlocked(
+                    "Hedge Mode Multi-Position setting is missing or invalid; confirm it before any Demo order."
+                )
         instrument = self.client.get_tradable_instrument(inst_id)
         balance = self.client.get_futures_balance(product_type="USDT-FUTURES")
         equity = _equity_from_balance(balance)
@@ -2513,7 +2532,7 @@ class BloFinDemoExecutor:
             exchange_order_id=str(order_id),
             side=plan["side"],
             position_mode=position_mode,
-            multi_position=mode.get("multiPosition") is True or str(mode.get("multiPosition") or "").lower() == "true",
+            multi_position=multi_position,
             quantity=plan["quantity"],
             take_profit=plan["take_profit"],
             stop_loss=plan["stop_loss"],

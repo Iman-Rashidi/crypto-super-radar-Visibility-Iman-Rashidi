@@ -1102,6 +1102,7 @@ class FakeExecutorClient:
         self.position_reads = 0
         self.last_order_kwargs = None
         self.tpsl_position_id = "simulated-position-id"
+        self.position_mode = "net_mode"
         self.multi_position = False
         self.ticker_quote = {"bidPrice": "99.99", "askPrice": "100.01"}
         self.order_response = {"code": "0", "data": [{"code": "0", "orderId": "simulated-demo-id"}]}
@@ -1120,7 +1121,7 @@ class FakeExecutorClient:
 
     def get_position_mode(self):
         self.calls.append("position_mode")
-        return {"positionMode": "net_mode", "multiPosition": self.multi_position}
+        return {"positionMode": self.position_mode, "multiPosition": self.multi_position}
 
     def get_tradable_instrument(self, inst_id):
         self.calls.append("instrument")
@@ -1378,6 +1379,60 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 len(store.list_unverified_protection_orders()),
                 1,
             )
+        finally:
+            store.close()
+
+    def test_hedge_mode_with_missing_multi_position_setting_blocks_before_any_write(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.position_mode = "long_short_mode"
+        client.multi_position = None
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaisesRegex(
+                BloFinDemoExecutionBlocked,
+                "Multi-Position setting is missing or invalid",
+            ):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT", leverage=1,
+                    allow_demo_orders=True,
+                )
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
+        finally:
+            store.close()
+
+    def test_net_mode_with_multi_position_true_is_rejected_as_inconsistent(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.position_mode = "net_mode"
+        client.multi_position = True
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaisesRegex(
+                BloFinDemoExecutionBlocked,
+                "inconsistent Multi-Position flag",
+            ):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT", leverage=1,
+                    allow_demo_orders=True,
+                )
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
         finally:
             store.close()
 
