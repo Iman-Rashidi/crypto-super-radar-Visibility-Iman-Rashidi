@@ -37,9 +37,11 @@ jobs:
             crypto_super_radar/challenge1_v2.py \
             crypto_super_radar/adaptive_brain.py \
             crypto_super_radar/challenge1_event_queue.py \
+            crypto_super_radar/challenge1_sandbox_worker.py \
             scripts/diagnose_blofin_funding_history.py \
             scripts/diagnose_blofin_market_data.py \
-            tests/test_challenge1_event_queue.py
+            tests/test_challenge1_event_queue.py \
+            tests/test_challenge1_sandbox_worker.py
 
       - name: Run V2 regression and duplicate-timestamp tests
         run: |
@@ -47,6 +49,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
           python -m unittest discover -s tests -p 'test_market_replay_duplicates.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_event_queue.py' -v
+          python -m unittest discover -s tests -p 'test_challenge1_sandbox_worker.py' -v
 
       - name: Diagnose public BTC funding-history intervals
         id: funding-diagnostic
