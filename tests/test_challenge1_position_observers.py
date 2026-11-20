@@ -277,10 +277,13 @@ class Challenge1PositionObserverAuditTests(unittest.TestCase):
         risk_thread.assert_called_once()
         report = self._events("experience-3")
         self.assertEqual(report["integrity"]["status"], "PASS")
-        self.assertEqual(
-            sum(event["phase"] == "POSITION_AI_REVIEW_BATCH_REQUESTED" for event in report["events"]),
-            1,
-        )
+        request_events = [
+            event for event in report["events"]
+            if event["phase"] == "POSITION_AI_REVIEW_BATCH_REQUESTED"
+        ]
+        self.assertEqual(len(request_events), 2)
+        request_details = [event["payload"]["details"] for event in request_events]
+        self.assertEqual(request_details[-1]["trigger_reason"], "MATERIAL_POSITION_EVENT")
 
 
 class Challenge1SupervisorWatchdogAuditTests(unittest.TestCase):
