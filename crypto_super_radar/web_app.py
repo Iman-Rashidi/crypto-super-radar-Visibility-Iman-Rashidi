@@ -10800,6 +10800,7 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
     stale_count = 0
     recorded = 0
     errors = []
+    guard_halt_positions = 0
     for snapshot in snapshots:
         position_id = str(snapshot.get("position_id") or "")
         experience_id = str(snapshot.get("experience_id") or "").strip() or None
@@ -10848,6 +10849,7 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
             "PRIVATE_WS_NOT_READY",
         }
         if critical_flags.intersection(flags):
+            guard_halt_positions += 1
             should_persist_halt = False
             with LOCK:
                 if BLOFIN_AUTOPILOT_STATE.get("enabled") and not str(BLOFIN_AUTOPILOT_STATE.get("status") or "").startswith("SUPERVISOR_"):
@@ -10890,7 +10892,8 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
             _persist_blofin_autopilot_state()
 
     state = {
-        "status": "ERROR" if errors else "HALTED" if private_ws_not_ready else "ALIVE",
+        "status": "ERROR" if errors else "HALTED" if private_ws_not_ready or guard_halt_positions else "ALIVE",
+        "guard_halt_positions": guard_halt_positions,
         "interval_seconds": 3,
         "source": "BLOFIN_PRIVATE_WEBSOCKET_AND_LOCAL_CACHE" if private_ws_required else "REST_MANAGER_CACHE",
         "private_websocket": private_ws,
