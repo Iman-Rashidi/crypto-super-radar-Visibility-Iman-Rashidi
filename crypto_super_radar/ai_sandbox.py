@@ -269,14 +269,29 @@ def run_sandbox(
 
     if "BTC-USDT" not in market:
         raise SandboxDataError("BTC-USDT is required as the master-guard market")
-    times = sorted(set().union(*(set(item["market"].index) for item in market.values())))
-    if len(times) < 100:
-        raise SandboxDataError("replay dataset is too small")
-    start_time = min(times)
+    # All five markets must cover the same six-calendar-month replay horizon.
+    # The downloader and loader fail closed on missing candles or funding events.
+    start_time = max(item["source_start"] for item in market.values())
+    common_end = min(item["source_end"] for item in market.values())
+    oos_end = start_time + pd.DateOffset(months=6)
+    minimum_end = oos_end - pd.Timedelta(minutes=15)
+    if common_end < minimum_end:
+        raise SandboxDataError(
+            f"replay coverage is shorter than six calendar months: "
+            f"start={start_time.isoformat()} end={common_end.isoformat()} "
+            f"required_end_at_least={minimum_end.isoformat()}"
+        )
     train_end = start_time + pd.DateOffset(months=4)
     validation_end = start_time + pd.DateOffset(months=5)
     train_end_ms = int(train_end.timestamp() * 1000)
     validation_end_ms = int(validation_end.timestamp() * 1000)
+    times = sorted(
+        stamp
+        for stamp in set().union(*(set(item["market"].index) for item in market.values()))
+        if start_time <= stamp < oos_end
+    )
+    if len(times) < 100:
+        raise SandboxDataError("replay dataset is too small after six-month window alignment")
 
     costs = CostModel(spread_fraction=spread_scenario)
     exchange = VirtualBloFin(costs=costs, max_holding_bars=12)
@@ -293,6 +308,10 @@ def run_sandbox(
     totals = defaultdict(float)
     counts = defaultdict(int)
     model_decisions = defaultdict(int)
+    calibration_observations: dict[str, list[dict[str, Any]]] = {
+        "VALIDATION": [],
+        "OUT_OF_SAMPLE": [],
+    }
 
     index_maps = {symbol: {stamp: i for i, stamp in enumerate(item["market"].index)} for symbol, item in market.items()}
     last_indices = {symbol: len(item["bars"]) - 1 for symbol, item in market.items()}
@@ -310,6 +329,9 @@ def run_sandbox(
             survivors: list[dict[str, Any]] = []
             for order in collection:
                 symbol = str(order["symbol"])
+                if order["phase"] != phase and not order.get("phase_boundary_crossed"):
+                    order["phase_boundary_crossed"] = True
+                    counts["cross_boundary_positions"] += 1
                 row_index = index_maps[symbol].get(stamp)
                 if row_index is None or row_index <= int(order["start_index"]):
                     survivors.append(order)
@@ -406,6 +428,9 @@ def run_sandbox(
                 shadow_trades.append({
                     "signal_id": order["signal_id"],
                     "instrument_id": order["symbol"],
+                    "phase": order["phase"],
+                    "phase_boundary_crossed": bool(order.get("phase_boundary_crossed")),
+                    "model_probability": order.get("model_probability"),
                     "exit_ts_ms": exit_ts_ms,
                     "net_pnl_usdt": result.net_pnl_usdt,
                     "fees_usdt": result.fees_usdt,
@@ -415,6 +440,16 @@ def run_sandbox(
                     "veto_correct": result.net_pnl_usdt <= 0,
                     "source": "COUNTERFACTUAL_SHADOW",
                 })
+                if (
+                    order["phase"] in calibration_observations
+                    and order.get("model_probability") is not None
+                ):
+                    calibration_observations[order["phase"]].append({
+                        "probability": float(order["model_probability"]),
+                        "label": 1 if result.net_pnl_usdt > 0 else 0,
+                    })
+                if order.get("phase_boundary_crossed"):
+                    counts["cross_boundary_closed_trades"] += 1
                 if result.net_pnl_usdt <= 0:
                     totals["estimated_losses_avoided_usdt"] += abs(result.net_pnl_usdt)
                     counts["shadow_correct_vetoes"] += 1
@@ -444,6 +479,9 @@ def run_sandbox(
                 "signal_id": order["signal_id"],
                 "instrument_id": order["symbol"],
                 "direction": order["direction"],
+                "phase": order["phase"],
+                "phase_boundary_crossed": bool(order.get("phase_boundary_crossed")),
+                "model_probability": order.get("model_probability"),
                 "entry_ts_ms": int(result.diagnostics["entry_ts_ms"]),
                 "exit_ts_ms": exit_ts_ms,
                 "exit_reason": result.exit_reason,
@@ -456,6 +494,16 @@ def run_sandbox(
                 "net_rr_at_entry": result.net_rr_at_entry,
                 "model_decision": order["model_decision"],
             })
+            if (
+                order["phase"] in calibration_observations
+                and order.get("model_probability") is not None
+            ):
+                calibration_observations[order["phase"]].append({
+                    "probability": float(order["model_probability"]),
+                    "label": 1 if result.net_pnl_usdt > 0 else 0,
+                })
+            if order.get("phase_boundary_crossed"):
+                counts["cross_boundary_closed_trades"] += 1
             last_results[order["symbol"]].append(1 if result.net_pnl_usdt > 0 else 0)
             if result.net_pnl_usdt > 0:
                 counts["wins"] += 1
@@ -496,8 +544,22 @@ def run_sandbox(
             row_index = index_maps[symbol].get(stamp)
             if row_index is None or row_index < 0:
                 continue
+            phase_boundary_ms = (
+                train_end_ms if phase == "TRAIN"
+                else validation_end_ms if phase == "VALIDATION"
+                else None
+            )
+            if phase_boundary_ms is not None and _within_purge_window(
+                asof_ms, phase_boundary_ms, max_holding_bars=12
+            ):
+                counts["purged_boundary_signal_blocks"] += 1
+                continue
             counts["strategy_checks"] += 1
-            funding_rate = _known_funding_rate(item["funding"], asof_ms)
+            funding_rate = _known_funding_rate(
+                item["funding"],
+                asof_ms,
+                max_age_ms=int(item["funding_interval_median_ms"] * 1.5),
+            )
             if funding_rate is None:
                 counts["missing_funding_rate_signals"] += 1
             try:
@@ -524,11 +586,13 @@ def run_sandbox(
             counts["qualified_signals"] += 1
             features = dict(signal["features"])
             decision = brain.evaluate(features)
+            model_probability: float | None = None
             if phase == "TRAIN":
                 model_decision, veto = "TRAINING_BASELINE", False
             elif brain.trained and decision.get("status") == "READY":
                 model_decision = str(decision["decision"])
                 veto = model_decision == "VETO"
+                model_probability = float(decision["probability"])
             else:
                 model_decision, veto = "MODEL_NOT_READY_BASELINE", False
                 counts["model_not_ready_signals"] += 1
@@ -558,6 +622,7 @@ def run_sandbox(
                 "features": features,
                 "phase": phase,
                 "model_decision": model_decision,
+                "model_probability": model_probability,
                 "shadow": bool(veto),
                 "entry_checked": False,
                 "submitted_ts_ms": asof_ms,
@@ -568,6 +633,10 @@ def run_sandbox(
             else:
                 active_orders.append(order)
 
+    cross_boundary_open_positions = sum(
+        1 for item in active_orders if item.get("phase_boundary_crossed")
+    )
+    counts["cross_boundary_open_positions"] = cross_boundary_open_positions
     counts["unresolved_at_dataset_end"] = sum(1 for item in active_orders if item.get("entry_checked"))
     counts["pending_entries_at_dataset_end"] = sum(1 for item in active_orders if not item.get("entry_checked"))
     counts["shadow_unresolved_at_dataset_end"] = len(shadow_orders)
@@ -576,6 +645,8 @@ def run_sandbox(
             "signal_id": item["signal_id"],
             "instrument_id": item["symbol"],
             "status": item.get("last_status", "ENTRY_PENDING"),
+            "phase": item["phase"],
+            "phase_boundary_crossed": bool(item.get("phase_boundary_crossed")),
             "last_observed_through_ts_ms": item.get("last_observed_through_ts_ms"),
         }
         for item in active_orders
@@ -627,6 +698,8 @@ def run_sandbox(
         },
         "ai_audit": {
             "model_version": "csr-online-meta-sgd-v1", "trained": brain.trained,
+            "model_sha256": brain.model_sha256(),
+            "max_examples": brain.max_examples,
             "training_closed_trade_count": closed_training_trades,
             "training_examples": len(brain.examples), "training_rounds": counts["training_rounds"],
             "decisions": dict(model_decisions),
@@ -641,12 +714,31 @@ def run_sandbox(
         "trade_ledger": sorted(actual_trades, key=lambda x: x["exit_ts_ms"]),
         "shadow_ledger": sorted(shadow_trades, key=lambda x: x["exit_ts_ms"]),
         "open_positions_at_dataset_end": unresolved_positions,
+        "walk_forward_audit": {
+            "train_start_utc": start_time.isoformat(),
+            "train_end_utc": train_end.isoformat(),
+            "validation_end_utc": validation_end.isoformat(),
+            "oos_end_utc": oos_end.isoformat(),
+            "purge_window_minutes": 195,
+            "purged_boundary_signal_blocks": counts["purged_boundary_signal_blocks"],
+            "cross_boundary_positions": counts["cross_boundary_positions"],
+            "cross_boundary_closed_trades": counts["cross_boundary_closed_trades"],
+            "cross_boundary_open_positions": cross_boundary_open_positions,
+            "status": "PASS" if cross_boundary_open_positions == 0 else "BLOCKED",
+            "model_frozen_after_training": True,
+        },
+        "model_calibration": {
+            "VALIDATION": _calibration_report(calibration_observations["VALIDATION"]),
+            "OUT_OF_SAMPLE": _calibration_report(calibration_observations["OUT_OF_SAMPLE"]),
+        },
         "lookahead_audit": {
             "policy": "BAR_BY_BAR_ASOF_CUTOFF",
             "future_candles_passed_to_strategy": False,
             "future_candles_passed_to_virtual_position": False,
             "position_exit_time_pre_reserved": False,
             "training_labels_used_only_after_exit_time": True,
+            "all_signal_decisions_use_closed_candles": True,
+            "funding_gate_input": "LATEST_PAST_SETTLEMENT_RATE_PROXY",
         },
     }
     output = Path(output_path)
