@@ -446,7 +446,17 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
         index = pd.date_range(
             "2026-01-01T00:00:00Z", periods=len(values), freq="1h"
         )
-        return pd.DataFrame({"close": values}, index=index)
+        close = np.asarray(values, dtype=float)
+        return pd.DataFrame(
+            {
+                "open": close,
+                "high": close + 0.5,
+                "low": close - 0.5,
+                "close": close,
+                "volume": np.full(len(close), 100.0),
+            },
+            index=index,
+        )
 
     def test_wave_evidence_uses_only_closed_one_hour_candles(self):
         frame = self._wave_frame()
@@ -467,13 +477,21 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
         original = _elliott_wave_1h_evidence(frame, asof)
         changed = frame.copy()
         future = changed.index + pd.Timedelta(hours=1) > asof
-        changed.loc[future, "close"] = 999.0
+        changed.loc[future, ["open", "high", "low", "close", "volume"]] = [
+            [999.0, 1000.0, 998.0, 999.5, 100.0]
+        ] * int(future.sum())
         mutated = _elliott_wave_1h_evidence(changed, asof)
         self.assertEqual(original, mutated)
 
     def test_wave_metadata_does_not_promote_ambiguous_history_to_alignment(self):
         frame = pd.DataFrame(
-            {"close": [100.0] * 220},
+            {
+                "open": [100.0] * 220,
+                "high": [100.5] * 220,
+                "low": [99.5] * 220,
+                "close": [100.0] * 220,
+                "volume": [100.0] * 220,
+            },
             index=pd.date_range("2026-01-01T00:00:00Z", periods=220, freq="1h"),
         )
         asof = frame.index[-1] + pd.Timedelta(hours=1)
