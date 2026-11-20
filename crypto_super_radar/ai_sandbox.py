@@ -94,6 +94,27 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     return {"frames": frames, "market": market, "bars": bars, "funding": funding, "rules": rules}
 
 
+def _visible_frame(
+    frame: pd.DataFrame,
+    asof: pd.Timestamp,
+    duration: pd.Timedelta,
+) -> pd.DataFrame:
+    """Return only candles whose close timestamp is no later than the cutoff."""
+    if asof.tzinfo is None:
+        raise ValueError("asof must be timezone-aware")
+    closed = frame.index + duration <= asof.tz_convert("UTC")
+    return frame.loc[closed].copy()
+
+
+def _visible_bars(bars: list[dict[str, Any]], asof_ms: int) -> list[dict[str, Any]]:
+    """Expose only fully closed 15m bars to an in-progress virtual position."""
+    return [
+        bar for bar in bars
+        if int(bar.get("close_ts") or (int(bar["ts"]) + BAR_MS)) <= asof_ms
+    ]
+
+
+
 def _known_funding_rate(events: list[dict[str, Any]], asof_ms: int) -> float | None:
     eligible = [item for item in events if int(item["fundingTime"]) <= asof_ms]
     if not eligible:
@@ -152,8 +173,8 @@ def run_sandbox(
     exchange = VirtualBloFin(costs=costs, max_holding_bars=12)
     brain = OnlineMetaBrain(warmup_trades=100, min_per_class=20)
     equity = float(initial_equity)
-    results_due: list[dict[str, Any]] = []
-    reservations: list[dict[str, Any]] = []
+    active_orders: list[dict[str, Any]] = []
+    shadow_orders: list[dict[str, Any]] = []
     last_results: dict[str, deque[int]] = {symbol: deque([-1, -1, -1], maxlen=3) for symbol in symbols}
     actual_trades: list[dict[str, Any]] = []
     shadow_trades: list[dict[str, Any]] = []
@@ -172,17 +193,112 @@ def run_sandbox(
         asof_ms = int(asof.timestamp() * 1000)
         phase = _phase(asof_ms, train_end_ms, validation_end_ms)
 
-        matured = sorted(
-            (item for item in results_due if int(item["exit_ts_ms"]) <= asof_ms),
-            key=lambda item: int(item["exit_ts_ms"]),
-        )
-        results_due = [item for item in results_due if int(item["exit_ts_ms"]) > asof_ms]
-        for item in matured:
-            result = item["result"]
-            if item["shadow"]:
+        # Advance every submitted virtual order only with data available at
+        # this event time. Replaying a trade from its entry is deterministic,
+        # but its input is strictly truncated at the latest closed candle.
+        completed: list[tuple[dict[str, Any], Any]] = []
+        for collection, is_shadow in ((active_orders, False), (shadow_orders, True)):
+            survivors: list[dict[str, Any]] = []
+            for order in collection:
+                symbol = str(order["symbol"])
+                row_index = index_maps[symbol].get(stamp)
+                if row_index is None or row_index <= int(order["start_index"]):
+                    survivors.append(order)
+                    continue
+                item = market[symbol]
+                observed_bars = _visible_bars(item["bars"][:row_index + 1], asof_ms)
+                try:
+                    result = exchange.simulate_post_only_trade(
+                        bars=observed_bars,
+                        start_index=int(order["start_index"]),
+                        direction=str(order["direction"]),
+                        limit_price=order["entry"],
+                        stop_price=order["stop_loss"],
+                        target_price=order["take_profit"],
+                        equity_usdt=float(order["equity_snapshot"]),
+                        risk_fraction=0.0025,
+                        rules=item["rules"],
+                        funding_events=item["funding"],
+                        spread_fraction=spread_scenario,
+                    )
+                except InsufficientEquityForRisk:
+                    if order.get("entry_checked"):
+                        counts["active_position_simulation_errors"] += 1
+                        order["last_error"] = "INSUFFICIENT_EQUITY_FOR_RISK_AFTER_ENTRY"
+                        survivors.append(order)
+                    else:
+                        counts["min_qty_rejections"] += 1
+                        if not is_shadow:
+                            counts["order_rejections"] += 1
+                    continue
+                except SimulationError as exc:
+                    if order.get("entry_checked"):
+                        counts["active_position_simulation_errors"] += 1
+                        order["last_error"] = str(exc)
+                        survivors.append(order)
+                    else:
+                        counts["simulation_data_rejections"] += 1
+                        if not is_shadow:
+                            counts["order_rejections"] += 1
+                    continue
+
+                if result.status == "UNFILLED":
+                    if order.get("entry_checked"):
+                        counts["active_position_state_errors"] += 1
+                        order["last_error"] = "FILLED_ORDER_REPLAYED_AS_UNFILLED"
+                        survivors.append(order)
+                    elif not is_shadow:
+                        counts["unfilled_limits"] += 1
+                    continue
+                if result.status == "REJECTED":
+                    if order.get("entry_checked"):
+                        counts["active_position_state_errors"] += 1
+                        order["last_error"] = "ACTIVE_ORDER_REPLAYED_AS_REJECTED"
+                        survivors.append(order)
+                    elif not is_shadow:
+                        counts["order_rejections"] += 1
+                    continue
+
+                if not order.get("entry_checked"):
+                    order["entry_checked"] = True
+                    order["entry_ts_ms"] = int(result.diagnostics["entry_ts_ms"])
+                    if not is_shadow:
+                        counts["submitted_virtual_entries"] += 1
+
+                if result.status == "CLOSED":
+                    completed.append((order, result))
+                    continue
+                if result.status == "OPEN":
+                    order["last_status"] = result.exit_reason
+                    order["last_observed_through_ts_ms"] = int(
+                        result.diagnostics.get("observed_through_ts_ms", asof_ms)
+                    )
+                    survivors.append(order)
+                    continue
+
+                # Unknown simulator states remain reserved and cannot be
+                # silently counted as a close or as a successful outcome.
+                counts["unknown_simulator_states"] += 1
+                order["last_error"] = f"UNKNOWN_SIMULATOR_STATUS:{result.status}"
+                survivors.append(order)
+
+            collection[:] = survivors
+
+        for order, result in sorted(
+            completed,
+            key=lambda pair: (
+                int(pair[1].diagnostics.get("exit_ts_ms", asof_ms)),
+                str(pair[0]["symbol"]),
+                str(pair[0]["signal_id"]),
+            ),
+        ):
+            exit_ts_ms = int(result.diagnostics["exit_ts_ms"])
+            if order["shadow"]:
                 shadow_trades.append({
-                    "signal_id": item["signal_id"], "instrument_id": item["symbol"],
-                    "exit_ts_ms": int(item["exit_ts_ms"]), "net_pnl_usdt": result.net_pnl_usdt,
+                    "signal_id": order["signal_id"],
+                    "instrument_id": order["symbol"],
+                    "exit_ts_ms": exit_ts_ms,
+                    "net_pnl_usdt": result.net_pnl_usdt,
                     "veto_correct": result.net_pnl_usdt <= 0,
                     "source": "COUNTERFACTUAL_SHADOW",
                 })
@@ -198,30 +314,41 @@ def run_sandbox(
             totals["funding_usdt"] += result.funding_usdt
             totals["gross_pnl_usdt"] += float(result.diagnostics.get("gross_realized_pnl_usdt", 0.0))
             actual_trades.append({
-                "signal_id": item["signal_id"], "instrument_id": item["symbol"],
-                "direction": item["direction"], "entry_ts_ms": int(item["entry_ts_ms"]),
-                "exit_ts_ms": int(item["exit_ts_ms"]), "exit_reason": result.exit_reason,
-                "net_pnl_usdt": result.net_pnl_usdt, "fees_usdt": result.fees_usdt,
-                "funding_usdt": result.funding_usdt, "tp1_filled": result.tp1_filled,
+                "signal_id": order["signal_id"],
+                "instrument_id": order["symbol"],
+                "direction": order["direction"],
+                "entry_ts_ms": int(result.diagnostics["entry_ts_ms"]),
+                "exit_ts_ms": exit_ts_ms,
+                "exit_reason": result.exit_reason,
+                "net_pnl_usdt": result.net_pnl_usdt,
+                "fees_usdt": result.fees_usdt,
+                "funding_usdt": result.funding_usdt,
+                "tp1_filled": result.tp1_filled,
                 "net_rr_at_entry": result.net_rr_at_entry,
-                "model_decision": item["model_decision"],
+                "model_decision": order["model_decision"],
             })
-            last_results[item["symbol"]].append(1 if result.net_pnl_usdt > 0 else 0)
+            last_results[order["symbol"]].append(1 if result.net_pnl_usdt > 0 else 0)
             if result.net_pnl_usdt > 0:
                 counts["wins"] += 1
             else:
                 counts["losses"] += 1
-            if item["phase"] == "TRAIN" and int(item["exit_ts_ms"]) <= train_end_ms:
+            if order["phase"] == "TRAIN" and exit_ts_ms <= train_end_ms:
                 brain.add_finalized_outcome(
-                    signal_id=item["signal_id"], instrument_id=item["symbol"],
-                    candle_time_utc=datetime.fromtimestamp(item["entry_ts_ms"] / 1000, timezone.utc).isoformat(),
-                    features=item["features"], net_pnl_usdt=result.net_pnl_usdt,
-                    fees_complete=True, funding_complete=True, source="EXECUTED_TRAINING_TRADE",
+                    signal_id=order["signal_id"],
+                    instrument_id=order["symbol"],
+                    candle_time_utc=datetime.fromtimestamp(
+                        int(result.diagnostics["entry_ts_ms"]) / 1000, timezone.utc
+                    ).isoformat(),
+                    features=order["features"],
+                    net_pnl_usdt=result.net_pnl_usdt,
+                    fees_complete=True,
+                    funding_complete=True,
+                    source="EXECUTED_TRAINING_TRADE",
                 )
                 closed_training_trades += 1
 
-        # If the final eligible training outcome matures just after the boundary,
-        # train before the first validation signal, never on validation labels.
+        # Only matured TRAIN labels can update weights. Retry readiness checks
+        # during validation if a training trade crossed the calendar boundary.
         if phase != "TRAIN" and not brain.trained and closed_training_trades >= 100 and brain.examples:
             terminal_train_status = brain.train()
             if terminal_train_status.get("status") == "TRAINED":
@@ -238,7 +365,7 @@ def run_sandbox(
         for symbol in symbols:
             item = market[symbol]
             row_index = index_maps[symbol].get(stamp)
-            if row_index is None or row_index < 0 or row_index >= last_indices[symbol]:
+            if row_index is None or row_index < 0:
                 continue
             counts["strategy_checks"] += 1
             funding_rate = _known_funding_rate(item["funding"], asof_ms)
@@ -247,10 +374,12 @@ def run_sandbox(
             try:
                 signal = analyze_signal(
                     instrument_id=symbol,
-                    frame_1h=item["frames"]["1H"],
-                    frame_4h=item["frames"]["4H"],
-                    frame_15m=item["frames"]["15m"],
-                    btc_15m=market["BTC-USDT"]["frames"]["15m"],
+                    frame_1h=_visible_frame(item["frames"]["1H"], asof, pd.Timedelta(hours=1)),
+                    frame_4h=_visible_frame(item["frames"]["4H"], asof, pd.Timedelta(hours=4)),
+                    frame_15m=_visible_frame(item["frames"]["15m"], asof, pd.Timedelta(minutes=15)),
+                    btc_15m=_visible_frame(
+                        market["BTC-USDT"]["frames"]["15m"], asof, pd.Timedelta(minutes=15)
+                    ),
                     asof=asof,
                     funding_rate=funding_rate,
                     spread_fraction=spread_scenario,
@@ -264,7 +393,7 @@ def run_sandbox(
                 counts["no_trade_decisions"] += 1
                 continue
             counts["qualified_signals"] += 1
-            features = signal["features"]
+            features = dict(signal["features"])
             decision = brain.evaluate(features)
             if phase == "TRAIN":
                 model_decision, veto = "TRAINING_BASELINE", False
@@ -276,59 +405,52 @@ def run_sandbox(
                 counts["model_not_ready_signals"] += 1
             model_decisions[model_decision] += 1
 
-            bars = item["bars"]
-            entry_idx = row_index + 1
-            if entry_idx >= len(bars):
-                continue
-            entry_ts = int(bars[entry_idx]["ts"])
-            overlapping = [r for r in reservations if int(r["entry_ts_ms"]) <= entry_ts < int(r["exit_ts_ms"])]
-            if any(r["symbol"] == symbol for r in overlapping) or len(overlapping) >= 2:
-                counts["portfolio_or_duplicate_blocks"] += 1
-                continue
+            # Actual positions and pending actual entry limits share the strict
+            # two-slot portfolio cap. Counterfactual Shadow Book orders are
+            # tracked separately and never reserve live-simulation capacity.
+            if veto:
+                if any(x["symbol"] == symbol for x in shadow_orders):
+                    counts["shadow_duplicate_blocks"] += 1
+                    continue
+            else:
+                if any(x["symbol"] == symbol for x in active_orders) or len(active_orders) >= 2:
+                    counts["portfolio_or_duplicate_blocks"] += 1
+                    continue
 
-            try:
-                result = exchange.simulate_post_only_trade(
-                    bars=bars, start_index=row_index,
-                    direction=str(signal["signal"]), limit_price=signal["entry"],
-                    stop_price=signal["stop_loss"], target_price=signal["take_profit"],
-                    equity_usdt=equity, risk_fraction=0.0025,
-                    rules=item["rules"], funding_events=item["funding"],
-                    spread_fraction=spread_scenario,
-                )
-            except InsufficientEquityForRisk:
-                counts["min_qty_rejections"] += 1
-                counts["order_rejections"] += 1
-                continue
-            except SimulationError:
-                counts["simulation_data_rejections"] += 1
-                counts["order_rejections"] += 1
-                continue
-
-            if result.status == "UNFILLED":
-                counts["unfilled_limits"] += 1
-                continue
-            if result.status == "REJECTED":
-                counts["order_rejections"] += 1
-                continue
-            exit_ts = int(result.diagnostics["exit_ts_ms"])
-            entry_ts_real = int(result.diagnostics["entry_ts_ms"])
-            scheduled = {
-                "symbol": symbol, "signal_id": signal["signal_id"],
-                "direction": signal["signal"], "entry_ts_ms": entry_ts_real,
-                "exit_ts_ms": exit_ts, "features": dict(features),
-                "result": result, "shadow": bool(veto),
-                "phase": phase, "model_decision": model_decision,
+            order = {
+                "symbol": symbol,
+                "signal_id": signal["signal_id"],
+                "direction": signal["signal"],
+                "entry": signal["entry"],
+                "stop_loss": signal["stop_loss"],
+                "take_profit": signal["take_profit"],
+                "start_index": row_index,
+                "equity_snapshot": equity,
+                "features": features,
+                "phase": phase,
+                "model_decision": model_decision,
+                "shadow": bool(veto),
+                "entry_checked": False,
+                "submitted_ts_ms": asof_ms,
             }
             if veto:
                 counts["vetoed_signals"] += 1
-                results_due.append(scheduled)
+                shadow_orders.append(order)
             else:
-                counts["submitted_virtual_entries"] += 1
-                results_due.append(scheduled)
-                reservations.append({"symbol": symbol, "entry_ts_ms": entry_ts_real, "exit_ts_ms": exit_ts})
+                active_orders.append(order)
 
-    unresolved = [item for item in results_due if not item["shadow"]]
-    counts["unresolved_at_dataset_end"] = len(unresolved)
+    counts["unresolved_at_dataset_end"] = sum(1 for item in active_orders if item.get("entry_checked"))
+    counts["pending_entries_at_dataset_end"] = sum(1 for item in active_orders if not item.get("entry_checked"))
+    counts["shadow_unresolved_at_dataset_end"] = len(shadow_orders)
+    unresolved_positions = [
+        {
+            "signal_id": item["signal_id"],
+            "instrument_id": item["symbol"],
+            "status": item.get("last_status", "ENTRY_PENDING"),
+            "last_observed_through_ts_ms": item.get("last_observed_through_ts_ms"),
+        }
+        for item in active_orders
+    ]
     if brain.trained:
         brain.save_json(brain_path)
 
@@ -365,6 +487,8 @@ def run_sandbox(
             "state_sync_mismatches": None,
             "state_sync_note": "Not applicable: offline simulator has no exchange state to reconcile.",
             "unresolved_at_dataset_end": counts["unresolved_at_dataset_end"],
+            "pending_entries_at_dataset_end": counts["pending_entries_at_dataset_end"],
+            "shadow_unresolved_at_dataset_end": counts["shadow_unresolved_at_dataset_end"],
         },
         "ai_audit": {
             "model_version": "csr-online-meta-sgd-v1", "trained": brain.trained,
@@ -381,6 +505,14 @@ def run_sandbox(
         "diagnostics": dict(counts),
         "trade_ledger": sorted(actual_trades, key=lambda x: x["exit_ts_ms"]),
         "shadow_ledger": sorted(shadow_trades, key=lambda x: x["exit_ts_ms"]),
+        "open_positions_at_dataset_end": unresolved_positions,
+        "lookahead_audit": {
+            "policy": "BAR_BY_BAR_ASOF_CUTOFF",
+            "future_candles_passed_to_strategy": False,
+            "future_candles_passed_to_virtual_position": False,
+            "position_exit_time_pre_reserved": False,
+            "training_labels_used_only_after_exit_time": True,
+        },
     }
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
