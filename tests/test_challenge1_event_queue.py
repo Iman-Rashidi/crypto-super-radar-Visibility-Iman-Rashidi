@@ -5,7 +5,9 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
+from crypto_super_radar import challenge1_event_queue as queue_module
 from crypto_super_radar.challenge1_event_queue import (
     Challenge1EventQueue,
     Challenge1QueueError,
@@ -197,6 +199,16 @@ class Challenge1EventQueueTests(unittest.TestCase):
 
             self.assertFalse(errors)
             self.assertEqual(sum(item is not None for item in results), 1)
+
+
+    def test_shared_worker_mode_fails_closed_on_local_sqlite(self):
+        with patch.object(queue_module, "storage_backend", return_value="LOCAL_SQLITE"):
+            with self.assertRaisesRegex(Challenge1QueueError, "shared Turso storage is required"):
+                Challenge1EventQueue(require_shared_backend=True)
+
+    def test_shared_worker_mode_rejects_injected_local_connection(self):
+        with self.assertRaisesRegex(Challenge1QueueError, "shared Turso storage is required"):
+            Challenge1EventQueue(self.connection, require_shared_backend=True)
 
 
 if __name__ == "__main__":
