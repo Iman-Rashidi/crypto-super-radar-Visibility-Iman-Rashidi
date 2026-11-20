@@ -674,7 +674,14 @@ def run_sandbox(
     wins, losses = int(counts["wins"]), int(counts["losses"])
     total_closed = wins + losses
     gross_positive = sum(
-        max(0.0, float(trade["net_pnl_usdt"]) + float(trade["fees_usdt"]) + float(trade["funding_usdt"]))
+        max(
+            0.0,
+            float(trade["net_pnl_usdt"])
+            + float(trade["fees_usdt"])
+            + float(trade["funding_usdt"])
+            + float(trade["spread_cost_usdt"])
+            + float(trade["slippage_cost_usdt"]),
+        )
         for trade in actual_trades
     )
     fee_ratio = totals["fees_usdt"] / gross_positive if gross_positive > 0 else None
