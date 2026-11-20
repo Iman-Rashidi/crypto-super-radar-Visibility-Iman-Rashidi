@@ -1,6 +1,9 @@
 name: Wake Crypto Super Radar Staging
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     # Stay below Render Free's 15-minute idle threshold.
     # Offset from minute zero because GitHub documents schedule delays at peak load.
