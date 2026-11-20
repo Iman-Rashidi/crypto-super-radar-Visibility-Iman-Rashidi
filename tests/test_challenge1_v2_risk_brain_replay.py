@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 
 from crypto_super_radar.adaptive_brain import OnlineMetaBrain
-from crypto_super_radar.challenge1_v2 import _elliott_wave_1h_evidence, analyze_signal
+from crypto_super_radar.challenge1_v2 import (
+    _elliott_wave_1h_evidence,
+    analyze_signal,
+    challenge1_v2_execution_evidence_ready,
+)
 from crypto_super_radar.ai_sandbox import (
     SandboxDataError,
     _calibration_report,
@@ -437,6 +441,59 @@ class VirtualBloFinFundingKindTests(unittest.TestCase):
 
 class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
     @staticmethod
+    def _valid_signal_record():
+        frame = V2HigherTimeframeWaveEvidenceTests._wave_frame()
+        asof = frame.index[-1] + pd.Timedelta(hours=1)
+        side = "LONG"
+        signal_open = asof - pd.Timedelta(minutes=15)
+        h1_open = asof - pd.Timedelta(hours=1)
+        h4_open = asof - pd.Timedelta(hours=4)
+        wave = _elliott_wave_1h_evidence(
+            frame, asof, expected_direction=side,
+        )
+        symbol = "BTC-USDT"
+        signal_id = f"challenge1-v2:{symbol}:15m:{signal_open.isoformat()}:{side}"
+        return {
+            "signal": side,
+            "signal_id": signal_id,
+            "instrument_id": symbol,
+            "entry": 100.0,
+            "stop_loss": 99.0,
+            "take_profit": 102.4,
+            "gross_rr": 2.4,
+            "confidence_score": 85.0,
+            "score_parts": {
+                "h1_h4_alignment": 30, "adx_gt_28": 20,
+                "value_zone_rejection": 25, "volume_gt_1_5x": 0,
+                "btc_alignment": 10,
+            },
+            "funding_rate": 0.0001,
+            "spread_fraction": 0.0002,
+            "signal_candle_open_utc": signal_open.isoformat(),
+            "orders_submitted": False,
+            "regime": {
+                "status": "TREND", "direction": side,
+                "candle_open_utc": h1_open.isoformat(),
+                "candle_open_utc_4h": h4_open.isoformat(),
+                "aligned_4h": True,
+            },
+            "challenge1_v2_evidence": {
+                "decision_engine_version": "CHALLENGE_1_V2_1H_4H_15M",
+                "signal_id": signal_id, "instrument_id": symbol,
+                "setup_timeframe": "15m",
+                "context_timeframes": ["1H", "4H"],
+                "higher_timeframes_used": True,
+                "completed_candles_only": True,
+                "signal_candle_open_utc": signal_open.isoformat(),
+                "context_1h_candle_open_utc": h1_open.isoformat(),
+                "context_4h_candle_open_utc": h4_open.isoformat(),
+                "data_asof_utc": asof.isoformat(),
+                "elliott_wave": wave,
+                "wave_alignment": "ALIGNED",
+            },
+        }
+
+    @staticmethod
     def _wave_frame() -> pd.DataFrame:
         values = [
             100, 100, 120, 120, 110, 110, 140, 140,
@@ -482,6 +539,49 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
         ] * int(future.sum())
         mutated = _elliott_wave_1h_evidence(changed, asof, expected_direction="LONG")
         self.assertEqual(original, mutated)
+
+    def test_v2_execution_preflight_accepts_complete_aligned_evidence_without_authorizing_order(self):
+        record = self._valid_signal_record()
+        ready, reason = challenge1_v2_execution_evidence_ready(record)
+        self.assertTrue(ready, reason)
+        self.assertIn("independent AI consensus", reason)
+
+    def test_v2_execution_preflight_rejects_signal_id_mismatch(self):
+        record = self._valid_signal_record()
+        record["challenge1_v2_evidence"]["signal_id"] = "other-signal"
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_stale_15m_candle(self):
+        record = self._valid_signal_record()
+        evidence = record["challenge1_v2_evidence"]
+        asof = pd.Timestamp(evidence["data_asof_utc"]) + pd.Timedelta(minutes=31)
+        evidence["data_asof_utc"] = asof.isoformat()
+        evidence["elliott_wave"]["data_asof_utc"] = asof.isoformat()
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_opposed_wave(self):
+        record = self._valid_signal_record()
+        record["challenge1_v2_evidence"]["elliott_wave"]["pattern"] = "BEARISH"
+        record["challenge1_v2_evidence"]["wave_alignment"] = "OPPOSED"
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_missing_4h_context(self):
+        record = self._valid_signal_record()
+        record["challenge1_v2_evidence"]["context_4h_candle_open_utc"] = None
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_order_side_effect_flag(self):
+        record = self._valid_signal_record()
+        record["orders_submitted"] = True
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
+
+    def test_v2_execution_preflight_rejects_future_pivot_confirmation(self):
+        record = self._valid_signal_record()
+        evidence = record["challenge1_v2_evidence"]
+        evidence["elliott_wave"]["pivots"][-1]["confirmed_at"] = (
+            pd.Timestamp(evidence["data_asof_utc"]) + pd.Timedelta(minutes=1)
+        ).isoformat()
+        self.assertFalse(challenge1_v2_execution_evidence_ready(record)[0])
 
     def test_opposite_wave_direction_is_reported_as_opposed(self):
         frame = self._wave_frame()
