@@ -314,12 +314,32 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
             return False, "V2 Elliott pivot chronology violates the as-of boundary."
         previous_pivot, previous_confirmation = pivot_time, confirmed_at
 
+    if (
+        record.get("funding_kind") != "0"
+        or evidence.get("funding_kind") != "0"
+        or evidence.get("funding_rate") != record.get("funding_rate")
+        or evidence.get("funding_event_time_ms") != record.get("funding_event_time_ms")
+        or evidence.get("funding_max_age_ms") != record.get("funding_max_age_ms")
+    ):
+        return False, "V2 funding type/rate proof is missing or inconsistent."
+    funding_time_ms = record.get("funding_event_time_ms")
+    funding_max_age_ms = record.get("funding_max_age_ms")
+    if (
+        isinstance(funding_time_ms, bool) or not isinstance(funding_time_ms, int)
+        or funding_time_ms <= 0
+        or isinstance(funding_max_age_ms, bool) or not isinstance(funding_max_age_ms, int)
+        or funding_max_age_ms <= 0
+    ):
+        return False, "V2 funding event timestamp or freshness contract is invalid."
+    funding_age_ms = int(asof.timestamp() * 1000) - funding_time_ms
+    if funding_age_ms < 0 or funding_age_ms > funding_max_age_ms:
+        return False, "V2 funding event is future-dated or stale."
+
     try:
         entry = float(record.get("entry"))
         stop = float(record.get("stop_loss"))
         target = float(record.get("take_profit"))
         score = float(record.get("confidence_score"))
-        gross_rr = float(record.get("gross_rr"))
         funding = float(record.get("funding_rate"))
         spread = float(record.get("spread_fraction"))
     except (TypeError, ValueError, OverflowError):
@@ -353,7 +373,9 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
 def analyze_signal(
     *, instrument_id: str, frame_1h: pd.DataFrame, frame_4h: pd.DataFrame,
     frame_15m: pd.DataFrame, btc_15m: pd.DataFrame, asof: pd.Timestamp,
-    funding_rate: float | None, spread_fraction: float | None,
+    funding_rate: float | None, funding_kind: str | int | None,
+    funding_event_time_ms: int | None, funding_max_age_ms: int | None,
+    spread_fraction: float | None,
     last_three_results: tuple[int, int, int] = (-1, -1, -1),
     tp_r: float = 2.4,
 ) -> dict[str, Any]:
@@ -367,6 +389,21 @@ def analyze_signal(
         return {"signal": "NO_TRADE", "reason": regime.get("reason"), "regime": regime}
     if funding_rate is None or spread_fraction is None:
         return {"signal": "NO_TRADE", "reason": "Funding or spread estimate is missing; no zero assumption", "regime": regime}
+    if str(funding_kind or "").strip() != "0":
+        return {"signal": "NO_TRADE", "reason": "Regular fundingKind=0 proof is missing or unsupported", "regime": regime}
+    if (
+        isinstance(funding_event_time_ms, bool)
+        or not isinstance(funding_event_time_ms, int)
+        or funding_event_time_ms <= 0
+        or isinstance(funding_max_age_ms, bool)
+        or not isinstance(funding_max_age_ms, int)
+        or funding_max_age_ms <= 0
+    ):
+        return {"signal": "NO_TRADE", "reason": "Funding event timestamp or freshness contract is missing", "regime": regime}
+    asof_ms = int(asof.timestamp() * 1000)
+    funding_age_ms = asof_ms - funding_event_time_ms
+    if funding_age_ms < 0 or funding_age_ms > funding_max_age_ms:
+        return {"signal": "NO_TRADE", "reason": "Funding event is future-dated or stale", "regime": regime}
     funding = float(funding_rate)
     spread = float(spread_fraction)
     if not math.isfinite(funding) or not math.isfinite(spread) or spread < 0 or spread > 0.0004:
@@ -475,6 +512,10 @@ def analyze_signal(
         "context_1h_candle_open_utc": regime.get("candle_open_utc"),
         "context_4h_candle_open_utc": regime.get("candle_open_utc_4h"),
         "data_asof_utc": asof.isoformat(),
+        "funding_rate": funding,
+        "funding_kind": "0",
+        "funding_event_time_ms": funding_event_time_ms,
+        "funding_max_age_ms": funding_max_age_ms,
         "elliott_wave": wave_evidence,
         "wave_alignment": wave_evidence["wave_alignment"],
     }
@@ -486,7 +527,10 @@ def analyze_signal(
         "regime": regime, "volume_ratio": volume_ratio, "rsi_15m": rsi_value,
         "elliott_wave_1h": wave_evidence,
         "challenge1_v2_evidence": v2_evidence,
-        "funding_rate": funding, "spread_fraction": spread,
+        "funding_rate": funding, "funding_kind": "0",
+        "funding_event_time_ms": funding_event_time_ms,
+        "funding_max_age_ms": funding_max_age_ms,
+        "spread_fraction": spread,
         "signal_candle_open_utc": signal_time, "features": features,
         "orders_submitted": False,
     }
