@@ -201,10 +201,14 @@ def normalize_blofin_demo_futures_message(
         payload_data = {
             "trade_id": str(trade_id).strip(),
             "price": trade_price,
-            "contract_size": contract_size,
-            "contract_value": multiplier,
-            "base_quantity": base_quantity,
-            "aggressor_side": side.upper(),
+            "reported_size": contract_size,
+            "contract_value_base_per_contract": multiplier,
+            "base_quantity_estimate": base_quantity,
+            "quantity_basis": "REPORTED_SIZE_X_PUBLIC_CONTRACT_VALUE",
+            # BloFin documents buy/sell as trade direction; it does not explicitly
+            # define this public field as taker/aggressor side. Do not map to CVD.
+            "reported_side": side.upper(),
+            "aggressor_side_semantics": "NOT_ESTABLISHED_DO_NOT_USE_FOR_CVD",
         }
         events.append({
             "event_id": _event_id(channel, [str(trade_id).strip()]),

@@ -9,6 +9,7 @@ from crypto_super_radar.blofin_demo_futures_ws import (
     BloFinDemoFuturesPublicEventStore,
     BloFinDemoFuturesPublicWorker,
     BloFinDemoWebSocketError,
+    demo_futures_public_websocket_stream,
     build_public_subscription,
     normalize_blofin_demo_futures_message,
 )
@@ -49,10 +50,12 @@ class BloFinDemoFuturesNormalizationTests(unittest.TestCase):
             "size": "12", "side": "buy", "ts": "1800000000050",
         }])
         event = result["events"][0]
-        self.assertEqual(event["payload"]["contract_size"], 12.0)
-        self.assertEqual(event["payload"]["contract_value"], 0.01)
-        self.assertAlmostEqual(event["payload"]["base_quantity"], 0.12)
-        self.assertEqual(event["payload"]["aggressor_side"], "BUY")
+        self.assertEqual(event["payload"]["reported_size"], 12.0)
+        self.assertEqual(event["payload"]["contract_value_base_per_contract"], 0.01)
+        self.assertAlmostEqual(event["payload"]["base_quantity_estimate"], 0.12)
+        self.assertEqual(event["payload"]["reported_side"], "BUY")
+        self.assertEqual(event["payload"]["aggressor_side_semantics"], "NOT_ESTABLISHED_DO_NOT_USE_FOR_CVD")
+        self.assertNotIn("aggressor_side", event["payload"])
         self.assertEqual(event["event_time_ms"], 1_800_000_000_050)
 
     def test_trade_rejects_wrong_instrument_or_missing_side(self):
@@ -115,6 +118,96 @@ class BloFinDemoFuturesNormalizationTests(unittest.TestCase):
         ])["events"]
         self.assertFalse(forming["payload"]["confirmed"])
         self.assertTrue(closed["payload"]["confirmed"])
+
+
+class BloFinDemoPublicWebSocketHeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_sends_text_ping_and_consumes_pong(self):
+        import websockets
+        from unittest.mock import patch
+
+        class FakeSocket:
+            def __init__(self):
+                self.queue = asyncio.Queue()
+                self.sent = []
+
+            async def send(self, message):
+                self.sent.append(message)
+                if message == "ping":
+                    await self.queue.put("pong")
+
+            async def recv(self):
+                return await self.queue.get()
+
+        class FakeConnection:
+            def __init__(self, socket):
+                self.socket = socket
+            async def __aenter__(self):
+                return self.socket
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        socket = FakeSocket()
+        socket.queue.put_nowait(json.dumps({
+            "event": "subscribe",
+            "arg": {"channel": "trades", "instId": "BTC-USDT"},
+        }))
+        ticker = {
+            "arg": {"channel": "tickers", "instId": "BTC-USDT"},
+            "data": [{
+                "instId": "BTC-USDT", "last": "65000", "lastSize": "1",
+                "askPrice": "65001", "askSize": "2",
+                "bidPrice": "64999", "bidSize": "3", "ts": "1800000000000",
+            }],
+        }
+        with patch.object(websockets, "connect", return_value=FakeConnection(socket)):
+            stream = demo_futures_public_websocket_stream(
+                "BTC-USDT", channels=("trades",),
+                heartbeat_interval_seconds=0.01, pong_timeout_seconds=0.1,
+            )
+            first = await asyncio.wait_for(anext(stream), timeout=0.2)
+            self.assertIn('"op":"subscribe"', socket.sent[0])
+            self.assertIn('"channel":"trades"', socket.sent[0])
+            next_item = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0.04)
+            self.assertIn("ping", socket.sent)
+            await socket.queue.put(json.dumps(ticker))
+            raw = await asyncio.wait_for(next_item, timeout=0.2)
+            self.assertEqual(json.loads(raw)["arg"]["channel"], "tickers")
+            await stream.aclose()
+
+    async def test_stream_fails_when_text_pong_is_not_received(self):
+        import websockets
+        from unittest.mock import patch
+
+        class FakeSocket:
+            def __init__(self):
+                self.queue = asyncio.Queue()
+                self.sent = []
+            async def send(self, message):
+                self.sent.append(message)
+            async def recv(self):
+                return await self.queue.get()
+
+        class FakeConnection:
+            def __init__(self, socket): self.socket = socket
+            async def __aenter__(self): return self.socket
+            async def __aexit__(self, exc_type, exc, tb): return False
+
+        socket = FakeSocket()
+        socket.queue.put_nowait(json.dumps({
+            "event": "subscribe",
+            "arg": {"channel": "trades", "instId": "BTC-USDT"},
+        }))
+        with patch.object(websockets, "connect", return_value=FakeConnection(socket)):
+            stream = demo_futures_public_websocket_stream(
+                "BTC-USDT", channels=("trades",),
+                heartbeat_interval_seconds=0.01, pong_timeout_seconds=0.02,
+            )
+            await asyncio.wait_for(anext(stream), timeout=0.2)
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(anext(stream), timeout=0.2)
+            self.assertIn("ping", socket.sent)
+            await stream.aclose()
 
 
 class BloFinDemoPublicEventStoreTests(unittest.TestCase):
