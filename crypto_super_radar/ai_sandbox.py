@@ -496,6 +496,8 @@ def run_sandbox(
     last_results: dict[str, deque[int]] = {symbol: deque([-1, -1, -1], maxlen=3) for symbol in symbols}
     actual_trades: list[dict[str, Any]] = []
     shadow_trades: list[dict[str, Any]] = []
+    unknown_pnl_trades: list[dict[str, Any]] = []
+    unknown_shadow_pnl_trades: list[dict[str, Any]] = []
     closed_training_trades = 0
     training_candle_count = 0
     last_train_candle = 0
@@ -584,6 +586,8 @@ def run_sandbox(
                         survivors.append(order)
                     elif not is_shadow:
                         counts["order_rejections"] += 1
+                        if result.exit_reason == "FUNDING_DATA_GAP_BLACKOUT":
+                            counts["funding_blackout_fill_entry_blocks"] += 1
                     continue
 
                 if not order.get("entry_checked"):
@@ -603,8 +607,33 @@ def run_sandbox(
                     survivors.append(order)
                     continue
 
-                # Unknown simulator states remain reserved and cannot be
-                # silently counted as a close or as a successful outcome.
+                # A price-confirmed close with an unobservable funding charge
+                # releases capacity, but its net PnL remains UNKNOWN.
+                if result.status == "UNKNOWN" and result.diagnostics.get("position_closed") is True:
+                    record = {
+                        "signal_id": order["signal_id"],
+                        "instrument_id": order["symbol"],
+                        "direction": order["direction"],
+                        "phase": order["phase"],
+                        "model_decision": order["model_decision"],
+                        "entry_ts_ms": result.diagnostics.get("entry_ts_ms"),
+                        "exit_ts_ms": result.diagnostics.get("exit_ts_ms"),
+                        "market_exit_reason": result.diagnostics.get("market_exit_reason"),
+                        "unknown_reason": result.diagnostics.get("pnl_unknown_reason"),
+                        "net_pnl_usdt": None,
+                        "fees_usdt": result.fees_usdt,
+                        "known_funding_usdt": result.funding_usdt,
+                        "funding_blackouts": result.diagnostics.get("funding_blackouts", []),
+                    }
+                    if is_shadow:
+                        unknown_shadow_pnl_trades.append(record)
+                        counts["funding_blackout_closed_shadow_pnl_unknown"] += 1
+                    else:
+                        unknown_pnl_trades.append(record)
+                        counts["funding_blackout_closed_pnl_unknown"] += 1
+                    continue
+
+                # Unknown states without a confirmed price exit remain reserved.
                 counts["unknown_simulator_states"] += 1
                 order["last_error"] = f"UNKNOWN_SIMULATOR_STATUS:{result.status}"
                 order["last_status"] = result.exit_reason or "UNKNOWN"
@@ -950,6 +979,9 @@ def run_sandbox(
         "trade_metrics": {
             "closed_trades": total_closed, "wins": wins, "losses": losses,
             "funding_blackout_new_entry_blocks": counts["funding_blackout_new_entry_blocks"],
+            "funding_blackout_fill_entry_blocks": counts["funding_blackout_fill_entry_blocks"],
+            "funding_blackout_closed_pnl_unknown": counts["funding_blackout_closed_pnl_unknown"],
+            "funding_blackout_closed_shadow_pnl_unknown": counts["funding_blackout_closed_shadow_pnl_unknown"],
             "funding_blackout_unresolved_positions": counts["funding_blackout_unresolved_positions"],
             "net_win_rate_pct": (wins / total_closed * 100.0) if total_closed else None,
             "gross_pnl_before_costs_usdt": totals["gross_pnl_usdt"],
@@ -1012,6 +1044,8 @@ def run_sandbox(
         "shadow_ledger": sorted(shadow_trades, key=lambda x: x["exit_ts_ms"]),
         "open_positions_at_dataset_end": unresolved_positions,
         "open_shadow_positions_at_dataset_end": unresolved_shadow_positions,
+        "closed_positions_with_unknown_net_pnl": unknown_pnl_trades,
+        "closed_shadow_positions_with_unknown_net_pnl": unknown_shadow_pnl_trades,
         "walk_forward_audit": {
             "train_start_utc": start_time.isoformat(),
             "train_end_utc": train_end.isoformat(),
@@ -1029,6 +1063,8 @@ def run_sandbox(
                 and counts["unresolved_at_dataset_end"] == 0
                 and counts["pending_entries_at_dataset_end"] == 0
                 and counts["shadow_unresolved_at_dataset_end"] == 0
+                 and counts["funding_blackout_closed_pnl_unknown"] == 0
+                 and counts["funding_blackout_closed_shadow_pnl_unknown"] == 0
                 else "BLOCKED"
             ),
             "model_frozen_after_training": True,
