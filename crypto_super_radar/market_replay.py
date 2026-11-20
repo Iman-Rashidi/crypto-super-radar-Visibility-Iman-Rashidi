@@ -1,0 +1,303 @@
+"""Download public BloFin Demo historical data into a local SQLite replay store.
+
+Only public market-data endpoints are used. No API key, no order-write method,
+and no Live account endpoint is included. The public candle API allows up to
+1,440 rows per page; pagination walks backward using the after timestamp.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Mapping
+
+import requests
+
+DEMO_REST_URL = "https://demo-trading-openapi.blofin.com"
+CANDLE_PATH = "/api/v1/market/candles"
+MARK_CANDLE_PATH = "/api/v1/market/mark-price-candles"
+FUNDING_PATH = "/api/v1/market/funding-rate-history"
+INSTRUMENTS_PATH = "/api/v1/market/instruments"
+DEFAULT_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
+BAR_MS = {"15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
+
+
+class ReplayDownloadError(RuntimeError):
+    pass
+
+
+def _utc_ms(value: datetime) -> int:
+    if value.tzinfo is None:
+        raise ValueError("datetime must be timezone-aware")
+    return int(value.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def _json_get(session: requests.Session, url: str, params: Mapping[str, Any], *, timeout: float = 15.0) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(5):
+        try:
+            response = session.get(url, params=params, timeout=timeout, allow_redirects=False)
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = max(float(retry_after or 0), 0.5 * (2 ** attempt))
+                except ValueError:
+                    delay = 0.5 * (2 ** attempt)
+                time.sleep(min(delay, 20.0))
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+                raise ReplayDownloadError(f"BloFin public API rejected request: {payload!r}")
+            return payload
+        except (requests.RequestException, ValueError, ReplayDownloadError) as exc:
+            last_error = exc
+            if isinstance(exc, ReplayDownloadError):
+                break
+            if attempt < 4:
+                time.sleep(min(0.5 * (2 ** attempt), 8.0))
+    raise ReplayDownloadError(f"BloFin public data request failed: {type(last_error).__name__ if last_error else 'unknown'}")
+
+
+def _parse_candle(row: Any, *, inst_id: str, bar: str, source: str) -> tuple[Any, ...] | None:
+    minimum_columns = 6 if source == "MARK" else 9
+    if not isinstance(row, (list, tuple)) or len(row) < minimum_columns:
+        return None
+    try:
+        ts = int(row[0])
+        values = [float(row[i]) for i in range(1, 5)]
+        volume = float(row[5]) if source != "MARK" else 0.0
+        confirm = str(row[8] if source != "MARK" else row[5])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    open_, high, low, close = values
+    if confirm != "1" or ts <= 0 or min(open_, high, low, close) <= 0 or volume < 0:
+        return None
+    if high < max(open_, close, low) or low > min(open_, close, high):
+        return None
+    return (inst_id, bar, ts, open_, high, low, close, volume, confirm, source, json.dumps(list(row), separators=(",", ":")))
+
+
+def download_candles(
+    inst_id: str,
+    bar: str,
+    *,
+    months: int = 6,
+    mark_price: bool = False,
+    session: requests.Session | None = None,
+    base_url: str = DEMO_REST_URL,
+    page_size: int = 1440,
+) -> list[tuple[Any, ...]]:
+    """Fetch confirmed bars from the requested lookback window.
+
+    BloFin returns descending data. Duplicate timestamps are collapsed, and
+    only confirmed bars are retained. If pagination stops making progress,
+    the function fails instead of pretending the requested range is complete.
+    """
+    symbol = str(inst_id or "").strip().upper()
+    if symbol not in DEFAULT_SYMBOLS:
+        raise ValueError("instrument is not in the approved Challenge 1 watchlist")
+    if bar not in BAR_MS or not 1 <= months <= 12 or not 1 <= page_size <= 1440:
+        raise ValueError("unsupported bar/months/page_size")
+    sess = session or requests.Session()
+    start_ms = _utc_ms(datetime.now(timezone.utc) - timedelta(days=30 * months))
+    path = MARK_CANDLE_PATH if mark_price else CANDLE_PATH
+    url = base_url.rstrip("/") + path
+    cursor: int | None = None
+    seen: dict[int, tuple[Any, ...]] = {}
+    previous_oldest: int | None = None
+    for _ in range(200):
+        params: dict[str, Any] = {"instId": symbol, "bar": bar, "limit": page_size}
+        if cursor is not None:
+            params["after"] = cursor
+        payload = _json_get(sess, url, params)
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise ReplayDownloadError("candle endpoint returned a non-list data field")
+        parsed = [item for raw in rows if (item := _parse_candle(raw, inst_id=symbol, bar=bar, source="MARK" if mark_price else "LAST"))]
+        if not parsed:
+            break
+        for item in parsed:
+            if item[2] >= start_ms:
+                seen[int(item[2])] = item
+        oldest = min(int(item[2]) for item in parsed)
+        if oldest <= start_ms:
+            break
+        if previous_oldest is not None and oldest >= previous_oldest:
+            raise ReplayDownloadError("candle pagination did not move backward; refusing incomplete replay data")
+        previous_oldest = oldest
+        cursor = oldest
+        if len(rows) < page_size:
+            break
+    else:
+        raise ReplayDownloadError("candle pagination exceeded the safety page limit")
+    if not seen:
+        raise ReplayDownloadError(f"no completed candles downloaded for {symbol} {bar}")
+    result = [seen[key] for key in sorted(seen)]
+    interval = BAR_MS[bar]
+    gaps = [b[2] - a[2] for a, b in zip(result, result[1:]) if b[2] - a[2] != interval]
+    if gaps:
+        raise ReplayDownloadError(f"historical candle series contains {len(gaps)} missing {bar} intervals")
+    return result
+
+
+def download_instrument_rules(
+    inst_id: str, *, session: requests.Session | None = None,
+    base_url: str = DEMO_REST_URL,
+) -> dict[str, Any]:
+    symbol = str(inst_id or "").strip().upper()
+    if symbol not in DEFAULT_SYMBOLS:
+        raise ValueError("instrument is not in the approved watchlist")
+    sess = session or requests.Session()
+    payload = _json_get(sess, base_url.rstrip("/") + INSTRUMENTS_PATH, {"instId": symbol})
+    rows = payload.get("data")
+    row = next((item for item in rows if isinstance(item, Mapping) and item.get("instId") == symbol), None) if isinstance(rows, list) else None
+    if row is None:
+        raise ReplayDownloadError(f"instrument metadata unavailable for {symbol}")
+    required = ("contractValue", "minSize", "lotSize", "tickSize", "contractType", "settleCurrency", "state")
+    missing = [key for key in required if row.get(key) in (None, "")]
+    if missing:
+        raise ReplayDownloadError(f"instrument metadata is incomplete for {symbol}: {missing}")
+    if str(row.get("contractType")).lower() != "linear" or str(row.get("settleCurrency")).upper() != "USDT" or str(row.get("state")).lower() != "live":
+        raise ReplayDownloadError(f"instrument {symbol} is not a live USDT linear contract")
+    return dict(row)
+
+
+def download_funding_rates(
+    inst_id: str,
+    *,
+    months: int = 6,
+    session: requests.Session | None = None,
+    base_url: str = DEMO_REST_URL,
+    page_size: int = 100,
+) -> list[tuple[Any, ...]]:
+    symbol = str(inst_id or "").strip().upper()
+    if symbol not in DEFAULT_SYMBOLS or not 1 <= months <= 12 or not 1 <= page_size <= 100:
+        raise ValueError("unsupported symbol/months/page_size")
+    sess = session or requests.Session()
+    start_ms = _utc_ms(datetime.now(timezone.utc) - timedelta(days=30 * months))
+    url = base_url.rstrip("/") + FUNDING_PATH
+    cursor: int | None = None
+    seen: dict[int, tuple[Any, ...]] = {}
+    previous_oldest: int | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {"instId": symbol, "limit": page_size}
+        if cursor is not None:
+            params["after"] = cursor
+        payload = _json_get(sess, url, params)
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise ReplayDownloadError("funding endpoint returned a non-list data field")
+        valid = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                ts, rate = int(row["fundingTime"]), float(row["fundingRate"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if ts > 0 and math_is_finite(rate):
+                valid.append((symbol, ts, rate, str(row.get("fundingKind") or "0")))
+        if not valid:
+            break
+        for item in valid:
+            if item[1] >= start_ms:
+                seen[item[1]] = item
+        oldest = min(item[1] for item in valid)
+        if oldest <= start_ms:
+            break
+        if previous_oldest is not None and oldest >= previous_oldest:
+            raise ReplayDownloadError("funding pagination did not move backward")
+        previous_oldest, cursor = oldest, oldest
+        if len(rows) < page_size:
+            break
+    else:
+        raise ReplayDownloadError("funding pagination exceeded the safety page limit")
+    return [seen[key] for key in sorted(seen)]
+
+
+def math_is_finite(value: float) -> bool:
+    return value == value and abs(value) != float("inf")
+
+
+def initialise_store(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS replay_candles (
+            instrument_id TEXT NOT NULL, bar TEXT NOT NULL, ts INTEGER NOT NULL,
+            open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+            volume REAL NOT NULL, confirm TEXT NOT NULL, source TEXT NOT NULL, raw_json TEXT NOT NULL,
+            PRIMARY KEY(instrument_id,bar,ts,source)
+        );
+        CREATE TABLE IF NOT EXISTS replay_instruments (
+            instrument_id TEXT PRIMARY KEY, fetched_at_utc TEXT NOT NULL, raw_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS replay_funding (
+            instrument_id TEXT NOT NULL, funding_time INTEGER NOT NULL,
+            funding_rate REAL NOT NULL, funding_kind TEXT NOT NULL,
+            PRIMARY KEY(instrument_id,funding_time)
+        );
+    """)
+    connection.commit()
+
+
+def save_replay(connection: sqlite3.Connection, candles: list[tuple[Any, ...]], funding: list[tuple[Any, ...]], instrument: Mapping[str, Any] | None = None) -> None:
+    with connection:
+        connection.executemany(
+            """INSERT OR REPLACE INTO replay_candles
+               (instrument_id,bar,ts,open,high,low,close,volume,confirm,source,raw_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""", candles,
+        )
+        if instrument is not None:
+            connection.execute(
+                "INSERT OR REPLACE INTO replay_instruments(instrument_id,fetched_at_utc,raw_json) VALUES(?,?,?)",
+                (str(instrument["instId"]), datetime.now(timezone.utc).isoformat(), json.dumps(dict(instrument), sort_keys=True)),
+            )
+        connection.executemany(
+            """INSERT OR REPLACE INTO replay_funding
+               (instrument_id,funding_time,funding_rate,funding_kind)
+               VALUES (?,?,?,?)""", funding,
+        )
+
+
+def download_watchlist(*, db_path: str, months: int = 6, symbols: tuple[str, ...] = DEFAULT_SYMBOLS) -> dict[str, Any]:
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(path))
+    initialise_store(connection)
+    report: dict[str, Any] = {"db_path": str(path), "environment": "BLOFIN_DEMO_PUBLIC_DATA", "symbols": {}}
+    try:
+        for symbol in symbols:
+            result: dict[str, Any] = {}
+            all_candles: list[tuple[Any, ...]] = []
+            for bar in ("15m", "1H", "4H"):
+                rows = download_candles(symbol, bar, months=months)
+                all_candles.extend(rows)
+                result[bar] = len(rows)
+            marks = download_candles(symbol, "15m", months=months, mark_price=True)
+            all_candles.extend(marks)
+            funding = download_funding_rates(symbol, months=months)
+            instrument = download_instrument_rules(symbol)
+            save_replay(connection, all_candles, funding, instrument)
+            result["MARK_15m"] = len(marks)
+            result["funding"] = len(funding)
+            report["symbols"][symbol] = result
+    finally:
+        connection.close()
+    return report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Download BloFin Demo public replay data; no credentials and no order writes")
+    parser.add_argument("--months", type=int, default=6)
+    parser.add_argument("--db", default="data/blofin_replay.sqlite3")
+    args = parser.parse_args()
+    print(json.dumps(download_watchlist(db_path=args.db, months=args.months), indent=2))
+
+
+if __name__ == "__main__":
+    main()
