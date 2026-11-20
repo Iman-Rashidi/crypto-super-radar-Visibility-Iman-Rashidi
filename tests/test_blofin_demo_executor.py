@@ -333,7 +333,7 @@ class FakeResponse:
         return self.payload
 
 
-class BloFinDemoOrderPlanTests(unittest.TestCase):
+class BloFinDemoV2OrderPlanTests(unittest.TestCase):
     def test_v2_plan_accepts_only_its_own_multitimeframe_evidence_contract(self):
         record = v2_signal_record()
         ready, reason = _challenge1_two_reviewer_approval_ready(record)
@@ -371,24 +371,28 @@ class BloFinDemoOrderPlanTests(unittest.TestCase):
         self.assertIn("different signal", reason)
 
     def test_v2_event_journal_keeps_multitimeframe_funding_and_reviewer_evidence(self):
+        store = BloFinDemoEventStore(":memory:")
         record = v2_signal_record()
-        experience_id = self.store.record_challenge1_v2_decision(
-            instrument_id="BTC-USDT", challenge_record=record,
-        )
-        self.assertEqual(
-            experience_id,
-            self.store.record_challenge1_v2_decision(
+        try:
+            experience_id = store.record_challenge1_v2_decision(
                 instrument_id="BTC-USDT", challenge_record=record,
-            ),
-        )
-        self.assertEqual(self.store.learning_memory.verify_experience(experience_id)["status"], "PASS")
-        experience = self.store.learning_memory.get_experience(experience_id)
-        snapshot = experience["events"][0]["payload"]["input_snapshot"]
-        self.assertEqual(snapshot["setup_timeframe"], "15m")
-        self.assertEqual(snapshot["context_timeframes"], ["1H", "4H"])
-        self.assertEqual(snapshot["funding_kind"], "0")
-        self.assertEqual(len(snapshot["ai_reviews"]), 2)
-        self.assertEqual(snapshot["challenge1_v2_evidence"]["signal_id"], record["signal_id"])
+            )
+            self.assertEqual(
+                experience_id,
+                store.record_challenge1_v2_decision(
+                    instrument_id="BTC-USDT", challenge_record=record,
+                ),
+            )
+            self.assertEqual(store.learning_memory.verify_experience(experience_id)["status"], "PASS")
+            experience = store.learning_memory.get_experience(experience_id)
+            snapshot = experience["events"][0]["payload"]["input_snapshot"]
+            self.assertEqual(snapshot["setup_timeframe"], "15m")
+            self.assertEqual(snapshot["context_timeframes"], ["1H", "4H"])
+            self.assertEqual(snapshot["funding_kind"], "0")
+            self.assertEqual(len(snapshot["ai_reviews"]), 2)
+            self.assertEqual(snapshot["challenge1_v2_evidence"]["signal_id"], record["signal_id"])
+        finally:
+            store.close()
 
 class BloFinDemoOrderPlanTests(unittest.TestCase):
     def test_four_concurrent_positions_is_supported_but_five_is_rejected(self):
@@ -1351,7 +1355,7 @@ class FakeExecutorClient:
         return self.order_response
 
 
-class BloFinDemoExecutorTests(unittest.TestCase):
+class BloFinDemoV2ExecutorTests(unittest.TestCase):
     def test_v2_executor_blocks_missing_reviewer_before_any_exchange_call_or_reservation(self):
         store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
