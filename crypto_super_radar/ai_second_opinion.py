@@ -961,10 +961,51 @@ def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
     }
 
 
+def _v2_prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
+    side = str(evidence.get("expected_side") or "").upper()
+    wave = evidence.get("elliott_wave_1h") or {}
+    funding = evidence.get("funding") or {}
+    system = (
+        "You are an independent multi-timeframe quant reviewer for a Demo-only research system. "
+        "This is CHALLENGE_1_V2, not the legacy 5m challenge. Review only the supplied completed "
+        "15m setup candles and 1H/4H context candles. The 1H timeframe contains the deterministic "
+        "Elliott structure. Check chronology, candle geometry, 1H/4H regime alignment, 15m trigger, "
+        "volume, Funding event classification and protective price geometry. "
+        "Do not invent a candle, pivot, Funding event, account balance, fill or execution result. "
+        "Do not use unclosed/future candles, news, social sentiment, whale/on-chain data or any "
+        "timeframe not present in the evidence. Funding is usable only when funding_kind is exactly "
+        "0; kind 1 is a stock-dividend event and must not be treated as regular Funding. "
+        "The Elliott analyst must echo the exact supplied phase and direction. If wave evidence is "
+        "ambiguous, stale, opposed to the expected side or not confirmed, do not approve. "
+        "You have no account, exchange or order tools. Never submit, cancel or modify an order. "
+        "Expected side: " + side + ". Supplied 1H wave phase: "
+        + str(wave.get("phase") or "UNKNOWN") + ". Supplied 1H wave direction: "
+        + str(wave.get("direction") or "AMBIGUOUS") + ". Funding kind: "
+        + str(funding.get("funding_kind") or "MISSING") + ". "
+        "Return exactly one JSON object and no markdown, using this schema: "
+        '{"multi_timeframe_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"price_action_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"wave_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","phase":"exact supplied phase","direction":"exact supplied direction","reason_fa":"..."},'
+        '"timeframe_analyst":{"verdict":"SUPPORT|OPPOSE|UNCERTAIN","reason_fa":"..."},'
+        '"trader":{"proposal":"LONG|SHORT|NO_TRADE","reason_fa":"..."},'
+        '"risk_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
+        '"portfolio_manager":{"verdict":"APPROVE|REJECT|INSUFFICIENT_DATA","reason_fa":"..."},'
+        '"final_decision":"APPROVE|REJECT|INSUFFICIENT_DATA","risk_flags":["..."],"rationale_fa":"..."'
+        "}. Every field must be grounded in the supplied data. Missing or conflicting evidence means "
+        "UNCERTAIN/INSUFFICIENT_DATA, never APPROVE."
+    )
+    user = "Review only this sanitized CHALLENGE_1_V2 evidence:\\n" + json.dumps(
+        evidence, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     perpetual = evidence.get("market_type") == "perpetual"
     expected_side = str(evidence.get("expected_side") or "LONG").upper()
     execution_profile = str(evidence.get("execution_profile") or "STRICT").upper()
+    if execution_profile == "CHALLENGE_1_V2" and evidence.get("review_mode") == "V2_MULTI_TIMEFRAME_REVIEW":
+        return _v2_prompt_messages(evidence)
     if execution_profile == "CHALLENGE_1" and evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW":
         return _pattern_prompt_messages(evidence)
     required_gate_ids = {
@@ -1204,6 +1245,146 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
             "error_type": known_error, "latency_ms": latency_ms,
             "paper_entry_eligible": False,
         }
+
+
+def _validated_v2_review(
+    document: dict[str, Any], model: str, asset: str, *, evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_side = str(evidence.get("expected_side") or "").upper()
+    wave = evidence.get("elliott_wave_1h")
+    wave = wave if isinstance(wave, Mapping) else {}
+    expected_phase = str(wave.get("phase") or "").upper()
+    expected_direction = str(wave.get("direction") or "").upper()
+    funding = evidence.get("funding")
+    funding = funding if isinstance(funding, Mapping) else {}
+    required = {
+        "multi_timeframe_analyst", "price_action_analyst", "wave_analyst",
+        "timeframe_analyst", "trader", "risk_manager", "portfolio_manager",
+    }
+    if (
+        expected_side not in {"LONG", "SHORT"}
+        or expected_phase not in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        or expected_direction not in {"BULLISH", "BEARISH"}
+        or expected_direction != ("BULLISH" if expected_side == "LONG" else "BEARISH")
+        or len(evidence.get("candles_15m") or []) != 30
+        or len(evidence.get("candles_1h") or []) != 30
+        or len(evidence.get("candles_4h") or []) != 30
+        or str(funding.get("funding_kind") or "") != "0"
+    ):
+        raise ValueError("Challenge 1 V2 multi-timeframe review input is incomplete")
+    if not isinstance(document, dict) or not required.issubset(document):
+        raise ValueError("Challenge 1 V2 specialist reviews are missing")
+    raw_flags = document.get("risk_flags")
+    if not isinstance(raw_flags, list) or len(raw_flags) > 8 or any(not isinstance(v, str) for v in raw_flags):
+        raise ValueError("Challenge 1 V2 risk flags have an invalid format")
+    risk_flags = [value.strip()[:180] for value in raw_flags if value.strip()]
+
+    cleaned: dict[str, dict[str, str]] = {}
+    for key in ("multi_timeframe_analyst", "price_action_analyst", "timeframe_analyst"):
+        view = document.get(key)
+        if not isinstance(view, Mapping):
+            raise ValueError("Challenge 1 V2 technical analyst response is invalid")
+        verdict = str(view.get("verdict") or "").upper()
+        reason = str(view.get("reason_fa") or "").strip()
+        if verdict not in {"SUPPORT", "OPPOSE", "UNCERTAIN"} or not reason:
+            raise ValueError("Challenge 1 V2 technical analyst verdict is invalid")
+        cleaned[key] = {"verdict": verdict, "reason_fa": reason[:360]}
+
+    wave_view = document.get("wave_analyst")
+    if not isinstance(wave_view, Mapping):
+        raise ValueError("Challenge 1 V2 Elliott analyst response is invalid")
+    wave_verdict = str(wave_view.get("verdict") or "").upper()
+    wave_phase = str(wave_view.get("phase") or "").upper()
+    wave_direction = str(wave_view.get("direction") or "").upper()
+    wave_reason = str(wave_view.get("reason_fa") or "").strip()
+    if (
+        wave_verdict not in {"SUPPORT", "OPPOSE", "UNCERTAIN"}
+        or not wave_reason or wave_phase != expected_phase
+        or wave_direction != expected_direction
+    ):
+        raise ValueError("Challenge 1 V2 Elliott response does not match supplied phase/direction")
+    cleaned["wave_analyst"] = {
+        "verdict": wave_verdict, "phase": wave_phase,
+        "direction": wave_direction, "reason_fa": wave_reason[:360],
+    }
+
+    trader, risk, portfolio = (
+        document.get("trader"), document.get("risk_manager"), document.get("portfolio_manager")
+    )
+    if not all(isinstance(item, Mapping) for item in (trader, risk, portfolio)):
+        raise ValueError("Challenge 1 V2 trader/risk response is invalid")
+    proposal = str(trader.get("proposal") or "").upper()
+    risk_verdict = str(risk.get("verdict") or "").upper()
+    portfolio_verdict = str(portfolio.get("verdict") or "").upper()
+    if (
+        proposal not in {"LONG", "SHORT", "NO_TRADE"}
+        or risk_verdict not in {"APPROVE", "REJECT", "INSUFFICIENT_DATA"}
+        or portfolio_verdict not in {"APPROVE", "REJECT", "INSUFFICIENT_DATA"}
+    ):
+        raise ValueError("Challenge 1 V2 trader/risk verdict is invalid")
+    for key, item, view in (
+        ("trader", trader, proposal),
+        ("risk_manager", risk, risk_verdict),
+        ("portfolio_manager", portfolio, portfolio_verdict),
+    ):
+        reason = str(item.get("reason_fa") or "").strip()
+        if not reason:
+            raise ValueError("Challenge 1 V2 specialist explanation is missing")
+        cleaned[key] = {"view": view, "reason_fa": reason[:360]}
+
+    final_decision = str(document.get("final_decision") or "INSUFFICIENT_DATA").upper()
+    if final_decision not in {"APPROVE", "REJECT", "INSUFFICIENT_DATA"}:
+        raise ValueError("Challenge 1 V2 final decision is invalid")
+    expected_wave = "BULLISH" if expected_side == "LONG" else "BEARISH"
+    approved = (
+        final_decision == "APPROVE"
+        and cleaned["multi_timeframe_analyst"]["verdict"] == "SUPPORT"
+        and cleaned["price_action_analyst"]["verdict"] == "SUPPORT"
+        and wave_verdict == "SUPPORT" and wave_direction == expected_wave
+        and cleaned["timeframe_analyst"]["verdict"] == "SUPPORT"
+        and proposal == expected_side
+        and risk_verdict == "APPROVE" and portfolio_verdict == "APPROVE"
+        and not risk_flags
+    )
+    explicit_veto = (
+        final_decision == "REJECT"
+        or any(cleaned[key]["verdict"] == "OPPOSE" for key in (
+            "multi_timeframe_analyst", "price_action_analyst", "timeframe_analyst",
+        ))
+        or wave_verdict == "OPPOSE" or wave_direction != expected_wave
+        or proposal != expected_side
+        or risk_verdict == "REJECT" or portfolio_verdict == "REJECT"
+        or bool(risk_flags)
+    )
+    status = "APPROVED" if approved else "VETO" if explicit_veto else "UNKNOWN"
+    return {
+        "provider": "OpenRouter", "model": model, "asset": asset,
+        "market_type": "perpetual", "expected_side": expected_side,
+        "execution_profile": "CHALLENGE_1_V2",
+        "review_mode": "V2_MULTI_TIMEFRAME_REVIEW",
+        "status": status,
+        "status_fa": (
+            "ناظر مستقل شواهد ۱۵m/۱H/۴H و موج ۱H را تأیید کرد."
+            if approved else "ناظر مستقل شواهد چندتایم‌فریمی یا ریسک V2 را رد/نامشخص کرد."
+        ),
+        "final_rating": "Buy" if expected_side == "LONG" and approved else
+            "Sell" if expected_side == "SHORT" and approved else "REVIEW",
+        "specialist_views": cleaned,
+        "risk_flags": risk_flags,
+        "rationale_fa": str(document.get("rationale_fa") or "")[:1000],
+        "risk_manager_verdict": risk_verdict,
+        "portfolio_manager_verdict": portfolio_verdict,
+        "trader_proposal": proposal,
+        "elliott_wave_phase": wave_phase,
+        "elliott_wave_direction": wave_direction,
+        "reviewed_signal_id": str(evidence.get("signal_id") or ""),
+        "paper_entry_eligible": approved,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "cost_usd": 0.0,
+    }
 
 
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
