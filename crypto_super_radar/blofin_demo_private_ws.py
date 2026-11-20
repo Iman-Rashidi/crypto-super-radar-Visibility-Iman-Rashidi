@@ -58,14 +58,24 @@ def _timestamp_ms(value: Any, name: str, *, optional: bool = False) -> int | Non
     return stamp
 
 
-def _number(value: Any, name: str, *, allow_zero: bool = False) -> float:
+def _number(
+    value: Any,
+    name: str,
+    *,
+    allow_zero: bool = False,
+    allow_negative: bool = False,
+) -> float:
     if isinstance(value, bool) or value is None:
         raise BloFinDemoPrivateWSError(f"INVALID_{name.upper()}")
     try:
         result = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
         raise BloFinDemoPrivateWSError(f"INVALID_{name.upper()}") from exc
-    if not math.isfinite(result) or (result < 0 if allow_zero else result <= 0):
+    if (
+        not math.isfinite(result)
+        or (not allow_negative and result < 0)
+        or (not allow_zero and result == 0)
+    ):
         raise BloFinDemoPrivateWSError(f"INVALID_{name.upper()}")
     return result
 
@@ -189,7 +199,7 @@ def normalize_blofin_private_futures_message(
                 raise BloFinDemoPrivateWSError("PRIVATE_WS_INVALID_MARGIN_MODE")
             if position_side not in {"long", "short", "net"} or not position_id:
                 raise BloFinDemoPrivateWSError("PRIVATE_WS_POSITION_IDENTITY_INVALID")
-            position_size = _number(row.get("positions"), "positions", allow_zero=True)
+            position_size = _number(row.get("positions"), "positions", allow_zero=True, allow_negative=True)
             payload_data = {
                 "position_id": position_id,
                 "margin_mode": margin_mode,
@@ -359,7 +369,12 @@ class BloFinDemoPrivateEventStore:
         return {"inserted": inserted, "duplicates": len(normalized) - inserted}
 
     def read_recent(self, *, inst_id: str, channel: str, limit: int = 100) -> list[dict[str, Any]]:
-        if channel not in PRIVATE_CHANNELS or not 1 <= limit <= 1000:
+        if (
+            channel not in PRIVATE_CHANNELS
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
             raise ValueError("channel or limit is invalid")
         cursor = self._connection.execute(
             """SELECT inst_id, channel, event_id, action, event_time_ms, received_at_ms, payload_json, source
@@ -543,6 +558,9 @@ class BloFinDemoPrivateWebSocketWorker:
             if self.max_attempts is not None and self._attempts >= self.max_attempts:
                 break
             self._attempts += 1
+            # A reconnect must earn a fresh login and fresh ACKs.
+            self._login_ok = False
+            self._acks.clear()
             stream = None
             try:
                 stream = self.connector()
@@ -563,6 +581,11 @@ class BloFinDemoPrivateWebSocketWorker:
                     if isinstance(message, Mapping) and message.get("event") == "subscribe":
                         if not self._login_ok:
                             raise BloFinDemoPrivateWSError("SUBSCRIPTION_ACK_BEFORE_LOGIN")
+                    elif not (
+                        isinstance(message, Mapping)
+                        and message.get("event") == "login"
+                    ) and not self._login_ok:
+                        raise BloFinDemoPrivateWSError("PRIVATE_WS_DATA_BEFORE_LOGIN")
                     normalized = normalize_blofin_private_futures_message(
                         message,
                         expected_symbols=self.inst_ids,
@@ -575,14 +598,16 @@ class BloFinDemoPrivateWebSocketWorker:
                     events = normalized["events"]
                     if not events:
                         raise BloFinDemoPrivateWSError("EMPTY_PRIVATE_EVENT_BATCH")
-                    for item in events:
+                    for index, item in enumerate(events):
                         if item["channel"] == "positions" and item["inst_id"] not in self._positions_first_observation:
-                            item = {**item, "action": "initial_or_first_observation"}
+                            events[index] = {**item, "action": "initial_or_first_observation"}
                             self._positions_first_observation.add(item["inst_id"])
-                        self._events[item["channel"]] += 1
                     persisted = self.event_store.append_many(events)
                     if not isinstance(persisted, Mapping) or persisted.get("inserted", 0) + persisted.get("duplicates", 0) != len(events):
                         raise BloFinDemoPrivateWSError("PRIVATE_EVENT_PERSISTENCE_NOT_CONFIRMED")
+                    self._events[normalized["channel"]] += sum(
+                        1 for item in events if item["channel"] == normalized["channel"]
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

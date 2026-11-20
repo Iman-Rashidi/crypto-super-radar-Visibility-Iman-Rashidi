@@ -55,6 +55,8 @@ jobs:
             scripts/live_blofin_demo_ws_acceptance.py \
             tests/test_blofin_demo_futures_ws.py \
             tests/test_live_blofin_demo_ws_acceptance.py \
+            crypto_super_radar/blofin_demo_private_ws.py \
+            tests/test_blofin_demo_private_ws.py \
             tests/test_challenge1_position_observers.py
 
       - name: Run V2 regression and duplicate-timestamp tests
@@ -69,6 +71,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_challenge1_sandbox_worker.py' -v
           python -m unittest discover -s tests -p 'test_blofin_demo_executor.py' -v
           python -m unittest discover -s tests -p 'test_ai_second_opinion.py' -v
+          python -m unittest discover -s tests -p 'test_blofin_demo_private_ws.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_position_observers.py' -v
           python -m unittest discover -s tests -p 'test_blofin_demo_futures_ws.py' -v
           python -m unittest discover -s tests -p 'test_live_blofin_demo_ws_acceptance.py' -v

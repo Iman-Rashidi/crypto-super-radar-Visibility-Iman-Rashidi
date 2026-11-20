@@ -92,6 +92,14 @@ class BloFinDemoPrivateMessageTests(unittest.TestCase):
         self.assertEqual(event["payload"]["positions"], "0.01")
         self.assertEqual(event["action"], "snapshot")
 
+    def test_net_short_position_preserves_negative_signed_size(self):
+        event = self.norm("positions", {
+            "instType": "SWAP", "instId": "BTC-USDT", "marginMode": "isolated",
+            "positionId": "p-short", "positionSide": "net", "positions": "-0.02",
+            "availablePositions": "-0.02", "updateTime": "1800000000050",
+        })["events"][0]
+        self.assertEqual(event["payload"]["position_size_numeric"], -0.02)
+
     def test_empty_positions_snapshot_is_a_valid_read_only_state_observation(self):
         result = normalize_blofin_private_futures_message(
             {"arg": {"channel": "positions", "instId": "BTC-USDT"}, "data": []},
@@ -221,6 +229,34 @@ class BloFinDemoPrivateWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report["positions_closed"])
         rows = store.read_recent(inst_id="BTC-USDT", channel="positions")
         self.assertEqual(rows[0]["payload"]["position_id"], "p-1")
+        db.close()
+
+    async def test_worker_rejects_private_data_before_login(self):
+        db = sqlite3.connect(":memory:")
+        store = BloFinDemoPrivateEventStore(db)
+        stop = asyncio.Event()
+
+        async def connector():
+            yield {
+                "action": "snapshot",
+                "arg": {"channel": "positions", "instId": "BTC-USDT"},
+                "data": [{
+                    "instType": "SWAP", "instId": "BTC-USDT", "marginMode": "isolated",
+                    "positionId": "p-1", "positionSide": "long", "positions": "0.01",
+                    "availablePositions": "0.01", "updateTime": "1800000000050",
+                }],
+            }
+            stop.set()
+
+        worker = BloFinDemoPrivateWebSocketWorker(
+            client=read_only_client(), event_store=store,
+            inst_ids=("BTC-USDT",), connector=connector, max_attempts=1,
+        )
+        report = await worker.run(stop)
+        self.assertIn("PRIVATE_WS_DATA_BEFORE_LOGIN", report["last_error"])
+        self.assertFalse(report["login_authenticated"])
+        self.assertEqual(report["channel_event_counts"], {})
+        self.assertEqual(store.read_recent(inst_id="BTC-USDT", channel="positions"), [])
         db.close()
 
     async def test_worker_rejects_subscription_ack_before_login(self):
