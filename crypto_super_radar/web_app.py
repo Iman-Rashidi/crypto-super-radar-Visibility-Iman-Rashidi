@@ -5497,6 +5497,7 @@ def _run_blofin_demo_execution_job(
         )
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
+        )
         _record_challenge1_audit(
             job_id, "ORDER_SUBMISSION_AUTHORIZED",
             {

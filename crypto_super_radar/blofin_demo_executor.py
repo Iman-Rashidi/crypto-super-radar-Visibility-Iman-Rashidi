@@ -198,7 +198,7 @@ def _challenge1_review_round_ready(
             reviewed_signal_id == round_signal_id
             and reviewer_age >= -30
             and reviewer_age <= 300
-            str(review.get("status") or "").strip().upper() == "APPROVED"
+            and str(review.get("status") or "").strip().upper() == "APPROVED"
             and review.get("paper_entry_eligible") is True
             and review.get("request_attempted") is True
             and str(review.get("response_source") or "").strip().upper() == "LIVE_API"

@@ -1424,7 +1424,6 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 elliott_wave_phase="WAVE_4_CONFIRMED",
             ),
             "cached response": lambda item: item["ai_reviews"][1]["review"].update(
-            "cached response": lambda item: item["ai_reviews"][1]["review"].update(
                 response_source="CACHE", request_attempted=False,
             ),
             "stale approval": lambda item: item["ai_reviews"][0]["review"].update(
@@ -1436,6 +1435,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         }
         for label, mutate in mutations.items():
             with self.subTest(case=label):
+                with patch.dict(os.environ, {
                     "TURSO_DATABASE_URL": "",
                     "TURSO_AUTH_TOKEN": "",
                 }):

@@ -468,7 +468,6 @@ class WebAppHttpTests(unittest.TestCase):
         start = source.index("def _run_blofin_demo_execution_job(")
         end = source.index("\ndef _blofin_demo_autopilot_worker(", start)
         execution_job = source[start:end]
-        execution_job = source[start:end]
 
         reviewer_call = execution_job.index(
             "_run_challenge1_supervisor_reviews("
@@ -477,6 +476,7 @@ class WebAppHttpTests(unittest.TestCase):
         order_readiness_check = execution_job.index(
             "_blofin_demo_execution_readiness()",
             reviewer_call,
+        )
         self.assertLess(reviewer_call, order_readiness_check)
 
         blocked_branch = execution_job[order_readiness_check:]
