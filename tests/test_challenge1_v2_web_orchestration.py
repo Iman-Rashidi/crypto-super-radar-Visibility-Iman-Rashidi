@@ -10,6 +10,7 @@ import pandas as pd
 
 from crypto_super_radar import challenge1_v2_orchestration as v2_orchestration
 from crypto_super_radar import web_app
+from crypto_super_radar.blofin_demo_executor import BloFinDemoEventStore
 
 
 def make_v2_record(asof_ms: int) -> dict:
@@ -159,6 +160,94 @@ class FakeBloFinReadOnly:
 
     def get_open_orders(self):
         return []
+
+
+class FakeBloFinDemoTradeClient(FakeBloFinReadOnly):
+    base_url = web_app.DEMO_REST_URL
+    api_key = "fake-demo-key"
+    api_secret = "fake-demo-secret"
+    passphrase = "fake-demo-passphrase"
+
+    def __init__(self, *, now_ms: int | None = None):
+        super().__init__(now_ms=now_ms)
+        self.calls = []
+        self.order_args = None
+        self.position_id = "v2-fake-position-1"
+
+    def verify_trade_permission(self):
+        self.calls.append("trade_permission")
+        return {"readOnly": 0, "trade_permission": True}
+
+    def check_clock_skew(self, *, inst_id):
+        self.calls.append("clock")
+        return {"offset_ms": 0}
+
+    def get_position_mode(self):
+        self.calls.append("position_mode")
+        return {"positionMode": "net_mode"}
+
+    def get_futures_balance(self, *, product_type="USDT-FUTURES"):
+        return {"totalEquity": "1000", "equity": "1000"}
+
+    def get_positions(self, *, inst_id=None):
+        self.calls.append(("positions", inst_id))
+        if self.order_args is None:
+            return []
+        filled = str(self.order_args["size"])
+        signed = filled if self.order_args["side"] == "buy" else "-" + filled
+        return [{
+            "positionId": self.position_id,
+            "instId": self.order_args["inst_id"],
+            "positionSide": self.order_args["position_side"],
+            "positions": signed,
+        }]
+
+    def get_open_orders(self, *, inst_id=None):
+        self.calls.append(("open_orders", inst_id))
+        return []
+
+    def set_futures_leverage(self, inst_id, leverage, *, margin_mode="isolated", position_side=None):
+        self.calls.append(("set_leverage", leverage, margin_mode, position_side))
+        return {"code": "0", "data": [{"code": "0"}]}
+
+    def place_futures_order(self, **kwargs):
+        self.calls.append(("place_order", dict(kwargs)))
+        self.order_args = dict(kwargs)
+        return {"code": "0", "data": [{"code": "0", "orderId": "v2-fake-order-1"}]}
+
+    def get_order_detail(self, inst_id, *, client_order_id):
+        self.calls.append(("order_detail", client_order_id))
+        return {
+            "clientOrderId": client_order_id,
+            "orderId": "v2-fake-order-1",
+            "positionId": self.position_id,
+            "instId": inst_id,
+            "side": self.order_args["side"],
+            "size": self.order_args["size"],
+            "filledSize": self.order_args["size"],
+            "averagePrice": "100",
+            "state": "filled",
+        }
+
+    def get_open_tpsl_orders(self, *, inst_id=None, client_order_id=None, limit=100):
+        self.calls.append(("tpsl", client_order_id))
+        if self.order_args is None:
+            return []
+        return [{
+            "tpslId": "v2-fake-tpsl-1",
+            "clientOrderId": client_order_id,
+            "positionId": self.position_id,
+            "instId": inst_id,
+            "positionSide": self.order_args["position_side"],
+            "side": "sell" if self.order_args["side"] == "buy" else "buy",
+            "size": self.order_args["size"],
+            "actualSize": self.order_args["size"],
+            "state": "live",
+            "tpTriggerPrice": self.order_args["take_profit"],
+            "tpTriggerPriceType": "mark",
+            "slTriggerPrice": self.order_args["stop_loss"],
+            "slTriggerPriceType": "mark",
+        }]
 
 
 class FakeEventStore:
@@ -360,6 +449,89 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         reviewer_one.assert_called_once()
         reviewer_two.assert_called_once()
         self.assertEqual(len(self.store.recorded), 1)
+
+    def test_gated_v2_single_shot_runs_real_executor_and_post_fill_tpsl_verification(self):
+        store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        trade_client = FakeBloFinDemoTradeClient(now_ms=self.client.now_ms)
+        with patch.dict(os.environ, {
+            "BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED": "true",
+            "CHALLENGE_1_V2_SINGLE_SHOT_WRITE": "true",
+            "SINGLE_SHOT_DEMO_TEST": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+        }):
+            with (
+                patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
+                patch.object(web_app, "BloFinDemoEventStore", return_value=store),
+                patch.object(web_app, "BloFinDemoReadOnly", return_value=self.client),
+                patch.object(web_app, "BloFinDemoTradeClient", return_value=trade_client),
+                patch.object(web_app, "_blofin_demo_autopilot_enabled", return_value=False),
+                patch.object(web_app, "get_fresh_execution_quote", return_value={
+                    "instrument_id": "BTC-USDT", "ticker_ts_ms": self.client.now_ms,
+                    "mark_ts_ms": self.client.now_ms, "last": 100.0,
+                    "bidPrice": 99.99, "askPrice": 100.01, "markPrice": 100.0,
+                    "spread_fraction": 0.0002, "quote_age_ms": 0,
+                }),
+                patch.object(v2_orchestration, "analyze_signal", return_value=dict(self.record)),
+                patch.object(web_app, "run_free_ai_second_opinion", return_value=approved_review(
+                    "OpenRouter", "nemotron/test-model",
+                )),
+                patch.object(web_app, "run_independent_ai_supervisor", return_value=approved_review(
+                    "Groq", "llama/test-model",
+                )),
+            ):
+                web_app._run_blofin_demo_execution_job(
+                    self.job_id, "BTC-USDT", "CHALLENGE_1_V2",
+                )
+
+        job = web_app.BLOFIN_EXECUTION_JOBS[self.job_id]
+        result = job["result"]
+        self.assertEqual(job["stage"], "V2_SINGLE_SHOT_POST_FILL_VERIFIED")
+        self.assertEqual(result["status"], "FILLED")
+        self.assertTrue(result["orders_submitted"])
+        self.assertTrue(result["trade_executed"])
+        self.assertTrue(result["post_fill_tp_sl_verified"])
+        self.assertEqual(result["position_id"], trade_client.position_id)
+        self.assertEqual(result["protection"]["tp_verified"], True)
+        self.assertEqual(result["protection"]["sl_verified"], True)
+        self.assertEqual(
+            sum(1 for call in trade_client.calls if isinstance(call, tuple) and call[0] == "place_order"),
+            1,
+        )
+        order = store.latest_order()
+        self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(order["position_id"], trade_client.position_id)
+        self.assertTrue(store.single_shot_lock_status()["locked"])
+        store.close()
+
+    def test_v2_write_flag_without_all_independent_safety_switches_stays_blocked(self):
+        with patch.dict(os.environ, {
+            "BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED": "true",
+            "CHALLENGE_1_V2_SINGLE_SHOT_WRITE": "true",
+            "SINGLE_SHOT_DEMO_TEST": "false",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+        }):
+            with (
+                patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
+                patch.object(web_app, "BloFinDemoEventStore", return_value=self.store),
+                patch.object(web_app, "BloFinDemoReadOnly", return_value=self.client),
+                patch.object(v2_orchestration, "analyze_signal", return_value=dict(self.record)),
+                patch.object(web_app, "run_free_ai_second_opinion", return_value=approved_review(
+                    "OpenRouter", "nemotron/test-model",
+                )),
+                patch.object(web_app, "run_independent_ai_supervisor", return_value=approved_review(
+                    "Groq", "llama/test-model",
+                )),
+            ):
+                web_app._run_blofin_demo_execution_job(
+                    self.job_id, "BTC-USDT", "CHALLENGE_1_V2",
+                )
+        job = web_app.BLOFIN_EXECUTION_JOBS[self.job_id]
+        self.assertEqual(job["stage"], "V2_BLOCKED")
+        self.assertFalse(job["result"]["orders_submitted"])
+        self.assertFalse(job["result"]["trade_executed"])
 
     def test_missing_4h_blocks_web_worker_without_calling_legacy_5m_analyzer(self):
         self.client.missing_bar = "4H"
