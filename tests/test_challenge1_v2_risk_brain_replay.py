@@ -24,6 +24,9 @@ from crypto_super_radar.virtual_blofin import (
     CostModel,
     InsufficientEquityForRisk,
     InstrumentRules,
+    SimulationError,
+    VirtualBloFin,
+    _net_breakeven_stop_price,
     _snap_trade_prices,
     size_position,
 )
@@ -82,6 +85,71 @@ class AllInPositionRiskTests(unittest.TestCase):
             ),
             (100.05, 101.05, 98.0),
         )
+
+
+class NetBreakEvenStopTests(unittest.TestCase):
+    def test_tp1_stop_uses_realized_profit_and_accrued_costs(self) -> None:
+        stop = _net_breakeven_stop_price(
+            entry=100.0,
+            quantity=1.0,
+            contract_value=1.0,
+            side="LONG",
+            accumulated_fees=0.05,
+            funding_paid=0.01,
+            spread_cost_usdt=0.02,
+            realized_gross_pnl_usdt=0.5,
+            stop_slippage=0.001,
+            stop_fee_rate=0.0006,
+            tick_size=Decimal("0.01"),
+        )
+        self.assertGreaterEqual(stop, 99.73)
+        self.assertAlmostEqual(stop * 100 % 1, 0.0, places=8)
+
+    def test_short_tp1_stop_rounds_down_to_tick(self) -> None:
+        stop = _net_breakeven_stop_price(
+            entry=100.0,
+            quantity=1.0,
+            contract_value=1.0,
+            side="SHORT",
+            accumulated_fees=0.05,
+            funding_paid=-0.01,
+            spread_cost_usdt=0.02,
+            realized_gross_pnl_usdt=0.5,
+            stop_slippage=0.001,
+            stop_fee_rate=0.0006,
+            tick_size=Decimal("0.05"),
+        )
+        self.assertGreater(stop, 0)
+        self.assertAlmostEqual((stop / 0.05) % 1, 0.0, places=8)
+
+    def test_negative_spread_assumption_is_rejected(self) -> None:
+        engine = VirtualBloFin()
+        rules = InstrumentRules(
+            inst_id="BTC-USDT",
+            contract_value=Decimal("1"),
+            min_size=Decimal("1"),
+            lot_size=Decimal("1"),
+            tick_size=Decimal("0.01"),
+        )
+        bars = [
+            {"ts": 1_700_000_000_000, "low": 99.0, "high": 101.0},
+            {"ts": 1_700_000_900_000, "low": 99.0, "high": 101.0},
+        ]
+        result = engine.simulate_post_only_trade(
+            bars=bars,
+            start_index=0,
+            direction="LONG",
+            limit_price=100,
+            stop_price=99,
+            target_price=104,
+            equity_usdt=1000,
+            risk_fraction=0.0025,
+            rules=rules,
+            funding_events=[{"fundingTime": 1_699_999_999_999, "fundingRate": 0.0}],
+            spread_fraction=-0.0001,
+        )
+        self.assertEqual(result.status, "REJECTED")
+        self.assertEqual(result.exit_reason, "WIDE_SPREAD")
 
 
 class WalkForwardAndCalibrationTests(unittest.TestCase):
