@@ -389,11 +389,11 @@ class VirtualBloFin:
                         raise SimulationError("fundingRate is missing; funding cannot be assumed zero")
                     fill_funding += entry * qty_total * cv * _float(event.get("fundingRate"), "fundingRate") * (1 if side == "LONG" else -1)
             fill_exit_fee = fill_exit * qty_total * cv * cc.taker_fee
-            fill_gross = (fill_exit - entry) * qty_total * cv * (1 if side == "LONG" else -1)
+            fill_gross = (stop - entry) * qty_total * cv * (1 if side == "LONG" else -1)
             fill_fees = entry_fee + fill_exit_fee
             fill_spread_cost = entry_notional * cc.spread_fraction
             fill_slippage_cost = abs(fill_exit - stop) * qty_total * cv
-            fill_net = fill_gross - fill_fees - fill_funding - fill_spread_cost
+            fill_net = fill_gross - fill_fees - fill_funding - fill_spread_cost - fill_slippage_cost
             return TradeResult("CLOSED", "SL", qty_total, entry, fill_exit, fill_net, fill_fees,
                                fill_funding, 0, False, rr_items["net_rr"], {
                                    **rr_items, "entry_order_type": "post_only_limit",
@@ -529,7 +529,8 @@ class VirtualBloFin:
         exit_fee_rate = cc.taker_fee if exit_reason == "TIME_EXIT" else (cc.maker_fee if exit_reason == "TP" else cc.taker_fee)
         fees += exit_price * qty_left * cv * exit_fee_rate
         slippage_cost = abs(exit_price - current_stop) * qty_left * cv if exit_reason == "SL" else 0.0
-        net = realized_gross - fees - funding_total - spread_cost
+        gross_before_execution_costs = realized_gross + slippage_cost
+        net = gross_before_execution_costs - fees - funding_total - spread_cost - slippage_cost
         diagnostics = {
             **rr_items,
             "entry_order_type": "post_only_limit",
@@ -543,7 +544,7 @@ class VirtualBloFin:
             "mark_price_trigger_model": "OHLC_MARK_STOP_FIRST",
             "same_bar_tp_sl_precedence": "SL_FIRST",
             "funding_event_count": sum(1 for x in funding if x.get("_applied") is True),
-            "gross_realized_pnl_usdt": realized_gross,
+            "gross_realized_pnl_usdt": gross_before_execution_costs,
             "total_fees_usdt": fees,
             "funding_paid_usdt": funding_total,
             "spread_cost_usdt": spread_cost,
