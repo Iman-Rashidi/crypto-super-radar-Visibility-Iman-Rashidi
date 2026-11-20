@@ -694,6 +694,52 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(reset["consumed_orders"], 0)
         self.assertTrue(self.store.reserve_order(second, single_shot=True))
 
+    def test_single_shot_lock_is_atomic_across_connections_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "single-shot-lock.sqlite3")
+            stores = [BloFinDemoEventStore(database_path) for _ in range(4)]
+            try:
+                plans = [
+                    build_demo_order_plan(
+                        signal_record(bar_offset_minutes=index * 5),
+                        instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+                    )
+                    for index in range(len(stores))
+                ]
+                barrier = threading.Barrier(len(stores))
+
+                def reserve(index):
+                    barrier.wait(timeout=10)
+                    return stores[index].reserve_order(
+                        plans[index], max_concurrent_positions=4, single_shot=True,
+                    )
+
+                with ThreadPoolExecutor(max_workers=len(stores)) as pool:
+                    results = list(pool.map(reserve, range(len(stores))))
+                self.assertEqual(results.count(True), 1)
+                self.assertEqual(results.count(False), len(stores) - 1)
+                self.assertTrue(stores[0].single_shot_lock_status()["locked"])
+            finally:
+                for store in stores:
+                    store.close()
+
+            recovered = BloFinDemoEventStore(database_path)
+            try:
+                status = recovered.single_shot_lock_status()
+                self.assertTrue(status["locked"])
+                self.assertEqual(status["consumed_orders"], 1)
+                retry_plan = build_demo_order_plan(
+                    signal_record(bar_offset_minutes=60),
+                    instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+                )
+                self.assertFalse(
+                    recovered.reserve_order(
+                        retry_plan, max_concurrent_positions=4, single_shot=False,
+                    )
+                )
+            finally:
+                recovered.close()
+
     def test_pending_reconcile_is_unresolved_and_blocks_new_capacity(self):
         first = self._plan()
         self.assertTrue(self.store.reserve_order(first))
