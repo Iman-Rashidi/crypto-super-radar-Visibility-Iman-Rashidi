@@ -39,6 +39,37 @@ def _closed(frame: pd.DataFrame, asof: pd.Timestamp, duration: pd.Timedelta) -> 
     return frame.loc[(frame.index + duration) <= asof]
 
 
+def _closed_candle_records(
+    frame: pd.DataFrame,
+    asof: pd.Timestamp,
+    *,
+    duration: pd.Timedelta,
+    label: str,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Serialize only validated, contiguous, completed OHLCV bars for independent review."""
+    data = _validate(frame, label, limit)
+    closed = _closed(data, asof, duration)
+    if len(closed) < limit:
+        raise ValueError(f"{label} has fewer than {limit} completed candles for V2 review.")
+    tail = closed.tail(limit)
+    rows: list[dict[str, Any]] = []
+    previous_time = None
+    for timestamp, row in tail.iterrows():
+        if previous_time is not None and timestamp - previous_time != duration:
+            raise ValueError(f"{label} review candles contain a missing interval.")
+        rows.append({
+            "open_time_utc": timestamp.isoformat(),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+        })
+        previous_time = timestamp
+    return rows
+
+
 def ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
 
@@ -263,6 +294,45 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
         or regime.get("candle_open_utc_4h") != evidence.get("context_4h_candle_open_utc")
     ):
         return False, "V2 1H/4H regime evidence does not match the signal packet."
+
+    candle_specs = (
+        ("candles_15m", signal_open, pd.Timedelta(minutes=15), "15M"),
+        ("candles_1h", h1_open, pd.Timedelta(hours=1), "1H"),
+        ("candles_4h", h4_open, pd.Timedelta(hours=4), "4H"),
+    )
+    for key, expected_last_open, duration, label in candle_specs:
+        rows = evidence.get(key)
+        if not isinstance(rows, list) or len(rows) != 30:
+            return False, f"V2 {label} reviewer OHLCV evidence must contain exactly 30 candles."
+        previous_open = None
+        for row in rows:
+            if not isinstance(row, Mapping):
+                return False, f"V2 {label} reviewer candle row is malformed."
+            open_time = _utc_timestamp(row.get("open_time_utc"))
+            if open_time is None or open_time + duration > asof:
+                return False, f"V2 {label} reviewer candles contain a future or timezone-naive bar."
+            if previous_open is not None and open_time - previous_open != duration:
+                return False, f"V2 {label} reviewer candles contain a gap or duplicate."
+            try:
+                candle_values = [
+                    float(row.get("open")), float(row.get("high")),
+                    float(row.get("low")), float(row.get("close")),
+                    float(row.get("volume")),
+                ]
+            except (TypeError, ValueError, OverflowError):
+                return False, f"V2 {label} reviewer candle contains missing OHLCV values."
+            open_price, high_price, low_price, close_price, volume = candle_values
+            if (
+                not all(math.isfinite(value) for value in candle_values)
+                or min(open_price, high_price, low_price, close_price) <= 0
+                or volume < 0
+                or high_price < max(open_price, close_price, low_price)
+                or low_price > min(open_price, close_price, high_price)
+            ):
+                return False, f"V2 {label} reviewer candle OHLCV geometry is invalid."
+            previous_open = open_time
+        if previous_open != expected_last_open:
+            return False, f"V2 {label} reviewer candle window does not end at the signal context candle."
 
     wave = evidence.get("elliott_wave")
     if not isinstance(wave, Mapping):
@@ -517,6 +587,15 @@ def analyze_signal(
         "funding_kind": "0",
         "funding_event_time_ms": funding_event_time_ms,
         "funding_max_age_ms": funding_max_age_ms,
+        "candles_15m": _closed_candle_records(
+            frame_15m, asof, duration=pd.Timedelta(minutes=15), label="15M",
+        ),
+        "candles_1h": _closed_candle_records(
+            frame_1h, asof, duration=pd.Timedelta(hours=1), label="1H",
+        ),
+        "candles_4h": _closed_candle_records(
+            frame_4h, asof, duration=pd.Timedelta(hours=4), label="4H",
+        ),
         "elliott_wave": wave_evidence,
         "wave_alignment": wave_evidence["wave_alignment"],
     }
