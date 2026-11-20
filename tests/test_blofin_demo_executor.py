@@ -219,6 +219,12 @@ class FakeResponse:
 
 
 class BloFinDemoOrderPlanTests(unittest.TestCase):
+    def test_four_concurrent_positions_is_supported_but_five_is_rejected(self):
+        self.assertEqual(BloFinDemoRiskPolicy().max_concurrent_positions, 1)
+        self.assertEqual(BloFinDemoRiskPolicy(max_concurrent_positions=4).max_concurrent_positions, 4)
+        with self.assertRaises(ValueError):
+            BloFinDemoRiskPolicy(max_concurrent_positions=5)
+
     def test_contract_size_is_sized_from_risk_and_contract_value(self):
         plan = build_demo_order_plan(
             signal_record(), instrument_record(), inst_id="BTC-USDT",
@@ -595,6 +601,70 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertFalse(self.store.reserve_order(plan, external_open_positions=1))
         self.assertFalse(self.store.reserve_order(plan, external_pending_orders=1))
         self.assertFalse(self.store.has_any_orders())
+
+    @staticmethod
+    def _small_reservation_plan(index: int):
+        return {
+            "client_order_id": f"{index:032x}",
+            "signal_id": f"capacity-four-signal-{index}",
+            "inst_id": "BTC-USDT",
+            "side": "LONG",
+            "quantity": "0.1",
+            "entry_reference_price": 100.0,
+            "stop_loss": "99",
+            "take_profit": "102",
+            "leverage": 1,
+            "reserved_risk_usdt": "0.5",
+            "reserved_margin_usdt": "10",
+            "aggregate_risk_limit_usdt": "5",
+            "aggregate_margin_limit_usdt": "100",
+        }
+
+    def test_four_reservations_fit_below_aggregate_limits_and_fifth_is_blocked(self):
+        plans = [self._small_reservation_plan(index) for index in range(5)]
+        for plan in plans[:4]:
+            self.assertTrue(self.store.reserve_order(plan, max_concurrent_positions=4))
+        self.assertFalse(self.store.reserve_order(plans[4], max_concurrent_positions=4))
+        budget = self.store.trade_budget_status()
+        self.assertEqual(budget["active_reservations"], 4)
+        self.assertEqual(budget["aggregate_reserved_risk_usdt"], "2")
+        self.assertEqual(budget["aggregate_reserved_margin_usdt"], "40")
+
+    def test_five_position_reservation_limit_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "between 1 and 4"):
+            self.store.reserve_order(self._small_reservation_plan(0), max_concurrent_positions=5)
+
+    def test_four_slot_reservation_is_atomic_across_independent_connections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "shared-demo-four.sqlite3")
+            stores = [BloFinDemoEventStore(database_path) for _ in range(8)]
+            try:
+                plans = [self._small_reservation_plan(index) for index in range(len(stores))]
+                barrier = threading.Barrier(len(stores))
+
+                def reserve_on_independent_connection(index):
+                    barrier.wait(timeout=10)
+                    return stores[index].reserve_order(
+                        plans[index], max_concurrent_positions=4,
+                    )
+
+                with ThreadPoolExecutor(max_workers=len(stores)) as pool:
+                    results = list(pool.map(
+                        reserve_on_independent_connection, range(len(stores))
+                    ))
+                self.assertEqual(results.count(True), 4)
+                self.assertEqual(results.count(False), 4)
+                self.assertEqual(
+                    stores[0]._db.execute("SELECT COUNT(*) FROM blofin_demo_orders").fetchone()[0],
+                    4,
+                )
+                budget = stores[0].trade_budget_status()
+                self.assertEqual(budget["active_reservations"], 4)
+                self.assertEqual(budget["aggregate_reserved_risk_usdt"], "2")
+                self.assertEqual(budget["aggregate_reserved_margin_usdt"], "40")
+            finally:
+                for store in stores:
+                    store.close()
 
     def test_capacity_reservation_is_atomic_across_independent_connections(self):
         with tempfile.TemporaryDirectory() as directory:
