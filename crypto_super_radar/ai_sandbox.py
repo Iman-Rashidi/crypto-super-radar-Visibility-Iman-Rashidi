@@ -186,22 +186,50 @@ def _visible_bars(bars: list[dict[str, Any]], asof_ms: int) -> list[dict[str, An
 
 
 
+def _known_funding_event(
+    events: list[dict[str, Any]],
+    asof_ms: int,
+    *,
+    max_age_ms: int | None = None,
+) -> dict[str, Any] | None:
+    eligible: list[tuple[int, dict[str, Any]]] = []
+    for item in events:
+        try:
+            event_time = int(item["fundingTime"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if event_time <= asof_ms:
+            eligible.append((event_time, item))
+    if not eligible:
+        return None
+    event_time, latest = max(eligible, key=lambda pair: pair[0])
+    if str(latest.get("fundingKind") or "").strip() != "0":
+        return None
+    if max_age_ms is not None and (
+        isinstance(max_age_ms, bool) or max_age_ms <= 0 or asof_ms - event_time > max_age_ms
+    ):
+        return None
+    try:
+        rate = float(latest["fundingRate"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not np.isfinite(rate):
+        return None
+    return {
+        "fundingTime": event_time,
+        "fundingRate": rate,
+        "fundingKind": "0",
+    }
+
+
 def _known_funding_rate(
     events: list[dict[str, Any]],
     asof_ms: int,
     *,
     max_age_ms: int | None = None,
 ) -> float | None:
-    eligible = [item for item in events if int(item["fundingTime"]) <= asof_ms]
-    if not eligible:
-        return None
-    latest = eligible[-1]
-    if str(latest.get("fundingKind") or "").strip() != "0":
-        return None
-    if max_age_ms is not None and asof_ms - int(latest["fundingTime"]) > max_age_ms:
-        return None
-    rate = float(latest["fundingRate"])
-    return rate if np.isfinite(rate) else None
+    event = _known_funding_event(events, asof_ms, max_age_ms=max_age_ms)
+    return float(event["fundingRate"]) if event is not None else None
 
 
 def _within_purge_window(
@@ -609,12 +637,16 @@ def run_sandbox(
                 counts["purged_boundary_signal_blocks"] += 1
                 continue
             counts["strategy_checks"] += 1
-            funding_rate = _known_funding_rate(
+            funding_max_age_ms = int(item["funding_interval_median_ms"] * 1.5)
+            funding_event = _known_funding_event(
                 item["funding"],
                 asof_ms,
-                max_age_ms=int(item["funding_interval_median_ms"] * 1.5),
+                max_age_ms=funding_max_age_ms,
             )
-            if funding_rate is None:
+            funding_rate = float(funding_event["fundingRate"]) if funding_event is not None else None
+            funding_kind = str(funding_event["fundingKind"]) if funding_event is not None else None
+            funding_event_time_ms = int(funding_event["fundingTime"]) if funding_event is not None else None
+            if funding_event is None:
                 counts["missing_funding_rate_signals"] += 1
             try:
                 signal = analyze_signal(
@@ -627,6 +659,9 @@ def run_sandbox(
                     ),
                     asof=asof,
                     funding_rate=funding_rate,
+                    funding_kind=funding_kind,
+                    funding_event_time_ms=funding_event_time_ms,
+                    funding_max_age_ms=funding_max_age_ms,
                     spread_fraction=spread_scenario,
                     last_three_results=tuple(last_results[symbol]),
                     tp_r=2.4,
