@@ -28,8 +28,14 @@ jobs:
           python -m compileall -q \
             crypto_super_radar/virtual_blofin.py \
             crypto_super_radar/ai_sandbox.py \
-            tests/test_challenge1_v2_time_exit_and_lookahead.py
+            crypto_super_radar/market_replay.py \
+            crypto_super_radar/challenge1_v2.py \
+            crypto_super_radar/adaptive_brain.py \
+            tests/test_challenge1_v2_time_exit_and_lookahead.py \
+            tests/test_challenge1_v2_risk_brain_replay.py
       - name: Test time-exit limit and as-of isolation
         run: |
           python -m unittest discover -s tests \
             -p 'test_challenge1_v2_time_exit_and_lookahead.py' -v
+          python -m unittest discover -s tests \
+            -p 'test_challenge1_v2_risk_brain_replay.py' -v
