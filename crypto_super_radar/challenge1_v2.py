@@ -5,7 +5,7 @@ only candles whose close time is <= the caller's UTC asof timestamp.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 import math
 import numpy as np
 import pandas as pd
@@ -145,6 +145,7 @@ def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) 
         "ema55_slope_1h": ema55_slope,
         "aligned_4h": bool(aligned_4h),
         "candle_open_utc": h1.index[-1].isoformat(),
+        "candle_open_utc_4h": h4.index[-1].isoformat() if not h4.empty else None,
         "reason": "1H trend, EMA structure and HH/HL or LL/LH hard gate",
     }
 
@@ -190,6 +191,163 @@ def _elliott_wave_1h_evidence(
         "data_asof_utc": asof.isoformat(),
         "wave_alignment": wave_alignment,
     }
+
+
+
+def _utc_timestamp(value: Any) -> pd.Timestamp | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        stamp = pd.Timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if stamp.tzinfo is None:
+        return None
+    return stamp.tz_convert("UTC")
+
+
+def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
+    """Preflight V2 analysis evidence; this function never authorizes an order.
+
+    The Demo executor must still obtain current contract/quote/account facts,
+    durable reservation, protective-order readiness and two independent,
+    signal-bound AI approvals before any order write.
+    """
+    if not isinstance(record, Mapping):
+        return False, "V2 analysis record is missing."
+    side = str(record.get("signal") or "").strip().upper()
+    symbol = str(record.get("instrument_id") or "").strip().upper()
+    if side not in {"LONG", "SHORT"} or not symbol.endswith("-USDT"):
+        return False, "V2 signal direction or USDT instrument is invalid."
+    if record.get("orders_submitted") is not False:
+        return False, "V2 analysis packet must remain analysis-only."
+    evidence = record.get("challenge1_v2_evidence")
+    if not isinstance(evidence, Mapping):
+        return False, "V2-specific execution evidence is missing."
+    signal_id = str(record.get("signal_id") or "").strip()
+    expected_time = str(record.get("signal_candle_open_utc") or "").strip()
+    if (
+        evidence.get("decision_engine_version") != "CHALLENGE_1_V2_1H_4H_15M"
+        or evidence.get("signal_id") != signal_id
+        or evidence.get("instrument_id") != symbol
+        or evidence.get("setup_timeframe") != "15m"
+        or evidence.get("context_timeframes") != ["1H", "4H"]
+        or evidence.get("higher_timeframes_used") is not True
+        or evidence.get("completed_candles_only") is not True
+        or evidence.get("signal_candle_open_utc") != expected_time
+    ):
+        return False, "V2 timeframe, identity or closed-candle evidence contract failed."
+
+    asof = _utc_timestamp(evidence.get("data_asof_utc"))
+    signal_open = _utc_timestamp(expected_time)
+    h1_open = _utc_timestamp(evidence.get("context_1h_candle_open_utc"))
+    h4_open = _utc_timestamp(evidence.get("context_4h_candle_open_utc"))
+    if any(value is None for value in (asof, signal_open, h1_open, h4_open)):
+        return False, "V2 as-of or higher-timeframe candle timestamp is missing or timezone-naive."
+    if signal_id != f"challenge1-v2:{symbol}:15m:{signal_open.isoformat()}:{side}":
+        return False, "V2 signal_id does not match instrument, setup candle and direction."
+    for open_time, duration, label in (
+        (signal_open, pd.Timedelta(minutes=15), "15M"),
+        (h1_open, pd.Timedelta(hours=1), "1H"),
+        (h4_open, pd.Timedelta(hours=4), "4H"),
+    ):
+        age = asof - (open_time + duration)
+        if age < pd.Timedelta(0) or age > duration:
+            return False, f"{label} closed candle is future-dated or stale."
+    regime = record.get("regime")
+    if (
+        not isinstance(regime, Mapping)
+        or str(regime.get("direction") or "").upper() != side
+        or str(regime.get("status") or "").upper() != "TREND"
+        or regime.get("candle_open_utc") != evidence.get("context_1h_candle_open_utc")
+        or regime.get("candle_open_utc_4h") != evidence.get("context_4h_candle_open_utc")
+    ):
+        return False, "V2 1H/4H regime evidence does not match the signal packet."
+
+    wave = evidence.get("elliott_wave")
+    if not isinstance(wave, Mapping):
+        return False, "V2 higher-timeframe Elliott evidence is missing."
+    expected_pattern = "BULLISH" if side == "LONG" else "BEARISH"
+    allowed_phases = {
+        "WAVES_1_AND_2_CONFIRMED",
+        "WAVE_3_CONFIRMED",
+        "WAVE_4_CONFIRMED",
+        "FIVE_WAVE_IMPULSE_CONFIRMED",
+    }
+    wave_status = str(wave.get("status") or "").upper()
+    phase = str(wave.get("phase") or "").upper()
+    if (
+        wave_status not in {"CANDIDATE", "CONFIRMED"}
+        or str(wave.get("pattern") or "").upper() != expected_pattern
+        or phase not in allowed_phases
+        or wave.get("wave_alignment") != "ALIGNED"
+        or wave.get("timeframe") != "1H"
+        or wave.get("evidence_source") != "CONFIRMED_CLOSED_1H_CANDLES"
+        or _utc_timestamp(wave.get("data_asof_utc")) != asof
+        or _utc_timestamp(wave.get("latest_closed_candle_open_utc")) != h1_open
+    ):
+        return False, "V2 Elliott phase, direction or as-of evidence is not aligned."
+    try:
+        pivot_count = int(wave.get("confirmed_pivot_count"))
+        invalidation = float(wave.get("invalidation_price"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "V2 Elliott pivot count or invalidation price is invalid."
+    if isinstance(wave.get("confirmed_pivot_count"), bool) or pivot_count < 3:
+        return False, "V2 Elliott history has fewer than three confirmed pivots."
+    if not math.isfinite(invalidation) or invalidation <= 0:
+        return False, "V2 Elliott invalidation price is missing or invalid."
+    pivots = wave.get("pivots")
+    if not isinstance(pivots, list) or len(pivots) < 3:
+        return False, "V2 Elliott pivot evidence is incomplete."
+    previous_pivot = previous_confirmation = None
+    for pivot in pivots:
+        if not isinstance(pivot, Mapping):
+            return False, "V2 Elliott pivot row is malformed."
+        pivot_time = _utc_timestamp(pivot.get("timestamp"))
+        confirmed_at = _utc_timestamp(pivot.get("confirmed_at"))
+        if (
+            pivot_time is None or confirmed_at is None
+            or pivot_time > confirmed_at or confirmed_at > asof
+            or (previous_pivot is not None and pivot_time <= previous_pivot)
+            or (previous_confirmation is not None and confirmed_at < previous_confirmation)
+        ):
+            return False, "V2 Elliott pivot chronology violates the as-of boundary."
+        previous_pivot, previous_confirmation = pivot_time, confirmed_at
+
+    try:
+        entry = float(record.get("entry"))
+        stop = float(record.get("stop_loss"))
+        target = float(record.get("take_profit"))
+        score = float(record.get("confidence_score"))
+        gross_rr = float(record.get("gross_rr"))
+        funding = float(record.get("funding_rate"))
+        spread = float(record.get("spread_fraction"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "V2 entry, stop, target, score, Funding or spread data is missing."
+    numeric = (entry, stop, target, score, gross_rr, funding, spread)
+    if not all(math.isfinite(value) for value in numeric):
+        return False, "V2 trade plan contains non-finite values."
+    if entry <= 0 or stop <= 0 or target <= 0 or score < 70 or gross_rr < 1.8:
+        return False, "V2 trade plan fails its positive-price, score or gross reward/risk floor."
+    if spread < 0 or spread > 0.0004:
+        return False, "V2 spread is outside its supported range."
+    if side == "LONG" and not stop < entry < target:
+        return False, "V2 LONG stop/entry/target ordering is invalid."
+    if side == "SHORT" and not target < entry < stop:
+        return False, "V2 SHORT stop/entry/target ordering is invalid."
+    parts = record.get("score_parts")
+    if not isinstance(parts, Mapping):
+        return False, "V2 confidence score components are missing."
+    try:
+        component_total = sum(float(value) for value in parts.values())
+    except (TypeError, ValueError, OverflowError):
+        return False, "V2 confidence score components are invalid."
+    if not math.isfinite(component_total) or abs(component_total - score) > 1e-9:
+        return False, "V2 confidence score does not reconcile to its components."
+    return True, (
+        "V2 analysis evidence is structurally valid; independent AI consensus, live quote, "
+        "account readiness and protective-order gates remain mandatory."
+    )
 
 
 def analyze_signal(
@@ -314,6 +472,8 @@ def analyze_signal(
         "higher_timeframes_used": True,
         "completed_candles_only": True,
         "signal_candle_open_utc": signal_time,
+        "context_1h_candle_open_utc": regime.get("candle_open_utc"),
+        "context_4h_candle_open_utc": regime.get("candle_open_utc_4h"),
         "data_asof_utc": asof.isoformat(),
         "elliott_wave": wave_evidence,
         "wave_alignment": wave_evidence["wave_alignment"],
