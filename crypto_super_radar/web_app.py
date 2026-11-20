@@ -10424,6 +10424,28 @@ def _blofin_demo_protective_order_evidence(
     }
 
 
+
+def _blofin_demo_protection_requires_emergency_close(
+    protective_evidence: Mapping[str, Any] | None,
+) -> bool:
+    """Require a guarded exact-position close when a successful read proves no SL exists."""
+    evidence = protective_evidence if isinstance(protective_evidence, Mapping) else {}
+    status = str(evidence.get("status") or "UNKNOWN").strip().upper()
+    return status in {
+        "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+        "TP_ONLY_VISIBLE",
+        "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
+    }
+
+
+def _blofin_demo_protection_fully_confirmed(
+    protective_evidence: Mapping[str, Any] | None,
+) -> bool:
+    """A position is fully protected only when both native exchange legs are visible."""
+    evidence = protective_evidence if isinstance(protective_evidence, Mapping) else {}
+    return str(evidence.get("status") or "").strip().upper() == "BOTH_TP_AND_SL_VISIBLE"
+
+
 def _is_positive_finite_number(value: Any) -> bool:
     try:
         number = float(value)
@@ -10688,7 +10710,7 @@ def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
         protective = snapshot.get("protective_orders")
         protective = protective if isinstance(protective, dict) else {}
         protection_status = str(protective.get("status") or "UNKNOWN")
-        if protection_status not in {"BOTH_TP_AND_SL_VISIBLE", "SL_ONLY_VISIBLE"}:
+        if protection_status != "BOTH_TP_AND_SL_VISIBLE":
             flags.append("PROTECTIVE_ORDER_NOT_CONFIRMED")
         if snapshot.get("stop_loss_threshold_reached") is True:
             flags.append("STOP_LEVEL_CROSSED_CHECK_EXCHANGE_NATIVE_PROTECTION")
@@ -11323,6 +11345,92 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "message_fa": "ثبت کامل چرخه پایش یا وضعیت عدم فراخوانی ناظرها تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
                 })
                 continue
+            protection_status = str(protective_evidence.get("status") or "UNKNOWN").strip().upper()
+            if protection_status in {"READ_FAILED", "INVALID_RESPONSE"} and not reason:
+                actions.append({
+                    "status": "PROTECTION_READ_UNAVAILABLE_NO_CLOSE",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "protective_orders": protective_evidence,
+                    "exchange_write_attempted": False,
+                    "reason_code": "PROTECTION_STATE_NOT_PROVEN",
+                    "position_cycle_audit": audit_result,
+                })
+                continue
+
+            if _blofin_demo_protection_requires_emergency_close(protective_evidence):
+                if read_only_supervision:
+                    _record_challenge1_audit(
+                        experience_id or position_id,
+                        "RISK_OVERRIDE_EXIT_BLOCKED_READ_ONLY",
+                        {
+                            **exit_basis,
+                            "decision": "EXIT_NOT_SUBMITTED",
+                            "reason_code": "NATIVE_STOP_LOSS_NOT_VERIFIED",
+                            "protective_order_status": protection_status,
+                            "exchange_write_attempted": False,
+                        },
+                        event_key=f"protection-missing-close-read-only:{audit_position_id}:{cycle_epoch_ms}",
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        status="WARNING",
+                        reason="A valid exchange stop-loss could not be verified; read-only supervision cannot close the position.",
+                    )
+                    actions.append({
+                        "status": "PROTECTION_MISSING_CLOSE_BLOCKED_READ_ONLY",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "protective_orders": protective_evidence,
+                        "exchange_write_attempted": False,
+                        "position_cycle_audit": audit_result,
+                    })
+                    continue
+                try:
+                    _record_challenge1_audit(
+                        experience_id or position_id,
+                        "RISK_OVERRIDE_PROTECTION_MISSING_CLOSE_AUTHORIZED",
+                        {
+                            **exit_basis,
+                            "decision": "CLOSE_DEMO_POSITION",
+                            "precondition": (
+                                "Exact linked position matched and a successful TP/SL read "
+                                "proved that no valid native stop-loss is attached."
+                            ),
+                            "protective_order_status": protection_status,
+                            "loss_exit_permitted": True,
+                        },
+                        event_key=f"protection-missing-close:{audit_position_id}:{cycle_epoch_ms}",
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        status="WARNING",
+                        reason="No valid exchange stop-loss is attached to the exact linked Demo position.",
+                    )
+                    close_result = _blofin_manual_close_position(
+                        instrument_id=instrument_id,
+                        position_id=position_id,
+                        action_source="RISK_OVERRIDE",
+                        audit_id=client_order_id,
+                        exit_reason="TP_SL_PROTECTION_MISSING",
+                    )
+                    actions.append({
+                        "status": "RISK_OVERRIDE_PROTECTION_MISSING_CLOSE_ACCEPTED",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "protective_orders": protective_evidence,
+                        "exchange_response": close_result.get("exchange_response"),
+                        "position_cycle_audit": audit_result,
+                    })
+                except Exception as close_exc:
+                    actions.append({
+                        "status": "RISK_OVERRIDE_PROTECTION_MISSING_CLOSE_NOT_CONFIRMED",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "protective_orders": protective_evidence,
+                        "error_type": type(close_exc).__name__,
+                        "position_cycle_audit": audit_result,
+                    })
+                continue
+
             if not reason:
                 if stop_loss_threshold_reached:
                     protection_status = str(protective_evidence.get("status") or "").upper()
