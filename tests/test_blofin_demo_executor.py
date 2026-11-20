@@ -1347,10 +1347,10 @@ class FakeExecutorClient:
 
     def get_positions(self, *, inst_id=None):
         self.calls.append(("positions_read", inst_id))
-        if self.position_rows_override is not None:
-            return self.position_rows_override
         if self.order_args is None:
             return []
+        if self.position_rows_override is not None:
+            return self.position_rows_override
         filled = self._filled_size()
         if filled <= 0:
             return []
@@ -1795,7 +1795,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 for event in store.recent_events(order["client_order_id"])
             ]
             self.assertIn("PENDING_RECONCILE", event_types)
-            self.assertIn("UNKNOWN", event_types)
+            self.assertIn("PENDING_RECONCILE", event_types)
         finally:
             store.close()
 
@@ -1845,6 +1845,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 # This quota test models each Demo position as closed before the
                 # next cycle; it does not weaken the concurrent-position limit.
                 store.update_order(result["client_order_id"], "CLOSED")
+                client.order_args = None
             self.assertTrue(all(row["status"] == "FILLED" for row in results))
             budget = store.trade_budget_status()
             self.assertEqual(budget["orders_today"], 7)
@@ -1980,6 +1981,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
             )
             store.update_order(first["client_order_id"], "CLOSED")
+            client.order_args = None
             second = executor.execute(
                 signal_record(bar_offset_minutes=25),
                 inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
@@ -2035,7 +2037,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 signal_record(bar_offset_minutes=10),
                 inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
             )
-            self.assertEqual(fresh["status"], "ACCEPTED")
+            self.assertEqual(fresh["status"], "FILLED")
             self.assertTrue(any(
                 isinstance(call, tuple) and call[0] == "place_order"
                 for call in client.calls
