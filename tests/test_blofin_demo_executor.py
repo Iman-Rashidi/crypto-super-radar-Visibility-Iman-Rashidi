@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 from crypto_super_radar.blofin_demo_executor import (
     BloFinDemoExecutionBlocked,
     BloFinDemoExecutionUnknown,
+    BloFinDemoEventStore,
     BloFinDemoExecutor,
     BloFinDemoRiskPolicy,
     BloFinDemoTradeClient,
@@ -62,6 +63,7 @@ def signal_record(**overrides):
     }
     record.update(overrides)
     side = str(record["signal"]).upper()
+    pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
     pattern_name = "Bullish Engulfing" if side == "LONG" else "Bearish Engulfing"
     base_bar = datetime.fromisoformat("2026-11-13T18:00:00+00:00")
     bar_offset = int(overrides.get("bar_offset_minutes", 0))
