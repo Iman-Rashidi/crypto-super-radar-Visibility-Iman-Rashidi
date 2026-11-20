@@ -5,7 +5,7 @@ import unittest
 
 import requests
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from scripts.live_provider_acceptance import (
     AcceptanceRunner,
@@ -15,6 +15,8 @@ from scripts.live_provider_acceptance import (
     positive_number,
     positive_or_zero,
     relative_difference_pct,
+    DEFAULT_ACCEPTANCE_SYMBOLS,
+    run_watchlist,
 )
 
 
@@ -216,6 +218,59 @@ class RunnerTests(unittest.TestCase):
         self.assertLess(derived[0]["details"]["difference_pct"], 0.01)
         self.assertEqual(derived[1]["details"]["binance_interval_hours"], 8.0)
         self.assertLess(derived[2]["details"]["absolute_difference"], 0.0002)
+
+
+    def test_default_watchlist_runs_market_checks_for_all_five_symbols_and_shared_checks_once(self):
+        calls = []
+
+        class FakeRunner:
+            def __init__(self, *, symbol, **kwargs):
+                self.symbol = symbol
+                self.results = []
+
+            def _record(self, name):
+                calls.append((self.symbol, name))
+                self.results.append({"check": name, "status": "PASS", "symbol": self.symbol})
+
+            def check_binance_spot(self): self._record("binance_spot")
+            def check_bybit_spot(self): self._record("bybit_spot")
+            def check_spot_price_agreement(self): self._record("spot_price_agreement")
+            def check_binance_perpetual(self): self._record("binance_perpetual")
+            def check_bybit_perpetual(self): self._record("bybit_perpetual")
+            def check_perpetual_agreement(self):
+                self._record("perpetual_price_agreement")
+                self._record("funding_interval_agreement")
+                self._record("funding_rate_agreement")
+            def check_evm_rpc(self, name, url, chain_id): self._record(name)
+            def check_solana_rpc(self): self._record("solana_rpc")
+            def check_fear_greed(self): self._record("fear_greed")
+            def check_rss(self, name, url): self._record(name)
+
+        with patch("scripts.live_provider_acceptance.AcceptanceRunner", FakeRunner):
+            report = run_watchlist(
+                session=object(),
+                limiter=FakeLimiter(),
+            )
+
+        self.assertEqual(report["symbols"], list(DEFAULT_ACCEPTANCE_SYMBOLS))
+        self.assertEqual(set(report["symbol_reports"]), set(DEFAULT_ACCEPTANCE_SYMBOLS))
+        for symbol in DEFAULT_ACCEPTANCE_SYMBOLS:
+            self.assertEqual(report["symbol_reports"][symbol]["check_count"], 8)
+        shared_names = [name for symbol, name in calls if name in {
+            "ethereum_rpc", "base_rpc", "solana_rpc", "fear_greed", "news_rss", "social_rss"
+        }]
+        self.assertCountEqual(shared_names, [
+            "ethereum_rpc", "base_rpc", "solana_rpc", "fear_greed", "news_rss", "social_rss"
+        ])
+        self.assertEqual(report["overall_status"], "PASS")
+        self.assertFalse(report["safety"]["orders_submitted"])
+        self.assertFalse(report["safety"]["production_or_live_account_accessed"])
+
+    def test_watchlist_rejects_empty_duplicate_and_injected_symbols(self):
+        for symbols in ((), ("BTCUSDT", "BTCUSDT"), ("BTCUSDT&x=1",)):
+            with self.subTest(symbols=symbols):
+                with self.assertRaises(ValueError):
+                    run_watchlist(symbols, session=object(), limiter=FakeLimiter())
 
     def test_cross_venue_price_divergence_is_a_hard_failure(self):
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

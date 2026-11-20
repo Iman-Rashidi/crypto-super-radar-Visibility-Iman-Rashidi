@@ -36,6 +36,7 @@ EVM_RPCS = (
 NEWS_RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
 SOCIAL_RSS = "https://www.reddit.com/r/CryptoCurrency/.rss"
 FEAR_GREED = "https://api.alternative.me/fng/"
+DEFAULT_ACCEPTANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "LINKUSDT")
 
 
 def utc_now() -> datetime:
@@ -573,6 +574,104 @@ class AcceptanceRunner:
         }
 
 
+def run_watchlist(
+    symbols: tuple[str, ...] = DEFAULT_ACCEPTANCE_SYMBOLS,
+    *,
+    timeout_seconds: float = 12.0,
+    max_latency_ms: float = 5000.0,
+    max_data_age_seconds: float = 180.0,
+    price_discrepancy_limit_pct: float = 5.0,
+    funding_discrepancy_limit: float = 0.0002,
+    session: Optional[requests.Session] = None,
+    limiter: Optional[SharedRateLimiter] = None,
+) -> dict[str, Any]:
+    """Run Spot/Perpetual acceptance for each symbol and shared context checks once."""
+    selected = tuple(symbols)
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("watchlist must be non-empty and contain no duplicates")
+    if any(not isinstance(symbol, str) or not re.fullmatch(r"[A-Z0-9]{3,30}", symbol) for symbol in selected):
+        raise ValueError("watchlist contains an invalid market symbol")
+
+    owns_session = session is None
+    shared_session = session or requests.Session()
+    shared_limiter = limiter or SharedRateLimiter(AppConfig().rate_limits.host_intervals)
+    runners: dict[str, AcceptanceRunner] = {}
+    market_records: dict[str, list[dict[str, Any]]] = {}
+    try:
+        for symbol in selected:
+            runner = AcceptanceRunner(
+                symbol=symbol,
+                timeout_seconds=timeout_seconds,
+                max_latency_ms=max_latency_ms,
+                max_data_age_seconds=max_data_age_seconds,
+                price_discrepancy_limit_pct=price_discrepancy_limit_pct,
+                funding_discrepancy_limit=funding_discrepancy_limit,
+                session=shared_session,
+                limiter=shared_limiter,
+            )
+            runner.check_binance_spot()
+            runner.check_bybit_spot()
+            runner.check_spot_price_agreement()
+            runner.check_binance_perpetual()
+            runner.check_bybit_perpetual()
+            runner.check_perpetual_agreement()
+            runners[symbol] = runner
+            market_records[symbol] = list(runner.results)
+
+        context_runner = runners[selected[0]]
+        for name, url, chain_id in EVM_RPCS:
+            check_name = "ethereum_rpc" if chain_id == 1 else "base_rpc"
+            context_runner.check_evm_rpc(check_name, url, chain_id)
+        context_runner.check_solana_rpc()
+        context_runner.check_fear_greed()
+        context_runner.check_rss("news_rss", NEWS_RSS)
+        context_runner.check_rss("social_rss", SOCIAL_RSS)
+        shared_records = list(context_runner.results[len(market_records[selected[0]]):])
+    finally:
+        if owns_session:
+            shared_session.close()
+
+    symbol_reports = {}
+    all_checks = []
+    for symbol in selected:
+        checks = market_records[symbol]
+        all_checks.extend(checks)
+        statuses = [item["status"] for item in checks]
+        overall = "FAIL" if "FAIL" in statuses else "INCONCLUSIVE" if "INCONCLUSIVE" in statuses else "PASS"
+        symbol_reports[symbol] = {
+            "overall_status": overall,
+            "check_count": len(checks),
+            "pass_count": statuses.count("PASS"),
+            "fail_count": statuses.count("FAIL"),
+            "inconclusive_count": statuses.count("INCONCLUSIVE"),
+            "checks": checks,
+        }
+    all_checks.extend(shared_records)
+    statuses = [item["status"] for item in all_checks]
+    overall = "FAIL" if "FAIL" in statuses else "INCONCLUSIVE" if "INCONCLUSIVE" in statuses else "PASS"
+    return {
+        "project": "CRYPTO SUPER RADAR",
+        "test_type": "LIVE_READ_ONLY_PROVIDER_ACCEPTANCE",
+        "generated_at_utc": iso_utc(utc_now()),
+        "symbols": list(selected),
+        "symbol_reports": symbol_reports,
+        "shared_context_checks": shared_records,
+        "overall_status": overall,
+        "check_count": len(all_checks),
+        "pass_count": statuses.count("PASS"),
+        "fail_count": statuses.count("FAIL"),
+        "inconclusive_count": statuses.count("INCONCLUSIVE"),
+        "safety": {
+            "read_only": True,
+            "orders_submitted": False,
+            "wallet_credentials_used": False,
+            "private_exchange_credentials_used": False,
+            "production_or_live_account_accessed": False,
+        },
+        "checks": all_checks,
+    }
+
+
 def finite_number(value: Any) -> Optional[float]:
     if isinstance(value, bool):
         return None
@@ -590,20 +689,30 @@ def positive_or_zero(value: Any) -> Optional[float]:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--symbol", default="BTCUSDT", help="CEX symbol to validate (default: BTCUSDT)")
+    parser.add_argument("--symbol", help="Validate one CEX symbol instead of the default five-symbol watchlist")
+    parser.add_argument("--all-symbols", action="store_true", help="Validate the five Challenge 1 symbols (default)")
     parser.add_argument("--output", type=Path, help="Optional JSON report path")
     parser.add_argument("--timeout", type=float, default=12.0, help="Per-request timeout in seconds")
     parser.add_argument("--max-latency-ms", type=float, default=5000.0)
     parser.add_argument("--max-data-age-seconds", type=float, default=180.0)
     args = parser.parse_args(argv)
 
-    runner = AcceptanceRunner(
-        symbol=args.symbol,
-        timeout_seconds=args.timeout,
-        max_latency_ms=args.max_latency_ms,
-        max_data_age_seconds=args.max_data_age_seconds,
-    )
-    report = runner.run()
+    if args.symbol and args.all_symbols:
+        parser.error("--symbol and --all-symbols cannot be used together")
+    if args.symbol:
+        runner = AcceptanceRunner(
+            symbol=args.symbol,
+            timeout_seconds=args.timeout,
+            max_latency_ms=args.max_latency_ms,
+            max_data_age_seconds=args.max_data_age_seconds,
+        )
+        report = runner.run()
+    else:
+        report = run_watchlist(
+            timeout_seconds=args.timeout,
+            max_latency_ms=args.max_latency_ms,
+            max_data_age_seconds=args.max_data_age_seconds,
+        )
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)
     if args.output:

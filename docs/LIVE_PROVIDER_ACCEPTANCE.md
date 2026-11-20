@@ -13,8 +13,10 @@ at the time of execution.
 - It does not sign transactions, connect wallets, read exchange accounts, create
   orders, or need private/API credentials.
 - It does not run the trading/research signal pipeline and cannot authorize a trade.
-- It checks BTCUSDT by default. Change the symbol only to another public market
-  instrument supported by both exchanges.
+- It checks the five-symbol Challenge 1 watchlist by default: BTCUSDT, ETHUSDT,
+  SOLUSDT, XRPUSDT, and LINKUSDT. Use --symbol to run a single supported symbol.
+- Spot and perpetual checks run independently for each symbol; Ethereum/Base/Solana
+  RPC, sentiment, and RSS context checks run once per watchlist execution.
 
 ## Run locally
 
@@ -22,7 +24,7 @@ From the repository root, install the existing project dependencies and run:
 
 ```bash
 python -m pip install -r requirements.txt
-python -m scripts.live_provider_acceptance --symbol BTCUSDT \
+python -m scripts.live_provider_acceptance --all-symbols \
   --output reports/live-provider-acceptance.json
 ```
 
@@ -33,8 +35,8 @@ is printed to stdout and optionally written to the supplied output path.
 
 | Area | Acceptance evidence |
 |---|---|
-| Binance Spot | BTCUSDT ticker schema, positive last price/turnover, recent exchange close timestamp |
-| Bybit Spot | V5 success envelope, exactly one symbol result, positive last price, recent server timestamp |
+| Binance Spot | Each watchlist ticker schema, positive last price/turnover, recent exchange close timestamp |
+| Bybit Spot | Each watchlist V5 success envelope, exactly one symbol result, positive last price, recent server timestamp |
 | Spot cross-check | Symmetric Binance/Bybit price difference no greater than 5% |
 | Binance USD-M | Positive mark price, finite signed funding rate, source timestamp and funding interval metadata |
 | Bybit Linear | V5 success envelope, positive mark price, finite signed funding rate, source timestamp and instrument funding interval |
@@ -89,8 +91,9 @@ python -m scripts.live_research_scan --asset perp:BTCUSDT \
   --output reports/live-research-scan-perpetual.json
 ```
 
-The runner is deliberately limited to a single CEX spot/perpetual symbol. Its
-JSON output for both spot and perpetual markets includes all twelve gate results,
+The integrated research scan remains deliberately limited to one CEX spot/perpetual
+symbol per scan. The provider acceptance runner separately checks all five watchlist
+symbols. Its JSON output for both spot and perpetual markets includes all twelve gate results,
 decision blockers, source evidence, the final `LONG`/`SHORT`/`NO TRADE` research result,
 and explicit safety fields
 confirming that no order was submitted and no transaction was signed. A scan

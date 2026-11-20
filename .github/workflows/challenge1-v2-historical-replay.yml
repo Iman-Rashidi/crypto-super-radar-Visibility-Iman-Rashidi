@@ -41,6 +41,8 @@ jobs:
             crypto_super_radar/ai_second_opinion.py \
             crypto_super_radar/challenge1_position_observers.py \
             scripts/diagnose_blofin_funding_history.py \
+            scripts/live_provider_acceptance.py \
+            tests/test_live_provider_acceptance.py \
             tests/test_funding_history_diagnostic.py \
             scripts/diagnose_blofin_market_data.py \
             tests/test_challenge1_event_queue.py \
@@ -55,6 +57,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
           python -m unittest discover -s tests -p 'test_market_replay_duplicates.py' -v
           python -m unittest discover -s tests -p 'test_funding_history_diagnostic.py' -v
+          python -m unittest discover -s tests -p 'test_live_provider_acceptance.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_event_queue.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_sandbox_worker.py' -v
           python -m unittest discover -s tests -p 'test_blofin_demo_executor.py' -v

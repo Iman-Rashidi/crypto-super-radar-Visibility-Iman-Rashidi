@@ -21,7 +21,7 @@ on:
       symbol:
         description: Public spot/perpetual symbol supported by the configured providers
         required: false
-        default: BTCUSDT
+        default: ""
         type: string
 
 permissions:
@@ -60,12 +60,18 @@ jobs:
         id: live_checks
         continue-on-error: true
         env:
-          ACCEPTANCE_SYMBOL: ${{ github.event.inputs.symbol || 'BTCUSDT' }}
+          ACCEPTANCE_SYMBOL: ${{ github.event.inputs.symbol || '' }}
         working-directory: ${{ runner.temp }}/csr-live/crypto-super-radar
         run: |
-          python -m scripts.live_provider_acceptance \
-            --symbol "${ACCEPTANCE_SYMBOL}" \
-            --output "$GITHUB_WORKSPACE/reports/live-provider-acceptance.json"
+          if [ -n "${ACCEPTANCE_SYMBOL}" ]; then
+            python -m scripts.live_provider_acceptance \
+              --symbol "${ACCEPTANCE_SYMBOL}" \
+              --output "$GITHUB_WORKSPACE/reports/live-provider-acceptance.json"
+          else
+            python -m scripts.live_provider_acceptance \
+              --all-symbols \
+              --output "$GITHUB_WORKSPACE/reports/live-provider-acceptance.json"
+          fi
       - name: Execute integrated 12-gate research scan (read-only)
         id: live_scan
         continue-on-error: true
