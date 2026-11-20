@@ -2248,6 +2248,38 @@ class BloFinDemoPositionEvidenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "NOT_VERIFIED_NO_EXACT_POSITION_LINK")
         self.assertEqual(result["orders"], [])
 
+    def test_exchange_protection_guard_distinguishes_missing_stop_from_partial_read(self):
+        for status in (
+            "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+            "TP_ONLY_VISIBLE",
+            "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
+        ):
+            self.assertTrue(
+                web_app._blofin_demo_protection_requires_emergency_close({"status": status}),
+                status,
+            )
+        for status in (
+            "BOTH_TP_AND_SL_VISIBLE",
+            "SL_ONLY_VISIBLE",
+            "READ_FAILED",
+            "INVALID_RESPONSE",
+            "UNKNOWN",
+        ):
+            self.assertFalse(
+                web_app._blofin_demo_protection_requires_emergency_close({"status": status}),
+                status,
+            )
+        self.assertTrue(
+            web_app._blofin_demo_protection_fully_confirmed(
+                {"status": "BOTH_TP_AND_SL_VISIBLE"}
+            )
+        )
+        self.assertFalse(
+            web_app._blofin_demo_protection_fully_confirmed(
+                {"status": "SL_ONLY_VISIBLE"}
+            )
+        )
+
     def test_stop_loss_threshold_crossings_are_detected_for_both_sides_without_order_side_effects(self):
         self.assertTrue(web_app._blofin_demo_stop_loss_triggered("LONG", 94.9, 95.0))
         self.assertFalse(web_app._blofin_demo_stop_loss_triggered("LONG", 95.1, 95.0))
