@@ -718,6 +718,21 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual(plan["aggregate_risk_limit_usdt"], "5")
         self.assertEqual(plan["aggregate_margin_limit_usdt"], "100")
         self.assertTrue(self.store.reserve_order(plan))
+        order = self.store.get_order(plan["client_order_id"])
+        self.assertIsNotNone(order)
+        self.assertAlmostEqual(
+            float(order["notional_usdt"]), float(plan["notional_usdt"]), places=8
+        )
+        reserved_event = self.store._db.execute(
+            "SELECT payload_json FROM blofin_demo_execution_events "
+            "WHERE client_order_id=? AND event_type='RESERVED'",
+            (plan["client_order_id"],),
+        ).fetchone()
+        self.assertIsNotNone(reserved_event)
+        self.assertAlmostEqual(
+            float(json.loads(reserved_event["payload_json"])["notional_usdt"]),
+            float(plan["notional_usdt"]), places=8,
+        )
         budget = self.store.trade_budget_status()
         self.assertTrue(budget["aggregate_exposure_complete"])
         self.assertEqual(
