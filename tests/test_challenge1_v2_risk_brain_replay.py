@@ -24,6 +24,7 @@ from crypto_super_radar.ai_sandbox import (
 )
 from crypto_super_radar.market_replay import (
     ReplayDownloadError,
+    _classify_funding_schedule_events,
     _parse_funding_event,
     _record_unique_timestamp,
     _subtract_calendar_months,
@@ -354,15 +355,17 @@ class ReplayDuplicateTimestampTests(unittest.TestCase):
 
 
 class ReplayFundingSchemaTests(unittest.TestCase):
-    def test_missing_funding_kind_is_not_fabricated_as_regular(self):
-        with self.assertRaisesRegex(ReplayDownloadError, "missing or unsupported fundingKind"):
+    def test_missing_funding_kind_is_preserved_as_missing_provenance(self):
+        self.assertEqual(
             _parse_funding_event(
                 {"fundingTime": "1000", "fundingRate": "0.0001"},
                 symbol="BTC-USDT",
-            )
+            ),
+            ("BTC-USDT", 1000, 0.0001, "MISSING", "MISSING_API_FIELD"),
+        )
 
     def test_unknown_funding_kind_is_rejected(self):
-        with self.assertRaisesRegex(ReplayDownloadError, "missing or unsupported fundingKind"):
+        with self.assertRaisesRegex(ReplayDownloadError, "unsupported fundingKind"):
             _parse_funding_event(
                 {"fundingTime": "1000", "fundingRate": "0.0001", "fundingKind": "9"},
                 symbol="BTC-USDT",
@@ -377,8 +380,8 @@ class ReplayFundingSchemaTests(unittest.TestCase):
             {"fundingTime": "2000", "fundingRate": "0.0002", "fundingKind": "1"},
             symbol="BTC-USDT",
         )
-        self.assertEqual(regular, ("BTC-USDT", 1000, 0.0001, "0"))
-        self.assertEqual(dividend, ("BTC-USDT", 2000, 0.0002, "1"))
+        self.assertEqual(regular, ("BTC-USDT", 1000, 0.0001, "0", "EXPLICIT_API"))
+        self.assertEqual(dividend, ("BTC-USDT", 2000, 0.0002, "1", "EXPLICIT_API"))
 
 
 class SandboxFundingKindTests(unittest.TestCase):
@@ -443,6 +446,80 @@ class VirtualBloFinFundingKindTests(unittest.TestCase):
             "fundingKind": "0",
         })
         self.assertNotEqual(result.status, "REJECTED")
+
+
+
+class ReplayFundingScheduleInferenceTests(unittest.TestCase):
+    @staticmethod
+    def _rows():
+        stamps = [
+            int(pd.Timestamp("2026-06-25T00:00:00Z").timestamp() * 1000),
+            int(pd.Timestamp("2026-06-25T08:00:00Z").timestamp() * 1000),
+            int(pd.Timestamp("2026-06-25T16:00:00Z").timestamp() * 1000),
+            int(pd.Timestamp("2026-06-26T16:00:00Z").timestamp() * 1000),
+            int(pd.Timestamp("2026-06-27T00:00:00Z").timestamp() * 1000),
+            int(pd.Timestamp("2026-06-27T04:00:00Z").timestamp() * 1000),
+            int(pd.Timestamp("2026-06-27T05:00:00Z").timestamp() * 1000),
+        ]
+        return [("BTC-USDT", stamp, 0.0001, "MISSING", "MISSING_API_FIELD") for stamp in stamps]
+
+    def test_missing_kind_is_inferred_from_observed_dynamic_cadence(self):
+        result = _classify_funding_schedule_events(self._rows(), symbol="BTC-USDT")
+        self.assertTrue(all(row[3] == "0" for row in result))
+        self.assertTrue(all(row[4] == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL" for row in result))
+        self.assertEqual({row[5] for row in result}, {60 * 60_000, 4 * 60 * 60_000, 8 * 60 * 60_000})
+
+    def test_event_outside_ten_second_boundary_tolerance_is_rejected(self):
+        rows = self._rows()
+        rows[1] = (rows[1][0], rows[1][1] + 11_000, rows[1][2], rows[1][3], rows[1][4])
+        with self.assertRaisesRegex(ReplayDownloadError, "supported observed"):
+            _classify_funding_schedule_events(rows, symbol="BTC-USDT")
+
+    def test_unregistered_long_gap_is_not_promoted_to_blackout(self):
+        rows = self._rows()
+        rows[3] = (rows[3][0], rows[3][1] + 60 * 60_000, rows[3][2], rows[3][3], rows[3][4])
+        with self.assertRaises(ReplayDownloadError):
+            _classify_funding_schedule_events(rows, symbol="BTC-USDT")
+
+    def test_explicit_stock_dividend_is_never_relabelled_regular(self):
+        rows = self._rows()
+        rows[2] = (rows[2][0], rows[2][1], rows[2][2], "1", "EXPLICIT_API")
+        with self.assertRaisesRegex(ReplayDownloadError, "stock-dividend"):
+            _classify_funding_schedule_events(rows, symbol="BTC-USDT")
+
+
+class VirtualBloFinFundingBlackoutTests(unittest.TestCase):
+    def test_position_overlapping_blackout_keeps_net_pnl_unknown(self):
+        engine = VirtualBloFin()
+        rules = InstrumentRules(
+            inst_id="BTC-USDT", contract_value=Decimal("1"),
+            min_size=Decimal("1"), lot_size=Decimal("1"), tick_size=Decimal("0.01"),
+        )
+        base = 1_700_000_000_000
+        bars = [
+            {"ts": base, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
+            {"ts": base + 900_000, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
+            {"ts": base + 1_800_000, "low": 99.0, "high": 101.0, "mark_high": 101.0, "mark_low": 99.0},
+        ]
+        result = engine.simulate_post_only_trade(
+            bars=bars, start_index=0, direction="LONG", limit_price=100,
+            stop_price=99, target_price=104, equity_usdt=1000,
+            risk_fraction=0.0025, rules=rules,
+            funding_events=[{
+                "fundingTime": base - 1, "fundingRate": 0.0001,
+                "fundingKind": "0", "fundingKindSource": "EXPLICIT_API",
+            }],
+            funding_blackouts=[{
+                "start_ms": base + 900_000, "end_ms": base + 24 * 60 * 60_000,
+                "label": "EXCHANGE_DATA_GAP_BLACKOUT",
+            }],
+            spread_fraction=0.0002,
+        )
+        self.assertEqual(result.status, "UNKNOWN")
+        self.assertEqual(result.exit_reason, "FUNDING_DATA_GAP_BLACKOUT")
+        self.assertIsNone(result.net_pnl_usdt)
+        self.assertFalse(result.diagnostics["funding_complete"])
+        self.assertFalse(result.diagnostics["orders_submitted"])
 
 
 class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):

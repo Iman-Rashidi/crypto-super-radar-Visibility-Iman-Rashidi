@@ -15,7 +15,7 @@ import sqlite3
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,11 @@ import pandas as pd
 from .adaptive_brain import OnlineMetaBrain
 from .challenge1_v2 import analyze_signal, atr
 from .virtual_blofin import CostModel, InstrumentRules, InsufficientEquityForRisk, SimulationError, VirtualBloFin
+from .market_replay import (
+    FUNDING_INTERVAL_HOURS, FUNDING_SCHEDULE_TOLERANCE_MS,
+    OBSERVED_FUNDING_BLACKOUTS, _classify_funding_schedule_events,
+    _is_observed_blackout_gap, _funding_interval_for_delta,
+)
 
 DEFAULT_WATCHLIST = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 BAR_MS = 15 * 60_000
@@ -51,16 +56,41 @@ def _load_candles(connection: sqlite3.Connection, symbol: str, bar: str, source:
 
 
 def _require_regular_funding_events(funding: list[Mapping[str, Any]], symbol: str) -> None:
-    unsupported = sorted({
-        str(item.get("fundingKind") or "").strip() or "MISSING"
-        for item in funding
-        if str(item.get("fundingKind") or "").strip() != "0"
-    })
+    unsupported = []
+    for item in funding:
+        kind = str(item.get("fundingKind") or "").strip()
+        source = str(item.get("fundingKindSource") or "").strip()
+        if kind != "0":
+            unsupported.append(kind or "MISSING")
+        elif source == "EXPLICIT_API":
+            continue
+        elif source == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL":
+            try:
+                interval_ms = int(item.get("fundingIntervalMs"))
+                timestamp = int(item.get("fundingTime"))
+            except (TypeError, ValueError, OverflowError):
+                unsupported.append("INFERENCE_METADATA_MISSING")
+                continue
+            allowed = {hours * 60 * 60_000 for hours in FUNDING_INTERVAL_HOURS}
+            remainder = timestamp % interval_ms if interval_ms > 0 else -1
+            if not (
+                item.get("fundingScheduleVerified") is True
+                and interval_ms in allowed
+                and min(remainder, interval_ms - remainder) <= FUNDING_SCHEDULE_TOLERANCE_MS
+            ):
+                unsupported.append("INFERENCE_NOT_VERIFIED")
+        else:
+            unsupported.append(source or "PROVENANCE_MISSING")
     if unsupported:
-        raise SandboxDataError(
-            f"unsupported fundingKind for {symbol}; Challenge 1 only models regular "
-            f"fundingKind=0, observed={unsupported}"
-        )
+        raise SandboxDataError(f"unsupported funding classification for {symbol}: {sorted(set(unsupported))}")
+
+
+def _funding_blackout_for_timestamp(timestamp_ms: int) -> dict[str, Any] | None:
+    stamp = int(timestamp_ms)
+    return next((
+        dict(window) for window in OBSERVED_FUNDING_BLACKOUTS
+        if int(window["start_ms"]) <= stamp < int(window["end_ms"])
+    ), None)
 
 
 def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
@@ -116,13 +146,25 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
             "mark_low": float(row["mark_low"]), "atr_15m": float(row["atr_15m"]),
         })
     funding_rows = connection.execute(
-        "SELECT funding_time,funding_rate,funding_kind FROM replay_funding WHERE instrument_id=? ORDER BY funding_time ASC",
+        """SELECT funding_time,funding_rate,funding_kind,funding_kind_source,funding_interval_ms
+           FROM replay_funding WHERE instrument_id=? ORDER BY funding_time ASC""",
         (symbol,),
     ).fetchall()
-    funding = [
-        {"fundingTime": int(ts), "fundingRate": float(rate), "fundingKind": str(kind)}
-        for ts, rate, kind in funding_rows
+    stored_rows = [
+        (symbol, int(ts), float(rate), str(kind), str(source))
+        for ts, rate, kind, source, _interval in funding_rows
     ]
+    verified_rows = _classify_funding_schedule_events(stored_rows, symbol=symbol)
+    funding = []
+    for stored, verified in zip(funding_rows, verified_rows):
+        ts, rate, kind, source, interval_ms = stored
+        if interval_ms is None or int(interval_ms) != int(verified[5]):
+            raise SandboxDataError(f"stored funding interval provenance changed for {symbol}")
+        funding.append({
+            "fundingTime": int(ts), "fundingRate": float(rate), "fundingKind": str(kind),
+            "fundingKindSource": str(source), "fundingIntervalMs": int(interval_ms),
+            "fundingScheduleVerified": str(source) == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL",
+        })
     if len(funding) < 3:
         raise SandboxDataError(f"funding history is incomplete for {symbol}")
     _require_regular_funding_events(funding, symbol)
@@ -134,16 +176,24 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     ):
         raise SandboxDataError(f"funding history is invalid or unordered for {symbol}")
     funding_deltas = np.diff(funding_times)
-    median_funding_interval = int(np.median(funding_deltas))
-    if median_funding_interval <= 0 or (
-        funding_deltas > median_funding_interval * 1.5
-    ).any():
-        raise SandboxDataError(f"funding history contains missing settlement intervals for {symbol}")
+    verified_intervals = []
+    for left, right, delta in zip(funding_times[:-1], funding_times[1:], funding_deltas):
+        if _is_observed_blackout_gap(int(left), int(right)):
+            continue
+        interval_ms = _funding_interval_for_delta(int(delta))
+        if interval_ms is None:
+            raise SandboxDataError(
+                f"funding history contains an unverified cadence gap for {symbol}: {int(delta)} ms"
+            )
+        verified_intervals.append(interval_ms)
+    if not verified_intervals:
+        raise SandboxDataError(f"funding history has no verified cadence for {symbol}")
+    median_funding_interval = int(np.median(np.asarray(verified_intervals, dtype=np.int64)))
     source_start_ms = int(source_start.timestamp() * 1000)
     source_end_ms = int(source_end.timestamp() * 1000)
     if (
-        int(funding_times[0]) - source_start_ms > median_funding_interval * 1.5
-        or source_end_ms - int(funding_times[-1]) > median_funding_interval * 1.5
+        int(funding_times[0]) - source_start_ms > int(funding[0]["fundingIntervalMs"] * 1.5)
+        or source_end_ms - int(funding_times[-1]) > int(funding[-1]["fundingIntervalMs"] * 1.5)
     ):
         raise SandboxDataError(f"funding history does not cover the full replay window for {symbol}")
     instrument_row = connection.execute(
@@ -322,6 +372,79 @@ def _max_consecutive_losses(trades: list[dict[str, Any]]) -> int:
     return best
 
 
+def _performance_summary(trades: list[dict[str, Any]], initial_equity: float) -> dict[str, Any]:
+    ordered = sorted(trades, key=lambda item: int(item.get("exit_ts_ms") or 0))
+    pnls = [float(item["net_pnl_usdt"]) for item in ordered if item.get("net_pnl_usdt") is not None]
+    wins = sum(pnl > 0 for pnl in pnls)
+    losses = sum(pnl < 0 for pnl in pnls)
+    gross_profit = sum(pnl for pnl in pnls if pnl > 0)
+    gross_loss = abs(sum(pnl for pnl in pnls if pnl < 0))
+    equity, peak, max_dd, max_dd_pct = float(initial_equity), float(initial_equity), 0.0, 0.0
+    for trade in ordered:
+        pnl = trade.get("net_pnl_usdt")
+        if pnl is None:
+            continue
+        equity += float(pnl)
+        peak = max(peak, equity)
+        dd = peak - equity
+        max_dd = max(max_dd, dd)
+        if peak > 0:
+            max_dd_pct = max(max_dd_pct, dd / peak * 100.0)
+    r_values = [float(t["net_r_multiple"]) for t in ordered if t.get("net_r_multiple") is not None]
+    net = sum(pnls)
+    return {
+        "completed_trades": len(pnls), "wins": wins, "losses": losses,
+        "net_win_rate_pct": wins / len(pnls) * 100.0 if pnls else None,
+        "total_net_pnl_usdt": net,
+        "total_net_pnl_pct_initial_portfolio_equity": net / initial_equity * 100.0 if initial_equity else None,
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else None,
+        "profit_factor_status": "CALCULATED" if gross_loss > 0 else "UNDEFINED_NO_GROSS_LOSS",
+        "expectancy_usdt_per_trade": float(np.mean(pnls)) if pnls else None,
+        "average_net_r": float(np.mean(r_values)) if r_values else None,
+        "maximum_drawdown_usdt": max_dd, "maximum_drawdown_pct": max_dd_pct,
+        "total_fees_usdt": sum(float(t.get("fees_usdt") or 0.0) for t in ordered),
+        "total_funding_usdt": sum(float(t.get("funding_usdt") or 0.0) for t in ordered),
+        "spread_cost_modelled_usdt": sum(float(t.get("spread_cost_usdt") or 0.0) for t in ordered),
+        "slippage_cost_modelled_usdt": sum(float(t.get("slippage_cost_usdt") or 0.0) for t in ordered),
+    }
+
+
+def _grouped_performance_summary(
+    trades: list[dict[str, Any]], initial_equity: float, symbols: tuple[str, ...],
+) -> dict[str, Any]:
+    phases = ("TRAIN", "VALIDATION", "OUT_OF_SAMPLE")
+    return {
+        "portfolio": _performance_summary(trades, initial_equity),
+        "by_symbol": {
+            symbol: _performance_summary([t for t in trades if t.get("instrument_id") == symbol], initial_equity)
+            for symbol in symbols
+        },
+        "by_phase": {
+            phase: _performance_summary([t for t in trades if t.get("phase") == phase], initial_equity)
+            for phase in phases
+        },
+        "by_symbol_and_phase": {
+            symbol: {
+                phase: _performance_summary([
+                    t for t in trades if t.get("instrument_id") == symbol and t.get("phase") == phase
+                ], initial_equity) for phase in phases
+            } for symbol in symbols
+        },
+    }
+
+
+def _shadow_book_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    losers = [t for t in trades if float(t.get("net_pnl_usdt") or 0.0) <= 0]
+    winners = [t for t in trades if float(t.get("net_pnl_usdt") or 0.0) > 0]
+    return {
+        "closed_counterfactual_trades": len(trades),
+        "losses_avoided_count": len(losers), "winners_missed_count": len(winners),
+        "estimated_losses_avoided_usdt": sum(abs(float(t["net_pnl_usdt"])) for t in losers),
+        "estimated_profit_missed_usdt": sum(float(t["net_pnl_usdt"]) for t in winners),
+        "interpretation": "Counterfactual only; shadow outcomes are not executable fills.",
+    }
+
+
 def run_sandbox(
     *, db_path: str, initial_equity: float = 1000.0,
     symbols: tuple[str, ...] = DEFAULT_WATCHLIST,
@@ -417,6 +540,7 @@ def run_sandbox(
                         rules=item["rules"],
                         funding_events=item["funding"],
                         spread_fraction=spread_scenario,
+                        funding_blackouts=OBSERVED_FUNDING_BLACKOUTS,
                     )
                 except InsufficientEquityForRisk:
                     if order.get("entry_checked"):
@@ -477,6 +601,17 @@ def run_sandbox(
                 # silently counted as a close or as a successful outcome.
                 counts["unknown_simulator_states"] += 1
                 order["last_error"] = f"UNKNOWN_SIMULATOR_STATUS:{result.status}"
+                order["last_status"] = result.exit_reason or "UNKNOWN"
+                observed = result.diagnostics.get("observed_through_ts_ms")
+                if observed is not None:
+                    order["last_observed_through_ts_ms"] = int(observed)
+                if result.exit_reason == "FUNDING_DATA_GAP_BLACKOUT":
+                    order["entry_checked"] = True
+                    if result.diagnostics.get("entry_ts_ms") is not None:
+                        order["entry_ts_ms"] = int(result.diagnostics["entry_ts_ms"])
+                    if not order.get("blackout_unknown_counted"):
+                        counts["funding_blackout_unresolved_positions"] += 1
+                        order["blackout_unknown_counted"] = True
                 survivors.append(order)
 
             collection[:] = survivors
@@ -565,6 +700,12 @@ def run_sandbox(
                 "exit_ts_ms": exit_ts_ms,
                 "exit_reason": result.exit_reason,
                 "net_pnl_usdt": result.net_pnl_usdt,
+                "risk_budget_usdt": float(result.diagnostics.get("risk_budget_usdt", 0.0)),
+                "all_in_stop_risk_usdt": float(result.diagnostics.get("all_in_stop_risk_usdt", 0.0)),
+                "net_r_multiple": (
+                    float(result.net_pnl_usdt) / float(result.diagnostics["all_in_stop_risk_usdt"])
+                    if result.diagnostics.get("all_in_stop_risk_usdt") else None
+                ),
                 "fees_usdt": result.fees_usdt,
                 "funding_usdt": result.funding_usdt,
                 "spread_cost_usdt": spread_cost,
@@ -634,17 +775,24 @@ def run_sandbox(
                 else validation_end_ms if phase == "VALIDATION"
                 else None
             )
+            if _funding_blackout_for_timestamp(asof_ms) is not None:
+                counts["funding_blackout_new_entry_blocks"] += 1
+                continue
             if phase_boundary_ms is not None and _within_purge_window(
                 asof_ms, phase_boundary_ms, max_holding_bars=12
             ):
                 counts["purged_boundary_signal_blocks"] += 1
                 continue
             counts["strategy_checks"] += 1
-            funding_max_age_ms = int(item["funding_interval_median_ms"] * 1.5)
+            latest_interval = next((
+                int(event["fundingIntervalMs"])
+                for event in reversed(item["funding"])
+                if int(event["fundingTime"]) <= asof_ms
+            ), int(item["funding_interval_median_ms"]))
             funding_event = _known_funding_event(
                 item["funding"],
                 asof_ms,
-                max_age_ms=funding_max_age_ms,
+                max_age_ms=int(latest_interval * 1.5),
             )
             funding_rate = float(funding_event["fundingRate"]) if funding_event is not None else None
             funding_kind = str(funding_event["fundingKind"]) if funding_event is not None else None
@@ -744,6 +892,7 @@ def run_sandbox(
             "phase": item["phase"],
             "phase_boundary_crossed": bool(item.get("phase_boundary_crossed")),
             "last_observed_through_ts_ms": item.get("last_observed_through_ts_ms"),
+            "last_error": item.get("last_error"),
         }
         for item in active_orders
     ]
@@ -757,6 +906,7 @@ def run_sandbox(
             "phase_boundary_crossed": bool(item.get("phase_boundary_crossed")),
             "model_probability": item.get("model_probability"),
             "last_observed_through_ts_ms": item.get("last_observed_through_ts_ms"),
+            "last_error": item.get("last_error"),
         }
         for item in shadow_orders
     ]
@@ -792,6 +942,8 @@ def run_sandbox(
         "equity": {"initial_usdt": initial_equity, "final_realized_usdt": equity, "net_pnl_usdt": equity - initial_equity},
         "trade_metrics": {
             "closed_trades": total_closed, "wins": wins, "losses": losses,
+            "funding_blackout_new_entry_blocks": counts["funding_blackout_new_entry_blocks"],
+            "funding_blackout_unresolved_positions": counts["funding_blackout_unresolved_positions"],
             "net_win_rate_pct": (wins / total_closed * 100.0) if total_closed else None,
             "gross_pnl_before_costs_usdt": totals["gross_pnl_usdt"],
             "fees_usdt": totals["fees_usdt"], "funding_usdt": totals["funding_usdt"],
@@ -812,6 +964,27 @@ def run_sandbox(
             "pending_entries_at_dataset_end": counts["pending_entries_at_dataset_end"],
             "shadow_unresolved_at_dataset_end": counts["shadow_unresolved_at_dataset_end"],
         },
+        "quantitative_metrics": _grouped_performance_summary(actual_trades, initial_equity, symbols),
+        "shadow_book_metrics": _shadow_book_summary(shadow_trades),
+        "funding_data_quality": {
+            "explicit_funding_kind_events": sum(
+                1 for item in market.values() for event in item["funding"]
+                if event.get("fundingKindSource") == "EXPLICIT_API"
+            ),
+            "schedule_inferred_events": sum(
+                1 for item in market.values() for event in item["funding"]
+                if event.get("fundingKindSource") == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
+            ),
+            "schedule_inference_is_not_explicit_exchange_kind": True,
+            "supported_observed_intervals_hours": list(FUNDING_INTERVAL_HOURS),
+            "blackout_windows": [dict(window) for window in OBSERVED_FUNDING_BLACKOUTS],
+            "new_entries_blocked_inside_blackout": True,
+            "positions_overlapping_blackout_keep_unknown_net_pnl": True,
+            "classification_note": (
+                "Absent Kind is inferred from observed 1/2/4/8-hour cadence within 10 seconds; "
+                "inferred labels remain distinct from explicit API kind."
+            ),
+        },
         "ai_audit": {
             "model_version": "csr-online-meta-sgd-v1", "trained": brain.trained,
             "model_sha256": brain.model_sha256(),
@@ -825,6 +998,7 @@ def run_sandbox(
             "estimated_losses_avoided_usdt": totals["estimated_losses_avoided_usdt"],
             "saved_capital_is_counterfactual_estimate": True,
             "feature_coefficients_not_causal_importance": brain.feature_importance(),
+            "feature_importance_interpretation": "Associational model coefficients only; not causal attribution.",
         },
         "diagnostics": dict(counts),
         "trade_ledger": sorted(actual_trades, key=lambda x: x["exit_ts_ms"]),

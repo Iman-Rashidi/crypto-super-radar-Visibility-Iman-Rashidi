@@ -35,6 +35,34 @@ def _float(value: Any, name: str) -> float:
     return float(_dec(value, name))
 
 
+def _normalise_funding_blackouts(windows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for window in windows:
+        if not isinstance(window, Mapping):
+            raise SimulationError("funding blackout window is malformed")
+        try:
+            start_ms, end_ms = int(window["start_ms"]), int(window["end_ms"])
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise SimulationError("funding blackout boundaries are invalid") from exc
+        if start_ms <= 0 or end_ms <= start_ms:
+            raise SimulationError("funding blackout boundaries must be positive and increasing")
+        result.append({**dict(window), "start_ms": start_ms, "end_ms": end_ms})
+    result.sort(key=lambda item: item["start_ms"])
+    if any(right["start_ms"] < left["end_ms"] for left, right in zip(result, result[1:])):
+        raise SimulationError("funding blackout windows overlap")
+    return result
+
+
+def _funding_blackout_for_interval(
+    start_ms: int, end_ms: int, windows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    return next((
+        dict(window) for window in windows
+        if int(start_ms) < int(window["end_ms"])
+        and int(end_ms) > int(window["start_ms"])
+    ), None)
+
+
 @dataclass(frozen=True)
 class InstrumentRules:
     inst_id: str
@@ -367,8 +395,10 @@ class VirtualBloFin:
         direction: str, limit_price: Any, stop_price: Any, target_price: Any,
         equity_usdt: Any, risk_fraction: float, rules: InstrumentRules,
         funding_events: Iterable[Mapping[str, Any]], spread_fraction: float | None = None,
+        funding_blackouts: Iterable[Mapping[str, Any]] = (),
     ) -> TradeResult:
         rows = list(bars)
+        blackout_windows = _normalise_funding_blackouts(funding_blackouts)
         side = str(direction).upper()
         if side not in {"LONG", "SHORT"}:
             raise SimulationError("direction must be LONG or SHORT")
@@ -449,12 +479,45 @@ class VirtualBloFin:
                     "only fundingKind=0 regular funding is modeled; missing, stock-dividend, "
                     "or unknown funding kinds are unsupported"
                 )
+            source = str(event.get("fundingKindSource") or "EXPLICIT_API").strip()
+            if source == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL":
+                if event.get("fundingScheduleVerified") is not True:
+                    raise SimulationError("schedule-inferred funding has no verified provenance")
+                try:
+                    interval_ms = int(event.get("fundingIntervalMs"))
+                    funding_ts = _timestamp_ms(event.get("fundingTime"))
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise SimulationError("schedule-inferred funding metadata is invalid") from exc
+                allowed = {hours * 60 * 60_000 for hours in (1, 2, 4, 8)}
+                if interval_ms not in allowed:
+                    raise SimulationError("schedule-inferred funding interval is unsupported")
+                remainder = funding_ts % interval_ms
+                if min(remainder, interval_ms - remainder) > 10_000:
+                    raise SimulationError("schedule-inferred funding timestamp is outside its cadence")
+            elif source != "EXPLICIT_API":
+                raise SimulationError("funding provenance is missing or unsupported")
             funding_input.append(dict(event))
         funding = sorted(funding_input, key=lambda x: _timestamp_ms(x.get("fundingTime")))
         if cc.require_funding_history and not funding:
             raise SimulationError("funding history is unavailable; funding cannot be assumed zero")
         entry_ts = _timestamp_ms(next_bar.get("ts"))
         fill_bar_close_ts = int(next_bar.get("close_ts") or (entry_ts + 15 * 60_000))
+        fill_blackout = _funding_blackout_for_interval(entry_ts, fill_bar_close_ts, blackout_windows)
+        if fill_blackout is not None:
+            return TradeResult(
+                "UNKNOWN", "FUNDING_DATA_GAP_BLACKOUT", qty_total, entry, None, None,
+                entry_fee, 0.0, 0, False, rr_items["net_rr"], {
+                    **rr_items,
+                    "entry_order_type": "post_only_limit",
+                    "entry_fill_model": "one_tick_trade_through",
+                    "entry_ts_ms": entry_ts,
+                    "observed_through_ts_ms": fill_bar_close_ts,
+                    "net_pnl_usdt": None,
+                    "funding_complete": False,
+                    "funding_blackout": fill_blackout,
+                    "orders_submitted": False,
+                },
+            )
         fill_mark_high, fill_mark_low = next_bar.get("mark_high"), next_bar.get("mark_low")
         if fill_mark_high is None or fill_mark_low is None:
             raise SimulationError("historical mark-price OHLC is required on the entry-fill candle")
@@ -496,6 +559,25 @@ class VirtualBloFin:
             held += 1
             ts = _timestamp_ms(bar.get("ts"))
             close_ts = int(bar.get("close_ts") or (ts + 15 * 60_000))
+            funding_blackout = _funding_blackout_for_interval(ts, close_ts, blackout_windows)
+            if funding_blackout is not None:
+                return TradeResult(
+                    "UNKNOWN", "FUNDING_DATA_GAP_BLACKOUT", qty_total, entry, None, None,
+                    fees, funding_total, held, tp1, rr_items["net_rr"], {
+                        **rr_items,
+                        "entry_order_type": "post_only_limit",
+                        "entry_fill_model": "one_tick_trade_through",
+                        "entry_ts_ms": entry_ts,
+                        "observed_through_ts_ms": close_ts,
+                        "net_pnl_usdt": None,
+                        "realized_net_pnl_so_far_usdt": None,
+                        "funding_complete": False,
+                        "funding_blackout": funding_blackout,
+                        "time_exit_order_type": "LIMIT" if time_exit_limit_price is not None else None,
+                        "time_exit_limit_price": time_exit_limit_price,
+                        "orders_submitted": False,
+                    },
+                )
             mark_high, mark_low = bar.get("mark_high"), bar.get("mark_low")
             if mark_high is None or mark_low is None:
                 raise SimulationError("historical mark-price OHLC is required; last-price candles are not a substitute")

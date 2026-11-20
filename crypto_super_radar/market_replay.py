@@ -26,6 +26,52 @@ INSTRUMENTS_PATH = "/api/v1/market/instruments"
 DEFAULT_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 BAR_MS = {"15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
 
+# BloFin has publicly documented dynamic 1/2/4/8-hour funding intervals.
+FUNDING_INTERVAL_HOURS = (1, 2, 4, 8)
+FUNDING_SCHEDULE_TOLERANCE_MS = 10_000
+OBSERVED_FUNDING_BLACKOUTS = ({
+    "start_ms": 1782403200000,  # 2026-06-25T16:00:00Z
+    "end_ms": 1782489600000,    # 2026-06-26T16:00:00Z
+    "label": "EXCHANGE_DATA_GAP_BLACKOUT",
+    "evidence": "Common 24-hour timestamp gap across all five approved symbols in Historical Replay Run #60",
+    "outage_confirmed": False,
+},)
+
+
+def _funding_interval_for_delta(delta_ms: int) -> int | None:
+    for hours in FUNDING_INTERVAL_HOURS:
+        interval_ms = hours * 60 * 60_000
+        if abs(int(delta_ms) - interval_ms) <= FUNDING_SCHEDULE_TOLERANCE_MS:
+            return interval_ms
+    return None
+
+
+def _is_observed_blackout_gap(left_ms: int, right_ms: int) -> bool:
+    return any(
+        abs(int(left_ms) - int(window["start_ms"])) <= FUNDING_SCHEDULE_TOLERANCE_MS
+        and abs(int(right_ms) - int(window["end_ms"])) <= FUNDING_SCHEDULE_TOLERANCE_MS
+        for window in OBSERVED_FUNDING_BLACKOUTS
+    )
+
+
+def _validate_common_funding_blackout(funding_by_symbol: Mapping[str, list[tuple[Any, ...]]]) -> None:
+    expected = (
+        int(OBSERVED_FUNDING_BLACKOUTS[0]["start_ms"]),
+        int(OBSERVED_FUNDING_BLACKOUTS[0]["end_ms"]),
+    )
+    if set(funding_by_symbol) != set(DEFAULT_SYMBOLS):
+        raise ReplayDownloadError("common blackout validation requires the exact five-symbol approved basket")
+    for symbol, items in funding_by_symbol.items():
+        timestamps = [int(item[1]) for item in items]
+        observed = {
+            (left, right) for left, right in zip(timestamps, timestamps[1:])
+            if abs((right - left) - (expected[1] - expected[0])) <= FUNDING_SCHEDULE_TOLERANCE_MS
+        }
+        if observed != {expected}:
+            raise ReplayDownloadError(
+                f"{symbol} does not contain exactly the declared common funding-data blackout"
+            )
+
 
 class ReplayDownloadError(RuntimeError):
     pass
@@ -207,8 +253,8 @@ def download_instrument_rules(
     return dict(row)
 
 
-def _parse_funding_event(row: Any, *, symbol: str) -> tuple[str, int, float, str] | None:
-    """Parse one funding event without inventing its event kind."""
+def _parse_funding_event(row: Any, *, symbol: str) -> tuple[str, int, float, str, str] | None:
+    """Keep a missing Kind explicit in provenance; do not silently assume API kind 0."""
     if not isinstance(row, Mapping):
         return None
     try:
@@ -218,12 +264,69 @@ def _parse_funding_event(row: Any, *, symbol: str) -> tuple[str, int, float, str
     if ts <= 0 or not math_is_finite(rate):
         return None
     raw_kind = row.get("fundingKind")
-    if raw_kind is None or str(raw_kind).strip() not in {"0", "1"}:
-        raise ReplayDownloadError(
-            f"funding history has missing or unsupported fundingKind for {symbol}; "
-            "event classification cannot be inferred"
-        )
-    return (symbol, ts, rate, str(raw_kind).strip())
+    if raw_kind is None or not str(raw_kind).strip():
+        return (symbol, ts, rate, "MISSING", "MISSING_API_FIELD")
+    kind = str(raw_kind).strip()
+    if kind not in {"0", "1"}:
+        raise ReplayDownloadError(f"funding history has unsupported fundingKind={kind!r} for {symbol}")
+    return (symbol, ts, rate, kind, "EXPLICIT_API")
+
+
+def _classify_funding_schedule_events(
+    events: list[tuple[str, int, float, str, str]], *, symbol: str,
+) -> list[tuple[str, int, float, str, str, int]]:
+    """Infer only when adjacent observed settlement timestamps prove a supported cadence.
+
+    Missing-Kind events retain SCHEDULE_INFERRED_DYNAMIC_INTERVAL provenance. Supported
+    observed cadences are 1/2/4/8 hours within 10 seconds; the registered common
+    24-hour funding-data gap is excluded from cadence estimation.
+    """
+    ordered = sorted(events, key=lambda item: int(item[1]))
+    if len(ordered) < 3:
+        raise ReplayDownloadError(f"funding history is too short to verify cadence for {symbol}")
+    timestamps = [int(item[1]) for item in ordered]
+    if len(set(timestamps)) != len(timestamps):
+        raise ReplayDownloadError(f"funding history contains duplicate timestamps for {symbol}")
+    gap_intervals: list[int | None] = []
+    for left, right in zip(timestamps, timestamps[1:]):
+        if _is_observed_blackout_gap(left, right):
+            gap_intervals.append(None)
+            continue
+        interval_ms = _funding_interval_for_delta(right - left)
+        if interval_ms is None:
+            raise ReplayDownloadError(
+                f"funding cadence for {symbol} is not a supported observed 1/2/4/8-hour "
+                f"interval or the registered blackout (delta_ms={right-left})"
+            )
+        gap_intervals.append(interval_ms)
+
+    classified = []
+    for index, (event_symbol, timestamp, rate, raw_kind, raw_source) in enumerate(ordered):
+        previous_interval = gap_intervals[index - 1] if index > 0 else None
+        next_interval = gap_intervals[index] if index < len(gap_intervals) else None
+        interval_ms = previous_interval or next_interval
+        if interval_ms is None:
+            raise ReplayDownloadError(f"funding cadence around blackout is unprovable for {symbol}")
+        remainder = int(timestamp) % int(interval_ms)
+        if min(remainder, interval_ms - remainder) > FUNDING_SCHEDULE_TOLERANCE_MS:
+            raise ReplayDownloadError(
+                f"fundingTime for {symbol} is outside the observed "
+                f"{interval_ms // 3_600_000}-hour settlement boundary tolerance"
+            )
+        if raw_kind == "1":
+            raise ReplayDownloadError(
+                f"stock-dividend fundingKind=1 is not supported by Challenge 1 replay for {symbol}"
+            )
+        if raw_kind == "0" and raw_source == "EXPLICIT_API":
+            kind, source = "0", "EXPLICIT_API"
+        elif raw_kind == "MISSING" and raw_source == "MISSING_API_FIELD":
+            kind, source = "0", "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
+        elif raw_kind == "0" and raw_source == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL":
+            kind, source = "0", "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
+        else:
+            raise ReplayDownloadError(f"funding kind provenance is invalid for {symbol}")
+        classified.append((event_symbol, int(timestamp), float(rate), kind, source, int(interval_ms)))
+    return classified
 
 
 def download_funding_rates(
@@ -262,9 +365,7 @@ def download_funding_rates(
             break
         for item in valid:
             if item[1] >= start_ms:
-                _record_unique_timestamp(
-                    seen, int(item[1]), item, series=f"{symbol} funding"
-                )
+                _record_unique_timestamp(seen, int(item[1]), item, series=f"{symbol} funding")
         oldest = min(item[1] for item in valid)
         if oldest <= start_ms:
             break
@@ -275,23 +376,24 @@ def download_funding_rates(
             break
     else:
         raise ReplayDownloadError("funding pagination exceeded the safety page limit")
-    result = [seen[key] for key in sorted(seen)]
-    if len(result) < 3:
-        raise ReplayDownloadError(f"funding history is too short for {symbol}")
-    funding_times = [int(item[1]) for item in result]
-    deltas = [right - left for left, right in zip(funding_times, funding_times[1:])]
-    if any(delta <= 0 for delta in deltas):
-        raise ReplayDownloadError(f"funding history timestamps are duplicated or unordered for {symbol}")
-    median_interval = int(statistics.median(deltas))
-    if median_interval <= 0 or any(delta > median_interval * 1.5 for delta in deltas):
-        raise ReplayDownloadError(f"funding history has missing settlement intervals for {symbol}")
-    if (
-        funding_times[0] - start_ms > median_interval * 1.5
-        or now_ms - funding_times[-1] > median_interval * 1.5
-    ):
-        raise ReplayDownloadError(f"funding history does not cover the requested six-month window for {symbol}")
-    return result
 
+    raw_events = [seen[key] for key in sorted(seen)]
+    if len(raw_events) < 3:
+        raise ReplayDownloadError(f"funding history is too short for {symbol}")
+    classified = _classify_funding_schedule_events(raw_events, symbol=symbol)
+    normal_intervals = [
+        int(right[1]) - int(left[1])
+        for left, right in zip(classified, classified[1:])
+        if not _is_observed_blackout_gap(int(left[1]), int(right[1]))
+    ]
+    if not normal_intervals:
+        raise ReplayDownloadError(f"funding history has no verified cadence for {symbol}")
+    first_max_age = int(classified[0][5] * 1.5)
+    last_max_age = int(classified[-1][5] * 1.5)
+    funding_times = [int(item[1]) for item in classified]
+    if funding_times[0] - start_ms > first_max_age or now_ms - funding_times[-1] > last_max_age:
+        raise ReplayDownloadError(f"funding history does not cover the requested window for {symbol}")
+    return classified
 
 def math_is_finite(value: float) -> bool:
     return value == value and abs(value) != float("inf")
@@ -313,9 +415,20 @@ def initialise_store(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS replay_funding (
             instrument_id TEXT NOT NULL, funding_time INTEGER NOT NULL,
             funding_rate REAL NOT NULL, funding_kind TEXT NOT NULL,
+            funding_kind_source TEXT NOT NULL DEFAULT 'EXPLICIT_API',
+            funding_interval_ms INTEGER,
             PRIMARY KEY(instrument_id,funding_time)
         );
     """)
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(replay_funding)").fetchall()
+    }
+    if "funding_kind_source" not in columns:
+        connection.execute(
+            "ALTER TABLE replay_funding ADD COLUMN funding_kind_source TEXT NOT NULL DEFAULT 'EXPLICIT_API'"
+        )
+    if "funding_interval_ms" not in columns:
+        connection.execute("ALTER TABLE replay_funding ADD COLUMN funding_interval_ms INTEGER")
     connection.commit()
 
 
@@ -331,10 +444,20 @@ def save_replay(connection: sqlite3.Connection, candles: list[tuple[Any, ...]], 
                 "INSERT OR REPLACE INTO replay_instruments(instrument_id,fetched_at_utc,raw_json) VALUES(?,?,?)",
                 (str(instrument["instId"]), datetime.now(timezone.utc).isoformat(), json.dumps(dict(instrument), sort_keys=True)),
             )
+        normalised = []
+        for item in funding:
+            if len(item) == 6:
+                symbol, timestamp, rate, kind, source, interval_ms = item
+            elif len(item) == 4:
+                symbol, timestamp, rate, kind = item
+                source, interval_ms = "EXPLICIT_API", None
+            else:
+                raise ReplayDownloadError("unsupported funding persistence tuple")
+            normalised.append((symbol, timestamp, rate, kind, source, interval_ms))
         connection.executemany(
             """INSERT OR REPLACE INTO replay_funding
-               (instrument_id,funding_time,funding_rate,funding_kind)
-               VALUES (?,?,?,?)""", funding,
+               (instrument_id,funding_time,funding_rate,funding_kind,funding_kind_source,funding_interval_ms)
+               VALUES (?,?,?,?,?,?)""", normalised,
         )
 
 
@@ -343,7 +466,14 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
     initialise_store(connection)
-    report: dict[str, Any] = {"db_path": str(path), "environment": "BLOFIN_DEMO_PUBLIC_DATA", "symbols": {}}
+    report: dict[str, Any] = {
+        "db_path": str(path), "environment": "BLOFIN_DEMO_PUBLIC_DATA",
+        "symbols": {},
+        "funding_kind_policy": "EXPLICIT_API_OR_PROVENANCE_TAGGED_SCHEDULE_INFERENCE",
+        "schedule_inference_is_not_explicit_fundingKind": True,
+        "blackout_windows": [dict(window) for window in OBSERVED_FUNDING_BLACKOUTS],
+    }
+    funding_by_symbol: dict[str, list[tuple[Any, ...]]] = {}
     try:
         for symbol in symbols:
             result: dict[str, Any] = {}
@@ -355,11 +485,18 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
             marks = download_candles(symbol, "15m", months=months, mark_price=True)
             all_candles.extend(marks)
             funding = download_funding_rates(symbol, months=months)
+            funding_by_symbol[symbol] = funding
             instrument = download_instrument_rules(symbol)
             save_replay(connection, all_candles, funding, instrument)
             result["MARK_15m"] = len(marks)
             result["funding"] = len(funding)
+            result["funding_kind_explicit"] = sum(1 for item in funding if item[4] == "EXPLICIT_API")
+            result["funding_kind_schedule_inferred"] = sum(
+                1 for item in funding if item[4] == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
+            )
             report["symbols"][symbol] = result
+        _validate_common_funding_blackout(funding_by_symbol)
+        report["common_blackout_verified_for_all_symbols"] = True
     finally:
         connection.close()
     return report
