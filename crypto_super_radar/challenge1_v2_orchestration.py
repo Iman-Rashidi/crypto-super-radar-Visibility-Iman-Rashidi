@@ -103,6 +103,14 @@ def _market_quote(client: Any, instrument_id: str, local_now_ms: int) -> dict[st
     }
 
 
+def get_fresh_execution_quote(
+    client: Any, instrument_id: str, *, local_now_ms: int | None = None,
+) -> dict[str, Any]:
+    """Return a timestamp-validated bid/ask/mark snapshot for dry-run sizing."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000) if local_now_ms is None else int(local_now_ms)
+    return _market_quote(client, instrument_id, now_ms)
+
+
 def _closed_frame(
     rows: Any, *, bar: str, asof_ms: int, minimum_rows: int,
 ) -> pd.DataFrame:
@@ -253,9 +261,7 @@ def analyze_challenge1_v2_market(
     )
     record = dict(record)
     record["execution_profile"] = "CHALLENGE_1_V2"
-    record["contract_specs"] = {
-        key: contract[key] for key in ("instId", "contractValue", "minSize", "lotSize", "tickSize")
-    }
+    record["contract_specs"] = dict(contract)
     record["market_quote"] = quote
     record["market_data_proof"] = {
         "source": "BLOFIN_DEMO_REST",
