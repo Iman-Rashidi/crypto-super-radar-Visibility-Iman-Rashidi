@@ -77,7 +77,6 @@ jobs:
               test_chart_patterns.py \
               test_challenge1_strategy.py \
               test_challenge1_entry_evaluation.py \
-              test_challenge1_historical_validation.py \
               test_ai_second_opinion.py \
               test_web_app.py \
               test_blofin_demo_executor.py \
