@@ -38,12 +38,20 @@ jobs:
             crypto_super_radar/challenge1_v2.py \
             crypto_super_radar/adaptive_brain.py \
             tests/test_challenge1_v2_risk_brain_replay.py \
-            tests/test_challenge1_v2_time_exit_and_lookahead.py
+            tests/test_challenge1_v2_time_exit_and_lookahead.py \
+            crypto_super_radar/funding_schema_probe.py
 
       - name: Run V2 risk, funding, blackout and look-ahead regressions
         run: |
           python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_v2_time_exit_and_lookahead.py' -v
+
+      - name: Probe live BloFin Demo public funding schema (read-only)
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          python -m crypto_super_radar.funding_schema_probe --output artifacts/funding_schema_probe.json
+          cat artifacts/funding_schema_probe.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download seven months of public BloFin market data
         id: download
@@ -115,6 +123,7 @@ jobs:
             "download_exit_code": "${{ steps.download.outputs.exit_code }}",
             "sandbox_exit_code": "${{ steps.sandbox.outputs.exit_code }}",
             "funding_policy": "explicit API Kind or provenance-tagged observed 1/2/4/8-hour schedule inference; never relabelled as explicit",
+            "funding_schema_probe": "public Demo API history/current funding metadata probe is included in the artifact; current interval is not substituted for historical per-event kind",
             "blackout_policy": "block new entries in the exact common funding-data gap; positions overlapping it retain UNKNOWN net PnL",
             "data_policy": "public BloFin Demo market data only; no credentials; no order writes; no synthetic data or interpolation",
             "spread_policy": "0.0002 modelled spread scenario; not historical order-book spread"
