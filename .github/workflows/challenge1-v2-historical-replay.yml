@@ -102,6 +102,24 @@ jobs:
           fi
           exit 0
 
+      - name: Run read-only five-symbol provider acceptance
+        id: provider_acceptance
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p artifacts
+          python -m scripts.live_provider_acceptance --all-symbols \
+            --output artifacts/live_provider_acceptance.json \
+            > artifacts/live_provider_acceptance.log 2>&1
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ -f artifacts/live_provider_acceptance.json ]; then
+            cat artifacts/live_provider_acceptance.json >> "$GITHUB_STEP_SUMMARY"
+          else
+            tail -n 100 artifacts/live_provider_acceptance.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          exit 0
+
       - name: Download seven months of public BloFin data
         id: download
         continue-on-error: true
@@ -154,6 +172,7 @@ jobs:
             "workflow": "challenge1-v2-historical-replay",
             "branch": "${GITHUB_REF_NAME}",
             "commit": "${GITHUB_SHA}",
+            "provider_acceptance_exit_code": "${{ steps.provider_acceptance.outputs.exit_code }}",
             "download_exit_code": "${{ steps.download.outputs.exit_code }}",
             "sandbox_exit_code": "${{ steps.sandbox.outputs.exit_code }}",
             "data_policy": "public BloFin market data only; no credentials; no order writes; no interpolation",
@@ -162,6 +181,7 @@ jobs:
           JSON
           echo "Branch: ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
           echo "Commit: ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Provider acceptance exit code: ${{ steps.provider_acceptance.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Download exit code: ${{ steps.download.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Sandbox exit code: ${{ steps.sandbox.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
 
