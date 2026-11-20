@@ -795,10 +795,11 @@ def run_sandbox(
                 for event in reversed(item["funding"])
                 if int(event["fundingTime"]) <= asof_ms
             ), int(item["funding_interval_median_ms"]))
+            funding_max_age_ms = int(latest_interval * 1.5)
             funding_event = _known_funding_event(
                 item["funding"],
                 asof_ms,
-                max_age_ms=int(latest_interval * 1.5),
+                max_age_ms=funding_max_age_ms,
             )
             funding_rate = float(funding_event["fundingRate"]) if funding_event is not None else None
             funding_kind = str(funding_event["fundingKind"]) if funding_event is not None else None
