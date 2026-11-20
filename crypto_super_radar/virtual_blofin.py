@@ -226,7 +226,7 @@ class TradeResult:
     quantity_contracts: float
     filled_entry: float | None
     average_exit: float | None
-    net_pnl_usdt: float
+    net_pnl_usdt: float | None
     fees_usdt: float
     funding_usdt: float
     bars_held: int
@@ -437,7 +437,8 @@ class VirtualBloFin:
                 "funding_paid_usdt": funding_total,
                 "spread_cost_usdt": spread_cost,
                 "slippage_cost_usdt": 0.0,
-                "net_pnl_usdt": realized_gross - fees - funding_total - spread_cost,
+                "net_pnl_usdt": None,
+                "realized_net_pnl_so_far_usdt": realized_gross - fees - funding_total - spread_cost,
                 "remaining_qty": qty_left,
                 "entry_ts_ms": entry_ts,
                 "observed_through_ts_ms": observed_through_ts,
@@ -450,7 +451,7 @@ class VirtualBloFin:
             return TradeResult(
                 "OPEN",
                 "TIME_EXIT_LIMIT_PENDING" if time_exit_limit_price is not None else "POSITION_OPEN",
-                qty_total, entry, None, realized_gross - fees - funding_total - spread_cost,
+                qty_total, entry, None, None,
                 fees, funding_total, held, tp1, rr_items["net_rr"], diagnostics,
             )
 
