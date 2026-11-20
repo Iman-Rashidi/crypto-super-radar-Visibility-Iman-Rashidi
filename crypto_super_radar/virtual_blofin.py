@@ -439,7 +439,18 @@ class VirtualBloFin:
         # The exact TP1 break-even stop is calculated at the partial fill,
         # after its maker fee and every funding event observed so far are known.
         be_stop = None
-        funding = sorted((dict(item) for item in funding_events), key=lambda x: _timestamp_ms(x.get("fundingTime")))
+        funding_input = []
+        for event in funding_events:
+            if not isinstance(event, Mapping):
+                raise SimulationError("funding history contains a non-object event")
+            funding_kind = str(event.get("fundingKind") or "").strip()
+            if funding_kind != "0":
+                raise SimulationError(
+                    "only fundingKind=0 regular funding is modeled; missing, stock-dividend, "
+                    "or unknown funding kinds are unsupported"
+                )
+            funding_input.append(dict(event))
+        funding = sorted(funding_input, key=lambda x: _timestamp_ms(x.get("fundingTime")))
         if cc.require_funding_history and not funding:
             raise SimulationError("funding history is unavailable; funding cannot be assumed zero")
         entry_ts = _timestamp_ms(next_bar.get("ts"))
