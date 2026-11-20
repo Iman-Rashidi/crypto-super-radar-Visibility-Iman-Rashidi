@@ -1146,8 +1146,15 @@ class FakeExecutorClient:
             "instId": inst_id,
             "positionId": self.tpsl_position_id,
             "marginMode": "isolated",
-            "positionSide": "net",
-            "positions": size if self.last_order_kwargs["side"] == "buy" else "-" + size,
+            "positionSide": (
+                "net" if self.position_mode == "net_mode"
+                else "long" if self.last_order_kwargs["side"] == "buy"
+                else "short"
+            ),
+            "positions": (
+                size if self.last_order_kwargs["side"] == "buy"
+                else "-" + size
+            ),
         }]
 
     def get_order_detail(self, inst_id, *, client_order_id):
@@ -1172,7 +1179,11 @@ class FakeExecutorClient:
             "instId": inst_id,
             "positionId": self.tpsl_position_id,
             "marginMode": "isolated",
-            "positionSide": "net",
+            "positionSide": (
+                "net" if self.position_mode == "net_mode"
+                else "long" if kwargs["side"] == "buy"
+                else "short"
+            ),
             "side": "sell" if kwargs["side"] == "buy" else "buy",
             "size": kwargs["size"],
             "state": "live",
@@ -1444,6 +1455,7 @@ class BloFinDemoExecutorTests(unittest.TestCase):
             store = BloFinDemoEventStore(":memory:")
         store.backend = "TURSO_CLOUD_SQLITE"
         client = FakeExecutorClient()
+        client.position_mode = "long_short_mode"
         client.multi_position = True
         client.tpsl_position_id = ""
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
