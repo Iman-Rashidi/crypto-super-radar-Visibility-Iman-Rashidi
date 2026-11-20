@@ -63,6 +63,20 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     )
     if len(market) < 70:
         raise SandboxDataError(f"insufficient aligned market/mark candles for {symbol}")
+    source_start = market.index[0]
+    source_end = market.index[-1] + pd.Timedelta(minutes=15)
+    for label, frame, interval in (
+        ("15m", frames["15m"], pd.Timedelta(minutes=15)),
+        ("1H", frames["1H"], pd.Timedelta(hours=1)),
+        ("4H", frames["4H"], pd.Timedelta(hours=4)),
+        ("MARK_15m", mark, pd.Timedelta(minutes=15)),
+        ("ALIGNED_15m", market, pd.Timedelta(minutes=15)),
+    ):
+        if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+            raise SandboxDataError(f"{symbol} {label} timestamps are duplicated or unordered")
+        gaps = frame.index.to_series().diff().dropna()
+        if not gaps.empty and not (gaps == interval).all():
+            raise SandboxDataError(f"{symbol} {label} replay has missing candle intervals")
     market["atr_15m"] = atr(market, 14)
     market = market.dropna(subset=["atr_15m"])
     market["close_ts"] = market.index.view("int64") // 1_000_000 + BAR_MS
@@ -84,6 +98,28 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         {"fundingTime": int(ts), "fundingRate": float(rate), "fundingKind": str(kind)}
         for ts, rate, kind in funding_rows
     ]
+    if len(funding) < 3:
+        raise SandboxDataError(f"funding history is incomplete for {symbol}")
+    funding_times = np.asarray([int(item["fundingTime"]) for item in funding], dtype=np.int64)
+    funding_rates = np.asarray([float(item["fundingRate"]) for item in funding], dtype=float)
+    if (
+        not np.isfinite(funding_rates).all()
+        or (np.diff(funding_times) <= 0).any()
+    ):
+        raise SandboxDataError(f"funding history is invalid or unordered for {symbol}")
+    funding_deltas = np.diff(funding_times)
+    median_funding_interval = int(np.median(funding_deltas))
+    if median_funding_interval <= 0 or (
+        funding_deltas > median_funding_interval * 1.5
+    ).any():
+        raise SandboxDataError(f"funding history contains missing settlement intervals for {symbol}")
+    source_start_ms = int(source_start.timestamp() * 1000)
+    source_end_ms = int(source_end.timestamp() * 1000)
+    if (
+        int(funding_times[0]) - source_start_ms > median_funding_interval * 1.5
+        or source_end_ms - int(funding_times[-1]) > median_funding_interval * 1.5
+    ):
+        raise SandboxDataError(f"funding history does not cover the full replay window for {symbol}")
     instrument_row = connection.execute(
         "SELECT raw_json FROM replay_instruments WHERE instrument_id=?", (symbol,)
     ).fetchone()
@@ -91,7 +127,16 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         raise SandboxDataError(f"instrument contract metadata missing for {symbol}; re-run market downloader")
     rules = InstrumentRules.from_exchange(json.loads(instrument_row[0]))
     frames["15m"] = market[["open", "high", "low", "close", "volume"]].copy()
-    return {"frames": frames, "market": market, "bars": bars, "funding": funding, "rules": rules}
+    return {
+        "frames": frames,
+        "market": market,
+        "bars": bars,
+        "funding": funding,
+        "funding_interval_median_ms": median_funding_interval,
+        "rules": rules,
+        "source_start": source_start,
+        "source_end": source_end,
+    }
 
 
 def _visible_frame(
@@ -115,11 +160,75 @@ def _visible_bars(bars: list[dict[str, Any]], asof_ms: int) -> list[dict[str, An
 
 
 
-def _known_funding_rate(events: list[dict[str, Any]], asof_ms: int) -> float | None:
+def _known_funding_rate(
+    events: list[dict[str, Any]],
+    asof_ms: int,
+    *,
+    max_age_ms: int | None = None,
+) -> float | None:
     eligible = [item for item in events if int(item["fundingTime"]) <= asof_ms]
     if not eligible:
         return None
-    return float(eligible[-1]["fundingRate"])
+    latest = eligible[-1]
+    if max_age_ms is not None and asof_ms - int(latest["fundingTime"]) > max_age_ms:
+        return None
+    rate = float(latest["fundingRate"])
+    return rate if np.isfinite(rate) else None
+
+
+def _within_purge_window(
+    asof_ms: int,
+    boundary_ms: int,
+    *,
+    max_holding_bars: int = 12,
+) -> bool:
+    """Block new fold entries whose maximum modeled life touches the next fold."""
+    purge_ms = (max_holding_bars + 1) * BAR_MS
+    return asof_ms >= boundary_ms - purge_ms
+
+
+def _calibration_report(observations: list[dict[str, Any]], *, bins: int = 10) -> dict[str, Any]:
+    valid = []
+    for row in observations:
+        try:
+            probability = float(row["probability"])
+            label = int(row["label"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if np.isfinite(probability) and 0.0 <= probability <= 1.0 and label in (0, 1):
+            valid.append((probability, label))
+    if not valid:
+        return {
+            "status": "UNKNOWN",
+            "sample_count": 0,
+            "brier_score": None,
+            "calibration_curve": [],
+            "note": "No completed outcomes had a frozen-model probability at signal time.",
+        }
+    brier = float(sum((probability - label) ** 2 for probability, label in valid) / len(valid))
+    curve = []
+    for bin_index in range(bins):
+        lower = bin_index / bins
+        upper = (bin_index + 1) / bins
+        rows = [
+            (probability, label) for probability, label in valid
+            if lower <= probability < upper or (bin_index == bins - 1 and probability == 1.0)
+        ]
+        if rows:
+            curve.append({
+                "bin_lower": lower,
+                "bin_upper": upper,
+                "sample_count": len(rows),
+                "mean_predicted_probability": float(np.mean([item[0] for item in rows])),
+                "observed_win_rate": float(np.mean([item[1] for item in rows])),
+            })
+    return {
+        "status": "CALCULATED",
+        "sample_count": len(valid),
+        "brier_score": brier,
+        "calibration_curve": curve,
+        "note": "Descriptive out-of-sample calibration; small samples and selective signal coverage limit inference.",
+    }
 
 
 def _phase(asof_ms: int, train_end_ms: int, validation_end_ms: int) -> str:
