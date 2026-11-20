@@ -196,6 +196,16 @@ def v2_signal_record(**overrides):
     signal_id = f"challenge1-v2:BTC-USDT:15m:{signal_open.isoformat()}:LONG"
     wave_phase = "WAVE_3_CONFIRMED"
     wave_direction = "BULLISH"
+    def closed_rows(last_open, interval):
+        return [
+            {
+                "open_time_utc": (last_open - interval * (29 - index)).isoformat(),
+                "open": 100.0, "high": 101.0, "low": 99.0,
+                "close": 100.5, "volume": 100.0,
+            }
+            for index in range(30)
+        ]
+
     wave = {
         "status": "CANDIDATE",
         "pattern": wave_direction,
@@ -241,6 +251,9 @@ def v2_signal_record(**overrides):
         "funding_kind": "0",
         "funding_event_time_ms": funding_time_ms,
         "funding_max_age_ms": 900_000,
+        "candles_15m": closed_rows(signal_open, timedelta(minutes=15)),
+        "candles_1h": closed_rows(h1_open, timedelta(hours=1)),
+        "candles_4h": closed_rows(h4_open, timedelta(hours=4)),
         "elliott_wave": wave,
         "wave_alignment": "ALIGNED",
     }
