@@ -347,3 +347,56 @@ class Challenge1ObserverUnknownStateRecoveryTests(unittest.TestCase):
         thread_class.return_value.start.assert_called_once()
 
 
+
+
+class Challenge1ObserverRawResponsePersistenceTests(unittest.TestCase):
+    def test_request_id_confidence_and_raw_response_are_saved_to_hash_chain(self):
+        raw = '{"verdict":"SUPPORTS_DECISION","confidence":91,"reason_fa":"evidence ok"}'
+        reviewer = {
+            "reviewer_id": "nemotron",
+            "provider": "OpenRouter",
+            "model": "nvidia/nemotron-auditor:free",
+            "returned_model": "nvidia/nemotron-auditor:free",
+            "status": "REVIEWED",
+            "request_attempted": True,
+            "requested_at_utc": "2026-11-20T16:00:00+00:00",
+            "completed_at_utc": "2026-11-20T16:00:01+00:00",
+            "latency_ms": 1000,
+            "http_status": 200,
+            "response_validated": True,
+            "model_verified": True,
+            "provider_request_id": "provider-request-123",
+            "confidence": 91,
+            "raw_response": raw,
+            "raw_response_sha256": "a" * 64,
+            "verdict": "SUPPORTS_DECISION",
+            "reason_fa": "شواهد کافی هستند.",
+            "observations": [],
+            "risk_flags": [],
+            "execution_effect": "NONE",
+            "observation_only": True,
+        }
+        with (
+            patch.object(
+                observers, "_record_audit_event",
+                return_value={"event_id": "observer-audit-event-1", "cycle_id": "experience-audit"},
+            ) as append,
+            patch.object(observers, "_queue_notion_projection", return_value="QUEUED"),
+        ):
+            saved = observers._reviewer_result_event(
+                review_batch_id="batch-audit-1",
+                reviewer=reviewer,
+                consensus="AGREEMENT",
+                experience_id="experience-audit",
+                position_id="position-audit",
+                order_id="order-audit",
+                symbol="BTC-USDT",
+                signal="LONG",
+            )
+        details = append.call_args.kwargs["details"]
+        self.assertEqual(details["provider_request_id"], "provider-request-123")
+        self.assertEqual(details["confidence"], 91)
+        self.assertEqual(details["raw_response"], raw)
+        self.assertEqual(details["raw_response_sha256"], "a" * 64)
+        self.assertEqual(details["execution_effect"], "NONE")
+        self.assertEqual(saved["event_id"], "observer-audit-event-1")
