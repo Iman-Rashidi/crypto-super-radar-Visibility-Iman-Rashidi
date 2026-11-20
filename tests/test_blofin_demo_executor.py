@@ -671,6 +671,29 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.store.reserve_order(self._plan())
         self.assertTrue(self.store.has_any_orders())
 
+    def test_single_shot_lifetime_lock_survives_closed_order_until_manual_reset(self):
+        first = self._plan()
+        self.assertTrue(self.store.reserve_order(first, single_shot=True))
+        status = self.store.single_shot_lock_status()
+        self.assertTrue(status["locked"])
+        self.assertEqual(status["max_lifetime_orders"], 1)
+        self.assertEqual(status["consumed_orders"], 1)
+        self.store.update_order(first["client_order_id"], "CLOSED")
+
+        second = build_demo_order_plan(
+            signal_record(bar_offset_minutes=5),
+            instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        self.assertFalse(self.store.reserve_order(second, single_shot=True))
+        # The consumed lock blocks even a later caller that omits the flag.
+        self.assertFalse(self.store.reserve_order(second, single_shot=False))
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            self.store.reset_single_shot_lock()
+        reset = self.store.reset_single_shot_lock(manual_confirmation=True)
+        self.assertFalse(reset["locked"])
+        self.assertEqual(reset["consumed_orders"], 0)
+        self.assertTrue(self.store.reserve_order(second, single_shot=True))
+
     def test_pending_reconcile_is_unresolved_and_blocks_new_capacity(self):
         first = self._plan()
         self.assertTrue(self.store.reserve_order(first))
@@ -1497,6 +1520,33 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
                 for call in client.calls
             ))
+        finally:
+            store.close()
+
+    def test_executor_rejects_hedge_mode_before_leverage_or_order_write(self):
+        with patch.dict(os.environ, {
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        client.get_position_mode = lambda: {
+            "positionMode": "long_short_mode",
+        }
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaisesRegex(BloFinDemoExecutionBlocked, "One-Way net_mode"):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT", leverage=1,
+                    allow_demo_orders=True,
+                )
+            self.assertIn("position_mode", client.calls)
+            self.assertFalse(any(
+                isinstance(call, tuple) and call[0] in {"set_leverage", "place_order"}
+                for call in client.calls
+            ))
+            self.assertFalse(store.has_any_orders())
         finally:
             store.close()
 
