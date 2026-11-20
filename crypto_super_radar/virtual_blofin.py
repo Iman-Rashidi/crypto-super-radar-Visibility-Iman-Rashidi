@@ -96,19 +96,39 @@ class PositionSize:
 
 def size_position(
     *, equity_usdt: Any, risk_fraction: float, entry: Any, stop: Any,
-    rules: InstrumentRules,
+    rules: InstrumentRules, costs: CostModel | None = None,
 ) -> PositionSize:
-    """Floor to lot size; never round the exchange minimum upward."""
+    """Floor to lot size against all-in modeled stop loss, never the exchange minimum.
+
+    The risk budget includes adverse stop slippage, entry and stop fees, spread,
+    and the configured funding reserve. It does not size from price distance alone.
+    """
     equity = _dec(equity_usdt, "equity_usdt", positive=True)
     entry_d = _dec(entry, "entry", positive=True)
     stop_d = _dec(stop, "stop", positive=True)
     if not math.isfinite(risk_fraction) or not 0 < risk_fraction <= 0.0025:
         raise SimulationError("risk_fraction must be in (0, 0.25%]")
-    distance = abs(entry_d - stop_d)
-    if distance <= 0:
+    if entry_d == stop_d:
         raise SimulationError("entry and stop must differ")
+    cost_model = costs or CostModel()
+    is_long = stop_d < entry_d
+    slip = Decimal(str(cost_model.stop_slippage))
+    stop_fill = stop_d * (Decimal("1") - slip if is_long else Decimal("1") + slip)
+    contract = rules.contract_value
+    entry_notional_per_contract = entry_d * contract
+    stop_notional_per_contract = stop_fill * contract
+    entry_fee_rate = cost_model.maker_fee if cost_model.entry_post_only else cost_model.taker_fee
+    entry_fee = entry_notional_per_contract * Decimal(str(entry_fee_rate))
+    stop_fee = stop_notional_per_contract * Decimal(str(cost_model.taker_fee))
+    spread_reserve = entry_notional_per_contract * Decimal(str(cost_model.spread_fraction))
+    funding_reserve = entry_notional_per_contract * Decimal(str(cost_model.funding_reserve))
+    gross_loss_at_slipped_fill = abs(entry_d - stop_fill) * contract
+    loss_per_contract = (
+        gross_loss_at_slipped_fill + entry_fee + stop_fee + spread_reserve + funding_reserve
+    )
+    if loss_per_contract <= 0:
+        raise SimulationError("all-in loss per contract is invalid")
     budget = equity * Decimal(str(risk_fraction))
-    loss_per_contract = distance * rules.contract_value
     raw_qty = budget / loss_per_contract
     quantity = (raw_qty / rules.lot_size).to_integral_value(rounding=ROUND_FLOOR) * rules.lot_size
     if quantity < rules.min_size:
@@ -116,14 +136,49 @@ def size_position(
             f"INSUFFICIENT_EQUITY_FOR_RISK: calculated={quantity}, minSize={rules.min_size}"
         )
     if rules.max_market_size is not None:
-        quantity = min(quantity, (rules.max_market_size / rules.lot_size).to_integral_value(rounding=ROUND_FLOOR) * rules.lot_size)
+        quantity = min(
+            quantity,
+            (rules.max_market_size / rules.lot_size).to_integral_value(rounding=ROUND_FLOOR)
+            * rules.lot_size,
+        )
     if quantity < rules.min_size:
         raise InsufficientEquityForRisk("INSUFFICIENT_EQUITY_FOR_RISK: maxMarketSize is below minSize")
     actual_risk = quantity * loss_per_contract
     if actual_risk > budget:
-        raise SimulationError("lot rounding would exceed the risk budget")
-    notional = quantity * rules.contract_value * entry_d
+        raise SimulationError("all-in lot-rounded risk would exceed the risk budget")
+    notional = quantity * contract * entry_d
     return PositionSize(quantity, notional, budget, actual_risk)
+
+
+def _snap_price(price: Any, tick_size: Decimal, rounding: str, name: str) -> float:
+    value = _dec(price, name, positive=True)
+    ticks = (value / tick_size).to_integral_value(
+        rounding=ROUND_FLOOR if rounding == "FLOOR" else ROUND_CEILING
+    )
+    snapped = ticks * tick_size
+    if snapped <= 0:
+        raise SimulationError(f"{name} is invalid after tick-size rounding")
+    return float(snapped)
+
+
+def _snap_trade_prices(
+    *, direction: str, entry: Any, stop: Any, target: Any, tick_size: Decimal
+) -> tuple[float, float, float]:
+    """Snap post-only entry, protective stop, and profit target conservatively."""
+    side = str(direction).upper()
+    if side not in {"LONG", "SHORT"}:
+        raise SimulationError("direction must be LONG or SHORT")
+    if side == "LONG":
+        return (
+            _snap_price(entry, tick_size, "FLOOR", "entry"),
+            _snap_price(stop, tick_size, "FLOOR", "stop"),
+            _snap_price(target, tick_size, "CEILING", "target"),
+        )
+    return (
+        _snap_price(entry, tick_size, "CEILING", "entry"),
+        _snap_price(stop, tick_size, "CEILING", "stop"),
+        _snap_price(target, tick_size, "FLOOR", "target"),
+    )
 
 
 def net_reward_risk(
@@ -261,9 +316,13 @@ class VirtualBloFin:
         if not math.isfinite(spread_fraction) or spread_fraction > self.costs.max_spread_fraction:
             return TradeResult("REJECTED", "WIDE_SPREAD", 0, None, None, 0, 0, 0, 0, False, None,
                                {"spread_fraction": spread_fraction, "max_spread_fraction": self.costs.max_spread_fraction})
-        entry = _float(limit_price, "limit_price")
-        stop = _float(stop_price, "stop_price")
-        target = _float(target_price, "target_price")
+        entry, stop, target = _snap_trade_prices(
+            direction=side,
+            entry=limit_price,
+            stop=stop_price,
+            target=target_price,
+            tick_size=rules.tick_size,
+        )
         next_bar = rows[start_index + 1]
         low = _float(next_bar.get("low"), "next.low")
         high = _float(next_bar.get("high"), "next.high")
@@ -272,9 +331,15 @@ class VirtualBloFin:
         if not filled:
             return TradeResult("UNFILLED", "LIMIT_EXPIRED_ONE_BAR", 0, None, None, 0, 0, 0, 1, False, None,
                                {"entry_limit": entry, "fill_rule": "one_tick_trade_through"})
-        size = size_position(equity_usdt=equity_usdt, risk_fraction=risk_fraction,
-                             entry=entry, stop=stop, rules=rules)
         cc = CostModel(**{**asdict(self.costs), "spread_fraction": spread_fraction})
+        size = size_position(
+            equity_usdt=equity_usdt,
+            risk_fraction=risk_fraction,
+            entry=entry,
+            stop=stop,
+            rules=rules,
+            costs=cc,
+        )
         rr_items = net_reward_risk(entry=entry, stop=stop, target=target, rules=rules,
                                    costs=cc, quantity=size.quantity_contracts)
         if rr_items["net_rr"] < cc.min_net_rr:
@@ -298,7 +363,12 @@ class VirtualBloFin:
         net_risk_per_unit = initial_risk_per_unit + entry * (cc.maker_fee + cc.taker_fee + cc.stop_slippage + cc.spread_fraction + cc.funding_reserve)
         tp1_net_reward_distance = 1.2 * net_risk_per_unit + entry * (cc.maker_fee + cc.maker_fee + cc.spread_fraction + cc.funding_reserve)
         tp1_price = entry + tp1_net_reward_distance * (1 if side == "LONG" else -1)
-        risk_free_buffer = entry * (cc.maker_fee + cc.maker_fee + cc.spread_fraction + cc.funding_reserve)
+        # Net break-even stop is a Stop-Market exit: use taker fee and
+        # adverse trigger slippage, not the maker fee of a resting TP limit.
+        risk_free_buffer = entry * (
+            cc.maker_fee + cc.taker_fee + cc.stop_slippage
+            + cc.spread_fraction + cc.funding_reserve
+        )
         be_stop = entry + risk_free_buffer if side == "LONG" else entry - risk_free_buffer
         funding = sorted((dict(item) for item in funding_events), key=lambda x: _timestamp_ms(x.get("fundingTime")))
         if cc.require_funding_history and not funding:
