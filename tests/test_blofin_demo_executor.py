@@ -1133,7 +1133,10 @@ class FakeExecutorClient:
     def get_positions(self, *, inst_id=None):
         self.calls.append(("positions", inst_id))
         self.position_reads += 1
-        if self.position_reads == 1:
+        # Each simulated execute() performs a pre-entry account read followed
+        # by one post-receipt protection readback. The former must be flat;
+        # the latter exposes the just-filled simulated position only.
+        if self.position_reads % 2 == 1:
             return []
         if self.last_order_kwargs is None:
             return []
