@@ -6035,7 +6035,7 @@ class Handler(BaseHTTPRequestHandler):
             <button id="blofin-demo-execute-once" type="button" disabled>درخواست اجرای دستی ربات در BloFin Demo</button>
             <div class="metric" id="blofin-autopilot-panel" style="margin-top:14px;border-color:#2d6470">
               <h3>حالت اتوماتیک · Challenge 1</h3>
-              <p class="muted">پس از فعال‌سازی، ربات بازارهای تنظیم‌شده را در هر کندل بسته‌شدهٔ ۵ دقیقه‌ای بررسی می‌کند. ورود همچنان به دو تأیید مستقل AI، مجوز Demo، حد ضرر/سود و کنترل ریسک وابسته است. توقف، چرخه جاری را قطع نمی‌کند و فقط از شروع چرخه‌های بعدی جلوگیری می‌کند. کنترل داشبورد تا راه‌اندازی مجدد همین سرویس معتبر است.</p>
+              <p class="muted">پس از فعال‌سازی، ربات بازارهای تنظیم‌شده را در هر کندل بسته‌شدهٔ ۵ دقیقه‌ای بررسی می‌کند. ورود همچنان به دو تأیید مستقل AI، مجوز Demo، حد ضرر/سود و کنترل ریسک وابسته است. توقف، چرخه جاری را قطع نمی‌کند و فقط از شروع چرخه‌های بعدی جلوگیری می‌کند. کنترل داشبورد تا راه‌اندازی مجدد همین سرویس معتبر است؛ پس از Restart، مقدار BLOFIN_DEMO_AUTOPILOT_ENABLED در Environment مبنا خواهد بود.</p>
               <div class="grid" style="margin:10px 0">
                 <button id="blofin-autopilot-start" type="button" disabled>شروع پایش و معامله اتوماتیک</button>
                 <button id="blofin-autopilot-stop" type="button" disabled>توقف چرخه‌های اتوماتیک</button>
@@ -8396,7 +8396,7 @@ async function loadBlofinInstruments(){
                         BLOFIN_AUTOPILOT_THREAD is not None
                         and BLOFIN_AUTOPILOT_THREAD.is_alive()
                     )
-                if active_jobs and not worker_alive:
+                if active_jobs:
                     return self._send(409, json.dumps({
                         "status": "EXECUTION_ALREADY_RUNNING",
                         "message_fa": "یک چرخه معامله در حال اجراست؛ پس از تعیین‌تکلیف همان چرخه اتوپایلوت را شروع کن.",
