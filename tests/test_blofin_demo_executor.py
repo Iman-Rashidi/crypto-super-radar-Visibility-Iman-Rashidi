@@ -1219,6 +1219,7 @@ class FakeExecutorClient:
 
     def get_position_mode(self):
         self.calls.append("position_mode")
+        return {"positionMode": "net_mode"}
 
     def get_tradable_instrument(self, inst_id):
         self.calls.append("instrument")
