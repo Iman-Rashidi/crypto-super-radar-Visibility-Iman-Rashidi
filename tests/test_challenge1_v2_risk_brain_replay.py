@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from crypto_super_radar.adaptive_brain import OnlineMetaBrain
+from crypto_super_radar.challenge1_v2 import analyze_signal
 from crypto_super_radar.ai_sandbox import (
     SandboxDataError,
     _calibration_report,
@@ -30,6 +32,60 @@ from crypto_super_radar.virtual_blofin import (
     _snap_trade_prices,
     size_position,
 )
+
+
+class StrategyAsOfIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _market_frame(index: pd.DatetimeIndex) -> pd.DataFrame:
+        x = np.arange(len(index), dtype=float)
+        close = 100.0 + 0.04 * x + 0.8 * np.sin(x / 5.0)
+        open_ = close - 0.1 * np.cos(x / 3.0)
+        high = np.maximum(open_, close) + 0.4 + 0.05 * np.sin(x / 2.0)
+        low = np.minimum(open_, close) - 0.4 - 0.05 * np.cos(x / 2.0)
+        volume = 100.0 + 20.0 * np.sin(x / 4.0)
+        return pd.DataFrame(
+            {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+            index=index,
+        )
+
+    def test_full_strategy_output_is_unchanged_by_mutating_future_candles(self) -> None:
+        start = pd.Timestamp("2026-01-01T00:00:00Z")
+        frame_1h = self._market_frame(pd.date_range(start, periods=300, freq="1h"))
+        frame_4h = self._market_frame(pd.date_range(start, periods=300, freq="4h"))
+        frame_15m = self._market_frame(pd.date_range(start, periods=1000, freq="15min"))
+        btc_15m = self._market_frame(pd.date_range(start, periods=1000, freq="15min"))
+        asof = start + pd.Timedelta(hours=221)
+
+        original = analyze_signal(
+            instrument_id="BTC-USDT",
+            frame_1h=frame_1h,
+            frame_4h=frame_4h,
+            frame_15m=frame_15m,
+            btc_15m=btc_15m,
+            asof=asof,
+            funding_rate=0.0,
+            spread_fraction=0.0002,
+        )
+
+        def mutate_future(frame: pd.DataFrame, interval: pd.Timedelta) -> pd.DataFrame:
+            changed = frame.copy()
+            future = changed.index + interval > asof
+            changed.loc[future, ["open", "high", "low", "close", "volume"]] = [
+                [501.0, 999.0, 1.0, 800.0, 1_000_000.0]
+            ] * int(future.sum())
+            return changed
+
+        changed = analyze_signal(
+            instrument_id="BTC-USDT",
+            frame_1h=mutate_future(frame_1h, pd.Timedelta(hours=1)),
+            frame_4h=mutate_future(frame_4h, pd.Timedelta(hours=4)),
+            frame_15m=mutate_future(frame_15m, pd.Timedelta(minutes=15)),
+            btc_15m=mutate_future(btc_15m, pd.Timedelta(minutes=15)),
+            asof=asof,
+            funding_rate=0.0,
+            spread_fraction=0.0002,
+        )
+        self.assertEqual(original, changed)
 
 
 class AllInPositionRiskTests(unittest.TestCase):
