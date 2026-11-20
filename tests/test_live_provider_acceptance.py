@@ -175,6 +175,17 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(result["status"], "INCONCLUSIVE")
             self.assertIn(f"HTTP {status_code}", result["reason"])
 
+    def test_missing_rss_endpoint_is_inconclusive_not_provider_failure(self):
+        runner = AcceptanceRunner(
+            session=FakeBlockedSession(404),
+            limiter=FakeLimiter(),
+        )
+        result = runner.check_rss(
+            "social_rss", "https://www.reddit.com/r/CryptoCurrency/.rss"
+        )
+        self.assertEqual(result["status"], "INCONCLUSIVE")
+        self.assertIn("HTTP 404", result["reason"])
+
     def test_missing_perpetual_venues_make_derived_checks_inconclusive(self):
         runner = AcceptanceRunner(limiter=FakeLimiter())
         runner.check_perpetual_agreement()

@@ -23,6 +23,8 @@ import requests
 
 from crypto_super_radar.config import AppConfig
 from crypto_super_radar.rate_limiter import SharedRateLimiter
+from crypto_super_radar.models import AssetSpec
+from crypto_super_radar.providers import DataProviderError, MarketDataService
 
 
 BINANCE_SPOT = "https://data-api.binance.vision"
@@ -220,6 +222,11 @@ class AcceptanceRunner:
                 inconclusive_reason = (
                     "HTTP 451: provider marks this endpoint unavailable for legal reasons "
                     "from the current request context; repeat only from an authorized location."
+                )
+            elif status_code in (404, 410) and name in {"news_rss", "social_rss"}:
+                inconclusive_reason = (
+                    f"HTTP {status_code}: this RSS feed endpoint is unavailable; this is not "
+                    "evidence that the underlying market data or exchange is invalid."
                 )
             else:
                 error = f"{type(exc).__name__}: {str(exc)[:180]}"
@@ -615,6 +622,140 @@ def run_watchlist(
             runner.check_binance_perpetual()
             runner.check_bybit_perpetual()
             runner.check_perpetual_agreement()
+
+            # Keep primary venue denials visible. Use only the project's explicit,
+            # public Gate.io/OKX fallback adapters; never proxy a blocked endpoint.
+            primary_by_check = {item.get("check"): item for item in runner.results}
+            spot_primary = primary_by_check.get("bybit_spot", {})
+            perp_primary = [
+                primary_by_check.get("binance_perpetual", {}),
+                primary_by_check.get("bybit_perpetual", {}),
+            ]
+            market_service = None
+
+            def ensure_market_service():
+                nonlocal market_service
+                if market_service is None:
+                    market_service = MarketDataService(AppConfig())
+                return market_service
+
+            if any(code in str(spot_primary.get("reason", "")) for code in ("HTTP 403", "HTTP 451")):
+                started = time.monotonic()
+                received = utc_now()
+                try:
+                    snapshot = ensure_market_service().snapshot(AssetSpec.parse(f"cex:{symbol}"))
+                    latency_ms = (time.monotonic() - started) * 1000.0
+                    raw_a = snapshot.raw.get("provider_a", {}) if isinstance(snapshot.raw, dict) else {}
+                    raw_b = snapshot.raw.get("provider_b", {}) if isinstance(snapshot.raw, dict) else {}
+                    source_a = epoch_datetime(raw_a.get("quote_timestamp_ms"))
+                    source_b = epoch_datetime(raw_b.get("quote_timestamp_ms"))
+                    missing_timestamp = source_a is None or source_b is None
+                    age_a = (received - source_a).total_seconds() if source_a else None
+                    age_b = (received - source_b).total_seconds() if source_b else None
+                    stale = any(age is not None and (age < -60 or age > max_data_age_seconds) for age in (age_a, age_b))
+                    status = (
+                        "FAIL" if latency_ms > max_latency_ms or stale
+                        else "INCONCLUSIVE" if missing_timestamp
+                        else "PASS"
+                    )
+                    reasons = []
+                    if latency_ms > max_latency_ms:
+                        reasons.append("fallback request exceeded the configured latency limit")
+                    if stale:
+                        reasons.append("one or more fallback source timestamps were stale or in the future")
+                    if missing_timestamp:
+                        reasons.append("one or more fallback sources omitted a trustworthy timestamp")
+                    runner.results.append({
+                        "check": "spot_cross_venue_regional_fallback",
+                        "provider": f"{snapshot.provider_a} + {snapshot.provider_b}",
+                        "status": status,
+                        "latency_ms": round(latency_ms, 2),
+                        "received_at_utc": iso_utc(received),
+                        "source_timestamp_utc": iso_utc(min(x for x in (source_a, source_b) if x)) if source_a or source_b else None,
+                        "data_age_seconds": round(max(x for x in (age_a, age_b) if x is not None), 2) if age_a is not None or age_b is not None else None,
+                        "details": {
+                            "symbol": symbol,
+                            "price": snapshot.price_usd,
+                            "price_discrepancy_pct": snapshot.price_discrepancy_pct,
+                            "price_discrepancy_limit_pct": price_discrepancy_limit_pct,
+                            "sources": [snapshot.provider_a, snapshot.provider_b],
+                            "fallback_reason": str(spot_primary.get("reason", ""))[:240],
+                        },
+                        **({"reason": "; ".join(reasons)} if reasons else {}),
+                    })
+                except Exception as exc:
+                    message = str(exc)
+                    status = "INCONCLUSIVE" if any(code in message for code in ("HTTP 403", "HTTP 451", "HTTP 429", "timed out", "Timeout")) else "FAIL"
+                    runner.results.append({
+                        "check": "spot_cross_venue_regional_fallback",
+                        "provider": "Binance Spot + Gate.io Spot",
+                        "status": status,
+                        "latency_ms": round((time.monotonic() - started) * 1000.0, 2),
+                        "received_at_utc": iso_utc(utc_now()),
+                        "source_timestamp_utc": None,
+                        "data_age_seconds": None,
+                        "details": {"symbol": symbol, "fallback_reason": str(spot_primary.get("reason", ""))[:240]},
+                        "reason": f"{type(exc).__name__}: {message[:180]}",
+                    })
+
+            if any(code in str(item.get("reason", "")) for item in perp_primary for code in ("HTTP 403", "HTTP 451")):
+                started = time.monotonic()
+                received = utc_now()
+                try:
+                    fallback = ensure_market_service().perpetual.execution_snapshot(symbol)
+                    latency_ms = (time.monotonic() - started) * 1000.0
+                    source_timestamp = epoch_datetime(fallback.get("timestamp_ms"))
+                    age = (received - source_timestamp).total_seconds() if source_timestamp else None
+                    stale = age is not None and (age < -60 or age > max_data_age_seconds)
+                    status = (
+                        "FAIL" if latency_ms > max_latency_ms or stale or fallback.get("status") != "PASS"
+                        else "INCONCLUSIVE" if source_timestamp is None
+                        else "PASS"
+                    )
+                    reasons = []
+                    if latency_ms > max_latency_ms:
+                        reasons.append("fallback request exceeded the configured latency limit")
+                    if stale:
+                        reasons.append("fallback snapshot timestamp was stale or in the future")
+                    if source_timestamp is None:
+                        reasons.append("fallback snapshot omitted a trustworthy timestamp")
+                    runner.results.append({
+                        "check": "perpetual_cross_venue_regional_fallback",
+                        "provider": " + ".join(fallback.get("sources", [])),
+                        "status": status,
+                        "latency_ms": round(latency_ms, 2),
+                        "received_at_utc": iso_utc(received),
+                        "source_timestamp_utc": iso_utc(source_timestamp),
+                        "data_age_seconds": round(age, 2) if age is not None else None,
+                        "details": {
+                            "symbol": symbol,
+                            "mark_price": fallback.get("mark_price"),
+                            "index_price": fallback.get("index_price"),
+                            "funding_rate": fallback.get("funding_rate"),
+                            "funding_interval_hours": fallback.get("funding_interval_hours"),
+                            "mark_price_discrepancy_pct": fallback.get("mark_price_discrepancy_pct"),
+                            "index_price_discrepancy_pct": fallback.get("index_price_discrepancy_pct"),
+                            "funding_rate_discrepancy": fallback.get("funding_rate_discrepancy"),
+                            "quote_quality": fallback.get("quote_quality"),
+                            "fallback_reason": str(fallback.get("provider_fallback_reason", ""))[:240],
+                        },
+                        **({"reason": "; ".join(reasons)} if reasons else {}),
+                    })
+                except Exception as exc:
+                    message = str(exc)
+                    status = "INCONCLUSIVE" if any(code in message for code in ("HTTP 403", "HTTP 451", "HTTP 429", "timed out", "Timeout")) else "FAIL"
+                    runner.results.append({
+                        "check": "perpetual_cross_venue_regional_fallback",
+                        "provider": "Gate.io USDT Perpetual + OKX USDT Swap",
+                        "status": status,
+                        "latency_ms": round((time.monotonic() - started) * 1000.0, 2),
+                        "received_at_utc": iso_utc(utc_now()),
+                        "source_timestamp_utc": None,
+                        "data_age_seconds": None,
+                        "details": {"symbol": symbol},
+                        "reason": f"{type(exc).__name__}: {message[:180]}",
+                    })
+
             runners[symbol] = runner
             market_records[symbol] = list(runner.results)
 
