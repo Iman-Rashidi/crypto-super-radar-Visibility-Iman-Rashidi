@@ -22,6 +22,107 @@ from crypto_super_radar.market_replay import (
 ALLOWED_HOURS = {1, 2, 4, 8}
 
 
+PRODUCTION_REST_URL = "https://openapi.blofin.com"
+OBSERVED_GAP_START_MS = 1782403200000  # 2026-06-25T16:00:00Z
+OBSERVED_GAP_END_MS = 1782489600000    # 2026-06-26T16:00:00Z
+
+
+def summarize_schema_rows(rows: list, *, environment: str, query: str) -> dict:
+    """Summarize event schema without exposing rates or mixing environments."""
+    if not isinstance(rows, list):
+        raise ReplayDownloadError("funding schema probe returned a non-list data field")
+    objects = [row for row in rows if isinstance(row, dict)]
+    kinds = Counter("MISSING" if row.get("fundingKind") is None else str(row.get("fundingKind")) for row in objects)
+    timestamps = []
+    for row in objects:
+        try:
+            ts = int(row.get("fundingTime"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if ts > 0:
+            timestamps.append(ts)
+    return {
+        "environment": environment,
+        "query": query,
+        "row_count": len(objects),
+        "row_key_sets": sorted({",".join(sorted(row.keys())) for row in objects}),
+        "funding_kind_distribution": dict(sorted(kinds.items())),
+        "funding_kind_field_present_for_all_rows": bool(objects) and all("fundingKind" in row for row in objects),
+        "funding_kind_values_supported": bool(objects) and all(str(row.get("fundingKind")) in {"0", "1"} for row in objects),
+        "funding_time_min_utc": _utc(min(timestamps)) if timestamps else None,
+        "funding_time_max_utc": _utc(max(timestamps)) if timestamps else None,
+    }
+
+
+def _probe_environment_schema(session: requests.Session, *, base_url: str, environment: str,
+                              symbol: str, query_name: str, cursor_params: dict) -> dict:
+    params = {"instId": symbol, "limit": 5, **cursor_params}
+    try:
+        payload = _json_get(session, base_url.rstrip("/") + FUNDING_PATH, params)
+        summary = summarize_schema_rows(payload.get("data"), environment=environment, query=query_name)
+        summary.update({"symbol": symbol, "status": "OK"})
+        return summary
+    except Exception as exc:
+        return {"environment": environment, "symbol": symbol, "query": query_name,
+                "status": "ERROR", "row_count": 0, "error_type": type(exc).__name__}
+
+
+def compare_environment_schemas(symbols: tuple[str, ...]) -> dict:
+    """Compare Demo and Production response shape only; Production is never replay data."""
+    queries = (
+        ("latest_page", {}),
+        ("older_side_of_observed_gap", {"after": str(OBSERVED_GAP_END_MS)}),
+        ("newer_side_of_observed_gap", {"before": str(OBSERVED_GAP_START_MS)}),
+    )
+    environments = (
+        ("BLOFIN_DEMO_REPLAY_SOURCE", DEMO_REST_URL),
+        ("BLOFIN_PRODUCTION_SCHEMA_ONLY_NOT_FOR_REPLAY", PRODUCTION_REST_URL),
+    )
+    probes = []
+    for environment, base_url in environments:
+        session = requests.Session()
+        try:
+            for symbol in symbols:
+                for query_name, cursor_params in queries:
+                    probes.append(_probe_environment_schema(
+                        session, base_url=base_url, environment=environment,
+                        symbol=symbol, query_name=query_name, cursor_params=cursor_params,
+                    ))
+        finally:
+            session.close()
+    demo_rows = [p for p in probes if p["environment"] == "BLOFIN_DEMO_REPLAY_SOURCE"
+                 and p["status"] == "OK" and p["row_count"] > 0]
+    prod_rows = [p for p in probes if p["environment"] == "BLOFIN_PRODUCTION_SCHEMA_ONLY_NOT_FOR_REPLAY"
+                 and p["status"] == "OK" and p["row_count"] > 0]
+    demo_all_missing = bool(demo_rows) and all(
+        p["funding_kind_distribution"].get("MISSING", 0) == p["row_count"] for p in demo_rows
+    )
+    prod_has_kind = any(p["funding_kind_values_supported"] for p in prod_rows)
+    demo_has_kind = any(p["funding_kind_values_supported"] for p in demo_rows)
+    if demo_all_missing and prod_has_kind:
+        finding = "DEMO_RESPONSE_SCHEMA_DIFFERS_FROM_PRODUCTION_CONTROL"
+    elif demo_has_kind:
+        finding = "FUNDING_KIND_PRESENT_IN_DEMO_SAMPLES"
+    elif prod_rows and not prod_has_kind:
+        finding = "FUNDING_KIND_NOT_OBSERVED_IN_EITHER_ENVIRONMENT_SAMPLE"
+    else:
+        finding = "INCONCLUSIVE_SCHEMA_COMPARISON"
+    return {
+        "purpose": "SCHEMA_DIAGNOSTIC_ONLY_NOT_A_REPLAY_DATASET",
+        "symbols": list(symbols),
+        "finding": finding,
+        "production_rows_may_be_used_for_demo_replay": False,
+        "gap_interval_utc": {"start": _utc(OBSERVED_GAP_START_MS), "end": _utc(OBSERVED_GAP_END_MS)},
+        "probes": probes,
+        "interpretation": (
+            "Production is a separately labelled schema control only. Its rates, timestamps and "
+            "records are not copied into, substituted for, or used to complete the Demo dataset."
+        ),
+    }
+
+
+
+
 def _utc(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, timezone.utc).isoformat()
 
@@ -177,17 +278,22 @@ def main() -> None:
     parser.add_argument("--symbol", default="BTC-USDT")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--months", type=int, default=7)
+    parser.add_argument("--compare-production-schema", action="store_true",
+                        help="Compare Production response schema as a separate read-only control; never use its rows for replay.")
     args = parser.parse_args()
     symbols = DEFAULT_SYMBOLS if args.all else (args.symbol,)
     results = [inspect_symbol(symbol, args.months) for symbol in symbols]
-    print(json.dumps({
+    report = {
         "status": "DIAGNOSTIC_ONLY_NOT_A_DATASET_ACCEPTANCE",
         "symbols": results,
         "interpretation": (
             "No data was synthesized. Unexplained intervals and missing event-kind fields "
             "must be resolved before a valid historical replay."
         ),
-    }, indent=2, ensure_ascii=False))
+    }
+    if args.compare_production_schema:
+        report["cross_environment_schema_control"] = compare_environment_schemas(symbols)
+    print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
