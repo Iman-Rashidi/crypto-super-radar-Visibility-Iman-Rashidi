@@ -612,7 +612,16 @@ class BloFinDemoPrivateWebSocketWorker:
                 raise
             except Exception as exc:
                 # Do not expose API keys, signatures, passphrases or private payloads in diagnostics.
-                self._last_error = type(exc).__name__ + ": private Demo WebSocket read failed"
+                safe_code = str(exc).strip() if isinstance(exc, BloFinDemoPrivateWSError) else ""
+                if (
+                    safe_code
+                    and len(safe_code) <= 96
+                    and safe_code.isascii()
+                    and all(character.isupper() or character.isdigit() or character in "_-:" for character in safe_code)
+                ):
+                    self._last_error = f"{type(exc).__name__}: {safe_code}"
+                else:
+                    self._last_error = type(exc).__name__ + ": private Demo WebSocket read failed"
             finally:
                 close = getattr(stream, "aclose", None)
                 if callable(close):
