@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from crypto_super_radar.ai_sandbox import _known_funding_rate, _visible_bars, _visible_frame
+from crypto_super_radar.ai_sandbox import _known_funding_event, _known_funding_rate, _visible_bars, _visible_frame
 from crypto_super_radar.virtual_blofin import CostModel, InstrumentRules, VirtualBloFin
 
 
@@ -155,6 +155,30 @@ class SandboxAsOfLeakageTests(unittest.TestCase):
         events[1]["fundingRate"] = 0.99
         self.assertEqual(_known_funding_rate(events, cutoff), 0.0001)
 
+
+    def test_known_funding_event_selects_latest_timestamp_not_list_order(self) -> None:
+        cutoff = 1_700_000_000_000
+        events = [
+            {"fundingTime": cutoff - 2_000, "fundingRate": 0.0001, "fundingKind": "0"},
+            {"fundingTime": cutoff - 1_000, "fundingRate": 0.0002, "fundingKind": "0"},
+        ]
+        event = _known_funding_event(events[::-1], cutoff, max_age_ms=5_000)
+        self.assertEqual(event["fundingTime"], cutoff - 1_000)
+        self.assertEqual(event["fundingRate"], 0.0002)
+        self.assertEqual(event["fundingKind"], "0")
+
+    def test_latest_unsupported_funding_kind_does_not_fall_back_to_older_regular_event(self) -> None:
+        cutoff = 1_700_000_000_000
+        events = [
+            {"fundingTime": cutoff - 2_000, "fundingRate": 0.0001, "fundingKind": "0"},
+            {"fundingTime": cutoff - 1_000, "fundingRate": 0.25, "fundingKind": "1"},
+        ]
+        self.assertIsNone(_known_funding_event(events, cutoff, max_age_ms=5_000))
+
+    def test_known_funding_event_rejects_stale_regular_event(self) -> None:
+        cutoff = 1_700_000_000_000
+        event = {"fundingTime": cutoff - 10_000, "fundingRate": 0.0001, "fundingKind": "0"}
+        self.assertIsNone(_known_funding_event([event], cutoff, max_age_ms=5_000))
 
     def test_stock_dividend_is_not_exposed_as_known_regular_funding_rate(self) -> None:
         cutoff = 1_700_000_000_000
