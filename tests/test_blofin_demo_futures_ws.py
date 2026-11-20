@@ -129,10 +129,12 @@ class BloFinDemoPublicWebSocketHeartbeatTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.queue = asyncio.Queue()
                 self.sent = []
+                self.ping_sent = asyncio.Event()
 
             async def send(self, message):
                 self.sent.append(message)
                 if message == "ping":
+                    self.ping_sent.set()
                     await self.queue.put("pong")
 
             async def recv(self):
@@ -162,13 +164,13 @@ class BloFinDemoPublicWebSocketHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(websockets, "connect", return_value=FakeConnection(socket)):
             stream = demo_futures_public_websocket_stream(
                 "BTC-USDT", channels=("trades",),
-                heartbeat_interval_seconds=0.01, pong_timeout_seconds=0.1,
+                heartbeat_interval_seconds=0.02, pong_timeout_seconds=0.1,
             )
             first = await asyncio.wait_for(anext(stream), timeout=0.2)
             self.assertIn('"op":"subscribe"', socket.sent[0])
             self.assertIn('"channel":"trades"', socket.sent[0])
             next_item = asyncio.create_task(anext(stream))
-            await asyncio.sleep(0.04)
+            await asyncio.wait_for(socket.ping_sent.wait(), timeout=0.2)
             self.assertIn("ping", socket.sent)
             await socket.queue.put(json.dumps(ticker))
             raw = await asyncio.wait_for(next_item, timeout=0.2)
