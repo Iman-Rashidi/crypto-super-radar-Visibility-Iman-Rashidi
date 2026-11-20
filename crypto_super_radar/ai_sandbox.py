@@ -63,8 +63,6 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     )
     if len(market) < 70:
         raise SandboxDataError(f"insufficient aligned market/mark candles for {symbol}")
-    source_start = market.index[0]
-    source_end = market.index[-1] + pd.Timedelta(minutes=15)
     for label, frame, interval in (
         ("15m", frames["15m"], pd.Timedelta(minutes=15)),
         ("1H", frames["1H"], pd.Timedelta(hours=1)),
@@ -79,6 +77,20 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
             raise SandboxDataError(f"{symbol} {label} replay has missing candle intervals")
     market["atr_15m"] = atr(market, 14)
     market = market.dropna(subset=["atr_15m"])
+    source_start = max(
+        market.index[0],
+        frames["1H"].index[0],
+        frames["4H"].index[0],
+        mark.index[0],
+    )
+    source_end = min(
+        market.index[-1] + pd.Timedelta(minutes=15),
+        frames["1H"].index[-1] + pd.Timedelta(hours=1),
+        frames["4H"].index[-1] + pd.Timedelta(hours=4),
+        mark.index[-1] + pd.Timedelta(minutes=15),
+    )
+    if source_end <= source_start:
+        raise SandboxDataError(f"no common 15m/1H/4H/Mark replay window for {symbol}")
     market["close_ts"] = market.index.view("int64") // 1_000_000 + BAR_MS
     market["ts_ms"] = market.index.view("int64") // 1_000_000
     bars = []
