@@ -459,6 +459,8 @@ class VirtualBloFin:
         spread_cost = entry_notional * cc.spread_fraction
         fees = entry_fee
         funding_total = 0.0
+        funding_complete = True
+        funding_blackouts_encountered: list[dict[str, Any]] = []
         realized_gross = 0.0
         tp1 = False
         current_stop = stop
@@ -505,13 +507,14 @@ class VirtualBloFin:
         fill_blackout = _funding_blackout_for_interval(entry_ts, fill_bar_close_ts, blackout_windows)
         if fill_blackout is not None:
             return TradeResult(
-                "UNKNOWN", "FUNDING_DATA_GAP_BLACKOUT", qty_total, entry, None, None,
-                entry_fee, 0.0, 0, False, rr_items["net_rr"], {
+                "REJECTED", "FUNDING_DATA_GAP_BLACKOUT", qty_total, None, None, None,
+                0.0, 0.0, 0, False, rr_items["net_rr"], {
                     **rr_items,
                     "entry_order_type": "post_only_limit",
                     "entry_fill_model": "one_tick_trade_through",
                     "entry_ts_ms": entry_ts,
                     "observed_through_ts_ms": fill_bar_close_ts,
+                    "entry_filled": False,
                     "net_pnl_usdt": None,
                     "funding_complete": False,
                     "funding_blackout": fill_blackout,
@@ -561,23 +564,13 @@ class VirtualBloFin:
             close_ts = int(bar.get("close_ts") or (ts + 15 * 60_000))
             funding_blackout = _funding_blackout_for_interval(ts, close_ts, blackout_windows)
             if funding_blackout is not None:
-                return TradeResult(
-                    "UNKNOWN", "FUNDING_DATA_GAP_BLACKOUT", qty_total, entry, None, None,
-                    fees, funding_total, held, tp1, rr_items["net_rr"], {
-                        **rr_items,
-                        "entry_order_type": "post_only_limit",
-                        "entry_fill_model": "one_tick_trade_through",
-                        "entry_ts_ms": entry_ts,
-                        "observed_through_ts_ms": close_ts,
-                        "net_pnl_usdt": None,
-                        "realized_net_pnl_so_far_usdt": None,
-                        "funding_complete": False,
-                        "funding_blackout": funding_blackout,
-                        "time_exit_order_type": "LIMIT" if time_exit_limit_price is not None else None,
-                        "time_exit_limit_price": time_exit_limit_price,
-                        "orders_submitted": False,
-                    },
-                )
+                funding_complete = False
+                if not any(
+                    item["start_ms"] == funding_blackout["start_ms"]
+                    and item["end_ms"] == funding_blackout["end_ms"]
+                    for item in funding_blackouts_encountered
+                ):
+                    funding_blackouts_encountered.append(funding_blackout)
             mark_high, mark_low = bar.get("mark_high"), bar.get("mark_low")
             if mark_high is None or mark_low is None:
                 raise SimulationError("historical mark-price OHLC is required; last-price candles are not a substitute")
@@ -585,6 +578,8 @@ class VirtualBloFin:
             last_high, last_low = _float(bar.get("high"), "last_high"), _float(bar.get("low"), "last_low")
             for event in funding:
                 fts = _timestamp_ms(event.get("fundingTime"))
+                if _funding_blackout_for_interval(fts, fts + 1, blackout_windows) is not None:
+                    continue
                 if entry_ts < fts <= close_ts and event.get("_applied") is not True:
                     if event.get("fundingRate") is None:
                         raise SimulationError("fundingRate is missing; funding cannot be assumed zero")
@@ -683,6 +678,8 @@ class VirtualBloFin:
                 "mark_price_trigger_model": "OHLC_MARK_STOP_FIRST",
                 "same_bar_tp_sl_precedence": "SL_FIRST",
                 "funding_event_count": sum(1 for x in funding if x.get("_applied") is True),
+                "funding_complete": funding_complete,
+                "funding_blackouts": funding_blackouts_encountered,
                 "gross_realized_pnl_usdt": realized_gross,
                 "total_fees_usdt": fees,
                 "funding_paid_usdt": funding_total,
@@ -728,12 +725,21 @@ class VirtualBloFin:
             "gross_realized_pnl_usdt": gross_before_execution_costs,
             "total_fees_usdt": fees,
             "funding_paid_usdt": funding_total,
+            "funding_complete": funding_complete,
+            "funding_blackouts": funding_blackouts_encountered,
             "spread_cost_usdt": spread_cost,
             "slippage_cost_usdt": slippage_cost,
-            "net_pnl_usdt": net,
+            "net_pnl_usdt": net if funding_complete else None,
+            "pnl_unknown_reason": None if funding_complete else "FUNDING_DATA_GAP_BLACKOUT",
+            "position_closed": True,
+            "market_exit_reason": exit_reason,
             "remaining_qty": qty_left,
             "entry_ts_ms": entry_ts,
             "exit_ts_ms": exit_ts,
         }
-        return TradeResult("CLOSED", exit_reason, qty_total, entry, exit_price, net, fees,
-                           funding_total, held, tp1, rr_items["net_rr"], diagnostics)
+        return TradeResult(
+            "CLOSED" if funding_complete else "UNKNOWN",
+            exit_reason if funding_complete else "FUNDING_DATA_GAP_PNL_UNKNOWN",
+            qty_total, entry, exit_price, net if funding_complete else None,
+            fees, funding_total, held, tp1, rr_items["net_rr"], diagnostics,
+        )
