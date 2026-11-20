@@ -461,7 +461,7 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
     def test_wave_evidence_uses_only_closed_one_hour_candles(self):
         frame = self._wave_frame()
         asof = frame.index[-1] + pd.Timedelta(hours=1)
-        evidence = _elliott_wave_1h_evidence(frame, asof)
+        evidence = _elliott_wave_1h_evidence(frame, asof, expected_direction="LONG")
         self.assertEqual(evidence["timeframe"], "1H")
         self.assertLessEqual(
             pd.Timestamp(evidence["latest_closed_candle_open_utc"]) + pd.Timedelta(hours=1),
@@ -474,7 +474,7 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
     def test_future_one_hour_candle_mutations_do_not_change_wave_evidence(self):
         frame = self._wave_frame()
         asof = frame.index[-3] + pd.Timedelta(hours=1)
-        original = _elliott_wave_1h_evidence(frame, asof)
+        original = _elliott_wave_1h_evidence(frame, asof, expected_direction="LONG")
         changed = frame.copy()
         future = changed.index + pd.Timedelta(hours=1) > asof
         changed.loc[future, ["open", "high", "low", "close", "volume"]] = [
@@ -482,6 +482,13 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
         ] * int(future.sum())
         mutated = _elliott_wave_1h_evidence(changed, asof)
         self.assertEqual(original, mutated)
+
+    def test_opposite_wave_direction_is_reported_as_opposed(self):
+        frame = self._wave_frame()
+        asof = frame.index[-1] + pd.Timedelta(hours=1)
+        evidence = _elliott_wave_1h_evidence(frame, asof, expected_direction="SHORT")
+        self.assertEqual(evidence["pattern"], "BULLISH")
+        self.assertEqual(evidence["wave_alignment"], "OPPOSED")
 
     def test_wave_metadata_does_not_promote_ambiguous_history_to_alignment(self):
         frame = pd.DataFrame(
@@ -495,7 +502,7 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
             index=pd.date_range("2026-01-01T00:00:00Z", periods=220, freq="1h"),
         )
         asof = frame.index[-1] + pd.Timedelta(hours=1)
-        evidence = _elliott_wave_1h_evidence(frame, asof)
+        evidence = _elliott_wave_1h_evidence(frame, asof, expected_direction="LONG")
         self.assertIn(evidence["status"], {"UNKNOWN", "AMBIGUOUS"})
         self.assertEqual(evidence["wave_alignment"], "UNCONFIRMED")
 
