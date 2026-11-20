@@ -233,12 +233,13 @@ def _calibration_report(observations: list[dict[str, Any]], *, bins: int = 10) -
 
 def _required_replay_end(start_time: pd.Timestamp, common_end: pd.Timestamp) -> pd.Timestamp:
     required = start_time + pd.DateOffset(months=6)
-    minimum_end = required - pd.Timedelta(minutes=15)
-    if common_end < minimum_end:
+    # source_end is the close timestamp of the latest fully confirmed 15m bar.
+    # It must reach the calendar boundary, not merely the start of the final bar.
+    if common_end < required:
         raise SandboxDataError(
             f"replay coverage is shorter than six calendar months: "
             f"start={start_time.isoformat()} end={common_end.isoformat()} "
-            f"required_end_at_least={minimum_end.isoformat()}"
+            f"required_end_at_least={required.isoformat()}"
         )
     return required
 
@@ -749,7 +750,14 @@ def run_sandbox(
             "cross_boundary_closed_trades": counts["cross_boundary_closed_trades"],
             "cross_boundary_open_positions": cross_boundary_open_positions,
             "cross_boundary_open_shadow_orders": cross_boundary_open_shadow_orders,
-            "status": "PASS" if counts["cross_boundary_positions"] == 0 else "BLOCKED",
+            "status": (
+                "PASS"
+                if counts["cross_boundary_positions"] == 0
+                and counts["unresolved_at_dataset_end"] == 0
+                and counts["pending_entries_at_dataset_end"] == 0
+                and counts["shadow_unresolved_at_dataset_end"] == 0
+                else "BLOCKED"
+            ),
             "model_frozen_after_training": True,
             "model_train_count_at_freeze": model_freeze_train_count,
         },
