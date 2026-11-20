@@ -5688,6 +5688,115 @@ def _run_blofin_demo_execution_job(
                     filled_at = datetime.fromtimestamp(int(latest_fill["ts"]) / 1000, tz=timezone.utc).isoformat()
                 except (TypeError, ValueError, OverflowError, OSError):
                     filled_at = None
+        entry_protection_evidence: dict[str, Any] = {
+            "status": "NOT_EVALUATED",
+            "source": "POST_FILL_RECONCILIATION",
+            "orders": [],
+        }
+        if trade_executed:
+            expected_side = "long" if str(execution.get("side") or "").upper() == "LONG" else "short"
+            active_matches = []
+            for candidate in positions:
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("instId") or "").strip().upper() != instrument_id:
+                    continue
+                candidate_side = str(candidate.get("positionSide") or "").strip().lower()
+                if candidate_side == expected_side:
+                    active_matches.append(candidate)
+                elif candidate_side == "net":
+                    try:
+                        signed_size = float(candidate.get("positions") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        signed_size = 0.0
+                    if (expected_side == "long" and signed_size > 0) or (
+                        expected_side == "short" and signed_size < 0
+                    ):
+                        active_matches.append(candidate)
+
+            if len(active_matches) == 1 and str(active_matches[0].get("positionId") or "").strip():
+                try:
+                    entry_protection_evidence = _blofin_demo_protective_order_evidence(
+                        client,
+                        instrument_id,
+                        {
+                            "client_order_id": str(execution.get("client_order_id") or ""),
+                            "side": str(execution.get("side") or "").upper(),
+                        },
+                        active_matches[0],
+                    )
+                except Exception as protection_exc:
+                    entry_protection_evidence = {
+                        "status": "READ_FAILED",
+                        "source": "POST_FILL_RECONCILIATION",
+                        "error_type": type(protection_exc).__name__,
+                        "orders": [],
+                    }
+            elif len(active_matches) > 1:
+                entry_protection_evidence = {
+                    "status": "POSITION_LINK_AMBIGUOUS",
+                    "source": "POST_FILL_RECONCILIATION",
+                    "orders": [],
+                }
+            else:
+                matching_closed = [
+                    row for row in position_history
+                    if isinstance(row, dict)
+                    and str(row.get("instId") or "").strip().upper() == instrument_id
+                    and str(row.get("positionSide") or row.get("side") or "").strip().lower() == expected_side
+                ]
+                entry_protection_evidence = {
+                    "status": "POSITION_NOT_ACTIVE_AFTER_FILL" if matching_closed else "POSITION_NOT_RECONCILED",
+                    "source": "POST_FILL_RECONCILIATION",
+                    "orders": [],
+                }
+
+            linked_position_id = (
+                str(active_matches[0].get("positionId") or "").strip()
+                if len(active_matches) == 1 else ""
+            )
+            _record_challenge1_audit(
+                job_id,
+                "ENTRY_PROTECTIVE_ORDER_VERIFICATION",
+                {
+                    "instrument_id": instrument_id,
+                    "trade_executed": True,
+                    "position_id": linked_position_id or None,
+                    "protection_status": entry_protection_evidence.get("status"),
+                    "protection_fully_confirmed": _blofin_demo_protection_fully_confirmed(
+                        entry_protection_evidence
+                    ),
+                    "protective_orders": entry_protection_evidence,
+                    "source": "POST_FILL_RECONCILIATION",
+                },
+                event_key="entry-protective-order-verification",
+                experience_id=learning_experience_id,
+                position_id=linked_position_id or None,
+                status=(
+                    "SUCCESS"
+                    if _blofin_demo_protection_fully_confirmed(entry_protection_evidence)
+                    else "WARNING"
+                ),
+                reason=(
+                    "Both native exchange TP and SL legs were visible after fill."
+                    if _blofin_demo_protection_fully_confirmed(entry_protection_evidence)
+                    else "Post-fill native TP/SL protection was not fully verified; new Demo entries are halted."
+                ),
+            )
+            if (
+                entry_protection_evidence.get("status") != "POSITION_NOT_ACTIVE_AFTER_FILL"
+                and not _blofin_demo_protection_fully_confirmed(entry_protection_evidence)
+            ):
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                    BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_PROTECTION_GUARD_HALT"
+                    BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                        "پس از اجرای سفارش، وجود هم‌زمان TP و SL متصل به همان پوزیشن تأیید نشد؛ "
+                        "ورودهای جدید متوقف شد تا حفاظت صرافی تطبیق داده شود."
+                    )
+                    BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                _persist_blofin_autopilot_state()
+
         _record_challenge1_audit(
             job_id, "ENTRY_FILL_RECONCILIATION",
             {
