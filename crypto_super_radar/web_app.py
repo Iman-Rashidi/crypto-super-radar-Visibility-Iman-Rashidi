@@ -10818,7 +10818,7 @@ def _blofin_demo_position_supervision_readiness(
     readiness: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Allow audited Demo position reviews without enabling exchange writes."""
-    if not isinstance(readiness, Mapping):
+    if not isinstance(readiness, dict):
         return {
             "status": "BLOCKED",
             "supervision_mode": "BLOCKED",
