@@ -878,6 +878,15 @@ class BloFinDemoEventStore:
                 )
             """)
             self._db.execute("""
+                CREATE TABLE IF NOT EXISTS blofin_demo_single_shot_lock (
+                    lock_name TEXT PRIMARY KEY,
+                    max_lifetime_orders INTEGER NOT NULL,
+                    consumed_orders INTEGER NOT NULL,
+                    client_order_id TEXT,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            self._db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_blofin_demo_events_order
                 ON blofin_demo_execution_events(client_order_id, sequence)
             """)
@@ -1131,6 +1140,57 @@ class BloFinDemoEventStore:
             (event_id, key, client_order_id, event_type, now, payload),
         )
 
+    def single_shot_lock_status(self) -> dict[str, Any]:
+        """Return the durable one-shot reservation state without changing it."""
+        row = self._db.execute(
+            "SELECT lock_name, max_lifetime_orders, consumed_orders, "
+            "client_order_id, updated_at FROM blofin_demo_single_shot_lock "
+            "WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
+        ).fetchone()
+        if row is None:
+            return {
+                "enabled": False, "locked": False, "max_lifetime_orders": 1,
+                "consumed_orders": 0, "client_order_id": None,
+            }
+        maximum = int(row["max_lifetime_orders"])
+        consumed = int(row["consumed_orders"])
+        return {
+            "enabled": True, "locked": consumed >= maximum,
+            "max_lifetime_orders": maximum, "consumed_orders": consumed,
+            "client_order_id": row["client_order_id"],
+            "updated_at": row["updated_at"],
+        }
+
+    def reset_single_shot_lock(self, *, manual_confirmation: bool = False) -> dict[str, Any]:
+        """Reset the lifetime lock only after an explicit manual operator confirmation."""
+        if manual_confirmation is not True:
+            raise BloFinDemoExecutionBlocked(
+                "Single-shot lock reset requires explicit manual_confirmation=True."
+            )
+        now = int(time.time())
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    """INSERT INTO blofin_demo_single_shot_lock
+                       (lock_name, max_lifetime_orders, consumed_orders, client_order_id, updated_at)
+                       VALUES ('SINGLE_SHOT_DEMO_TEST', 1, 0, NULL, ?)
+                       ON CONFLICT(lock_name) DO UPDATE SET
+                         max_lifetime_orders=1, consumed_orders=0,
+                         client_order_id=NULL, updated_at=excluded.updated_at""",
+                    (now,),
+                )
+                reset_event_id = f"SINGLE_SHOT_DEMO_TEST_RESET_{now}_{uuid.uuid4().hex[:8]}"
+                self._append_event(
+                    reset_event_id, "SINGLE_SHOT_LOCK_RESET",
+                    {"manual_confirmation": True, "max_lifetime_orders": 1},
+                )
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return self.single_shot_lock_status()
+
     def reserve_order(
         self,
         plan: Mapping[str, Any],
@@ -1138,6 +1198,8 @@ class BloFinDemoEventStore:
         max_concurrent_positions: int = 1,
         external_open_positions: int = 0,
         external_pending_orders: int = 0,
+        single_shot: bool = False,
+        max_lifetime_orders: int = 1,
     ) -> bool:
         """Atomically reserve one account-wide slot across independent DB connections.
 
