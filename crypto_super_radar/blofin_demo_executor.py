@@ -49,6 +49,10 @@ class BloFinDemoExecutionUnknown(RuntimeError):
     """An order request may have reached BloFin; reconcile before any retry."""
 
 
+class BloFinDemoOrderRejected(BloFinDemoResponseError):
+    """BloFin returned an explicit non-zero business code for the order request."""
+
+
 _TRADE_WRITE_LOCK = threading.Lock()
 _TRADE_WRITE_TIMES: deque[float] = deque()
 
@@ -697,7 +701,23 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             raise BloFinDemoResponseError("BloFin Demo returned invalid JSON.") from exc
         if not isinstance(payload, dict):
             raise BloFinDemoResponseError("BloFin Demo response must be a JSON object.")
-        _check_response_codes(payload)
+        try:
+            _check_response_codes(payload)
+        except BloFinDemoResponseError as exc:
+            data = payload.get("data")
+            rows = data if isinstance(data, list) else [data]
+            top_code = payload.get("code")
+            explicit_nonzero = top_code not in (None, "", "0", 0, "401", 401)
+            explicit_nonzero = explicit_nonzero or any(
+                isinstance(row, Mapping)
+                and row.get("code") not in (None, "", "0", 0, "401", 401)
+                for row in rows
+            )
+            if explicit_nonzero:
+                raise BloFinDemoOrderRejected(
+                    "BloFin returned an explicit non-zero order business code."
+                ) from exc
+            raise
         if "data" not in payload:
             raise BloFinDemoResponseError("BloFin Demo response is missing data.")
         return payload
@@ -2480,7 +2500,7 @@ class BloFinDemoExecutor:
                     stop_loss=plan["stop_loss"],
                     margin_mode="isolated",
                 )
-            except BloFinDemoResponseError as exc:
+            except BloFinDemoOrderRejected as exc:
                 self.store.update_order(plan["client_order_id"], "REJECTED")
                 raise BloFinDemoExecutionBlocked(
                     "BloFin explicitly rejected the Demo order; no retry was sent."

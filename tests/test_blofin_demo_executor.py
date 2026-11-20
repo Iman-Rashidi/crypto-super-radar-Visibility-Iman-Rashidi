@@ -16,6 +16,7 @@ from crypto_super_radar.blofin_demo_executor import (
     BloFinDemoExecutionBlocked,
     BloFinDemoExecutionUnknown,
     BloFinDemoExecutor,
+    BloFinDemoOrderRejected,
     BloFinDemoRiskPolicy,
     BloFinDemoTradeClient,
     _challenge1_two_reviewer_approval_ready,
@@ -1755,13 +1756,31 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         store.backend = "TURSO_CLOUD_SQLITE"
         client = FakeExecutorClient()
         def reject(**kwargs):
-            raise BloFinDemoResponseError("BloFin rejected order code=51000")
+            raise BloFinDemoOrderRejected("BloFin returned an explicit order code=51000")
         client.place_futures_order = reject
         executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
         try:
             with self.assertRaises(BloFinDemoExecutionBlocked):
                 executor.execute(signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True)
             self.assertEqual(store.latest_order()["status"], "REJECTED")
+        finally:
+            store.close()
+
+    def test_malformed_exchange_response_is_ambiguous_not_a_definitive_rejection(self):
+        with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
+            store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        def malformed(**kwargs):
+            raise BloFinDemoResponseError("BloFin Demo returned invalid JSON")
+        client.place_futures_order = malformed
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        try:
+            with self.assertRaises(BloFinDemoExecutionUnknown):
+                executor.execute(
+                    signal_record(), inst_id="BTC-USDT", leverage=1, allow_demo_orders=True,
+                )
+            self.assertEqual(store.latest_order()["status"], "PENDING_RECONCILE")
         finally:
             store.close()
 
