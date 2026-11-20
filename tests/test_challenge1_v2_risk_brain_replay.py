@@ -14,6 +14,7 @@ from crypto_super_radar.challenge1_v2 import analyze_signal
 from crypto_super_radar.ai_sandbox import (
     SandboxDataError,
     _calibration_report,
+    _require_regular_funding_events,
     _required_replay_end,
     _within_purge_window,
 )
@@ -369,6 +370,27 @@ class ReplayFundingSchemaTests(unittest.TestCase):
         self.assertEqual(regular, ("BTC-USDT", 1000, 0.0001, "0"))
         self.assertEqual(dividend, ("BTC-USDT", 2000, 0.0002, "1"))
 
+
+class SandboxFundingKindTests(unittest.TestCase):
+    def test_regular_kind_zero_is_accepted(self):
+        _require_regular_funding_events(
+            [{"fundingTime": 1000, "fundingRate": 0.0001, "fundingKind": "0"}],
+            "BTC-USDT",
+        )
+
+    def test_stock_dividend_kind_is_blocked_before_replay(self):
+        with self.assertRaisesRegex(SandboxDataError, "only models regular fundingKind=0"):
+            _require_regular_funding_events(
+                [{"fundingTime": 1000, "fundingRate": 0.0001, "fundingKind": "1"}],
+                "BTC-USDT",
+            )
+
+    def test_missing_kind_is_blocked_before_replay(self):
+        with self.assertRaisesRegex(SandboxDataError, "only models regular fundingKind=0"):
+            _require_regular_funding_events(
+                [{"fundingTime": 1000, "fundingRate": 0.0001}],
+                "BTC-USDT",
+            )
 
 class VirtualBloFinFundingKindTests(unittest.TestCase):
     @staticmethod
