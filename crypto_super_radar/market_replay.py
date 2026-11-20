@@ -307,7 +307,7 @@ def save_replay(connection: sqlite3.Connection, candles: list[tuple[Any, ...]], 
         )
 
 
-def download_watchlist(*, db_path: str, months: int = 6, symbols: tuple[str, ...] = DEFAULT_SYMBOLS) -> dict[str, Any]:
+def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...] = DEFAULT_SYMBOLS) -> dict[str, Any]:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
@@ -336,7 +336,7 @@ def download_watchlist(*, db_path: str, months: int = 6, symbols: tuple[str, ...
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download BloFin Demo public replay data; no credentials and no order writes")
-    parser.add_argument("--months", type=int, default=6)
+    parser.add_argument("--months", type=int, default=7, help="Calendar months to fetch; one extra month provides indicator warm-up for the six-month walk-forward window.")
     parser.add_argument("--db", default="data/blofin_replay.sqlite3")
     args = parser.parse_args()
     print(json.dumps(download_watchlist(db_path=args.db, months=args.months), indent=2))
