@@ -206,7 +206,10 @@ def _known_funding_event(
     if str(latest.get("fundingKind") or "").strip() != "0":
         return None
     if max_age_ms is not None and (
-        isinstance(max_age_ms, bool) or max_age_ms <= 0 or asof_ms - event_time > max_age_ms
+        isinstance(max_age_ms, bool)
+        or not isinstance(max_age_ms, int)
+        or max_age_ms <= 0
+        or asof_ms - event_time > max_age_ms
     ):
         return None
     try:
