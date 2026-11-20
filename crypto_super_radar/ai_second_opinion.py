@@ -912,13 +912,17 @@ def _build_v2_review_input(result: Any, asset: Any) -> dict[str, Any]:
 
 
 def _build_review_input(result: Any, asset: Any) -> dict[str, Any]:
+    normalized_record = _challenge1_result_record(result)
     asset_name = getattr(asset, "raw", asset)
+    if asset_name in (None, ""):
+        asset_name = normalized_record.get("asset") or normalized_record.get("instrument_id") or "unknown"
     market_type = (
         "perpetual" if getattr(asset, "market_type", None) == "perp"
-        or str(asset_name).lower().startswith("perp:") else "spot"
+        or str(asset_name).lower().startswith(("perp:", "perp")) else "spot"
     )
     expected_side = str(
-        getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "UNKNOWN"))
+        normalized_record.get("signal")
+        or getattr(getattr(result, "signal", None), "value", getattr(result, "signal", "UNKNOWN"))
     ).upper().replace(" ", "_")
     profile = _challenge1_result_profile(result)
     metrics = getattr(result, "metrics", {})
