@@ -263,6 +263,46 @@ class Challenge1V2MarketIngestionTests(unittest.TestCase):
         analyze.assert_not_called()
 
 
+    def test_missing_1h_or_15m_history_fails_closed_before_analysis(self):
+        for missing_bar in ("1H", "15m"):
+            with self.subTest(missing_bar=missing_bar):
+                client = FakeBloFinReadOnly(
+                    now_ms=self.client.now_ms, missing_bar=missing_bar,
+                )
+                with patch.object(v2_orchestration, "analyze_signal") as analyze:
+                    with self.assertRaisesRegex(
+                        v2_orchestration.Challenge1V2DataBlocked, missing_bar,
+                    ):
+                        v2_orchestration.analyze_challenge1_v2_market(
+                            client, "BTC-USDT", local_now_ms=client.now_ms,
+                        )
+                analyze.assert_not_called()
+
+    def test_stale_required_timeframes_fail_closed_before_analysis(self):
+        for stale_bar in ("1H", "4H", "15m"):
+            with self.subTest(stale_bar=stale_bar):
+                client = FakeBloFinReadOnly(now_ms=self.client.now_ms)
+                get_candles = client.get_candles
+
+                def stale_candles(inst_id: str, *, bar: str, limit: int):
+                    rows = get_candles(inst_id, bar=bar, limit=limit)
+                    if bar == stale_bar:
+                        shift_ms = 2 * v2_orchestration.BAR_INTERVAL_MS[bar]
+                        for row in rows:
+                            row[0] = str(int(row[0]) - shift_ms)
+                    return rows
+
+                client.get_candles = stale_candles
+                with patch.object(v2_orchestration, "analyze_signal") as analyze:
+                    with self.assertRaisesRegex(
+                        v2_orchestration.Challenge1V2DataBlocked, "stale",
+                    ):
+                        v2_orchestration.analyze_challenge1_v2_market(
+                            client, "BTC-USDT", local_now_ms=client.now_ms,
+                        )
+                analyze.assert_not_called()
+
+
 class Challenge1V2WebOrchestrationTests(unittest.TestCase):
     def setUp(self):
         self.job_id = "v2-web-orchestration-test"
