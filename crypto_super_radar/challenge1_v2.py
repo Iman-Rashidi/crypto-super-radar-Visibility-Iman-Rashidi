@@ -149,7 +149,9 @@ def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) 
     }
 
 
-def _elliott_wave_1h_evidence(frame_1h: pd.DataFrame, asof: pd.Timestamp) -> dict[str, Any]:
+def _elliott_wave_1h_evidence(
+    frame_1h: pd.DataFrame, asof: pd.Timestamp, *, expected_direction: str
+) -> dict[str, Any]:
     """Capture structural wave evidence from completed 1H candles only.
 
     This is evidence metadata, not a direction/probability override. The V2
@@ -169,19 +171,24 @@ def _elliott_wave_1h_evidence(frame_1h: pd.DataFrame, asof: pd.Timestamp) -> dic
         "WAVE_4_CONFIRMED",
         "FIVE_WAVE_IMPULSE_CONFIRMED",
     }
+    expected = str(expected_direction or "").strip().upper()
+    if expected not in {"LONG", "SHORT"}:
+        raise ValueError("expected_direction must be LONG or SHORT")
+    expected_pattern = "BULLISH" if expected == "LONG" else "BEARISH"
+    if pattern in {"BULLISH", "BEARISH"} and phase in allowed_phases:
+        wave_alignment = "ALIGNED" if pattern == expected_pattern else "OPPOSED"
+    else:
+        wave_alignment = "UNCONFIRMED"
     return {
         **wave,
         "timeframe": "1H",
         "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+        "expected_signal_direction": expected,
         "latest_closed_candle_open_utc": (
             closed.index[-1].isoformat() if not closed.empty else None
         ),
         "data_asof_utc": asof.isoformat(),
-        "wave_alignment": (
-            "ALIGNED"
-            if pattern in {"BULLISH", "BEARISH"} and phase in allowed_phases
-            else "UNCONFIRMED"
-        ),
+        "wave_alignment": wave_alignment,
     }
 
 
@@ -295,7 +302,9 @@ def analyze_signal(
     }
     signal_time = m15.index[-1].isoformat()
     signal_id = f"challenge1-v2:{symbol}:15m:{signal_time}:{direction}"
-    wave_evidence = _elliott_wave_1h_evidence(frame_1h, asof)
+    wave_evidence = _elliott_wave_1h_evidence(
+        frame_1h, asof, expected_direction=direction
+    )
     v2_evidence = {
         "decision_engine_version": "CHALLENGE_1_V2_1H_4H_15M",
         "signal_id": signal_id,
