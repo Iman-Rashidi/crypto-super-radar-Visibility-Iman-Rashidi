@@ -2449,6 +2449,7 @@ class BloFinDemoExecutor:
         )
         if is_challenge1:
             experience_id = str(record.get("learning_experience_id") or "").strip()
+            if not experience_id:
                 # The Executor also owns durable 5m decision linkage when called
                 # directly, not only when invoked through the web worker.
                 experience_id = self.store.record_challenge1_decision(
