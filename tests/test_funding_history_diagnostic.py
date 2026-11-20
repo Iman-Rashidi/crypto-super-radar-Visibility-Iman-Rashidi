@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.diagnose_blofin_funding_history import summarize_schema_rows
+from scripts.diagnose_blofin_funding_history import summarize_cursor_semantics, summarize_schema_rows
 
 
 class FundingHistorySchemaDiagnosticTests(unittest.TestCase):
@@ -39,6 +39,50 @@ class FundingHistorySchemaDiagnosticTests(unittest.TestCase):
         )
         # Field names are retained for schema diagnosis; raw rate values are not.
         self.assertNotIn("999", str(result))
+
+
+class FundingHistoryPaginationContractTests(unittest.TestCase):
+    def test_after_cursor_must_return_only_older_records(self):
+        result = summarize_cursor_semantics(
+            [{"fundingTime": "1000"}, {"fundingTime": "2000"}],
+            cursor_ms=3000,
+            direction="after",
+        )
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["returned_max_ms"], 2000)
+
+    def test_before_cursor_must_return_only_newer_records(self):
+        result = summarize_cursor_semantics(
+            [{"fundingTime": "3000"}, {"fundingTime": "4000"}],
+            cursor_ms=2000,
+            direction="before",
+        )
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["returned_min_ms"], 3000)
+
+    def test_after_cursor_rejects_equal_or_newer_records(self):
+        result = summarize_cursor_semantics(
+            [{"fundingTime": "1000"}, {"fundingTime": "3000"}],
+            cursor_ms=3000,
+            direction="after",
+        )
+        self.assertEqual(result["status"], "FAIL")
+
+    def test_before_cursor_rejects_equal_or_older_records(self):
+        result = summarize_cursor_semantics(
+            [{"fundingTime": "1000"}, {"fundingTime": "3000"}],
+            cursor_ms=2000,
+            direction="before",
+        )
+        self.assertEqual(result["status"], "FAIL")
+
+    def test_empty_or_timestamp_free_page_is_inconclusive(self):
+        result = summarize_cursor_semantics(
+            [{"fundingTime": None}],
+            cursor_ms=2000,
+            direction="after",
+        )
+        self.assertEqual(result["status"], "INCONCLUSIVE")
 
 
 if __name__ == "__main__":
