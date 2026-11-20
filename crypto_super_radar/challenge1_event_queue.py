@@ -58,6 +58,16 @@ _WORKER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{1,79}$")
 _MAX_PAYLOAD_BYTES = 64 * 1024
 
 
+def _has_forbidden_key(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if str(key).strip().lower() in _FORBIDDEN_PAYLOAD_KEYS or _has_forbidden_key(child):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_has_forbidden_key(item) for item in value)
+    return False
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     try:
         result = json.dumps(
@@ -95,9 +105,7 @@ def _validate_event(event: Mapping[str, Any]) -> dict[str, Any]:
         raise Challenge1QueueError("payload must be a mapping")
 
     payload_dict = dict(payload)
-    keys = {str(key).strip().lower() for key in payload_dict}
-    forbidden = sorted(keys.intersection(_FORBIDDEN_PAYLOAD_KEYS))
-    if forbidden:
+    if _has_forbidden_key(payload_dict):
         raise Challenge1QueueError("payload contains a prohibited command or credential field")
     payload_json = _canonical_json(payload_dict)
 
@@ -119,59 +127,45 @@ class Challenge1EventQueue:
         self.backend = storage_backend() if connection is None else "INJECTED_CONNECTION"
         self._db = connection or connect_database()
         self._lock = threading.RLock()
+        ddl = (
+            """CREATE TABLE IF NOT EXISTS csr_challenge1_queue_events (
+                event_id TEXT PRIMARY KEY, producer TEXT NOT NULL, consumer TEXT NOT NULL,
+                event_type TEXT NOT NULL, occurred_at_ms INTEGER NOT NULL,
+                payload_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS csr_challenge1_queue_delivery (
+                event_id TEXT NOT NULL, consumer TEXT NOT NULL, status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, available_at_ms INTEGER NOT NULL,
+                lease_owner TEXT, lease_until_ms INTEGER, delivered_at_ms INTEGER,
+                last_error_type TEXT, updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(event_id, consumer),
+                FOREIGN KEY(event_id) REFERENCES csr_challenge1_queue_events(event_id)
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_csr_ch1_queue_claim
+               ON csr_challenge1_queue_delivery(consumer, status, available_at_ms, lease_until_ms, updated_at_ms)""",
+            """CREATE TABLE IF NOT EXISTS csr_challenge1_queue_history (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+                consumer TEXT NOT NULL, state TEXT NOT NULL, worker_id TEXT,
+                occurred_at_ms INTEGER NOT NULL, details_json TEXT NOT NULL
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_csr_ch1_queue_history_event
+               ON csr_challenge1_queue_history(event_id, sequence)""",
+            """CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_events_no_update
+               BEFORE UPDATE ON csr_challenge1_queue_events
+               BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue events are append-only'); END""",
+            """CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_events_no_delete
+               BEFORE DELETE ON csr_challenge1_queue_events
+               BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue events are append-only'); END""",
+            """CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_history_no_update
+               BEFORE UPDATE ON csr_challenge1_queue_history
+               BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue history is append-only'); END""",
+            """CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_history_no_delete
+               BEFORE DELETE ON csr_challenge1_queue_history
+               BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue history is append-only'); END""",
+        )
         with self._db:
-            self._db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS csr_challenge1_queue_events (
-                    event_id TEXT PRIMARY KEY,
-                    producer TEXT NOT NULL,
-                    consumer TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    occurred_at_ms INTEGER NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at_ms INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS csr_challenge1_queue_delivery (
-                    event_id TEXT NOT NULL,
-                    consumer TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    available_at_ms INTEGER NOT NULL,
-                    lease_owner TEXT,
-                    lease_until_ms INTEGER,
-                    delivered_at_ms INTEGER,
-                    last_error_type TEXT,
-                    updated_at_ms INTEGER NOT NULL,
-                    PRIMARY KEY(event_id, consumer),
-                    FOREIGN KEY(event_id) REFERENCES csr_challenge1_queue_events(event_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_csr_ch1_queue_claim
-                ON csr_challenge1_queue_delivery(consumer, status, available_at_ms, lease_until_ms, updated_at_ms);
-                CREATE TABLE IF NOT EXISTS csr_challenge1_queue_history (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id TEXT NOT NULL,
-                    consumer TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    worker_id TEXT,
-                    occurred_at_ms INTEGER NOT NULL,
-                    details_json TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_csr_ch1_queue_history_event
-                ON csr_challenge1_queue_history(event_id, sequence);
-                CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_events_no_update
-                BEFORE UPDATE ON csr_challenge1_queue_events
-                BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue events are append-only'); END;
-                CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_events_no_delete
-                BEFORE DELETE ON csr_challenge1_queue_events
-                BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue events are append-only'); END;
-                CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_history_no_update
-                BEFORE UPDATE ON csr_challenge1_queue_history
-                BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue history is append-only'); END;
-                CREATE TRIGGER IF NOT EXISTS csr_ch1_queue_history_no_delete
-                BEFORE DELETE ON csr_challenge1_queue_history
-                BEGIN SELECT RAISE(ABORT, 'Challenge 1 queue history is append-only'); END;
-                """
-            )
+            for statement in ddl:
+                self._db.execute(statement)
 
     def close(self) -> None:
         if self._owns_db:
