@@ -155,10 +155,10 @@ class NetBreakEvenStopTests(unittest.TestCase):
 class WalkForwardAndCalibrationTests(unittest.TestCase):
     def test_six_calendar_month_coverage_is_mandatory(self) -> None:
         start = pd.Timestamp("2026-01-31T00:00:00Z")
-        required = _required_replay_end(start, pd.Timestamp("2026-07-30T23:45:00Z"))
+        required = _required_replay_end(start, pd.Timestamp("2026-07-31T00:00:00Z"))
         self.assertEqual(required, pd.Timestamp("2026-07-31T00:00:00Z"))
         with self.assertRaises(SandboxDataError):
-            _required_replay_end(start, pd.Timestamp("2026-07-30T23:00:00Z"))
+            _required_replay_end(start, pd.Timestamp("2026-07-30T23:45:00Z"))
 
     def test_purge_window_blocks_entries_that_can_overlap_fold_boundary(self) -> None:
         boundary = 2_000_000_000
