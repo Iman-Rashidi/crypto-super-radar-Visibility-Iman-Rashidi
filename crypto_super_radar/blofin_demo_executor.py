@@ -692,6 +692,7 @@ def build_demo_order_plan(
     stop = _decimal(record.get("stop_loss_usd", record.get("stop_loss")), "stop_loss")
     target = _decimal(record.get("take_profit_usd", record.get("take_profit")), "take_profit")
     if entry <= 0 or stop <= 0 or target <= 0:
+        raise BloFinDemoExecutionBlocked("Entry, stop-loss and take-profit must be strictly positive.")
     if side == "LONG":
         if not stop < entry < target:
             raise BloFinDemoExecutionBlocked("LONG requires stop < entry < take-profit.")
