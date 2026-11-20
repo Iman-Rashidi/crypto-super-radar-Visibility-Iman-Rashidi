@@ -9,6 +9,7 @@ on:
       - staging/challenge1-integration-2026-11-16
       - feature/github-actions-demo-runner-2026-11-16
       - feature/challenge1-active-supervisors-2026-11-19
+      - fix/challenge1-protection-and-supervisor-cadence-2026-11-20
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
