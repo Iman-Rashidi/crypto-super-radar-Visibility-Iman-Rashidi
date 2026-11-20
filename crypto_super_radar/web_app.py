@@ -6084,7 +6084,15 @@ class Handler(BaseHTTPRequestHandler):
                 })
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
-            payload["execution_profile"] = "CHALLENGE_1"
+            configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+            payload["execution_profile"] = (
+                configured_profile
+                if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+                else "CHALLENGE_1"
+            )
+            payload["v2_orchestration_enabled"] = (
+                os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() == "true"
+            )
             with LOCK:
                 payload["runtime_controlled_by_dashboard"] = BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE is not None
             payload["readiness"] = _blofin_demo_execution_readiness()
@@ -8670,15 +8678,37 @@ async function loadBlofinInstruments(){
                         "message_fa": "توقف ثبت شد؛ چرخه جاری قطع نمی‌شود و پس از پایان آن چرخه جدیدی آغاز نخواهد شد.",
                     }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
-                readiness = _blofin_demo_execution_readiness()
-                if readiness.get("status") != "READY":
-                    return self._send(409, json.dumps({
-                        "status": "BLOCKED",
-                        "message_fa": readiness.get("message_fa"),
-                        "blockers": readiness.get("blockers") or [],
-                        "blockers_fa": readiness.get("blockers_fa") or [],
-                        "readiness": readiness,
-                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+                configured_profile = (
+                    configured_profile
+                    if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+                    else "CHALLENGE_1"
+                )
+                if configured_profile == "CHALLENGE_1_V2":
+                    if os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() != "true":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_ORCHESTRATION_FEATURE_FLAG_DISABLED",
+                            "message_fa": "پروفایل AutoPilot روی V2 تنظیم شده اما Feature Flag مسیر مستقل خاموش است.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if storage_backend() != "TURSO_CLOUD_SQLITE":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                            "message_fa": "ذخیره‌سازی پایدار Turso برای چرخه V2 آماده نیست.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                else:
+                    readiness = _blofin_demo_execution_readiness()
+                    if readiness.get("status") != "READY":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "message_fa": readiness.get("message_fa"),
+                            "blockers": readiness.get("blockers") or [],
+                            "blockers_fa": readiness.get("blockers_fa") or [],
+                            "readiness": readiness,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
                 if role != "WEB":
                     return self._send(409, json.dumps({
@@ -8792,15 +8822,31 @@ async function loadBlofinInstruments(){
                 if (
                     form.get("confirm", [""])[0] != "1"
                     or not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id)
-                    or execution_profile != "CHALLENGE_1"
+                    or execution_profile not in {"CHALLENGE_1", "CHALLENGE_1_V2"}
                 ):
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
-                readiness = _blofin_demo_execution_readiness()
-                if readiness.get("status") != "READY":
-                    return self._send(409, json.dumps({
-                        "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
-                        "readiness": readiness,
-                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if execution_profile == "CHALLENGE_1_V2":
+                    if os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() != "true":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_ORCHESTRATION_FEATURE_FLAG_DISABLED",
+                            "message_fa": "مسیر مستقل V2 با Feature Flag خاموش است؛ هیچ سفارش یا چرخه‌ای شروع نشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if storage_backend() != "TURSO_CLOUD_SQLITE":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                            "message_fa": "برای اجرای V2 فقط‌خواندنی، دفتر ثبت پایدار Turso باید قابل دسترسی باشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                else:
+                    readiness = _blofin_demo_execution_readiness()
+                    if readiness.get("status") != "READY":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
+                            "readiness": readiness,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 with BLOFIN_EXECUTION_GUARD:
                     with LOCK:
                         active = any(
@@ -9090,7 +9136,12 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
     ))
     if not instrument_ids:
         instrument_ids = DEFAULT_CHALLENGE1_INSTRUMENTS
-    execution_profile = "CHALLENGE_1"
+    configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+    execution_profile = (
+        configured_profile
+        if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+        else "CHALLENGE_1"
+    )
     instrument_id = instrument_ids[0]
     completed_cycles = 0
     with LOCK:
