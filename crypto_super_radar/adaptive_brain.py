@@ -6,6 +6,7 @@ No executable pickle or external ML dependency is used.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -66,6 +67,7 @@ class OnlineMetaBrain:
         self, *, warmup_trades: int = 100, min_per_class: int = 20,
         veto_below: float = 0.55, a_plus_above: float = 0.75,
         epochs: int = 5, learning_rate: float = 0.03, decay_half_life: int = 800,
+        max_examples: int = 5000,
     ) -> None:
         if warmup_trades < 100 or min_per_class < 10:
             raise ValueError("warm-up must be >=100 and min_per_class >=10")
@@ -73,6 +75,8 @@ class OnlineMetaBrain:
             raise ValueError("probability thresholds are invalid")
         if not 1 <= epochs <= 20 or not 0 < learning_rate <= 0.2:
             raise ValueError("SGD parameters are invalid")
+        if max_examples < warmup_trades or max_examples > 100_000:
+            raise ValueError("max_examples must be between warmup_trades and 100000")
         self.warmup_trades = int(warmup_trades)
         self.min_per_class = int(min_per_class)
         self.veto_below = float(veto_below)
@@ -80,6 +84,7 @@ class OnlineMetaBrain:
         self.epochs = int(epochs)
         self.learning_rate = float(learning_rate)
         self.decay_half_life = max(100, int(decay_half_life))
+        self.max_examples = int(max_examples)
         self.examples: list[dict[str, Any]] = []
         self.weights = [0.0] * len(FEATURES)
         self.bias = 0.0
@@ -120,6 +125,11 @@ class OnlineMetaBrain:
             "features": vector, "net_pnl_usdt": pnl, "label": label,
             "source": str(source).upper(),
         })
+        # Keep a bounded chronological training window; age decay is then
+        # applied inside this recent sample window during every SGD pass.
+        overflow = len(self.examples) - self.max_examples
+        if overflow > 0:
+            del self.examples[:overflow]
         return {"status": "RECORDED", "inserted": True, "label": label}
 
     def train(self) -> dict[str, Any]:
@@ -177,6 +187,26 @@ class OnlineMetaBrain:
             key=lambda row: row["absolute_weight"], reverse=True,
         )
 
+    def model_sha256(self) -> str:
+        """Stable hash of the deployable model identity and feature contract."""
+        identity = {
+            "model_version": MODEL_VERSION,
+            "features": list(FEATURES),
+            "weights": self.weights,
+            "bias": self.bias,
+            "trained": self.trained,
+            "warmup_trades": self.warmup_trades,
+            "min_per_class": self.min_per_class,
+            "veto_below": self.veto_below,
+            "a_plus_above": self.a_plus_above,
+            "epochs": self.epochs,
+            "learning_rate": self.learning_rate,
+            "decay_half_life": self.decay_half_life,
+            "max_examples": self.max_examples,
+        }
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     def save_json(self, path: str | Path) -> None:
         payload = {
             "model_version": MODEL_VERSION, "features": list(FEATURES),
@@ -184,8 +214,18 @@ class OnlineMetaBrain:
             "trained_at_utc": self.trained_at_utc, "train_count": self.train_count,
             "warmup_trades": self.warmup_trades, "min_per_class": self.min_per_class,
             "veto_below": self.veto_below, "a_plus_above": self.a_plus_above,
+            "epochs": self.epochs, "learning_rate": self.learning_rate,
+            "decay_half_life": self.decay_half_life, "max_examples": self.max_examples,
+            "examples": self.examples, "model_sha256": self.model_sha256(),
         }
-        Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
+        temporary.replace(destination)
 
     @classmethod
     def load_json(cls, path: str | Path) -> "OnlineMetaBrain":
@@ -197,6 +237,10 @@ class OnlineMetaBrain:
             min_per_class=int(payload["min_per_class"]),
             veto_below=float(payload["veto_below"]),
             a_plus_above=float(payload["a_plus_above"]),
+            epochs=int(payload.get("epochs", 5)),
+            learning_rate=float(payload.get("learning_rate", 0.03)),
+            decay_half_life=int(payload.get("decay_half_life", 800)),
+            max_examples=int(payload.get("max_examples", 5000)),
         )
         weights = payload.get("weights")
         if not isinstance(weights, list) or len(weights) != len(FEATURES):
@@ -204,10 +248,62 @@ class OnlineMetaBrain:
         model.weights = [float(x) for x in weights]
         if not all(math.isfinite(x) for x in model.weights):
             raise MetaBrainError("stored model weights are non-finite")
-        model.bias = float(payload.get("bias"))
+        try:
+            model.bias = float(payload.get("bias"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MetaBrainError("stored model bias is invalid") from exc
         if not math.isfinite(model.bias):
             raise MetaBrainError("stored model bias is non-finite")
         model.trained = bool(payload.get("trained"))
         model.trained_at_utc = payload.get("trained_at_utc")
         model.train_count = int(payload.get("train_count") or 0)
+        examples = payload.get("examples", [])
+        if not isinstance(examples, list) or len(examples) > model.max_examples:
+            raise MetaBrainError("stored training window is invalid")
+        seen_ids: set[str] = set()
+        restored: list[dict[str, Any]] = []
+        for row in examples:
+            if not isinstance(row, Mapping):
+                raise MetaBrainError("stored example is invalid")
+            signal_id = str(row.get("signal_id") or "").strip()
+            instrument_id = str(row.get("instrument_id") or "").strip().upper()
+            features = row.get("features")
+            pnl = row.get("net_pnl_usdt")
+            label = row.get("label")
+            try:
+                pnl_value = float(pnl)
+                label_value = int(label)
+                vector = [float(value) for value in features]
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise MetaBrainError("stored example values are invalid") from exc
+            if (
+                not signal_id or signal_id in seen_ids or not instrument_id
+                or len(vector) != len(FEATURES)
+                or not all(math.isfinite(value) for value in vector)
+                or not math.isfinite(pnl_value) or label_value not in (0, 1)
+                or label_value != (1 if pnl_value > 0 else 0)
+            ):
+                raise MetaBrainError("stored example failed integrity validation")
+            try:
+                stamp = datetime.fromisoformat(str(row["candle_time_utc"]).replace("Z", "+00:00"))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise MetaBrainError("stored example timestamp is invalid") from exc
+            if stamp.tzinfo is None:
+                raise MetaBrainError("stored example timestamp must include a timezone")
+            seen_ids.add(signal_id)
+            restored.append({
+                "signal_id": signal_id,
+                "instrument_id": instrument_id,
+                "candle_time_utc": stamp.astimezone(timezone.utc).isoformat(),
+                "features": vector,
+                "net_pnl_usdt": pnl_value,
+                "label": label_value,
+                "source": str(row.get("source") or "EXECUTED").upper(),
+            })
+        if restored != sorted(restored, key=lambda item: item["candle_time_utc"]):
+            raise MetaBrainError("stored training examples are not chronological")
+        model.examples = restored
+        expected_hash = payload.get("model_sha256")
+        if expected_hash is not None and expected_hash != model.model_sha256():
+            raise MetaBrainError("stored model SHA-256 does not match its contents")
         return model
