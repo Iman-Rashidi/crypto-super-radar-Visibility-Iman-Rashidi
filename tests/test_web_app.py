@@ -18,7 +18,6 @@ from unittest.mock import ANY, Mock, patch
 from http.server import ThreadingHTTPServer
 from http.client import HTTPConnection
 from urllib.parse import quote
-
 from crypto_super_radar.web_app import Handler
 from crypto_super_radar import web_app
 
@@ -2101,11 +2100,36 @@ class BloFinUnifiedReadinessTests(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED")
 
 class BloFinPositionManagerReadinessReportingTests(unittest.TestCase):
-    def test_position_manager_reports_actual_readiness_blockers_without_false_key_diagnosis(self):
+    def test_position_manager_blocks_when_read_only_supervision_prerequisites_are_missing(self):
+        readiness = {
+            "status": "BLOCKED",
+            "trade_credentials_configured": False,
+            "credential_source": "MISSING",
+            "trade_permission_status": "UNKNOWN",
+            "trade_permission_verified": False,
+            "trading_enabled": False,
+            "dashboard_auth_configured": False,
+            "durable_storage": False,
+            "event_store_readable": False,
+        }
+        with patch.object(
+            web_app, "_blofin_demo_execution_readiness", return_value=readiness,
+        ):
+            result = web_app._blofin_demo_position_manager_cycle()
+
+        self.assertEqual(result["status"], "POSITION_SUPERVISION_READINESS_BLOCKED")
+        self.assertIn("TRADE_CREDENTIALS_NOT_CONFIGURED", result["readiness_blockers"])
+        self.assertIn("TRADE_PERMISSION_NOT_CONFIRMED", result["readiness_blockers"])
+        self.assertIn("DURABLE_STORAGE_UNAVAILABLE", result["readiness_blockers"])
+        self.assertIn("EVENT_STORE_UNREADABLE", result["readiness_blockers"])
+        self.assertFalse(result["trading_enabled"])
+        self.assertEqual(result["supervision_mode"], "BLOCKED")
+        self.assertEqual(result["exchange_writes_performed"], 0)
+
+    def test_read_only_supervision_gate_allows_verified_demo_reads_without_enabling_execution(self):
         readiness = {
             "status": "BLOCKED",
             "trade_credentials_configured": True,
-            "credential_source": "UNIFIED_ACCOUNT_KEY",
             "trade_permission_status": "READ_WRITE_CONFIRMED",
             "trade_permission_verified": True,
             "trading_enabled": False,
@@ -2113,26 +2137,14 @@ class BloFinPositionManagerReadinessReportingTests(unittest.TestCase):
             "durable_storage": True,
             "event_store_readable": True,
         }
-        with patch.object(
-            web_app, "_blofin_demo_execution_readiness", return_value=readiness,
-        ):
-            result = web_app._blofin_demo_position_manager_cycle()
-
-        self.assertEqual(result["status"], "EXECUTION_READINESS_BLOCKED")
-        self.assertEqual(result["readiness_status"], "BLOCKED")
+        result = web_app._blofin_demo_position_supervision_readiness(readiness)
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["supervision_mode"], "READ_ONLY")
+        self.assertFalse(result["execution_enabled"])
         self.assertEqual(
-            result["readiness_blockers"],
-            ["DEMO_TRADING_DISABLED", "DASHBOARD_TOKEN_NOT_CONFIGURED"],
+            set(result["execution_blockers"]),
+            {"DEMO_TRADING_DISABLED", "DASHBOARD_TOKEN_NOT_CONFIGURED"},
         )
-        self.assertEqual(result["trade_permission_status"], "READ_WRITE_CONFIRMED")
-        self.assertEqual(result["credential_source"], "UNIFIED_ACCOUNT_KEY")
-        self.assertFalse(result["trading_enabled"])
-        self.assertFalse(result["dashboard_auth_configured"])
-        self.assertTrue(result["durable_storage"])
-        self.assertTrue(result["event_store_readable"])
-        self.assertNotIn("کلید Trade اختصاصی", result["message_fa"])
-        self.assertIn("فعال‌سازی معاملات Demo خاموش است", result["message_fa"])
-        self.assertIn("توکن پنل تنظیم نشده است", result["message_fa"])
 
 
 class BloFinDemoPositionEvidenceTests(unittest.TestCase):
@@ -2235,6 +2247,38 @@ class BloFinDemoPositionEvidenceTests(unittest.TestCase):
         result = web_app._blofin_demo_protective_order_evidence(reader, "BTC-USDT", order, position)
         self.assertEqual(result["status"], "NOT_VERIFIED_NO_EXACT_POSITION_LINK")
         self.assertEqual(result["orders"], [])
+
+    def test_exchange_protection_guard_distinguishes_missing_stop_from_partial_read(self):
+        for status in (
+            "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+            "TP_ONLY_VISIBLE",
+            "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
+        ):
+            self.assertTrue(
+                web_app._blofin_demo_protection_requires_emergency_close({"status": status}),
+                status,
+            )
+        for status in (
+            "BOTH_TP_AND_SL_VISIBLE",
+            "SL_ONLY_VISIBLE",
+            "READ_FAILED",
+            "INVALID_RESPONSE",
+            "UNKNOWN",
+        ):
+            self.assertFalse(
+                web_app._blofin_demo_protection_requires_emergency_close({"status": status}),
+                status,
+            )
+        self.assertTrue(
+            web_app._blofin_demo_protection_fully_confirmed(
+                {"status": "BOTH_TP_AND_SL_VISIBLE"}
+            )
+        )
+        self.assertFalse(
+            web_app._blofin_demo_protection_fully_confirmed(
+                {"status": "SL_ONLY_VISIBLE"}
+            )
+        )
 
     def test_stop_loss_threshold_crossings_are_detected_for_both_sides_without_order_side_effects(self):
         self.assertTrue(web_app._blofin_demo_stop_loss_triggered("LONG", 94.9, 95.0))
@@ -2344,7 +2388,17 @@ class BloFinOpenPositionObserverIntegrationTests(unittest.TestCase):
         with (
             patch.object(
                 web_app, "_blofin_demo_execution_readiness",
-                return_value={"status": "READY"},
+                return_value={
+                    "status": "BLOCKED",
+                    "trade_credentials_configured": True,
+                    "credential_source": "UNIFIED_ACCOUNT_KEY",
+                    "trade_permission_status": "READ_WRITE_CONFIRMED",
+                    "trade_permission_verified": True,
+                    "trading_enabled": False,
+                    "dashboard_auth_configured": False,
+                    "durable_storage": True,
+                    "event_store_readable": True,
+                },
             ),
             patch.object(web_app, "BloFinDemoEventStore", return_value=fake_store),
             patch.object(web_app, "BloFinDemoReadOnly", return_value=fake_reader),
@@ -2369,7 +2423,10 @@ class BloFinOpenPositionObserverIntegrationTests(unittest.TestCase):
         ):
             result = web_app._blofin_demo_position_manager_cycle()
 
-        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["status"], "READ_ONLY_SUPERVISION")
+        self.assertEqual(result["supervision_mode"], "READ_ONLY")
+        self.assertFalse(result["execution_enabled"])
+        self.assertEqual(result["exchange_writes_performed"], 0)
         self.assertEqual(result["managed_positions"], 1)
         schedule.assert_called_once()
         self.assertEqual(skip_event.call_count, 2)
@@ -2531,3 +2588,202 @@ class BloFinRiskOverrideCloseTests(unittest.TestCase):
             fake_store.record_manual_action.call_args_list[-1].args[1],
             "RISK_OVERRIDE_POSITION_CLOSE_ACCEPTED",
         )
+
+class Challenge1ActiveSupervisorRuntimeTests(unittest.TestCase):
+    def tearDown(self):
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE.clear()
+
+    def test_three_second_watchdog_uses_cached_state_and_never_calls_network_or_models(self):
+        snapshot = {
+            "experience_id": "experience-watchdog",
+            "position_id": "position-watchdog",
+            "position": {"positionId": "position-watchdog"},
+            "updated_at_epoch": time.time(),
+            "source": "REST_MANAGER_CACHE",
+            "protective_orders": {"status": "BOTH_TP_AND_SL_VISIBLE"},
+            "reviewer_states": {
+                "nemotron": {"status": "REVIEWED", "last_action": "HOLD_POSITION"},
+                "second_ai": {"status": "NOT_CALLED", "reason_code": "SCHEDULED_INTERVAL_NOT_REACHED"},
+            },
+            "stop_loss_threshold_reached": False,
+        }
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE["position-watchdog"] = snapshot
+        with patch.object(web_app, "record_position_supervisor_watchdog_cycle") as record:
+            result = web_app._blofin_demo_position_supervisor_watchdog_cycle()
+        self.assertEqual(result["status"], "ALIVE")
+        self.assertEqual(result["interval_seconds"], 3)
+        self.assertEqual(result["source"], "REST_MANAGER_CACHE")
+        self.assertEqual(result["llm_calls_performed"], 0)
+        self.assertEqual(result["rest_calls_performed"], 0)
+        self.assertEqual(result["exchange_writes_performed"], 0)
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs["snapshot_status"], "FRESH_CACHED_SNAPSHOT")
+
+    def test_watchdog_reports_halted_when_native_stop_protection_is_partial(self):
+        snapshot = {
+            "experience_id": "experience-partial-protection",
+            "position_id": "position-partial-protection",
+            "position": {"positionId": "position-partial-protection"},
+            "updated_at_epoch": time.time(),
+            "source": "REST_MANAGER_CACHE",
+            "protective_orders": {"status": "SL_ONLY_VISIBLE"},
+            "reviewer_states": {},
+            "stop_loss_threshold_reached": False,
+        }
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE["position-partial-protection"] = snapshot
+        state_keys = (
+            "enabled", "status", "last_message_fa", "last_cycle_finished_at_utc",
+        )
+        previous = {key: web_app.BLOFIN_AUTOPILOT_STATE.get(key) for key in state_keys}
+        try:
+            with web_app.LOCK:
+                web_app.BLOFIN_AUTOPILOT_STATE["enabled"] = True
+                web_app.BLOFIN_AUTOPILOT_STATE["status"] = "RUNNING"
+            with (
+                patch.object(web_app, "BLOFIN_PRIVATE_WS_CLIENT", None),
+                patch.object(web_app, "record_position_supervisor_watchdog_cycle") as record,
+                patch.object(web_app, "_persist_blofin_autopilot_state") as persist,
+            ):
+                result = web_app._blofin_demo_position_supervisor_watchdog_cycle()
+            self.assertEqual(result["status"], "HALTED")
+            self.assertEqual(result["guard_halt_positions"], 1)
+            self.assertEqual(
+                web_app.BLOFIN_AUTOPILOT_STATE["status"],
+                "SUPERVISOR_POSITION_GUARD_HALT",
+            )
+            self.assertIn(
+                "PROTECTIVE_ORDER_NOT_CONFIRMED",
+                record.call_args.kwargs["deterministic_flags"],
+            )
+            persist.assert_called_once()
+        finally:
+            with web_app.LOCK:
+                for key, value in previous.items():
+                    if value is None and key in web_app.BLOFIN_AUTOPILOT_STATE:
+                        web_app.BLOFIN_AUTOPILOT_STATE.pop(key, None)
+                    else:
+                        web_app.BLOFIN_AUTOPILOT_STATE[key] = value
+
+    def test_stale_cached_position_halts_new_autopilot_entries_without_closing_position(self):
+        previous = dict(web_app.BLOFIN_AUTOPILOT_STATE)
+        web_app.BLOFIN_AUTOPILOT_STATE.update({"enabled": True, "status": "RUNNING"})
+        snapshot = {
+            "experience_id": "experience-stale",
+            "position_id": "position-stale",
+            "position": {"positionId": "position-stale"},
+            "updated_at_epoch": time.time() - 60,
+            "source": "REST_MANAGER_CACHE",
+            "protective_orders": {"status": "BOTH_TP_AND_SL_VISIBLE"},
+            "reviewer_states": {},
+            "stop_loss_threshold_reached": False,
+        }
+        with web_app.BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            web_app.BLOFIN_POSITION_SUPERVISOR_CACHE["position-stale"] = snapshot
+        try:
+            with (
+                patch.object(web_app, "record_position_supervisor_watchdog_cycle") as record,
+                patch.object(web_app, "_persist_blofin_autopilot_state", return_value=True) as persist,
+            ):
+                result = web_app._blofin_demo_position_supervisor_watchdog_cycle()
+            self.assertEqual(result["stale_positions"], 1)
+            self.assertFalse(web_app.BLOFIN_AUTOPILOT_STATE["enabled"])
+            self.assertEqual(web_app.BLOFIN_AUTOPILOT_STATE["status"], "SUPERVISOR_POSITION_GUARD_HALT")
+            persist.assert_called_once()
+            record.assert_called_once()
+            self.assertIn("POSITION_SNAPSHOT_STALE", record.call_args.kwargs["deterministic_flags"])
+        finally:
+            web_app.BLOFIN_AUTOPILOT_STATE.clear()
+            web_app.BLOFIN_AUTOPILOT_STATE.update(previous)
+
+    def test_ai_close_is_enabled_by_default_and_explicit_kill_switch_blocks(self):
+        context = {
+            "instrument_id": "BTC-USDT",
+            "client_order_id": "entryClient123",
+            "position": {"positionId": "position-1", "positionSide": "long"},
+            "supervisor_reviews": [],
+        }
+        decision = {
+            "status": "AUTHORIZED",
+            "execution_authorized": True,
+            "position_id": "position-1",
+            "experience_id": "experience-1",
+            "evidence_hash": "evidence-123",
+            "action": "CLOSE_POSITION",
+        }
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(web_app, "_blofin_demo_execution_readiness", return_value={"status": "READY"}),
+            patch.object(web_app, "_blofin_manual_close_position", return_value={"status": "ACCEPTED"}) as close,
+        ):
+            result = web_app._execute_challenge1_supervisor_action(
+                action="CLOSE_POSITION", challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context=context, coordinator_decision=decision,
+            )
+        self.assertEqual(result["status"], "ACCEPTED")
+        self.assertEqual(close.call_args.kwargs["position_id"], "position-1")
+        self.assertEqual(close.call_args.kwargs["audit_id"], "entryClient123")
+        self.assertEqual(close.call_args.kwargs["action_source"], "AI_SUPERVISOR")
+
+        with patch.dict(os.environ, {"BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED": "false"}):
+            blocked = web_app._execute_challenge1_supervisor_action(
+                action="CLOSE_POSITION", challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context=context, coordinator_decision=decision,
+            )
+        self.assertEqual(blocked["reason_code"], "AI_SUPERVISOR_INTERVENTIONS_DISABLED")
+
+    def test_supervisor_gateway_blocks_exchange_write_when_demo_is_read_only(self):
+        decision = {
+            "status": "AUTHORIZED",
+            "execution_authorized": True,
+            "position_id": "position-1",
+            "experience_id": "experience-1",
+            "evidence_hash": "evidence-123",
+            "action": "CLOSE_POSITION",
+        }
+        with (
+            patch.object(
+                web_app, "_blofin_demo_execution_readiness",
+                return_value={"status": "BLOCKED", "trading_enabled": False},
+            ),
+            patch.object(web_app, "_blofin_manual_close_position") as close,
+        ):
+            result = web_app._execute_challenge1_supervisor_action(
+                action="CLOSE_POSITION",
+                challenge_record={"instrument_id": "BTC-USDT"},
+                cycle_context={
+                    "instrument_id": "BTC-USDT",
+                    "client_order_id": "entryClient123",
+                    "position": {"positionId": "position-1", "positionSide": "long"},
+                    "supervisor_reviews": [],
+                },
+                coordinator_decision=decision,
+            )
+        self.assertEqual(result["reason_code"], "DEMO_EXECUTION_READINESS_NOT_READY")
+        self.assertFalse(result["exchange_write_attempted"])
+        close.assert_not_called()
+
+    def test_supervisor_gateway_rejects_unapproved_coordinator_action(self):
+        decision = {
+            "status": "DISAGREEMENT",
+            "execution_authorized": False,
+            "position_id": "position-1",
+            "experience_id": "experience-1",
+            "evidence_hash": "evidence-123",
+            "action": "CLOSE_POSITION",
+        }
+        result = web_app._execute_challenge1_supervisor_action(
+            action="CLOSE_POSITION",
+            challenge_record={"instrument_id": "BTC-USDT"},
+            cycle_context={
+                "instrument_id": "BTC-USDT",
+                "client_order_id": "entryClient123",
+                "position": {"positionId": "position-1", "positionSide": "long"},
+                "supervisor_reviews": [],
+            },
+            coordinator_decision=decision,
+        )
+        self.assertEqual(result["reason_code"], "COORDINATOR_QUORUM_NOT_AUTHORIZED")
+

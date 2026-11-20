@@ -104,6 +104,132 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
     return record
 
 
+def _challenge1_review_round_ready(
+    raw_reviews: Any,
+    consensus: Any,
+    *,
+    side: str,
+    wave_phase: str,
+    wave_direction: str,
+) -> tuple[bool, str, list[datetime], list[datetime]]:
+    """Validate one complete, independent, uncached two-reviewer round."""
+    if not isinstance(consensus, Mapping):
+        return False, "The reviewer-round consensus record is missing.", [], []
+    round_signal_id = str(consensus.get("reviewed_signal_id") or "").strip()
+    try:
+        round_reviewed_at = datetime.fromisoformat(
+            str(consensus.get("reviewed_at_utc") or "").replace("Z", "+00:00")
+        )
+        if round_reviewed_at.tzinfo is None:
+            return False, "Reviewer-round timestamp has no timezone.", [], []
+        round_age = (
+            datetime.now(timezone.utc) - round_reviewed_at.astimezone(timezone.utc)
+        ).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return False, "Reviewer-round timestamp is missing or invalid.", [], []
+    if not round_signal_id or round_age < -30 or round_age > 300:
+        return False, "Reviewer-round approval is stale or unbound to a signal.", [], []
+    required = (
+        consensus.get("status") == "APPROVED_BY_BOTH"
+        and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
+        and consensus.get("two_reviewer_approval") is True
+        and consensus.get("entry_gate_enforced") is True
+        and consensus.get("primary_verified") is True
+        and consensus.get("second_verified") is True
+        and consensus.get("primary_approved") is True
+        and consensus.get("second_approved") is True
+        and consensus.get("providers_independent") is True
+        and consensus.get("models_independent") is True
+        and str(consensus.get("expected_side") or "").upper() == side
+        and str(consensus.get("elliott_wave_phase") or "").upper() == wave_phase
+        and str(consensus.get("elliott_wave_direction") or "").upper() == wave_direction
+        and str(consensus.get("primary_status") or "").upper() == "APPROVED"
+        and str(consensus.get("second_status") or "").upper() == "APPROVED"
+    )
+    if not required:
+        return False, "The reviewer round does not contain a complete, matching two-reviewer approval.", [], []
+    if not isinstance(raw_reviews, list) or len(raw_reviews) != 2:
+        return False, "Exactly two reviewer responses are required in each round.", [], []
+
+    verified: dict[str, Mapping[str, Any]] = {}
+    providers: set[str] = set()
+    models: set[str] = set()
+    returned_models: set[str] = set()
+    requested_times: list[datetime] = []
+    completed_times: list[datetime] = []
+
+    def parse_time(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    for item in raw_reviews:
+        if not isinstance(item, Mapping):
+            return False, "A reviewer record is malformed.", [], []
+        review = item.get("review")
+        if not isinstance(review, Mapping):
+            return False, "A reviewer response is missing.", [], []
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or "").strip().lower()
+        if reviewer_id not in {"nemotron", "second_ai"} or reviewer_id in verified:
+            return False, "Reviewer identities must be exactly Nemotron and the independent second reviewer.", [], []
+
+        provider = str(review.get("provider") or "").strip().casefold()
+        model = str(review.get("model") or review.get("configured_model") or "").strip()
+        returned_model = str(review.get("returned_model") or "").strip()
+        configured_identity = model.split(":", 1)[0].casefold()
+        returned_identity = returned_model.split(":", 1)[0].casefold()
+        requested_at = parse_time(
+            review.get("request_started_at_utc") or review.get("requested_at_utc")
+        )
+        completed_at = parse_time(review.get("completed_at_utc"))
+        reviewed_signal_id = str(review.get("reviewed_signal_id") or "").strip()
+        reviewer_reviewed_at = parse_time(review.get("reviewed_at_utc"))
+        reviewer_age = (
+            (datetime.now(timezone.utc) - reviewer_reviewed_at).total_seconds()
+            if reviewer_reviewed_at is not None else float("inf")
+        )
+        valid = (
+            reviewed_signal_id == round_signal_id
+            and reviewer_age >= -30
+            and reviewer_age <= 300
+            and str(review.get("status") or "").strip().upper() == "APPROVED"
+            and review.get("paper_entry_eligible") is True
+            and review.get("request_attempted") is True
+            and str(review.get("response_source") or "").strip().upper() == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and bool(provider and model and returned_model)
+            and configured_identity == returned_identity
+            and str(review.get("expected_side") or "").strip().upper() == side
+            and str(review.get("trader_proposal") or "").strip().upper() == side
+            and str(review.get("elliott_wave_phase") or "").strip().upper() == wave_phase
+            and str(review.get("elliott_wave_direction") or "").strip().upper() == wave_direction
+            and requested_at is not None
+            and completed_at is not None
+            and completed_at >= requested_at
+        )
+        if not valid:
+            return False, f"{reviewer_id} did not provide a timestamped, verified live approval for this signal.", [], []
+        verified[reviewer_id] = review
+        providers.add(provider)
+        models.add(configured_identity)
+        returned_models.add(returned_identity)
+        requested_times.append(requested_at)
+        completed_times.append(completed_at)
+
+    if set(verified) != {"nemotron", "second_ai"}:
+        return False, "One of the two required reviewers is missing.", [], []
+    if len(providers) != 2 or len(models) != 2 or len(returned_models) != 2:
+        return False, "Both reviewers must use distinct verified providers and models.", [], []
+    return True, "Both independent reviewers approved this round.", requested_times, completed_times
+
+
 def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
     """Require two independent, live, verified AI approvals before Demo writes."""
     evidence = record.get("challenge1_evidence")
@@ -129,8 +255,7 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     if not isinstance(consensus, Mapping):
         return False, "The two-reviewer consensus record is missing."
     signal_id = str(record.get("signal_id") or "").strip()
-    consensus_signal_id = str(consensus.get("reviewed_signal_id") or "").strip()
-    if not signal_id or consensus_signal_id != signal_id:
+    if not signal_id or str(consensus.get("reviewed_signal_id") or "").strip() != signal_id:
         return False, "The two-reviewer approval is not bound to this exact signal_id."
     try:
         consensus_reviewed_at = datetime.fromisoformat(
@@ -138,18 +263,181 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         )
         if consensus_reviewed_at.tzinfo is None:
             return False, "The reviewer approval timestamp has no timezone."
-        approval_age = (datetime.now(timezone.utc) - consensus_reviewed_at.astimezone(timezone.utc)).total_seconds()
-    except (TypeError, ValueError):
+        approval_age = (
+            datetime.now(timezone.utc) - consensus_reviewed_at.astimezone(timezone.utc)
+        ).total_seconds()
+    except (TypeError, ValueError, OverflowError):
         return False, "The reviewer approval timestamp is missing or invalid."
     if approval_age < -30 or approval_age > 300:
         return False, "The two-reviewer approval is outside the five-minute validity window."
+
+    # The executor is the final fail-closed boundary. A caller cannot bypass
+    # the five-minute evaluation by fabricating only the latest reviewer quorum.
+    evaluation = record.get("entry_evaluation_window")
+    if not isinstance(evaluation, Mapping):
+        return False, "The five-minute Challenge 1 entry evaluation proof is missing."
+    if consensus.get("entry_evaluation_window") != dict(evaluation):
+        return False, "The evaluator proof is not bound to the final reviewer consensus."
+    try:
+        elapsed_seconds = float(evaluation.get("elapsed_seconds"))
+        minimum_seconds = int(evaluation.get("minimum_window_seconds"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "The five-minute entry evaluation timing proof is invalid."
+    if (
+        evaluation.get("status") != "PASS"
+        or minimum_seconds < 300
+        or not math.isfinite(elapsed_seconds)
+        or elapsed_seconds < 300
+        or evaluation.get("review_rounds_completed") != 2
+        or evaluation.get("direction_preserved") is not True
+        or evaluation.get("pattern_preserved") is not True
+        or evaluation.get("new_closed_candle_confirmed") is not True
+        or str(evaluation.get("final_signal_id") or "") != str(record.get("signal_id") or "")
+        or str(evaluation.get("initial_signal_id") or "") == str(evaluation.get("final_signal_id") or "")
+        or str(evaluation.get("initial_direction") or "").upper() != side
+        or str(evaluation.get("final_direction") or "").upper() != side
+    ):
+        return False, "The five-minute window, fresh candle, or persistent signal proof did not pass."
+    initial_pattern_name = str(evaluation.get("initial_pattern_name") or "").strip()
+    final_pattern_name = str(evaluation.get("final_pattern_name") or "").strip()
+    initial_pattern_direction = str(evaluation.get("initial_pattern_direction") or "").strip().upper()
+    final_pattern_direction = str(evaluation.get("final_pattern_direction") or "").strip().upper()
+    initial_pattern_category = str(evaluation.get("initial_pattern_category") or "").strip().upper()
+    final_pattern_category = str(evaluation.get("final_pattern_category") or "").strip().upper()
+    final_pattern = evidence.get("chosen_pattern")
+    final_pattern = final_pattern if isinstance(final_pattern, Mapping) else {}
+    final_record_pattern_name = str(final_pattern.get("name_en") or "").strip()
+    final_record_pattern_direction = str(final_pattern.get("direction") or "").strip().upper()
+    final_record_pattern_category = str(final_pattern.get("category") or "").strip().upper()
+    execution_evidence = record.get("execution")
+    execution_evidence = execution_evidence if isinstance(execution_evidence, Mapping) else {}
+    final_signal_bar = str(
+        record.get("signal_bar_open_utc")
+        or execution_evidence.get("signal_bar_open_utc")
+        or ""
+    ).strip()
+    proof_final_bar = str(evaluation.get("final_signal_bar_open_utc") or "").strip()
+    proof_initial_bar = str(evaluation.get("initial_signal_bar_open_utc") or "").strip()
+    try:
+        initial_bar_time = datetime.fromisoformat(proof_initial_bar.replace("Z", "+00:00"))
+        final_bar_time = datetime.fromisoformat(proof_final_bar.replace("Z", "+00:00"))
+        if initial_bar_time.tzinfo is None:
+            initial_bar_time = initial_bar_time.replace(tzinfo=timezone.utc)
+        if final_bar_time.tzinfo is None:
+            final_bar_time = final_bar_time.replace(tzinfo=timezone.utc)
+        candle_advance_seconds = (
+            final_bar_time.astimezone(timezone.utc)
+            - initial_bar_time.astimezone(timezone.utc)
+        ).total_seconds()
+        newer_completed_bar = candle_advance_seconds >= 300
+    except (TypeError, ValueError):
+        newer_completed_bar = False
+    try:
+        window_started = datetime.fromisoformat(
+            str(evaluation.get("window_started_at_utc") or "").replace("Z", "+00:00")
+        )
+        window_completed = datetime.fromisoformat(
+            str(evaluation.get("window_completed_at_utc") or "").replace("Z", "+00:00")
+        )
+        if window_started.tzinfo is None:
+            window_started = window_started.replace(tzinfo=timezone.utc)
+        if window_completed.tzinfo is None:
+            window_completed = window_completed.replace(tzinfo=timezone.utc)
+        wall_window_seconds = (
+            window_completed.astimezone(timezone.utc)
+            - window_started.astimezone(timezone.utc)
+        ).total_seconds()
+    except (TypeError, ValueError):
+        wall_window_seconds = -1.0
+    if (
+        not initial_pattern_name
+        or initial_pattern_name != final_pattern_name
+        or initial_pattern_direction != expected_direction
+        or final_pattern_direction != initial_pattern_direction
+        or initial_pattern_category != final_pattern_category
+        or not initial_pattern_category
+        or final_record_pattern_name != final_pattern_name
+        or final_record_pattern_direction != final_pattern_direction
+        or final_record_pattern_category != final_pattern_category
+        or proof_final_bar != final_signal_bar
+        or not proof_initial_bar
+        or not newer_completed_bar
+        or not math.isfinite(wall_window_seconds)
+        or wall_window_seconds < 300
+        or evaluation.get("entry_evaluation_heartbeat_seconds") != 3.0
+    ):
+        return False, "The selected pattern, fresh candle, or wall-clock evaluation window did not pass."
+
+    final_round = evaluation.get("final_round")
+    if (
+        not isinstance(final_round, Mapping)
+        or final_round.get("reviewer_ids") != ["nemotron", "second_ai"]
+        or final_round.get("consensus_status") != consensus.get("status")
+        or str(final_round.get("reviewed_signal_id") or "") != str(record.get("signal_id") or "")
+    ):
+        return False, "The final reviewer round is not bound to the refreshed signal."
+
+    initial_round = evaluation.get("initial_round")
+    if not isinstance(initial_round, Mapping):
+        return False, "The first independent reviewer round is missing."
+    initial_ok, initial_reason, initial_requested, initial_completed = _challenge1_review_round_ready(
+        initial_round.get("ai_reviews"),
+        initial_round.get("ai_consensus"),
+        side=side,
+        wave_phase=wave_phase,
+        wave_direction=wave_direction,
+    )
+    if not initial_ok:
+        return False, "Initial reviewer round failed: " + initial_reason
+    final_requested = []
+    final_completed = []
+    final_reviews_for_timing = record.get("ai_reviews")
+    if isinstance(final_reviews_for_timing, list):
+        for item in final_reviews_for_timing:
+            review = item.get("review") if isinstance(item, Mapping) else None
+            if not isinstance(review, Mapping):
+                return False, "A final reviewer response is missing."
+            if str(review.get("reviewed_signal_id") or "").strip() != signal_id:
+                return False, "Final reviewer approval belongs to a different signal."
+            try:
+                reviewer_reviewed_at = datetime.fromisoformat(
+                    str(review.get("reviewed_at_utc") or "").replace("Z", "+00:00")
+                )
+                if reviewer_reviewed_at.tzinfo is None:
+                    return False, "Final reviewer approval timestamp has no timezone."
+                reviewer_age = (
+                    datetime.now(timezone.utc)
+                    - reviewer_reviewed_at.astimezone(timezone.utc)
+                ).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                return False, "Final reviewer approval timestamp is invalid."
+            if reviewer_age < -30 or reviewer_age > 300:
+                return False, "Final reviewer approval is stale."
+            request_text = review.get("request_started_at_utc") or review.get("requested_at_utc")
+            completed_text = review.get("completed_at_utc")
+            try:
+                request_time = datetime.fromisoformat(str(request_text).replace("Z", "+00:00"))
+                completed_time = datetime.fromisoformat(str(completed_text).replace("Z", "+00:00"))
+                if request_time.tzinfo is None:
+                    request_time = request_time.replace(tzinfo=timezone.utc)
+                if completed_time.tzinfo is None:
+                    completed_time = completed_time.replace(tzinfo=timezone.utc)
+                final_requested.append(request_time.astimezone(timezone.utc))
+                final_completed.append(completed_time.astimezone(timezone.utc))
+            except (TypeError, ValueError):
+                return False, "Final reviewer round timestamps are missing or invalid."
+    if (
+        len(final_requested) != 2
+        or len(final_completed) != 2
+        or max(initial_completed) >= min(final_requested)
+    ):
+        return False, "The final reviewer round must be a separate call after the initial round."
 
     required_consensus = (
         consensus.get("status") == "APPROVED_BY_BOTH"
         and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
         and consensus.get("two_reviewer_approval") is True
         and consensus.get("entry_gate_enforced") is True
-        and consensus.get("reviewed_signal_id") == signal_id
         and consensus.get("primary_verified") is True
         and consensus.get("second_verified") is True
         and consensus.get("primary_approved") is True
@@ -207,7 +495,6 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
         valid = (
             str(review.get("status") or "").strip().upper() == "APPROVED"
             and review.get("paper_entry_eligible") is True
-            and review.get("request_attempted") is True
             and str(review.get("response_source") or "").strip().upper() == "LIVE_API"
             and review.get("response_validated") is True
             and review.get("model_verified") is True
@@ -268,7 +555,7 @@ class BloFinDemoRiskPolicy:
     max_margin_usage_pct: float = 0.10
     max_aggregate_risk_pct: float = 0.005
     max_leverage: int = 3
-    max_concurrent_positions: int = 1
+    max_concurrent_positions: int = 4
     max_orders_per_utc_day: int | None = None
     min_seconds_between_orders: int = 0
     min_confirmation_score: float = 75.0
@@ -306,8 +593,8 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Minimum seconds between Demo orders must be between 0 and 86400")
         if isinstance(self.max_leverage, bool) or not 1 <= int(self.max_leverage) <= 3:
             raise ValueError("Demo test leverage is restricted to 1x through 3x")
-        if not 1 <= int(self.max_concurrent_positions) <= 3:
-            raise ValueError("Concurrent positions must be between 1 and 3")
+        if not 1 <= int(self.max_concurrent_positions) <= 4:
+            raise ValueError("Concurrent positions must be between 1 and 4")
         if self.min_reward_risk < 1.0 or self.max_entry_deviation_pct <= 0:
             raise ValueError("Reward/risk or entry-deviation policy is invalid")
         if not 0 <= self.taker_fee_rate <= 0.01:
@@ -404,7 +691,7 @@ def build_demo_order_plan(
     stop = _decimal(record.get("stop_loss_usd", record.get("stop_loss")), "stop_loss")
     target = _decimal(record.get("take_profit_usd", record.get("take_profit")), "take_profit")
     if entry <= 0 or stop <= 0 or target <= 0:
-        raise BloFinDemoExecutionBlocked("Entry, stop-loss and take-profit prices must be positive.")
+        raise BloFinDemoExecutionBlocked("Entry, stop-loss and take-profit must be strictly positive.")
     if side == "LONG":
         if not stop < entry < target:
             raise BloFinDemoExecutionBlocked("LONG requires stop < entry < take-profit.")
@@ -491,6 +778,7 @@ def build_demo_order_plan(
         "reward_risk": float(reward_distance / risk_distance),
         "position_side_long_short": side.lower(),
     }
+
 
 
 
@@ -595,7 +883,10 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     ORDER_PATH = "/api/v1/trade/order"
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
     CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
-    ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH})
+    AMEND_TPSL_PATH = "/api/v1/trade/amend-tpsl"
+    ALLOWED_POST_PATHS = frozenset({
+        ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH, AMEND_TPSL_PATH,
+    })
 
     def __init__(self, **kwargs: Any) -> None:
         # Prefer a dedicated Demo Trade override. Otherwise use the unified
@@ -753,6 +1044,36 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         if position_id:
             body["positionId"] = position_id
         return self._post(self.CLOSE_POSITION_PATH, body)
+
+    def amend_tpsl_stop_loss(
+        self, *, inst_id: str, tpsl_id: str, new_stop_loss: str,
+        request_id: str, ttl_ms: int = 5_000,
+    ) -> dict[str, Any]:
+        """Tighten only the SL leg of one standalone Demo TP/SL order.
+
+        The omitted TP fields are intentionally left untouched. Zero is
+        prohibited because BloFin interprets zero as removing protection.
+        This method sends exactly one POST and never retries an ambiguous write.
+        """
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
+            raise ValueError("Only a USDT linear Demo instrument can be amended.")
+        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", tpsl_id or ""):
+            raise ValueError("tpsl_id is invalid.")
+        if not re.fullmatch(r"[A-Za-z0-9]{1,32}", request_id or ""):
+            raise ValueError("request_id must contain 1-32 alphanumeric characters.")
+        stop = _decimal(new_stop_loss, "new_stop_loss")
+        if stop <= 0:
+            raise ValueError("A protective stop must be strictly positive; zero removes it.")
+        if not isinstance(ttl_ms, int) or isinstance(ttl_ms, bool) or not 1_000 <= ttl_ms <= 10_000:
+            raise ValueError("ttl_ms must be between 1000 and 10000.")
+        body = {
+            "instId": inst_id,
+            "tpslId": tpsl_id,
+            "requestId": request_id,
+            "ttl": ttl_ms,
+            "newSlTriggerPrice": _format_decimal(stop),
+        }
+        return self._post(self.AMEND_TPSL_PATH, body)
 
 
 class BloFinDemoEventStore:
@@ -998,10 +1319,18 @@ class BloFinDemoEventStore:
                 evidence=evidence,
             )
 
-    def _append_event(self, client_order_id: str, event_type: str, details: Mapping[str, Any]) -> None:
+    def _append_event(
+        self, client_order_id: str, event_type: str, details: Mapping[str, Any],
+        *, idempotency_suffix: str | None = None,
+    ) -> None:
         now = int(time.time())
         key = f"{client_order_id}:{event_type}"
-        payload = json.dumps(dict(details), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if idempotency_suffix:
+            key += ":" + str(idempotency_suffix)[:160]
+        payload = json.dumps(
+            dict(details), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
         event_id = hashlib.sha256(key.encode("utf-8")).hexdigest()
         self._db.execute(
             """INSERT OR IGNORE INTO blofin_demo_execution_events
@@ -1010,11 +1339,45 @@ class BloFinDemoEventStore:
             (event_id, key, client_order_id, event_type, now, payload),
         )
 
+    def record_manual_action(
+        self, client_order_id: str, event_type: str, details: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Durably append a manual/AI Demo intervention to the original order timeline."""
+        order_key = str(client_order_id or "").strip()
+        event_name = str(event_type or "").strip().upper()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", order_key):
+            raise ValueError("A valid linked Demo client_order_id is required for manual action audit.")
+        if not re.fullmatch(r"[A-Z0-9_:-]{3,120}", event_name):
+            raise ValueError("Manual action event_type is invalid.")
+        if not isinstance(details, Mapping):
+            raise TypeError("Manual action details must be a mapping.")
+        payload = dict(details)
+        # A distinct request ID gives each intervention its own lifecycle while
+        # preserving idempotency for a replay of the same action request.
+        suffix_value = (
+            payload.get("request_id")
+            or payload.get("exchange_close_client_order_id")
+            or hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()[:24]
+        )
+        with self._lock, self._db:
+            self._append_event(
+                order_key, event_name, payload,
+                idempotency_suffix=str(suffix_value),
+            )
+        return {
+            "client_order_id": order_key,
+            "event_type": event_name,
+            "idempotency_suffix": str(suffix_value)[:160],
+            "status": "RECORDED",
+        }
+
     def reserve_order(
         self,
         plan: Mapping[str, Any],
         *,
-        max_concurrent_positions: int = 1,
+        max_concurrent_positions: int = 4,
         external_open_positions: int = 0,
         external_pending_orders: int = 0,
     ) -> bool:
@@ -1031,8 +1394,8 @@ class BloFinDemoEventStore:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field} must be a non-negative integer.")
-        if not 1 <= max_concurrent_positions <= 3:
-            raise ValueError("max_concurrent_positions must be between 1 and 3.")
+        if not 1 <= max_concurrent_positions <= 4:
+            raise ValueError("max_concurrent_positions must be between 1 and 4.")
 
         now = int(time.time())
         order_id = str(plan["client_order_id"])
@@ -1048,9 +1411,10 @@ class BloFinDemoEventStore:
         if min(new_risk, new_margin, risk_cap, margin_cap) <= 0:
             raise BloFinDemoExecutionBlocked("Aggregate risk and margin reservations must be positive.")
 
-        # External positions/orders have no trusted local stop-risk and margin ledger.
-        # Fail closed rather than undercounting exposure when those are present.
-        if external_open_positions > 0 or external_pending_orders > 0:
+        # Pending exchange orders are always a blocker. Exchange positions may be
+        # counted only when all of them are represented by durable local reservations.
+        # An untracked/manual position has no trusted stop-risk or margin ledger.
+        if external_pending_orders > 0:
             return False
 
         active_statuses = (
@@ -1074,7 +1438,11 @@ class BloFinDemoEventStore:
                         FROM blofin_demo_orders WHERE status IN ({active_statuses})"""
                 ).fetchall()
                 local_active = len(active_rows)
-                observed_total = local_active + external_open_positions + external_pending_orders
+                if external_open_positions > local_active:
+                    self._db.rollback()
+                    return False
+                effective_open_positions = max(local_active, external_open_positions)
+                observed_total = effective_open_positions + external_pending_orders
                 if observed_total >= max_concurrent_positions:
                     self._db.rollback()
                     return False
@@ -1127,6 +1495,7 @@ class BloFinDemoEventStore:
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,
                         "exchange_open_positions": external_open_positions,
+                        "effective_open_positions": effective_open_positions,
                         "exchange_pending_orders": external_pending_orders,
                         "max_concurrent_positions": max_concurrent_positions,
                     },
@@ -2056,7 +2425,9 @@ class BloFinDemoExecutor:
         signal_entry = _finite(record.get("entry_price_usd", record.get("entry_price")), "entry_price", minimum=0.0000001)
         deviation = abs(last_price - signal_entry) / signal_entry
         if deviation > self.policy.max_entry_deviation_pct:
-            raise BloFinDemoExecutionBlocked("Market price moved too far from the signal entry reference.")
+            raise BloFinDemoExecutionBlocked(
+                "Market entry price deviates beyond the configured maximum from the reviewed signal."
+            )
 
         mode = self.client.get_position_mode()
         position_mode = mode.get("positionMode")
@@ -2075,10 +2446,12 @@ class BloFinDemoExecutor:
         # Account-wide pending orders can fill on another symbol and consume the
         # concurrency/margin budget, so the safety check is intentionally global.
         pending = self.client.get_open_orders()
-        if _active_position_count(positions) >= self.policy.max_concurrent_positions:
+        exchange_open_positions = _active_position_count(positions)
+        if exchange_open_positions >= self.policy.max_concurrent_positions:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")
         if _active_order_count(pending) > 0:
             raise BloFinDemoExecutionBlocked("Pending orders exist; reconcile them before a new entry.")
+
 
         plan = build_demo_order_plan(
             record, instrument, inst_id=inst_id, equity_usdt=equity,
@@ -2133,7 +2506,7 @@ class BloFinDemoExecutor:
         if not self.store.reserve_order(
             plan,
             max_concurrent_positions=self.policy.max_concurrent_positions,
-            external_open_positions=_active_position_count(positions),
+            external_open_positions=exchange_open_positions,
             external_pending_orders=_active_order_count(pending),
         ):
             raise BloFinDemoExecutionBlocked(
@@ -2202,6 +2575,8 @@ class BloFinDemoExecutor:
             "instrument_id": inst_id,
             "side": plan["side"],
             "quantity_contracts": plan["quantity"],
+            "sizing_mode": "EXCHANGE_MINIMUM_SIZE_ONLY" if minimum_size_only else "RISK_BUDGET_SIZED",
+            "risk_based_sizing_validated": not minimum_size_only,
             "leverage": int(leverage),
             "stop_loss": plan["stop_loss"],
             "take_profit": plan["take_profit"],

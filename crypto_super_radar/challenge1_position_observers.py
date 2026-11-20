@@ -1,4 +1,4 @@
-"""Durable, observation-only AI review scheduling for open BloFin Demo positions.
+"""Durable active AI review scheduling for open BloFin Demo positions.
 
 The position manager keeps its 15-second deterministic risk loop. Independent AI
 reviews are scheduled at a much slower, configurable cadence so free-provider
@@ -7,6 +7,7 @@ including explicit NOT_CALLED reasons.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -16,12 +17,13 @@ from typing import Any, Mapping
 
 from .ai_second_opinion import run_challenge1_observer_reviews
 from .challenge1_audit import Challenge1AuditRecorder
+from .challenge1_supervisor_policy import coordinate_position_supervisors
 from .notion_event_sync import NotionEventOutbox
 
 
 _REVIEW_THREADS: dict[str, threading.Thread] = {}
 _REVIEW_LOCK = threading.RLock()
-_DEFAULT_INTERVAL_SECONDS = 10_800
+_DEFAULT_INTERVAL_SECONDS = 300
 _IN_FLIGHT_TIMEOUT_SECONDS = 90
 _RETRY_AFTER_INTERRUPTED_SECONDS = 900
 _MAX_AUDIT_EVENTS = 2_000
@@ -46,6 +48,223 @@ def _audit_details(event: Mapping[str, Any]) -> dict[str, Any]:
     payload = payload if isinstance(payload, Mapping) else {}
     details = payload.get("details")
     return dict(details) if isinstance(details, Mapping) else {}
+
+def _risk_fingerprint(value: Any, decimals: int = 3) -> float | str | None:
+    """Normalize risk values without retriggering on every tiny exchange tick."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return "INVALID"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "INVALID"
+    if not _is_finite_number(number):
+        return "INVALID"
+    return round(number, decimals)
+
+
+def _material_review_event_key(
+    challenge_record: Mapping[str, Any],
+    cycle_context: Mapping[str, Any],
+    position_id: str,
+) -> str:
+    """Hash material market, protection, account and position-risk changes."""
+    position = cycle_context.get("position")
+    position = position if isinstance(position, Mapping) else {}
+    protective = cycle_context.get("protective_orders")
+    protective = protective if isinstance(protective, Mapping) else {}
+    candles = cycle_context.get("market_direction_evidence")
+    candles = candles if isinstance(candles, list) else []
+    last_candle = candles[-1] if candles else None
+    if isinstance(last_candle, Mapping):
+        candle_marker = next(
+            (last_candle.get(key) for key in ("ts", "timestamp", "time", "open_time", "openTime")
+             if last_candle.get(key) not in (None, "")),
+            None,
+        )
+    elif isinstance(last_candle, (list, tuple)) and last_candle:
+        candle_marker = last_candle[0]
+    else:
+        candle_marker = None
+
+    raw_evidence = challenge_record.get("challenge1_evidence")
+    raw_evidence = raw_evidence if isinstance(raw_evidence, Mapping) else {}
+    protective_orders = protective.get("orders")
+    protective_orders = protective_orders if isinstance(protective_orders, list) else []
+    protection_signature = [
+        {
+            "tpsl_id": item.get("tpsl_id"),
+            "position_id": item.get("position_id"),
+            "state": item.get("state"),
+            "sl_trigger_price": _risk_fingerprint(item.get("sl_trigger_price"), 8),
+            "tp_trigger_price": _risk_fingerprint(item.get("tp_trigger_price"), 8),
+        }
+        for item in protective_orders if isinstance(item, Mapping)
+    ]
+
+    position_signature = {
+        "position_id": str(position.get("positionId") or position_id),
+        "instrument_id": str(position.get("instId") or challenge_record.get("instrument_id") or ""),
+        "side": str(position.get("positionSide") or ""),
+        "size": _risk_fingerprint(position.get("positions"), 8),
+        "available_size_to_close": _risk_fingerprint(position.get("availablePositions"), 8),
+        "average_price": _risk_fingerprint(position.get("averagePrice"), 8),
+        "liquidation_price": _risk_fingerprint(position.get("liquidationPrice"), 4),
+        "leverage": _risk_fingerprint(position.get("leverage"), 3),
+        "margin_mode": str(position.get("marginMode") or ""),
+        "initial_margin": _risk_fingerprint(position.get("initialMargin"), 2),
+        "position_margin": _risk_fingerprint(position.get("margin"), 2),
+        "margin_ratio": _risk_fingerprint(position.get("marginRatio"), 4),
+        "maintenance_margin": _risk_fingerprint(position.get("maintenanceMargin"), 2),
+        "unrealized_pnl_ratio": _risk_fingerprint(position.get("unrealizedPnlRatio"), 4),
+        "adl_level": str(position.get("adl") or ""),
+        "unrealized_pnl_sign": (
+            "NEGATIVE" if _is_negative_number(position.get("unrealizedPnl"))
+            else "NON_NEGATIVE" if _is_finite_number(position.get("unrealizedPnl"))
+            else "UNKNOWN"
+        ),
+    }
+
+    account_raw = cycle_context.get("account_snapshot")
+    if isinstance(account_raw, list):
+        account_root = next((item for item in account_raw if isinstance(item, Mapping)), {})
+        account_details = account_root.get("details")
+        if not isinstance(account_details, list):
+            account_details = account_raw
+    elif isinstance(account_raw, Mapping):
+        account_root = account_raw
+        account_details = account_root.get("details")
+    else:
+        account_root, account_details = {}, []
+    account_signature = {
+        "total_equity": _risk_fingerprint(account_root.get("totalEquity"), 0),
+        "isolated_equity": _risk_fingerprint(account_root.get("isolatedEquity"), 0),
+        "balances": [],
+    }
+    if isinstance(account_details, list):
+        for item in account_details[:12]:
+            if not isinstance(item, Mapping):
+                continue
+            account_signature["balances"].append({
+                "currency": str(item.get("currency") or "").upper(),
+                "equity": _risk_fingerprint(item.get("equity"), 0),
+                "available": _risk_fingerprint(item.get("available"), 0),
+                "available_equity": _risk_fingerprint(item.get("availableEquity"), 0),
+                "frozen": _risk_fingerprint(item.get("frozen"), 0),
+                "open_order_margin": _risk_fingerprint(item.get("orderFrozen"), 0),
+                "margin_ratio": _risk_fingerprint(item.get("marginRatio"), 4),
+            })
+    account_signature["balances"].sort(key=lambda item: item["currency"])
+
+    open_order_signature = []
+    raw_open_orders = cycle_context.get("open_orders_snapshot")
+    if isinstance(raw_open_orders, list):
+        for item in raw_open_orders[:30]:
+            if not isinstance(item, Mapping):
+                continue
+            open_order_signature.append({
+                "instrument_id": str(item.get("instId") or "").upper(),
+                "order_id": str(item.get("orderId") or ""),
+                "client_order_id": str(item.get("clientOrderId") or ""),
+                "position_id": str(item.get("positionId") or ""),
+                "side": str(item.get("side") or "").lower(),
+                "position_side": str(item.get("positionSide") or "").lower(),
+                "state": str(item.get("state") or "").lower(),
+                "reduce_only": str(item.get("reduceOnly") or "").lower(),
+                "price": _risk_fingerprint(item.get("price"), 8),
+                "size": _risk_fingerprint(item.get("size"), 8),
+                "filled_size": _risk_fingerprint(item.get("filledSize"), 8),
+                "leverage": _risk_fingerprint(item.get("leverage"), 3),
+            })
+    open_order_signature.sort(
+        key=lambda item: (item["instrument_id"], item["order_id"], item["client_order_id"])
+    )
+
+    material = {
+        "position": position_signature,
+        "account_risk": account_signature,
+        "open_orders": open_order_signature,
+        "robot_decision": str(cycle_context.get("robot_decision") or "UNKNOWN"),
+        "market_direction": str(cycle_context.get("market_direction") or "UNKNOWN"),
+        "last_closed_candle_marker": candle_marker,
+        "setup_pattern": raw_evidence.get("chosen_pattern"),
+        "chart_structure": raw_evidence.get("chart_structure"),
+        "protection_status": protective.get("status"),
+        "protection_orders": protection_signature,
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        number = float(value)
+        return number == number and number not in (float("inf"), float("-inf"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _is_negative_number(value: Any) -> bool:
+    try:
+        return _is_finite_number(value) and float(value) < 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def record_position_supervisor_watchdog_cycle(
+    *,
+    experience_id: str | None,
+    position_id: str,
+    cycle_epoch_ms: int,
+    snapshot_age_seconds: float,
+    snapshot_source: str,
+    snapshot_status: str,
+    reviewer_states: Mapping[str, Any],
+    deterministic_flags: list[str] | None = None,
+    loop_drift_ms: int | None = None,
+    connection: Any = None,
+) -> dict[str, Any]:
+    """Persist one compact 3-second local supervisor-coordinator heartbeat.
+
+    This function makes no network, LLM, Notion, or exchange calls.
+    """
+    if not position_id:
+        raise ValueError("position_id is required for supervisor watchdog audit.")
+    cycle_id = f"{position_id}:{int(cycle_epoch_ms)}"
+    details = {
+        "environment": "BLOFIN_DEMO",
+        "watchdog_interval_seconds": 3,
+        "cycle_epoch_ms": int(cycle_epoch_ms),
+        "snapshot_age_seconds": round(max(0.0, float(snapshot_age_seconds)), 3),
+        "snapshot_source": str(snapshot_source or "UNKNOWN")[:80],
+        "snapshot_status": str(snapshot_status or "UNKNOWN")[:80],
+        "reviewer_states": {
+            reviewer_id: {
+                "status": str((reviewer_states.get(reviewer_id) or {}).get("status") or "UNKNOWN"),
+                "action": str((reviewer_states.get(reviewer_id) or {}).get("action") or ""),
+                "last_action": str((reviewer_states.get(reviewer_id) or {}).get("last_action") or ""),
+                "last_result_age_seconds": (reviewer_states.get(reviewer_id) or {}).get("last_result_age_seconds"),
+                "reason_code": str((reviewer_states.get(reviewer_id) or {}).get("reason_code") or "")[:100],
+            }
+            for reviewer_id in ("nemotron", "second_ai")
+            if isinstance(reviewer_states.get(reviewer_id), Mapping)
+        },
+        "deterministic_flags": [str(flag)[:100] for flag in (deterministic_flags or [])[:12]],
+        "loop_drift_ms": int(loop_drift_ms) if loop_drift_ms is not None else None,
+        "llm_request_attempted": False,
+        "rest_request_attempted": False,
+        "exchange_write_attempted": False,
+        "execution_effect": "NONE",
+    }
+    return _record_audit_event(
+        cycle_id=experience_id or f"unlinked-position:{position_id}",
+        phase="POSITION_SUPERVISOR_WATCHDOG_CYCLE",
+        event_key=f"position-supervisor-watchdog:{position_id}:{cycle_id}",
+        details=details,
+        experience_id=experience_id,
+        position_id=position_id,
+        connection=connection,
+    )
 
 
 def _record_audit_event(
@@ -106,7 +325,7 @@ def _queue_notion_projection(
             "symbol": symbol,
             "timeframe": "5m",
             "signal": signal,
-            "ai_decision": "OBSERVE_ONLY",
+            "ai_decision": str(details.get("action") or "ACTIVE_SUPERVISION"),
             "reviewer_id": reviewer_id,
             "ai_provider": provider,
             "ai_model": model,
@@ -121,6 +340,9 @@ def _queue_notion_projection(
                 {
                     "observations": details.get("observations", []),
                     "risk_flags": details.get("risk_flags", []),
+                    "action": details.get("action"),
+                    "proposed_stop_loss_price": details.get("proposed_stop_loss_price"),
+                    "data_gaps": details.get("data_gaps", []),
                 },
                 ensure_ascii=False,
                 default=str,
@@ -387,13 +609,18 @@ def _reviewer_result_event(
         "response_validated": result.get("response_validated") if isinstance(result.get("response_validated"), bool) else None,
         "model_verified": result.get("model_verified") if isinstance(result.get("model_verified"), bool) else None,
         "verdict": str(result.get("verdict") or ""),
+        "action": str(result.get("action") or ""),
+        "proposed_stop_loss_price": result.get("proposed_stop_loss_price"),
+        "data_gaps": list(result.get("data_gaps") or [])[:10],
+        "evidence_hash": str(result.get("evidence_hash") or ""),
+        "mandate": str(result.get("mandate") or ""),
         "reason_fa": str(result.get("reason_fa") or result.get("reason") or "")[:1000],
         "observations": list(result.get("observations") or [])[:10],
         "risk_flags": list(result.get("risk_flags") or [])[:10],
         "skip_reason_code": str(result.get("skip_reason_code") or result.get("error_code") or ""),
         "configuration_issues": list(result.get("configuration_issues") or [])[:10],
-        "execution_effect": "NONE",
-        "observation_only": True,
+        "execution_effect": str(result.get("execution_effect") or "NONE"),
+        "observation_only": False,
     }
     phase = "POSITION_AI_REVIEW_RESULT"
     event_key = f"position-review-result:{position_id}:{review_batch_id}:{reviewer_id}"
@@ -456,6 +683,7 @@ def _position_review_worker(
     order_id: str,
     symbol: str,
     signal: str,
+    action_executor: Any = None,
 ) -> None:
     try:
         from .ai_second_opinion import run_challenge1_observer_reviews
@@ -497,6 +725,99 @@ def _position_review_worker(
                 symbol=symbol,
                 signal=signal,
             )
+
+        position = cycle_context.get("position")
+        position = position if isinstance(position, Mapping) else {}
+        cycle_context = {
+            **dict(cycle_context),
+            "supervisor_reviews": [dict(item) for item in reviewers if isinstance(item, Mapping)],
+        }
+        evidence_hash = str(result.get("evidence_hash") or "")
+        coordinator = coordinate_position_supervisors(
+            reviewers,
+            evidence_hash=evidence_hash,
+            experience_id=experience_id,
+            position_id=position_id,
+            current_position_id=str(position.get("positionId") or ""),
+        )
+        coordinator_event = _record_audit_event(
+            cycle_id=experience_id,
+            phase="POSITION_AI_COORDINATOR_DECISION",
+            event_key=f"position-supervisor-coordinator:{position_id}:{review_batch_id}",
+            details={
+                **coordinator,
+                "review_batch_id": review_batch_id,
+                "reviewer_consensus": consensus,
+                "supervisor_actions": {
+                    str(item.get("reviewer_id") or ""): str(item.get("action") or "")
+                    for item in reviewers if isinstance(item, Mapping)
+                },
+                "decided_at_utc": _now_utc().isoformat(),
+            },
+            experience_id=experience_id,
+            position_id=position_id,
+        )
+        execution_result: dict[str, Any] = {
+            "status": "NOT_EXECUTED",
+            "reason_code": "NO_AUTHORIZED_ACTION",
+        }
+        if coordinator.get("execution_authorized") is True:
+            if callable(action_executor):
+                try:
+                    raw_execution = action_executor(
+                        action=str(coordinator.get("action") or ""),
+                        challenge_record=dict(challenge_record),
+                        cycle_context=dict(cycle_context),
+                        coordinator_decision=dict(coordinator),
+                    )
+                    execution_result = (
+                        dict(raw_execution) if isinstance(raw_execution, Mapping)
+                        else {"status": "UNKNOWN", "reason_code": "EXECUTOR_RETURN_NOT_MAPPING"}
+                    )
+                except Exception as action_exc:
+                    execution_result = {
+                        "status": "EXECUTION_ERROR",
+                        "reason_code": type(action_exc).__name__,
+                    }
+            else:
+                execution_result = {
+                    "status": "BLOCKED",
+                    "reason_code": "DEMO_ACTION_EXECUTOR_NOT_CONFIGURED",
+                }
+        elif coordinator.get("status") == "RISK_ALERT":
+            if callable(action_executor):
+                try:
+                    raw_execution = action_executor(
+                        action="URGENT_RISK_ALERT",
+                        challenge_record=dict(challenge_record),
+                        cycle_context=dict(cycle_context),
+                        coordinator_decision=dict(coordinator),
+                    )
+                    execution_result = (
+                        dict(raw_execution) if isinstance(raw_execution, Mapping)
+                        else {"status": "ALERT_RECORDED", "reason_code": "NO_ACTION_EXECUTOR_RESULT"}
+                    )
+                except Exception as action_exc:
+                    execution_result = {"status": "ALERT_EXECUTION_ERROR", "reason_code": type(action_exc).__name__}
+            else:
+                execution_result = {"status": "ALERT_RECORDED", "reason_code": "NO_ALERT_HANDLER_CONFIGURED"}
+        _record_audit_event(
+            cycle_id=experience_id,
+            phase="POSITION_AI_INTERVENTION_EXECUTION",
+            event_key=f"position-supervisor-execution:{position_id}:{review_batch_id}",
+            details={
+                "review_batch_id": review_batch_id,
+                "coordinator_event_id": coordinator_event.get("event_id"),
+                "coordinator_status": coordinator.get("status"),
+                "action": coordinator.get("action"),
+                "execution_authorized": coordinator.get("execution_authorized") is True,
+                "execution_result": execution_result,
+                "execution_effect": execution_result.get("status", "UNKNOWN"),
+                "recorded_at_utc": _now_utc().isoformat(),
+            },
+            experience_id=experience_id,
+            position_id=position_id,
+        )
         _record_audit_event(
             cycle_id=experience_id,
             phase="POSITION_AI_REVIEW_BATCH_COMPLETE",
@@ -505,7 +826,8 @@ def _position_review_worker(
                 "review_batch_id": review_batch_id,
                 "consensus": consensus,
                 "reviewers_recorded": sorted(seen),
-                "execution_effect": "NONE",
+                "execution_effect": str(execution_result.get("status") or "UNKNOWN"),
+                "coordinator_status": coordinator.get("status"),
                 "completed_at_utc": _now_utc().isoformat(),
             },
             experience_id=experience_id,
@@ -548,8 +870,9 @@ def schedule_position_observer_review(
     symbol: str,
     signal: str,
     now: datetime | None = None,
+    action_executor: Any = None,
 ) -> dict[str, Any]:
-    """Start two independent reviewers on a durable per-position schedule, never as an exit gate."""
+    """Start two independent active reviewers; every result and execution is durably audited."""
     current = (now or _now_utc()).astimezone(timezone.utc)
     now_epoch = current.timestamp()
     try:
@@ -559,7 +882,7 @@ def schedule_position_observer_review(
         ))
     except (TypeError, ValueError):
         interval_seconds = _DEFAULT_INTERVAL_SECONDS
-    interval_seconds = max(3_600, min(interval_seconds, 86_400))
+    interval_seconds = max(300, min(interval_seconds, 3_600))
 
     if not experience_id or not position_id:
         return {
@@ -596,7 +919,11 @@ def schedule_position_observer_review(
 
     latest_batch_id = ""
     latest_request_time = None
+    latest_details: dict[str, Any] = {}
     latest_results: dict[str, dict[str, Any]] = {}
+    current_material_hash = _material_review_event_key(
+        challenge_record, cycle_context, position_id,
+    )
     if latest_request is not None:
         latest_details = _audit_details(latest_request)
         latest_batch_id = str(latest_details.get("review_batch_id") or "")
@@ -659,6 +986,13 @@ def schedule_position_observer_review(
                 for key in ("nemotron", "second_ai")
             }
 
+    previous_material_hash = str(latest_details.get("material_event_hash") or "")
+    material_event_changed = (
+        latest_request is None
+        or not previous_material_hash
+        or previous_material_hash != current_material_hash
+    )
+    trigger_reason = "MATERIAL_POSITION_EVENT" if material_event_changed else "SCHEDULED_INTERVAL"
     if latest_request is not None and not incomplete_batch and latest_request_time is not None and len(latest_results) == 2:
         completed_times = [
             _parse_utc(item.get("response_completed_at_utc"))
@@ -666,18 +1000,20 @@ def schedule_position_observer_review(
         ]
         completed_times = [item for item in completed_times if item is not None]
         anchor = max(completed_times).timestamp() if completed_times else latest_request_time.timestamp()
-        if now_epoch - anchor < interval_seconds:
+        if now_epoch - anchor < interval_seconds and not material_event_changed:
             output: dict[str, Any] = {}
             for reviewer_id in ("nemotron", "second_ai"):
                 previous = latest_results.get(reviewer_id, {})
                 output[reviewer_id] = {
                     "status": "NOT_CALLED",
-                    "reason_code": "REVIEW_NOT_DUE",
+                    "reason_code": "SCHEDULED_INTERVAL_NOT_REACHED",
                     "request_attempted": False,
                     "last_result_status": previous.get("status"),
                     "last_verdict": previous.get("verdict"),
+                    "last_action": previous.get("action"),
                     "last_result_event_id": previous.get("event_id"),
                     "last_result_age_seconds": max(0, int(now_epoch - anchor)),
+                    "material_event_hash": current_material_hash,
                 }
             return output
 
@@ -692,9 +1028,11 @@ def schedule_position_observer_review(
             "request_attempted": True,
             "request_started_at_utc": current.isoformat(),
             "schedule_interval_seconds": interval_seconds,
+            "material_event_hash": current_material_hash,
+            "trigger_reason": trigger_reason,
             "robot_decision": str(cycle_context.get("robot_decision") or "UNKNOWN"),
-            "execution_effect": "NONE",
-            "observation_only": True,
+            "execution_effect": "PENDING_COORDINATOR",
+            "observation_only": False,
         },
         experience_id=experience_id,
         position_id=position_id,
@@ -711,6 +1049,7 @@ def schedule_position_observer_review(
             "order_id": order_id,
             "symbol": symbol,
             "signal": signal,
+            "action_executor": action_executor,
         },
         name=f"position-ai-review-{position_id[:12]}",
         daemon=True,

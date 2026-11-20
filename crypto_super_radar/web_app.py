@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,7 @@ from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
 from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_TRADE_CREDENTIAL_ENV, DEMO_REST_URL, _resolve_env_credential
+from .blofin_demo_private_websocket import BloFinDemoPrivateWebSocket
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
@@ -45,6 +47,13 @@ from .blofin_demo_executor import (
 )
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
+from .challenge1_entry_evaluation import (
+    ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+    MIN_ENTRY_EVALUATION_SECONDS,
+    EntryEvaluationCancelled,
+    wait_for_minimum_entry_evaluation_window,
+    validate_challenge1_entry_revalidation,
+)
 from .database import storage_backend
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
@@ -54,6 +63,7 @@ from .challenge1_position_observers import (
     schedule_position_observer_review,
     record_position_monitor_cycle,
     record_position_observer_skip,
+    record_position_supervisor_watchdog_cycle,
 )
 from .ai_supervisor import ai_supervisor_status, run_ai_supervisor
 from .execution_diagnostics import build_execution_error_diagnostic
@@ -79,6 +89,24 @@ BLOFIN_EXECUTION_GUARD = threading.Lock()
 BLOFIN_ORDER_SUBMISSION_LOCK = threading.Lock()
 BLOFIN_POSITION_MANAGER_START_LOCK = threading.Lock()
 BLOFIN_POSITION_MANAGER_THREAD = None
+BLOFIN_POSITION_SUPERVISOR_START_LOCK = threading.Lock()
+BLOFIN_POSITION_SUPERVISOR_THREAD = None
+BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK = threading.RLock()
+BLOFIN_POSITION_SUPERVISOR_CACHE: dict[str, dict[str, Any]] = {}
+BLOFIN_PRIVATE_WS_START_LOCK = threading.Lock()
+BLOFIN_PRIVATE_WS_CLIENT: BloFinDemoPrivateWebSocket | None = None
+BLOFIN_POSITION_SUPERVISOR_STATE = {
+    "status": "STARTING",
+    "interval_seconds": 3,
+    "source": "REST_MANAGER_CACHE",
+    "last_cycle_at_utc": None,
+    "last_error_type": None,
+    "tracked_positions": 0,
+    "stale_positions": 0,
+    "llm_calls_performed": 0,
+    "rest_calls_performed": 0,
+    "exchange_writes_performed": 0,
+}
 BLOFIN_POSITION_MANAGER_STATE = {
     "status": "STARTING",
     "last_check_at_utc": None,
@@ -2986,7 +3014,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "daily_loss_limit_pct": 1.0,
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
-        "max_concurrent_positions": 1,
+        "max_concurrent_positions": 4,
         "signal_deduplication": "ONE_ORDER_PER_COMPLETED_5M_CANDLE",
         "message_fa": message_fa,
     }
@@ -4872,6 +4900,24 @@ def _run_blofin_demo_execution_job(
             elliott_wave=wave_report,
             trade_context=trade_context,
         )
+        entry_evaluation_started_monotonic = time.monotonic()
+        entry_evaluation_started_at_utc = datetime.now(timezone.utc).isoformat()
+        _record_challenge1_audit(
+            job_id, "ENTRY_EVALUATION_WINDOW_STARTED",
+            {
+                "instrument_id": instrument_id,
+                "signal_id": record.get("signal_id"),
+                "direction": record.get("signal"),
+                "minimum_window_seconds": MIN_ENTRY_EVALUATION_SECONDS,
+                "heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                "review_rounds_required": 2,
+                "entry_role": "PRE_ORDER_CHALLENGE1_EVALUATION",
+                "execution_environment": "BLOFIN_DEMO",
+            },
+            event_key="entry-evaluation-window-started",
+            experience_id=learning_experience_id,
+            reason="Challenge 1 started a minimum five-minute evidence and two-round review window before any order.",
+        )
         _record_challenge1_audit(
             job_id, "AI_REVIEW_REQUESTED",
             {
@@ -4879,33 +4925,430 @@ def _run_blofin_demo_execution_job(
                 "signal": str(getattr(getattr(analysis, "signal", None), "value", getattr(analysis, "signal", "UNKNOWN"))),
                 "reviewers": ["nemotron", "second_ai"],
                 "review_contract": "Independent reviews run concurrently; neither receives the other's answer.",
-                "execution_role": "ENTRY_APPROVAL_GATE",
+                "execution_role": "ENTRY_APPROVAL_GATE_INITIAL_ROUND",
             },
-            event_key="ai-review-requested", experience_id=learning_experience_id,
-            reason="Two independent reviewer calls are starting before any Demo order decision.",
+            event_key="ai-review-initial-requested", experience_id=learning_experience_id,
+            reason="Initial independent reviewer round is required before the five-minute wait and revalidation.",
         )
-        failed_operation = "ai_supervisors.request_and_validate_quorum"
-        ai_quorum = _run_challenge1_supervisor_reviews(
+        failed_operation = "ai_supervisors.initial_request_and_validate_quorum"
+        initial_ai_quorum = _run_challenge1_supervisor_reviews(
             analysis, asset, signal_id=str(record.get("signal_id") or ""),
         )
         _record_challenge1_audit(
-            job_id, "AI_REVIEW_RESULT",
+            job_id, "AI_REVIEW_INITIAL_RESULT",
             {
-                "instrument_id": instrument_id, "ai_reviews": ai_quorum.get("ai_reviews"),
-                "ai_consensus": ai_quorum.get("ai_consensus"),
-                "ai_status": ai_quorum.get("ai_status"),
-                "approved": ai_quorum.get("approved"),
-                "reason_fa": ai_quorum.get("reason_fa"),
+                "instrument_id": instrument_id,
+                "ai_reviews": initial_ai_quorum.get("ai_reviews"),
+                "ai_consensus": initial_ai_quorum.get("ai_consensus"),
+                "ai_status": initial_ai_quorum.get("ai_status"),
+                "approved": initial_ai_quorum.get("approved"),
+                "reason_fa": initial_ai_quorum.get("reason_fa"),
             },
-            event_key="ai-review-result", experience_id=learning_experience_id,
-            status="SUCCESS" if ai_quorum.get("approved") else "WARNING",
-            reason=str(ai_quorum.get("reason_fa") or "Independent reviewer results recorded."),
+            event_key="ai-review-initial-result", experience_id=learning_experience_id,
+            status="SUCCESS" if initial_ai_quorum.get("approved") else "WARNING",
+            reason=str(initial_ai_quorum.get("reason_fa") or "Initial independent reviewer results recorded."),
         )
+
+        ai_quorum = initial_ai_quorum
+        entry_evaluation_proof = None
+        if initial_ai_quorum.get("approved") is True:
+            _set_blofin_execution_job(
+                job_id, "running", stage="ENTRY_EVALUATION_WINDOW",
+                message_fa="اجماع اولیه دو ناظر ثبت شد؛ پنجره حداقل پنج‌دقیقه‌ای فعال است. پایش محلی هر ۳ ثانیه انجام می‌شود و در پایان، کندل تازه و رأی مستقل دوباره بررسی خواهد شد.",
+                ai_reviews=initial_ai_quorum.get("ai_reviews"),
+                ai_consensus=initial_ai_quorum.get("ai_consensus"),
+                analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
+                entry_evaluation_started_at_utc=entry_evaluation_started_at_utc,
+                entry_evaluation_minimum_seconds=MIN_ENTRY_EVALUATION_SECONDS,
+            )
+            last_heartbeat_bucket = [0]
+
+            def _entry_window_cancel_requested() -> bool:
+                with LOCK:
+                    current_job = BLOFIN_EXECUTION_JOBS.get(job_id) or {}
+                    current_status = str(current_job.get("status") or "").strip().lower()
+                    return bool(
+                        current_job.get("cancel_requested") is True
+                        or current_status in {"cancelled", "canceled"}
+                    )
+
+            def _entry_window_progress(elapsed: float) -> None:
+                remaining = max(0.0, MIN_ENTRY_EVALUATION_SECONDS - float(elapsed))
+                with LOCK:
+                    current_job = BLOFIN_EXECUTION_JOBS.get(job_id)
+                    if isinstance(current_job, dict):
+                        current_job.update({
+                            "stage": "ENTRY_EVALUATION_WINDOW",
+                            "entry_evaluation_elapsed_seconds": round(float(elapsed), 3),
+                            "entry_evaluation_remaining_seconds": round(remaining, 3),
+                            "entry_evaluation_heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                        })
+                bucket = int(float(elapsed) // 30)
+                if bucket > last_heartbeat_bucket[0] and bucket < 11:
+                    last_heartbeat_bucket[0] = bucket
+                    _record_challenge1_audit(
+                        job_id, "ENTRY_EVALUATION_HEARTBEAT",
+                        {
+                            "instrument_id": instrument_id,
+                            "signal_id": record.get("signal_id"),
+                            "elapsed_seconds": round(float(elapsed), 3),
+                            "remaining_seconds": round(remaining, 3),
+                            "heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                            "llm_request_attempted": False,
+                            "exchange_request_attempted": False,
+                            "exchange_write_attempted": False,
+                        },
+                        event_key=f"entry-evaluation-heartbeat-{bucket}",
+                        experience_id=learning_experience_id,
+                        reason="Local pre-entry evaluation heartbeat; no model or exchange request was made.",
+                    )
+
+            try:
+                entry_evaluation_elapsed = wait_for_minimum_entry_evaluation_window(
+                    entry_evaluation_started_monotonic,
+                    cancel_check=_entry_window_cancel_requested,
+                    progress=_entry_window_progress,
+                )
+            except EntryEvaluationCancelled as cancel_exc:
+                _record_challenge1_audit(
+                    job_id, "ENTRY_EVALUATION_CANCELLED",
+                    {
+                        "instrument_id": instrument_id,
+                        "signal_id": record.get("signal_id"),
+                        "elapsed_seconds": round(max(0.0, time.monotonic() - entry_evaluation_started_monotonic), 3),
+                        "orders_submitted": False,
+                    },
+                    event_key="entry-evaluation-cancelled",
+                    experience_id=learning_experience_id,
+                    status="WARNING",
+                    reason=str(cancel_exc),
+                )
+                if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="ENTRY_EVALUATION_CANCELLED",
+                        reason="پنجره ارزیابی پیش از تأیید نهایی لغو شد.",
+                    )
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="ENTRY_EVALUATION_CANCELLED",
+                    message_fa="ارزیابی ورود لغو شد؛ هیچ سفارشی ارسال نشد.",
+                    result={
+                        "status": "CANCELLED",
+                        "environment": "BLOFIN_DEMO",
+                        "signal_id": record.get("signal_id"),
+                        "learning_experience_id": learning_experience_id,
+                        "orders_submitted": False,
+                        "trade_executed": False,
+                    },
+                    completed_at_utc=datetime.now(timezone.utc).isoformat(),
+                )
+                _queue_blofin_completed_job_reports(job_id, instrument_id)
+                return
+
+            _set_blofin_execution_job(
+                job_id, "running", stage="ENTRY_EVALUATION_REVALIDATION",
+                message_fa="حداقل پنج دقیقه کامل شد؛ داده جدید کندل بسته‌شده ۵ دقیقه‌ای دریافت و سیگنال دوباره محاسبه می‌شود.",
+                entry_evaluation_elapsed_seconds=round(entry_evaluation_elapsed, 3),
+                entry_evaluation_remaining_seconds=0,
+            )
+            try:
+                refreshed_challenge_record = analyze_blofin_challenge1(
+                    read_client, instrument_id,
+                    audit_callback=lambda phase, details, key: _record_challenge1_audit(
+                        job_id, f"ENTRY_WINDOW_{phase}", details,
+                        event_key=f"entry-window-{key}",
+                        experience_id=learning_experience_id,
+                        reason=str(details.get("reason_fa") or phase),
+                    ),
+                )
+            except Exception as refresh_exc:
+                failure_details = {
+                    "status": "BLOCKED",
+                    "reason_codes": ["FRESH_CLOSED_CANDLE_ANALYSIS_FAILED"],
+                    "error_type": type(refresh_exc).__name__,
+                    "minimum_window_seconds": MIN_ENTRY_EVALUATION_SECONDS,
+                    "elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                }
+                _record_challenge1_audit(
+                    job_id, "ENTRY_EVALUATION_REVALIDATION_RESULT",
+                    {"instrument_id": instrument_id, "validation": failure_details, "orders_submitted": False},
+                    event_key="entry-evaluation-revalidation-failed",
+                    experience_id=learning_experience_id,
+                    status="WARNING",
+                    reason="Fresh closed-candle reanalysis failed; entry is blocked.",
+                )
+                if learning_experience_id and not store.has_final_experience(learning_experience_id):
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="ENTRY_EVALUATION_REFRESH_FAILED",
+                        reason="تحلیل مجدد کندل بسته‌شده پس از پنجره پنج‌دقیقه‌ای ناموفق بود.",
+                    )
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="ENTRY_EVALUATION_REFRESH_FAILED",
+                    message_fa="داده تازه و قابل‌اعتبارسنجی دریافت نشد؛ ورود مسدود شد و هیچ سفارشی ارسال نشد.",
+                    result={
+                        "status": "BLOCKED",
+                        "environment": "BLOFIN_DEMO",
+                        "entry_evaluation_validation": failure_details,
+                        "orders_submitted": False,
+                        "trade_executed": False,
+                    },
+                    completed_at_utc=datetime.now(timezone.utc).isoformat(),
+                )
+                _queue_blofin_completed_job_reports(job_id, instrument_id)
+                return
+
+            refreshed_challenge_record["gates"] = gates
+            entry_revalidation = validate_challenge1_entry_revalidation(
+                challenge_record,
+                refreshed_challenge_record,
+                elapsed_seconds=entry_evaluation_elapsed,
+            )
+            refreshed_experience_id = store.record_challenge1_decision(
+                instrument_id=instrument_id,
+                challenge_record=refreshed_challenge_record,
+            )
+            refreshed_challenge_record["learning_experience_id"] = refreshed_experience_id
+            _record_challenge1_audit(
+                job_id, "ENTRY_EVALUATION_REVALIDATION_RESULT",
+                {
+                    "instrument_id": instrument_id,
+                    "initial_signal_id": record.get("signal_id"),
+                    "refreshed_signal_id": refreshed_challenge_record.get("signal_id"),
+                    "validation": entry_revalidation,
+                    "initial_direction": challenge_record.get("signal"),
+                    "refreshed_direction": refreshed_challenge_record.get("signal"),
+                    "initial_entry_price": challenge_record.get("entry_price_usd"),
+                    "refreshed_entry_price": refreshed_challenge_record.get("entry_price_usd"),
+                    "orders_submitted": False,
+                },
+                event_key="entry-evaluation-revalidation-result",
+                experience_id=refreshed_experience_id,
+                status="SUCCESS" if entry_revalidation.get("status") == "PASS" else "WARNING",
+                reason=(
+                    "The same Challenge 1 setup persisted on a newer closed 5m candle."
+                    if entry_revalidation.get("status") == "PASS"
+                    else "The original entry setup did not survive five-minute revalidation."
+                ),
+            )
+
+            def _mark_initial_entry_superseded(reason: str) -> None:
+                if (
+                    learning_experience_id
+                    and learning_experience_id != refreshed_experience_id
+                    and not store.has_final_experience(learning_experience_id)
+                ):
+                    store.record_experience_not_executed(
+                        experience_id=learning_experience_id,
+                        instrument_id=instrument_id,
+                        signal=learning_signal,
+                        stage="SUPERSEDED_BY_FIVE_MINUTE_REVALIDATION",
+                        reason=reason,
+                    )
+
+            if (
+                entry_revalidation.get("status") != "PASS"
+                or store.has_final_experience(refreshed_experience_id)
+                or store.has_signal(str(refreshed_challenge_record.get("signal_id") or ""))
+            ):
+                reason_fa = (
+                    "سیگنال اولیه پس از پنج دقیقه با کندل بسته‌شده جدید تأیید نشد، یا سیگنال/تجربه تکراری است؛ "
+                    "ورود جدید انجام نمی‌شود."
+                )
+                if not store.has_final_experience(refreshed_experience_id):
+                    store.record_experience_not_executed(
+                        experience_id=refreshed_experience_id,
+                        instrument_id=instrument_id,
+                        signal=str(refreshed_challenge_record.get("signal") or "NO_TRADE").strip().upper(),
+                        stage="FIVE_MINUTE_REVALIDATION_BLOCKED",
+                        reason=reason_fa,
+                    )
+                _mark_initial_entry_superseded(reason_fa)
+                if not entry_revalidation.get("reason_codes"):
+                    entry_revalidation["reason_codes"] = ["DUPLICATE_OR_FINALIZED_SIGNAL"]
+                entry_revalidation["status"] = "BLOCKED"
+                _record_challenge1_audit(
+                    job_id, "FINAL_ENTRY_DECISION",
+                    {
+                        "instrument_id": instrument_id,
+                        "decision": "BLOCK_AFTER_FIVE_MINUTE_REVALIDATION",
+                        "reason_fa": reason_fa,
+                        "entry_evaluation_validation": entry_revalidation,
+                        "orders_submitted": False,
+                    },
+                    event_key="final-entry-blocked-after-revalidation",
+                    experience_id=refreshed_experience_id,
+                    status="WARNING",
+                    reason=reason_fa,
+                )
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="ENTRY_EVALUATION_REVALIDATION_BLOCKED",
+                    message_fa=reason_fa,
+                    analysis=gate_summary,
+                    trade_context={
+                        **trade_context,
+                        "entry_evaluation_validation": entry_revalidation,
+                        "entry_evaluation_elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                    },
+                    result={
+                        **refreshed_challenge_record,
+                        "status": "BLOCKED",
+                        "environment": "BLOFIN_DEMO",
+                        "entry_evaluation_validation": entry_revalidation,
+                        "orders_submitted": False,
+                        "trade_executed": False,
+                        "reason_fa": reason_fa,
+                    },
+                    completed_at_utc=datetime.now(timezone.utc).isoformat(),
+                )
+                _queue_blofin_completed_job_reports(job_id, instrument_id)
+                return
+
+            _mark_initial_entry_superseded(
+                "سیگنال اولیه با کندل بسته‌شده جدید و همان الگو دوباره تأیید شد؛ رأی نهایی بر مبنای تجربه تازه گرفته می‌شود."
+            )
+            challenge_record = refreshed_challenge_record
+            learning_experience_id = refreshed_experience_id
+            learning_signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
+            mtf_signal = challenge_record.get("execution") if isinstance(challenge_record.get("execution"), dict) else {}
+            last_candle_time = challenge_record.get("signal_bar_open_utc")
+            last_candle_close = challenge_record.get("entry_price_usd")
+            analysis.signal = Signal.LONG if learning_signal == "LONG" else Signal.SHORT
+            analysis.entry_price = challenge_record.get("entry_price_usd")
+            analysis.stop_loss = challenge_record.get("stop_loss_usd")
+            analysis.take_profit = challenge_record.get("take_profit_usd")
+            analysis.metrics["challenge1_evidence"] = challenge_record.get("challenge1_evidence", {})
+            analysis.metrics["challenge1_execution"] = dict(mtf_signal)
+            analysis.to_record = lambda: challenge_record
+            trade_context.update({
+                "last_completed_candle_time_utc": last_candle_time,
+                "last_candle_close": last_candle_close,
+                "challenge1_execution": mtf_signal,
+                "entry_evaluation_validation": entry_revalidation,
+                "entry_evaluation_started_at_utc": entry_evaluation_started_at_utc,
+                "entry_evaluation_elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                "execution_timeframe": "5m",
+                "higher_timeframes_used": False,
+                "completed_candles_only": True,
+            })
+            gate_summary.update({
+                "signal": learning_signal,
+                "signal_fa": {"LONG": "خرید (LONG)", "SHORT": "فروش استقراضی (SHORT)"}.get(learning_signal, "بدون معامله"),
+                "entry_reference_price": challenge_record.get("entry_price_usd"),
+                "stop_loss": challenge_record.get("stop_loss_usd"),
+                "take_profit": challenge_record.get("take_profit_usd"),
+            })
+            wave_report = _blofin_elliott_wave_report_fa(
+                challenge_record.get("challenge1_evidence", {}).get("elliott_wave"),
+                learning_signal,
+            )
+            record = analysis.to_record()
+            record.update({
+                "signal_id": challenge_record.get("signal_id"),
+                "signal_bar_open_utc": challenge_record.get("signal_bar_open_utc"),
+                "instrument_id": instrument_id,
+                "inst_id": instrument_id,
+                "execution_profile": "CHALLENGE_1",
+            })
+
+            _set_blofin_execution_job(
+                job_id, "running", stage="AI_SUPERVISOR_FINAL_REVIEW",
+                message_fa="کندل جدید و همان الگو تأیید شد؛ اکنون هر دو ناظر مستقل، شواهد تازه را برای رأی نهایی بررسی می‌کنند.",
+                analysis=gate_summary,
+                elliott_wave=wave_report,
+                trade_context=trade_context,
+                entry_evaluation_validation=entry_revalidation,
+            )
+            _record_challenge1_audit(
+                job_id, "AI_REVIEW_FINAL_REQUESTED",
+                {
+                    "instrument_id": instrument_id,
+                    "signal_id": record.get("signal_id"),
+                    "signal": learning_signal,
+                    "reviewers": ["nemotron", "second_ai"],
+                    "review_contract": "Both reviewers are called again independently on refreshed closed-candle evidence.",
+                    "execution_role": "ENTRY_APPROVAL_GATE_FINAL_ROUND",
+                    "entry_evaluation_elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                },
+                event_key="ai-review-final-requested",
+                experience_id=learning_experience_id,
+                reason="Final independent reviewer round is mandatory after the five-minute fresh-candle check.",
+            )
+            failed_operation = "ai_supervisors.final_request_and_validate_quorum"
+            final_ai_quorum = _run_challenge1_supervisor_reviews(
+            analysis, asset, signal_id=str(record.get("signal_id") or ""),
+        )
+            _record_challenge1_audit(
+                job_id, "AI_REVIEW_FINAL_RESULT",
+                {
+                    "instrument_id": instrument_id,
+                    "signal_id": record.get("signal_id"),
+                    "ai_reviews": final_ai_quorum.get("ai_reviews"),
+                    "ai_consensus": final_ai_quorum.get("ai_consensus"),
+                    "ai_status": final_ai_quorum.get("ai_status"),
+                    "approved": final_ai_quorum.get("approved"),
+                    "reason_fa": final_ai_quorum.get("reason_fa"),
+                },
+                event_key="ai-review-final-result",
+                experience_id=learning_experience_id,
+                status="SUCCESS" if final_ai_quorum.get("approved") else "WARNING",
+                reason=str(final_ai_quorum.get("reason_fa") or "Final independent reviewer results recorded."),
+            )
+            ai_quorum = final_ai_quorum
+            if ai_quorum.get("approved") is True:
+                entry_evaluation_proof = {
+                    **entry_revalidation,
+                    "status": "PASS",
+                    "minimum_window_seconds": MIN_ENTRY_EVALUATION_SECONDS,
+                    "elapsed_seconds": round(entry_evaluation_elapsed, 3),
+                    "review_rounds_completed": 2,
+                    "entry_evaluation_heartbeat_seconds": ENTRY_EVALUATION_HEARTBEAT_SECONDS,
+                    "window_started_at_utc": entry_evaluation_started_at_utc,
+                    "window_completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "initial_round": {
+                        "ai_reviews": initial_ai_quorum.get("ai_reviews"),
+                        "ai_consensus": initial_ai_quorum.get("ai_consensus"),
+                    },
+                    "final_round": {
+                        "reviewer_ids": ["nemotron", "second_ai"],
+                        "consensus_status": ai_quorum.get("ai_consensus", {}).get("status"),
+                        "reviewed_signal_id": record.get("signal_id"),
+                    },
+                }
+                ai_consensus_with_window = dict(ai_quorum.get("ai_consensus") or {})
+                ai_consensus_with_window["entry_evaluation_window"] = copy.deepcopy(entry_evaluation_proof)
+                ai_quorum["ai_consensus"] = ai_consensus_with_window
+                record["entry_evaluation_window"] = entry_evaluation_proof
+                record["ai_reviews"] = ai_quorum.get("ai_reviews")
+                record["ai_consensus"] = ai_consensus_with_window
+
+                _record_challenge1_audit(
+                    job_id, "ENTRY_EVALUATION_WINDOW_PASSED",
+                    {
+                        "instrument_id": instrument_id,
+                        "signal_id": record.get("signal_id"),
+                        "entry_evaluation_window": entry_evaluation_proof,
+                        "decision": "READY_FOR_FINAL_DEMO_EXECUTOR_PREFLIGHT",
+                        "orders_submitted": False,
+                    },
+                    event_key="entry-evaluation-window-passed",
+                    experience_id=learning_experience_id,
+                    status="SUCCESS",
+                    reason="Five-minute revalidation and both independent reviewer rounds passed.",
+                )
+
         ai_review = ai_quorum["ai_review"]
         ai_reviews = ai_quorum["ai_reviews"]
         ai_consensus = ai_quorum["ai_consensus"]
         ai_status = ai_quorum["ai_status"]
         second_ai_review = ai_quorum["second_ai_review"]
+
 
         if not ai_quorum["approved"]:
             reason_fa = str(ai_quorum.get("reason_fa") or "اجماع دو ناظر مستقل تأیید نشد؛ ورود مسدود است.")
@@ -5043,6 +5486,7 @@ def _run_blofin_demo_execution_job(
             _queue_blofin_completed_job_reports(job_id, instrument_id)
             return
 
+
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
             max_leverage=1,
@@ -5087,7 +5531,7 @@ def _run_blofin_demo_execution_job(
                     key: execution.get(key) for key in (
                         "status", "side", "quantity_contracts", "entry_reference_price",
                         "exchange_order_id", "client_order_id", "stop_loss", "take_profit",
-                        "risk_budget_usdt", "leverage",
+                        "risk_budget_usdt", "leverage", "sizing_mode", "risk_based_sizing_validated",
                     ) if key in execution
                 },
                 "orders_submitted": True, "environment": "BLOFIN_DEMO",
@@ -5245,6 +5689,115 @@ def _run_blofin_demo_execution_job(
                     filled_at = datetime.fromtimestamp(int(latest_fill["ts"]) / 1000, tz=timezone.utc).isoformat()
                 except (TypeError, ValueError, OverflowError, OSError):
                     filled_at = None
+        entry_protection_evidence: dict[str, Any] = {
+            "status": "NOT_EVALUATED",
+            "source": "POST_FILL_RECONCILIATION",
+            "orders": [],
+        }
+        if trade_executed:
+            expected_side = "long" if str(execution.get("side") or "").upper() == "LONG" else "short"
+            active_matches = []
+            for candidate in positions:
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("instId") or "").strip().upper() != instrument_id:
+                    continue
+                candidate_side = str(candidate.get("positionSide") or "").strip().lower()
+                if candidate_side == expected_side:
+                    active_matches.append(candidate)
+                elif candidate_side == "net":
+                    try:
+                        signed_size = float(candidate.get("positions") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        signed_size = 0.0
+                    if (expected_side == "long" and signed_size > 0) or (
+                        expected_side == "short" and signed_size < 0
+                    ):
+                        active_matches.append(candidate)
+
+            if len(active_matches) == 1 and str(active_matches[0].get("positionId") or "").strip():
+                try:
+                    entry_protection_evidence = _blofin_demo_protective_order_evidence(
+                        client,
+                        instrument_id,
+                        {
+                            "client_order_id": str(execution.get("client_order_id") or ""),
+                            "side": str(execution.get("side") or "").upper(),
+                        },
+                        active_matches[0],
+                    )
+                except Exception as protection_exc:
+                    entry_protection_evidence = {
+                        "status": "READ_FAILED",
+                        "source": "POST_FILL_RECONCILIATION",
+                        "error_type": type(protection_exc).__name__,
+                        "orders": [],
+                    }
+            elif len(active_matches) > 1:
+                entry_protection_evidence = {
+                    "status": "POSITION_LINK_AMBIGUOUS",
+                    "source": "POST_FILL_RECONCILIATION",
+                    "orders": [],
+                }
+            else:
+                matching_closed = [
+                    row for row in position_history
+                    if isinstance(row, dict)
+                    and str(row.get("instId") or "").strip().upper() == instrument_id
+                    and str(row.get("positionSide") or row.get("side") or "").strip().lower() == expected_side
+                ]
+                entry_protection_evidence = {
+                    "status": "POSITION_NOT_ACTIVE_AFTER_FILL" if matching_closed else "POSITION_NOT_RECONCILED",
+                    "source": "POST_FILL_RECONCILIATION",
+                    "orders": [],
+                }
+
+            linked_position_id = (
+                str(active_matches[0].get("positionId") or "").strip()
+                if len(active_matches) == 1 else ""
+            )
+            _record_challenge1_audit(
+                job_id,
+                "ENTRY_PROTECTIVE_ORDER_VERIFICATION",
+                {
+                    "instrument_id": instrument_id,
+                    "trade_executed": True,
+                    "position_id": linked_position_id or None,
+                    "protection_status": entry_protection_evidence.get("status"),
+                    "protection_fully_confirmed": _blofin_demo_protection_fully_confirmed(
+                        entry_protection_evidence
+                    ),
+                    "protective_orders": entry_protection_evidence,
+                    "source": "POST_FILL_RECONCILIATION",
+                },
+                event_key="entry-protective-order-verification",
+                experience_id=learning_experience_id,
+                position_id=linked_position_id or None,
+                status=(
+                    "SUCCESS"
+                    if _blofin_demo_protection_fully_confirmed(entry_protection_evidence)
+                    else "WARNING"
+                ),
+                reason=(
+                    "Both native exchange TP and SL legs were visible after fill."
+                    if _blofin_demo_protection_fully_confirmed(entry_protection_evidence)
+                    else "Post-fill native TP/SL protection was not fully verified; new Demo entries are halted."
+                ),
+            )
+            if (
+                entry_protection_evidence.get("status") != "POSITION_NOT_ACTIVE_AFTER_FILL"
+                and not _blofin_demo_protection_fully_confirmed(entry_protection_evidence)
+            ):
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                    BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_PROTECTION_GUARD_HALT"
+                    BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                        "پس از اجرای سفارش، وجود هم‌زمان TP و SL متصل به همان پوزیشن تأیید نشد؛ "
+                        "ورودهای جدید متوقف شد تا حفاظت صرافی تطبیق داده شود."
+                    )
+                    BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                _persist_blofin_autopilot_state()
+
         _record_challenge1_audit(
             job_id, "ENTRY_FILL_RECONCILIATION",
             {
@@ -5647,7 +6200,10 @@ class Handler(BaseHTTPRequestHandler):
                 "primary_supervisor": ai_connection_status(),
                 "second_supervisor": second_ai_connection_status(),
                 "two_reviewer_gate": "REQUIRES_BOTH_VERIFIED_APPROVALS",
-                "execution_role": "REPORT_ONLY",
+                "execution_role": "ACTIVE_ENTRY_APPROVAL_AND_POSITION_SUPERVISION",
+                "position_intervention_switch_enabled": os.getenv(
+                    "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true"
+                ).strip().lower() in {"1", "true", "yes", "on"},
             }
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
@@ -5700,9 +6256,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/blofin/demo/position-manager/status":
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
+                payload["supervisor_watchdog"] = copy.deepcopy(BLOFIN_POSITION_SUPERVISOR_STATE)
+            payload["private_websocket"] = _blofin_demo_private_ws_public_status()
             payload["thread_alive"] = bool(
                 BLOFIN_POSITION_MANAGER_THREAD is not None
                 and BLOFIN_POSITION_MANAGER_THREAD.is_alive()
+            )
+            payload["supervisor_watchdog_thread_alive"] = bool(
+                BLOFIN_POSITION_SUPERVISOR_THREAD is not None
+                and BLOFIN_POSITION_SUPERVISOR_THREAD.is_alive()
             )
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
@@ -5745,9 +6307,15 @@ class Handler(BaseHTTPRequestHandler):
             payload["readiness"] = _blofin_demo_execution_readiness()
             with LOCK:
                 payload["position_manager"] = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
+                payload["supervisor_watchdog"] = copy.deepcopy(BLOFIN_POSITION_SUPERVISOR_STATE)
+                payload["private_websocket"] = _blofin_demo_private_ws_public_status()
                 payload["position_manager_thread_alive"] = bool(
                     BLOFIN_POSITION_MANAGER_THREAD is not None
                     and BLOFIN_POSITION_MANAGER_THREAD.is_alive()
+                )
+                payload["supervisor_watchdog_thread_alive"] = bool(
+                    BLOFIN_POSITION_SUPERVISOR_THREAD is not None
+                    and BLOFIN_POSITION_SUPERVISOR_THREAD.is_alive()
                 )
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                               "application/json; charset=utf-8")
@@ -9382,15 +9950,19 @@ def _blofin_manual_close_position(
         pnl = None
 
     action_source = str(action_source or "MANUAL").strip().upper()
-    if action_source not in {"MANUAL", "AUTOPILOT", "RISK_OVERRIDE"}:
+    if action_source not in {"MANUAL", "AUTOPILOT", "AI_SUPERVISOR", "RISK_OVERRIDE"}:
         raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
+    if action_source == "AI_SUPERVISOR" and os.getenv(
+        "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true"
+    ).strip().lower() not in {"1", "true", "yes", "on"}:
+        raise BloFinDemoExecutionBlocked("AI supervisor interventions are disabled for BloFin Demo.")
     if action_source == "AUTOPILOT":
         try:
             minimum_profit = max(
-                0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")), 100_000.0)
+                0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")), 100_000.0)
             )
         except (TypeError, ValueError):
-            minimum_profit = 0.02
+            minimum_profit = 0.50
         if pnl is None or pnl < Decimal(str(minimum_profit)):
             raise BloFinDemoExecutionBlocked(
                 "سود شناور پوزیشن در بازبینی نهایی به حداقل محافظه‌کارانه نرسید؛ خروج خودکار ارسال نشد."
@@ -9399,8 +9971,11 @@ def _blofin_manual_close_position(
     audit_event_id = str(audit_id or action_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_event_id):
         raise BloFinDemoExecutionBlocked("شناسه ثبت گزارش بستن پوزیشن معتبر نیست.")
-    event_prefix = "AUTO" if action_source == "AUTOPILOT" else (
-        "RISK_OVERRIDE" if action_source == "RISK_OVERRIDE" else "MANUAL"
+    event_prefix = (
+        "AI_SUPERVISOR" if action_source == "AI_SUPERVISOR"
+        else "RISK_OVERRIDE" if action_source == "RISK_OVERRIDE"
+        else "AUTO" if action_source == "AUTOPILOT"
+        else "MANUAL"
     )
     requested_event = f"{event_prefix}_POSITION_CLOSE_REQUESTED"
     accepted_event = f"{event_prefix}_POSITION_CLOSE_ACCEPTED"
@@ -9458,6 +10033,244 @@ def _blofin_manual_close_position(
             "منفی بودن PnL مانع بستن نبود؛ قیمت اجرای واقعی و PnL نهایی پس از Fill مشخص می‌شود."
         ),
     }
+
+def _blofin_manual_tighten_stop_position(
+    *, instrument_id: str, position_id: str, new_stop_loss: Any,
+    audit_id: str, experience_id: str, reason_fa: str = "",
+) -> dict[str, Any]:
+    """Revalidate one exact Demo position and tighten only its linked native SL."""
+    instrument_id = str(instrument_id or "").strip().upper()
+    position_id = str(position_id or "").strip()
+    audit_id = str(audit_id or "").strip()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+        raise BloFinDemoExecutionBlocked("نماد پوزیشن برای اصلاح Stop معتبر نیست.")
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", position_id):
+        raise BloFinDemoExecutionBlocked("Position ID برای اصلاح Stop معتبر نیست.")
+    if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_id):
+        raise BloFinDemoExecutionBlocked("شناسه ممیزی Stop معتبر نیست.")
+    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise BloFinDemoExecutionBlocked("مداخله فعال ناظرهای هوش مصنوعی در تنظیمات Demo غیرفعال است.")
+
+    requested_stop = _blofin_manual_decimal(new_stop_loss, "new_stop_loss")
+    if requested_stop <= 0:
+        raise BloFinDemoExecutionBlocked("Stop جدید باید مثبت باشد و نمی‌تواند حفاظت را حذف کند.")
+
+    client = _blofin_manual_write_client()
+    positions = client.get_positions(inst_id=instrument_id)
+    if not isinstance(positions, list):
+        raise BloFinDemoExecutionBlocked("بازخوانی تازه پوزیشن برای اصلاح Stop معتبر نیست.")
+    matches = [
+        row for row in positions
+        if isinstance(row, dict)
+        and str(row.get("instId") or "").strip().upper() == instrument_id
+        and str(row.get("positionId") or "").strip() == position_id
+        and _blofin_manual_decimal(row.get("positions") or "0", "position_size") != 0
+    ]
+    if len(matches) != 1:
+        raise BloFinDemoExecutionBlocked("پوزیشن زنده با Position ID دقیق پیدا نشد یا یکتا نیست.")
+    position = matches[0]
+    quantity = _blofin_manual_decimal(position.get("positions"), "position_size")
+    raw_side = str(position.get("positionSide") or "").strip().lower()
+    direction = raw_side if raw_side in {"long", "short"} else ("long" if quantity > 0 else "short")
+    margin_mode = str(position.get("marginMode") or "").strip().lower()
+    if margin_mode not in {"isolated", "cross"} or direction not in {"long", "short"}:
+        raise BloFinDemoExecutionBlocked("جهت یا Margin Mode پوزیشن قابل تأیید نیست.")
+
+    mark_rows = client.get_mark_price(inst_id=instrument_id)
+    mark_row = (
+        mark_rows[0] if isinstance(mark_rows, list) and mark_rows and isinstance(mark_rows[0], dict)
+        else mark_rows if isinstance(mark_rows, dict) else None
+    )
+    if not isinstance(mark_row, dict):
+        raise BloFinDemoExecutionBlocked("قیمت Mark تازه برای اصلاح Stop در دسترس نیست.")
+    mark = _blofin_manual_decimal(mark_row.get("markPrice"), "mark_price")
+
+    tpsl_rows = client.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+    if not isinstance(tpsl_rows, list):
+        raise BloFinDemoExecutionBlocked("فهرست TP/SL فعال قابل تفسیر نیست.")
+    tpsl_matches = [
+        row for row in tpsl_rows
+        if isinstance(row, dict)
+        and str(row.get("instId") or "").strip().upper() == instrument_id
+        and str(row.get("positionId") or "").strip() == position_id
+        and str(row.get("state") or "").strip().lower() == "live"
+    ]
+    if len(tpsl_matches) != 1:
+        raise BloFinDemoExecutionBlocked("یک TP/SL زنده و متصل به همین Position ID پیدا نشد؛ Stop تغییر نکرد.")
+    protective = tpsl_matches[0]
+    tpsl_id = str(protective.get("tpslId") or "").strip()
+    if not tpsl_id or not re.fullmatch(r"[A-Za-z0-9]{1,64}", tpsl_id):
+        raise BloFinDemoExecutionBlocked("شناسه سفارش TP/SL برای اصلاح Stop معتبر نیست.")
+    old_stop = _blofin_manual_decimal(protective.get("slTriggerPrice"), "current_stop_loss")
+    if requested_stop == old_stop:
+        return {
+            "status": "STOP_ALREADY_AT_PROPOSED_LEVEL",
+            "environment": "BLOFIN_DEMO",
+            "position_id": position_id,
+            "tpsl_id": tpsl_id,
+            "stop_loss": str(old_stop),
+            "readback_verified": True,
+            "exchange_write_attempted": False,
+        }
+    if direction == "long":
+        if not (requested_stop > old_stop and requested_stop < mark):
+            raise BloFinDemoExecutionBlocked("برای LONG، Stop جدید باید فقط به سمت بالا و پایین‌تر از Mark حرکت کند.")
+    else:
+        if not (requested_stop < old_stop and requested_stop > mark):
+            raise BloFinDemoExecutionBlocked("برای SHORT، Stop جدید باید فقط به سمت پایین و بالاتر از Mark حرکت کند.")
+
+    instrument = client.get_tradable_instrument(instrument_id)
+    tick_size = _blofin_manual_decimal(instrument.get("tickSize"), "tick_size")
+    if requested_stop / tick_size != (requested_stop / tick_size).to_integral_value():
+        raise BloFinDemoExecutionBlocked("قیمت Stop جدید با Tick Size نماد هم‌تراز نیست.")
+
+    request_id = "AISTOP" + hashlib.sha256(
+        f"{position_id}:{tpsl_id}:{requested_stop}".encode("utf-8")
+    ).hexdigest()[:20]
+    audit = {
+        "environment": "BLOFIN_DEMO", "action_source": "AI_SUPERVISOR",
+        "experience_id": experience_id, "position_id": position_id,
+        "instrument_id": instrument_id, "direction": direction.upper(),
+        "tpsl_id": tpsl_id, "previous_stop_loss": str(old_stop),
+        "proposed_stop_loss": str(requested_stop), "mark_price_at_confirmation": str(mark),
+        "take_profit_before": protective.get("tpTriggerPrice"),
+        "request_id": request_id, "reason_fa": str(reason_fa or "")[:1000],
+    }
+    store = None
+    try:
+        store = BloFinDemoEventStore()
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise BloFinDemoExecutionBlocked("حافظه پایدار Turso فعال نیست؛ اصلاح Stop انجام نشد.")
+        prior_amendments = store.recent_events(audit_id, limit=100)
+        matching_prior = [
+            event for event in prior_amendments
+            if str(event.get("event_type") or "").startswith("AI_SUPERVISOR_STOP_AMEND_")
+            and str((event.get("payload") or {}).get("request_id") or "") == request_id
+        ]
+        if matching_prior:
+            return {
+                "status": "STOP_AMEND_PREVIOUSLY_RECORDED_RECONCILIATION_REQUIRED",
+                "environment": "BLOFIN_DEMO",
+                "position_id": position_id,
+                "tpsl_id": tpsl_id,
+                "request_id": request_id,
+                "previous_event_types": [str(event.get("event_type") or "") for event in matching_prior],
+                "exchange_write_attempted": False,
+                "retry_allowed": False,
+            }
+        store.record_manual_action(audit_id, "AI_SUPERVISOR_STOP_AMEND_REQUESTED", audit)
+        try:
+            with BLOFIN_ORDER_SUBMISSION_LOCK:
+                response = client.amend_tpsl_stop_loss(
+                    inst_id=instrument_id, tpsl_id=tpsl_id,
+                    new_stop_loss=str(requested_stop), request_id=request_id, ttl_ms=5_000,
+                )
+        except Exception as exc:
+            store.record_manual_action(audit_id, "AI_SUPERVISOR_STOP_AMEND_UNKNOWN", {
+                **audit, "submission_outcome": "UNKNOWN",
+                "error_type": type(exc).__name__, "retry_allowed": False,
+            })
+            raise
+
+        try:
+            refreshed = client.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+            readback = [
+                row for row in refreshed if isinstance(row, dict)
+                and str(row.get("tpslId") or "").strip() == tpsl_id
+                and str(row.get("positionId") or "").strip() == position_id
+                and str(row.get("state") or "").strip().lower() == "live"
+            ] if isinstance(refreshed, list) else []
+            verified = (
+                len(readback) == 1
+                and _blofin_manual_decimal(readback[0].get("slTriggerPrice"), "readback_stop") == requested_stop
+                and str(readback[0].get("tpTriggerPrice") or "") == str(protective.get("tpTriggerPrice") or "")
+            )
+        except Exception:
+            verified, readback = False, []
+        event_type = "AI_SUPERVISOR_STOP_AMEND_VERIFIED" if verified else "AI_SUPERVISOR_STOP_AMEND_ACCEPTED_UNVERIFIED"
+        store.record_manual_action(audit_id, event_type, {
+            **audit, "submission_outcome": "ACCEPTED",
+            "exchange_response": response.get("data") if isinstance(response, dict) else None,
+            "readback_verified": verified,
+            "stop_loss_after_readback": readback[0].get("slTriggerPrice") if verified else None,
+            "retry_allowed": False,
+        })
+        return {
+            "status": "STOP_AMEND_VERIFIED" if verified else "STOP_AMEND_ACCEPTED_UNVERIFIED",
+            "environment": "BLOFIN_DEMO", "position_id": position_id, "tpsl_id": tpsl_id,
+            "old_stop_loss": str(old_stop), "new_stop_loss": str(requested_stop),
+            "exchange_response": response.get("data") if isinstance(response, dict) else None,
+            "readback_verified": verified, "retry_allowed": False,
+        }
+    finally:
+        if store is not None:
+            store.close()
+
+
+def _execute_challenge1_supervisor_action(
+    *, action: str, challenge_record: dict, cycle_context: dict,
+    coordinator_decision: dict,
+) -> dict[str, Any]:
+    """Execute only a two-reviewer-authorized, guarded action on BloFin Demo."""
+    action = str(action or "").strip().upper()
+    position = cycle_context.get("position")
+    position = position if isinstance(position, dict) else {}
+    instrument_id = str(cycle_context.get("instrument_id") or challenge_record.get("instrument_id") or "").strip().upper()
+    position_id = str(coordinator_decision.get("position_id") or position.get("positionId") or "").strip()
+    experience_id = str(coordinator_decision.get("experience_id") or "").strip()
+    if action == "URGENT_RISK_ALERT":
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE["enabled"] = False
+            BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_RISK_HALT"
+            BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                "یکی از ناظرهای مستقل هشدار ریسک فوری داده است؛ ورود خودکار جدید متوقف شد و پوزیشن باز دست‌کاری نشد."
+            )
+            BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        _persist_blofin_autopilot_state()
+        return {"status": "NEW_ENTRIES_HALTED", "reason_code": "SUPERVISOR_URGENT_RISK_ALERT", "position_id": position_id, "exchange_order_sent": False}
+    if action == "HOLD_POSITION":
+        return {"status": "NO_ACTION", "reason_code": "BOTH_SUPERVISORS_AGREE_HOLD"}
+    if action not in {"CLOSE_POSITION", "TIGHTEN_STOP"}:
+        return {"status": "BLOCKED", "reason_code": "ACTION_NOT_IMPLEMENTED"}
+    if (
+        coordinator_decision.get("status") != "AUTHORIZED"
+        or coordinator_decision.get("execution_authorized") is not True
+        or str(coordinator_decision.get("action") or "").strip().upper() != action
+        or not str(coordinator_decision.get("evidence_hash") or "").strip()
+    ):
+        return {"status": "BLOCKED", "reason_code": "COORDINATOR_QUORUM_NOT_AUTHORIZED"}
+    if os.getenv("BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        return {"status": "BLOCKED", "reason_code": "AI_SUPERVISOR_INTERVENTIONS_DISABLED"}
+    execution_readiness = _blofin_demo_execution_readiness()
+    if execution_readiness.get("status") != "READY":
+        return {
+            "status": "BLOCKED",
+            "reason_code": "DEMO_EXECUTION_READINESS_NOT_READY",
+            "exchange_write_attempted": False,
+        }
+    if not position_id or str(position.get("positionId") or "").strip() != position_id:
+        return {"status": "BLOCKED", "reason_code": "LIVE_POSITION_ID_MISMATCH"}
+    decision_id = str(cycle_context.get("client_order_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{1,32}", decision_id):
+        return {"status": "BLOCKED", "reason_code": "ORIGINAL_CLIENT_ORDER_ID_MISSING"}
+    reason_fa = "; ".join(
+        str(item.get("reason_fa") or "")[:400]
+        for item in cycle_context.get("supervisor_reviews", [])
+        if isinstance(item, dict)
+    )[:1200]
+    if action == "CLOSE_POSITION":
+        return _blofin_manual_close_position(
+            instrument_id=instrument_id, position_id=position_id,
+            position_side_hint=str(position.get("positionSide") or ""),
+            action_source="AI_SUPERVISOR", audit_id=decision_id,
+            exit_reason="AI_SUPERVISOR_DUAL_QUORUM",
+        )
+    return _blofin_manual_tighten_stop_position(
+        instrument_id=instrument_id, position_id=position_id,
+        new_stop_loss=coordinator_decision.get("proposed_stop_loss_price"),
+        audit_id=decision_id, experience_id=experience_id, reason_fa=reason_fa,
+    )
+
 
 def _blofin_demo_profit_exit_decision(
     order: dict[str, Any], position: dict[str, Any], mark_price: Any,
@@ -9630,25 +10443,31 @@ def _blofin_demo_position_market_evidence(reader: Any, instrument_id: str) -> di
 
 def _blofin_demo_protective_order_evidence(
     reader: Any, instrument_id: str, order: dict[str, Any], position: dict[str, Any],
+    *, available_tpsl_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify pending exchange TP/SL only by exact positionId or exact originating clientOrderId."""
     position_id = str(position.get("positionId") or "").strip()
     client_order_id = str(order.get("client_order_id") or "").strip()
     side = str(order.get("side") or "").strip().lower()
-    try:
-        rows = reader.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
-    except Exception as exc:
-        return {
-            "status": "READ_FAILED",
-            "error_type": type(exc).__name__,
-            "source": "BLOFIN_PENDING_TPSL",
-            "matched_by": None,
-            "orders": [],
-        }
+    if available_tpsl_rows is not None:
+        rows = available_tpsl_rows
+        source = "BLOFIN_PRIVATE_WEBSOCKET_RECONCILED_AND_STREAMED"
+    else:
+        try:
+            rows = reader.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+            source = "BLOFIN_PENDING_TPSL"
+        except Exception as exc:
+            return {
+                "status": "READ_FAILED",
+                "error_type": type(exc).__name__,
+                "source": "BLOFIN_PENDING_TPSL",
+                "matched_by": None,
+                "orders": [],
+            }
     if not isinstance(rows, list):
         return {
             "status": "INVALID_RESPONSE",
-            "source": "BLOFIN_PENDING_TPSL",
+            "source": source,
             "matched_by": None,
             "orders": [],
         }
@@ -9657,6 +10476,8 @@ def _blofin_demo_protective_order_evidence(
         if not isinstance(row, dict):
             continue
         if str(row.get("instId") or "").strip().upper() != instrument_id:
+            continue
+        if str(row.get("state") or "").strip().lower() != "live":
             continue
         row_position_id = str(row.get("positionId") or "").strip()
         row_client_id = str(row.get("clientOrderId") or "").strip()
@@ -9687,7 +10508,7 @@ def _blofin_demo_protective_order_evidence(
     if not matched:
         return {
             "status": "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
-            "source": "BLOFIN_PENDING_TPSL",
+            "source": source,
             "matched_by": None,
             "orders": [],
         }
@@ -9707,10 +10528,32 @@ def _blofin_demo_protective_order_evidence(
         status = "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES"
     return {
         "status": status,
-        "source": "BLOFIN_PENDING_TPSL",
+        "source": source,
         "matched_by": sorted({item["matched_by"] for item in matched}),
         "orders": matched,
     }
+
+
+
+def _blofin_demo_protection_requires_emergency_close(
+    protective_evidence: Mapping[str, Any] | None,
+) -> bool:
+    """Require a guarded exact-position close when a successful read proves no SL exists."""
+    evidence = protective_evidence if isinstance(protective_evidence, dict) else {}
+    status = str(evidence.get("status") or "UNKNOWN").strip().upper()
+    return status in {
+        "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+        "TP_ONLY_VISIBLE",
+        "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
+    }
+
+
+def _blofin_demo_protection_fully_confirmed(
+    protective_evidence: Mapping[str, Any] | None,
+) -> bool:
+    """A position is fully protected only when both native exchange legs are visible."""
+    evidence = protective_evidence if isinstance(protective_evidence, dict) else {}
+    return str(evidence.get("status") or "").strip().upper() == "BOTH_TP_AND_SL_VISIBLE"
 
 
 def _is_positive_finite_number(value: Any) -> bool:
@@ -9721,63 +10564,479 @@ def _is_positive_finite_number(value: Any) -> bool:
     return math.isfinite(number) and number > 0
 
 
+def _clear_challenge1_supervisor_snapshot(position_id: str) -> None:
+    """Remove a cache entry only after the exact exchange position is reconciled closed."""
+    with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+        BLOFIN_POSITION_SUPERVISOR_CACHE.pop(str(position_id or ""), None)
+
+
+def _cache_challenge1_supervisor_snapshot(
+    *,
+    experience_id: str | None,
+    position_id: str,
+    order_id: str,
+    instrument_id: str,
+    signal: str,
+    position: dict[str, Any],
+    mark_price: float | None,
+    unrealized_pnl: float | None,
+    stop_loss_price: float | None,
+    stop_loss_threshold_reached: bool,
+    market_evidence: dict[str, Any],
+    protective_orders: dict[str, Any],
+    reviewer_states: dict[str, dict[str, Any]],
+) -> None:
+    """Publish the latest validated 15-second manager snapshot for the 3-second local loop."""
+    snapshot = {
+        "experience_id": experience_id,
+        "position_id": str(position_id),
+        "order_id": str(order_id),
+        "instrument_id": str(instrument_id),
+        "signal": str(signal),
+        "position": dict(position),
+        "mark_price": mark_price,
+        "unrealized_pnl": unrealized_pnl,
+        "stop_loss_price": stop_loss_price,
+        "stop_loss_threshold_reached": bool(stop_loss_threshold_reached),
+        "market_direction": str(market_evidence.get("direction") or "UNKNOWN"),
+        "protective_orders": dict(protective_orders),
+        "reviewer_states": {
+            key: dict(value) for key, value in reviewer_states.items()
+            if isinstance(value, dict)
+        },
+        "source": "REST_MANAGER_CACHE",
+        "updated_at_epoch": time.time(),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+        BLOFIN_POSITION_SUPERVISOR_CACHE[str(position_id)] = snapshot
+
+
+def _blofin_demo_private_ws_reconcile() -> dict[str, Any]:
+    """Fetch one read-only baseline after each private WebSocket connect/reconnect."""
+    reader = BloFinDemoReadOnly(timeout=8.0)
+    positions = reader.get_positions()
+    orders = reader.get_open_orders()
+    algo_orders = reader.get_open_tpsl_orders(limit=100)
+    account = reader.get_futures_balance()
+    if not isinstance(positions, list) or not isinstance(orders, list):
+        raise BloFinDemoResponseError("Private WebSocket REST reconciliation returned invalid positions/orders.")
+    if not isinstance(algo_orders, list) or not isinstance(account, (dict, list)):
+        raise BloFinDemoResponseError("Private WebSocket REST reconciliation returned invalid algo/account data.")
+    return {
+        "positions": positions,
+        "orders": orders,
+        "algo_orders": algo_orders,
+        "account": account,
+    }
+
+
+def _blofin_demo_private_ws_public_status() -> dict[str, Any]:
+    """Expose connection health and counts without returning balances or account rows."""
+    client = BLOFIN_PRIVATE_WS_CLIENT
+    if client is None:
+        return {
+            "status": "NOT_STARTED",
+            "required_for_position_supervision": False,
+            "connected": False,
+            "authenticated": False,
+            "reconciled": False,
+        }
+    snapshot = client.get_snapshot()
+    return {
+        "status": snapshot.get("status", "UNKNOWN"),
+        "environment": "BLOFIN_DEMO",
+        "source": snapshot.get("source", "BLOFIN_DEMO_PRIVATE_WEBSOCKET"),
+        "required_for_position_supervision": True,
+        "connected": bool(snapshot.get("connected")),
+        "authenticated": bool(snapshot.get("authenticated")),
+        "reconciled": bool(snapshot.get("reconciled")),
+        "subscribed_channels": list(snapshot.get("subscribed_channels") or []),
+        "last_message_at_utc": snapshot.get("last_message_at_utc"),
+        "reconciled_at_utc": snapshot.get("reconciled_at_utc"),
+        "reconnect_count": int(snapshot.get("reconnect_count") or 0),
+        "events_received": int(snapshot.get("events_received") or 0),
+        "last_error_type": snapshot.get("last_error_type"),
+        "channels": copy.deepcopy(snapshot.get("channels") or {}),
+        "positions_count": len(snapshot.get("positions") or {}),
+        "orders_count": len(snapshot.get("orders") or {}),
+        "algo_orders_count": len(snapshot.get("algo_orders") or {}),
+        "account_snapshot_available": snapshot.get("account") is not None,
+    }
+
+
+def _blofin_demo_private_ws_event(channel: str, message: dict[str, Any]) -> None:
+    """Refresh the local 3-second supervisor cache from exact-ID Demo WS events."""
+    data = message.get("data")
+    rows = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+    if channel == "positions":
+        with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                position_id = str(row.get("positionId") or "").strip()
+                cached = BLOFIN_POSITION_SUPERVISOR_CACHE.get(position_id)
+                if not position_id or not isinstance(cached, dict):
+                    continue
+                if str(row.get("instId") or "").strip().upper() != str(cached.get("instrument_id") or "").strip().upper():
+                    continue
+                previous = cached.get("position") if isinstance(cached.get("position"), dict) else {}
+                cached["position"] = {**previous, **row}
+                for source, target in (
+                    ("markPrice", "mark_price"),
+                    ("unrealizedPnl", "unrealized_pnl"),
+                ):
+                    value = row.get(source)
+                    if value not in (None, ""):
+                        try:
+                            number = float(value)
+                            if math.isfinite(number):
+                                cached[target] = number
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                cached["updated_at_epoch"] = time.time()
+                cached["source"] = "BLOFIN_PRIVATE_WEBSOCKET"
+    elif channel == "orders-algo":
+        client = BLOFIN_PRIVATE_WS_CLIENT
+        if client is None:
+            return
+        affected_ids = {
+            str(row.get("positionId") or "").strip()
+            for row in rows if isinstance(row, dict) and str(row.get("positionId") or "").strip()
+        }
+        if not affected_ids:
+            return
+        ws_snapshot = client.get_snapshot()
+        algo_orders = list((ws_snapshot.get("algo_orders") or {}).values())
+        with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+            for position_id in affected_ids:
+                cached = BLOFIN_POSITION_SUPERVISOR_CACHE.get(position_id)
+                if not isinstance(cached, dict):
+                    continue
+                instrument_id = str(cached.get("instrument_id") or "").strip().upper()
+                matched = []
+                for row in algo_orders:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("instId") or "").strip().upper() != instrument_id:
+                        continue
+                    if str(row.get("positionId") or "").strip() != str(position_id):
+                        continue
+                    if str(row.get("state") or "").strip().lower() != "live":
+                        continue
+                    matched.append({
+                        "matched_by": "EXACT_POSITION_ID",
+                        "tpsl_id": str(row.get("tpslId") or ""),
+                        "client_order_id": str(row.get("clientOrderId") or ""),
+                        "position_id": str(row.get("positionId") or ""),
+                        "inst_id": str(row.get("instId") or ""),
+                        "position_side": str(row.get("positionSide") or "").lower(),
+                        "state": str(row.get("state") or ""),
+                        "tp_trigger_price": row.get("tpTriggerPrice"),
+                        "sl_trigger_price": row.get("slTriggerPrice"),
+                        "tp_order_price": row.get("tpOrderPrice"),
+                        "sl_order_price": row.get("slOrderPrice"),
+                        "actual_size": row.get("actualSize"),
+                        "size": row.get("size"),
+                    })
+                has_sl = any(_is_positive_finite_number(item.get("sl_trigger_price")) for item in matched)
+                has_tp = any(_is_positive_finite_number(item.get("tp_trigger_price")) for item in matched)
+                status = (
+                    "BOTH_TP_AND_SL_VISIBLE" if has_sl and has_tp else
+                    "SL_ONLY_VISIBLE" if has_sl else
+                    "TP_ONLY_VISIBLE" if has_tp else
+                    "NOT_VERIFIED_NO_EXACT_POSITION_LINK"
+                )
+                cached["protective_orders"] = {
+                    "status": status,
+                    "source": "BLOFIN_PRIVATE_WEBSOCKET_RECONCILED_AND_STREAMED",
+                    "matched_by": ["EXACT_POSITION_ID"] if matched else None,
+                    "orders": matched,
+                }
+                cached["updated_at_epoch"] = time.time()
+                cached["source"] = "BLOFIN_PRIVATE_WEBSOCKET"
+
+
+def _start_blofin_demo_private_websocket() -> None:
+    """Start one authenticated, read-only BloFin Demo private WebSocket per WEB process."""
+    global BLOFIN_PRIVATE_WS_CLIENT
+    enabled = os.getenv("BLOFIN_DEMO_PRIVATE_WS_ENABLED", "true").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    with BLOFIN_PRIVATE_WS_START_LOCK:
+        if BLOFIN_PRIVATE_WS_CLIENT is not None and BLOFIN_PRIVATE_WS_CLIENT.is_alive():
+            return
+        reader = BloFinDemoReadOnly(timeout=8.0)
+        BLOFIN_PRIVATE_WS_CLIENT = BloFinDemoPrivateWebSocket(
+            reader,
+            reconcile_callback=_blofin_demo_private_ws_reconcile,
+            event_callback=_blofin_demo_private_ws_event,
+        )
+        BLOFIN_PRIVATE_WS_CLIENT.start()
+
+
+def _blofin_demo_position_supervisor_watchdog_cycle() -> dict[str, Any]:
+    """Three-second local reevaluation over cached state; only the audit database is written."""
+    now_epoch = time.time()
+    private_ws = _blofin_demo_private_ws_public_status()
+    private_ws_required = BLOFIN_PRIVATE_WS_CLIENT is not None
+    private_ws_age = None
+    if private_ws_required:
+        raw_ws = BLOFIN_PRIVATE_WS_CLIENT.get_snapshot()
+        try:
+            private_ws_age = max(0.0, now_epoch - float(raw_ws.get("last_message_epoch") or 0))
+        except (TypeError, ValueError, OverflowError):
+            private_ws_age = float("inf")
+    private_ws_not_ready = private_ws_required and (
+        private_ws.get("status") != "READY"
+        or not private_ws.get("connected")
+        or not private_ws.get("authenticated")
+        or not private_ws.get("reconciled")
+        or set(private_ws.get("subscribed_channels") or []) != {"positions", "orders", "orders-algo", "account"}
+        or private_ws_age is None
+        or private_ws_age > 45.0
+    )
+    with BLOFIN_POSITION_SUPERVISOR_CACHE_LOCK:
+        snapshots = [dict(item) for item in BLOFIN_POSITION_SUPERVISOR_CACHE.values()]
+    stale_count = 0
+    recorded = 0
+    errors = []
+    guard_halt_positions = 0
+    for snapshot in snapshots:
+        position_id = str(snapshot.get("position_id") or "")
+        experience_id = str(snapshot.get("experience_id") or "").strip() or None
+        age = max(0.0, now_epoch - float(snapshot.get("updated_at_epoch") or 0))
+        fresh = age <= 45.0
+        if not fresh:
+            stale_count += 1
+        flags = []
+        if private_ws_not_ready:
+            flags.append("PRIVATE_WS_NOT_READY")
+        if not fresh:
+            flags.append("POSITION_SNAPSHOT_STALE")
+        if not experience_id:
+            flags.append("EXPERIENCE_LINK_MISSING")
+        if not position_id or str((snapshot.get("position") or {}).get("positionId") or "") != position_id:
+            flags.append("POSITION_ID_MISMATCH")
+        protective = snapshot.get("protective_orders")
+        protective = protective if isinstance(protective, dict) else {}
+        protection_status = str(protective.get("status") or "UNKNOWN")
+        if protection_status != "BOTH_TP_AND_SL_VISIBLE":
+            flags.append("PROTECTIVE_ORDER_NOT_CONFIRMED")
+        if snapshot.get("stop_loss_threshold_reached") is True:
+            flags.append("STOP_LEVEL_CROSSED_CHECK_EXCHANGE_NATIVE_PROTECTION")
+        reviewer_states = snapshot.get("reviewer_states")
+        reviewer_states = reviewer_states if isinstance(reviewer_states, dict) else {}
+        try:
+            record_position_supervisor_watchdog_cycle(
+                experience_id=experience_id,
+                position_id=position_id,
+                cycle_epoch_ms=int(now_epoch * 1000),
+                snapshot_age_seconds=age,
+                snapshot_source=str(snapshot.get("source") or "UNKNOWN"),
+                snapshot_status="FRESH_CACHED_SNAPSHOT" if fresh else "STALE_INPUT_BLOCKED",
+                reviewer_states=reviewer_states,
+                deterministic_flags=flags,
+            )
+            recorded += 1
+        except Exception as exc:
+            errors.append({"position_id": position_id, "error_type": type(exc).__name__})
+        critical_flags = {
+            "POSITION_SNAPSHOT_STALE",
+            "EXPERIENCE_LINK_MISSING",
+            "POSITION_ID_MISMATCH",
+            "PROTECTIVE_ORDER_NOT_CONFIRMED",
+            "STOP_LEVEL_CROSSED_CHECK_EXCHANGE_NATIVE_PROTECTION",
+            "PRIVATE_WS_NOT_READY",
+        }
+        if critical_flags.intersection(flags):
+            guard_halt_positions += 1
+            should_persist_halt = False
+            with LOCK:
+                if BLOFIN_AUTOPILOT_STATE.get("enabled") and not str(BLOFIN_AUTOPILOT_STATE.get("status") or "").startswith("SUPERVISOR_"):
+                    BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                    BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_POSITION_GUARD_HALT"
+                    BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                        "کنترل محلی ناظر نقص حیاتی در داده، هویت پوزیشن یا حفاظت پیدا کرد؛ ورود جدید متوقف شد و پوزیشن باز خودکار دست‌کاری نشد."
+                    )
+                    BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                    should_persist_halt = True
+            if should_persist_halt:
+                _persist_blofin_autopilot_state()
+
+    if errors:
+        should_persist_audit_halt = False
+        with LOCK:
+            if BLOFIN_AUTOPILOT_STATE.get("enabled") and BLOFIN_AUTOPILOT_STATE.get("status") != "SUPERVISOR_AUDIT_FAILURE_HALT":
+                BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_AUDIT_FAILURE_HALT"
+                BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                    "ثبت ممیزی ناظرها شکست خورد؛ ورود خودکار جدید متوقف شد تا هیچ اقدام بدون سابقه باقی نماند."
+                )
+                BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                should_persist_audit_halt = True
+        if should_persist_audit_halt:
+            _persist_blofin_autopilot_state()
+
+    if private_ws_not_ready:
+        should_persist_ws_halt = False
+        with LOCK:
+            if BLOFIN_AUTOPILOT_STATE.get("enabled") and BLOFIN_AUTOPILOT_STATE.get("status") != "SUPERVISOR_PRIVATE_WS_HALT":
+                BLOFIN_AUTOPILOT_STATE["enabled"] = False
+                BLOFIN_AUTOPILOT_STATE["status"] = "SUPERVISOR_PRIVATE_WS_HALT"
+                BLOFIN_AUTOPILOT_STATE["last_message_fa"] = (
+                    "اتصال خصوصی BloFin Demo یا تطبیق Snapshot معتبر نیست؛ ورود جدید متوقف شد و هیچ پوزیشن بازی خودکار بسته نشد."
+                )
+                BLOFIN_AUTOPILOT_STATE["last_cycle_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                should_persist_ws_halt = True
+        if should_persist_ws_halt:
+            _persist_blofin_autopilot_state()
+
+    state = {
+        "status": "ERROR" if errors else "HALTED" if private_ws_not_ready or guard_halt_positions else "ALIVE",
+        "guard_halt_positions": guard_halt_positions,
+        "interval_seconds": 3,
+        "source": "BLOFIN_PRIVATE_WEBSOCKET_AND_LOCAL_CACHE" if private_ws_required else "REST_MANAGER_CACHE",
+        "private_websocket": private_ws,
+        "private_websocket_last_message_age_seconds": private_ws_age,
+        "private_websocket_ready": not private_ws_not_ready if private_ws_required else None,
+        "last_cycle_at_utc": datetime.now(timezone.utc).isoformat(),
+        "tracked_positions": len(snapshots),
+        "stale_positions": stale_count,
+        "audit_events_recorded": recorded,
+        "llm_calls_performed": 0,
+        "rest_calls_performed": 0,
+        "exchange_writes_performed": 0,
+        "errors": errors[:10],
+    }
+    with LOCK:
+        BLOFIN_POSITION_SUPERVISOR_STATE.update(state)
+    return state
+
+
+def _blofin_demo_position_supervisor_watchdog_worker() -> None:
+    """Monotonic 3-second local coordinator loop over the latest validated cache."""
+    deadline = time.monotonic()
+    while True:
+        deadline += 3.0
+        try:
+            _blofin_demo_position_supervisor_watchdog_cycle()
+        except Exception as exc:
+            with LOCK:
+                BLOFIN_POSITION_SUPERVISOR_STATE.update({
+                    "status": "ERROR",
+                    "last_cycle_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "last_error_type": type(exc).__name__,
+                    "llm_calls_performed": 0,
+                    "rest_calls_performed": 0,
+                    "exchange_writes_performed": 0,
+                })
+        delay = max(0.0, deadline - time.monotonic())
+        time.sleep(delay)
+
+
+def _start_blofin_demo_position_supervisor_watchdog() -> None:
+    """Start at most one local three-second supervisor coordinator per web process."""
+    global BLOFIN_POSITION_SUPERVISOR_THREAD
+    with BLOFIN_POSITION_SUPERVISOR_START_LOCK:
+        if BLOFIN_POSITION_SUPERVISOR_THREAD is not None and BLOFIN_POSITION_SUPERVISOR_THREAD.is_alive():
+            return
+        BLOFIN_POSITION_SUPERVISOR_THREAD = threading.Thread(
+            target=_blofin_demo_position_supervisor_watchdog_worker,
+            daemon=True,
+            name="blofin-demo-supervisor-watchdog-3s",
+        )
+        BLOFIN_POSITION_SUPERVISOR_THREAD.start()
+
+
+def _blofin_demo_position_supervision_readiness(
+    readiness: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Allow audited Demo position reviews without enabling exchange writes."""
+    if not isinstance(readiness, dict):
+        return {
+            "status": "BLOCKED",
+            "supervision_mode": "BLOCKED",
+            "execution_enabled": False,
+            "blockers": ["EXECUTION_READINESS_NOT_AVAILABLE"],
+            "execution_blockers": [],
+        }
+    if str(readiness.get("status") or "").upper() == "READY":
+        return {
+            "status": "READY",
+            "supervision_mode": "ACTIVE_DEMO_EXECUTION",
+            "execution_enabled": True,
+            "blockers": [],
+            "execution_blockers": [],
+        }
+
+    blockers: list[str] = []
+    permission_status = str(readiness.get("trade_permission_status") or "").strip().upper()
+    if not readiness.get("trade_credentials_configured"):
+        blockers.append("TRADE_CREDENTIALS_NOT_CONFIGURED")
+    if permission_status not in {"READ_ONLY", "READ_WRITE_CONFIRMED"}:
+        blockers.append("TRADE_PERMISSION_NOT_CONFIRMED")
+    elif permission_status == "READ_WRITE_CONFIRMED" and readiness.get("trade_permission_verified") is not True:
+        blockers.append("TRADE_PERMISSION_NOT_VERIFIED")
+    if not readiness.get("durable_storage"):
+        blockers.append("DURABLE_STORAGE_UNAVAILABLE")
+    if not readiness.get("event_store_readable"):
+        blockers.append("EVENT_STORE_UNREADABLE")
+
+    execution_blockers: list[str] = []
+    if permission_status == "READ_ONLY":
+        execution_blockers.append("TRADE_PERMISSION_READ_ONLY")
+    if readiness.get("trading_enabled") is not True:
+        execution_blockers.append("DEMO_TRADING_DISABLED")
+    if readiness.get("dashboard_auth_configured") is not True:
+        execution_blockers.append("DASHBOARD_TOKEN_NOT_CONFIGURED")
+    if not execution_blockers:
+        blockers.append("EXECUTION_READINESS_NOT_READY")
+
+    if blockers:
+        return {
+            "status": "BLOCKED",
+            "supervision_mode": "BLOCKED",
+            "execution_enabled": False,
+            "blockers": blockers,
+            "execution_blockers": execution_blockers,
+        }
+    return {
+        "status": "READY",
+        "supervision_mode": "READ_ONLY",
+        "execution_enabled": False,
+        "blockers": [],
+        "execution_blockers": execution_blockers,
+    }
+
+
 def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
     """Manage only exchange positions linked by exact ID to the robot's Demo orders."""
     store = None
     try:
         readiness = _blofin_demo_execution_readiness()
-        if readiness.get("status") != "READY":
-            readiness_blockers: list[str] = []
-            if not readiness.get("trade_credentials_configured"):
-                readiness_blockers.append("TRADE_CREDENTIALS_NOT_CONFIGURED")
-            if readiness.get("trade_permission_status") == "READ_ONLY":
-                readiness_blockers.append("TRADE_PERMISSION_READ_ONLY")
-            elif not readiness.get("trade_permission_verified"):
-                readiness_blockers.append("TRADE_PERMISSION_NOT_VERIFIED")
-            if not readiness.get("trading_enabled"):
-                readiness_blockers.append("DEMO_TRADING_DISABLED")
-            if not readiness.get("dashboard_auth_configured"):
-                readiness_blockers.append("DASHBOARD_TOKEN_NOT_CONFIGURED")
-            if not readiness.get("durable_storage"):
-                readiness_blockers.append("DURABLE_STORAGE_UNAVAILABLE")
-            if not readiness.get("event_store_readable"):
-                readiness_blockers.append("EVENT_STORE_UNREADABLE")
-            if not readiness_blockers:
-                readiness_blockers.append("EXECUTION_READINESS_NOT_READY")
-
-            if "TRADE_CREDENTIALS_NOT_CONFIGURED" in readiness_blockers:
-                message_fa = "اعتبارنامه‌های Trade در Environment کامل نیستند؛ مدیر خروج هیچ اقدامی انجام نداد."
-            elif "TRADE_PERMISSION_READ_ONLY" in readiness_blockers:
-                message_fa = "مجوز API فقط‌خواندنی است؛ مدیر خروج مجوز تغییر پوزیشن ندارد و هیچ اقدامی انجام نداد."
-            elif "TRADE_PERMISSION_NOT_VERIFIED" in readiness_blockers:
-                message_fa = "مجوز Trade تأیید نشد؛ مدیر خروج متوقف ماند و هیچ پوزیشنی تغییر نکرد."
-            else:
-                reasons = []
-                if "DEMO_TRADING_DISABLED" in readiness_blockers:
-                    reasons.append("فعال‌سازی معاملات Demo خاموش است")
-                if "DASHBOARD_TOKEN_NOT_CONFIGURED" in readiness_blockers:
-                    reasons.append("توکن پنل تنظیم نشده است")
-                if "DURABLE_STORAGE_UNAVAILABLE" in readiness_blockers:
-                    reasons.append("حافظه پایدار در دسترس نیست")
-                if "EVENT_STORE_UNREADABLE" in readiness_blockers:
-                    reasons.append("دفتر رویداد قابل خواندن نیست")
-                message_fa = (
-                    "مدیر خروج به‌دلیل پیش‌نیازهای مسدودشده اقدام نکرد: "
-                    + "؛ ".join(reasons or ["آمادگی اجرای Demo تأیید نشده است"])
-                    + ". هیچ پوزیشنی تغییر نکرد."
-                )
+        supervision_readiness = _blofin_demo_position_supervision_readiness(readiness)
+        if supervision_readiness.get("status") != "READY":
+            blockers = list(supervision_readiness.get("blockers") or ["SUPERVISION_READINESS_BLOCKED"])
             return {
-                "status": "EXECUTION_READINESS_BLOCKED",
+                "status": "POSITION_SUPERVISION_READINESS_BLOCKED",
                 "readiness_status": readiness.get("status"),
-                "readiness_blockers": readiness_blockers,
+                "readiness_blockers": blockers,
                 "trade_permission_status": readiness.get("trade_permission_status"),
                 "credential_source": readiness.get("credential_source"),
                 "trading_enabled": bool(readiness.get("trading_enabled")),
                 "dashboard_auth_configured": bool(readiness.get("dashboard_auth_configured")),
                 "durable_storage": bool(readiness.get("durable_storage")),
                 "event_store_readable": bool(readiness.get("event_store_readable")),
-                "message_fa": message_fa,
+                "supervision_mode": "BLOCKED",
+                "exchange_writes_performed": 0,
+                "message_fa": (
+                    "نظارت پوزیشن آغاز نشد؛ اعتبارنامهٔ خواندن، وضعیت مجوز حساب و دفتر ممیزی پایدار "
+                    "باید قابل تأیید باشند. هیچ پوزیشن یا سفارشی تغییر نکرد."
+                ),
             }
+        read_only_supervision = supervision_readiness.get("execution_enabled") is not True
+        execution_blockers = list(supervision_readiness.get("execution_blockers") or [])
         raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")
         raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
         try:
@@ -9793,15 +11052,62 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
         pending_orders = store.orders_pending_learning_outcome(limit=50)
         if not pending_orders:
             return {
-                "status": "IDLE",
+                "status": "READ_ONLY_SUPERVISION" if read_only_supervision else "IDLE",
                 "managed_positions": 0,
-                "message_fa": "پوزیشن رباتیِ لینک‌شده‌ای برای مدیریت خروج وجود ندارد.",
+                "supervision_mode": "READ_ONLY" if read_only_supervision else "ACTIVE_DEMO_EXECUTION",
+                "execution_enabled": not read_only_supervision,
+                "execution_blockers": execution_blockers,
+                "exchange_writes_performed": 0,
+                "message_fa": (
+                    "نظارت فقط‌خواندنی فعال است؛ پوزیشن لینک‌شده‌ای در دفتر ربات نیست و هیچ سفارش یا پوزیشنی تغییر نکرد."
+                    if read_only_supervision else
+                    "پوزیشن رباتیِ لینک‌شده‌ای برای مدیریت خروج وجود ندارد."
+                ),
             }
 
         reader = BloFinDemoReadOnly(timeout=8.0)
-        positions = reader.get_positions()
-        if not isinstance(positions, list):
-            raise BloFinDemoResponseError("BloFin positions response is not a list.")
+        private_ws_snapshot = None
+        available_tpsl_rows = None
+        if BLOFIN_PRIVATE_WS_CLIENT is not None:
+            private_ws_snapshot = BLOFIN_PRIVATE_WS_CLIENT.get_snapshot()
+            channel_set = set(private_ws_snapshot.get("subscribed_channels") or [])
+            try:
+                ws_message_age = max(
+                    0.0,
+                    time.time() - float(private_ws_snapshot.get("last_message_epoch") or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                ws_message_age = float("inf")
+            if (
+                private_ws_snapshot.get("status") != "READY"
+                or not private_ws_snapshot.get("connected")
+                or not private_ws_snapshot.get("authenticated")
+                or not private_ws_snapshot.get("reconciled")
+                or channel_set != {"positions", "orders", "orders-algo", "account"}
+                or ws_message_age > 45.0
+            ):
+                return {
+                    "status": "PRIVATE_WEBSOCKET_NOT_READY",
+                    "environment": "BLOFIN_DEMO",
+                    "message_fa": "جریان خصوصی BloFin Demo هنوز متصل، احراز هویت و با REST تطبیق نشده است؛ چرخه مدیریت متوقف شد و هیچ اقدام معاملاتی ارسال نشد.",
+                    "private_websocket": _blofin_demo_private_ws_public_status(),
+                    "exchange_writes_performed": 0,
+                }
+            positions_map = private_ws_snapshot.get("positions")
+            orders_map = private_ws_snapshot.get("orders")
+            algo_orders_map = private_ws_snapshot.get("algo_orders")
+            if not all(isinstance(item, dict) for item in (positions_map, orders_map, algo_orders_map)):
+                raise BloFinDemoResponseError("BloFin private WebSocket snapshot maps are invalid.")
+            positions = list(positions_map.values())
+            available_tpsl_rows = list(algo_orders_map.values())
+            private_ws_orders = list(orders_map.values())
+            private_ws_account = private_ws_snapshot.get("account")
+        else:
+            positions = reader.get_positions()
+            private_ws_orders = []
+            private_ws_account = None
+        if not isinstance(positions, list) or any(not isinstance(row, dict) for row in positions):
+            raise BloFinDemoResponseError("BloFin positions snapshot is not a valid list.")
 
         active_rows = []
         for row in positions:
@@ -9854,6 +11160,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         position_id=position_id,
                     )
                     if outcome:
+                        _clear_challenge1_supervisor_snapshot(position_id)
                         activity_update = _update_blofin_activity_after_close(
                             outcome, instrument_id, position_id,
                             closed_rows if isinstance(closed_rows, list) else [],
@@ -9886,6 +11193,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 event for event in prior_events
                 if str(event.get("event_type") or "").upper() in {
                     "AUTO_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_UNKNOWN",
+                    "AI_SUPERVISOR_POSITION_CLOSE_ACCEPTED",
+                    "AI_SUPERVISOR_POSITION_CLOSE_UNKNOWN",
                     "RISK_OVERRIDE_POSITION_CLOSE_REQUESTED",
                     "RISK_OVERRIDE_POSITION_CLOSE_ACCEPTED",
                     "RISK_OVERRIDE_POSITION_CLOSE_UNKNOWN",
@@ -9954,6 +11263,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
             market_evidence = _blofin_demo_position_market_evidence(reader, instrument_id)
             protective_evidence = _blofin_demo_protective_order_evidence(
                 reader, instrument_id, order, position,
+                available_tpsl_rows=available_tpsl_rows,
             )
 
             entry_snapshot = None
@@ -10000,6 +11310,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 cycle_context = {
                     "cycle_id": monitor_cycle_id,
                     "instrument_id": instrument_id,
+                    "client_order_id": client_order_id,
                     "position": position,
                     "average_fill_price": (
                         entry_snapshot.get("actual_entry_price")
@@ -10015,7 +11326,15 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "market_direction_source": market_evidence.get("source", "UNKNOWN"),
                     "market_direction_evidence": market_evidence.get("candles", []),
                     "protective_orders": protective_evidence,
+                    "account_snapshot": private_ws_account,
+                    "open_orders_snapshot": [
+                        item for item in private_ws_orders
+                        if isinstance(item, dict)
+                        and str(item.get("instId") or "").strip().upper() == instrument_id
+                    ][:20],
                     "risk_change": "NONE_BY_POSITION_MANAGER_CYCLE",
+                    "supervision_mode": "READ_ONLY" if read_only_supervision else "ACTIVE_DEMO_EXECUTION",
+                    "exchange_writes_permitted": not read_only_supervision,
                 }
                 try:
                     reviewer_states = schedule_position_observer_review(
@@ -10026,6 +11345,7 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         order_id=str(order.get("exchange_order_id") or client_order_id),
                         symbol=instrument_id,
                         signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                        action_executor=_execute_challenge1_supervisor_action,
                     )
                 except Exception as observer_exc:
                     skip_code = "OBSERVER_SCHEDULER_FAILED"
@@ -10069,6 +11389,22 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                             "error_type": type(skip_exc).__name__,
                         })
 
+            _cache_challenge1_supervisor_snapshot(
+                experience_id=experience_id,
+                position_id=audit_position_id,
+                order_id=str(order.get("exchange_order_id") or client_order_id),
+                instrument_id=instrument_id,
+                signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                position=position,
+                mark_price=mark_price_value,
+                unrealized_pnl=pnl_value,
+                stop_loss_price=stop_value if stop_value > 0 else None,
+                stop_loss_threshold_reached=stop_loss_threshold_reached,
+                market_evidence=market_evidence,
+                protective_orders=protective_evidence,
+                reviewer_states=reviewer_states,
+            )
+
             exit_basis = {
                 "instrument_id": instrument_id, "position_id": audit_position_id,
                 "experience_id": experience_id,
@@ -10097,8 +11433,8 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "protective_orders": protective_evidence,
                 "reviewer_states": reviewer_states,
                 "reviewer_skip_audit_errors": skip_audit_errors,
-                "observer_review_policy": "TWO_INDEPENDENT_POST_DECISION_AUDIT_REVIEWERS",
-                "observer_execution_effect": "NONE",
+                 "observer_review_policy": "TWO_INDEPENDENT_ACTIVE_POSITION_SUPERVISORS",
+                "observer_execution_effect": "DUAL_QUORUM_COORDINATOR_GATED",
                 "observer_evidence_source": "PERSISTED_NOTION_ACTIVITY_JOURNAL",
             }
             try:
@@ -10122,6 +11458,92 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "message_fa": "ثبت کامل چرخه پایش یا وضعیت عدم فراخوانی ناظرها تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
                 })
                 continue
+            protection_status = str(protective_evidence.get("status") or "UNKNOWN").strip().upper()
+            if protection_status in {"READ_FAILED", "INVALID_RESPONSE"} and not reason:
+                actions.append({
+                    "status": "PROTECTION_READ_UNAVAILABLE_NO_CLOSE",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "protective_orders": protective_evidence,
+                    "exchange_write_attempted": False,
+                    "reason_code": "PROTECTION_STATE_NOT_PROVEN",
+                    "position_cycle_audit": audit_result,
+                })
+                continue
+
+            if _blofin_demo_protection_requires_emergency_close(protective_evidence):
+                if read_only_supervision:
+                    _record_challenge1_audit(
+                        experience_id or position_id,
+                        "RISK_OVERRIDE_EXIT_BLOCKED_READ_ONLY",
+                        {
+                            **exit_basis,
+                            "decision": "EXIT_NOT_SUBMITTED",
+                            "reason_code": "NATIVE_STOP_LOSS_NOT_VERIFIED",
+                            "protective_order_status": protection_status,
+                            "exchange_write_attempted": False,
+                        },
+                        event_key=f"protection-missing-close-read-only:{audit_position_id}:{cycle_epoch_ms}",
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        status="WARNING",
+                        reason="A valid exchange stop-loss could not be verified; read-only supervision cannot close the position.",
+                    )
+                    actions.append({
+                        "status": "PROTECTION_MISSING_CLOSE_BLOCKED_READ_ONLY",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "protective_orders": protective_evidence,
+                        "exchange_write_attempted": False,
+                        "position_cycle_audit": audit_result,
+                    })
+                    continue
+                try:
+                    _record_challenge1_audit(
+                        experience_id or position_id,
+                        "RISK_OVERRIDE_PROTECTION_MISSING_CLOSE_AUTHORIZED",
+                        {
+                            **exit_basis,
+                            "decision": "CLOSE_DEMO_POSITION",
+                            "precondition": (
+                                "Exact linked position matched and a successful TP/SL read "
+                                "proved that no valid native stop-loss is attached."
+                            ),
+                            "protective_order_status": protection_status,
+                            "loss_exit_permitted": True,
+                        },
+                        event_key=f"protection-missing-close:{audit_position_id}:{cycle_epoch_ms}",
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        status="WARNING",
+                        reason="No valid exchange stop-loss is attached to the exact linked Demo position.",
+                    )
+                    close_result = _blofin_manual_close_position(
+                        instrument_id=instrument_id,
+                        position_id=position_id,
+                        action_source="RISK_OVERRIDE",
+                        audit_id=client_order_id,
+                        exit_reason="TP_SL_PROTECTION_MISSING",
+                    )
+                    actions.append({
+                        "status": "RISK_OVERRIDE_PROTECTION_MISSING_CLOSE_ACCEPTED",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "protective_orders": protective_evidence,
+                        "exchange_response": close_result.get("exchange_response"),
+                        "position_cycle_audit": audit_result,
+                    })
+                except Exception as close_exc:
+                    actions.append({
+                        "status": "RISK_OVERRIDE_PROTECTION_MISSING_CLOSE_NOT_CONFIRMED",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "protective_orders": protective_evidence,
+                        "error_type": type(close_exc).__name__,
+                        "position_cycle_audit": audit_result,
+                    })
+                continue
+
             if not reason:
                 if stop_loss_threshold_reached:
                     protection_status = str(protective_evidence.get("status") or "").upper()
@@ -10134,6 +11556,30 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
                     }
                     if verified_sl_absent:
+                        if read_only_supervision:
+                            _record_challenge1_audit(
+                                experience_id or position_id, "RISK_OVERRIDE_EXIT_BLOCKED_READ_ONLY",
+                                {
+                                    **exit_basis,
+                                    "decision": "EXIT_NOT_SUBMITTED",
+                                    "reason_code": "DEMO_TRADING_DISABLED_READ_ONLY_SUPERVISION",
+                                    "protective_order_status": protection_status,
+                                    "exchange_write_attempted": False,
+                                },
+                                event_key=f"risk-override-exit-read-only:{audit_position_id}:{cycle_epoch_ms}",
+                                experience_id=experience_id, position_id=audit_position_id,
+                                status="WARNING",
+                                reason="The supervisor manager is in read-only mode; risk override was not submitted.",
+                            )
+                            actions.append({
+                                "status": "RISK_OVERRIDE_CLOSE_BLOCKED_READ_ONLY",
+                                "instrument_id": instrument_id,
+                                "position_id": position_id,
+                                "stop_loss_price": stop_value,
+                                "mark_price": mark_price_value,
+                                "exchange_write_attempted": False,
+                            })
+                            continue
                         try:
                             _record_challenge1_audit(
                                 experience_id or position_id, "RISK_OVERRIDE_EXIT_AUTHORIZED",
@@ -10188,7 +11634,6 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                         "instrument_id": instrument_id,
                         "position_id": position_id,
                         "stop_loss_price": stop_value,
-                        "mark_price": mark_price_value,
                         "protective_orders": protective_evidence,
                         "position_cycle_audit": audit_result,
                     })
@@ -10200,6 +11645,17 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "unrealized_pnl_usdt": position.get("unrealizedPnl"),
                     "minimum_profit_usdt": minimum_profit,
                     "position_cycle_audit": audit_result,
+                })
+                continue
+
+            if read_only_supervision:
+                actions.append({
+                    "status": "AUTO_EXIT_BLOCKED_READ_ONLY",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "exchange_write_attempted": False,
+                    "reason_code": "DEMO_TRADING_DISABLED_READ_ONLY_SUPERVISION",
                 })
                 continue
 
@@ -10260,12 +11716,19 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 })
 
         return {
-            "status": "PASS",
+            "status": "READ_ONLY_SUPERVISION" if read_only_supervision else "PASS",
+            "supervision_mode": "READ_ONLY" if read_only_supervision else "ACTIVE_DEMO_EXECUTION",
+            "execution_enabled": not read_only_supervision,
+            "execution_blockers": execution_blockers,
+            "exchange_writes_performed": 0 if read_only_supervision else None,
             "managed_positions": managed,
             "actions": actions,
             "minimum_profit_usdt": minimum_profit,
             "maximum_hold_seconds": maximum_hold,
             "message_fa": (
+                "دو ناظر و مدیر پوزیشن در حالت فقط‌خواندنی فعال‌اند؛ بررسی و ممیزی انجام می‌شود، "
+                "اما تا آماده‌شدن مجوز اجرای Demo هیچ سفارش یا تغییری روی پوزیشن ارسال نمی‌شود."
+                if read_only_supervision else
                 "مدیر خروج فقط پوزیشن‌های دقیقاً لینک‌شده به سفارش ربات را بررسی می‌کند؛ "
                 "خروج خودکار فقط با رسیدن به حد سود یا پایان زمان نگهداری و سود شناور کافی انجام می‌شود."
             ),
@@ -10291,6 +11754,10 @@ def _blofin_demo_position_manager_worker() -> None:
                     "last_message_fa": result.get("message_fa", "مدیر خروج بررسی را انجام داد."),
                     "readiness_status": result.get("readiness_status"),
                     "readiness_blockers": list(result.get("readiness_blockers") or []),
+                    "supervision_mode": result.get("supervision_mode", "UNKNOWN"),
+                    "execution_enabled": result.get("execution_enabled", False),
+                    "execution_blockers": list(result.get("execution_blockers") or []),
+                    "exchange_writes_performed": result.get("exchange_writes_performed"),
                     "trade_permission_status": result.get("trade_permission_status", "UNKNOWN"),
                     "credential_source": result.get("credential_source"),
                     "trading_enabled": result.get("trading_enabled"),
@@ -11082,7 +12549,9 @@ def main():
     role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
     if role == "WEB":
         _start_notion_sync_worker()
+        _start_blofin_demo_private_websocket()
         _start_blofin_demo_position_manager()
+        _start_blofin_demo_position_supervisor_watchdog()
     _start_blofin_demo_autopilot()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
