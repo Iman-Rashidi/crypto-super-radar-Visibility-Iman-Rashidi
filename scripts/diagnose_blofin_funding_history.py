@@ -26,7 +26,7 @@ def _utc(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, timezone.utc).isoformat()
 
 
-def inspect_symbol(symbol: str, months: int = 7) -> dict:
+def inspect_symbol(symbol: str, months: int = 7, base_url: str = DEMO_REST_URL) -> dict:
     session = requests.Session()
     now = datetime.now(timezone.utc)
     start_ms = _utc_ms(_subtract_calendar_months(now, months))
@@ -42,7 +42,7 @@ def inspect_symbol(symbol: str, months: int = 7) -> dict:
             params["after"] = str(cursor)
         payload = _json_get(
             session,
-            DEMO_REST_URL.rstrip("/") + FUNDING_PATH,
+            base_url.rstrip("/") + FUNDING_PATH,
             params,
         )
         rows = payload.get("data")
@@ -127,7 +127,7 @@ def inspect_symbol(symbol: str, months: int = 7) -> dict:
     try:
         current = _json_get(
             session,
-            DEMO_REST_URL.rstrip("/") + "/api/v1/market/funding-rate",
+            base_url.rstrip("/") + "/api/v1/market/funding-rate",
             {"instId": symbol},
         )
         rows = current.get("data")
@@ -149,6 +149,7 @@ def inspect_symbol(symbol: str, months: int = 7) -> dict:
 
     return {
         "symbol": symbol,
+        "source_host": base_url,
         "window_start_utc": _utc(start_ms),
         "window_end_utc": now.isoformat(),
         "pages": pages,
@@ -176,11 +177,14 @@ def main() -> None:
     parser.add_argument("--symbol", default="BTC-USDT")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--months", type=int, default=7)
+    parser.add_argument("--compare-public-and-demo", action="store_true")
     args = parser.parse_args()
     symbols = DEFAULT_SYMBOLS if args.all else (args.symbol,)
+    hosts = [DEMO_REST_URL, PUBLIC_REST_URL] if args.compare_public_and_demo else [DEMO_REST_URL]
     results = []
-    for symbol in symbols:
-        results.append(inspect_symbol(symbol, args.months))
+    for host in hosts:
+        for symbol in symbols:
+            results.append(inspect_symbol(symbol, args.months, host))
     print(json.dumps({
         "status": "DIAGNOSTIC_ONLY_NOT_A_DATASET_ACCEPTANCE",
         "symbols": results,
