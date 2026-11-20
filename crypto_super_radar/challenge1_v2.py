@@ -340,6 +340,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
         stop = float(record.get("stop_loss"))
         target = float(record.get("take_profit"))
         score = float(record.get("confidence_score"))
+        gross_rr = float(record.get("gross_rr"))
         funding = float(record.get("funding_rate"))
         spread = float(record.get("spread_fraction"))
     except (TypeError, ValueError, OverflowError):
