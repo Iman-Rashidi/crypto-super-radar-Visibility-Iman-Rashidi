@@ -231,6 +231,18 @@ def _calibration_report(observations: list[dict[str, Any]], *, bins: int = 10) -
     }
 
 
+def _required_replay_end(start_time: pd.Timestamp, common_end: pd.Timestamp) -> pd.Timestamp:
+    required = start_time + pd.DateOffset(months=6)
+    minimum_end = required - pd.Timedelta(minutes=15)
+    if common_end < minimum_end:
+        raise SandboxDataError(
+            f"replay coverage is shorter than six calendar months: "
+            f"start={start_time.isoformat()} end={common_end.isoformat()} "
+            f"required_end_at_least={minimum_end.isoformat()}"
+        )
+    return required
+
+
 def _phase(asof_ms: int, train_end_ms: int, validation_end_ms: int) -> str:
     if asof_ms <= train_end_ms:
         return "TRAIN"
@@ -273,14 +285,7 @@ def run_sandbox(
     # The downloader and loader fail closed on missing candles or funding events.
     start_time = max(item["source_start"] for item in market.values())
     common_end = min(item["source_end"] for item in market.values())
-    oos_end = start_time + pd.DateOffset(months=6)
-    minimum_end = oos_end - pd.Timedelta(minutes=15)
-    if common_end < minimum_end:
-        raise SandboxDataError(
-            f"replay coverage is shorter than six calendar months: "
-            f"start={start_time.isoformat()} end={common_end.isoformat()} "
-            f"required_end_at_least={minimum_end.isoformat()}"
-        )
+    oos_end = _required_replay_end(start_time, common_end)
     train_end = start_time + pd.DateOffset(months=4)
     validation_end = start_time + pd.DateOffset(months=5)
     train_end_ms = int(train_end.timestamp() * 1000)
@@ -308,6 +313,7 @@ def run_sandbox(
     totals = defaultdict(float)
     counts = defaultdict(int)
     model_decisions = defaultdict(int)
+    model_freeze_train_count: int | None = None
     calibration_observations: dict[str, list[dict[str, Any]]] = {
         "VALIDATION": [],
         "OUT_OF_SAMPLE": [],
@@ -443,6 +449,7 @@ def run_sandbox(
                 if (
                     order["phase"] in calibration_observations
                     and order.get("model_probability") is not None
+                    and not order.get("phase_boundary_crossed")
                 ):
                     calibration_observations[order["phase"]].append({
                         "probability": float(order["model_probability"]),
@@ -497,6 +504,7 @@ def run_sandbox(
             if (
                 order["phase"] in calibration_observations
                 and order.get("model_probability") is not None
+                and not order.get("phase_boundary_crossed")
             ):
                 calibration_observations[order["phase"]].append({
                     "probability": float(order["model_probability"]),
@@ -538,6 +546,11 @@ def run_sandbox(
                 if train_status.get("status") == "TRAINED":
                     counts["training_rounds"] += 1
                 last_train_candle = training_candle_count
+        else:
+            if model_freeze_train_count is None:
+                model_freeze_train_count = brain.train_count
+            elif brain.train_count != model_freeze_train_count:
+                raise SandboxDataError("model weights changed after the TRAIN phase freeze")
 
         for symbol in symbols:
             item = market[symbol]
@@ -636,7 +649,11 @@ def run_sandbox(
     cross_boundary_open_positions = sum(
         1 for item in active_orders if item.get("phase_boundary_crossed")
     )
+    cross_boundary_open_shadow_orders = sum(
+        1 for item in shadow_orders if item.get("phase_boundary_crossed")
+    )
     counts["cross_boundary_open_positions"] = cross_boundary_open_positions
+    counts["cross_boundary_open_shadow_orders"] = cross_boundary_open_shadow_orders
     counts["unresolved_at_dataset_end"] = sum(1 for item in active_orders if item.get("entry_checked"))
     counts["pending_entries_at_dataset_end"] = sum(1 for item in active_orders if not item.get("entry_checked"))
     counts["shadow_unresolved_at_dataset_end"] = len(shadow_orders)
@@ -724,8 +741,10 @@ def run_sandbox(
             "cross_boundary_positions": counts["cross_boundary_positions"],
             "cross_boundary_closed_trades": counts["cross_boundary_closed_trades"],
             "cross_boundary_open_positions": cross_boundary_open_positions,
-            "status": "PASS" if cross_boundary_open_positions == 0 else "BLOCKED",
+            "cross_boundary_open_shadow_orders": cross_boundary_open_shadow_orders,
+            "status": "PASS" if counts["cross_boundary_positions"] == 0 else "BLOCKED",
             "model_frozen_after_training": True,
+            "model_train_count_at_freeze": model_freeze_train_count,
         },
         "model_calibration": {
             "VALIDATION": _calibration_report(calibration_observations["VALIDATION"]),
