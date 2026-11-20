@@ -122,10 +122,20 @@ def _validate_event(event: Mapping[str, Any]) -> dict[str, Any]:
 class Challenge1EventQueue:
     """SQLite/Turso-compatible durable queue with leases and immutable history."""
 
-    def __init__(self, connection: Any | None = None) -> None:
+    def __init__(
+        self,
+        connection: Any | None = None,
+        *,
+        require_shared_backend: bool = False,
+    ) -> None:
         self._owns_db = connection is None
         self.backend = storage_backend() if connection is None else "INJECTED_CONNECTION"
+        if require_shared_backend and self.backend != "TURSO_CLOUD_SQLITE":
+            raise Challenge1QueueError(
+                "shared Turso storage is required for cross-worker event delivery"
+            )
         self._db = connection or connect_database()
+        self.require_shared_backend = bool(require_shared_backend)
         self._lock = threading.RLock()
         ddl = (
             """CREATE TABLE IF NOT EXISTS csr_challenge1_queue_events (
