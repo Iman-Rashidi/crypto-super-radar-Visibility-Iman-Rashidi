@@ -342,6 +342,12 @@ class VirtualBloFin:
         )
         rr_items = net_reward_risk(entry=entry, stop=stop, target=target, rules=rules,
                                    costs=cc, quantity=size.quantity_contracts)
+        rr_items.update({
+            "quantity_contracts": float(size.quantity_contracts),
+            "risk_budget_usdt": float(size.risk_budget_usdt),
+            "all_in_stop_risk_usdt": float(size.stop_risk_usdt),
+            "position_notional_usdt": float(size.notional_usdt),
+        })
         if rr_items["net_rr"] < cc.min_net_rr:
             return TradeResult("REJECTED", "NET_RR_BELOW_MINIMUM", float(size.quantity_contracts),
                                entry, None, 0, 0, 0, 1, False, rr_items["net_rr"], rr_items)
