@@ -306,8 +306,8 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Minimum seconds between Demo orders must be between 0 and 86400")
         if isinstance(self.max_leverage, bool) or not 1 <= int(self.max_leverage) <= 3:
             raise ValueError("Demo test leverage is restricted to 1x through 3x")
-        if not 1 <= int(self.max_concurrent_positions) <= 3:
-            raise ValueError("Concurrent positions must be between 1 and 3")
+        if not 1 <= int(self.max_concurrent_positions) <= 4:
+            raise ValueError("Concurrent positions must be between 1 and 4")
         if self.min_reward_risk < 1.0 or self.max_entry_deviation_pct <= 0:
             raise ValueError("Reward/risk or entry-deviation policy is invalid")
         if not 0 <= self.taker_fee_rate <= 0.01:
@@ -1031,8 +1031,8 @@ class BloFinDemoEventStore:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field} must be a non-negative integer.")
-        if not 1 <= max_concurrent_positions <= 3:
-            raise ValueError("max_concurrent_positions must be between 1 and 3.")
+        if not 1 <= max_concurrent_positions <= 4:
+            raise ValueError("max_concurrent_positions must be between 1 and 4.")
 
         now = int(time.time())
         order_id = str(plan["client_order_id"])
