@@ -205,6 +205,25 @@ def download_instrument_rules(
     return dict(row)
 
 
+def _parse_funding_event(row: Any, *, symbol: str) -> tuple[str, int, float, str] | None:
+    """Parse one funding event without inventing its event kind."""
+    if not isinstance(row, Mapping):
+        return None
+    try:
+        ts, rate = int(row["fundingTime"]), float(row["fundingRate"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if ts <= 0 or not math_is_finite(rate):
+        return None
+    raw_kind = row.get("fundingKind")
+    if raw_kind is None or str(raw_kind).strip() not in {"0", "1"}:
+        raise ReplayDownloadError(
+            f"funding history has missing or unsupported fundingKind for {symbol}; "
+            "event classification cannot be inferred"
+        )
+    return (symbol, ts, rate, str(raw_kind).strip())
+
+
 def download_funding_rates(
     inst_id: str,
     *,
@@ -234,14 +253,9 @@ def download_funding_rates(
             raise ReplayDownloadError("funding endpoint returned a non-list data field")
         valid = []
         for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            try:
-                ts, rate = int(row["fundingTime"]), float(row["fundingRate"])
-            except (KeyError, TypeError, ValueError, OverflowError):
-                continue
-            if ts > 0 and math_is_finite(rate):
-                valid.append((symbol, ts, rate, str(row.get("fundingKind") or "0")))
+            parsed = _parse_funding_event(row, symbol=symbol)
+            if parsed is not None:
+                valid.append(parsed)
         if not valid:
             break
         for item in valid:
