@@ -304,7 +304,7 @@ def _classify_funding_schedule_events(
     for index, (event_symbol, timestamp, rate, raw_kind, raw_source) in enumerate(ordered):
         previous_interval = gap_intervals[index - 1] if index > 0 else None
         next_interval = gap_intervals[index] if index < len(gap_intervals) else None
-        interval_ms = previous_interval or next_interval
+        interval_ms = next_interval or previous_interval
         if interval_ms is None:
             raise ReplayDownloadError(f"funding cadence around blackout is unprovable for {symbol}")
         remainder = int(timestamp) % int(interval_ms)

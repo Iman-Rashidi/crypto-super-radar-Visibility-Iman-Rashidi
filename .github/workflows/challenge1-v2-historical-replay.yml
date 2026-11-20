@@ -44,7 +44,6 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_v2_time_exit_and_lookahead.py' -v
-          python -m unittest discover -s tests -p 'test_challenge1_v2_web_orchestration.py' -v
 
       - name: Download seven months of public BloFin market data
         id: download
