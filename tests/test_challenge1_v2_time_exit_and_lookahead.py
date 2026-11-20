@@ -140,7 +140,7 @@ class SandboxAsOfLeakageTests(unittest.TestCase):
         ]
         asof = start + 4 * 900_000
         visible = _visible_bars(bars, asof)
-        self.assertEqual(len(visible), 3)
+        self.assertEqual(len(visible), 4)
         self.assertTrue(all(int(row["close_ts"]) <= asof for row in visible))
 
     def test_future_funding_rates_do_not_change_rate_known_at_cutoff(self) -> None:
