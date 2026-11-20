@@ -299,6 +299,10 @@ def run_sandbox(
                     "instrument_id": order["symbol"],
                     "exit_ts_ms": exit_ts_ms,
                     "net_pnl_usdt": result.net_pnl_usdt,
+                    "fees_usdt": result.fees_usdt,
+                    "funding_usdt": result.funding_usdt,
+                    "spread_cost_usdt": float(result.diagnostics["spread_cost_usdt"]),
+                    "slippage_cost_usdt": float(result.diagnostics["slippage_cost_usdt"]),
                     "veto_correct": result.net_pnl_usdt <= 0,
                     "source": "COUNTERFACTUAL_SHADOW",
                 })
@@ -309,9 +313,23 @@ def run_sandbox(
                     counts["shadow_missed_winners"] += 1
                 continue
 
+            spread_cost = result.diagnostics.get("spread_cost_usdt")
+            slippage_cost = result.diagnostics.get("slippage_cost_usdt")
+            if spread_cost is None or slippage_cost is None:
+                raise SandboxDataError(
+                    f"closed virtual trade {order['signal_id']} lacks explicit spread/slippage reconciliation"
+                )
+            spread_cost = float(spread_cost)
+            slippage_cost = float(slippage_cost)
+            if not np.isfinite(spread_cost) or spread_cost < 0 or not np.isfinite(slippage_cost) or slippage_cost < 0:
+                raise SandboxDataError(
+                    f"closed virtual trade {order['signal_id']} has invalid spread/slippage cost values"
+                )
             equity += result.net_pnl_usdt
             totals["fees_usdt"] += result.fees_usdt
             totals["funding_usdt"] += result.funding_usdt
+            totals["spread_cost_usdt"] += spread_cost
+            totals["slippage_cost_usdt"] += slippage_cost
             totals["gross_pnl_usdt"] += float(result.diagnostics.get("gross_realized_pnl_usdt", 0.0))
             actual_trades.append({
                 "signal_id": order["signal_id"],
@@ -323,6 +341,8 @@ def run_sandbox(
                 "net_pnl_usdt": result.net_pnl_usdt,
                 "fees_usdt": result.fees_usdt,
                 "funding_usdt": result.funding_usdt,
+                "spread_cost_usdt": spread_cost,
+                "slippage_cost_usdt": slippage_cost,
                 "tp1_filled": result.tp1_filled,
                 "net_rr_at_entry": result.net_rr_at_entry,
                 "model_decision": order["model_decision"],
@@ -479,6 +499,12 @@ def run_sandbox(
             "net_win_rate_pct": (wins / total_closed * 100.0) if total_closed else None,
             "gross_pnl_before_costs_usdt": totals["gross_pnl_usdt"],
             "fees_usdt": totals["fees_usdt"], "funding_usdt": totals["funding_usdt"],
+            "spread_cost_usdt": totals["spread_cost_usdt"],
+            "slippage_cost_usdt": totals["slippage_cost_usdt"],
+            "total_explicit_costs_usdt": (
+                totals["fees_usdt"] + totals["funding_usdt"]
+                + totals["spread_cost_usdt"] + totals["slippage_cost_usdt"]
+            ),
             "fee_to_gross_positive_profit_ratio": fee_ratio,
             "order_rejection_rate_pct": (counts["order_rejections"] / attempts * 100.0) if attempts else None,
             "unfilled_limit_rate_pct": (counts["unfilled_limits"] / (counts["unfilled_limits"] + counts["submitted_virtual_entries"]) * 100.0)
