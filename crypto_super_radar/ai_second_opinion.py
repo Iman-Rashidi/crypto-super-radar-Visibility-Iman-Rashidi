@@ -1214,6 +1214,9 @@ def run_free_ai_second_opinion(
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
         body = response.json()
+        body_request_id = body.get("id") or body.get("request_id") if isinstance(body, dict) else None
+        if isinstance(body_request_id, str) and body_request_id.strip():
+            provider_request_id = body_request_id.strip()[:200]
         choices = body.get("choices") if isinstance(body, dict) else None
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ValueError("Missing AI response choices")
@@ -1493,6 +1496,13 @@ def run_independent_ai_supervisor(
         )
         latency_ms = int((time.monotonic() - started) * 1000)
         http_status = int(getattr(response, "status_code", 0) or 0)
+        response_headers = getattr(response, "headers", {}) or {}
+        if isinstance(response_headers, Mapping):
+            for header_name in ("x-request-id", "request-id", "x-correlation-id"):
+                header_value = response_headers.get(header_name)
+                if header_value not in (None, ""):
+                    provider_request_id = str(header_value).strip()[:200] or None
+                    break
         if http_status != 200:
             return {
                 "reviewer_id": "second_ai", "provider": provider, "model": model,
@@ -1844,10 +1854,10 @@ def _call_challenge1_observer(
         '{"verdict":"SUPPORTS_DECISION|CONCERNS|INSUFFICIENT_DATA",'
         '"confidence":0,'
         '"reason_fa":"short Persian explanation",'
-        "Confidence must be a number from 0 to 100 describing confidence in this audit finding, "
-        "not in a trading outcome. "
         '"observations":["short factual observation"],'
         '"risk_flags":["specific concern"]}. '
+        "Confidence must be a number from 0 to 100 describing confidence in this audit finding, "
+        "not in a trading outcome. "
         "No trade instruction, no entry/exit recommendation, no price target, no guarantee of profit."
     )
     payload = {
@@ -1925,6 +1935,9 @@ def _call_challenge1_observer(
                 "model_verified": False, "observation_only": True,
                 "entry_gate_enforced": False, "execution_effect": "NONE",
                 "http_status": http_status, "latency_ms": latency_ms,
+                "provider_request_id": provider_request_id,
+                "confidence": None, "raw_response": raw_response,
+                "raw_response_sha256": raw_response_sha256,
                 "requested_at_utc": requested_at,
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "error_code": "RETURNED_MODEL_MISSING",
