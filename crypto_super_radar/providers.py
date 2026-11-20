@@ -354,20 +354,47 @@ class BybitProvider:
                         f"Gate.io spot fallback pair mismatch: expected {currency_pair}, "
                         f"received {returned_pair!r}"
                     )
-                price = _positive_float(item.get("last"))
+                ticker_price = _positive_float(item.get("last"))
                 volume = _safe_float(item.get("quote_volume"))
-                if price is None or volume is None:
+                if ticker_price is None or volume is None:
                     raise DataProviderError(
                         f"Gate.io spot fallback returned incomplete ticker for {currency_pair}"
                     )
+
+                # The public Spot ticker schema has no event timestamp. Do not
+                # substitute local receive time. Use the latest public trade so
+                # the accepted reference price and its create_time_ms are linked.
+                trades = self.http.get(
+                    f"{self.GATE}/spot/trades",
+                    {"currency_pair": currency_pair, "limit": 1},
+                )
+                if not isinstance(trades, list) or len(trades) != 1 or not isinstance(trades[0], dict):
+                    raise DataProviderError(
+                        f"Gate.io spot fallback returned no unique latest trade for {currency_pair}"
+                    )
+                trade = trades[0]
+                trade_pair = trade.get("currency_pair")
+                trade_price = _positive_float(trade.get("price"))
+                trade_time_ms = _positive_float(trade.get("create_time_ms"))
+                if trade_pair != currency_pair:
+                    raise DataProviderError(
+                        f"Gate.io latest-trade pair mismatch: expected {currency_pair}, "
+                        f"received {trade_pair!r}"
+                    )
+                if trade_price is None or trade_time_ms is None:
+                    raise DataProviderError(
+                        f"Gate.io latest trade omitted a positive price or create_time_ms for {currency_pair}"
+                    )
                 return {
-                    "price": price,
+                    "price": trade_price,
                     "volume_24h": volume,
                     "bid_price": _positive_float(item.get("highest_bid")),
                     "ask_price": _positive_float(item.get("lowest_ask")),
-                    "quote_timestamp_ms": _safe_float(item.get("time")) * 1000 if _safe_float(item.get("time")) is not None else None,
+                    "quote_timestamp_ms": trade_time_ms,
+                    "quote_timestamp_kind": "GATE_SPOT_LATEST_TRADE_CREATE_TIME_MS",
+                    "ticker_last_price": ticker_price,
                     "returned_symbol": item.get("currency_pair"),
-                    "raw": item,
+                    "raw": {"ticker": item, "latest_trade": trade},
                     "provider": "Gate.io Spot",
                     "fallback_reason": message[:240],
                 }
@@ -962,15 +989,30 @@ class PerpetualMarketProvider:
             raise DataProviderError("Gate.io/OKX funding settlement interval is invalid")
         best_bid = max(values["gate_bid"], values["okx_bid"])
         best_ask = min(values["gate_ask"], values["okx_ask"])
-        if best_ask < best_bid:
-            raise DataProviderError("Gate.io/OKX cross-venue best bid/ask is crossed")
+        cross_venue_book_crossed = best_ask < best_bid
+        # Each venue's own book has already been validated independently above.
+        # A crossed synthetic NBBO across separate exchanges is not an executable
+        # single-venue quote; preserve it as INCONCLUSIVE rather than calling either
+        # source corrupt or returning a misleading combined bid/ask.
         return {
-            "status": "PASS",
+            "status": "INCONCLUSIVE" if cross_venue_book_crossed else "PASS",
+            "status_reason": (
+                "Individual Gate.io and OKX books are valid, but their combined "
+                "cross-venue NBBO is crossed; no synthetic executable quote is returned."
+                if cross_venue_book_crossed else None
+            ),
             "symbol": normalized,
             "mark_price": (values["gate_mark"] + values["okx_mark"]) / 2.0,
             "index_price": (values["gate_index"] + values["okx_index"]) / 2.0,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
+            "best_bid": None if cross_venue_book_crossed else best_bid,
+            "best_ask": None if cross_venue_book_crossed else best_ask,
+            "cross_venue_best_bid": best_bid,
+            "cross_venue_best_ask": best_ask,
+            "cross_venue_book_crossed": cross_venue_book_crossed,
+            "venue_books": {
+                "gate_io": {"best_bid": values["gate_bid"], "best_ask": values["gate_ask"], "valid": True},
+                "okx": {"best_bid": values["okx_bid"], "best_ask": values["okx_ask"], "valid": True},
+            },
             "funding_rate": (values["gate_funding"] + values["okx_funding"]) / 2.0,
             "funding_interval_hours": funding_interval,
             "open_interest_binance": values["gate_open_interest"],

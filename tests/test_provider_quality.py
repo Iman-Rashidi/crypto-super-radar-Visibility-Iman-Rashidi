@@ -237,34 +237,66 @@ class PerpetualProviderTests(unittest.TestCase):
 class FreeRegionalFallbackTests(unittest.TestCase):
     def test_bybit_spot_access_denial_uses_public_gate_ticker(self):
         http = MagicMock()
+        now_ms = int(time.time() * 1000)
         http.get.side_effect = [
             DataProviderError("HTTP 403 from api.bybit.com"),
             [{"currency_pair": "BTC_USDT", "last": "65000",
               "quote_volume": "1200000"}],
+            [{"currency_pair": "BTC_USDT", "price": "65000.1",
+              "create_time_ms": str(now_ms)}],
         ]
         result = BybitProvider(http).ticker("BTCUSDT")
         self.assertEqual(result["provider"], "Gate.io Spot")
-        self.assertEqual(result["price"], 65000)
+        self.assertEqual(result["price"], 65000.1)
         self.assertEqual(result["volume_24h"], 1200000)
-        self.assertEqual(http.get.call_count, 2)
+        self.assertEqual(result["quote_timestamp_ms"], float(now_ms))
+        self.assertEqual(result["quote_timestamp_kind"], "GATE_SPOT_LATEST_TRADE_CREATE_TIME_MS")
+        self.assertEqual(http.get.call_count, 3)
+        self.assertEqual(http.get.call_args_list[2].args[0], "https://api.gateio.ws/api/v4/spot/trades")
+        self.assertEqual(http.get.call_args_list[2].args[1], {"currency_pair": "BTC_USDT", "limit": 1})
 
     def test_bybit_api_error_uses_exact_gate_gram_pair_and_keeps_fallback_provenance(self):
         http = MagicMock()
+        now_ms = int(time.time() * 1000)
         http.get.side_effect = [
             {"retCode": 170121, "retMsg": "Invalid symbol", "result": {"list": []}},
             [{"currency_pair": "GRAM_USDT", "last": "1.2076",
               "quote_volume": "13379966.04326"}],
+            [{"currency_pair": "GRAM_USDT", "price": "1.2077",
+              "create_time_ms": str(now_ms)}],
         ]
         result = BybitProvider(http).ticker("GRAMUSDT")
         self.assertEqual(result["provider"], "Gate.io Spot")
-        self.assertEqual(result["price"], 1.2076)
+        self.assertEqual(result["price"], 1.2077)
         self.assertEqual(result["volume_24h"], 13379966.04326)
-        self.assertEqual(result["raw"]["currency_pair"], "GRAM_USDT")
+        self.assertEqual(result["raw"]["ticker"]["currency_pair"], "GRAM_USDT")
         self.assertIn("retCode=170121", result["fallback_reason"])
         self.assertEqual(http.get.call_args_list[1].args[0],
                          "https://api.gateio.ws/api/v4/spot/tickers")
         self.assertEqual(http.get.call_args_list[1].args[1],
                          {"currency_pair": "GRAM_USDT"})
+        self.assertEqual(http.get.call_args_list[2].args[0],
+                         "https://api.gateio.ws/api/v4/spot/trades")
+
+    def test_gate_spot_trade_timestamp_and_pair_are_required_for_timestamped_fallback(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            DataProviderError("HTTP 403 from api.bybit.com"),
+            [{"currency_pair": "BTC_USDT", "last": "65000", "quote_volume": "1200000"}],
+            [{"currency_pair": "BTC_USDT", "price": "65000"}],
+        ]
+        with self.assertRaisesRegex(DataProviderError, "missing latest trade timestamp|create_time_ms"):
+            BybitProvider(http).ticker("BTCUSDT")
+
+    def test_gate_spot_trade_pair_mismatch_is_rejected(self):
+        http = MagicMock()
+        http.get.side_effect = [
+            DataProviderError("HTTP 403 from api.bybit.com"),
+            [{"currency_pair": "BTC_USDT", "last": "65000", "quote_volume": "1200000"}],
+            [{"currency_pair": "ETH_USDT", "price": "65000", "create_time_ms": str(int(time.time() * 1000))}],
+        ]
+        with self.assertRaisesRegex(DataProviderError, "latest-trade pair mismatch"):
+            BybitProvider(http).ticker("BTCUSDT")
 
     def test_bybit_api_error_details_survive_when_gate_fallback_fails(self):
         http = MagicMock()
@@ -366,6 +398,51 @@ class FreeRegionalFallbackTests(unittest.TestCase):
         self.assertAlmostEqual(result["funding_rate"], -0.000105)
         self.assertEqual(result["funding_interval_hours"], 8.0)
         self.assertIn("HTTP 451", result["provider_fallback_reason"])
+
+    def test_gate_okx_crossed_cross_venue_nbbo_is_inconclusive_not_bad_source(self):
+        now_ms = int(time.time() * 1000)
+        now_seconds = now_ms / 1000.0
+
+        class CrossedNbboHttp:
+            config = AppConfig()
+
+            def get(self, url, params=None):
+                if "fapi.binance.com" in url:
+                    raise DataProviderError("HTTP 451 from fapi.binance.com")
+                if url.endswith("/futures/usdt/tickers"):
+                    return [{"contract": "BTC_USDT", "mark_price": "65000",
+                             "index_price": "64980", "funding_rate": "-0.00010",
+                             "total_size": "1234"}]
+                if url.endswith("/futures/usdt/order_book"):
+                    return {"current": now_seconds, "update": now_seconds,
+                            "asks": [{"p": "65020"}], "bids": [{"p": "65010"}]}
+                if url.endswith("/market/ticker"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP",
+                            "bidPx": "65030", "askPx": "65040", "ts": str(now_ms)}]}
+                if url.endswith("/public/mark-price"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP",
+                            "markPx": "65001", "ts": str(now_ms)}]}
+                if url.endswith("/market/index-tickers"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT",
+                            "idxPx": "64985", "ts": str(now_ms)}]}
+                if url.endswith("/public/funding-rate"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP",
+                            "fundingRate": "-0.00011", "nextFundingTime": str(now_ms + 3600000)}]}
+                if url.endswith("/public/open-interest"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP",
+                            "oi": "2345", "ts": str(now_ms)}]}
+                raise AssertionError(f"Unexpected market-data URL: {url}")
+
+        provider = PerpetualMarketProvider(CrossedNbboHttp())
+        provider.funding_interval_hours = lambda symbol: 8.0
+        result = provider.execution_snapshot("BTCUSDT")
+        self.assertEqual(result["status"], "INCONCLUSIVE")
+        self.assertTrue(result["cross_venue_book_crossed"])
+        self.assertIsNone(result["best_bid"])
+        self.assertIsNone(result["best_ask"])
+        self.assertTrue(result["venue_books"]["gate_io"]["valid"])
+        self.assertTrue(result["venue_books"]["okx"]["valid"])
+        self.assertGreater(result["cross_venue_best_bid"], result["cross_venue_best_ask"])
 
     def test_gate_okx_fallback_still_blocks_cross_venue_mark_disagreement(self):
         now_ms = int(time.time() * 1000)

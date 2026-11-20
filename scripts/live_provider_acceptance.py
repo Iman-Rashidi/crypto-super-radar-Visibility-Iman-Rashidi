@@ -649,7 +649,12 @@ def run_watchlist(
                     raw_b = snapshot.raw.get("provider_b", {}) if isinstance(snapshot.raw, dict) else {}
                     source_a = epoch_datetime(raw_a.get("quote_timestamp_ms"))
                     source_b = epoch_datetime(raw_b.get("quote_timestamp_ms"))
-                    missing_timestamp = source_a is None or source_b is None
+                    missing_timestamp_sources = [
+                        source_name for source_name, source_time in (
+                            (snapshot.provider_a, source_a), (snapshot.provider_b, source_b)
+                        ) if source_time is None
+                    ]
+                    missing_timestamp = bool(missing_timestamp_sources)
                     age_a = (received - source_a).total_seconds() if source_a else None
                     age_b = (received - source_b).total_seconds() if source_b else None
                     stale = any(age is not None and (age < -60 or age > max_data_age_seconds) for age in (age_a, age_b))
@@ -664,7 +669,9 @@ def run_watchlist(
                     if stale:
                         reasons.append("one or more fallback source timestamps were stale or in the future")
                     if missing_timestamp:
-                        reasons.append("one or more fallback sources omitted a trustworthy timestamp")
+                        reasons.append(
+                            "no trustworthy timestamp from: " + ", ".join(missing_timestamp_sources)
+                        )
                     runner.results.append({
                         "check": "spot_cross_venue_regional_fallback",
                         "provider": f"{snapshot.provider_a} + {snapshot.provider_b}",
@@ -679,6 +686,11 @@ def run_watchlist(
                             "price_discrepancy_pct": snapshot.price_discrepancy_pct,
                             "price_discrepancy_limit_pct": price_discrepancy_limit_pct,
                             "sources": [snapshot.provider_a, snapshot.provider_b],
+                            "source_timestamp_utc_by_provider": {
+                                snapshot.provider_a: iso_utc(source_a),
+                                snapshot.provider_b: iso_utc(source_b),
+                            },
+                            "missing_timestamp_sources": missing_timestamp_sources,
                             "fallback_reason": str(spot_primary.get("reason", ""))[:240],
                         },
                         **({"reason": "; ".join(reasons)} if reasons else {}),
@@ -707,9 +719,10 @@ def run_watchlist(
                     source_timestamp = epoch_datetime(fallback.get("timestamp_ms"))
                     age = (received - source_timestamp).total_seconds() if source_timestamp else None
                     stale = age is not None and (age < -60 or age > max_data_age_seconds)
+                    fallback_status = str(fallback.get("status") or "UNKNOWN").upper()
                     status = (
-                        "FAIL" if latency_ms > max_latency_ms or stale or fallback.get("status") != "PASS"
-                        else "INCONCLUSIVE" if source_timestamp is None
+                        "FAIL" if latency_ms > max_latency_ms or stale or fallback_status == "FAIL"
+                        else "INCONCLUSIVE" if source_timestamp is None or fallback_status != "PASS"
                         else "PASS"
                     )
                     reasons = []
@@ -719,6 +732,8 @@ def run_watchlist(
                         reasons.append("fallback snapshot timestamp was stale or in the future")
                     if source_timestamp is None:
                         reasons.append("fallback snapshot omitted a trustworthy timestamp")
+                    if fallback_status == "INCONCLUSIVE":
+                        reasons.append(str(fallback.get("status_reason") or "fallback source quality is inconclusive"))
                     runner.results.append({
                         "check": "perpetual_cross_venue_regional_fallback",
                         "provider": " + ".join(fallback.get("sources", [])),
@@ -737,6 +752,12 @@ def run_watchlist(
                             "index_price_discrepancy_pct": fallback.get("index_price_discrepancy_pct"),
                             "funding_rate_discrepancy": fallback.get("funding_rate_discrepancy"),
                             "quote_quality": fallback.get("quote_quality"),
+                            "cross_venue_book_crossed": fallback.get("cross_venue_book_crossed"),
+                            "cross_venue_best_bid": fallback.get("cross_venue_best_bid"),
+                            "cross_venue_best_ask": fallback.get("cross_venue_best_ask"),
+                            "venue_books": fallback.get("venue_books"),
+                            "fallback_status": fallback_status,
+                            "fallback_status_reason": fallback.get("status_reason"),
                             "fallback_reason": str(fallback.get("provider_fallback_reason", ""))[:240],
                         },
                         **({"reason": "; ".join(reasons)} if reasons else {}),
