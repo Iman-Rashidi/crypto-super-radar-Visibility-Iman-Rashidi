@@ -1922,6 +1922,9 @@ def _call_challenge1_observer(
                 "error_message": "ناظر مستقل پاسخ موفق نداد؛ اثر معاملاتی اعمال نشد.",
             }
         body = response.json()
+        body_request_id = (body.get("id") or body.get("request_id")) if isinstance(body, dict) else None
+        if isinstance(body_request_id, str) and body_request_id.strip():
+            provider_request_id = body_request_id.strip()[:200]
         choices = body.get("choices") if isinstance(body, dict) else None
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ValueError("OBSERVER_CHOICES_MISSING")
