@@ -8,6 +8,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_executor import (
@@ -17,6 +18,7 @@ from crypto_super_radar.blofin_demo_executor import (
     BloFinDemoExecutor,
     BloFinDemoRiskPolicy,
     BloFinDemoTradeClient,
+    _challenge1_two_reviewer_approval_ready,
     build_demo_order_plan,
 )
 from crypto_super_radar.blofin_demo_readonly import (
@@ -183,6 +185,120 @@ def signal_record(**overrides):
     return record
 
 
+
+def v2_signal_record(**overrides):
+    """Build a structurally valid V2 preflight record with signal-bound review fixtures."""
+    record = signal_record()
+    asof = datetime.now(timezone.utc).replace(microsecond=0)
+    signal_open = asof - timedelta(minutes=15)
+    h1_open = asof - timedelta(hours=1)
+    h4_open = asof - timedelta(hours=4)
+    signal_id = f"challenge1-v2:BTC-USDT:15m:{signal_open.isoformat()}:LONG"
+    wave_phase = "WAVE_3_CONFIRMED"
+    wave_direction = "BULLISH"
+    wave = {
+        "status": "CANDIDATE",
+        "pattern": wave_direction,
+        "phase": wave_phase,
+        "wave_count": 3,
+        "next_wave": 4,
+        "confirmed_pivot_count": 4,
+        "invalidation_price": 97.0,
+        "timeframe": "1H",
+        "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+        "latest_closed_candle_open_utc": h1_open.isoformat(),
+        "data_asof_utc": asof.isoformat(),
+        "wave_alignment": "ALIGNED",
+        "pivots": [
+            {"index": 10, "kind": "LOW", "price": 90.0,
+             "timestamp": (asof - timedelta(hours=12)).isoformat(),
+             "confirmed_at": (asof - timedelta(hours=11)).isoformat()},
+            {"index": 20, "kind": "HIGH", "price": 105.0,
+             "timestamp": (asof - timedelta(hours=9)).isoformat(),
+             "confirmed_at": (asof - timedelta(hours=8)).isoformat()},
+            {"index": 30, "kind": "LOW", "price": 95.0,
+             "timestamp": (asof - timedelta(hours=6)).isoformat(),
+             "confirmed_at": (asof - timedelta(hours=5)).isoformat()},
+            {"index": 40, "kind": "HIGH", "price": 110.0,
+             "timestamp": (asof - timedelta(hours=3)).isoformat(),
+             "confirmed_at": (asof - timedelta(hours=2)).isoformat()},
+        ],
+    }
+    funding_time_ms = int(asof.timestamp() * 1000) - 60_000
+    evidence = {
+        "decision_engine_version": "CHALLENGE_1_V2_1H_4H_15M",
+        "signal_id": signal_id,
+        "instrument_id": "BTC-USDT",
+        "setup_timeframe": "15m",
+        "context_timeframes": ["1H", "4H"],
+        "higher_timeframes_used": True,
+        "completed_candles_only": True,
+        "signal_candle_open_utc": signal_open.isoformat(),
+        "context_1h_candle_open_utc": h1_open.isoformat(),
+        "context_4h_candle_open_utc": h4_open.isoformat(),
+        "data_asof_utc": asof.isoformat(),
+        "funding_rate": 0.0001,
+        "funding_kind": "0",
+        "funding_event_time_ms": funding_time_ms,
+        "funding_max_age_ms": 900_000,
+        "elliott_wave": wave,
+        "wave_alignment": "ALIGNED",
+    }
+    record.update({
+        "signal": "LONG",
+        "signal_id": signal_id,
+        "instrument_id": "BTC-USDT",
+        "inst_id": "BTC-USDT",
+        "execution_profile": "CHALLENGE_1_V2",
+        "entry": 100.0,
+        "stop_loss": 98.0,
+        "take_profit": 106.0,
+        "gross_rr": 3.0,
+        "confidence_score": 85.0,
+        "score_parts": {
+            "h1_h4_alignment": 30,
+            "adx_gt_28": 20,
+            "value_zone_rejection": 25,
+            "volume_gt_1_5x": 0,
+            "btc_alignment": 10,
+        },
+        "funding_rate": 0.0001,
+        "funding_kind": "0",
+        "funding_event_time_ms": funding_time_ms,
+        "funding_max_age_ms": 900_000,
+        "spread_fraction": 0.0002,
+        "signal_candle_open_utc": signal_open.isoformat(),
+        "orders_submitted": False,
+        "regime": {
+            "status": "TREND",
+            "direction": "LONG",
+            "candle_open_utc": h1_open.isoformat(),
+            "candle_open_utc_4h": h4_open.isoformat(),
+            "aligned_4h": True,
+        },
+        "challenge1_v2_evidence": evidence,
+    })
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+    for item in record["ai_reviews"]:
+        review = item["review"]
+        review.update({
+            "reviewed_signal_id": signal_id,
+            "reviewed_at_utc": reviewed_at,
+            "expected_side": "LONG",
+            "trader_proposal": "LONG",
+            "elliott_wave_phase": wave_phase,
+            "elliott_wave_direction": wave_direction,
+        })
+    record["ai_consensus"].update({
+        "expected_side": "LONG",
+        "elliott_wave_phase": wave_phase,
+        "elliott_wave_direction": wave_direction,
+        "reviewed_signal_id": signal_id,
+        "reviewed_at_utc": reviewed_at,
+    })
+    record.update(overrides)
+    return record
+
 def instrument_record(**overrides):
     record = {
         "instId": "BTC-USDT",
@@ -218,7 +334,74 @@ class FakeResponse:
         return self.payload
 
 
+class BloFinDemoV2OrderPlanTests(unittest.TestCase):
+    def test_v2_plan_accepts_only_its_own_multitimeframe_evidence_contract(self):
+        record = v2_signal_record()
+        ready, reason = _challenge1_two_reviewer_approval_ready(record)
+        self.assertTrue(ready, reason)
+        plan = build_demo_order_plan(
+            record, instrument_record(), inst_id="BTC-USDT",
+            equity_usdt=1000, leverage=1,
+        )
+        self.assertEqual(plan["signal_id"], record["signal_id"])
+        self.assertEqual(plan["side"], "LONG")
+        self.assertEqual(plan["stop_loss"], "98")
+        self.assertEqual(plan["take_profit"], "106")
+        self.assertLessEqual(Decimal(plan["reserved_risk_usdt"]), Decimal("2.5"))
+
+    def test_v2_plan_rejects_missing_or_unsupported_funding_proof(self):
+        for field, value in (("funding_kind", None), ("funding_kind", "1"),
+                             ("funding_event_time_ms", None), ("funding_max_age_ms", 0)):
+            record = v2_signal_record()
+            if value is None:
+                record.pop(field, None)
+                record["challenge1_v2_evidence"].pop(field, None)
+            else:
+                record[field] = value
+                record["challenge1_v2_evidence"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(BloFinDemoExecutionBlocked):
+                build_demo_order_plan(
+                    record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+                )
+
+    def test_v2_quorum_rejects_a_reviewer_bound_to_another_signal(self):
+        record = v2_signal_record()
+        record["ai_reviews"][1]["review"]["reviewed_signal_id"] = "another-signal"
+        ready, reason = _challenge1_two_reviewer_approval_ready(record)
+        self.assertFalse(ready)
+        self.assertIn("different signal", reason)
+
+    def test_v2_event_journal_keeps_multitimeframe_funding_and_reviewer_evidence(self):
+        store = BloFinDemoEventStore(":memory:")
+        record = v2_signal_record()
+        try:
+            experience_id = store.record_challenge1_v2_decision(
+                instrument_id="BTC-USDT", challenge_record=record,
+            )
+            self.assertEqual(
+                experience_id,
+                store.record_challenge1_v2_decision(
+                    instrument_id="BTC-USDT", challenge_record=record,
+                ),
+            )
+            self.assertEqual(store.learning_memory.verify_experience(experience_id)["status"], "PASS")
+            experience = store.learning_memory.get_experience(experience_id)
+            snapshot = experience["events"][0]["payload"]["input_snapshot"]
+            self.assertEqual(snapshot["setup_timeframe"], "15m")
+            self.assertEqual(snapshot["context_timeframes"], ["1H", "4H"])
+            self.assertEqual(snapshot["funding_kind"], "0")
+            self.assertEqual(len(snapshot["ai_reviews"]), 2)
+            self.assertEqual(snapshot["challenge1_v2_evidence"]["signal_id"], record["signal_id"])
+        finally:
+            store.close()
+
 class BloFinDemoOrderPlanTests(unittest.TestCase):
+    def test_four_concurrent_positions_is_supported_but_five_is_rejected(self):
+        self.assertEqual(BloFinDemoRiskPolicy().max_concurrent_positions, 1)
+        self.assertEqual(BloFinDemoRiskPolicy(max_concurrent_positions=4).max_concurrent_positions, 4)
+        with self.assertRaises(ValueError):
+            BloFinDemoRiskPolicy(max_concurrent_positions=5)
+
     def test_contract_size_is_sized_from_risk_and_contract_value(self):
         plan = build_demo_order_plan(
             signal_record(), instrument_record(), inst_id="BTC-USDT",
@@ -595,6 +778,70 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertFalse(self.store.reserve_order(plan, external_open_positions=1))
         self.assertFalse(self.store.reserve_order(plan, external_pending_orders=1))
         self.assertFalse(self.store.has_any_orders())
+
+    @staticmethod
+    def _small_reservation_plan(index: int):
+        return {
+            "client_order_id": f"{index:032x}",
+            "signal_id": f"capacity-four-signal-{index}",
+            "inst_id": "BTC-USDT",
+            "side": "LONG",
+            "quantity": "0.1",
+            "entry_reference_price": 100.0,
+            "stop_loss": "99",
+            "take_profit": "102",
+            "leverage": 1,
+            "reserved_risk_usdt": "0.5",
+            "reserved_margin_usdt": "10",
+            "aggregate_risk_limit_usdt": "5",
+            "aggregate_margin_limit_usdt": "100",
+        }
+
+    def test_four_reservations_fit_below_aggregate_limits_and_fifth_is_blocked(self):
+        plans = [self._small_reservation_plan(index) for index in range(5)]
+        for plan in plans[:4]:
+            self.assertTrue(self.store.reserve_order(plan, max_concurrent_positions=4))
+        self.assertFalse(self.store.reserve_order(plans[4], max_concurrent_positions=4))
+        budget = self.store.trade_budget_status()
+        self.assertEqual(budget["active_reservations"], 4)
+        self.assertEqual(budget["aggregate_reserved_risk_usdt"], "2")
+        self.assertEqual(budget["aggregate_reserved_margin_usdt"], "40")
+
+    def test_five_position_reservation_limit_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "between 1 and 4"):
+            self.store.reserve_order(self._small_reservation_plan(0), max_concurrent_positions=5)
+
+    def test_four_slot_reservation_is_atomic_across_independent_connections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "shared-demo-four.sqlite3")
+            stores = [BloFinDemoEventStore(database_path) for _ in range(8)]
+            try:
+                plans = [self._small_reservation_plan(index) for index in range(len(stores))]
+                barrier = threading.Barrier(len(stores))
+
+                def reserve_on_independent_connection(index):
+                    barrier.wait(timeout=10)
+                    return stores[index].reserve_order(
+                        plans[index], max_concurrent_positions=4,
+                    )
+
+                with ThreadPoolExecutor(max_workers=len(stores)) as pool:
+                    results = list(pool.map(
+                        reserve_on_independent_connection, range(len(stores))
+                    ))
+                self.assertEqual(results.count(True), 4)
+                self.assertEqual(results.count(False), 4)
+                self.assertEqual(
+                    stores[0]._db.execute("SELECT COUNT(*) FROM blofin_demo_orders").fetchone()[0],
+                    4,
+                )
+                budget = stores[0].trade_budget_status()
+                self.assertEqual(budget["active_reservations"], 4)
+                self.assertEqual(budget["aggregate_reserved_risk_usdt"], "2")
+                self.assertEqual(budget["aggregate_reserved_margin_usdt"], "40")
+            finally:
+                for store in stores:
+                    store.close()
 
     def test_capacity_reservation_is_atomic_across_independent_connections(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1108,6 +1355,28 @@ class FakeExecutorClient:
         self.calls.append(("place_order", kwargs))
         return self.order_response
 
+
+class BloFinDemoV2ExecutorTests(unittest.TestCase):
+    def test_v2_executor_blocks_missing_reviewer_before_any_exchange_call_or_reservation(self):
+        store = BloFinDemoEventStore(":memory:")
+        store.backend = "TURSO_CLOUD_SQLITE"
+        client = FakeExecutorClient()
+        executor = BloFinDemoExecutor(client=client, store=store, trading_enabled=True)
+        record = v2_signal_record()
+        record["ai_reviews"].pop()
+        try:
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                executor.execute(
+                    record, inst_id="BTC-USDT", leverage=1,
+                    allow_demo_orders=True,
+                )
+            self.assertEqual(client.calls, [])
+            self.assertEqual(
+                store._db.execute("SELECT COUNT(*) FROM blofin_demo_orders").fetchone()[0],
+                0,
+            )
+        finally:
+            store.close()
 
 class BloFinDemoExecutorTests(unittest.TestCase):
     def test_two_key_safety_gate_blocks_by_default(self):
