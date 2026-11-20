@@ -91,6 +91,18 @@ class FakeSession:
         return FakeResponse(self.payload)
 
 
+class FakePostSession:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.headers = {}
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        payload = self.payloads.pop(0)
+        return FakeResponse(payload)
+
+
 class FakeBlockedResponse:
     def __init__(self, status_code):
         self.status_code = status_code
@@ -117,6 +129,51 @@ class FakeLimiter:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_solana_rpc_batches_independent_health_and_slot_calls(self):
+        now = datetime.now(timezone.utc)
+        block_time = int(now.timestamp())
+        session = FakePostSession([
+            [
+                {"jsonrpc": "2.0", "id": 2, "result": 471832476},
+                {"jsonrpc": "2.0", "id": 1, "result": "ok"},
+            ],
+            {"jsonrpc": "2.0", "id": 1, "result": block_time},
+        ])
+        runner = AcceptanceRunner(session=session, limiter=FakeLimiter())
+        result = runner.check_solana_rpc()
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["details"]["health"], "ok")
+        self.assertEqual(result["details"]["confirmed_slot"], 471832476)
+        self.assertEqual(result["details"]["rpc_round_trips"], 2)
+        self.assertEqual(len(session.calls), 2)
+        first_body = session.calls[0][1]["json"]
+        self.assertEqual([item["method"] for item in first_body], ["getHealth", "getSlot"])
+        self.assertEqual(session.calls[1][1]["json"]["method"], "getBlockTime")
+
+    def test_solana_rpc_batch_rejects_missing_duplicate_or_error_responses(self):
+        bad_payloads = [
+            [{"jsonrpc": "2.0", "id": 1, "result": "ok"}],
+            [
+                {"jsonrpc": "2.0", "id": 1, "result": "ok"},
+                {"jsonrpc": "2.0", "id": 1, "result": 100},
+            ],
+            [
+                {"jsonrpc": "2.0", "id": 1, "result": "ok"},
+                {"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "unavailable"}},
+            ],
+        ]
+        for payload in bad_payloads:
+            with self.subTest(payload=payload):
+                runner = AcceptanceRunner(
+                    session=FakePostSession([payload]),
+                    limiter=FakeLimiter(),
+                )
+                with self.assertRaises(ValueError):
+                    runner._rpc_batch(
+                        "https://api.mainnet-beta.solana.com",
+                        [("getHealth", []), ("getSlot", [{"commitment": "confirmed"}])],
+                    )
+
     def test_symbol_validation_blocks_url_or_parameter_injection(self):
         with self.assertRaises(ValueError):
             AcceptanceRunner(symbol="BTCUSDT&foo=bar")

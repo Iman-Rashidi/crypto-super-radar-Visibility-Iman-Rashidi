@@ -160,7 +160,7 @@ class AcceptanceRunner:
         url: str,
         *,
         params: Optional[dict] = None,
-        body: Optional[dict] = None,
+        body: Optional[Any] = None,
     ) -> tuple[Any, float, datetime]:
         self.limiter.wait(url)
         started = time.monotonic()
@@ -189,6 +189,48 @@ class AcceptanceRunner:
         if "result" not in payload:
             raise ValueError(f"{method}: JSON-RPC response omitted result")
         return payload["result"], latency, received
+
+    def _rpc_batch(self, url: str, calls: list[tuple[str, list[Any]]]) -> dict[int, Any]:
+        """Send independent read-only JSON-RPC calls in one HTTP POST.
+
+        The response may be returned in any order. Every request ID must appear
+        exactly once, and any missing result or RPC error fails closed.
+        """
+        if not isinstance(calls, list) or not calls:
+            raise ValueError("JSON-RPC batch calls must be a non-empty list")
+        requests_payload = [
+            {
+                "jsonrpc": "2.0",
+                "id": index,
+                "method": method,
+                "params": params,
+            }
+            for index, (method, params) in enumerate(calls, start=1)
+        ]
+        payload, _, _ = self._request_json("post", url, body=requests_payload)
+        if not isinstance(payload, list) or len(payload) != len(requests_payload):
+            raise ValueError("JSON-RPC batch response has an invalid length or schema")
+        expected_ids = {item["id"] for item in requests_payload}
+        results: dict[int, Any] = {}
+        for item in payload:
+            if not isinstance(item, dict) or item.get("jsonrpc") != "2.0":
+                raise ValueError("JSON-RPC batch response contains an invalid envelope")
+            response_id = item.get("id")
+            if isinstance(response_id, bool) or response_id not in expected_ids or response_id in results:
+                raise ValueError("JSON-RPC batch response contains an unknown or duplicate ID")
+            if item.get("error"):
+                error_payload = item.get("error")
+                code = error_payload.get("code") if isinstance(error_payload, dict) else None
+                message = error_payload.get("message") if isinstance(error_payload, dict) else str(error_payload)
+                raise ValueError(
+                    f"JSON-RPC batch method failed: code={code}, message={str(message)[:120]}"
+                )
+            if "result" not in item:
+                raise ValueError("JSON-RPC batch response omitted a result")
+            results[int(response_id)] = item["result"]
+        if set(results) != expected_ids:
+            raise ValueError("JSON-RPC batch response omitted one or more request IDs")
+        return results
 
     def _probe(
         self,
@@ -489,13 +531,28 @@ class AcceptanceRunner:
 
     def check_solana_rpc(self) -> dict[str, Any]:
         def operation():
-            health, _, _ = self._rpc(SOLANA_RPC, "getHealth", [])
-            slot, _, _ = self._rpc(SOLANA_RPC, "getSlot", [{"commitment": "confirmed"}])
+            # Health and confirmed-slot reads are independent and are sent as one
+            # standard JSON-RPC batch to avoid two extra round trips/limiter waits.
+            batch = self._rpc_batch(
+                SOLANA_RPC,
+                [
+                    ("getHealth", []),
+                    ("getSlot", [{"commitment": "confirmed"}]),
+                ],
+            )
+            health, slot = batch[1], batch[2]
             if health != "ok" or isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
                 raise ValueError("Solana RPC health or confirmed slot is invalid")
+            # Block time depends on the returned slot and therefore remains a
+            # second read-only request; freshness is still checked against source time.
             block_time, _, _ = self._rpc(SOLANA_RPC, "getBlockTime", [slot])
             source = epoch_datetime(block_time)
-            return {"health": health, "confirmed_slot": slot}, source
+            return {
+                "health": health,
+                "confirmed_slot": slot,
+                "rpc_transport": "JSON_RPC_BATCH_PLUS_DEPENDENT_BLOCK_TIME",
+                "rpc_round_trips": 2,
+            }, source
         return self._probe("solana_rpc", "Solana Mainnet JSON-RPC", operation)
 
     def check_fear_greed(self) -> dict[str, Any]:
