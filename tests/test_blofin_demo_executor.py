@@ -56,7 +56,6 @@ def signal_record(**overrides):
         "gate_fail_count": fail_count,
         "gate_unknown_count": unknown_count,
         "gates": [{"gate_id": gate_id, "status": statuses[gate_id - 1]} for gate_id in range(1, 13)],
-        "gates": [{"gate_id": gate_id, "status": statuses[gate_id - 1]} for gate_id in range(1, 13)],
         "entry_price_usd": 100.0,
         "stop_loss_usd": 98.0,
         "take_profit_usd": 106.0,
