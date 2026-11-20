@@ -6,13 +6,13 @@ import os
 import sqlite3
 import tempfile
 import threading
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.blofin_demo_executor import (
-    BloFinDemoEventStore,
     BloFinDemoExecutionBlocked,
     BloFinDemoExecutionUnknown,
     BloFinDemoExecutor,
@@ -57,13 +57,13 @@ def signal_record(**overrides):
         "gate_fail_count": fail_count,
         "gate_unknown_count": unknown_count,
         "gates": [{"gate_id": gate_id, "status": statuses[gate_id - 1]} for gate_id in range(1, 13)],
+        "gates": [{"gate_id": gate_id, "status": statuses[gate_id - 1]} for gate_id in range(1, 13)],
         "entry_price_usd": 100.0,
         "stop_loss_usd": 98.0,
-        "take_profit_usd": 104.0,
+        "take_profit_usd": 106.0,
     }
     record.update(overrides)
     side = str(record["signal"]).upper()
-    pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
     pattern_name = "Bullish Engulfing" if side == "LONG" else "Bearish Engulfing"
     base_bar = datetime.fromisoformat("2026-11-13T18:00:00+00:00")
     bar_offset = int(overrides.get("bar_offset_minutes", 0))
@@ -164,6 +164,7 @@ def signal_record(**overrides):
     ]
     final_request_time = last_time + timedelta(minutes=5)
     initial_request_time = last_time
+    reviewed_at_utc = datetime.now(timezone.utc).isoformat()
     for row in reviewers:
         review = row["review"]
         if row["reviewer_id"] == "nemotron":
@@ -171,6 +172,8 @@ def signal_record(**overrides):
         else:
             review["requested_at_utc"] = final_request_time.isoformat()
         review["completed_at_utc"] = (final_request_time + timedelta(seconds=2)).isoformat()
+        review["reviewed_signal_id"] = signal_id
+        review["reviewed_at_utc"] = reviewed_at_utc
 
     record["ai_reviews"] = reviewers
     record["ai_consensus"] = {
@@ -184,6 +187,8 @@ def signal_record(**overrides):
         "two_reviewer_approval": True,
         "decision": "AUTHORIZE_DEMO_EXECUTION",
         "entry_gate_enforced": True,
+        "reviewed_signal_id": signal_id,
+        "reviewed_at_utc": reviewed_at_utc,
     }
     initial_reviews = copy.deepcopy(reviewers)
     for row in initial_reviews:
@@ -195,6 +200,12 @@ def signal_record(**overrides):
         review["completed_at_utc"] = (initial_request_time + timedelta(seconds=2)).isoformat()
     initial_bar = last_time - timedelta(minutes=5)
     initial_signal_id = f"challenge1-v4:BTC-USDT:5m:{initial_bar.isoformat()}"
+    for row in initial_reviews:
+        row["review"]["reviewed_signal_id"] = initial_signal_id
+        row["review"]["reviewed_at_utc"] = reviewed_at_utc
+    initial_consensus = copy.deepcopy(record["ai_consensus"])
+    initial_consensus["reviewed_signal_id"] = initial_signal_id
+    initial_consensus["reviewed_at_utc"] = reviewed_at_utc
     evaluation = {
         "status": "PASS",
         "minimum_window_seconds": 300,
@@ -220,7 +231,7 @@ def signal_record(**overrides):
         "window_completed_at_utc": final_request_time.isoformat(),
         "initial_round": {
             "ai_reviews": initial_reviews,
-            "ai_consensus": copy.deepcopy(record["ai_consensus"]),
+            "ai_consensus": initial_consensus,
         },
         "final_round": {
             "reviewer_ids": ["nemotron", "second_ai"],
@@ -1188,25 +1199,26 @@ class FakeExecutorClient:
     api_secret = "fake-demo-secret"
     passphrase = "fake-demo-passphrase"
 
+
     def __init__(self):
         self.calls = []
+        self.ticker_quote = {"bidPrice": "99.99", "askPrice": "100.01"}
         self.order_response = {"code": "0", "data": [{"code": "0", "orderId": "simulated-demo-id"}]}
 
     def verify_trade_permission(self):
-        self.calls.append("trade_permission")
         return {"readOnly": 0, "trade_permission": True}
 
     def check_clock_skew(self, *, inst_id):
         self.calls.append("clock")
         return {"offset_ms": 0}
 
+
     def get_tickers(self, *, inst_id=None):
         self.calls.append("ticker")
-        return [{"instId": inst_id, "last": "100", "ts": "1800000000000"}]
+        return [{"instId": inst_id, "last": "100", "ts": "1800000000000", **self.ticker_quote}]
 
     def get_position_mode(self):
         self.calls.append("position_mode")
-        return {"positionMode": "net_mode"}
 
     def get_tradable_instrument(self, inst_id):
         self.calls.append("instrument")
@@ -1312,6 +1324,22 @@ class BloFinDemoExecutorTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_execution_cost_gate_rejects_wide_spread_and_missing_quote(self):
+        from crypto_super_radar.blofin_demo_executor import apply_demo_execution_cost_gate
+
+        plan = {
+            "side": "LONG", "entry_reference_price": "100",
+            "stop_loss": "98", "take_profit": "104", "quantity": "1",
+        }
+        instrument = {"contractValue": "0.001"}
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            apply_demo_execution_cost_gate(
+                dict(plan), instrument,
+                {"bidPrice": "80", "askPrice": "105"},
+            )
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            apply_demo_execution_cost_gate(dict(plan), instrument, {})
+
     def test_executor_blocks_missing_or_invalid_two_reviewer_quorum_before_any_exchange_call(self):
         def sync_evaluation(item):
             item["ai_consensus"]["entry_evaluation_window"] = copy.deepcopy(
@@ -1396,12 +1424,18 @@ class BloFinDemoExecutorTests(unittest.TestCase):
                 elliott_wave_phase="WAVE_4_CONFIRMED",
             ),
             "cached response": lambda item: item["ai_reviews"][1]["review"].update(
+            "cached response": lambda item: item["ai_reviews"][1]["review"].update(
                 response_source="CACHE", request_attempted=False,
+            ),
+            "stale approval": lambda item: item["ai_reviews"][0]["review"].update(
+                reviewed_at_utc=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+            ),
+            "approval for another signal": lambda item: item["ai_reviews"][1]["review"].update(
+                reviewed_signal_id="different-signal-id",
             ),
         }
         for label, mutate in mutations.items():
             with self.subTest(case=label):
-                with patch.dict(os.environ, {
                     "TURSO_DATABASE_URL": "",
                     "TURSO_AUTH_TOKEN": "",
                 }):

@@ -4930,7 +4930,9 @@ def _run_blofin_demo_execution_job(
             reason="Initial independent reviewer round is required before the five-minute wait and revalidation.",
         )
         failed_operation = "ai_supervisors.initial_request_and_validate_quorum"
-        initial_ai_quorum = _run_challenge1_supervisor_reviews(analysis, asset)
+        initial_ai_quorum = _run_challenge1_supervisor_reviews(
+            analysis, asset, signal_id=str(record.get("signal_id") or ""),
+        )
         _record_challenge1_audit(
             job_id, "AI_REVIEW_INITIAL_RESULT",
             {
@@ -5278,7 +5280,9 @@ def _run_blofin_demo_execution_job(
                 reason="Final independent reviewer round is mandatory after the five-minute fresh-candle check.",
             )
             failed_operation = "ai_supervisors.final_request_and_validate_quorum"
-            final_ai_quorum = _run_challenge1_supervisor_reviews(analysis, asset)
+            final_ai_quorum = _run_challenge1_supervisor_reviews(
+            analysis, asset, signal_id=str(record.get("signal_id") or ""),
+        )
             _record_challenge1_audit(
                 job_id, "AI_REVIEW_FINAL_RESULT",
                 {
@@ -5481,13 +5485,18 @@ def _run_blofin_demo_execution_job(
             _queue_blofin_completed_job_reports(job_id, instrument_id)
             return
 
+
         client = BloFinDemoTradeClient(timeout=10.0)
         policy = BloFinDemoRiskPolicy(
-            max_leverage=1, min_confirmation_score=float(profile_rule["min_score"]),
+            max_leverage=1,
+            min_confirmation_score=float(profile_rule["min_score"]),
+            taker_fee_rate=float(os.getenv("BLOFIN_DEMO_TAKER_FEE_RATE", "0.0006")),
+            estimated_slippage_bps_per_side=float(
+                os.getenv("BLOFIN_DEMO_ESTIMATED_SLIPPAGE_BPS_PER_SIDE", "2.0")
+            ),
         )
         trader = BloFinDemoExecutor(
             client=client, store=store, policy=policy, trading_enabled=True,
-        )
         _record_challenge1_audit(
             job_id, "ORDER_SUBMISSION_AUTHORIZED",
             {
@@ -9568,13 +9577,13 @@ def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict
     notion = _queue_blofin_job_notion_events(job_id, instrument_id, job)
     activity = _queue_blofin_activity_journal(job_id, instrument_id, job)
     return {"status": "QUEUED", "notion": notion, "activity": activity}
+    return {"status": "QUEUED", "notion": notion, "activity": activity}
 
 def _run_challenge1_supervisor_reviews(
-    analysis: Any, asset: AssetSpec,
+    analysis: Any, asset: AssetSpec, *, signal_id: str | None = None,
 ) -> dict[str, Any]:
     """Run two independent AI reviews and return a fail-closed Demo entry quorum."""
     signal_value = getattr(analysis, "signal", "UNKNOWN")
-    expected_side = str(getattr(signal_value, "value", signal_value) or "UNKNOWN").upper()
     metrics = getattr(analysis, "metrics", {})
     metrics = metrics if isinstance(metrics, dict) else {}
     evidence = metrics.get("challenge1_evidence")
@@ -9626,12 +9635,18 @@ def _run_challenge1_supervisor_reviews(
         second = unavailable("second_ai", "InvalidReviewPayload")
     primary, second = dict(primary), dict(second)
     primary.setdefault("reviewer_id", "nemotron")
+    primary.setdefault("reviewer_id", "nemotron")
     second.setdefault("reviewer_id", "second_ai")
+
+    reviewed_at_utc = datetime.now(timezone.utc).isoformat()
+    reviewed_signal_id = str(signal_id or "").strip()
+    for reviewer in (primary, second):
+        reviewer["reviewed_signal_id"] = reviewed_signal_id
+        reviewer["reviewed_at_utc"] = reviewed_at_utc
 
     primary_verified, second_verified = verified(primary), verified(second)
     primary_wave_match = (
         primary.get("elliott_wave_phase") == expected_wave_phase
-        and primary.get("elliott_wave_direction") == expected_wave_direction
     )
     second_wave_match = (
         second.get("elliott_wave_phase") == expected_wave_phase
@@ -9724,12 +9739,14 @@ def _run_challenge1_supervisor_reviews(
         "elliott_wave_phase": expected_wave_phase,
         "elliott_wave_direction": expected_wave_direction,
         "two_reviewer_approval": two_approvals,
+        "two_reviewer_approval": two_approvals,
         "decision": decision,
         "entry_gate_enforced": True,
+        "reviewed_signal_id": reviewed_signal_id,
+        "reviewed_at_utc": reviewed_at_utc,
         "status_fa": status_fa,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
     }
-    ai_status = "APPROVED_BY_BOTH" if two_approvals else consensus_status
     return {
         "approved": two_approvals, "status": ai_status, "ai_status": ai_status,
         "ai_review": primary, "second_ai_review": second,
@@ -9819,8 +9836,12 @@ def _blofin_manual_close_position(
         pnl = None
 
     action_source = str(action_source or "MANUAL").strip().upper()
-    if action_source not in {"MANUAL", "AUTOPILOT", "AI_SUPERVISOR"}:
+    if action_source not in {"MANUAL", "AUTOPILOT", "AI_SUPERVISOR", "RISK_OVERRIDE"}:
         raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
+    if action_source == "AI_SUPERVISOR" and os.getenv(
+        "BLOFIN_DEMO_AI_SUPERVISOR_INTERVENTIONS_ENABLED", ""
+    ).strip().lower() not in {"1", "true", "yes", "on"}:
+        raise BloFinDemoExecutionBlocked("AI supervisor interventions are disabled for BloFin Demo.")
     if action_source == "AUTOPILOT":
         try:
             minimum_profit = max(
@@ -9836,8 +9857,11 @@ def _blofin_manual_close_position(
     audit_event_id = str(audit_id or action_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_event_id):
         raise BloFinDemoExecutionBlocked("شناسه ثبت گزارش بستن پوزیشن معتبر نیست.")
-    event_prefix = "AI_SUPERVISOR" if action_source == "AI_SUPERVISOR" else (
-        "AUTO" if action_source == "AUTOPILOT" else "MANUAL"
+    event_prefix = (
+        "AI_SUPERVISOR" if action_source == "AI_SUPERVISOR"
+        else "RISK_OVERRIDE" if action_source == "RISK_OVERRIDE"
+        else "AUTO" if action_source == "AUTOPILOT"
+        else "MANUAL"
     )
     requested_event = f"{event_prefix}_POSITION_CLOSE_REQUESTED"
     accepted_event = f"{event_prefix}_POSITION_CLOSE_ACCEPTED"
@@ -10829,18 +10853,18 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                 "dashboard_auth_configured": bool(readiness.get("dashboard_auth_configured")),
                 "durable_storage": bool(readiness.get("durable_storage")),
                 "event_store_readable": bool(readiness.get("event_store_readable")),
+                "event_store_readable": bool(readiness.get("event_store_readable")),
                 "message_fa": message_fa,
             }
-        raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.50")
+        raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")
         raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
         try:
             minimum_profit = max(0.01, min(float(raw_min_profit), 100_000.0))
         except (TypeError, ValueError):
-            minimum_profit = 0.50
+            minimum_profit = 0.02
         try:
             maximum_hold = max(900, min(int(raw_max_hold), 604_800))
         except (TypeError, ValueError):
-            maximum_hold = 86_400
 
         store = BloFinDemoEventStore()
         pending_orders = store.orders_pending_learning_outcome(limit=50)
@@ -10981,6 +11005,9 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "AUTO_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_UNKNOWN",
                     "AI_SUPERVISOR_POSITION_CLOSE_ACCEPTED",
                     "AI_SUPERVISOR_POSITION_CLOSE_UNKNOWN",
+                    "RISK_OVERRIDE_POSITION_CLOSE_REQUESTED",
+                    "RISK_OVERRIDE_POSITION_CLOSE_ACCEPTED",
+                    "RISK_OVERRIDE_POSITION_CLOSE_UNKNOWN",
                 }
             ]
             if prior_close:
@@ -11239,14 +11266,73 @@ def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
                     "message_fa": "ثبت کامل چرخه پایش یا وضعیت عدم فراخوانی ناظرها تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
                 })
                 continue
+                continue
             if not reason:
                 if stop_loss_threshold_reached:
+                    protection_status = str(protective_evidence.get("status") or "").upper()
+                    verified_sl_present = protection_status in {
+                        "BOTH_TP_AND_SL_VISIBLE", "SL_ONLY_VISIBLE",
+                    }
+                    verified_sl_absent = protection_status in {
+                        "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+                        "TP_ONLY_VISIBLE",
+                        "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
+                    }
+                    if verified_sl_absent:
+                        try:
+                            _record_challenge1_audit(
+                                experience_id or position_id, "RISK_OVERRIDE_EXIT_AUTHORIZED",
+                                {
+                                    **exit_basis,
+                                    "decision": "CLOSE_DEMO_POSITION",
+                                    "precondition": (
+                                        "Exact linked position matched, mark crossed stored stop, "
+                                        "and no active exchange SL could be verified."
+                                    ),
+                                    "protective_order_status": protection_status,
+                                    "loss_exit_permitted": True,
+                                },
+                                event_key=f"risk-override-exit:{audit_position_id}:{cycle_epoch_ms}",
+                                experience_id=experience_id, position_id=audit_position_id,
+                                status="WARNING",
+                                reason="Stop threshold crossed without verifiable exchange SL; exact-position risk override requested.",
+                            )
+                            close_result = _blofin_manual_close_position(
+                                instrument_id=instrument_id,
+                                position_id=position_id,
+                                action_source="RISK_OVERRIDE",
+                                audit_id=client_order_id,
+                                exit_reason="STOP_LOSS_CROSSED_WITHOUT_VERIFIED_SL",
+                            )
+                            actions.append({
+                                "status": "RISK_OVERRIDE_CLOSE_REQUESTED",
+                                "instrument_id": instrument_id,
+                                "position_id": position_id,
+                                "stop_loss_price": stop_value,
+                                "mark_price": mark_price_value,
+                                "protective_orders": protective_evidence,
+                                "exchange_response": close_result.get("exchange_response"),
+                                "position_cycle_audit": audit_result,
+                            })
+                        except Exception as close_exc:
+                            actions.append({
+                                "status": "RISK_OVERRIDE_CLOSE_NOT_CONFIRMED",
+                                "instrument_id": instrument_id,
+                                "position_id": position_id,
+                                "error_type": type(close_exc).__name__,
+                                "protective_orders": protective_evidence,
+                                "position_cycle_audit": audit_result,
+                            })
+                        continue
                     actions.append({
-                        "status": "STOP_LOSS_LEVEL_CROSSED_NO_MANUAL_CLOSE_SENT",
+                        "status": (
+                            "STOP_LOSS_LEVEL_CROSSED_AWAIT_EXCHANGE_SL"
+                            if verified_sl_present
+                            else "STOP_LOSS_LEVEL_CROSSED_PROTECTION_STATE_UNKNOWN"
+                        ),
                         "instrument_id": instrument_id,
                         "position_id": position_id,
                         "stop_loss_price": stop_value,
-                        "mark_price": mark_price_value,
                         "protective_orders": protective_evidence,
                         "position_cycle_audit": audit_result,
                     })
