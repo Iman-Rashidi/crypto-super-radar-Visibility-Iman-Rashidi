@@ -5530,7 +5530,7 @@ def _run_blofin_demo_execution_job(
                     key: execution.get(key) for key in (
                         "status", "side", "quantity_contracts", "entry_reference_price",
                         "exchange_order_id", "client_order_id", "stop_loss", "take_profit",
-                        "risk_budget_usdt", "leverage",
+                        "risk_budget_usdt", "leverage", "sizing_mode", "risk_based_sizing_validated",
                     ) if key in execution
                 },
                 "orders_submitted": True, "environment": "BLOFIN_DEMO",
