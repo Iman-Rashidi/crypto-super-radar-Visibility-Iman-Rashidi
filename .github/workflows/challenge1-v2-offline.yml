@@ -3,9 +3,11 @@ on:
   push:
     branches:
       - feature/challenge1-v2-confluence-dynamic-exit
+      - feature/unified-pattern-intelligence-v3
   pull_request:
     branches:
       - feature/challenge1-v2-confluence-dynamic-exit
+      - feature/unified-pattern-intelligence-v3
 permissions:
   contents: read
 concurrency:
@@ -32,10 +34,14 @@ jobs:
             crypto_super_radar/challenge1_v2.py \
             crypto_super_radar/adaptive_brain.py \
             tests/test_challenge1_v2_time_exit_and_lookahead.py \
-            tests/test_challenge1_v2_risk_brain_replay.py
+            tests/test_challenge1_v2_risk_brain_replay.py \
+            crypto_super_radar/pattern_intelligence_v3.py \
+            tests/test_pattern_intelligence_v3.py
       - name: Test time-exit limit and as-of isolation
         run: |
           python -m unittest discover -s tests \
             -p 'test_challenge1_v2_time_exit_and_lookahead.py' -v
           python -m unittest discover -s tests \
             -p 'test_challenge1_v2_risk_brain_replay.py' -v
+          python -m unittest discover -s tests \
+            -p 'test_pattern_intelligence_v3.py' -v
