@@ -585,6 +585,18 @@ def apply_demo_execution_cost_gate(
             f"({float(net_reward_risk):.4f} < {policy.min_reward_risk:.4f})."
         )
 
+    # Fee/slippage/spread-adjusted break-even, solved for the opposite-side exit.
+    # Funding is intentionally excluded and disclosed in the plan.
+    cost_rate = fee_rate + slippage_rate
+    if side == "LONG":
+        denominator = Decimal("1") - cost_rate - half_spread_fraction
+        if denominator <= 0:
+            raise BloFinDemoExecutionBlocked("Net break-even denominator is invalid.")
+        net_break_even = entry * (Decimal("1") + cost_rate) / denominator
+    else:
+        denominator = Decimal("1") + cost_rate + half_spread_fraction
+        net_break_even = entry * (Decimal("1") - cost_rate) / denominator
+    plan["net_break_even_price"] = _format_decimal(net_break_even)
     plan["net_reward_risk"] = float(net_reward_risk)
     plan["execution_cost_estimate"] = {
         "status": "MODELLED_PRETRADE",
@@ -3034,6 +3046,11 @@ class BloFinDemoExecutor:
             "entry_reference_price": plan["entry_reference_price"],
             "net_reward_risk": plan.get("net_reward_risk"),
             "execution_cost_estimate": plan.get("execution_cost_estimate"),
+            "net_break_even_price": plan.get("net_break_even_price"),
+            "client_order_id": plan["client_order_id"],
+            "entry_price": plan["entry_reference_price"],
+            "position_id": reconciliation.get("position_id"),
+            "filled_size": reconciliation.get("filled_size"),
             "position_mode": position_mode,
             "orders_enabled": True,
         }
