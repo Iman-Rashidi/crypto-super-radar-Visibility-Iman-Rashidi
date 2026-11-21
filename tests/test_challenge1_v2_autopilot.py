@@ -1,7 +1,29 @@
 from __future__ import annotations
 import sqlite3
 import unittest
-from crypto_super_radar.challenge1_v2_autopilot import SYMBOLS,TABLE,preflight_errors,run_cycle,manage_open_positions
+from crypto_super_radar.challenge1_v2_autopilot import SYMBOLS,TABLE,preflight_errors,run_cycle,manage_open_positions,build_v2_demo_risk_policy
+from crypto_super_radar.challenge1_v2_trade_controls import v2_entry_capacity
+
+class Challenge1V2FourSlotPolicyTests(unittest.TestCase):
+    def test_runtime_policy_is_four_slots_and_blocks_the_fifth(self):
+        policy = build_v2_demo_risk_policy()
+        self.assertEqual(policy.max_concurrent_positions, 4)
+        self.assertEqual(policy.max_leverage, 1)
+        for active_count in range(4):
+            positions = [{"instId": f"ASSET{i + 1}-USDT"} for i in range(active_count)]
+            allowed, reason = v2_entry_capacity(
+                positions, [], candidate_symbol="NEWCOIN-USDT",
+                max_concurrent_positions=policy.max_concurrent_positions,
+            )
+            self.assertTrue(allowed, reason)
+        four_positions = [{"instId": f"ASSET{i + 1}-USDT"} for i in range(4)]
+        allowed, reason = v2_entry_capacity(
+            four_positions, [], candidate_symbol="FIFTH-USDT",
+            max_concurrent_positions=policy.max_concurrent_positions,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "MAX_CONCURRENT_POSITIONS_REACHED")
+
 
 class Challenge1V2AutopilotDryRunTests(unittest.TestCase):
     def test_requires_explicit_enable_and_turso(self):
