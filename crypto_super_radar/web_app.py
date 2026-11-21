@@ -61,8 +61,7 @@ from .challenge1_position_observers import (
     record_position_observer_skip,
 )
 from .ai_supervisor import (
-    ai_supervisor_status, run_ai_supervisor, _demo_ai_review_approved,
-    run_challenge1_v2_supervisor_reviews,
+    ai_supervisor_status, run_ai_supervisor, run_challenge1_v2_supervisor_reviews,
 )
 from .execution_diagnostics import build_execution_error_diagnostic
 
@@ -9811,7 +9810,24 @@ def _start_blofin_demo_autopilot() -> None:
         BLOFIN_AUTOPILOT_THREAD = threading.Thread(
             target=_blofin_demo_autopilot_worker,
             daemon=True,
-            name="p())
+            name="blofin-demo-autopilot",
+        )
+        BLOFIN_AUTOPILOT_THREAD.start()
+
+
+
+def _demo_ai_review_approved(review: Any) -> bool:
+    """Fail closed unless a real AI review explicitly approves Demo entry."""
+    if not isinstance(review, dict):
+        return False
+    return (
+        str(review.get("status") or "").strip().upper() == "APPROVED"
+        and review.get("paper_entry_eligible") is True
+        and review.get("request_attempted") is True
+        and str(review.get("response_source") or "").upper() == "LIVE_API"
+        and review.get("response_validated") is True
+        and review.get("model_verified") is True
+        and bool(str(review.get("model") or "").strip())
         and bool(str(review.get("returned_model") or "").strip())
     )
 
