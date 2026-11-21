@@ -3,8 +3,8 @@ import unittest
 import numpy as np
 import pandas as pd
 from crypto_super_radar.adaptive_brain import ShadowPatternBrain
-from crypto_super_radar.ai_sandbox import _actual_entry_veto, _v3_pattern_entry_gate, _v3_pattern_shadow_observation
-from crypto_super_radar.pattern_intelligence_v3 import PATTERN_FAMILIES,advance_pattern_lifecycle,analyze_unified_patterns_v3,closed_frame,normalized_candle_metrics
+from crypto_super_radar.ai_sandbox import _actual_entry_veto, _v3_pattern_entry_gate, _v3_pattern_shadow_observation, _v3_pattern_research_observation
+from crypto_super_radar.pattern_intelligence_v3 import PATTERN_FAMILIES,advance_pattern_lifecycle,analyze_unified_patterns_v3,closed_frame,normalized_candle_metrics,per_pattern_name_features
 
 def frame(rows=100,scale=1.0):
     idx=pd.date_range("2026-01-01T00:00:00Z",periods=rows,freq="15min"); base=100+np.linspace(0,8,rows)+np.sin(np.arange(rows)/3)
@@ -20,7 +20,8 @@ class CausalPatternTests(unittest.TestCase):
         a=analyze_unified_patterns_v3(instrument_id="X",frames={"15m":f,"1H":f,"4H":f},asof=t,expected_direction="LONG",lifecycle_state={})
         g=f.copy(); mask=g.index+pd.Timedelta(minutes=15)>t; g.loc[mask,["open","high","low","close","volume"]]*=9
         b=analyze_unified_patterns_v3(instrument_id="X",frames={"15m":g,"1H":g,"4H":g},asof=t,expected_direction="LONG",lifecycle_state={})
-        self.assertEqual(a["features"],b["features"]); self.assertEqual(a["timeframes"]["15m"]["atr_normalized"],b["timeframes"]["15m"]["atr_normalized"])
+        self.assertEqual(a["features"],b["features"]); self.assertEqual(a["pattern_name_features"],b["pattern_name_features"])
+        self.assertEqual(a["timeframes"]["15m"]["atr_normalized"],b["timeframes"]["15m"]["atr_normalized"])
     def test_atr_ratios_are_price_scale_invariant(self):
         a=normalized_candle_metrics(frame(scale=1)); b=normalized_candle_metrics(frame(scale=250))
         for k in ("body_atr","upper_wick_atr","lower_wick_atr","range_atr"): self.assertAlmostEqual(a[k],b[k],places=8)
@@ -43,6 +44,54 @@ class PatternBrainTests(unittest.TestCase):
         for i in range(20): b.add_finalized_outcome(signal_id=f"u{i}",instrument_id="X",candle_time_utc=f"2026-02-{i+1:02d}T00:00:00Z",features={k:1 for k in PATTERN_FAMILIES},net_pnl_usdt=1,fees_complete=True,funding_complete=True)
         p=b.add_finalized_outcome(signal_id="p",instrument_id="X",candle_time_utc="2026-03-01T00:00:00Z",features={},net_pnl_usdt=1,fees_complete=False,funding_complete=True)
         self.assertFalse(p["inserted"]); self.assertEqual(b.train()["status"],"MODEL_NOT_READY"); self.assertFalse(b.trained)
+
+
+class PerPatternNameFeatureTests(unittest.TestCase):
+    def test_pattern_name_features_are_normalized_binary_and_ignore_invalidated_patterns(self):
+        features = per_pattern_name_features([
+            {"name_en": "  ATR   Hammer ", "lifecycle_status": "CONFIRMED"},
+            {"name_en": "Bullish Engulfing", "lifecycle_status": "FORMING"},
+            {"name_en": "Rising Wedge", "lifecycle_status": "INVALIDATED"},
+            {"name_en": "Expired Pattern", "lifecycle_status": "EXPIRED"},
+        ])
+        self.assertEqual(features, {
+            "pattern_name::atr_hammer": 1,
+            "pattern_name::bullish_engulfing": 1,
+        })
+
+
+    def test_named_pattern_features_are_learned_from_train_examples_and_frozen(self):
+        b = ShadowPatternBrain()
+        for i in range(20):
+            features = {key: i % 2 for key in PATTERN_FAMILIES}
+            features["pattern_name::atr_hammer"] = 1 if i % 2 == 0 else 0
+            features["pattern_name::bullish_engulfing"] = 1 if i % 2 == 1 else 0
+            b.add_finalized_outcome(
+                signal_id=f"named-{i}", instrument_id="X",
+                candle_time_utc=f"2026-03-{i+1:02d}T00:00:00Z",
+                features=features, net_pnl_usdt=1 if i < 10 else -1,
+                fees_complete=True, funding_complete=True,
+            )
+        trained = b.train()
+        self.assertEqual(trained["status"], "TRAINED")
+        self.assertEqual(trained["pattern_name_feature_count"], 2)
+        self.assertIn("pattern_name::atr_hammer", b.feature_names)
+        before = list(b.feature_names)
+        frozen = b.freeze()
+        self.assertEqual(frozen["status"], "FROZEN")
+        self.assertEqual(frozen["training_scope"], "TRAIN_ONLY")
+        self.assertTrue(frozen["model_hash"] and len(frozen["model_hash"]) == 64)
+        self.assertTrue(frozen["training_timestamp"])
+        pending = b.add_finalized_outcome(
+            signal_id="validation-unseen-name", instrument_id="X",
+            candle_time_utc="2026-04-01T00:00:00Z",
+            features={"pattern_name::future_validation_only": 1},
+            net_pnl_usdt=1, fees_complete=True, funding_complete=True,
+        )
+        self.assertEqual(pending["status"], "MODEL_FROZEN")
+        self.assertEqual(b.feature_names, before)
+        with self.assertRaises(ValueError):
+            b.train()
 
 
 class ActivePatternGateTests(unittest.TestCase):
@@ -92,6 +141,33 @@ class ActivePatternGateTests(unittest.TestCase):
                               "direction": "BEARISH", "lifecycle_status": "INVALIDATED"}],
                             side="SHORT", score=0.50)
         self.assertEqual(result["decision"], "ALLOW")
+
+class ResearchFilterOptInTests(unittest.TestCase):
+    def test_research_filter_can_veto_only_when_explicitly_enabled(self):
+        observation = _v3_pattern_research_observation(
+            detections=[{"name_en": "Rising Wedge", "family": "structure_reversal",
+                         "direction": "BEARISH", "lifecycle_status": "FORMING"}],
+            expected_direction="LONG",
+            brain_evaluation={"status": "READY", "score_0_1": 0.60},
+        )
+        self.assertEqual(observation["decision"], "RESEARCH_FILTER")
+        self.assertTrue(observation["would_veto"])
+        self.assertTrue(_actual_entry_veto(
+            model_veto=False, pattern_observation=observation, v3_research_filter=True
+        ))
+        with self.assertRaises(ValueError):
+            _actual_entry_veto(model_veto=False, pattern_observation=observation)
+
+    def test_default_shadow_observation_never_vetoes_from_v3(self):
+        observation = _v3_pattern_shadow_observation(
+            detections=[{"name_en": "Rising Wedge", "family": "structure_reversal",
+                         "direction": "BEARISH", "lifecycle_status": "FORMING"}],
+            expected_direction="LONG",
+            brain_evaluation={"status": "READY", "score_0_1": 0.60},
+        )
+        self.assertTrue(observation["would_veto"])
+        self.assertFalse(_actual_entry_veto(model_veto=False, pattern_observation=observation))
+
 
 class ShadowOnlyEntryIntegrationTests(unittest.TestCase):
     def test_v3_toxic_pattern_veto_is_only_a_suggestion(self):
