@@ -1247,11 +1247,6 @@ class BloFinDemoEventStore:
         if abs(notional_value - expected_notional) > max(expected_notional, Decimal("1")) * Decimal("0.00000001"):
             raise BloFinDemoExecutionBlocked("Notional does not reconcile to reserved margin multiplied by leverage.")
 
-        # External positions/orders have no trusted local stop-risk and margin ledger.
-        # Fail closed rather than undercounting exposure when those are present.
-        if external_open_positions > 0 or external_pending_orders > 0:
-            return False
-
         active_statuses = (
             "'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',"
             "'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'"
@@ -1313,7 +1308,12 @@ class BloFinDemoEventStore:
                     self._db.rollback()
                     return False
                 local_active = len(active_rows)
-                observed_total = local_active + external_open_positions + external_pending_orders
+                # Reconcile exchange positions against durable V2 reservations. Any
+                # untracked exchange position/order remains a hard blocker.
+                if external_open_positions > local_active or external_pending_orders > 0:
+                    self._db.rollback()
+                    return False
+                observed_total = max(local_active, external_open_positions) + external_pending_orders
                 if observed_total >= max_concurrent_positions:
                     self._db.rollback()
                     return False
