@@ -888,18 +888,34 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         active = self.get_open_tpsl_orders(inst_id=inst_id, limit=100)
         if not isinstance(active, list):
             raise BloFinDemoResponseError("Active TP/SL response is not a list.")
-        matches = [
-            row for row in active
-            if isinstance(row, Mapping)
-            and str(row.get("tpslId") or "") == tpsl_id
-            and str(row.get("instId") or "").upper() == inst_id
-            and str(row.get("positionSide") or "").lower() == "net"
-            and str(row.get("state") or "").lower() == "live"
-            and (
-                not position_id
-                or str(row.get("positionId") or "").strip() == position_id
-            )
-        ]
+        expected_size = abs(position["_signed_size_decimal"])
+        matches = []
+        for row in active:
+            if not isinstance(row, Mapping):
+                continue
+            if (
+                str(row.get("tpslId") or "") != tpsl_id
+                or str(row.get("instId") or "").upper() != inst_id
+                or str(row.get("positionSide") or "").lower() != "net"
+                or str(row.get("state") or "").lower() != "live"
+                or (
+                    position_id
+                    and str(row.get("positionId") or "").strip() != position_id
+                )
+            ):
+                continue
+            size_values = [
+                value for value in (row.get("size"), row.get("actualSize"))
+                if value not in (None, "")
+            ]
+            if not size_values:
+                continue
+            try:
+                if any(_decimal(value, "tpsl_size") != expected_size for value in size_values):
+                    continue
+            except ValueError:
+                continue
+            matches.append(row)
         if len(matches) != 1 or not matches[0].get("slTriggerPrice"):
             raise BloFinDemoExecutionBlocked(
                 "The exact active protective SL could not be proven; amendment blocked."
@@ -922,7 +938,13 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             and str(row.get("instId") or "").upper() == inst_id
             and str(row.get("positionSide") or "").lower() == "net"
             and str(row.get("state") or "").lower() == "live"
+            and str(row.get("positionId") or "").strip() == str(position.get("positionId") or "").strip()
             and _decimal(row.get("slTriggerPrice"), "verified_stop_loss") == stop
+            and any(
+                value not in (None, "")
+                and _decimal(value, "verified_tpsl_size") == abs(position["_signed_size_decimal"])
+                for value in (row.get("size"), row.get("actualSize"))
+            )
         ]
         if len(exact) != 1:
             raise BloFinDemoExecutionUnknown(
