@@ -117,6 +117,13 @@ class PriceCandleBlackoutTests(unittest.TestCase):
             last_missing_ms=four_hour["last_missing_ms"],
             missing_count=2, mark_price=False,
         ))
+        eth_hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[4])
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="ETH-USDT", bar="1H",
+            first_missing_ms=eth_hourly["start_ms"],
+            last_missing_ms=eth_hourly["last_missing_ms"],
+            missing_count=5, mark_price=False,
+        ))
         self.assertFalse(_observed_price_candle_gap_matches(
             symbol="BTC-USDT", bar="1H",
             first_missing_ms=four_hour["start_ms"],
@@ -132,6 +139,12 @@ class PriceCandleBlackoutTests(unittest.TestCase):
         self.assertEqual(eth["missing_intervals"], 20)
         self.assertEqual(eth["missing_from_utc"], self.window["missing_from_utc"])
         self.assertEqual(eth["missing_to_utc"], self.window["missing_to_utc"])
+        eth_hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[4])
+        self.assertEqual(eth_hourly["instrument_id"], "ETH-USDT")
+        self.assertEqual(eth_hourly["bar"], "1H")
+        self.assertEqual(eth_hourly["missing_intervals"], 5)
+        self.assertEqual(eth_hourly["missing_from_utc"], "2026-03-09T07:00:00+00:00")
+        self.assertEqual(eth_hourly["missing_to_utc"], "2026-03-09T11:00:00+00:00")
 
     def test_combined_blackout_windows_are_scoped_per_instrument(self):
         btc = _combine_price_candle_blackout_windows(
@@ -143,7 +156,7 @@ class PriceCandleBlackoutTests(unittest.TestCase):
         self.assertEqual(btc["instrument_id"], "BTC-USDT")
         self.assertEqual(eth["instrument_id"], "ETH-USDT")
         self.assertEqual(len(btc["timeframe_windows"]), 3)
-        self.assertEqual(len(eth["timeframe_windows"]), 1)
+        self.assertEqual(len(eth["timeframe_windows"]), 2)
         self.assertIsNone(_combine_price_candle_blackout_windows("SOL-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)))
 
     def test_blackout_interval_uses_inclusive_first_and_exclusive_end(self):
