@@ -641,7 +641,17 @@ def run_sandbox(
     tp1_enabled: bool = True,
     tp1_reward_r_multiple: float = 1.2,
     tp1_fraction: float = 0.5,
+    stop_atr_multiplier_overrides: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
+    stop_overrides: dict[str, float] = {}
+    for raw_symbol, raw_multiplier in (stop_atr_multiplier_overrides or {}).items():
+        symbol_key = str(raw_symbol or "").strip().upper()
+        if symbol_key not in symbols:
+            raise ValueError(f"stop ATR override symbol is not in selected watchlist: {symbol_key}")
+        multiplier = float(raw_multiplier)
+        if not np.isfinite(multiplier) or not 0.5 <= multiplier <= 4.0:
+            raise ValueError(f"stop ATR override for {symbol_key} must be between 0.5 and 4.0")
+        stop_overrides[symbol_key] = multiplier
     if not 0 < initial_equity or not np.isfinite(initial_equity):
         raise ValueError("initial_equity must be positive")
     if not 0 <= spread_scenario <= 0.0004:
@@ -1152,6 +1162,7 @@ def run_sandbox(
                     spread_fraction=spread_scenario,
                     last_three_results=tuple(last_results[symbol]),
                     tp_r=2.4,
+                    stop_atr_multiplier_override=stop_overrides.get(symbol),
                     precomputed_context=precomputed_context,
                 )
             except (ValueError, KeyError, IndexError) as exc:
@@ -1355,6 +1366,7 @@ def run_sandbox(
             "tp1_enabled": bool(tp1_enabled),
             "tp1_reward_r_multiple": tp1_reward_r_multiple,
             "tp1_fraction": tp1_fraction,
+            "stop_atr_multiplier_overrides": dict(stop_overrides),
             "v3_pattern_mode": "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
         },
         "periods": {
@@ -1545,12 +1557,20 @@ def main() -> None:
     parser.add_argument("--tp1-r", type=float, default=1.2)
     parser.add_argument("--tp1-fraction", type=float, default=0.5)
     parser.add_argument("--symbols", default=",".join(DEFAULT_WATCHLIST))
+    parser.add_argument("--eth-stop-atr", type=float, default=None)
+    parser.add_argument("--sol-stop-atr", type=float, default=None)
     args = parser.parse_args()
+    stop_overrides = {}
+    if args.eth_stop_atr is not None:
+        stop_overrides["ETH-USDT"] = args.eth_stop_atr
+    if args.sol_stop_atr is not None:
+        stop_overrides["SOL-USDT"] = args.sol_stop_atr
     report = run_sandbox(
         db_path=args.db, initial_equity=args.equity, symbols=tuple(x.strip() for x in args.symbols.split(",") if x.strip()),
         spread_scenario=args.spread, output_path=args.output, brain_path=args.brain,
         max_holding_bars=args.max_holding_bars, tp1_enabled=not args.tp1_disabled,
         tp1_reward_r_multiple=args.tp1_r, tp1_fraction=args.tp1_fraction,
+        stop_atr_multiplier_overrides=stop_overrides,
     )
     print(json.dumps({
         "equity": report["equity"],

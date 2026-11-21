@@ -534,6 +534,18 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     )
 
 
+def _resolve_stop_atr_multiplier(symbol: str, override: float | None = None) -> float:
+    """Resolve the symbol default or an explicit research-only stop ATR multiplier."""
+    key = str(symbol or "").strip().upper()
+    default = 1.3 if key in {"BTC-USDT", "ETH-USDT"} else 1.8
+    if override is None:
+        return default
+    value = float(override)
+    if not math.isfinite(value) or not 0.5 <= value <= 4.0:
+        raise ValueError("stop ATR multiplier override must be between 0.5 and 4.0")
+    return value
+
+
 def analyze_signal(
     *, instrument_id: str, frame_1h: pd.DataFrame, frame_4h: pd.DataFrame,
     frame_15m: pd.DataFrame, btc_15m: pd.DataFrame, asof: pd.Timestamp,
@@ -542,6 +554,7 @@ def analyze_signal(
     spread_fraction: float | None,
     last_three_results: tuple[int, int, int] = (-1, -1, -1),
     tp_r: float = 2.4,
+    stop_atr_multiplier_override: float | None = None,
     precomputed_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a completed-candle decision plus ML feature vector source values."""
@@ -652,7 +665,7 @@ def analyze_signal(
         return {"signal": "NO_TRADE", "reason": "BTC master guard blocked altcoin setup", "regime": regime}
 
     entry = float(last["close"])
-    atr_mult = 1.3 if symbol in {"BTC-USDT", "ETH-USDT"} else 1.8
+    atr_mult = _resolve_stop_atr_multiplier(symbol, stop_atr_multiplier_override)
     if direction == "LONG":
         stop = min(float(m15["low"].tail(5).min()), entry - atr_mult * current_atr)
         target = entry + tp_r * (entry - stop)

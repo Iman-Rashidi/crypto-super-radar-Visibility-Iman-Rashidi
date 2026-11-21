@@ -12,6 +12,7 @@ import pandas as pd
 from crypto_super_radar.adaptive_brain import OnlineMetaBrain
 from crypto_super_radar.challenge1_v2 import (
     _elliott_wave_1h_evidence,
+    _resolve_stop_atr_multiplier,
     analyze_signal,
     challenge1_v2_execution_evidence_ready,
 )
@@ -48,6 +49,25 @@ from crypto_super_radar.virtual_blofin import (
     _snap_trade_prices,
     size_position,
 )
+class StopAtrMultiplierConfigurationTests(unittest.TestCase):
+    def test_symbol_defaults_are_unchanged(self):
+        self.assertEqual(_resolve_stop_atr_multiplier("BTC-USDT"), 1.3)
+        self.assertEqual(_resolve_stop_atr_multiplier("ETH-USDT"), 1.3)
+        self.assertEqual(_resolve_stop_atr_multiplier("SOL-USDT"), 1.8)
+        self.assertEqual(_resolve_stop_atr_multiplier("LINK-USDT"), 1.8)
+
+    def test_research_override_changes_only_the_requested_symbol(self):
+        self.assertEqual(_resolve_stop_atr_multiplier("ETH-USDT", 1.625), 1.625)
+        self.assertEqual(_resolve_stop_atr_multiplier("SOL-USDT", 2.25), 2.25)
+        self.assertEqual(_resolve_stop_atr_multiplier("BTC-USDT"), 1.3)
+
+    def test_invalid_stop_override_fails_closed(self):
+        for value in (0.0, 0.49, 4.01, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    _resolve_stop_atr_multiplier("ETH-USDT", value)
+
+
 class BloFinFundingSchemaProbeTests(unittest.TestCase):
     def test_history_probe_counts_explicit_and_missing_kind_separately(self):
         report = summarize_history_payload({
