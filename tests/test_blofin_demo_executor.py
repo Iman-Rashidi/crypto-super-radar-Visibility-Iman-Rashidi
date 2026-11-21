@@ -632,6 +632,93 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
             client.get_tradable_instrument("BTC-USDT")
 
 
+    def _configure_net_position(self, *, size="2.0"):
+        self.client.get_position_mode = Mock(return_value={"positionMode": "net_mode"})
+        self.client.get_positions = Mock(return_value=[{
+            "instId": "BTC-USDT", "positionSide": "net",
+            "positions": size, "positionId": "position-1",
+            "marginMode": "isolated",
+        }])
+        self.client.get_tradable_instrument = Mock(return_value=instrument_record())
+        self.client._post = Mock(return_value={"code": "0", "data": {"orderId": "exit-order-1"}})
+
+    def test_partial_close_is_exact_half_reduce_only_market_order(self):
+        self._configure_net_position(size="2.0")
+        result = self.client.partial_close_reduce_only(
+            inst_id="BTC-USDT", client_order_id="partialclose00000000000000000001",
+            position_id="position-1",
+        )
+        self.assertEqual(result["data"]["orderId"], "exit-order-1")
+        path, body = self.client._post.call_args.args
+        self.assertEqual(path, "/api/v1/trade/order")
+        self.assertEqual(body["orderType"], "market")
+        self.assertEqual(body["size"], "1")
+        self.assertEqual(body["side"], "sell")
+        self.assertEqual(body["reduceOnly"], "true")
+        self.assertEqual(body["clientOrderId"], "partialclose00000000000000000001")
+
+    def test_partial_close_blocks_when_half_is_not_lot_representable(self):
+        self._configure_net_position(size="1.1")
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            self.client.partial_close_reduce_only(
+                inst_id="BTC-USDT", client_order_id="partialclose00000000000000000002",
+            )
+        self.client._post.assert_not_called()
+
+    def test_reduce_only_exits_block_hedge_mode_because_blofin_ignores_reduce_only(self):
+        self._configure_net_position()
+        self.client.get_position_mode.return_value = {"positionMode": "long_short_mode"}
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            self.client.partial_close_reduce_only(
+                inst_id="BTC-USDT", client_order_id="partialclose00000000000000000003",
+            )
+        self.client._post.assert_not_called()
+
+    def test_amend_sl_in_place_and_verify_active_exchange_protection(self):
+        self._configure_net_position()
+        active = [{
+            "tpslId": "tpsl-1", "instId": "BTC-USDT", "positionSide": "net",
+            "positionId": "position-1", "state": "live", "slTriggerPrice": "98",
+        }]
+        amended = [{**active[0], "slTriggerPrice": "100.2"}]
+        self.client.get_open_tpsl_orders = Mock(side_effect=[active, amended])
+        result = self.client.amend_or_replace_sl(
+            inst_id="BTC-USDT", tpsl_id="tpsl-1", new_stop_loss="100.2",
+            request_id="amendsl0000000000000000000001", position_id="position-1",
+        )
+        self.assertTrue(result["sl_verified"])
+        path, body = self.client._post.call_args.args
+        self.assertEqual(path, "/api/v1/trade/amend-tpsl")
+        self.assertEqual(body["newSlTriggerPrice"], "100.2")
+        self.assertEqual(body["tpslId"], "tpsl-1")
+        self.assertNotIn("cancel", path)
+
+    def test_amend_sl_blocks_if_existing_protective_order_is_not_verified(self):
+        self._configure_net_position()
+        self.client.get_open_tpsl_orders = Mock(return_value=[])
+        with self.assertRaises(BloFinDemoExecutionBlocked):
+            self.client.amend_or_replace_sl(
+                inst_id="BTC-USDT", tpsl_id="tpsl-1", new_stop_loss="100.2",
+                request_id="amendsl0000000000000000000002",
+            )
+        self.client._post.assert_not_called()
+
+    def test_limit_exit_is_reduce_only_and_uses_remaining_position_size(self):
+        self._configure_net_position(size="-2.0")
+        self.client.place_limit_exit_reduce_only(
+            inst_id="BTC-USDT", limit_price="100.2",
+            client_order_id="timeexit00000000000000000000001",
+            position_id="position-1",
+        )
+        path, body = self.client._post.call_args.args
+        self.assertEqual(path, "/api/v1/trade/order")
+        self.assertEqual(body["orderType"], "limit")
+        self.assertEqual(body["side"], "buy")
+        self.assertEqual(body["price"], "100.2")
+        self.assertEqual(body["size"], "2")
+        self.assertEqual(body["reduceOnly"], "true")
+
+
 class BloFinDemoEventStoreTests(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict(os.environ, {
