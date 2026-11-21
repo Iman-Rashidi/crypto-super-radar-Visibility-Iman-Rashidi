@@ -20,7 +20,8 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-from .adaptive_brain import OnlineMetaBrain
+from .adaptive_brain import OnlineMetaBrain, ShadowPatternBrain
+from .pattern_intelligence_v3 import PATTERN_FAMILIES, advance_pattern_lifecycle, analyze_unified_patterns_v3, lifecycle_outcomes, pattern_family_performance
 from .challenge1_v2 import (
     analyze_signal, atr, prepare_signal_context, prepared_signal_history_ready,
 )
@@ -30,6 +31,18 @@ from .market_replay import (
     OBSERVED_FUNDING_BLACKOUTS, _classify_funding_schedule_events,
     _is_observed_blackout_gap, _is_regular_utc_funding_boundary,
 )
+
+
+
+def _pattern_trade_excursions(bars:list[dict[str,Any]],*,direction:str,entry_price:float,entry_ts_ms:int,exit_ts_ms:int)->dict[str,float|None]:
+    """Closed Mark-candle MFE/MAE proxies over the observed holding interval."""
+    if not np.isfinite(entry_price) or entry_price<=0: return {"mfe_pct":None,"mae_pct":None,"excursion_bars":0}
+    visible=[r for r in bars if int(r.get("close_ts") or (int(r["ts"])+BAR_MS))<=exit_ts_ms and int(r.get("close_ts") or (int(r["ts"])+BAR_MS))>entry_ts_ms]
+    hi=[float(r["mark_high"]) for r in visible if r.get("mark_high") is not None]; lo=[float(r["mark_low"]) for r in visible if r.get("mark_low") is not None]
+    if not hi or not lo: return {"mfe_pct":None,"mae_pct":None,"excursion_bars":len(visible)}
+    if direction=="LONG": mfe=max(0,max((v-entry_price)/entry_price for v in hi)); mae=max(0,max((entry_price-v)/entry_price for v in lo))
+    else: mfe=max(0,max((entry_price-v)/entry_price for v in lo)); mae=max(0,max((v-entry_price)/entry_price for v in hi))
+    return {"mfe_pct":round(mfe*100,6),"mae_pct":round(mae*100,6),"excursion_bars":len(visible)}
 
 DEFAULT_WATCHLIST = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 BAR_MS = 15 * 60_000
@@ -543,6 +556,11 @@ def run_sandbox(
     costs = CostModel(spread_fraction=spread_scenario)
     exchange = VirtualBloFin(costs=costs, max_holding_bars=12)
     brain = OnlineMetaBrain(warmup_trades=100, min_per_class=20)
+    pattern_brain = ShadowPatternBrain(warmup_trades=20, min_per_class=5)
+    pattern_lifecycle: dict[str, dict[str, Any]] = {}
+    closed_pattern_training_trades = 0
+    last_pattern_brain_train_examples = 0
+    pattern_brain_freeze_train_count: int | None = None
     equity = float(initial_equity)
     active_orders: list[dict[str, Any]] = []
     shadow_orders: list[dict[str, Any]] = []
@@ -600,6 +618,7 @@ def run_sandbox(
                     survivors.append(order)
                     continue
                 item = market[symbol]
+                advance_pattern_lifecycle(pattern_lifecycle, instrument_id=symbol, frames=item["frames"], asof=asof)
                 # The simulator only reads the entry candle and subsequent
                 # holding candles. Rebase that bounded slice to index zero;
                 # every supplied candle is closed by the current as-of time.
@@ -719,6 +738,8 @@ def run_sandbox(
                         "fees_usdt": result.fees_usdt,
                         "known_funding_usdt": result.funding_usdt,
                         "funding_blackouts": result.diagnostics.get("funding_blackouts", []),
+                        "pattern_features": dict(order.get("pattern_features") or {}),
+                        "pattern_lifecycle_outcomes": lifecycle_outcomes(pattern_lifecycle, order.get("pattern_family_keys") or {}),
                     }
                     if is_shadow:
                         unknown_shadow_pnl_trades.append(record)
@@ -843,6 +864,12 @@ def run_sandbox(
                 "tp1_filled": result.tp1_filled,
                 "net_rr_at_entry": result.net_rr_at_entry,
                 "model_decision": order["model_decision"],
+                "pattern_features": dict(order.get("pattern_features") or {}),
+                "pattern_detections": list(order.get("pattern_detections") or []),
+                "market_regime": order.get("pattern_market_regime","UNKNOWN"),
+                "pattern_brain_shadow_score": (order.get("pattern_brain_evaluation") or {}).get("score_0_1"),
+                "pattern_lifecycle_outcomes": lifecycle_outcomes(pattern_lifecycle, order.get("pattern_family_keys") or {}),
+                **_pattern_trade_excursions(market[order["symbol"]]["bars"],direction=order["direction"],entry_price=float(result.filled_entry or order["entry"]),entry_ts_ms=int(result.diagnostics["entry_ts_ms"]),exit_ts_ms=exit_ts_ms),
             })
             if (
                 order["phase"] in calibration_observations
@@ -874,6 +901,10 @@ def run_sandbox(
                     source="EXECUTED_TRAINING_TRADE",
                 )
                 closed_training_trades += 1
+                label=pattern_brain.add_finalized_outcome(signal_id=order["signal_id"],instrument_id=order["symbol"],
+                    candle_time_utc=datetime.fromtimestamp(int(result.diagnostics["entry_ts_ms"])/1000,timezone.utc).isoformat(),
+                    features=order.get("pattern_features") or {},net_pnl_usdt=result.net_pnl_usdt,fees_complete=True,funding_complete=True)
+                if label.get("inserted"): closed_pattern_training_trades += 1
 
         # Only matured TRAIN labels can update weights. Retry readiness checks
         # during validation if a training trade crossed the calendar boundary.
@@ -889,11 +920,18 @@ def run_sandbox(
                 if train_status.get("status") == "TRAINED":
                     counts["training_rounds"] += 1
                 last_train_candle = training_candle_count
-        else:
-            if model_freeze_train_count is None:
-                model_freeze_train_count = brain.train_count
-            elif brain.train_count != model_freeze_train_count:
-                raise SandboxDataError("model weights changed after the TRAIN phase freeze")
+        if phase=="TRAIN" and len(pattern_brain.examples)>=pattern_brain.warmup_trades and len(pattern_brain.examples)-last_pattern_brain_train_examples>=5:
+            train_state=pattern_brain.train()
+            if train_state.get("status")=="TRAINED": counts["pattern_training_rounds"]+=1; last_pattern_brain_train_examples=len(pattern_brain.examples)
+        if phase!="TRAIN":
+            if pattern_brain_freeze_train_count is None:
+                if not pattern_brain.trained and len(pattern_brain.examples)>=pattern_brain.warmup_trades:
+                    train_state=pattern_brain.train()
+                    if train_state.get("status")=="TRAINED": counts["pattern_training_rounds"]+=1
+                pattern_brain_freeze_train_count=pattern_brain.train_count
+            elif pattern_brain.train_count!=pattern_brain_freeze_train_count: raise SandboxDataError("V3 pattern brain changed after TRAIN freeze")
+            if model_freeze_train_count is None: model_freeze_train_count=brain.train_count
+            elif brain.train_count!=model_freeze_train_count: raise SandboxDataError("model weights changed after the TRAIN phase freeze")
 
         for symbol in symbols:
             item = market[symbol]
@@ -976,8 +1014,14 @@ def run_sandbox(
                 )
                 continue
             counts["qualified_signals"] += 1
-            features = dict(signal["features"])
-            decision = brain.evaluate(features)
+            features=dict(signal["features"])
+            try:
+                snapshot=analyze_unified_patterns_v3(instrument_id=symbol,frames=item["frames"],asof=asof,expected_direction=signal["signal"],lifecycle_state=pattern_lifecycle)
+                pattern_features=dict(snapshot["features"]); pattern_family_keys=dict(snapshot["family_lifecycle_keys"]); pattern_detections=list(snapshot["detections"]); pattern_market_regime=snapshot.get("market_regime","UNKNOWN")
+            except (ValueError,KeyError,TypeError,IndexError):
+                counts["pattern_analysis_errors"]+=1; pattern_features={x:0 for x in PATTERN_FAMILIES}; pattern_family_keys={x:[] for x in PATTERN_FAMILIES}; pattern_detections=[]; pattern_market_regime="UNKNOWN"
+            pattern_brain_evaluation=pattern_brain.evaluate(pattern_features); counts["pattern_shadow_observations"]+=1
+            decision=brain.evaluate(features)
             model_probability: float | None = None
             if phase == "TRAIN":
                 model_decision, veto = "TRAINING_BASELINE", False
@@ -1033,6 +1077,8 @@ def run_sandbox(
                 "shadow": bool(veto),
                 "entry_checked": False,
                 "submitted_ts_ms": asof_ms,
+                "pattern_features":pattern_features,"pattern_family_keys":pattern_family_keys,"pattern_detections":pattern_detections,
+                "pattern_market_regime":pattern_market_regime,"pattern_brain_evaluation":pattern_brain_evaluation,"pattern_snapshot_asof":asof.isoformat(),
             }
             if veto:
                 counts["vetoed_signals"] += 1
@@ -1136,6 +1182,19 @@ def run_sandbox(
         },
         "quantitative_metrics": _grouped_performance_summary(actual_trades, initial_equity, symbols),
         "shadow_book_metrics": _shadow_book_summary(shadow_trades),
+        "pattern_intelligence_v3_shadow": {
+            "mode":"SHADOW_ONLY_NO_V2_SIGNAL_OR_RISK_CHANGES","timeframes":["15m","1H","4H"],"completed_candles_only":True,"future_candles_used":False,
+            "observations":counts["pattern_shadow_observations"],"analysis_errors":counts["pattern_analysis_errors"],
+            "training_scope":"Matured TRAIN outcomes only; Validation and OOS do not update weights.",
+            "trade_scope":"V2-qualified entries with fully reconciled closed PnL; patterns tagged at entry.",
+            "family_performance":{"ALL":pattern_family_performance(actual_trades),"TRAIN":pattern_family_performance(actual_trades,"TRAIN"),"VALIDATION":pattern_family_performance(actual_trades,"VALIDATION"),"OUT_OF_SAMPLE":pattern_family_performance(actual_trades,"OUT_OF_SAMPLE")},
+            "by_market_regime":{regime:pattern_family_performance(actual_trades,regime=regime) for regime in ("TRENDING","RANGING","HIGH_VOLATILITY")},
+            "adaptive_brain":{"model":"SHADOW_PATTERN_LOGISTIC_SGD_V1","trained":pattern_brain.trained,"warmup_trades":pattern_brain.warmup_trades,"min_per_class":pattern_brain.min_per_class,
+              "training_examples":len(pattern_brain.examples),"training_closed_trades":closed_pattern_training_trades,"training_rounds":counts["pattern_training_rounds"],
+              "wins":sum(1 for x in pattern_brain.examples if x["label"]==1),"losses":sum(1 for x in pattern_brain.examples if x["label"]==0),
+              "feature_weights":pattern_brain.feature_weights(),"frozen_after_train":pattern_brain_freeze_train_count is not None},
+            "metric_semantics":"Expectancy=mean net USDT; MFE/MAE=closed Mark-candle excursion %; false-break rate=observed invalidations after confirmation."
+        },
         "funding_data_quality": {
             "explicit_funding_kind_events": sum(
                 1 for item in market.values() for event in item["funding"]
