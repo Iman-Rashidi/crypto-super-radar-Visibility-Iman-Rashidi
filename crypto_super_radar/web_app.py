@@ -2947,6 +2947,7 @@ def _blofin_demo_execution_readiness() -> dict:
     autopilot_enabled = _blofin_demo_autopilot_enabled()
     dashboard_auth_configured = bool(os.getenv("BLOFIN_DASHBOARD_TOKEN", "").strip())
     budget = None
+    single_shot_lock = None
     try:
         backend = storage_backend()
     except Exception:
@@ -2957,6 +2958,7 @@ def _blofin_demo_execution_readiness() -> dict:
             store = BloFinDemoEventStore()
             try:
                 budget = store.trade_budget_status()
+                single_shot_lock = store.single_shot_lock_status()
             finally:
                 store.close()
         except Exception:
@@ -3014,7 +3016,12 @@ def _blofin_demo_execution_readiness() -> dict:
         "autopilot_enabled": autopilot_enabled,
         "durable_storage": durable_storage,
         "dashboard_auth_configured": dashboard_auth_configured,
-        "order_quota_unlimited": True,
+        "order_quota_unlimited": False,
+        "single_shot_lock": single_shot_lock,
+        "single_shot_consumed_orders": single_shot_lock.get("consumed_orders") if isinstance(single_shot_lock, dict) else None,
+        "single_shot_locked": single_shot_lock.get("locked") if isinstance(single_shot_lock, dict) else None,
+        "v2_orchestration_enabled": os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() == "true",
+        "single_shot_write_enabled": os.getenv("CHALLENGE_1_V2_SINGLE_SHOT_WRITE", "").strip().lower() == "true",
         "orders_today_utc": orders_today,
         "orders_total": orders_total,
         "max_orders_per_utc_day": None,
@@ -6455,7 +6462,7 @@ class Handler(BaseHTTPRequestHandler):
               <div>
                 <label for="blofin-engine-profile">استراتژی معامله Demo</label>
                 <select id="blofin-engine-profile">
-                  <option value="CHALLENGE_1" selected>CHALLENGE 1 · ربات الگوهای کندلی و نموداری</option>
+                  <option value="CHALLENGE_1_V2" selected>CHALLENGE_1_V2 · نسخه چندبازه‌ای Single-Shot</option>
                 </select>
               </div>
             </div>
@@ -6463,7 +6470,7 @@ class Handler(BaseHTTPRequestHandler):
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
             <p class="muted">استراتژی اصلی Challenge 1: تحلیل کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای شامل الگوهای تک‌کندلی و چندکندلی، ساختار نمودار و شکست معتبر؛ سپس تحلیل موج الیوت، فاز/جهت موج و سطح ابطال و تطبیق موج با ساختار قیمت، حجم و شواهد مکمل. ورود فقط پس از دریافت پاسخ معتبر APPROVED از هر دو ناظر مستقل AI با Provider و Model متفاوت، توافق بر جهت و فاز موج و عبور از کنترل ریسک مجاز است. VETO، UNKNOWN، ERROR، قطع ارتباط یا اختلاف ناظران ورود را مسدود می‌کند. تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. سفارش فقط در BloFin Demo اجرا می‌شود؛ کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
-            <button id="blofin-demo-execute-once" type="button" disabled>درخواست اجرای دستی ربات در BloFin Demo</button>
+            <button id="blofin-demo-execute-once" type="button" disabled>اجرای دستی یک چرخه نسخه جدید (CHALLENGE_1_V2 Single-Shot)</button>
             <div class="metric" id="blofin-autopilot-panel" style="margin-top:14px;border-color:#2d6470">
               <h3>حالت اتوماتیک · Challenge 1</h3>
               <p class="muted">پس از فعال‌سازی، ربات بازارهای تنظیم‌شده را در هر کندل بسته‌شدهٔ ۵ دقیقه‌ای بررسی می‌کند. ورود همچنان به دو تأیید مستقل AI، مجوز Demo، حد ضرر/سود و کنترل ریسک وابسته است. توقف، چرخه جاری را قطع نمی‌کند و فقط از شروع چرخه‌های بعدی جلوگیری می‌کند. کنترل داشبورد تا راه‌اندازی مجدد همین سرویس معتبر است؛ پس از Restart، مقدار BLOFIN_DEMO_AUTOPILOT_ENABLED در Environment مبنا خواهد بود.</p>
@@ -6852,9 +6859,13 @@ async function loadBlofinInstruments(){
                 const response=await fetch('/api/blofin/demo/execution-readiness',{cache:'no-store'});
                 const result=await response.json();
                 executionReadiness.textContent=result.message_fa||'وضعیت پیش‌نیازهای Demo مشخص نیست.';
-                if(result.status==='READY'&&result.order_quota_unlimited===true&&instrumentSelect.value){
+                const lock=result.single_shot_lock||{};
+                const lockReadable=typeof lock.locked==='boolean'&&Number.isFinite(Number(lock.consumed_orders));
+                const lockLabel=lockReadable?('قفل یک‌بارمصرف: '+Number(lock.consumed_orders)+'/1 · '+(lock.locked?'مصرف‌شده و بسته':'باز')):'وضعیت قفل یک‌بارمصرف قابل خواندن نیست';
+                executionReadiness.textContent+=' · '+lockLabel;
+                if(result.status==='READY'&&result.v2_orchestration_enabled===true&&result.single_shot_write_enabled===true&&result.autopilot_enabled===false&&lockReadable&&lock.locked===false&&Number(lock.consumed_orders)===0&&instrumentSelect.value){
                   executeButton.disabled=false;
-                  executionReadiness.textContent+=' آماده ثبت درخواست دستی ربات است؛ جهت معامله فقط از سیگنال معتبر می‌آید.';
+                  executionReadiness.textContent+=' · آماده ثبت یک چرخه دستی V2 در BloFin Demo است؛ این دکمه AutoPilot را روشن نمی‌کند.';
                 }
                 refreshAutopilotStatus();
               }catch(error){executionReadiness.textContent='بررسی پیش‌نیازهای سفارش Demo ممکن نشد.';}
@@ -7182,7 +7193,7 @@ async function loadBlofinInstruments(){
               const token=tokenInput.value.trim();
               if(!token){executionReadiness.textContent='ابتدا توکن پنل را در کادر بالا وارد کن.';return;}
               const selectedInstrument=instrumentSelect.value;
-              const selectedProfile=profileSelect.value;
+              const selectedProfile='CHALLENGE_1_V2';
               if(!selectedInstrument){executionReadiness.textContent='ابتدا قرارداد مجاز را از فهرست زنده انتخاب کن.';return;}
               if(!window.confirm('یک چرخه '+selectedProfile+' روی '+selectedInstrument+' Perpetual فقط در BloFin Demo اجرا می‌شود؛ جهت LONG/SHORT از سیگنال زنده، اهرم ایزوله 1x و SL/TP اجباری است. در نبود سیگنال معتبر هیچ سفارشی ارسال نمی‌شود. ادامه؟'))return;
               executeButton.disabled=true;
@@ -8962,6 +8973,54 @@ async function loadBlofinInstruments(){
                             "status": "BLOCKED",
                             "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
                             "message_fa": "برای اجرای V2 فقط‌خواندنی، دفتر ثبت پایدار Turso باید قابل دسترسی باشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if (
+                        os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "false"
+                        or _blofin_demo_autopilot_enabled()
+                    ):
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "AUTOPILOT_MUST_REMAIN_DISABLED",
+                            "message_fa": "برای اجرای دستی V2، AutoPilot باید در Render خاموش باشد؛ هیچ چرخه‌ای شروع نشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    required_flags = {
+                        "SINGLE_SHOT_DEMO_TEST": os.getenv("SINGLE_SHOT_DEMO_TEST", "").strip().lower() == "true",
+                        "BLOFIN_DEMO_TRADING_ENABLED": os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true",
+                        "CHALLENGE_1_V2_SINGLE_SHOT_WRITE": os.getenv("CHALLENGE_1_V2_SINGLE_SHOT_WRITE", "").strip().lower() == "true",
+                    }
+                    missing_flags = [key for key, enabled in required_flags.items() if not enabled]
+                    if missing_flags:
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_SINGLE_SHOT_FLAGS_INCOMPLETE",
+                            "missing_flags": missing_flags,
+                            "message_fa": "کلیدهای ایمنی اجرای یک‌باره V2 کامل نیستند؛ هیچ چرخه‌ای شروع نشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    lock_store = None
+                    try:
+                        lock_store = BloFinDemoEventStore()
+                        single_shot_lock = lock_store.single_shot_lock_status()
+                    except Exception:
+                        single_shot_lock = None
+                    finally:
+                        if lock_store is not None:
+                            lock_store.close()
+                    if not isinstance(single_shot_lock, dict) or not isinstance(single_shot_lock.get("locked"), bool):
+                        return self._send(503, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "SINGLE_SHOT_LOCK_UNREADABLE",
+                            "message_fa": "قفل دائمی Single-Shot قابل خواندن نیست؛ اجرای V2 متوقف شد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if single_shot_lock.get("locked") or int(single_shot_lock.get("consumed_orders") or 0) != 0:
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "SINGLE_SHOT_ALREADY_CONSUMED",
+                            "single_shot_lock": single_shot_lock,
+                            "message_fa": "سهمیه یک‌بارمصرف قبلاً مصرف شده است؛ اجرای مجدد مجاز نیست.",
                             "orders_submitted": False,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 else:
