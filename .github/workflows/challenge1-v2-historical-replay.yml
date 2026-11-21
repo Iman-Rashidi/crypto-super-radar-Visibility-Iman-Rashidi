@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: challenge1-v2-historical-replay-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   replay:
