@@ -29,9 +29,14 @@ from crypto_super_radar.ai_sandbox import (
     _required_replay_end,
     _within_purge_window,
     _datetime_index_to_epoch_ms,
+    _price_candle_entry_block_status,
+    _ambiguous_price_candle_position,
 )
 from crypto_super_radar.market_replay import (
     ReplayDownloadError,
+    OBSERVED_PRICE_CANDLE_BLACKOUTS,
+    _observed_price_candle_gap_matches,
+    _is_price_candle_blackout,
     _classify_funding_schedule_events,
     _is_observed_blackout_gap,
     _parse_funding_event,
@@ -49,6 +54,84 @@ from crypto_super_radar.virtual_blofin import (
     _snap_trade_prices,
     size_position,
 )
+class PriceCandleBlackoutTests(unittest.TestCase):
+    def setUp(self):
+        self.window = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[0])
+
+    def test_registered_btc_gap_has_exact_timestamp_and_count(self):
+        self.assertEqual(self.window["instrument_id"], "BTC-USDT")
+        self.assertEqual(self.window["bar"], "15m")
+        self.assertEqual(self.window["missing_from_utc"], "2026-03-09T07:45:00+00:00")
+        self.assertEqual(self.window["missing_to_utc"], "2026-03-09T12:30:00+00:00")
+        self.assertEqual(self.window["missing_intervals"], 20)
+
+    def test_only_exact_last_price_gap_is_allowlisted(self):
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="ETH-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=19, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=True,
+        ))
+
+    def test_blackout_interval_uses_inclusive_first_and_exclusive_end(self):
+        self.assertIsNotNone(_is_price_candle_blackout(self.window["start_ms"]))
+        self.assertIsNotNone(_is_price_candle_blackout(self.window["last_missing_ms"]))
+        self.assertIsNone(_is_price_candle_blackout(self.window["end_exclusive_ms"]))
+
+    def test_new_entries_block_during_gap_and_until_rewarm_completes(self):
+        self.assertEqual(
+            _price_candle_entry_block_status(self.window["start_ms"], self.window, indicator_rewarm_complete=False),
+            "PRICE_CANDLE_BLACKOUT",
+        )
+        self.assertEqual(
+            _price_candle_entry_block_status(self.window["end_exclusive_ms"], self.window, indicator_rewarm_complete=False),
+            "PRICE_CANDLE_BLACKOUT_INDICATOR_REWARM",
+        )
+        self.assertIsNone(
+            _price_candle_entry_block_status(self.window["end_exclusive_ms"], self.window, indicator_rewarm_complete=True)
+        )
+
+    def test_pre_gap_btc_position_becomes_ambiguous_without_fabricated_exit(self):
+        order = {
+            "symbol": "BTC-USDT", "signal_id": "gap-crossing",
+            "direction": "LONG", "phase": "TRAIN", "entry_checked": True,
+            "submitted_ts_ms": self.window["start_ms"] - 900_000,
+            "entry_ts_ms": self.window["start_ms"] - 1_800_000,
+            "last_observed_through_ts_ms": self.window["start_ms"],
+        }
+        result = _ambiguous_price_candle_position(order, self.window)
+        self.assertEqual(result["status"], "AMBIGUOUS_PRICE_CANDLE_BLACKOUT")
+        self.assertIsNone(result["exit_ts_ms"])
+        self.assertIsNone(result["exit_price"])
+        self.assertIsNone(result["net_pnl_usdt"])
+        self.assertFalse(result["synthetic_candles_used"])
+
+    def test_other_symbol_and_orders_created_after_gap_are_not_marked_ambiguous(self):
+        order = {"symbol": "ETH-USDT", "submitted_ts_ms": self.window["start_ms"] - 1, "signal_id": "eth"}
+        self.assertIsNone(_ambiguous_price_candle_position(order, self.window))
+        order["symbol"] = "BTC-USDT"
+        order["submitted_ts_ms"] = self.window["end_exclusive_ms"] + 1
+        self.assertIsNone(_ambiguous_price_candle_position(order, self.window))
+
+
 class StopAtrMultiplierConfigurationTests(unittest.TestCase):
     def test_symbol_defaults_are_unchanged(self):
         self.assertEqual(_resolve_stop_atr_multiplier("BTC-USDT"), 1.3)
