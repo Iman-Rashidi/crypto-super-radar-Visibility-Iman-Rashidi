@@ -520,8 +520,10 @@ class ReplayDownloaderCompletenessTests(unittest.TestCase):
     class Session:
         def __init__(self, rows):
             self.rows = rows
+            self.last_params = None
 
         def get(self, *args, **kwargs):
+            self.last_params = kwargs.get("params")
             return ReplayDownloaderCompletenessTests.Response(self.rows)
 
     def test_six_calendar_months_uses_calendar_arithmetic(self) -> None:
@@ -530,6 +532,36 @@ class ReplayDownloaderCompletenessTests(unittest.TestCase):
             _subtract_calendar_months(value, 6),
             datetime(2026, 2, 28, 12, 0, tzinfo=timezone.utc),
         )
+
+    def test_explicit_historical_window_filters_newer_rows_and_seeds_after_cursor(self) -> None:
+        start = datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 4, 21, 16, 0, tzinfo=timezone.utc)
+        interval = 15 * 60_000
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        row = lambda ts: [
+            str(ts), "100", "101", "99", "100", "1", "1", "100", "1"
+        ]
+        session = self.Session([
+            row(end_ms + interval),
+            row(end_ms),
+            row(end_ms - interval),
+            row(start_ms + 2 * interval),
+            row(start_ms + interval),
+            row(start_ms),
+            row(start_ms - interval),
+        ])
+        result = download_candles(
+            "BTC-USDT", "15m", months=6,
+            start_utc=start, end_utc=end,
+            session=session, base_url="https://example.invalid", page_size=100,
+        )
+        self.assertEqual([item[2] for item in result], [
+            start_ms, start_ms + interval, start_ms + 2 * interval,
+            start_ms + 3 * interval,
+        ])
+        self.assertEqual(session.last_params["after"], end_ms)
+
 
     def test_short_recent_candle_response_is_not_mistaken_for_six_month_coverage(self) -> None:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
