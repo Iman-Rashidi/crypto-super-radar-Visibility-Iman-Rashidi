@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/v2-demo-adapter-contract-2026-11-20
+      - feature/unified-pattern-intelligence-v3
   workflow_dispatch:
 
 permissions:
@@ -39,12 +40,15 @@ jobs:
             crypto_super_radar/adaptive_brain.py \
             tests/test_challenge1_v2_risk_brain_replay.py \
             tests/test_challenge1_v2_time_exit_and_lookahead.py \
-            crypto_super_radar/funding_schema_probe.py
+            crypto_super_radar/funding_schema_probe.py \
+            crypto_super_radar/pattern_intelligence_v3.py \
+            tests/test_pattern_intelligence_v3.py
 
       - name: Run V2 risk, funding, blackout and look-ahead regressions
         run: |
           python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_v2_time_exit_and_lookahead.py' -v
+          python -m unittest discover -s tests -p 'test_pattern_intelligence_v3.py' -v
 
       - name: Probe live BloFin Demo public funding schema (read-only)
         continue-on-error: true
