@@ -1497,17 +1497,81 @@ def run_sandbox(
             "decision_policy": "V3 patterns, scores, veto suggestions, and priority bonuses are telemetry only; the actual entry decision is independent of all V3 outputs.",
         },
         "pattern_intelligence_v3_shadow": {
-            "mode":"SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO","timeframes":["15m","1H","4H"],"completed_candles_only":True,"future_candles_used":False,
-            "observations":counts["pattern_shadow_observations"],"analysis_errors":counts["pattern_analysis_errors"],
-            "training_scope":"Matured TRAIN outcomes only; Validation and OOS do not update weights.",
-            "trade_scope":"V2-qualified entries with fully reconciled closed PnL; patterns tagged at entry.",
-            "family_performance":{"ALL":pattern_family_performance(actual_trades),"TRAIN":pattern_family_performance(actual_trades,"TRAIN"),"VALIDATION":pattern_family_performance(actual_trades,"VALIDATION"),"OUT_OF_SAMPLE":pattern_family_performance(actual_trades,"OUT_OF_SAMPLE")},
-            "by_market_regime":{regime:pattern_family_performance(actual_trades,regime=regime) for regime in ("TRENDING","RANGING","HIGH_VOLATILITY")},
-            "adaptive_brain":{"model":"SHADOW_PATTERN_LOGISTIC_SGD_V1","trained":pattern_brain.trained,"warmup_trades":pattern_brain.warmup_trades,"min_per_class":pattern_brain.min_per_class,
-              "training_examples":len(pattern_brain.examples),"training_closed_trades":closed_pattern_training_trades,"training_rounds":counts["pattern_training_rounds"],
-              "wins":sum(1 for x in pattern_brain.examples if x["label"]==1),"losses":sum(1 for x in pattern_brain.examples if x["label"]==0),
-              "feature_weights":pattern_brain.feature_weights(),"frozen_after_train":pattern_brain_freeze_train_count is not None},
-            "metric_semantics":"Expectancy=mean net USDT; MFE/MAE=closed Mark-candle excursion %; false-break rate=observed invalidations after confirmation."
+            "mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "research_filter_enabled": bool(v3_research_filter),
+            "default_mode_unchanged": not bool(v3_research_filter),
+            "timeframes": ["15m", "1H", "4H"],
+            "completed_candles_only": True,
+            "future_candles_used": False,
+            "observations": counts["pattern_shadow_observations"],
+            "analysis_errors": counts["pattern_analysis_errors"],
+            "training_scope": "Matured TRAIN outcomes only; named-feature vocabulary and weights are frozen before Validation/OOS.",
+            "trade_scope": "V2-qualified entries with fully reconciled closed PnL; patterns tagged at entry.",
+            "family_performance": {
+                "ALL": pattern_family_performance(actual_trades),
+                "TRAIN": pattern_family_performance(actual_trades, "TRAIN"),
+                "VALIDATION": pattern_family_performance(actual_trades, "VALIDATION"),
+                "OUT_OF_SAMPLE": pattern_family_performance(actual_trades, "OUT_OF_SAMPLE"),
+            },
+            "by_market_regime": {
+                regime: pattern_family_performance(actual_trades, regime=regime)
+                for regime in ("TRENDING", "RANGING", "HIGH_VOLATILITY")
+            },
+            "adaptive_brain": {
+                "model": pattern_brain.MODEL_VERSION,
+                "trained": pattern_brain.trained,
+                "warmup_trades": pattern_brain.warmup_trades,
+                "min_per_class": pattern_brain.min_per_class,
+                "training_examples": len(pattern_brain.examples),
+                "training_closed_trades": closed_pattern_training_trades,
+                "training_rounds": counts["pattern_training_rounds"],
+                "wins": sum(1 for x in pattern_brain.examples if x["label"] == 1),
+                "losses": sum(1 for x in pattern_brain.examples if x["label"] == 0),
+                "feature_weights": pattern_brain.feature_weights(),
+                "feature_names": list(pattern_brain.feature_names),
+                "feature_count": len(pattern_brain.feature_names),
+                "pattern_name_feature_count": sum(name.startswith("pattern_name::") for name in pattern_brain.feature_names),
+                "model_version": pattern_brain.MODEL_VERSION,
+                "training_timestamp": pattern_brain.training_timestamp,
+                "model_hash": pattern_brain.model_hash,
+                "freeze_metadata": pattern_brain_freeze_metadata,
+                "frozen_after_train": pattern_brain.frozen and pattern_brain_freeze_train_count is not None,
+            },
+            "suggestion_counts": {
+                "hypothetical_veto_suggestions": counts["v3_pattern_veto_suggestions"],
+                "toxic_or_sweep_suggestions": counts["v3_toxic_pattern_veto_suggestions"],
+                "low_brain_score_suggestions": counts["v3_brain_low_score_suggestions"],
+                "priority_supported_signals": counts["v3_priority_supported_signals"],
+                "actual_v3_entry_vetoes": counts["v3_research_filter_entry_vetoes"],
+                "capacity_slots_released": counts["v3_research_filter_capacity_slots_released"],
+                "replacement_entries": counts["v3_replacement_entries"],
+            },
+            "counterfactual": {
+                "available": bool(v3_research_filter),
+                "closed_vetoed_trades": sum(
+                    1 for row in shadow_trades
+                    if "V3_RESEARCH_FILTER" in str(row.get("veto_source") or "").split("+")
+                ),
+                "rejected_candidate_ledger": [
+                    row for row in shadow_trades
+                    if "V3_RESEARCH_FILTER" in str(row.get("veto_source") or "").split("+")
+                ],
+                "replacement_trade_ledger": [
+                    row for row in actual_trades
+                    if row.get("capacity_replacement_for_signal_id")
+                ],
+                "interpretation": (
+                    "Rejected V3 candidates are replayed in the separate counterfactual book; later accepted entries can use the freed two-slot portfolio capacity."
+                    if v3_research_filter else
+                    "Not active in the default Shadow mode; suggestions do not alter entries."
+                ),
+            },
+            "decision_policy": (
+                "Isolated offline research filter may veto V3-suggested entries; no exchange order path exists."
+                if v3_research_filter else
+                "V3 patterns, scores, veto suggestions and priority bonuses are telemetry only; actual entries are independent of V3."
+            ),
+            "metric_semantics": "Expectancy=mean net USDT; MFE/MAE=closed Mark-candle excursion %; false-break rate=observed invalidations after confirmation.",
         },
         "funding_data_quality": {
             "explicit_funding_kind_events": sum(
@@ -1623,6 +1687,11 @@ def main() -> None:
     parser.add_argument("--symbols", default=",".join(DEFAULT_WATCHLIST))
     parser.add_argument("--eth-stop-atr", type=float, default=None)
     parser.add_argument("--sol-stop-atr", type=float, default=None)
+    parser.add_argument(
+        "--v3-research-filter",
+        action="store_true",
+        help="Enable isolated TRAIN-only V3 entry vetoes in this offline replay only; default remains Shadow.",
+    )
     args = parser.parse_args()
     stop_overrides = {}
     if args.eth_stop_atr is not None:
@@ -1635,6 +1704,7 @@ def main() -> None:
         max_holding_bars=args.max_holding_bars, tp1_enabled=not args.tp1_disabled,
         tp1_reward_r_multiple=args.tp1_r, tp1_fraction=args.tp1_fraction,
         stop_atr_multiplier_overrides=stop_overrides,
+        v3_research_filter=args.v3_research_filter,
     )
     print(json.dumps({
         "equity": report["equity"],
