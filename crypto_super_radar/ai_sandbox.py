@@ -351,7 +351,7 @@ def _within_purge_window(
     asof_ms: int,
     boundary_ms: int,
     *,
-    max_holding_bars: int = 24,
+    max_holding_bars: int = 12,
 ) -> bool:
     """Block new fold entries whose maximum modeled life touches the next fold."""
     purge_ms = (max_holding_bars + 1) * BAR_MS
@@ -637,11 +637,17 @@ def run_sandbox(
     spread_scenario: float = 0.0002,
     output_path: str = "reports/ai_sandbox_report.json",
     brain_path: str = "reports/trained_brain.json",
+    max_holding_bars: int = 12,
+    tp1_enabled: bool = True,
+    tp1_reward_r_multiple: float = 1.2,
+    tp1_fraction: float = 0.5,
 ) -> dict[str, Any]:
     if not 0 < initial_equity or not np.isfinite(initial_equity):
         raise ValueError("initial_equity must be positive")
     if not 0 <= spread_scenario <= 0.0004:
         raise ValueError("spread_scenario must be between 0 and 0.04%")
+    if not 1 <= max_holding_bars <= 96:
+        raise ValueError("max_holding_bars must be 1..96")
     connection = sqlite3.connect(db_path)
     try:
         market = {symbol: _load_symbol(connection, symbol) for symbol in symbols}
@@ -660,7 +666,7 @@ def run_sandbox(
         )
         for symbol, item in market.items()
     }
-    # All five markets must cover the same six-calendar-month replay horizon.
+    # Selected markets must cover the same six-calendar-month replay horizon.
     # The downloader and loader fail closed on missing candles or funding events.
     start_time = max(item["source_start"] for item in market.values())
     common_end = min(item["source_end"] for item in market.values())
@@ -678,7 +684,11 @@ def run_sandbox(
         raise SandboxDataError("replay dataset is too small after six-month window alignment")
 
     costs = CostModel(spread_fraction=spread_scenario)
-    exchange = VirtualBloFin(costs=costs, max_holding_bars=24)
+    exchange = VirtualBloFin(
+        costs=costs, max_holding_bars=max_holding_bars,
+        tp1_enabled=tp1_enabled, tp1_reward_r_multiple=tp1_reward_r_multiple,
+        tp1_fraction=tp1_fraction,
+    )
     brain = OnlineMetaBrain(warmup_trades=100, min_per_class=20)
     pattern_brain = ShadowPatternBrain(warmup_trades=20, min_per_class=5)
     pattern_lifecycle: dict[str, dict[str, Any]] = {}
@@ -981,6 +991,13 @@ def run_sandbox(
                 "entry_ts_ms": int(result.diagnostics["entry_ts_ms"]),
                 "exit_ts_ms": exit_ts_ms,
                 "exit_reason": result.exit_reason,
+                "entry_price": float(result.filled_entry or order["entry"]),
+                "stop_loss_price": float(order["stop_loss"]),
+                "take_profit_price": float(order["take_profit"]),
+                "atr_15m_at_signal": float(order["signal_atr_15m"]),
+                "stop_distance_pct": abs(float(result.filled_entry or order["entry"]) - float(order["stop_loss"])) / float(result.filled_entry or order["entry"]) * 100.0,
+                "stop_distance_atr": abs(float(result.filled_entry or order["entry"]) - float(order["stop_loss"])) / float(order["signal_atr_15m"]) if float(order["signal_atr_15m"]) > 0 else None,
+                "exit_price": float(result.average_exit) if result.average_exit is not None else None,
                 "net_pnl_usdt": result.net_pnl_usdt,
                 "risk_budget_usdt": float(result.diagnostics.get("risk_budget_usdt", 0.0)),
                 "all_in_stop_risk_usdt": float(result.diagnostics.get("all_in_stop_risk_usdt", 0.0)),
@@ -993,6 +1010,10 @@ def run_sandbox(
                 "spread_cost_usdt": spread_cost,
                 "slippage_cost_usdt": slippage_cost,
                 "tp1_filled": result.tp1_filled,
+                "tp1_fill_quantity": float(result.diagnostics.get("tp1_fill_quantity", 0.0)),
+                "tp1_fill_price": result.diagnostics.get("tp1_fill_price"),
+                "tp1_realized_gross_pnl_usdt": float(result.diagnostics.get("tp1_realized_gross_pnl_usdt", 0.0)),
+                "tp1_fee_usdt": float(result.diagnostics.get("tp1_fee_usdt", 0.0)),
                 "net_rr_at_entry": result.net_rr_at_entry,
                 "model_decision": order["model_decision"],
                 "pattern_features": dict(order.get("pattern_features") or {}),
@@ -1083,12 +1104,12 @@ def run_sandbox(
                 )
                 continue
             if phase_boundary_ms is not None and _within_purge_window(
-                asof_ms, phase_boundary_ms, max_holding_bars=24
+                asof_ms, phase_boundary_ms, max_holding_bars=max_holding_bars
             ):
                 counts["purged_boundary_signal_blocks"] += 1
                 _record_block_reason(
                     block_reasons, block_reasons_by_symbol, symbol,
-                    "PURGED_WALK_FORWARD_375_MINUTE_BOUNDARY",
+                    f"PURGED_WALK_FORWARD_{(max_holding_bars + 1) * 15}_MINUTE_BOUNDARY",
                 )
                 continue
             precomputed_context = prepared_contexts[symbol]
@@ -1235,6 +1256,8 @@ def run_sandbox(
                     )
                     continue
 
+            atr_row = item["market"].loc[stamp]
+            signal_atr_15m = float(atr_row["atr_15m"])
             order = {
                 "symbol": symbol,
                 "signal_id": signal["signal_id"],
@@ -1242,6 +1265,7 @@ def run_sandbox(
                 "entry": signal["entry"],
                 "stop_loss": signal["stop_loss"],
                 "take_profit": signal["take_profit"],
+                "signal_atr_15m": signal_atr_15m,
                 "start_index": row_index,
                 "equity_snapshot": equity,
                 "features": features,
@@ -1324,6 +1348,15 @@ def run_sandbox(
         "network_order_writes": False,
         "data_source": "LOCAL_SQLITE_REPLAY_DOWNLOADED_FROM_BLOFIN_DEMO_PUBLIC_API",
         "spread_assumption": {"fraction": spread_scenario, "quality": "MODELLED_NOT_HISTORICAL_ORDERBOOK"},
+        "experiment_configuration": {
+            "symbols": list(symbols),
+            "max_holding_bars": max_holding_bars,
+            "purge_window_minutes": (max_holding_bars + 1) * 15,
+            "tp1_enabled": bool(tp1_enabled),
+            "tp1_reward_r_multiple": tp1_reward_r_multiple,
+            "tp1_fraction": tp1_fraction,
+            "v3_pattern_mode": "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+        },
         "periods": {
             "start_utc": min(times).isoformat(), "end_utc": max(times).isoformat(),
             "training_end_utc": train_end.isoformat(), "validation_end_utc": validation_end.isoformat(),
@@ -1461,7 +1494,7 @@ def run_sandbox(
             "train_end_utc": train_end.isoformat(),
             "validation_end_utc": validation_end.isoformat(),
             "oos_end_utc": oos_end.isoformat(),
-            "purge_window_minutes": 375,
+            "purge_window_minutes": (max_holding_bars + 1) * 15,
             "purged_boundary_signal_blocks": counts["purged_boundary_signal_blocks"],
             "cross_boundary_positions": counts["cross_boundary_positions"],
             "cross_boundary_closed_trades": counts["cross_boundary_closed_trades"],
@@ -1507,9 +1540,18 @@ def main() -> None:
     parser.add_argument("--spread", type=float, default=0.0002, help="MODELED scenario spread fraction, not historical L2")
     parser.add_argument("--output", default="reports/ai_sandbox_report.json")
     parser.add_argument("--brain", default="reports/trained_brain.json")
+    parser.add_argument("--max-holding-bars", type=int, default=12)
+    parser.add_argument("--tp1-disabled", action="store_true")
+    parser.add_argument("--tp1-r", type=float, default=1.2)
+    parser.add_argument("--tp1-fraction", type=float, default=0.5)
+    parser.add_argument("--symbols", default=",".join(DEFAULT_WATCHLIST))
     args = parser.parse_args()
-    report = run_sandbox(db_path=args.db, initial_equity=args.equity,
-                         spread_scenario=args.spread, output_path=args.output, brain_path=args.brain)
+    report = run_sandbox(
+        db_path=args.db, initial_equity=args.equity, symbols=tuple(x.strip() for x in args.symbols.split(",") if x.strip()),
+        spread_scenario=args.spread, output_path=args.output, brain_path=args.brain,
+        max_holding_bars=args.max_holding_bars, tp1_enabled=not args.tp1_disabled,
+        tp1_reward_r_multiple=args.tp1_r, tp1_fraction=args.tp1_fraction,
+    )
     print(json.dumps({
         "equity": report["equity"],
         "trade_metrics": report["trade_metrics"],

@@ -10,6 +10,24 @@ from crypto_super_radar.virtual_blofin import CostModel, InstrumentRules, Virtua
 
 
 class VirtualTimeExitLimitTests(unittest.TestCase):
+    def test_default_simulator_uses_twelve_bar_exit_and_tp1_12r_half_size(self) -> None:
+        engine = VirtualBloFin()
+        self.assertEqual(engine.max_holding_bars, 12)
+        self.assertTrue(engine.tp1_enabled)
+        self.assertEqual(engine.tp1_reward_r_multiple, 1.2)
+        self.assertEqual(engine.tp1_fraction, 0.5)
+
+    def test_tp1_configuration_is_independently_adjustable(self) -> None:
+        engine = VirtualBloFin(
+            max_holding_bars=12,
+            tp1_enabled=False,
+            tp1_reward_r_multiple=1.5,
+            tp1_fraction=0.5,
+        )
+        self.assertEqual(engine.max_holding_bars, 12)
+        self.assertFalse(engine.tp1_enabled)
+        self.assertEqual(engine.tp1_reward_r_multiple, 1.5)
+
     def setUp(self) -> None:
         self.rules = InstrumentRules(
             inst_id="BTC-USDT",
@@ -20,7 +38,7 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
         )
         self.engine = VirtualBloFin(
             costs=CostModel(spread_fraction=0.0002),
-            max_holding_bars=24,
+            max_holding_bars=12,
         )
         self.start_ms = 1_700_000_000_000
 
@@ -66,15 +84,15 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
             spread_fraction=0.0002,
         )
 
-    def test_time_exit_submits_limit_after_exactly_twenty_four_completed_bars(self) -> None:
+    def test_time_exit_submits_limit_after_exactly_twelve_completed_bars(self) -> None:
         for side in ("LONG", "SHORT"):
             with self.subTest(side=side):
-                result = self._simulate(side, self._bars(side, 26))
+                result = self._simulate(side, self._bars(side, 14))
                 self.assertEqual(result.status, "OPEN")
                 self.assertIsNone(result.net_pnl_usdt, "an open position cannot have finalized Net PnL")
                 self.assertIsNone(result.diagnostics["net_pnl_usdt"])
                 self.assertEqual(result.exit_reason, "TIME_EXIT_LIMIT_PENDING")
-                self.assertEqual(result.bars_held, 24)
+                self.assertEqual(result.bars_held, 12)
                 self.assertEqual(result.diagnostics["time_exit_order_type"], "LIMIT")
                 self.assertIsNotNone(result.diagnostics["time_exit_limit_price"])
                 self.assertIsNotNone(result.diagnostics["time_exit_submitted_ts_ms"])
@@ -86,14 +104,14 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
                 bars = self._bars(side, 26)
                 # The twelfth holding candle already spans the calculated
                 # break-even level, but the limit is submitted only at its close.
-                result = self._simulate(side, bars)
+                result = self._simulate(side, bars[:14])
                 self.assertEqual(result.status, "OPEN")
                 self.assertEqual(result.exit_reason, "TIME_EXIT_LIMIT_PENDING")
 
     def test_time_exit_limit_fills_only_on_a_later_trade_through(self) -> None:
         for side in ("LONG", "SHORT"):
             with self.subTest(side=side):
-                result = self._simulate(side, self._bars(side, 27))
+                result = self._simulate(side, self._bars(side, 15))
                 self.assertEqual(result.status, "CLOSED")
                 self.assertEqual(result.exit_reason, "TIME_EXIT")
                 self.assertEqual(result.diagnostics["time_exit_order_type"], "LIMIT")
