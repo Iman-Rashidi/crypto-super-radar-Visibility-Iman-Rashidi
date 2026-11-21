@@ -176,3 +176,14 @@ These tests validate existing code contracts; they do not validate profitability
 5. Repeat on a truly independent historical window. PF > 1.25 remains a target, never an optimization constraint or a pass condition by itself.
 
 **Final status: `RESEARCH_CONTINUES`.**
+
+
+## Post-commit verification — 2026-11-21
+
+The audit commit itself triggered a fresh CI cycle:
+- Full offline suite Run `44916421481` (#2512): **930 tests passed**, Streamlit smoke succeeded.
+- Focused TIME_EXIT/look-ahead workflow Run `44916421476` (#55): success.
+- Historical Replay Run `44916421490` (#112), at audit commit `ff041a2cf0fa5343666c68fdc345e1e2416be2c4`: the same one-missing-15m-interval error occurred; sandbox remained skipped.
+- Latest failed-run artifact: `14711593683`; SQLite contained zero candles, zero funding rows and zero instrument rows; SHA-256 remained `73fc9bc4415309a155b837c5f6c15a5f3298542dd29615f0f6bbc15cf1ffa390`.
+
+This repeat confirms the data-acquisition blocker remains present on the committed branch. The workflow still does not disclose the exact missing timestamp, so a price-candle Blackout cannot be registered or validated from the current evidence.
