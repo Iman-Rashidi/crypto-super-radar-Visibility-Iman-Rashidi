@@ -71,9 +71,37 @@ def _pivots(f:pd.DataFrame,radius:int=2)->list[dict[str,Any]]:
 def _family(p:Mapping[str,Any])->str|None:
     n=str(p.get("name_en") or "").lower(); cat=str(p.get("category") or "").upper()
     if "liquidity sweep" in n or "false break" in n: return "liquidity_sweep"
-    if cat=="CANDLE": return "candle_continuation" if any(x in n for x in ("inside bar","three white soldiers","three black crows","three inside")) else "candle_reversal"
-    if cat: return "structure_reversal" if any(x in n for x in ("double top","double bottom","head and shoulders","wedge")) else "structure_continuation"
+    if cat=="CANDLE":
+        continuation=("inside bar","three white soldiers","three black crows","three inside up","three inside down")
+        return "candle_continuation" if any(x in n for x in continuation) else "candle_reversal"
+    if cat:
+        reversal=("double top","double bottom","head and shoulders","inverse head and shoulders","wedge")
+        return "structure_reversal" if any(x in n for x in reversal) else "structure_continuation"
     return None
+
+def _market_regime(frame:pd.DataFrame,analysis:Mapping[str,Any])->str:
+    """Three causal regimes using 4H ADX context and trailing ATR expansion."""
+    atr_values=_atr(frame,14).dropna()
+    if len(atr_values)>=20:
+        current=float(atr_values.iloc[-1])
+        baseline=atr_values.iloc[-97:-1]
+        if len(baseline)>=10 and current>0:
+            percentile=float((baseline<=current).mean())
+            median=float(baseline.median())
+            ratio=current/median if median>0 else 1.0
+            if percentile>=0.80 or ratio>=1.75:
+                return "HIGH_VOLATILITY"
+    direction=analysis.get("direction") or {}
+    base=str(direction.get("regime") or "").upper()
+    if base=="TRENDING":
+        return "TRENDING"
+    if base=="RANGING":
+        return "RANGING"
+    adx=direction.get("adx14")
+    trend=str(direction.get("trend") or "").upper()
+    if adx is not None and float(adx)>=20 and trend in {"BULLISH","BEARISH"}:
+        return "TRENDING"
+    return "RANGING"
 
 def _advance(r:dict[str,Any],close:float,high:float,low:float,t:pd.Timestamp,duration:pd.Timedelta)->None:
     if r.get("last_updated_asof")==t.isoformat(): return
@@ -106,7 +134,7 @@ def _upsert(state:dict[str,dict[str,Any]],symbol:str,tf:str,p:Mapping[str,Any],t
     if r and r.get("status") in {"INVALIDATED","EXPIRED"}: key+="|"+t.isoformat(); r=None
     incoming=str(p.get("state") or "FORMING").upper(); status="CONFIRMED" if incoming=="CONFIRMED" else "FORMING"
     if r is None:
-        state[key]={"instrument_id":symbol,"timeframe":tf,"name":name,"family":fam,"direction":str(p.get("direction") or "NEUTRAL"),"status":status,
+        state[key]={"instrument_id":symbol,"timeframe":tf,"name":name,"family":fam,"direction":str(p.get("direction") if p.get("direction") in {"BULLISH","BEARISH"} else (p.get("potential_direction") or "NEUTRAL")),"status":status,
           "trigger_price":p.get("trigger_price"),"invalidation_price":p.get("invalidation_price"),"created_at":t.isoformat(),
           "confirmed_at":t.isoformat() if status=="CONFIRMED" else None,"breakout_price":close if status=="CONFIRMED" else None,
           "invalidated_after_confirmation":False,"max_age_bars":12 if tf=="15m" else 8 if tf=="1H" else 6,"last_updated_asof":t.isoformat()}
@@ -147,7 +175,7 @@ def analyze_unified_patterns_v3(*,instrument_id:str,frames:Mapping[str,pd.DataFr
         aligned=wp==("BULLISH" if direction=="LONG" else "BEARISH") and ws in {"CANDIDATE","CONFIRMED"}
         if aligned: features["elliott_alignment"]=1
         regime=str(((analysis.get("direction") or {}).get("regime") or "UNKNOWN")).upper().replace(" ","_")
-        tf_result[tf]={"closed_candles":len(f),"latest_closed_at":(f.index[-1]+duration).isoformat(),"atr_normalized":normalized_candle_metrics(f),"market_regime":regime,
+        tf_result[tf]={"closed_candles":len(f),"latest_closed_at":(f.index[-1]+duration).isoformat(),"atr_normalized":normalized_candle_metrics(f),"market_regime":_market_regime(f,analysis) if tf=="4H" else str(((analysis.get("direction") or {}).get("regime") or "UNKNOWN")).upper(),
           "patterns":[{"name_en":x.get("name_en") or x.get("name"),"family":x.get("family"),"direction":x.get("direction"),"status":x.get("lifecycle_status") or x.get("state"),"trigger_price":x.get("trigger_price"),"invalidation_price":x.get("invalidation_price"),"lifecycle_key":x.get("lifecycle_key")} for x in all_patterns if x.get("lifecycle_key") in local],
           "wave_structure":{"pattern":wp,"status":ws,"phase":str((wave or {}).get("phase") or "UNKNOWN"),"aligned_with_v2":bool(aligned)}}
     keys={k:list(dict.fromkeys(v)) for k,v in keys.items()}
