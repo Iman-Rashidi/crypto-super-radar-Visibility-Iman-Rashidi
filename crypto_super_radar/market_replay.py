@@ -179,7 +179,7 @@ def download_candles(
     symbol = str(inst_id or "").strip().upper()
     if symbol not in DEFAULT_SYMBOLS:
         raise ValueError("instrument is not in the approved Challenge 1 watchlist")
-    if bar not in BAR_MS or not 1 <= months <= 12 or not 1 <= page_size <= 1440:
+    if bar not in BAR_MS or not 1 <= months <= 13 or not 1 <= page_size <= 1440:
         raise ValueError("unsupported bar/months/page_size")
     sess = session or requests.Session()
     now = datetime.now(timezone.utc)
@@ -364,7 +364,7 @@ def download_funding_rates(
     page_size: int = 100,
 ) -> list[tuple[Any, ...]]:
     symbol = str(inst_id or "").strip().upper()
-    if symbol not in DEFAULT_SYMBOLS or not 1 <= months <= 12 or not 1 <= page_size <= 100:
+    if symbol not in DEFAULT_SYMBOLS or not 1 <= months <= 13 or not 1 <= page_size <= 100:
         raise ValueError("unsupported symbol/months/page_size")
     sess = session or requests.Session()
     now = datetime.now(timezone.utc)
@@ -530,7 +530,7 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download BloFin Demo public replay data; no credentials and no order writes")
-    parser.add_argument("--months", type=int, default=7, help="Calendar months to fetch; one extra month provides indicator warm-up for the six-month walk-forward window.")
+    parser.add_argument("--months", type=int, default=7, help="Calendar months to fetch (maximum 13); one extra month provides indicator warm-up for the six-month walk-forward window.")
     parser.add_argument("--db", default="data/blofin_replay.sqlite3")
     args = parser.parse_args()
     print(json.dumps(download_watchlist(db_path=args.db, months=args.months), indent=2))

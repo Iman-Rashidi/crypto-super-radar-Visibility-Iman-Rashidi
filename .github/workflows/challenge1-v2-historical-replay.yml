@@ -59,14 +59,14 @@ jobs:
           python -m crypto_super_radar.funding_schema_probe --output artifacts/funding_schema_probe.json
           cat artifacts/funding_schema_probe.json >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Download seven months of public BloFin market data
+      - name: Download thirteen months of public BloFin market data for a non-overlapping historical window
         id: download
         continue-on-error: true
         run: |
           set +e
           mkdir -p artifacts
           python -m crypto_super_radar.market_replay \
-            --months 7 \
+            --months 13 \
             --db artifacts/blofin_replay.sqlite3 \
             > artifacts/downloader.log 2>&1
           code=$?
