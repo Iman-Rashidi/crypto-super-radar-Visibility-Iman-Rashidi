@@ -27,6 +27,7 @@ from crypto_super_radar.ai_sandbox import (
     _record_block_reason,
     _required_replay_end,
     _within_purge_window,
+    _datetime_index_to_epoch_ms,
 )
 from crypto_super_radar.market_replay import (
     ReplayDownloadError,
@@ -471,6 +472,16 @@ class ReplayFundingSchemaTests(unittest.TestCase):
         self.assertEqual(dividend, ("BTC-USDT", 2000, 0.0002, "1", "EXPLICIT_API"))
 
 
+class SandboxDatetimeResolutionTests(unittest.TestCase):
+    def test_epoch_milliseconds_are_stable_across_pandas_datetime_resolutions(self):
+        expected = np.asarray([1779966000000, 1779966900000], dtype=np.int64)
+        index = pd.to_datetime(expected, unit="ms", utc=True)
+        for unit in ("ms", "us", "ns"):
+            with self.subTest(unit=unit):
+                converted = _datetime_index_to_epoch_ms(index.as_unit(unit))
+                np.testing.assert_array_equal(converted, expected)
+
+
 class SandboxFundingKindTests(unittest.TestCase):
     def test_regular_kind_zero_is_accepted(self):
         _require_regular_funding_events(
@@ -618,6 +629,42 @@ class VirtualBloFinFundingKindTests(unittest.TestCase):
                 "fundingIntervalMs": 60 * 60_000,
                 "fundingScheduleVerified": True,
             })
+
+    def test_virtual_simulator_applies_funding_with_epoch_millisecond_timestamps(self):
+        engine = VirtualBloFin()
+        rules = InstrumentRules(
+            inst_id="BTC-USDT",
+            contract_value=Decimal("1"),
+            min_size=Decimal("1"),
+            lot_size=Decimal("1"),
+            tick_size=Decimal("0.01"),
+        )
+        base = 1_700_000_000_000
+        bars = [
+            {"ts": base, "low": 99.5, "high": 100.5, "mark_high": 100.5, "mark_low": 99.5},
+            {"ts": base + 900_000, "low": 99.5, "high": 101.0, "mark_high": 101.0, "mark_low": 99.5},
+            {"ts": base + 1_800_000, "low": 99.5, "high": 101.0, "mark_high": 101.0, "mark_low": 99.5},
+        ]
+        result = engine.simulate_post_only_trade(
+            bars=bars, start_index=0, direction="LONG", limit_price=100,
+            stop_price=99, target_price=104, equity_usdt=1000,
+            risk_fraction=0.0025, rules=rules,
+            funding_events=[{
+                "fundingTime": base + 1_800_000,
+                "fundingRate": "0.0001",
+                "fundingKind": "0",
+            }],
+            spread_fraction=0.0002,
+        )
+        self.assertEqual(result.status, "OPEN")
+        self.assertGreater(result.diagnostics["entry_ts_ms"], 1_000_000_000_000)
+        self.assertEqual(result.diagnostics["funding_event_count"], 1)
+        self.assertGreater(result.funding_usdt, 0)
+
+    def test_virtual_simulator_rejects_epoch_seconds(self):
+        with self.assertRaisesRegex(SimulationError, "Unix epoch milliseconds"):
+            from crypto_super_radar.virtual_blofin import _timestamp_ms
+            _timestamp_ms(1_700_000_000)
 
 
 

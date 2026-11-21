@@ -247,11 +247,15 @@ def net_reward_risk(
 
 def _timestamp_ms(value: Any) -> int:
     if hasattr(value, "timestamp"):
-        return int(value.timestamp() * 1000)
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise SimulationError("candle timestamp is invalid") from exc
+        result = int(value.timestamp() * 1000)
+    else:
+        try:
+            result = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise SimulationError("candle timestamp is invalid") from exc
+    if result < 1_000_000_000_000:
+        raise SimulationError("timestamp must be Unix epoch milliseconds, not seconds")
+    return result
 
 
 def _net_breakeven_limit_price(

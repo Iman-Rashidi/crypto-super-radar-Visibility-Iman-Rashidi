@@ -128,6 +128,20 @@ def _strategy_history_ready(
     )
 
 
+def _datetime_index_to_epoch_ms(index: pd.DatetimeIndex) -> np.ndarray:
+    """Return UTC Unix milliseconds independent of Pandas datetime resolution."""
+    values = pd.DatetimeIndex(index)
+    if values.tz is None:
+        raise SandboxDataError("market candle index must be timezone-aware")
+    try:
+        # Pandas 3.x can retain microsecond/millisecond storage units. Normalize
+        # to ns explicitly before interpreting the backing int64 values.
+        epoch_ns = values.tz_convert("UTC").as_unit("ns").asi8
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SandboxDataError("market candle index cannot be normalized to UTC nanoseconds") from exc
+    return np.asarray(epoch_ns // 1_000_000, dtype=np.int64)
+
+
 def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     frames = {
         "15m": _load_candles(connection, symbol, "15m", "LAST"),
@@ -169,8 +183,9 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     )
     if source_end <= source_start:
         raise SandboxDataError(f"no common 15m/1H/4H/Mark replay window for {symbol}")
-    market["close_ts"] = market.index.view("int64") // 1_000_000 + BAR_MS
-    market["ts_ms"] = market.index.view("int64") // 1_000_000
+    timestamp_ms = _datetime_index_to_epoch_ms(market.index)
+    market["close_ts"] = timestamp_ms + BAR_MS
+    market["ts_ms"] = timestamp_ms
     bars = []
     for _, row in market.iterrows():
         bars.append({
