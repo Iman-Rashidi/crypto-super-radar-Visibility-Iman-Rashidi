@@ -1321,3 +1321,46 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class AlphaDiscoveryHypothesisTests(unittest.TestCase):
+    def test_gross_to_fee_ratio_uses_signal_time_inputs_and_costs(self):
+        from crypto_super_radar.ai_sandbox import (
+            _gross_to_fee_ratio, _passes_cost_friction_guard, _passes_4h_regime_alignment,
+        )
+        from crypto_super_radar.virtual_blofin import CostModel
+
+        signal = {"signal": "LONG", "entry": 100.0, "stop_loss": 98.0, "take_profit": 104.8}
+        ratio = _gross_to_fee_ratio(
+            signal, contract_value=1.0, costs=CostModel(spread_fraction=0.0002),
+            tp1_reward_r_multiple=1.2, tp1_fraction=0.5,
+        )
+        self.assertIsNotNone(ratio)
+        self.assertGreater(ratio, 3.0)
+        self.assertTrue(_passes_cost_friction_guard(ratio, 3.0))
+        self.assertFalse(_passes_cost_friction_guard(None, 3.0))
+
+        higher_cost_ratio = _gross_to_fee_ratio(
+            signal, contract_value=1.0,
+            costs=CostModel(spread_fraction=0.0004, maker_fee=0.0006, taker_fee=0.001),
+            tp1_reward_r_multiple=1.2, tp1_fraction=0.5,
+        )
+        self.assertLess(higher_cost_ratio, ratio)
+        self.assertTrue(_passes_4h_regime_alignment({"regime":{"aligned_4h":False}}, False))
+        self.assertTrue(_passes_4h_regime_alignment({"regime":{"aligned_4h":True}}, True))
+        self.assertFalse(_passes_4h_regime_alignment({"regime":{"aligned_4h":False}}, True))
+        self.assertFalse(_passes_4h_regime_alignment({}, True))
+
+    def test_gross_to_fee_ratio_rejects_invalid_trade_geometry(self):
+        from crypto_super_radar.ai_sandbox import _gross_to_fee_ratio
+        from crypto_super_radar.virtual_blofin import CostModel
+
+        self.assertIsNone(_gross_to_fee_ratio(
+            {"signal":"LONG","entry":100,"stop_loss":101,"take_profit":104},
+            contract_value=1.0,costs=CostModel(),
+        ))
+        self.assertIsNone(_gross_to_fee_ratio(
+            {"signal":"LONG","entry":float("nan"),"stop_loss":98,"take_profit":104},
+            contract_value=1.0,costs=CostModel(),
+        ))

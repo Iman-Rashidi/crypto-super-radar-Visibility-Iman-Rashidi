@@ -698,6 +698,59 @@ def _phase(asof_ms: int, train_end_ms: int, validation_end_ms: int) -> str:
     return "OUT_OF_SAMPLE"
 
 
+def _gross_to_fee_ratio(signal: Mapping[str, Any], *, contract_value: float,
+                        costs: CostModel, tp1_reward_r_multiple: float = 1.2,
+                        tp1_fraction: float = 0.5) -> float | None:
+    """Signal-time target reward divided by modeled maker fees, spread and funding reserve."""
+    try:
+        entry, stop, target = (float(signal[k]) for k in ("entry", "stop_loss", "take_profit"))
+        cv, fraction, reward_r = float(contract_value), float(tp1_fraction), float(tp1_reward_r_multiple)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(np.isfinite(v) for v in (entry, stop, target, cv, fraction, reward_r)):
+        return None
+    if entry <= 0 or stop <= 0 or target <= 0 or cv <= 0 or not 0 < fraction < 1 or reward_r <= 0:
+        return None
+    direction = str(signal.get("signal") or "").upper()
+    if direction not in {"LONG", "SHORT"}:
+        return None
+    if not ((stop < entry < target) if direction == "LONG" else (target < entry < stop)):
+        return None
+    net_risk = abs(entry - stop) + entry * (
+        costs.maker_fee + costs.taker_fee + costs.stop_slippage
+        + costs.spread_fraction + costs.funding_reserve
+    )
+    tp1_distance = reward_r * net_risk + entry * (
+        2 * costs.maker_fee + costs.spread_fraction + costs.funding_reserve
+    )
+    tp1_price = entry + tp1_distance if direction == "LONG" else entry - tp1_distance
+    gross_reward = cv * (
+        fraction * tp1_distance + (1.0 - fraction) * abs(target - entry)
+    )
+    friction = cv * (
+        entry * costs.maker_fee
+        + fraction * tp1_price * costs.maker_fee
+        + (1.0 - fraction) * target * costs.maker_fee
+        + entry * (costs.spread_fraction + costs.funding_reserve)
+    )
+    if not np.isfinite(gross_reward) or not np.isfinite(friction) or friction <= 0:
+        return None
+    return float(gross_reward / friction)
+
+
+def _passes_cost_friction_guard(ratio: float | None, minimum_ratio: float) -> bool:
+    if not np.isfinite(minimum_ratio) or minimum_ratio <= 0:
+        raise ValueError("minimum gross-to-fee ratio must be finite and positive")
+    return ratio is not None and np.isfinite(ratio) and float(ratio) >= float(minimum_ratio)
+
+
+def _passes_4h_regime_alignment(signal: Mapping[str, Any], enabled: bool) -> bool:
+    if not enabled:
+        return True
+    regime = signal.get("regime")
+    return isinstance(regime, Mapping) and regime.get("aligned_4h") is True
+
+
 def _max_consecutive_losses(trades: list[dict[str, Any]]) -> int:
     streak = best = 0
     for trade in sorted(trades, key=lambda x: x["exit_ts_ms"]):
@@ -794,7 +847,11 @@ def run_sandbox(
     tp1_fraction: float = 0.5,
     stop_atr_multiplier_overrides: Mapping[str, float] | None = None,
     v3_research_filter: bool = False,
+    cost_friction_guard: bool = False,
+    minimum_gross_to_fee_ratio: float = 3.0,
+    four_hour_regime_alignment: bool = False,
     replay_start_utc: str | None = None,
+    replay_end_utc: str | None = None,
     replay_months: int = 6,
     training_months: int = 4,
     validation_months: int = 5,
@@ -815,10 +872,15 @@ def run_sandbox(
         raise ValueError("spread_scenario must be between 0 and 0.04%")
     if not 1 <= max_holding_bars <= 96:
         raise ValueError("max_holding_bars must be 1..96")
-    if not 1 <= replay_months <= 24:
-        raise ValueError("replay_months must be 1..24")
-    if not 1 <= training_months <= validation_months < replay_months:
-        raise ValueError("require 1 <= training_months <= validation_months < replay_months")
+    if replay_end_utc is None:
+        if not 1 <= replay_months <= 24:
+            raise ValueError("replay_months must be 1..24")
+        if not 1 <= training_months <= validation_months < replay_months:
+            raise ValueError("require 1 <= training_months <= validation_months < replay_months")
+    elif replay_start_utc is None or training_months != 0 or validation_months != 0:
+        raise ValueError("explicit independent holdout requires a start and zero TRAIN/VALIDATION months")
+    if not np.isfinite(minimum_gross_to_fee_ratio) or minimum_gross_to_fee_ratio <= 0:
+        raise ValueError("minimum_gross_to_fee_ratio must be finite and positive")
     if not np.isfinite(risk_fraction) or not 0.0001 <= risk_fraction <= 0.01:
         raise ValueError("risk_fraction must be between 0.01% and 1.0% of equity")
     connection = sqlite3.connect(db_path)
@@ -875,15 +937,28 @@ def run_sandbox(
             f"start={start_time.isoformat()} source_start={source_start.isoformat()} "
             f"common_end={common_end.isoformat()}"
         )
-    oos_end = start_time + pd.DateOffset(months=replay_months)
-    if common_end < oos_end:
-        raise SandboxDataError(
-            f"replay coverage is shorter than requested {replay_months}-month window: "
-            f"start={start_time.isoformat()} end={common_end.isoformat()} "
-            f"required_end_at_least={oos_end.isoformat()}"
-        )
-    train_end = start_time + pd.DateOffset(months=training_months)
-    validation_end = start_time + pd.DateOffset(months=validation_months)
+    if replay_end_utc is None:
+        oos_end = start_time + pd.DateOffset(months=replay_months)
+        if common_end < oos_end:
+            raise SandboxDataError(
+                f"replay coverage is shorter than requested {replay_months}-month window: "
+                f"start={start_time.isoformat()} end={common_end.isoformat()} "
+                f"required_end_at_least={oos_end.isoformat()}"
+            )
+        train_end = start_time + pd.DateOffset(months=training_months)
+        validation_end = start_time + pd.DateOffset(months=validation_months)
+    else:
+        requested_end = pd.Timestamp(replay_end_utc)
+        if requested_end.tzinfo is None:
+            raise ValueError("replay_end_utc must include an explicit timezone")
+        oos_end = requested_end.tz_convert("UTC")
+        if oos_end <= start_time or oos_end > common_end:
+            raise SandboxDataError(
+                f"explicit holdout end is outside common data: start={start_time.isoformat()} "
+                f"end={oos_end.isoformat()} common_end={common_end.isoformat()}"
+            )
+        train_end = start_time
+        validation_end = start_time
     train_end_ms = int(train_end.timestamp() * 1000)
     validation_end_ms = int(validation_end.timestamp() * 1000)
     times = sorted(
@@ -1219,6 +1294,8 @@ def run_sandbox(
                 "entry_price": float(result.filled_entry or order["entry"]),
                 "stop_loss_price": float(order["stop_loss"]),
                 "take_profit_price": float(order["take_profit"]),
+                "gross_to_fee_ratio_at_signal": order.get("gross_to_fee_ratio_at_signal"),
+                "aligned_4h_at_signal": order.get("aligned_4h_at_signal"),
                 "atr_15m_at_signal": float(order["signal_atr_15m"]),
                 "stop_distance_pct": abs(float(result.filled_entry or order["entry"]) - float(order["stop_loss"])) / float(result.filled_entry or order["entry"]) * 100.0,
                 "stop_distance_atr": abs(float(result.filled_entry or order["entry"]) - float(order["stop_loss"])) / float(order["signal_atr_15m"]) if float(order["signal_atr_15m"]) > 0 else None,
@@ -1469,6 +1546,30 @@ def run_sandbox(
                     f"STRATEGY_NO_TRADE: {signal.get('reason')}",
                 )
                 continue
+
+            gross_fee_ratio = _gross_to_fee_ratio(
+                signal, contract_value=float(item["rules"].contract_value),
+                costs=costs, tp1_reward_r_multiple=tp1_reward_r_multiple,
+                tp1_fraction=tp1_fraction,
+            )
+            counts["gross_to_fee_ratio_evaluations"] += 1
+            if four_hour_regime_alignment:
+                counts["four_hour_alignment_evaluations"] += 1
+                if not _passes_4h_regime_alignment(signal, True):
+                    counts["four_hour_alignment_entry_blocks"] += 1
+                    _record_block_reason(block_reasons, block_reasons_by_symbol, symbol,
+                                         "RESEARCH_4H_REGIME_NOT_ALIGNED")
+                    continue
+            if cost_friction_guard and not _passes_cost_friction_guard(
+                gross_fee_ratio, minimum_gross_to_fee_ratio
+            ):
+                counts["cost_friction_guard_entry_blocks"] += 1
+                if gross_fee_ratio is None:
+                    counts["cost_friction_guard_unknown_ratio_blocks"] += 1
+                _record_block_reason(block_reasons, block_reasons_by_symbol, symbol,
+                                     "RESEARCH_GROSS_TO_FEE_RATIO_BELOW_THRESHOLD_OR_UNKNOWN")
+                continue
+
             counts["qualified_signals"] += 1
             features=dict(signal["features"])
             try:
@@ -1587,6 +1688,8 @@ def run_sandbox(
                 "entry": signal["entry"],
                 "stop_loss": signal["stop_loss"],
                 "take_profit": signal["take_profit"],
+                "gross_to_fee_ratio_at_signal": gross_fee_ratio,
+                "aligned_4h_at_signal": bool((signal.get("regime") or {}).get("aligned_4h")),
                 "signal_atr_15m": signal_atr_15m,
                 "start_index": row_index,
                 "equity_snapshot": equity,
@@ -1691,20 +1794,25 @@ def run_sandbox(
             "maximum_simultaneous_positions": 2,
             "maximum_nominal_aggregate_risk_fraction": risk_fraction * 2,
             "v3_pattern_mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "cost_friction_guard_enabled": bool(cost_friction_guard),
+            "minimum_gross_to_fee_ratio": minimum_gross_to_fee_ratio if cost_friction_guard else None,
+            "four_hour_regime_alignment_enabled": bool(four_hour_regime_alignment),
         },
         "periods": {
             "start_utc": min(times).isoformat(), "end_utc": max(times).isoformat(),
+            "end_exclusive_utc": oos_end.isoformat(),
             "training_end_utc": train_end.isoformat(), "validation_end_utc": validation_end.isoformat(),
-            "requested_replay_months": replay_months,
+            "requested_replay_months": replay_months if replay_end_utc is None else None,
             "training_months": training_months,
             "validation_months": validation_months - training_months,
-            "out_of_sample_months": replay_months - validation_months,
+            "out_of_sample_months": replay_months - validation_months if replay_end_utc is None else None,
+            "explicit_independent_holdout": replay_end_utc is not None,
             "phases": (
                 f"first {training_months} months TRAIN; "
                 f"next {validation_months - training_months} months VALIDATION; "
                 f"remaining {replay_months - validation_months} months OUT_OF_SAMPLE; "
                 "model frozen after TRAIN"
-            ),
+            ) if replay_end_utc is None else "Entire explicit independent window scored as OUT_OF_SAMPLE; no model fitting on this dataset.",
         },
         "equity": {"initial_usdt": initial_equity, "final_realized_usdt": equity, "net_pnl_usdt": equity - initial_equity},
         "trade_metrics": {
