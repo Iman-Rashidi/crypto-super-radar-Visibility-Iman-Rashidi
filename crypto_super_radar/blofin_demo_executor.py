@@ -498,6 +498,7 @@ def build_demo_order_plan(
     aggregate_margin_limit = equity * Decimal(str(policy.max_margin_usage_pct))
     return {
         "signal_id": signal_id,
+        "execution_profile": execution_profile,
         "client_order_id": client_order_id,
         "inst_id": inst_id,
         "side": side,
@@ -1264,10 +1265,15 @@ class BloFinDemoEventStore:
                     self._db.rollback()
                     return False
 
+                v2_controls_enabled = (
+                    bool(v2_autopilot)
+                    and str(plan.get("execution_profile") or "").strip().upper() == "CHALLENGE_1_V2"
+                    and os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+                )
                 lock_row = self._db.execute(
                     "SELECT max_lifetime_orders, consumed_orders FROM "
                     "blofin_demo_single_shot_lock WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
-                ).fetchone() if not v2_autopilot else None
+                ).fetchone() if not v2_controls_enabled else None
                 if lock_row is not None:
                     try:
                         lock_maximum = int(lock_row["max_lifetime_orders"])
@@ -1304,8 +1310,10 @@ class BloFinDemoEventStore:
                         FROM blofin_demo_orders WHERE status IN ({active_statuses})"""
                 ).fetchall()
                 candidate_symbol = str(plan.get("inst_id") or "").strip().upper()
-                if any(str(row["instrument_id"] or "").strip().upper() == candidate_symbol
-                       for row in active_rows):
+                if v2_controls_enabled and any(
+                    str(row["instrument_id"] or "").strip().upper() == candidate_symbol
+                    for row in active_rows
+                ):
                     self._db.rollback()
                     return False
                 local_active = len(active_rows)
