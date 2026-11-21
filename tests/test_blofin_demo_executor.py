@@ -711,6 +711,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         # closed 15m candle while preserving the exact same contract.
         duplicate_record = v2_signal_record()
         duplicate_record["signal"] = "SHORT"
+        duplicate_record["regime"]["direction"] = "SHORT"
         duplicate_record["stop_loss_usd"] = 102.0
         duplicate_record["stop_loss"] = 102.0
         duplicate_record["take_profit_usd"] = 96.0
