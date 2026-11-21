@@ -772,6 +772,11 @@ def run_sandbox(
     tp1_fraction: float = 0.5,
     stop_atr_multiplier_overrides: Mapping[str, float] | None = None,
     v3_research_filter: bool = False,
+    replay_start_utc: str | None = None,
+    replay_months: int = 6,
+    training_months: int = 4,
+    validation_months: int = 5,
+    risk_fraction: float = 0.0025,
 ) -> dict[str, Any]:
     stop_overrides: dict[str, float] = {}
     for raw_symbol, raw_multiplier in (stop_atr_multiplier_overrides or {}).items():
@@ -788,6 +793,12 @@ def run_sandbox(
         raise ValueError("spread_scenario must be between 0 and 0.04%")
     if not 1 <= max_holding_bars <= 96:
         raise ValueError("max_holding_bars must be 1..96")
+    if not 1 <= replay_months <= 24:
+        raise ValueError("replay_months must be 1..24")
+    if not 1 <= training_months <= validation_months < replay_months:
+        raise ValueError("require 1 <= training_months <= validation_months < replay_months")
+    if not np.isfinite(risk_fraction) or not 0.0001 <= risk_fraction <= 0.01:
+        raise ValueError("risk_fraction must be between 0.01% and 1.0% of equity")
     connection = sqlite3.connect(db_path)
     try:
         market = {symbol: _load_symbol(connection, symbol) for symbol in symbols}
@@ -822,13 +833,32 @@ def run_sandbox(
         for symbol, item in market.items()
     }
     price_blackout_context_rewarmed = price_blackout_window is None
-    # Selected markets must cover the same six-calendar-month replay horizon.
-    # The downloader and loader fail closed on missing candles or funding events.
-    start_time = max(item["source_start"] for item in market.values())
+    # Selected markets must cover the explicitly requested calendar window.
+    # Indicators remain causal: frames are cut by each as-of timestamp at use.
+    source_start = max(item["source_start"] for item in market.values())
     common_end = min(item["source_end"] for item in market.values())
-    oos_end = _required_replay_end(start_time, common_end)
-    train_end = start_time + pd.DateOffset(months=4)
-    validation_end = start_time + pd.DateOffset(months=5)
+    if replay_start_utc is None:
+        start_time = source_start
+    else:
+        requested_start = pd.Timestamp(replay_start_utc)
+        if requested_start.tzinfo is None:
+            raise ValueError("replay_start_utc must include an explicit timezone")
+        start_time = requested_start.tz_convert("UTC")
+    if start_time < source_start or start_time >= common_end:
+        raise SandboxDataError(
+            f"requested replay start is outside the common dataset: "
+            f"start={start_time.isoformat()} source_start={source_start.isoformat()} "
+            f"common_end={common_end.isoformat()}"
+        )
+    oos_end = start_time + pd.DateOffset(months=replay_months)
+    if common_end < oos_end:
+        raise SandboxDataError(
+            f"replay coverage is shorter than requested {replay_months}-month window: "
+            f"start={start_time.isoformat()} end={common_end.isoformat()} "
+            f"required_end_at_least={oos_end.isoformat()}"
+        )
+    train_end = start_time + pd.DateOffset(months=training_months)
+    validation_end = start_time + pd.DateOffset(months=validation_months)
     train_end_ms = int(train_end.timestamp() * 1000)
     validation_end_ms = int(validation_end.timestamp() * 1000)
     times = sorted(
@@ -945,7 +975,7 @@ def run_sandbox(
                         stop_price=order["stop_loss"],
                         target_price=order["take_profit"],
                         equity_usdt=float(order["equity_snapshot"]),
-                        risk_fraction=0.0025,
+                        risk_fraction=risk_fraction,
                         rules=item["rules"],
                         funding_events=item["funding"],
                         spread_fraction=spread_scenario,
@@ -1616,12 +1646,24 @@ def run_sandbox(
             "tp1_reward_r_multiple": tp1_reward_r_multiple,
             "tp1_fraction": tp1_fraction,
             "stop_atr_multiplier_overrides": dict(stop_overrides),
-            "v3_pattern_mode": "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "risk_fraction_per_trade": risk_fraction,
+            "maximum_simultaneous_positions": 2,
+            "maximum_nominal_aggregate_risk_fraction": risk_fraction * 2,
+            "v3_pattern_mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
         },
         "periods": {
             "start_utc": min(times).isoformat(), "end_utc": max(times).isoformat(),
             "training_end_utc": train_end.isoformat(), "validation_end_utc": validation_end.isoformat(),
-            "phases": "first four months TRAIN; fifth month VALIDATION; sixth month OUT_OF_SAMPLE; model frozen after TRAIN",
+            "requested_replay_months": replay_months,
+            "training_months": training_months,
+            "validation_months": validation_months - training_months,
+            "out_of_sample_months": replay_months - validation_months,
+            "phases": (
+                f"first {training_months} months TRAIN; "
+                f"next {validation_months - training_months} months VALIDATION; "
+                f"remaining {replay_months - validation_months} months OUT_OF_SAMPLE; "
+                "model frozen after TRAIN"
+            ),
         },
         "equity": {"initial_usdt": initial_equity, "final_realized_usdt": equity, "net_pnl_usdt": equity - initial_equity},
         "trade_metrics": {
@@ -1814,6 +1856,16 @@ def run_sandbox(
         "open_shadow_positions_at_dataset_end": unresolved_shadow_positions,
         "closed_positions_with_unknown_net_pnl": unknown_pnl_trades,
         "closed_shadow_positions_with_unknown_net_pnl": unknown_shadow_pnl_trades,
+        "price_candle_blackout_audit": {
+            "windows": price_blackout_windows,
+            "entry_block_window": price_blackout_window,
+            "new_entry_blocks": counts["price_blackout_new_entry_blocks"],
+            "indicator_rewarm_completed": bool(price_blackout_context_rewarmed),
+            "indicator_rewarm_minimum_closed_btc_15m_bars": 70,
+            "ambiguous_actual_positions": ambiguous_price_gap_positions,
+            "ambiguous_shadow_positions": ambiguous_shadow_price_gap_positions,
+            "synthetic_candles_used": False,
+        },
         "walk_forward_audit": {
             "train_start_utc": start_time.isoformat(),
             "train_end_utc": train_end.isoformat(),
