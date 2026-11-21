@@ -500,10 +500,10 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
                     "spread_fraction": 0.0002, "quote_age_ms": 0,
                 }),
                 patch.object(v2_orchestration, "analyze_signal", return_value=dict(self.record)),
-                patch.object(web_app, "run_free_ai_second_opinion", return_value=approved_review(
+                patch.object(ai_supervisor._ai, "run_free_ai_second_opinion", return_value=approved_review(
                     "OpenRouter", "nemotron/test-model",
                 )),
-                patch.object(web_app, "run_independent_ai_supervisor", return_value=approved_review(
+                patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=approved_review(
                     "Groq", "llama/test-model",
                 )),
             ):
@@ -544,10 +544,10 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
                 patch.object(web_app, "BloFinDemoEventStore", return_value=self.store),
                 patch.object(web_app, "BloFinDemoReadOnly", return_value=self.client),
                 patch.object(v2_orchestration, "analyze_signal", return_value=dict(self.record)),
-                patch.object(web_app, "run_free_ai_second_opinion", return_value=approved_review(
+                patch.object(ai_supervisor._ai, "run_free_ai_second_opinion", return_value=approved_review(
                     "OpenRouter", "nemotron/test-model",
                 )),
-                patch.object(web_app, "run_independent_ai_supervisor", return_value=approved_review(
+                patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=approved_review(
                     "Groq", "llama/test-model",
                 )),
             ):
