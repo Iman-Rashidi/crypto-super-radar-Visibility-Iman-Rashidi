@@ -724,7 +724,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         # Use a distinct, valid closed-candle identity while retaining the same instrument.
         duplicate_record["signal_candle_open_utc"] = (
             datetime.fromisoformat(duplicate_record["signal_candle_open_utc"])
-            + timedelta(minutes=15)
+            - timedelta(minutes=15)
         ).isoformat()
         duplicate_signal_id = (
             f"challenge1-v2:BTC-USDT:15m:{duplicate_record['signal_candle_open_utc']}:LONG"
