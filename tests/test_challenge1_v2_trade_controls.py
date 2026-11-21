@@ -11,7 +11,8 @@ from crypto_super_radar.challenge1_v2_trade_controls import (
 
 class Challenge1V2TradeControlTests(unittest.TestCase):
     def test_four_positions_allowed_and_fifth_rejected(self):
-        positions = [{"instId": f"{symbol}-USDT"} for symbol in ("BTC", "ETH", "SOL")]
+        # Three active positions/orders leave exactly one of four slots available.
+        positions = [{"instId": f"{symbol}-USDT"} for symbol in ("BTC", "ETH")]
         pending = [{"instId": "XRP-USDT"}]
         allowed, reason = v2_entry_capacity(
             positions, pending, candidate_symbol="LINK-USDT", max_concurrent_positions=4
