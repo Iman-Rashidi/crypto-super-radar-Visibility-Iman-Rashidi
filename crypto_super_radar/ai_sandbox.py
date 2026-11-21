@@ -448,6 +448,40 @@ def _v3_pattern_entry_gate(
     }
 
 
+def _v3_pattern_shadow_observation(
+    *,
+    detections: list[Mapping[str, Any]],
+    expected_direction: str,
+    brain_evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Record what V3 would recommend without allowing it to affect entries."""
+    suggestion = _v3_pattern_entry_gate(
+        detections=detections,
+        expected_direction=expected_direction,
+        brain_evaluation=brain_evaluation,
+    )
+    return {
+        **suggestion,
+        "decision": "SHADOW_ONLY",
+        "reason": "TELEMETRY_ONLY_NO_ENTRY_VETO",
+        "suggested_decision": suggestion["decision"],
+        "suggested_reason": suggestion["reason"],
+        "would_veto": suggestion["decision"] == "VETO",
+        "telemetry_only": True,
+    }
+
+
+def _actual_entry_veto(
+    *,
+    model_veto: bool,
+    pattern_observation: Mapping[str, Any],
+) -> bool:
+    """Only the existing V2 model may veto; V3 must remain telemetry-only."""
+    if pattern_observation.get("decision") != "SHADOW_ONLY":
+        raise ValueError("V3 pattern observation must be SHADOW_ONLY")
+    return bool(model_veto)
+
+
 def _calibration_report(observations: list[dict[str, Any]], *, bins: int = 10) -> dict[str, Any]:
     valid = []
     for row in observations:
@@ -899,6 +933,7 @@ def run_sandbox(
                     "pattern_brain_adjusted_score": (order.get("pattern_gate") or {}).get("adjusted_brain_score"),
                     "pattern_priority_bonus": (order.get("pattern_gate") or {}).get("priority_bonus", 0.0),
                     "priority_patterns": list((order.get("pattern_gate") or {}).get("priority_patterns") or []),
+                    "pattern_gate_telemetry": dict(order.get("pattern_gate") or {}),
                 })
                 if (
                     order["phase"] in calibration_observations
@@ -964,6 +999,7 @@ def run_sandbox(
                 "pattern_detections": list(order.get("pattern_detections") or []),
                 "market_regime": order.get("pattern_market_regime","UNKNOWN"),
                 "pattern_brain_shadow_score": (order.get("pattern_brain_evaluation") or {}).get("score_0_1"),
+                "pattern_gate_telemetry": dict(order.get("pattern_gate") or {}),
                 "pattern_lifecycle_outcomes": lifecycle_outcomes(pattern_lifecycle, order.get("pattern_family_keys") or {}),
                 **_pattern_trade_excursions(market[order["symbol"]]["bars"],direction=order["direction"],entry_price=float(result.filled_entry or order["entry"]),entry_ts_ms=int(result.diagnostics["entry_ts_ms"]),exit_ts_ms=exit_ts_ms),
             })
@@ -1133,7 +1169,7 @@ def run_sandbox(
             # Learn only from matured TRAIN outcomes, then freeze before
             # Validation/OOS. The V3 score is uncalibrated, not a probability.
             if phase != "TRAIN" and pattern_brain.trained:
-                pattern_gate = _v3_pattern_entry_gate(
+                pattern_gate = _v3_pattern_shadow_observation(
                     detections=pattern_detections,
                     expected_direction=signal["signal"],
                     brain_evaluation=pattern_brain_evaluation,
@@ -1141,25 +1177,33 @@ def run_sandbox(
             else:
                 pattern_gate = {
                     "decision": "SHADOW_ONLY",
-                    "reason": "TRAINING_OR_PATTERN_BRAIN_NOT_READY",
+                    "reason": "TELEMETRY_ONLY_NO_ENTRY_VETO",
+                    "suggested_decision": "NOT_EVALUATED",
+                    "suggested_reason": "TRAINING_OR_PATTERN_BRAIN_NOT_READY",
+                    "would_veto": False,
+                    "telemetry_only": True,
                     "toxic_patterns": [], "liquidity_sweeps": [],
                     "priority_patterns": [], "priority_bonus": 0.0,
                     "brain_score": pattern_brain_evaluation.get("score_0_1"),
                     "adjusted_brain_score": pattern_brain_evaluation.get("score_0_1"),
                     "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
                 }
-            pattern_veto = pattern_gate["decision"] == "VETO"
-            veto = bool(model_veto or pattern_veto)
+            pattern_veto_suggestion = bool(pattern_gate.get("would_veto"))
+            # Scientific ablation: V3 recommendations are telemetry only.
+            # They cannot suppress, prioritize, size, or otherwise alter entries.
+            veto = _actual_entry_veto(
+                model_veto=model_veto,
+                pattern_observation=pattern_gate,
+            )
             veto_sources = []
             if model_veto:
                 veto_sources.append("V2_META_BRAIN")
-            if pattern_veto:
-                veto_sources.append("V3_PATTERN_BRAIN")
-                counts["v3_pattern_vetoes"] += 1
+            if pattern_veto_suggestion:
+                counts["v3_pattern_veto_suggestions"] += 1
                 if pattern_gate.get("toxic_patterns") or pattern_gate.get("liquidity_sweeps"):
-                    counts["v3_toxic_pattern_vetoes"] += 1
-                elif pattern_gate.get("reason") == "V3_PATTERN_BRAIN_LOW_SCORE":
-                    counts["v3_brain_low_score_vetoes"] += 1
+                    counts["v3_toxic_pattern_veto_suggestions"] += 1
+                elif pattern_gate.get("suggested_reason") == "V3_PATTERN_BRAIN_LOW_SCORE":
+                    counts["v3_brain_low_score_suggestions"] += 1
             if pattern_gate.get("priority_patterns"):
                 counts["v3_priority_supported_signals"] += 1
             veto_source = "+".join(veto_sources) if veto_sources else None
@@ -1272,8 +1316,6 @@ def run_sandbox(
     )
     fee_ratio = totals["fees_usdt"] / gross_positive if gross_positive > 0 else None
     attempts = int(counts["qualified_signals"])
-    v3_pattern_counterfactual = [row for row in shadow_trades if "V3_PATTERN_BRAIN" in str(row.get("veto_source") or "")]
-    v3_counterfactual_pnls = [float(row["net_pnl_usdt"]) for row in v3_pattern_counterfactual if row.get("net_pnl_usdt") is not None]
     report = {
         "report_version": "CHALLENGE1_AI_SANDBOX_V1",
         "environment": "OFFLINE_VIRTUAL_BLOFIN_DEMO_MODEL",
@@ -1315,8 +1357,8 @@ def run_sandbox(
         },
         "quantitative_metrics": _grouped_performance_summary(actual_trades, initial_equity, symbols),
         "shadow_book_metrics": _shadow_book_summary(shadow_trades),
-        "pattern_intelligence_v3_active_calibration": {
-            "mode": "TRAIN_ONLY_LEARNING_THEN_ACTIVE_VALIDATION_OOS_VETO",
+        "pattern_intelligence_v3_shadow_calibration": {
+            "mode": "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
             "training_is_unfiltered": True,
             "pattern_brain_trained": pattern_brain.trained,
             "training_examples": len(pattern_brain.examples),
@@ -1327,27 +1369,24 @@ def run_sandbox(
             "model_score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
             "score_is_calibrated_probability": False,
             "toxic_pattern_names": sorted(V3_TOXIC_PATTERN_NAMES),
-            "liquidity_sweep_policy": "VETO_ACTIVE_SWEEPS: prior replay observed 93.33% post-confirmation invalidation; this is intentionally conservative.",
+            "liquidity_sweep_policy": "OBSERVE_ONLY: candidate sweep and toxic-pattern flags are logged but never block an entry.",
             "priority_pattern_directions": V3_PRIORITY_PATTERN_DIRECTIONS,
-            "gate_counts": {
-                "pattern_vetoes": counts["v3_pattern_vetoes"],
-                "toxic_or_sweep_vetoes": counts["v3_toxic_pattern_vetoes"],
-                "low_brain_score_vetoes": counts["v3_brain_low_score_vetoes"],
+            "suggestion_counts": {
+                "hypothetical_veto_suggestions": counts["v3_pattern_veto_suggestions"],
+                "toxic_or_sweep_suggestions": counts["v3_toxic_pattern_veto_suggestions"],
+                "low_brain_score_suggestions": counts["v3_brain_low_score_suggestions"],
                 "priority_supported_signals": counts["v3_priority_supported_signals"],
+                "actual_v3_entry_vetoes": 0,
             },
             "counterfactual": {
-                "closed_vetoed_trades": len(v3_counterfactual_pnls),
-                "losses_avoided_count": sum(1 for value in v3_counterfactual_pnls if value <= 0),
-                "winners_missed_count": sum(1 for value in v3_counterfactual_pnls if value > 0),
-                "estimated_losses_avoided_usdt": sum(abs(value) for value in v3_counterfactual_pnls if value <= 0),
-                "estimated_profit_missed_usdt": sum(value for value in v3_counterfactual_pnls if value > 0),
-                "net_pnl_of_vetoed_counterfactuals_usdt": sum(v3_counterfactual_pnls),
-                "interpretation": "Offline counterfactual only; not exchange fills or realized profit.",
+                "available": False,
+                "closed_vetoed_trades": 0,
+                "interpretation": "Not generated because V3 is telemetry-only and no V3-suggested entry is suppressed.",
             },
-            "decision_policy": "TRAIN labels remain unfiltered; V3 vetoes apply only after the trained model is frozen, during VALIDATION and OUT_OF_SAMPLE.",
+            "decision_policy": "V3 patterns, scores, veto suggestions, and priority bonuses are telemetry only; the actual entry decision is independent of all V3 outputs.",
         },
         "pattern_intelligence_v3_shadow": {
-            "mode":"SHADOW_OBSERVATION_WITH_POST_TRAIN_ACTIVE_ENTRY_VETO","timeframes":["15m","1H","4H"],"completed_candles_only":True,"future_candles_used":False,
+            "mode":"SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO","timeframes":["15m","1H","4H"],"completed_candles_only":True,"future_candles_used":False,
             "observations":counts["pattern_shadow_observations"],"analysis_errors":counts["pattern_analysis_errors"],
             "training_scope":"Matured TRAIN outcomes only; Validation and OOS do not update weights.",
             "trade_scope":"V2-qualified entries with fully reconciled closed PnL; patterns tagged at entry.",

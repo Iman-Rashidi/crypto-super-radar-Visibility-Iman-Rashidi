@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 import pandas as pd
 from crypto_super_radar.adaptive_brain import ShadowPatternBrain
-from crypto_super_radar.ai_sandbox import _v3_pattern_entry_gate
+from crypto_super_radar.ai_sandbox import _actual_entry_veto, _v3_pattern_entry_gate, _v3_pattern_shadow_observation
 from crypto_super_radar.pattern_intelligence_v3 import PATTERN_FAMILIES,advance_pattern_lifecycle,analyze_unified_patterns_v3,closed_frame,normalized_candle_metrics
 
 def frame(rows=100,scale=1.0):
@@ -92,5 +92,42 @@ class ActivePatternGateTests(unittest.TestCase):
                               "direction": "BEARISH", "lifecycle_status": "INVALIDATED"}],
                             side="SHORT", score=0.50)
         self.assertEqual(result["decision"], "ALLOW")
+
+class ShadowOnlyEntryIntegrationTests(unittest.TestCase):
+    def test_v3_toxic_pattern_veto_is_only_a_suggestion(self):
+        observation = _v3_pattern_shadow_observation(
+            detections=[{
+                "name_en": "Rising Wedge",
+                "family": "structure_reversal",
+                "direction": "BEARISH",
+                "lifecycle_status": "FORMING",
+            }],
+            expected_direction="LONG",
+            brain_evaluation={"status": "READY", "score_0_1": 0.50},
+        )
+        self.assertEqual(observation["decision"], "SHADOW_ONLY")
+        self.assertTrue(observation["would_veto"])
+        self.assertEqual(observation["suggested_decision"], "VETO")
+        self.assertFalse(_actual_entry_veto(model_veto=False, pattern_observation=observation))
+
+    def test_v3_priority_bonus_never_changes_actual_entry_authorization(self):
+        observation = _v3_pattern_shadow_observation(
+            detections=[{
+                "name_en": "Bullish Engulfing",
+                "family": "candle_reversal",
+                "direction": "BULLISH",
+                "lifecycle_status": "CONFIRMED",
+            }],
+            expected_direction="LONG",
+            brain_evaluation={"status": "READY", "score_0_1": 0.42},
+        )
+        self.assertEqual(observation["decision"], "SHADOW_ONLY")
+        self.assertGreater(observation["priority_bonus"], 0)
+        self.assertFalse(_actual_entry_veto(model_veto=False, pattern_observation=observation))
+
+    def test_existing_v2_veto_remains_respected(self):
+        observation = {"decision": "SHADOW_ONLY", "would_veto": True}
+        self.assertTrue(_actual_entry_veto(model_veto=True, pattern_observation=observation))
+
 
 if __name__=="__main__": unittest.main()
