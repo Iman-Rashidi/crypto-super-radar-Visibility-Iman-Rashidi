@@ -9078,33 +9078,31 @@ async function loadBlofinInstruments(){
                     return self._send(409, json.dumps({
                         "status": "ROLE_BLOCKED", "orders_submitted": False,
                     }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-                with V2_AUTOPILOT_RUN_LOCK:
+                if not V2_AUTOPILOT_RUN_LOCK.acquire(blocking=False):
                     with LOCK:
-                        active = V2_AUTOPILOT_RUN_STATE.get("status") == "RUNNING"
-                    if active:
-                        return self._send(409, json.dumps({
-                            "status": "ALREADY_RUNNING",
-                            "job_id": V2_AUTOPILOT_RUN_STATE.get("job_id"),
-                            "message_fa": "یک چرخه V2 در حال اجراست؛ همان چرخه را دنبال کن.",
-                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-                    job_id = uuid.uuid4().hex
+                        active_job_id = V2_AUTOPILOT_RUN_STATE.get("job_id")
+                    return self._send(409, json.dumps({
+                        "status": "ALREADY_RUNNING", "job_id": active_job_id,
+                        "message_fa": "یک چرخه V2 در حال اجراست؛ همان چرخه را دنبال کن.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                job_id = uuid.uuid4().hex
+                with LOCK:
+                    V2_AUTOPILOT_RUN_STATE.update({
+                        "status": "QUEUED", "job_id": job_id,
+                        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "finished_at_utc": None, "result": None, "error_type": None,
+                    })
+                worker = threading.Thread(
+                    target=_run_challenge1_v2_dashboard_cycle,
+                    args=(job_id,), daemon=True, name="challenge1-v2-dashboard-cycle",
+                )
+                try:
+                    worker.start()
+                except Exception:
+                    V2_AUTOPILOT_RUN_LOCK.release()
                     with LOCK:
-                        V2_AUTOPILOT_RUN_STATE.update({
-                            "status": "QUEUED", "job_id": job_id,
-                            "started_at_utc": datetime.now(timezone.utc).isoformat(),
-                            "finished_at_utc": None, "result": None, "error_type": None,
-                        })
-                    worker = threading.Thread(
-                        target=_run_challenge1_v2_dashboard_cycle,
-                        args=(job_id,), daemon=True, name="challenge1-v2-dashboard-cycle",
-                    )
-                    try:
-                        worker.start()
-                    except Exception:
-                        V2_AUTOPILOT_RUN_LOCK.release()
-                        with LOCK:
-                            V2_AUTOPILOT_RUN_STATE.update({"status": "WORKER_START_FAILED", "error_type": "ThreadStartError"})
-                        return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
+                        V2_AUTOPILOT_RUN_STATE.update({"status": "WORKER_START_FAILED", "error_type": "ThreadStartError"})
+                    return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
                 return self._send(202, json.dumps({
                     "status": "QUEUED", "job_id": job_id,
                     "message_fa": "چرخه واقعی CHALLENGE_1_V2 در محیط BloFin Demo آغاز شد؛ ورود فقط با تأیید هر دو ناظر و کنترل‌های ریسک مجاز است.",
