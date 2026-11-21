@@ -203,6 +203,48 @@ class PriceCandleBlackoutTests(unittest.TestCase):
         self.assertIsNone(_ambiguous_price_candle_position(order, self.window))
 
 
+    def test_unregistered_single_candle_gap_reports_exact_symbol_timeframe_and_utc(self):
+        start = pd.Timestamp("2026-01-01T00:00:00Z")
+        end = pd.Timestamp("2026-01-01T00:45:00Z")
+        start_ms = int(start.timestamp() * 1000)
+
+        def candle(ts_ms):
+            return [str(ts_ms), "100", "101", "99", "100", "1000", "0", "0", "1"]
+
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"code": "0", "data": [
+                    candle(start_ms + 30 * 60_000),
+                    candle(start_ms),
+                ]}
+
+        class Session:
+            def get(self, *args, **kwargs):
+                return Response()
+
+        with self.assertRaises(ReplayDownloadError) as raised:
+            download_candles(
+                "LINK-USDT", "15m",
+                start_utc=start.to_pydatetime(),
+                end_utc=end.to_pydatetime(),
+                session=Session(),
+                page_size=1440,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("LINK-USDT 15m", message)
+        self.assertIn("missing_from_utc=2026-01-01T00:15:00+00:00", message)
+        self.assertIn("missing_to_utc=2026-01-01T00:15:00+00:00", message)
+        self.assertIn("missing_intervals=1", message)
+        self.assertIn("left_candle_utc=2026-01-01T00:00:00+00:00", message)
+        self.assertIn("right_candle_utc=2026-01-01T00:30:00+00:00", message)
+
 class StopAtrMultiplierConfigurationTests(unittest.TestCase):
     def test_symbol_defaults_are_unchanged(self):
         self.assertEqual(_resolve_stop_atr_multiplier("BTC-USDT"), 1.3)

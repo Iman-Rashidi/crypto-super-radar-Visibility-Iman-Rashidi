@@ -93,6 +93,30 @@ class PerPatternNameFeatureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.train()
 
+    def test_individual_pattern_name_weight_is_learned_from_train_labels(self):
+        brain = ShadowPatternBrain()
+        feature_name = "pattern_name::bullish_engulfing"
+        for index in range(20):
+            is_bullish_engulfing = index % 2 == 0
+            features = {key: 0 for key in PATTERN_FAMILIES}
+            features[feature_name] = int(is_bullish_engulfing)
+            brain.add_finalized_outcome(
+                signal_id=f"weight-{index}",
+                instrument_id="X",
+                candle_time_utc=f"2026-04-{index + 1:02d}T00:00:00Z",
+                features=features,
+                net_pnl_usdt=1 if is_bullish_engulfing else -1,
+                fees_complete=True,
+                funding_complete=True,
+            )
+
+        trained = brain.train()
+        self.assertEqual(trained["status"], "TRAINED")
+        weights = {row["feature"]: row["weight"] for row in brain.feature_weights()}
+        self.assertGreater(weights[feature_name], 0.0)
+        self.assertEqual(trained["pattern_name_feature_count"], 1)
+        self.assertTrue(all(row["training_scope"] == "TRAIN" for row in brain.examples))
+
 
 class ActivePatternGateTests(unittest.TestCase):
     def _gate(self, detections, side="LONG", score=0.50):
