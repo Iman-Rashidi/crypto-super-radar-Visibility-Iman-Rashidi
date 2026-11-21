@@ -720,6 +720,58 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
 
 
 class BloFinDemoEventStoreTests(unittest.TestCase):
+    def test_v2_exit_state_persists_tp1_bar_count_and_limit_exit_id(self):
+        store = BloFinDemoEventStore(":memory:")
+        try:
+            initial = {
+                "position_id": "position-v2-1",
+                "client_order_id": "entryclient0000000000000000000001",
+                "instrument_id": "BTC-USDT",
+                "side": "LONG",
+                "entry_price": "100",
+                "initial_stop_loss": "98",
+                "original_size": "2",
+                "remaining_size": "2",
+                "tp1_executed": False,
+                "candles_elapsed": 0,
+                "status": "OPEN",
+            }
+            store.save_v2_position_exit_state(initial)
+            updated = {
+                **initial, "remaining_size": "1",
+                "tp1_executed": True, "candles_elapsed": 12,
+                "exit_order_id": "timeexitorder123",
+                "sl_tpsl_id": "tpsl-v2-1", "status": "TIME_EXIT_PENDING",
+            }
+            store.save_v2_position_exit_state(updated)
+            loaded = store.get_v2_position_exit_state("position-v2-1")
+            self.assertTrue(loaded["tp1_executed"])
+            self.assertEqual(loaded["candles_elapsed"], 12)
+            self.assertEqual(loaded["exit_order_id"], "timeexitorder123")
+            self.assertEqual(loaded["remaining_size"], "1")
+            self.assertEqual(loaded["status"], "TIME_EXIT_PENDING")
+            self.assertEqual(len(store.list_v2_position_exit_states()), 1)
+        finally:
+            store.close()
+
+    def test_v2_exit_state_cannot_be_reassigned_to_another_order(self):
+        store = BloFinDemoEventStore(":memory:")
+        try:
+            state = {
+                "position_id": "position-v2-2",
+                "client_order_id": "entryclient0000000000000000000002",
+                "instrument_id": "ETH-USDT", "side": "SHORT",
+                "entry_price": "200", "initial_stop_loss": "204",
+                "original_size": "3", "remaining_size": "3",
+            }
+            store.save_v2_position_exit_state(state)
+            with self.assertRaises(BloFinDemoExecutionBlocked):
+                store.save_v2_position_exit_state({
+                    **state, "client_order_id": "anotherentryclient000000000000001",
+                })
+        finally:
+            store.close()
+
     def setUp(self):
         self.env = patch.dict(os.environ, {
             "TURSO_DATABASE_URL": "",
