@@ -577,6 +577,48 @@ class VirtualBloFinFundingKindTests(unittest.TestCase):
         })
         self.assertNotEqual(result.status, "REJECTED")
 
+    def test_verified_fixed_utc_8h_schedule_inference_is_accepted(self):
+        timestamp = int(pd.Timestamp("2023-11-14T16:00:00Z").timestamp() * 1000)
+        result = self._simulate({
+            "fundingTime": timestamp,
+            "fundingRate": "0.0001",
+            "fundingKind": "0",
+            "fundingKindSource": "SCHEDULE_INFERRED_UTC_8H_BOUNDARY",
+            "fundingIntervalMs": 8 * 60 * 60_000,
+            "fundingScheduleVerified": True,
+        })
+        self.assertNotEqual(result.status, "REJECTED")
+
+    def test_schedule_inference_requires_verified_fixed_8h_utc_boundary(self):
+        boundary = int(pd.Timestamp("2023-11-14T16:00:00Z").timestamp() * 1000)
+        base_event = {
+            "fundingTime": boundary,
+            "fundingRate": "0.0001",
+            "fundingKind": "0",
+            "fundingKindSource": "SCHEDULE_INFERRED_UTC_8H_BOUNDARY",
+            "fundingIntervalMs": 8 * 60 * 60_000,
+            "fundingScheduleVerified": True,
+        }
+        invalid_events = (
+            {**base_event, "fundingTime": boundary + 11_000},
+            {**base_event, "fundingIntervalMs": 4 * 60 * 60_000},
+            {**base_event, "fundingScheduleVerified": False},
+        )
+        for event in invalid_events:
+            with self.subTest(event=event), self.assertRaises(SimulationError):
+                self._simulate(event)
+
+    def test_dynamic_interval_funding_provenance_is_rejected(self):
+        with self.assertRaisesRegex(SimulationError, "funding provenance is missing or unsupported"):
+            self._simulate({
+                "fundingTime": "1699999999999",
+                "fundingRate": "0.0001",
+                "fundingKind": "0",
+                "fundingKindSource": "SCHEDULE_INFERRED_DYNAMIC_INTERVAL",
+                "fundingIntervalMs": 60 * 60_000,
+                "fundingScheduleVerified": True,
+            })
+
 
 
 class ReplayFundingScheduleInferenceTests(unittest.TestCase):

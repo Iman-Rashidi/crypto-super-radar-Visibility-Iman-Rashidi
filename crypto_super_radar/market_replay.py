@@ -518,7 +518,7 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
             result["funding"] = len(funding)
             result["funding_kind_explicit"] = sum(1 for item in funding if item[4] == "EXPLICIT_API")
             result["funding_kind_schedule_inferred"] = sum(
-                1 for item in funding if item[4] == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL"
+                1 for item in funding if item[4] == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY"
             )
             report["symbols"][symbol] = result
         _validate_common_funding_blackout(funding_by_symbol)

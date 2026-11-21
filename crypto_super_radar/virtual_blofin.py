@@ -482,7 +482,7 @@ class VirtualBloFin:
                     "or unknown funding kinds are unsupported"
                 )
             source = str(event.get("fundingKindSource") or "EXPLICIT_API").strip()
-            if source == "SCHEDULE_INFERRED_DYNAMIC_INTERVAL":
+            if source == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY":
                 if event.get("fundingScheduleVerified") is not True:
                     raise SimulationError("schedule-inferred funding has no verified provenance")
                 try:
@@ -490,12 +490,11 @@ class VirtualBloFin:
                     funding_ts = _timestamp_ms(event.get("fundingTime"))
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise SimulationError("schedule-inferred funding metadata is invalid") from exc
-                allowed = {hours * 60 * 60_000 for hours in (1, 2, 4, 8)}
-                if interval_ms not in allowed:
-                    raise SimulationError("schedule-inferred funding interval is unsupported")
+                if interval_ms != 8 * 60 * 60_000:
+                    raise SimulationError("schedule-inferred funding must use the fixed 8-hour UTC interval")
                 remainder = funding_ts % interval_ms
                 if min(remainder, interval_ms - remainder) > 10_000:
-                    raise SimulationError("schedule-inferred funding timestamp is outside its cadence")
+                    raise SimulationError("schedule-inferred funding timestamp is outside its UTC 8-hour boundary")
             elif source != "EXPLICIT_API":
                 raise SimulationError("funding provenance is missing or unsupported")
             funding_input.append(dict(event))
