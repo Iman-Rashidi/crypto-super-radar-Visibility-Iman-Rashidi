@@ -308,10 +308,11 @@ class PriceCandleBlackoutTests(unittest.TestCase):
         self.assertIn("right_candle_utc=2026-01-01T00:30:00+00:00", message)
 
 class StopAtrMultiplierConfigurationTests(unittest.TestCase):
-    def test_symbol_defaults_are_unchanged(self):
+    def test_winning_b_core_symbol_defaults_are_applied(self):
         self.assertEqual(_resolve_stop_atr_multiplier("BTC-USDT"), 1.3)
-        self.assertEqual(_resolve_stop_atr_multiplier("ETH-USDT"), 1.3)
-        self.assertEqual(_resolve_stop_atr_multiplier("SOL-USDT"), 1.8)
+        self.assertEqual(_resolve_stop_atr_multiplier("ETH-USDT"), 1.625)
+        self.assertEqual(_resolve_stop_atr_multiplier("SOL-USDT"), 2.25)
+        self.assertEqual(_resolve_stop_atr_multiplier("XRP-USDT"), 1.8)
         self.assertEqual(_resolve_stop_atr_multiplier("LINK-USDT"), 1.8)
 
     def test_research_override_changes_only_the_requested_symbol(self):
