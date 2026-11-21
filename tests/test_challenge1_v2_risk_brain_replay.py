@@ -31,6 +31,7 @@ from crypto_super_radar.ai_sandbox import (
     _datetime_index_to_epoch_ms,
     _price_candle_entry_block_status,
     _ambiguous_price_candle_position,
+    _combine_price_candle_blackout_windows,
 )
 from crypto_super_radar.market_replay import (
     ReplayDownloadError,
@@ -72,8 +73,14 @@ class PriceCandleBlackoutTests(unittest.TestCase):
             last_missing_ms=self.window["last_missing_ms"],
             missing_count=20, mark_price=False,
         ))
-        self.assertFalse(_observed_price_candle_gap_matches(
+        self.assertTrue(_observed_price_candle_gap_matches(
             symbol="ETH-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="SOL-USDT", bar="15m",
             first_missing_ms=self.window["start_ms"],
             last_missing_ms=self.window["last_missing_ms"],
             missing_count=20, mark_price=False,
@@ -116,6 +123,28 @@ class PriceCandleBlackoutTests(unittest.TestCase):
             last_missing_ms=four_hour["last_missing_ms"],
             missing_count=2, mark_price=False,
         ))
+
+    def test_eth_blackout_is_registered_and_exactly_scoped(self):
+        eth = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[3])
+        self.assertEqual(eth["instrument_id"], "ETH-USDT")
+        self.assertEqual(eth["bar"], "15m")
+        self.assertEqual(eth["source"], "LAST")
+        self.assertEqual(eth["missing_intervals"], 20)
+        self.assertEqual(eth["missing_from_utc"], self.window["missing_from_utc"])
+        self.assertEqual(eth["missing_to_utc"], self.window["missing_to_utc"])
+
+    def test_combined_blackout_windows_are_scoped_per_instrument(self):
+        btc = _combine_price_candle_blackout_windows(
+            "BTC-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)
+        )
+        eth = _combine_price_candle_blackout_windows(
+            "ETH-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)
+        )
+        self.assertEqual(btc["instrument_id"], "BTC-USDT")
+        self.assertEqual(eth["instrument_id"], "ETH-USDT")
+        self.assertEqual(len(btc["timeframe_windows"]), 3)
+        self.assertEqual(len(eth["timeframe_windows"]), 1)
+        self.assertIsNone(_combine_price_candle_blackout_windows("SOL-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)))
 
     def test_blackout_interval_uses_inclusive_first_and_exclusive_end(self):
         hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[1])
