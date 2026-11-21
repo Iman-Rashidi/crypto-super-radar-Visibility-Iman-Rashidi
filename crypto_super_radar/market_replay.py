@@ -221,9 +221,28 @@ def download_candles(
         raise ReplayDownloadError(f"no completed candles downloaded for {symbol} {bar}")
     result = [seen[key] for key in sorted(seen)]
     interval = BAR_MS[bar]
-    gaps = [b[2] - a[2] for a, b in zip(result, result[1:]) if b[2] - a[2] != interval]
+    gaps = [
+        (int(a[2]), int(b[2]), int((b[2] - a[2]) // interval) - 1)
+        for a, b in zip(result, result[1:])
+        if int(b[2]) - int(a[2]) != interval
+    ]
     if gaps:
-        raise ReplayDownloadError(f"historical candle series contains {len(gaps)} missing {bar} intervals")
+        details = []
+        for left_ms, right_ms, missing_count in gaps:
+            first_missing_ms = left_ms + interval
+            last_missing_ms = right_ms - interval
+            first_missing = datetime.fromtimestamp(first_missing_ms / 1000, timezone.utc).isoformat()
+            last_missing = datetime.fromtimestamp(last_missing_ms / 1000, timezone.utc).isoformat()
+            details.append(
+                f"{symbol} {bar}: missing_from_utc={first_missing}, "
+                f"missing_to_utc={last_missing}, missing_intervals={missing_count}, "
+                f"left_candle_utc={datetime.fromtimestamp(left_ms / 1000, timezone.utc).isoformat()}, "
+                f"right_candle_utc={datetime.fromtimestamp(right_ms / 1000, timezone.utc).isoformat()}"
+            )
+        raise ReplayDownloadError(
+            f"historical candle series contains {len(gaps)} timestamp gap(s): "
+            + " | ".join(details)
+        )
     if result[0][2] > start_ms + interval:
         raise ReplayDownloadError(
             f"historical candle series for {symbol} {bar} does not cover the requested start"
