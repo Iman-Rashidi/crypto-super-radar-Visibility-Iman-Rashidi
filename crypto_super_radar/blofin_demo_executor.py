@@ -1200,6 +1200,7 @@ class BloFinDemoEventStore:
         external_open_positions: int = 0,
         external_pending_orders: int = 0,
         single_shot: bool = False,
+        v2_autopilot: bool = False,
         max_lifetime_orders: int = 1,
     ) -> bool:
         """Atomically reserve one account-wide slot across independent DB connections.
@@ -1266,7 +1267,7 @@ class BloFinDemoEventStore:
                 lock_row = self._db.execute(
                     "SELECT max_lifetime_orders, consumed_orders FROM "
                     "blofin_demo_single_shot_lock WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
-                ).fetchone() if single_shot else None
+                ).fetchone() if not v2_autopilot else None
                 if lock_row is not None:
                     try:
                         lock_maximum = int(lock_row["max_lifetime_orders"])
@@ -2615,6 +2616,7 @@ class BloFinDemoExecutor:
             external_open_positions=_active_position_count(positions),
             external_pending_orders=_active_order_count(pending),
             single_shot=single_shot_enabled,
+            v2_autopilot=v2_autopilot_enabled,
             max_lifetime_orders=1,
         ):
             raise BloFinDemoExecutionBlocked(
