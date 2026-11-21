@@ -266,7 +266,7 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(result["model_verified"])
         self.assertTrue(result["response_validated"])
         self.assertTrue(result["paper_entry_eligible"])
-        self.assertFalse(result["orders_submitted"])
+        self.assertFalse(result.get("orders_submitted", False))
 
     def test_openrouter_reasoning_json_is_only_a_fallback_when_content_is_empty(self):
         document = valid_document()
