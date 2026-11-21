@@ -702,42 +702,42 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             ))
 
     def test_v2_autopilot_rejects_duplicate_active_instrument(self):
-        def make_v2_plan():
-            record = v2_signal_record()
-            signal_id = (
-                f"challenge1-v2:BTC-USDT:15m:{record['signal_candle_open_utc']}:LONG"
-            )
-            record["signal_id"] = signal_id
-            record["challenge1_v2_evidence"]["signal_id"] = signal_id
-            record["ai_consensus"]["reviewed_signal_id"] = signal_id
-            for reviewer in record["ai_reviews"]:
-                reviewer["review"]["reviewed_signal_id"] = signal_id
-            return build_demo_order_plan(
-                record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
-            )
-
-        first = make_v2_plan()
-        duplicate_record = v2_signal_record()
-        duplicate_signal_id = (
-            f"challenge1-v2:BTC-USDT:15m:{duplicate_record['signal_candle_open_utc']}:LONG"
+        first_record = v2_signal_record()
+        first = build_demo_order_plan(
+            first_record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
         )
-        # Use a distinct, valid closed-candle identity while retaining the same instrument.
-        duplicate_record["signal_candle_open_utc"] = (
-            datetime.fromisoformat(duplicate_record["signal_candle_open_utc"])
-            - timedelta(minutes=15)
-        ).isoformat()
+
+        # Opposite direction gives a distinct, valid signal identity on the same
+        # closed 15m candle while preserving the exact same contract.
+        duplicate_record = v2_signal_record()
+        duplicate_record["signal"] = "SHORT"
+        duplicate_record["stop_loss_usd"] = 102.0
+        duplicate_record["stop_loss"] = 102.0
+        duplicate_record["take_profit_usd"] = 96.0
+        duplicate_record["take_profit"] = 96.0
+        duplicate_record["challenge1_v2_evidence"]["elliott_wave"]["pattern"] = "BEARISH"
+        duplicate_record["challenge1_v2_evidence"]["elliott_wave"]["invalidation_price"] = 103.0
         duplicate_signal_id = (
-            f"challenge1-v2:BTC-USDT:15m:{duplicate_record['signal_candle_open_utc']}:LONG"
+            f"challenge1-v2:BTC-USDT:15m:{duplicate_record['signal_candle_open_utc']}:SHORT"
         )
         duplicate_record["signal_id"] = duplicate_signal_id
         duplicate_record["challenge1_v2_evidence"]["signal_id"] = duplicate_signal_id
-        duplicate_record["challenge1_v2_evidence"]["signal_candle_open_utc"] = duplicate_record["signal_candle_open_utc"]
-        duplicate_record["ai_consensus"]["reviewed_signal_id"] = duplicate_signal_id
+        duplicate_record["ai_consensus"].update({
+            "reviewed_signal_id": duplicate_signal_id,
+            "expected_side": "SHORT",
+            "elliott_wave_direction": "BEARISH",
+        })
         for reviewer in duplicate_record["ai_reviews"]:
-            reviewer["review"]["reviewed_signal_id"] = duplicate_signal_id
+            reviewer["review"].update({
+                "reviewed_signal_id": duplicate_signal_id,
+                "expected_side": "SHORT",
+                "trader_proposal": "SHORT",
+                "elliott_wave_direction": "BEARISH",
+            })
         duplicate = build_demo_order_plan(
             duplicate_record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
         )
+
         with patch.dict(os.environ, {"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true"}):
             self.assertTrue(self.store.reserve_order(
                 first, max_concurrent_positions=4, v2_autopilot=True,
