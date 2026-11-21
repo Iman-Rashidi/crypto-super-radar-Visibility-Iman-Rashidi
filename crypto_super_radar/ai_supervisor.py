@@ -195,7 +195,7 @@ def _message_text_candidates(message: Any) -> list[str]:
                     value = part.get("json", part.get("value"))
                     if isinstance(value, dict):
                         json_parts.append(json.dumps(value, ensure_ascii=False))
-        joined = "\\n".join(item.strip() for item in text_parts if item.strip()).strip()
+        joined = "\n".join(item.strip() for item in text_parts if item.strip()).strip()
         if joined:
             add_value(joined)
         for item in json_parts:
@@ -208,7 +208,7 @@ def _message_text_candidates(message: Any) -> list[str]:
     add_value(message.get("reasoning"))
     reasoning_details = message.get("reasoning_details")
     if isinstance(reasoning_details, list):
-        detail_text = "\\n".join(
+        detail_text = "\n".join(
             item.get("text", "") for item in reasoning_details
             if isinstance(item, dict) and isinstance(item.get("text"), str)
         ).strip()
