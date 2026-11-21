@@ -310,41 +310,190 @@ class OnlineMetaBrain:
 
 
 class ShadowPatternBrain:
-    """Separate six-feature learner for V3 research; it never gates V2."""
-    FEATURES=("candle_reversal","candle_continuation","structure_reversal","structure_continuation","elliott_alignment","liquidity_sweep")
-    def __init__(self,*,warmup_trades:int=20,min_per_class:int=5)->None:
-        if warmup_trades<20 or min_per_class<5: raise ValueError("requires >=20 samples and >=5 per class")
-        self.warmup_trades=warmup_trades; self.min_per_class=min_per_class; self.examples=[]; self.weights=[0.0]*len(self.FEATURES); self.bias=0.; self.trained=False; self.train_count=0
-    def add_finalized_outcome(self,*,signal_id:str,instrument_id:str,candle_time_utc:str,features:Mapping[str,Any],net_pnl_usdt:Any,fees_complete:bool,funding_complete:bool)->dict[str,Any]:
-        if fees_complete is not True or funding_complete is not True: return {"status":"PENDING_RECONCILIATION","inserted":False}
-        sid=str(signal_id or "").strip(); symbol=str(instrument_id or "").strip().upper()
-        if not sid or not symbol: raise MetaBrainError("pattern outcome requires identifiers")
-        if any(x["signal_id"]==sid for x in self.examples): return {"status":"DUPLICATE","inserted":False}
-        stamp=datetime.fromisoformat(str(candle_time_utc).replace("Z","+00:00"))
-        if stamp.tzinfo is None: raise MetaBrainError("pattern timestamp needs timezone")
-        pnl=float(net_pnl_usdt)
-        if not math.isfinite(pnl): raise MetaBrainError("pattern PnL must be finite")
-        vector=[]
-        for key in self.FEATURES:
-            raw=(features or {}).get(key,0); raw=int(raw) if isinstance(raw,bool) else raw; v=float(raw)
-            if not math.isfinite(v) or v not in (0.,1.): raise MetaBrainError(key+" must be binary")
-            vector.append(v)
-        self.examples.append({"signal_id":sid,"instrument_id":symbol,"candle_time_utc":stamp.astimezone(timezone.utc).isoformat(),"features":vector,"net_pnl_usdt":pnl,"label":1 if pnl>0 else 0})
-        return {"status":"RECORDED","inserted":True}
-    def train(self)->dict[str,Any]:
-        wins=sum(int(x["label"]) for x in self.examples); losses=len(self.examples)-wins
-        if len(self.examples)<self.warmup_trades or min(wins,losses)<self.min_per_class:
-            self.trained=False; return {"status":"MODEL_NOT_READY","samples":len(self.examples),"wins":wins,"losses":losses}
-        self.weights=[0.]*len(self.FEATURES); self.bias=0.
+    """TRAIN-only learner over six pattern families and individual pattern names."""
+
+    FEATURES = (
+        "candle_reversal", "candle_continuation", "structure_reversal",
+        "structure_continuation", "elliott_alignment", "liquidity_sweep",
+    )
+    MODEL_VERSION = "csr-v3-pattern-name-logistic-sgd-v2"
+
+    def __init__(self, *, warmup_trades: int = 20, min_per_class: int = 5) -> None:
+        if warmup_trades < 20 or min_per_class < 5:
+            raise ValueError("requires >=20 samples and >=5 per class")
+        self.warmup_trades = int(warmup_trades)
+        self.min_per_class = int(min_per_class)
+        self.examples: list[dict[str, Any]] = []
+        self.feature_names: list[str] = list(self.FEATURES)
+        self.weights: list[float] = [0.0] * len(self.feature_names)
+        self.bias = 0.0
+        self.trained = False
+        self.frozen = False
+        self.train_count = 0
+        self.training_timestamp: str | None = None
+        self.model_hash: str | None = None
+
+    def add_finalized_outcome(
+        self, *, signal_id: str, instrument_id: str, candle_time_utc: str,
+        features: Mapping[str, Any], net_pnl_usdt: Any,
+        fees_complete: bool, funding_complete: bool,
+    ) -> dict[str, Any]:
+        if self.frozen:
+            return {"status": "MODEL_FROZEN", "inserted": False}
+        if fees_complete is not True or funding_complete is not True:
+            return {"status": "PENDING_RECONCILIATION", "inserted": False}
+        sid = str(signal_id or "").strip()
+        symbol = str(instrument_id or "").strip().upper()
+        if not sid or not symbol:
+            raise MetaBrainError("pattern outcome requires identifiers")
+        if any(row["signal_id"] == sid for row in self.examples):
+            return {"status": "DUPLICATE", "inserted": False}
+        stamp = datetime.fromisoformat(str(candle_time_utc).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            raise MetaBrainError("pattern timestamp needs timezone")
+        pnl = float(net_pnl_usdt)
+        if not math.isfinite(pnl):
+            raise MetaBrainError("pattern PnL must be finite")
+        if not isinstance(features, Mapping):
+            raise MetaBrainError("pattern features must be a mapping")
+
+        feature_map: dict[str, float] = {name: 0.0 for name in self.FEATURES}
+        for raw_name, raw_value in features.items():
+            name = str(raw_name or "").strip()
+            if not name or len(name) > 160:
+                raise MetaBrainError("pattern feature name is invalid")
+            value = int(raw_value) if isinstance(raw_value, bool) else float(raw_value)
+            if not math.isfinite(value) or value not in (0.0, 1.0):
+                raise MetaBrainError(f"{name} must be binary")
+            feature_map[name] = value
+
+        self.examples.append({
+            "signal_id": sid,
+            "instrument_id": symbol,
+            "candle_time_utc": stamp.astimezone(timezone.utc).isoformat(),
+            "features": dict(sorted(feature_map.items())),
+            "net_pnl_usdt": pnl,
+            "label": 1 if pnl > 0 else 0,
+            "training_scope": "TRAIN",
+        })
+        return {"status": "RECORDED", "inserted": True, "label": 1 if pnl > 0 else 0}
+
+    def train(self) -> dict[str, Any]:
+        if self.frozen:
+            raise MetaBrainError("TRAIN-frozen V3 model cannot be retrained")
+        wins = sum(int(row["label"]) for row in self.examples)
+        losses = len(self.examples) - wins
+        if len(self.examples) < self.warmup_trades or min(wins, losses) < self.min_per_class:
+            self.trained = False
+            return {
+                "status": "MODEL_NOT_READY", "samples": len(self.examples),
+                "wins": wins, "losses": losses,
+            }
+
+        observed_names = {
+            name
+            for row in self.examples
+            for name, value in row["features"].items()
+            if name not in self.FEATURES and float(value) == 1.0
+        }
+        self.feature_names = list(self.FEATURES) + sorted(observed_names)
+        self.weights = [0.0] * len(self.feature_names)
+        self.bias = 0.0
         for _ in range(8):
             for row in self.examples:
-                x=row["features"]; z=max(-30.,min(30.,sum(w*v for w,v in zip(self.weights,x))+self.bias)); score=1/(1+math.exp(-z)); err=score-int(row["label"])
-                self.weights=[w-.04*(err*v+.002*w) for w,v in zip(self.weights,x)]; self.bias-=.04*err
-        self.trained=True; self.train_count+=1
-        return {"status":"TRAINED","samples":len(self.examples),"wins":wins,"losses":losses,"round":self.train_count}
-    def evaluate(self,features:Mapping[str,Any])->dict[str,Any]:
-        if not self.trained: return {"mode":"SHADOW_ONLY","status":"MODEL_NOT_READY","score_0_1":None}
-        x=[float((features or {}).get(k,0)) for k in self.FEATURES]; z=max(-30.,min(30.,sum(w*v for w,v in zip(self.weights,x))+self.bias))
-        return {"mode":"SHADOW_ONLY","status":"READY","score_0_1":round(1/(1+math.exp(-z)),6),"semantics":"Uncalibrated model score; not a probability or trade instruction."}
-    def feature_weights(self)->list[dict[str,Any]]:
-        return [{"feature":k,"weight":round(v,8)} for k,v in zip(self.FEATURES,self.weights)]
+                feature_map = row["features"]
+                vector = [float(feature_map.get(name, 0.0)) for name in self.feature_names]
+                z = max(-30.0, min(30.0, sum(w * v for w, v in zip(self.weights, vector)) + self.bias))
+                score = 1.0 / (1.0 + math.exp(-z))
+                error = score - int(row["label"])
+                self.weights = [
+                    w - 0.04 * (error * value + 0.002 * w)
+                    for w, value in zip(self.weights, vector)
+                ]
+                self.bias -= 0.04 * error
+
+        self.trained = True
+        self.train_count += 1
+        self.training_timestamp = datetime.now(timezone.utc).isoformat()
+        self.model_hash = self.model_sha256()
+        return {
+            "status": "TRAINED",
+            "model_version": self.MODEL_VERSION,
+            "samples": len(self.examples),
+            "wins": wins,
+            "losses": losses,
+            "round": self.train_count,
+            "feature_count": len(self.feature_names),
+            "pattern_name_feature_count": sum(name.startswith("pattern_name::") for name in self.feature_names),
+            "training_timestamp": self.training_timestamp,
+            "model_hash": self.model_hash,
+        }
+
+    def evaluate(self, features: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.trained:
+            return {
+                "mode": "SHADOW_ONLY", "status": "MODEL_NOT_READY",
+                "score_0_1": None, "decision": "NOT_EVALUATED",
+            }
+        if not isinstance(features, Mapping):
+            raise MetaBrainError("pattern evaluation features must be a mapping")
+        vector = []
+        for name in self.feature_names:
+            raw = features.get(name, 0)
+            value = int(raw) if isinstance(raw, bool) else float(raw)
+            if not math.isfinite(value) or value not in (0.0, 1.0):
+                raise MetaBrainError(f"{name} must be binary")
+            vector.append(value)
+        z = max(-30.0, min(30.0, sum(w * v for w, v in zip(self.weights, vector)) + self.bias))
+        score = 1.0 / (1.0 + math.exp(-z))
+        return {
+            "mode": "SHADOW_ONLY", "status": "READY",
+            "score_0_1": round(score, 6), "decision": "MODEL_SCORE_ONLY",
+            "feature_count": len(self.feature_names),
+            "semantics": "Uncalibrated model score; not a probability or trade instruction.",
+        }
+
+    def model_sha256(self) -> str:
+        identity = {
+            "model_version": self.MODEL_VERSION,
+            "feature_names": self.feature_names,
+            "weights": self.weights,
+            "bias": self.bias,
+            "warmup_trades": self.warmup_trades,
+            "min_per_class": self.min_per_class,
+            "training_examples": len(self.examples),
+            "training_signal_ids": [row["signal_id"] for row in self.examples],
+        }
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def freeze(self) -> dict[str, Any]:
+        """Freeze the last TRAIN-only model before Validation/OOS."""
+        if not self.trained:
+            self.frozen = True
+            return {
+                "status": "FROZEN_NOT_READY",
+                "model_version": self.MODEL_VERSION,
+                "training_timestamp": self.training_timestamp,
+                "model_hash": self.model_hash,
+            }
+        self.frozen = True
+        self.model_hash = self.model_sha256()
+        return {
+            "status": "FROZEN",
+            "model_version": self.MODEL_VERSION,
+            "training_timestamp": self.training_timestamp,
+            "model_hash": self.model_hash,
+            "training_samples": len(self.examples),
+            "training_scope": "TRAIN_ONLY",
+            "feature_names": list(self.feature_names),
+            "feature_count": len(self.feature_names),
+            "pattern_name_feature_count": sum(name.startswith("pattern_name::") for name in self.feature_names),
+        }
+
+    def feature_weights(self) -> list[dict[str, Any]]:
+        return [
+            {"feature": name, "weight": round(weight, 8),
+             "feature_type": "PATTERN_NAME" if name.startswith("pattern_name::") else "PATTERN_FAMILY"}
+            for name, weight in zip(self.feature_names, self.weights)
+        ]
