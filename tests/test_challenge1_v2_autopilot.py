@@ -3,12 +3,15 @@ import sqlite3
 import unittest
 from crypto_super_radar.challenge1_v2_autopilot import SYMBOLS,TABLE,preflight_errors,run_cycle,manage_open_positions,build_v2_demo_risk_policy
 from crypto_super_radar.challenge1_v2_trade_controls import v2_entry_capacity
+from crypto_super_radar.blofin_demo_executor import BloFinDemoExecutor
 
 class Challenge1V2FourSlotPolicyTests(unittest.TestCase):
     def test_runtime_policy_is_four_slots_and_blocks_the_fifth(self):
         policy = build_v2_demo_risk_policy()
         self.assertEqual(policy.max_concurrent_positions, 4)
         self.assertEqual(policy.max_leverage, 1)
+        executor = BloFinDemoExecutor(client=object(), store=object(), policy=policy, trading_enabled=True)
+        self.assertEqual(executor.policy.max_concurrent_positions, 4)
         for active_count in range(4):
             positions = [{"instId": f"ASSET{i + 1}-USDT"} for i in range(active_count)]
             allowed, reason = v2_entry_capacity(
@@ -30,7 +33,10 @@ class Challenge1V2AutopilotDryRunTests(unittest.TestCase):
         self.assertIn("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED must be true",preflight_errors({}))
     def test_both_opt_in_flags_are_allowed_but_not_required_for_dry_run(self):
         env={"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED":"true","TURSO_DATABASE_URL":"libsql://unit.test",
-             "TURSO_AUTH_TOKEN":"fake","BLOFIN_DEMO_TRADING_ENABLED":"true"}
+             "TURSO_AUTH_TOKEN":"fake","BLOFIN_DEMO_TRADING_ENABLED":"true",
+             "BLOFIN_DEMO_AUTOPILOT_ENABLED":"false",
+             "BLOFIN_DEMO_TRADE_API_KEY":"demo-key","BLOFIN_DEMO_TRADE_API_SECRET":"demo-secret",
+             "BLOFIN_DEMO_TRADE_PASSPHRASE":"demo-pass"}
         self.assertEqual(preflight_errors(env),[])
     def test_scans_five_symbols_and_persists_without_orders(self):
         db=sqlite3.connect(":memory:"); seen=[]
