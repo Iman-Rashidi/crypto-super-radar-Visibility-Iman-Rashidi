@@ -28,8 +28,9 @@ from .challenge1_v2 import (
 from .virtual_blofin import CostModel, InstrumentRules, InsufficientEquityForRisk, SimulationError, VirtualBloFin
 from .market_replay import (
     REGULAR_FUNDING_INTERVAL_MS, FUNDING_SCHEDULE_TOLERANCE_MS,
-    OBSERVED_FUNDING_BLACKOUTS, _classify_funding_schedule_events,
-    _is_observed_blackout_gap, _is_regular_utc_funding_boundary,
+    OBSERVED_FUNDING_BLACKOUTS, OBSERVED_PRICE_CANDLE_BLACKOUTS,
+    _classify_funding_schedule_events, _is_observed_blackout_gap,
+    _is_price_candle_blackout, _is_regular_utc_funding_boundary,
 )
 
 
@@ -168,6 +169,8 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     )
     if len(market) < 70:
         raise SandboxDataError(f"insufficient aligned market/mark candles for {symbol}")
+    price_blackout_observed = False
+    matched_price_blackouts: dict[tuple[str, int], dict[str, Any]] = {}
     for label, frame, interval in (
         ("15m", frames["15m"], pd.Timedelta(minutes=15)),
         ("1H", frames["1H"], pd.Timedelta(hours=1)),
@@ -178,9 +181,43 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
             raise SandboxDataError(f"{symbol} {label} timestamps are duplicated or unordered")
         gaps = frame.index.to_series().diff().dropna()
-        if not gaps.empty and not (gaps == interval).all():
-            raise SandboxDataError(f"{symbol} {label} replay has missing candle intervals")
+        bad_positions = np.flatnonzero((gaps != interval).to_numpy())
+        if len(bad_positions):
+            approved = False
+            if symbol == "BTC-USDT" and label in {"15m", "ALIGNED_15m"} and len(bad_positions) == 1:
+                position = int(bad_positions[0])
+                left_ms = int(frame.index[position].timestamp() * 1000)
+                right_ms = int(frame.index[position + 1].timestamp() * 1000)
+                missing_count = int((right_ms - left_ms) // int(interval.total_seconds() * 1000) - 1)
+                first_missing_ms = left_ms + int(interval.total_seconds() * 1000)
+                last_missing_ms = right_ms - int(interval.total_seconds() * 1000)
+                for window in OBSERVED_PRICE_CANDLE_BLACKOUTS:
+                    if (
+                        window["instrument_id"] == symbol
+                        and window["bar"] == "15m"
+                        and window["source"] == "LAST"
+                        and int(window["start_ms"]) == first_missing_ms
+                        and int(window["last_missing_ms"]) == last_missing_ms
+                        and int(window["missing_intervals"]) == missing_count
+                    ):
+                        matched_price_blackouts[(symbol, first_missing_ms)] = dict(window)
+                        approved = True
+                        price_blackout_observed = True
+                        break
+            if not approved:
+                first_bad = int(bad_positions[0])
+                left = frame.index[first_bad]
+                right = frame.index[first_bad + 1]
+                raise SandboxDataError(
+                    f"{symbol} {label} replay has unregistered missing candle intervals: "
+                    f"left={left.isoformat()} right={right.isoformat()}"
+                )
     market["atr_15m"] = atr(market, 14)
+    if price_blackout_observed:
+        approved_window = next(iter(matched_price_blackouts.values()))
+        recovery_start = pd.to_datetime(int(approved_window["end_exclusive_ms"]), unit="ms", utc=True)
+        post_gap = market.loc[market.index >= recovery_start]
+        market.loc[post_gap.index, "atr_15m"] = atr(post_gap, 14)
     market = market.dropna(subset=["atr_15m"])
     source_start = max(
         market.index[0],
@@ -274,6 +311,7 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         "rules": rules,
         "source_start": source_start,
         "source_end": source_end,
+        "price_candle_blackouts": list(matched_price_blackouts.values()),
     }
 
 
