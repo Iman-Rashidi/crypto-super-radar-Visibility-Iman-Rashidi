@@ -149,6 +149,72 @@ def _failure(provider: dict[str, Any], status: str, *,
     return result
 
 
+def _message_text_candidates(message: Any) -> list[str]:
+    """Extract parseable text/JSON candidates from OpenAI-compatible message shapes.
+
+    Content is preferred. Reasoning is only a last-resort candidate and still
+    must contain a valid JSON review object before it can be accepted.
+    """
+    if not isinstance(message, dict):
+        return []
+
+    candidates: list[str] = []
+
+    def add_value(value: Any) -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text not in candidates:
+                candidates.append(text)
+        elif isinstance(value, dict):
+            try:
+                rendered = json.dumps(value, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return
+            if rendered not in candidates:
+                candidates.append(rendered)
+
+    content = message.get("content")
+    if isinstance(content, str):
+        add_value(content)
+    elif isinstance(content, dict):
+        add_value(content)
+    elif isinstance(content, list):
+        text_parts: list[str] = []
+        json_parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                text_parts.append(part)
+            elif isinstance(part, dict):
+                part_type = str(part.get("type") or "").lower()
+                if isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    text_parts.append(part["content"])
+                elif part_type in {"json", "output_json"}:
+                    value = part.get("json", part.get("value"))
+                    if isinstance(value, dict):
+                        json_parts.append(json.dumps(value, ensure_ascii=False))
+        joined = "\\n".join(item.strip() for item in text_parts if item.strip()).strip()
+        if joined:
+            add_value(joined)
+        for item in json_parts:
+            add_value(item)
+
+    # Some OpenRouter reasoning models return an empty/null content field but
+    # include a structured final object in a reasoning-compatible field. These
+    # are fallback candidates only; plain reasoning prose is never an approval.
+    add_value(message.get("output_text"))
+    add_value(message.get("reasoning"))
+    reasoning_details = message.get("reasoning_details")
+    if isinstance(reasoning_details, list):
+        detail_text = "\\n".join(
+            item.get("text", "") for item in reasoning_details
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ).strip()
+        add_value(detail_text)
+    return candidates
+
+
 def _run_provider(provider: dict[str, Any], evidence: dict[str, Any], *,
                   expected_side: str, market_type: str,
                   http_post: Callable[..., Any] | None = None) -> dict[str, Any]:
@@ -188,15 +254,22 @@ def _run_provider(provider: dict[str, Any], evidence: dict[str, Any], *,
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ValueError("Missing AI response choices")
         message = choices[0].get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, list):
-            content = "\\n".join(
-                part.get("text", "") for part in content
-                if isinstance(part, dict) and isinstance(part.get("text"), str)
+        candidates = _message_text_candidates(message)
+        parsed = None
+        parse_errors = []
+        for candidate in candidates:
+            if not candidate or len(candidate) > _ai.MAX_RESPONSE_CHARS:
+                continue
+            try:
+                parsed = _ai._extract_json(candidate)
+                break
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                parse_errors.append(type(exc).__name__)
+        if parsed is None:
+            raise ValueError(
+                "AI response content contains no valid JSON review object"
+                + (":" + ",".join(parse_errors[:3]) if parse_errors else "")
             )
-        if not isinstance(content, str) or len(content) > _ai.MAX_RESPONSE_CHARS:
-            raise ValueError("AI response content is invalid or too large")
-        parsed = _ai._extract_json(content)
         returned_model = body.get("model") if isinstance(body, dict) else None
         if not isinstance(returned_model, str) or not returned_model.strip():
             return _failure(
