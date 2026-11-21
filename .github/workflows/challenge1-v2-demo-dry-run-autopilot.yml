@@ -1,0 +1,55 @@
+name: challenge1-v2-demo-autopilot-dispatch-target
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: challenge1-v2-demo-dry-run-autopilot
+  cancel-in-progress: false
+
+jobs:
+  v2-market-dry-run:
+    if: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED }}
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      BLOFIN_DEMO_TRADING_ENABLED: ${{ vars.BLOFIN_DEMO_TRADING_ENABLED || 'false' }}
+      BLOFIN_DEMO_AUTOPILOT_ENABLED: 'false'
+      BLOFIN_DEMO_SMOKE_TEST_ENABLED: 'false'
+      BLOFIN_DEMO_TRADE_API_KEY: ${{ secrets.BLOFIN_DEMO_TRADE_API_KEY }}
+      BLOFIN_DEMO_TRADE_API_SECRET: ${{ secrets.BLOFIN_DEMO_TRADE_API_SECRET }}
+      BLOFIN_DEMO_TRADE_PASSPHRASE: ${{ secrets.BLOFIN_DEMO_TRADE_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging/challenge1-integration-2026-11-16
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile V2 dry-run worker and tests
+        run: |
+          python -m compileall -q crypto_super_radar/challenge1_v2_autopilot.py crypto_super_radar/challenge1_v2_orchestration.py crypto_super_radar/challenge1_v2.py crypto_super_radar/challenge1_v2_trade_controls.py tests/test_challenge1_v2_autopilot.py tests/test_challenge1_v2_trade_controls.py
+      - name: Run V2 dry-run and ingestion tests
+        run: |
+          python -m unittest discover -s tests -p 'test_challenge1_v2_autopilot.py' -v
+          python -m unittest discover -s tests -p 'test_challenge1_v2_trade_controls.py' -v
+          python -m unittest discover -s tests -p 'test_challenge1_v2_web_orchestration.py' -v
+      - name: Execute guarded V2 Demo cycle and persist to Turso
+        run: python -m crypto_super_radar.challenge1_v2_autopilot
+      - name: Upload non-secret cycle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenge1-v2-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/challenge1-v2-cycle.json
+          if-no-files-found: ignore
+          retention-days: 7
