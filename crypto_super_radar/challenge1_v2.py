@@ -537,7 +537,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
 def _resolve_stop_atr_multiplier(symbol: str, override: float | None = None) -> float:
     """Resolve the symbol default or an explicit research-only stop ATR multiplier."""
     key = str(symbol or "").strip().upper()
-    default = 1.3 if key in {"BTC-USDT", "ETH-USDT"} else 1.8
+    default = {"BTC-USDT": 1.3, "ETH-USDT": 1.625, "SOL-USDT": 2.25}.get(key, 1.8)
     if override is None:
         return default
     value = float(override)
