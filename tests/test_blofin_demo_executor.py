@@ -666,6 +666,47 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual([row[0] for row in events], ["RESERVED"])
 
+    def test_v2_autopilot_bypasses_legacy_single_shot_and_enforces_four_slots(self):
+        # Consume the manual lifetime lock first. V2 autopilot must not inherit it.
+        legacy = self._plan()
+        self.assertTrue(self.store.reserve_order(legacy, single_shot=True))
+        self.store.update_order(legacy["client_order_id"], "CLOSED")
+        symbols = ("ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
+        plans = []
+        for index, symbol in enumerate(symbols):
+            record = signal_record(bar_offset_minutes=(index + 1) * 5)
+            record["signal_id"] = f"v2-capacity:{symbol}:{index}"
+            plan = build_demo_order_plan(
+                record, instrument_record(), inst_id=symbol, equity_usdt=1000,
+            )
+            plans.append(plan)
+        for plan in plans:
+            self.assertTrue(self.store.reserve_order(
+                plan, max_concurrent_positions=4, v2_autopilot=True,
+            ))
+        fifth_record = signal_record(bar_offset_minutes=60)
+        fifth_record["signal_id"] = "v2-capacity:DOGE-USDT:5"
+        fifth = build_demo_order_plan(
+            fifth_record, instrument_record(), inst_id="DOGE-USDT", equity_usdt=1000,
+        )
+        self.assertFalse(self.store.reserve_order(
+            fifth, max_concurrent_positions=4, v2_autopilot=True,
+        ))
+
+    def test_v2_autopilot_rejects_duplicate_active_instrument(self):
+        first = self._plan()
+        self.assertTrue(self.store.reserve_order(
+            first, max_concurrent_positions=4, v2_autopilot=True,
+        ))
+        duplicate_record = signal_record(bar_offset_minutes=5)
+        duplicate_record["signal_id"] = "different-signal-same-symbol"
+        duplicate = build_demo_order_plan(
+            duplicate_record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+        )
+        self.assertFalse(self.store.reserve_order(
+            duplicate, max_concurrent_positions=4, v2_autopilot=True,
+        ))
+
     def test_has_any_orders_tracks_reserved_order_history(self):
         self.assertFalse(self.store.has_any_orders())
         self.store.reserve_order(self._plan())
