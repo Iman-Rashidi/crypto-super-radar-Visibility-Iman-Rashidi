@@ -9,8 +9,11 @@ from unittest.mock import patch
 import pandas as pd
 
 from crypto_super_radar import challenge1_v2_orchestration as v2_orchestration
+from crypto_super_radar import ai_supervisor
 from crypto_super_radar import web_app
-from crypto_super_radar.blofin_demo_executor import BloFinDemoEventStore
+from crypto_super_radar.blofin_demo_executor import (
+    BloFinDemoEventStore, _challenge1_two_reviewer_approval_ready,
+)
 
 
 def make_v2_record(asof_ms: int) -> dict:
@@ -283,6 +286,27 @@ def approved_review(provider: str, model: str):
     }
 
 
+    def test_v2_orchestration_attaches_live_dual_review_and_real_executor_gate_accepts_it(self):
+        self.record = make_v2_record(self.client.now_ms)
+        nemotron = approved_review("OpenRouter", "nemotron/test-model")
+        groq = approved_review("Groq", "llama/test-model")
+        with (
+            patch.object(v2_orchestration, "analyze_signal", return_value=dict(self.record)),
+            patch.object(ai_supervisor._ai, "run_free_ai_second_opinion", return_value=nemotron) as reviewer_one,
+            patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=groq) as reviewer_two,
+        ):
+            result = v2_orchestration.analyze_challenge1_v2_market(
+                self.client, "BTC-USDT", local_now_ms=self.client.now_ms,
+            )
+        self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_BOTH")
+        self.assertEqual(result["ai_consensus"]["reviewed_signal_id"], result["signal_id"])
+        self.assertEqual({row["reviewer_id"] for row in result["ai_reviews"]}, {"nemotron", "second_ai"})
+        self.assertTrue(all(row["review"]["reviewed_signal_id"] == result["signal_id"] for row in result["ai_reviews"]))
+        ready, reason = _challenge1_two_reviewer_approval_ready(result)
+        self.assertTrue(ready, reason)
+        reviewer_one.assert_called_once()
+        reviewer_two.assert_called_once()
+
 class Challenge1V2MarketIngestionTests(unittest.TestCase):
     def setUp(self):
         self.client = FakeBloFinReadOnly()
@@ -420,8 +444,8 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
                     "spread_fraction": 0.0002, "quote_age_ms": 0,
                 }),
                 patch.object(v2_orchestration, "analyze_signal", return_value=self.record) as engine,
-                patch.object(web_app, "run_free_ai_second_opinion", return_value=review_one) as reviewer_one,
-                patch.object(web_app, "run_independent_ai_supervisor", return_value=review_two) as reviewer_two,
+                patch.object(ai_supervisor._ai, "run_free_ai_second_opinion", return_value=review_one) as reviewer_one,
+                patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=review_two) as reviewer_two,
                 patch.object(web_app, "analyze_blofin_challenge1", side_effect=AssertionError("5m legacy fallback forbidden")),
             ):
                 web_app._run_blofin_demo_execution_job(

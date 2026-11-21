@@ -29,7 +29,8 @@ def preflight_errors(environ: Mapping[str, str] | None = None) -> list[str]:
 def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
     allowed = ("execution_profile", "signal", "status", "reason", "entry_price",
                "stop_loss", "take_profit", "regime", "market_data_proof",
-               "contract_specs", "market_quote", "signal_id")
+               "contract_specs", "market_quote", "signal_id", "ai_review", "second_ai_review",
+               "ai_reviews", "ai_consensus", "ai_status", "ai_review_reason")
     return {key: record.get(key) for key in allowed if key in record}
 
 def persist_result(connection: Any, *, cycle_id: str, symbol: str,
@@ -79,7 +80,7 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None,
             "mode":"DRY_RUN", "environment":"BLOFIN_DEMO", "symbols":rows,
             "orders_submitted":False, "trade_executed":False,
             "open_position_limit":4, "position_limit_enforced":False,
-            "tpsl_verified":False, "ai_reviews_performed":False, "persistence":"TURSO"}
+            "tpsl_verified":False, "ai_reviews_performed":any(bool(row.get("ai_reviews")) for row in rows), "persistence":"TURSO"}
 
 def main() -> int:
     errors = preflight_errors()

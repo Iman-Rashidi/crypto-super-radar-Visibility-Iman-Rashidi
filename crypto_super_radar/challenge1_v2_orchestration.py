@@ -12,6 +12,10 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from types import SimpleNamespace
+
+from .models import AssetSpec, Signal
+from .ai_supervisor import run_challenge1_v2_supervisor_reviews
 from .challenge1_v2 import analyze_signal, challenge1_v2_execution_evidence_ready
 
 BAR_INTERVAL_MS = {"15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
@@ -298,4 +302,30 @@ def analyze_challenge1_v2_market(
         raise Challenge1V2DataBlocked("V2 execution evidence failed closed: " + reason)
     record["status"] = "ANALYSIS_READY"
     record["orders_submitted"] = False
+    asset = AssetSpec.parse("perp:" + symbol.replace("-", ""))
+    analysis = SimpleNamespace(
+        signal=Signal(str(record["signal"])), asset=asset.raw,
+        metrics={"execution_profile":"CHALLENGE_1_V2",
+                 "challenge1_v2_evidence":record.get("challenge1_v2_evidence"),
+                 "market_data_proof":record.get("market_data_proof")},
+        entry_price=record.get("entry"), stop_loss=record.get("stop_loss"),
+        take_profit=record.get("take_profit"),
+        confirmation_score=record.get("confidence_score"),
+        estimated_risk_score=None, to_record=lambda:record,
+    )
+    reviewers = run_challenge1_v2_supervisor_reviews(
+        analysis, asset, signal_id=str(record.get("signal_id") or ""),
+    )
+    record.update({
+        "ai_review":reviewers.get("ai_review"),
+        "second_ai_review":reviewers.get("second_ai_review"),
+        "ai_reviews":reviewers.get("ai_reviews") or [],
+        "ai_consensus":reviewers.get("ai_consensus") or {},
+        "ai_status":reviewers.get("status") or "UNKNOWN",
+        "ai_review_reason":reviewers.get("reason_fa"),
+        "orders_submitted":False,
+    })
+    if reviewers.get("approved") is not True:
+        record["status"]="AI_REVIEW_BLOCKED"
+        record["reason"]=reviewers.get("reason_fa") or "Two independent live AI approvals were not received"
     return record

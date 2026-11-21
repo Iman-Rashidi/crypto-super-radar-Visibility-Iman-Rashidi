@@ -57,6 +57,203 @@ _PROVIDER_DEFINITIONS = (
 )
 
 
+
+def _demo_ai_review_approved(review: Any) -> bool:
+    """Fail closed unless a real AI review explicitly approves Demo entry."""
+    if not isinstance(review, dict):
+        return False
+    return (
+        str(review.get("status") or "").strip().upper() == "APPROVED"
+        and review.get("paper_entry_eligible") is True
+        and review.get("request_attempted") is True
+        and str(review.get("response_source") or "").upper() == "LIVE_API"
+        and review.get("response_validated") is True
+        and review.get("model_verified") is True
+        and bool(str(review.get("model") or "").strip())
+        and bool(str(review.get("returned_model") or "").strip())
+    )
+
+def run_challenge1_v2_supervisor_reviews(
+    analysis: Any, asset: Any, *, signal_id: str | None = None,
+    primary_reviewer: Callable[..., dict[str, Any]] | None = None,
+    second_reviewer: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Run two independent AI reviews and return a fail-closed Demo entry quorum."""
+    signal_value = getattr(analysis, "signal", "UNKNOWN")
+    expected_side = str(getattr(signal_value, "value", signal_value) or "UNKNOWN").upper()
+    metrics = getattr(analysis, "metrics", {})
+    metrics = metrics if isinstance(metrics, dict) else {}
+    execution_profile = str(metrics.get("execution_profile") or "").upper()
+    if execution_profile == "CHALLENGE_1_V2":
+        evidence = metrics.get("challenge1_v2_evidence")
+    else:
+        evidence = metrics.get("challenge1_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    wave = evidence.get("elliott_wave")
+    wave = wave if isinstance(wave, dict) else {}
+    expected_wave_phase = str(wave.get("phase") or "").upper()
+    expected_wave_direction = str(wave.get("pattern") or "").upper()
+
+    def unavailable(reviewer_id: str, error_type: str) -> dict[str, Any]:
+        return {
+            "reviewer_id": reviewer_id, "status": "ERROR",
+            "request_attempted": None, "response_source": "UNKNOWN",
+            "response_validated": False, "model_verified": False,
+            "paper_entry_eligible": False, "error_type": error_type,
+        }
+
+    def verified(review: dict[str, Any]) -> bool:
+        return bool(
+            review.get("request_attempted") is True
+            and str(review.get("response_source") or "").upper() == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and str(review.get("model") or "").strip()
+            and str(review.get("returned_model") or "").strip()
+        )
+
+    # Separate credentials/models are validated inside each adapter. Calls run
+    # concurrently; neither reviewer receives the other's response.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="challenge1-review",
+    ) as pool:
+        primary_future = pool.submit(
+            (primary_reviewer or _ai.run_free_ai_second_opinion), analysis, asset, bypass_cache=True,
+        )
+        second_future = pool.submit((second_reviewer or _ai.run_independent_ai_supervisor), analysis, asset)
+        try:
+            primary = primary_future.result()
+        except Exception as exc:
+            primary = unavailable("nemotron", type(exc).__name__)
+        try:
+            second = second_future.result()
+        except Exception as exc:
+            second = unavailable("second_ai", type(exc).__name__)
+
+    if not isinstance(primary, dict):
+        primary = unavailable("nemotron", "InvalidReviewPayload")
+    if not isinstance(second, dict):
+        second = unavailable("second_ai", "InvalidReviewPayload")
+    primary, second = dict(primary), dict(second)
+    primary.setdefault("reviewer_id", "nemotron")
+    second.setdefault("reviewer_id", "second_ai")
+
+    reviewed_at_utc = datetime.now(timezone.utc).isoformat()
+    reviewed_signal_id = str(signal_id or "").strip()
+    for reviewer in (primary, second):
+        reviewer["reviewed_signal_id"] = reviewed_signal_id
+        reviewer["reviewed_at_utc"] = reviewed_at_utc
+
+    primary_verified, second_verified = verified(primary), verified(second)
+    primary_wave_match = (
+        primary.get("elliott_wave_phase") == expected_wave_phase
+        and primary.get("elliott_wave_direction") == expected_wave_direction
+    )
+    second_wave_match = (
+        second.get("elliott_wave_phase") == expected_wave_phase
+        and second.get("elliott_wave_direction") == expected_wave_direction
+    )
+    primary_side_match = (
+        primary.get("expected_side") == expected_side
+        and primary.get("trader_proposal") == expected_side
+    )
+    second_side_match = (
+        second.get("expected_side") == expected_side
+        and second.get("trader_proposal") == expected_side
+    )
+    providers_independent = (
+        bool(str(primary.get("provider") or "").strip())
+        and bool(str(second.get("provider") or "").strip())
+        and str(primary.get("provider")).strip().casefold()
+            != str(second.get("provider")).strip().casefold()
+    )
+    models_independent = (
+        bool(str(primary.get("model") or "").strip())
+        and bool(str(second.get("model") or "").strip())
+        and str(primary.get("model")).strip().casefold()
+            != str(second.get("model")).strip().casefold()
+    )
+    primary_approved = (
+        _demo_ai_review_approved(primary)
+        and primary_verified and primary_wave_match and primary_side_match
+    )
+    second_approved = (
+        _demo_ai_review_approved(second)
+        and second_verified and second_wave_match and second_side_match
+    )
+    independent_pair = providers_independent and models_independent
+    two_approvals = (
+        expected_side in {"LONG", "SHORT"}
+        and expected_wave_phase in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+        and primary_approved and second_approved and independent_pair
+    )
+
+    primary_status = str(primary.get("status") or "UNKNOWN").upper()
+    second_status = str(second.get("status") or "UNKNOWN").upper()
+    if two_approvals:
+        consensus_status = "APPROVED_BY_BOTH"
+        decision = "AUTHORIZE_DEMO_EXECUTION"
+        status_fa = "هر دو ناظر مستقل، الگو و موج الیوت یکسان را تأیید کردند؛ کنترل‌های Executor همچنان اجباری است."
+    elif primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"}:
+        consensus_status = "VETO"
+        decision = "BLOCK_DEMO_ENTRY"
+        status_fa = "حداقل یک ناظر مستقل ورود را رد کرد؛ هیچ سفارش Demo ارسال نمی‌شود."
+    elif primary_verified and second_verified and (
+        primary_status != second_status
+        or primary.get("trader_proposal") != second.get("trader_proposal")
+        or primary_wave_match != second_wave_match
+    ):
+        consensus_status = "DISAGREEMENT"
+        decision = "BLOCK_DEMO_ENTRY"
+        status_fa = "دو ناظر به نتیجه یکسان نرسیدند؛ ورود مسدود شد."
+    elif "NOT_CONFIGURED" in {primary_status, second_status}:
+        consensus_status = "NOT_CONFIGURED"
+        decision = "BLOCK_DEMO_ENTRY"
+        status_fa = "هر دو ناظر مستقل با تنظیمات معتبر و مجزا در دسترس نیستند؛ ورود مسدود شد."
+    else:
+        consensus_status = "UNKNOWN"
+        decision = "BLOCK_DEMO_ENTRY"
+        status_fa = "دو تأیید مستقل، معتبر و هم‌جهت دریافت نشد؛ ورود مسدود شد."
+
+    for reviewer in (primary, second):
+        reviewer["execution_role"] = "ENTRY_APPROVAL_GATE"
+        reviewer["entry_gate_enforced"] = True
+    reviews = [
+        {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": primary},
+        {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second},
+    ]
+    consensus = {
+        "status": consensus_status,
+        "primary_status": primary_status,
+        "second_status": second_status,
+        "primary_verified": primary_verified,
+        "second_verified": second_verified,
+        "primary_approved": primary_approved,
+        "second_approved": second_approved,
+        "providers_independent": providers_independent,
+        "models_independent": models_independent,
+        "expected_side": expected_side,
+        "elliott_wave_phase": expected_wave_phase,
+        "elliott_wave_direction": expected_wave_direction,
+        "two_reviewer_approval": two_approvals,
+        "decision": decision,
+        "entry_gate_enforced": True,
+        "reviewed_signal_id": reviewed_signal_id,
+        "reviewed_at_utc": reviewed_at_utc,
+        "status_fa": status_fa,
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    ai_status = "APPROVED_BY_BOTH" if two_approvals else consensus_status
+    return {
+        "approved": two_approvals, "status": ai_status, "ai_status": ai_status,
+        "ai_review": primary, "second_ai_review": second,
+        "ai_reviews": reviews, "ai_consensus": consensus, "reason_fa": status_fa,
+    }
+
 def _configured_providers() -> list[dict[str, Any]]:
     providers: list[dict[str, Any]] = []
     for definition in _PROVIDER_DEFINITIONS:
@@ -299,6 +496,8 @@ def _run_provider(provider: dict[str, Any], evidence: dict[str, Any], *,
             "returned_model": returned_model[:160],
             "model_verified": True,
             "response_validated": True,
+            "response_id": (str(body.get("id"))[:200] if isinstance(body, dict) and body.get("id") is not None else None),
+            "confidence": (parsed.get("confidence", parsed.get("confidence_score")) if isinstance(parsed, dict) and isinstance(parsed.get("confidence", parsed.get("confidence_score")), (int, float)) and not isinstance(parsed.get("confidence", parsed.get("confidence_score")), bool) else None),
             "http_status": http_status,
             "latency_ms": latency_ms,
             "total_tokens": total_tokens,
@@ -421,7 +620,7 @@ def run_ai_supervisor(result: Any, asset: Any = None, *,
                 "final_rating", "trader_proposal", "risk_manager_verdict",
                 "portfolio_manager_verdict", "risk_flags", "rationale_fa",
                 "http_status", "latency_ms", "total_tokens",
-                "model_verified", "response_validated",
+                "model_verified", "response_validated", "response_id", "confidence",
             ) if key in review
         })
     rationale_parts = [

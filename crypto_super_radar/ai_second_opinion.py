@@ -1508,6 +1508,8 @@ def run_free_ai_second_opinion(
         if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
             total_tokens = None
         review.update({
+            "response_id": (str(body.get("id"))[:200] if isinstance(body, dict) and body.get("id") is not None else None),
+            "confidence": (parsed.get("confidence", parsed.get("confidence_score")) if isinstance(parsed, dict) and isinstance(parsed.get("confidence", parsed.get("confidence_score")), (int, float)) and not isinstance(parsed.get("confidence", parsed.get("confidence_score")), bool) else None),
             "http_status": http_status,
             "returned_model": returned_model[:160],
             "request_attempted": True,
@@ -1805,6 +1807,8 @@ def run_independent_ai_supervisor(
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
             tokens = None
         review.update({
+            "response_id": (str(body.get("id"))[:200] if isinstance(body, dict) and body.get("id") is not None else None),
+            "confidence": (parsed.get("confidence", parsed.get("confidence_score")) if isinstance(parsed, dict) and isinstance(parsed.get("confidence", parsed.get("confidence_score")), (int, float)) and not isinstance(parsed.get("confidence", parsed.get("confidence_score")), bool) else None),
             "reviewer_id": "second_ai", "provider": provider,
             "configured_model": model, "returned_model": returned_model[:160],
             "request_attempted": True, "response_source": "LIVE_API",
