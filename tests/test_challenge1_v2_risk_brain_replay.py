@@ -79,7 +79,7 @@ class PriceCandleBlackoutTests(unittest.TestCase):
             last_missing_ms=self.window["last_missing_ms"],
             missing_count=20, mark_price=False,
         ))
-        self.assertFalse(_observed_price_candle_gap_matches(
+        self.assertTrue(_observed_price_candle_gap_matches(
             symbol="SOL-USDT", bar="15m",
             first_missing_ms=self.window["start_ms"],
             last_missing_ms=self.window["last_missing_ms"],
@@ -161,6 +161,24 @@ class PriceCandleBlackoutTests(unittest.TestCase):
             missing_count=2, mark_price=False,
         ))
 
+    def test_sol_blackout_is_registered_and_exactly_scoped(self):
+        sol = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[6])
+        self.assertEqual(sol["instrument_id"], "SOL-USDT")
+        self.assertEqual(sol["bar"], "15m")
+        self.assertEqual(sol["source"], "LAST")
+        self.assertEqual(sol["missing_intervals"], 20)
+        self.assertEqual(sol["missing_from_utc"], "2026-03-09T07:45:00+00:00")
+        self.assertEqual(sol["missing_to_utc"], "2026-03-09T12:30:00+00:00")
+        self.assertEqual(sol["left_candle_utc"], "2026-03-09T07:30:00+00:00")
+        self.assertEqual(sol["right_candle_utc"], "2026-03-09T12:45:00+00:00")
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="SOL-USDT", bar="15m",
+            first_missing_ms=sol["start_ms"],
+            last_missing_ms=sol["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertIsNotNone(_is_price_candle_blackout(sol["start_ms"]))
+
     def test_combined_blackout_windows_are_scoped_per_instrument(self):
         btc = _combine_price_candle_blackout_windows(
             "BTC-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)
@@ -172,7 +190,11 @@ class PriceCandleBlackoutTests(unittest.TestCase):
         self.assertEqual(eth["instrument_id"], "ETH-USDT")
         self.assertEqual(len(btc["timeframe_windows"]), 3)
         self.assertEqual(len(eth["timeframe_windows"]), 3)
-        self.assertIsNone(_combine_price_candle_blackout_windows("SOL-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)))
+        sol = _combine_price_candle_blackout_windows(
+            "SOL-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)
+        )
+        self.assertEqual(sol["instrument_id"], "SOL-USDT")
+        self.assertEqual(len(sol["timeframe_windows"]), 1)
 
     def test_blackout_interval_uses_inclusive_first_and_exclusive_end(self):
         hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[1])

@@ -105,3 +105,18 @@ The partial file `independent_5m.sqlite3` is only 8,151,040 bytes, has 41,857 pr
 The workflow intentionally preserved the Replay #109 matrix after download failure: `download_exit_code=1`, `research_suite_exit_code=0`, `independent_5m_status=NOT_RUN_INDEPENDENT_DOWNLOAD_UNAVAILABLE`; the final enforcement gate then correctly failed the overall historical workflow. Replay #109 A-E ran and reproduced the previously reported metrics. No independent A-E result exists in this run.
 
 The exact ETH-USDT 4H window has now been added as a separate evidence-backed Price-Candle Blackout. It remains isolated from other symbols and timeframes; no missing candle was synthesized. The corresponding tests assert exact bounds, count, left/right observations and blackout lookup. Re-run of the downloader is required before claiming an independent dataset.
+
+
+## Supplemental finding from downloader Run #149 — 21 November 2026
+
+After the ETH-USDT 4H blackout was registered, the next fresh download reached SOL-USDT and found another exact, unregistered 15m gap:
+
+- `SOL-USDT / 15m`
+- `missing_from_utc=2026-03-09T07:45:00+00:00`
+- `missing_to_utc=2026-03-09T12:30:00+00:00`
+- 20 missing candle intervals; neighboring observed candles: 07:30 UTC and 12:45 UTC.
+- Evidence: Run #149 artifact `14716736282`, `downloader.log`.
+
+The partial SQLite has 83,714 candles for BTC-USDT and ETH-USDT only, plus 906 funding rows for those two instruments. It is structurally valid but not the approved five-symbol dataset. SHA-256: `b127a0484f22ebb2d67b93120891f57d68b79a2c63d7f30bb05e9ba0a8e7f787`. Independent A-E was not run. Replay #109 A-E completed with the same results as before.
+
+The exact SOL window has been added to the evidence-backed blackout registry, with tests for its scope, gap match, interval count, observed neighbors, and per-instrument aggregation. This is a separate SOL window, not a global wildcard.
