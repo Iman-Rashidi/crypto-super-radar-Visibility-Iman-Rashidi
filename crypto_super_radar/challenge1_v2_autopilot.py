@@ -64,7 +64,7 @@ def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "take_profit", "regime", "market_data_proof", "contract_specs", "market_quote",
         "signal_id", "ai_review", "second_ai_review", "ai_reviews", "ai_consensus",
         "ai_status", "ai_review_reason", "orders_submitted", "execution_result",
-        "entry_skipped_reason", "mode")
+        "entry_skipped_reason", "mode", "exit_manager_summary")
     return {key: record.get(key) for key in allowed if key in record}
 
 
@@ -223,7 +223,8 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             result=analyzer(client,symbol)
             if not isinstance(result,Mapping): raise TypeError("V2 analyzer returned a non-mapping result")
             safe=_safe_record(result)
-            safe.update(execution_profile="CHALLENGE_1_V2",orders_submitted=False,mode="DRY_RUN")
+            safe.update(execution_profile="CHALLENGE_1_V2",orders_submitted=False,mode="DRY_RUN",
+                exit_manager_summary=exit_summary.get("results", []))
             consensus=safe.get("ai_consensus")
             approved=isinstance(consensus,Mapping) and consensus.get("status")=="APPROVED_BY_BOTH"
             if trading_active and approved and str(safe.get("signal") or "").upper() in {"LONG","SHORT"}:
