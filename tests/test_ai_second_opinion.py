@@ -233,6 +233,93 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(status["model"], DEFAULT_FREE_MODEL)
         self.assertTrue(status["model"].endswith(":free"))
 
+    def test_openrouter_content_array_text_parts_are_joined_and_validated(self):
+        document = valid_document()
+        serialized = json.dumps(document, ensure_ascii=False)
+
+        class StructuredResponse:
+            status_code = 200
+
+            def json(self):
+                split_at = len(serialized) // 2
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "usage": {"total_tokens": 44},
+                    "choices": [{
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": serialized[:split_at]},
+                                {"type": "text", "text": serialized[split_at:]},
+                                {"type": "image", "image_url": {"url": "ignored"}},
+                            ]
+                        }
+                    }],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: StructuredResponse(),
+                bypass_cache=True,
+            )
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertTrue(result["model_verified"])
+        self.assertTrue(result["response_validated"])
+        self.assertTrue(result["paper_entry_eligible"])
+        self.assertFalse(result["orders_submitted"])
+
+    def test_openrouter_reasoning_json_is_only_a_fallback_when_content_is_empty(self):
+        document = valid_document()
+
+        class ReasoningResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": None,
+                            "reasoning": json.dumps(document, ensure_ascii=False),
+                        }
+                    }],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: ReasoningResponse(),
+                bypass_cache=True,
+            )
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertTrue(result["response_validated"])
+        self.assertTrue(result["paper_entry_eligible"])
+
+    def test_non_text_parts_and_plain_reasoning_never_approve(self):
+        class InvalidStructuredResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "message": {
+                            "content": [{"type": "image", "image_url": {"url": "ignored"}}],
+                            "reasoning": "I reviewed the market but returned no JSON verdict.",
+                        }
+                    }],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: InvalidStructuredResponse(),
+                bypass_cache=True,
+            )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertFalse(result["response_validated"])
+        self.assertFalse(result["paper_entry_eligible"])
+
     def test_connection_diagnostic_verifies_model_and_never_returns_secret(self):
         captured = {}
         marker = "CSR_NEMOTRON_PROBE_OK"
