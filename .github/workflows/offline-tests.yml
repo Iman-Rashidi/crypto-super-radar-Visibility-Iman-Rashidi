@@ -8,6 +8,9 @@ on:
       - fix/ch01-analysis-independent-readiness
       - staging/challenge1-integration-2026-11-16
       - feature/github-actions-demo-runner-2026-11-16
+      - feature/unified-pattern-intelligence-v3
+    paths-ignore:
+      - dist/crypto-super-radar-source.tar.xz
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
@@ -46,7 +49,7 @@ jobs:
           cd /tmp/csr-render/crypto-super-radar
           python -m pip install -r requirements.txt
           python -m compileall -q .
-          PORT=18765 CSR_DB_PATH=/tmp/csr-render/crypto-super-radar/data/csr-test.sqlite3 python -m crypto_super_radar.web_app > /tmp/csr-render/server.log 2>&1 &
+          PORT=18765 CSR_DB_PATH=/tmp/csr-render/crypto-super-radar/data/csr-test.sqlite3 python -m crypto_super_radar.bootstrap_web > /tmp/csr-render/server.log 2>&1 &
           server_pid=$!
           trap 'status=$?; if [[ "$status" -ne 0 ]]; then
             echo "===== Render overlay server.log ====="

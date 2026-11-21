@@ -5,6 +5,8 @@ on:
     branches:
       - feature/v2-demo-adapter-contract-2026-11-20
       - feature/unified-pattern-intelligence-v3
+    paths-ignore:
+      - dist/crypto-super-radar-source.tar.xz
   workflow_dispatch:
 
 permissions:

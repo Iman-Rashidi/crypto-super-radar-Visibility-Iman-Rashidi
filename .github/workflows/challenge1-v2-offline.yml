@@ -4,6 +4,8 @@ on:
     branches:
       - feature/challenge1-v2-confluence-dynamic-exit
       - feature/unified-pattern-intelligence-v3
+    paths-ignore:
+      - dist/crypto-super-radar-source.tar.xz
   pull_request:
     branches:
       - feature/challenge1-v2-confluence-dynamic-exit

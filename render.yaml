@@ -9,7 +9,7 @@ services:
       cp README.md pyproject.toml requirements.txt crypto-super-radar/ &&
       cd crypto-super-radar &&
       pip install -r requirements.txt
-    startCommand: cd crypto-super-radar && python -m crypto_super_radar.web_app
+    startCommand: cd crypto-super-radar && python -m crypto_super_radar.bootstrap_web
     healthCheckPath: /health
     autoDeploy: false
     envVars:
