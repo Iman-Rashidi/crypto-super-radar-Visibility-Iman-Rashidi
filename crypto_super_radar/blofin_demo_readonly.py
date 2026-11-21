@@ -298,6 +298,18 @@ class BloFinDemoReadOnly:
             params={"instId": inst_id, "bar": bar, "limit": limit},
         )
 
+    def get_funding_rate_history(self, *, inst_id: str, limit: int = 100) -> Any:
+        """Read recent funding settlements; classification remains the caller's duty."""
+        if not inst_id or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("inst_id is required and limit must be between 1 and 100.")
+        rows = self._get(
+            "/api/v1/market/funding-rate-history",
+            params={"instId": inst_id, "limit": limit},
+        )
+        if not isinstance(rows, list):
+            raise BloFinDemoResponseError("Funding history response is not a list.")
+        return rows
+
     # Private endpoints: READ permission only.
     def get_position_mode(self) -> dict[str, Any]:
         result = self._get("/api/v1/account/position-mode", private=True)
@@ -351,13 +363,18 @@ class BloFinDemoReadOnly:
         read_only = int(raw_read_only)
         return {"readOnly": read_only, "trade_permission": read_only == 0}
 
-    def get_open_tpsl_orders(self, *, inst_id: str | None = None, limit: int = 100) -> Any:
-        """Read untriggered exchange-managed take-profit / stop-loss orders."""
+    def get_open_tpsl_orders(
+        self, *, inst_id: str | None = None,
+        client_order_id: str | None = None, limit: int = 100,
+    ) -> Any:
+        """Read active exchange-managed TP/SL orders, optionally by client order id."""
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100.")
+        if client_order_id is not None and not str(client_order_id).strip():
+            raise ValueError("client_order_id must be non-empty when provided.")
         return self._get(
             "/api/v1/trade/orders-tpsl-pending",
-            params={"instId": inst_id, "limit": str(limit)},
+            params={"instId": inst_id, "clientOrderId": client_order_id, "limit": str(limit)},
             private=True,
         )
 

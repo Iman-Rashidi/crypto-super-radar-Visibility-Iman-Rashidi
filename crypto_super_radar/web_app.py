@@ -42,9 +42,14 @@ from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
     BloFinDemoExecutor, BloFinDemoRiskPolicy, BloFinDemoTradeClient,
     _active_order_count, _active_position_count, _equity_from_balance,
+    build_demo_order_plan, _challenge1_two_reviewer_approval_ready,
 )
 from .blofin_demo_smoke_test import BloFinDemoSmokeTestRunner
 from .challenge1_strategy import analyze_blofin_challenge1, DEFAULT_CHALLENGE1_INSTRUMENTS
+from .challenge1_v2 import challenge1_v2_execution_evidence_ready
+from .challenge1_v2_orchestration import (
+    Challenge1V2DataBlocked, analyze_challenge1_v2_market, get_fresh_execution_quote,
+)
 from .database import storage_backend
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
@@ -4280,6 +4285,421 @@ def _blofin_demo_analysis_storage_ready(readiness: dict) -> bool:
     )
 
 
+
+def _blofin_v2_aggregate_exposure_preview(
+    client: BloFinDemoReadOnly, *, proposed_plan: dict, equity_usdt: float,
+    policy: BloFinDemoRiskPolicy,
+) -> dict[str, Any]:
+    """Read-only aggregate margin/risk gate for at most four Demo positions.
+
+    Existing positions without an independently readable margin and attached
+    stop trigger are UNKNOWN and block the preview. Pending entry orders also
+    block because their reserved exposure cannot be safely reconstructed here.
+    """
+    positions = client.get_positions()
+    open_orders = client.get_open_orders()
+    if not isinstance(positions, list) or not isinstance(open_orders, list):
+        raise BloFinDemoExecutionBlocked("Demo positions/open-orders response is incomplete.")
+    if open_orders:
+        raise BloFinDemoExecutionBlocked("Pending Demo entry orders exist; aggregate exposure is unresolved.")
+    active = []
+    for row in positions:
+        if not isinstance(row, dict):
+            raise BloFinDemoExecutionBlocked("Demo position row is malformed.")
+        raw_size = row.get("positions")
+        try:
+            size = abs(Decimal(str(raw_size)))
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked("Demo position size is missing or invalid.") from exc
+        if not size.is_finite():
+            raise BloFinDemoExecutionBlocked("Demo position size is not finite.")
+        if size > 0:
+            active.append((row, size))
+    if len(active) + 1 > policy.max_concurrent_positions:
+        raise BloFinDemoExecutionBlocked("Four-position Demo concurrency cap would be exceeded.")
+
+    aggregate_margin = Decimal("0")
+    aggregate_risk = Decimal("0")
+    for position, size in active:
+        inst_id = str(position.get("instId") or "").strip().upper()
+        position_side = str(position.get("positionSide") or "").strip().lower()
+        if not inst_id or not position_side:
+            raise BloFinDemoExecutionBlocked("Existing Demo position identity is incomplete.")
+        try:
+            margin = Decimal(str(position.get("margin")))
+            average_price = Decimal(str(position.get("averagePrice")))
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked("Existing Demo margin/averagePrice is unavailable.") from exc
+        if not margin.is_finite() or margin < 0 or not average_price.is_finite() or average_price <= 0:
+            raise BloFinDemoExecutionBlocked("Existing Demo margin/averagePrice is invalid.")
+        tpsl = client.get_open_tpsl_orders(inst_id=inst_id, limit=100)
+        if not isinstance(tpsl, list):
+            raise BloFinDemoExecutionBlocked("Existing Demo TP/SL orders cannot be verified.")
+        matching_stops = []
+        for item in tpsl:
+            if not isinstance(item, dict):
+                continue
+            if (
+                str(item.get("instId") or "").upper() == inst_id
+                and str(item.get("positionSide") or "").strip().lower() == position_side
+            ):
+                raw_stop = item.get("slTriggerPrice")
+                try:
+                    stop_price = Decimal(str(raw_stop))
+                except Exception:
+                    continue
+                if stop_price.is_finite() and stop_price > 0:
+                    matching_stops.append(stop_price)
+        if not matching_stops:
+            raise BloFinDemoExecutionBlocked("An existing Demo position has no independently verified stop-loss trigger.")
+        instrument = client.get_tradable_instrument(inst_id)
+        if not isinstance(instrument, dict) or instrument.get("instId") != inst_id:
+            raise BloFinDemoExecutionBlocked("Existing Demo position contract metadata is unavailable.")
+        try:
+            contract_value = Decimal(str(instrument.get("contractValue")))
+        except Exception as exc:
+            raise BloFinDemoExecutionBlocked("Existing Demo contractValue is invalid.") from exc
+        if not contract_value.is_finite() or contract_value <= 0:
+            raise BloFinDemoExecutionBlocked("Existing Demo contractValue is invalid.")
+        stop_price = matching_stops[0]
+        aggregate_margin += margin
+        aggregate_risk += abs(average_price - stop_price) * size * contract_value
+
+    proposed_margin = Decimal(str(proposed_plan.get("reserved_margin_usdt")))
+    proposed_risk = Decimal(str(proposed_plan.get("reserved_risk_usdt")))
+    margin_limit = Decimal(str(proposed_plan.get("aggregate_margin_limit_usdt")))
+    risk_limit = Decimal(str(proposed_plan.get("aggregate_risk_limit_usdt")))
+    if any(not value.is_finite() or value < 0 for value in (
+        proposed_margin, proposed_risk, margin_limit, risk_limit,
+    )):
+        raise BloFinDemoExecutionBlocked("Proposed aggregate margin/risk values are invalid.")
+    total_margin = aggregate_margin + proposed_margin
+    total_risk = aggregate_risk + proposed_risk
+    if total_margin > margin_limit:
+        raise BloFinDemoExecutionBlocked("Aggregate Demo margin would exceed the 10% policy ceiling.")
+    if total_risk > risk_limit:
+        raise BloFinDemoExecutionBlocked("Aggregate Demo risk would exceed the 0.5% policy ceiling.")
+    return {
+        "status": "PASS",
+        "active_positions": len(active),
+        "max_concurrent_positions": policy.max_concurrent_positions,
+        "existing_margin_usdt": str(aggregate_margin),
+        "proposed_margin_usdt": str(proposed_margin),
+        "aggregate_margin_after_plan_usdt": str(total_margin),
+        "aggregate_margin_limit_usdt": str(margin_limit),
+        "existing_stop_risk_usdt": str(aggregate_risk),
+        "proposed_stop_risk_usdt": str(proposed_risk),
+        "aggregate_risk_after_plan_usdt": str(total_risk),
+        "aggregate_risk_limit_usdt": str(risk_limit),
+        "orders_submitted": False,
+    }
+
+
+def _run_blofin_demo_v2_readonly_job(
+    job_id: str, instrument_id: str, selection_context: dict | None = None,
+) -> None:
+    """Run isolated V2 ingestion, dual review and order-plan preview; never write orders."""
+    store = None
+    try:
+        instrument_id = str(instrument_id or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+            raise BloFinDemoExecutionBlocked("Invalid V2 USDT perpetual instrument.")
+        if os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() != "true":
+            raise BloFinDemoExecutionBlocked("V2_ORCHESTRATION_FEATURE_FLAG_DISABLED")
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise BloFinDemoExecutionBlocked("V2 durable Turso storage is not configured.")
+        _set_blofin_execution_job(
+            job_id, "running", stage="V2_READ_ONLY_INGESTION",
+            message_fa="موتور V2 فقط‌خواندنی در حال دریافت کندل‌های بسته‌شدهٔ 1H/4H/15m، BTC 15m و Funding است.",
+            trade_context={"instrument_id": instrument_id, "execution_profile": "CHALLENGE_1_V2"},
+        )
+        store = BloFinDemoEventStore()
+        budget = store.trade_budget_status()
+        if not isinstance(budget, dict) or budget.get("unresolved_orders") is None:
+            raise BloFinDemoExecutionBlocked("V2 event-store unresolved-order state is unavailable.")
+        if int(budget.get("unresolved_orders") or 0) > 0:
+            raise BloFinDemoExecutionBlocked("Unresolved Demo orders block a new V2 dry-run.")
+        client = BloFinDemoReadOnly(timeout=10.0)
+        record = analyze_challenge1_v2_market(client, instrument_id)
+        record["execution_profile"] = "CHALLENGE_1_V2"
+        record["orders_submitted"] = False
+        if record.get("signal") not in {"LONG", "SHORT"}:
+            _set_blofin_execution_job(
+                job_id, "completed", stage="V2_NO_TRADE",
+                message_fa="داده‌های V2 بررسی شدند؛ شرایط ورود معتبر نیست و هیچ سفارش یا Reviewer اجرایی ارسال نشد.",
+                analysis=record,
+                result={
+                    "status": "NO_TRADE", "environment": "BLOFIN_DEMO",
+                    "execution_profile": "CHALLENGE_1_V2", "signal": "NO_TRADE",
+                    "reason": record.get("reason"), "orders_submitted": False,
+                    "trade_executed": False,
+                },
+            )
+            return
+
+        ready, evidence_reason = challenge1_v2_execution_evidence_ready(record)
+        if not ready:
+            raise BloFinDemoExecutionBlocked("V2 pre-reviewer evidence gate: " + evidence_reason)
+        asset = AssetSpec.parse("perp:" + instrument_id.replace("-", ""))
+        analysis = SimpleNamespace(
+            signal=Signal(str(record["signal"])),
+            asset=asset.raw,
+            metrics={
+                "execution_profile": "CHALLENGE_1_V2",
+                "challenge1_v2_evidence": record.get("challenge1_v2_evidence"),
+                "market_data_proof": record.get("market_data_proof"),
+            },
+            entry_price=record.get("entry"),
+            stop_loss=record.get("stop_loss"),
+            take_profit=record.get("take_profit"),
+            confirmation_score=record.get("confidence_score"),
+            estimated_risk_score=None,
+            to_record=lambda: record,
+        )
+        _set_blofin_execution_job(
+            job_id, "running", stage="V2_DUAL_REVIEW",
+            message_fa="شواهد V2 تأیید شد؛ دو ناظر مستقل فقط همین signal_id و شواهد 1H/4H/15m را بررسی می‌کنند.",
+            analysis=record,
+        )
+        reviewers = _run_challenge1_supervisor_reviews(
+            analysis, asset, signal_id=str(record.get("signal_id") or ""),
+        )
+        record.update({
+            "ai_review": reviewers.get("ai_review"),
+            "second_ai_review": reviewers.get("second_ai_review"),
+            "ai_reviews": reviewers.get("ai_reviews") or [],
+            "ai_consensus": reviewers.get("ai_consensus") or {},
+            "orders_submitted": False,
+        })
+        if reviewers.get("approved") is not True:
+            _set_blofin_execution_job(
+                job_id, "completed", stage="V2_REVIEW_BLOCKED",
+                message_fa=reviewers.get("reason_fa") or "دو تأیید مستقل و معتبر دریافت نشد؛ اجرای V2 مسدود است.",
+                analysis=record,
+                ai_reviews=record["ai_reviews"], ai_consensus=record["ai_consensus"],
+                result={
+                    "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                    "execution_profile": "CHALLENGE_1_V2", "signal": "NO_TRADE",
+                    "reason_fa": reviewers.get("reason_fa"), "orders_submitted": False,
+                    "trade_executed": False,
+                },
+            )
+            return
+        quorum_ready, quorum_reason = _challenge1_two_reviewer_approval_ready(record)
+        if not quorum_ready:
+            raise BloFinDemoExecutionBlocked("V2 two-reviewer quorum gate: " + quorum_reason)
+
+        _set_blofin_execution_job(
+            job_id, "running", stage="V2_READ_ONLY_ACCOUNT_RISK",
+            message_fa="در حال خواندن موجودی، موقعیت‌ها، سفارش‌های باز و حفاظت TP/SL برای کنترل ریسک تجمیعی؛ هیچ سفارش ارسال نمی‌شود.",
+        )
+        balance = client.get_futures_balance(product_type="USDT-FUTURES")
+        equity = _equity_from_balance(balance)
+        if equity is None or not math.isfinite(float(equity)) or float(equity) <= 0:
+            raise BloFinDemoExecutionBlocked("Fresh positive Demo equity is unavailable.")
+        policy = BloFinDemoRiskPolicy(
+            max_concurrent_positions=4,
+            max_margin_usage_pct=0.10,
+            max_aggregate_risk_pct=0.005,
+            risk_per_trade_pct=0.0025,
+            max_leverage=1,
+        )
+        quote = get_fresh_execution_quote(client, instrument_id)
+        record["market_quote_after_review"] = quote
+        contract = record.get("contract_specs")
+        if not isinstance(contract, dict):
+            raise BloFinDemoExecutionBlocked("Exact V2 contract specifications are missing.")
+        plan = build_demo_order_plan(
+            record, contract, inst_id=instrument_id, equity_usdt=float(equity),
+            leverage=1, policy=policy,
+            market_quote={"bidPrice": quote["bidPrice"], "askPrice": quote["askPrice"]},
+        )
+        aggregate = _blofin_v2_aggregate_exposure_preview(
+            client, proposed_plan=plan, equity_usdt=float(equity), policy=policy,
+        )
+        if aggregate.get("status") != "PASS":
+            raise BloFinDemoExecutionBlocked("V2 aggregate margin/risk gate did not pass.")
+        experience_id = store.record_challenge1_v2_decision(
+            instrument_id=instrument_id, challenge_record=record,
+        )
+        record["learning_experience_id"] = experience_id
+        record["orders_submitted"] = False
+
+        # V2 remains read-only unless all independent, explicit Demo-only switches agree.
+        write_enabled = (
+            os.getenv("CHALLENGE_1_V2_SINGLE_SHOT_WRITE", "").strip().lower() == "true"
+        )
+        if write_enabled:
+            single_shot_enabled = (
+                os.getenv("SINGLE_SHOT_DEMO_TEST", "").strip().lower() == "true"
+            )
+            demo_trading_enabled = (
+                os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
+            )
+            autopilot_env = os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower()
+            if not single_shot_enabled:
+                raise BloFinDemoExecutionBlocked(
+                    "V2 single-shot Order Write requires SINGLE_SHOT_DEMO_TEST=true."
+                )
+            if not demo_trading_enabled:
+                raise BloFinDemoExecutionBlocked(
+                    "V2 single-shot Order Write requires BLOFIN_DEMO_TRADING_ENABLED=true."
+                )
+            if autopilot_env != "false" or _blofin_demo_autopilot_enabled():
+                raise BloFinDemoExecutionBlocked(
+                    "V2 single-shot Order Write requires AutoPilot explicitly set to false."
+                )
+            lock_status = store.single_shot_lock_status()
+            if lock_status.get("locked"):
+                raise BloFinDemoExecutionBlocked(
+                    "The durable Single-Shot lifetime allowance has already been consumed; manual reset is required."
+                )
+
+            write_policy = BloFinDemoRiskPolicy(
+                max_concurrent_positions=1,
+                max_margin_usage_pct=0.10,
+                max_aggregate_risk_pct=0.005,
+                risk_per_trade_pct=0.0025,
+                max_leverage=1,
+            )
+            trade_client = BloFinDemoTradeClient(timeout=10.0)
+            executor = BloFinDemoExecutor(
+                client=trade_client, store=store, policy=write_policy,
+                trading_enabled=True,
+            )
+            _set_blofin_execution_job(
+                job_id, "running", stage="V2_SINGLE_SHOT_EXECUTOR_PREFLIGHT",
+                message_fa="همه کلیدهای مستقل Demo فعال‌اند؛ Executor با One-Way، اهرم 1x، حداقل حجم و قفل یک‌بارمصرف پیش‌بررسی می‌کند.",
+                analysis=record, ai_reviews=record["ai_reviews"],
+                ai_consensus=record["ai_consensus"],
+                trade_context={
+                    "instrument_id": instrument_id,
+                    "execution_profile": "CHALLENGE_1_V2",
+                    "single_shot_demo_test": True,
+                    "max_lifetime_orders": 1,
+                    "autopilot_enabled": False,
+                },
+            )
+            try:
+                execution = executor.execute(
+                    record, inst_id=instrument_id, leverage=1,
+                    allow_demo_orders=True, minimum_size_only=True,
+                    single_shot=True,
+                    submission_lock=BLOFIN_ORDER_SUBMISSION_LOCK,
+                )
+            except BloFinDemoExecutionUnknown as exc:
+                _set_blofin_execution_job(
+                    job_id, "completed", stage="V2_SINGLE_SHOT_PENDING_RECONCILE",
+                    message_fa="نتیجه POST مبهم است؛ سهم یک‌بارمصرف مصرف شده و فقط Reconciliation خواندنی مجاز است. هیچ Retry ارسال نمی‌شود.",
+                    analysis=record, ai_reviews=record["ai_reviews"],
+                    ai_consensus=record["ai_consensus"],
+                    result={
+                        "status": "PENDING_RECONCILE",
+                        "environment": "BLOFIN_DEMO",
+                        "execution_profile": "CHALLENGE_1_V2",
+                        "error_type": type(exc).__name__,
+                        "orders_submitted": True,
+                        "submission_outcome": "UNKNOWN",
+                        "trade_executed": False,
+                        "retry_allowed": False,
+                        "single_shot_lock": store.single_shot_lock_status(),
+                    },
+                )
+                return
+
+            execution_status = str(execution.get("status") or "UNKNOWN").upper()
+            protection = execution.get("protection") if isinstance(execution.get("protection"), dict) else {}
+            critical = execution_status == "CRITICAL_UNPROTECTED"
+            filled = execution_status in {"FILLED", "PARTIALLY_FILLED", "CRITICAL_UNPROTECTED"}
+            if critical:
+                stage = "V2_SINGLE_SHOT_CRITICAL_UNPROTECTED"
+            elif execution_status in {"FILLED", "PARTIALLY_FILLED"} and protection.get("verified") is True:
+                stage = "V2_SINGLE_SHOT_POST_FILL_VERIFIED"
+            else:
+                stage = "V2_SINGLE_SHOT_RECONCILIATION_PENDING"
+            _set_blofin_execution_job(
+                job_id, "completed", stage=stage,
+                message_fa=(
+                    "سفارش Demo فقط یک‌بار ارسال شد؛ Fill، شناسه پوزیشن و TP/SL پس از Fill از API خواندنی تطبیق داده شدند."
+                    if stage == "V2_SINGLE_SHOT_POST_FILL_VERIFIED"
+                    else "وضعیت اجرای تک‌معامله Demo نیازمند بررسی است؛ سفارش مجدد یا Retry خودکار انجام نمی‌شود."
+                ),
+                analysis=record, ai_reviews=record["ai_reviews"],
+                ai_consensus=record["ai_consensus"],
+                trade_context={
+                    "instrument_id": instrument_id,
+                    "execution_profile": "CHALLENGE_1_V2",
+                    "single_shot_demo_test": True,
+                    "max_lifetime_orders": 1,
+                    "autopilot_enabled": False,
+                    "aggregate_risk_preview": aggregate,
+                },
+                result={
+                    **execution,
+                    "status": execution_status,
+                    "environment": "BLOFIN_DEMO",
+                    "execution_profile": "CHALLENGE_1_V2",
+                    "orders_submitted": True,
+                    "trade_executed": filled,
+                    "post_fill_tp_sl_verified": protection.get("verified") is True,
+                    "single_shot_lock": store.single_shot_lock_status(),
+                    "retry_allowed": False,
+                },
+            )
+            return
+
+        _set_blofin_execution_job(
+            job_id, "completed", stage="V2_DRY_RUN_ORDER_PLAN_READY",
+            message_fa="مسیر V2 از دریافت داده تا دو Reviewer و ساخت Order Plan عبور کرد؛ ارسال سفارش عمداً انجام نشد.",
+            analysis=record,
+            ai_reviews=record["ai_reviews"], ai_consensus=record["ai_consensus"],
+            trade_context={
+                "instrument_id": instrument_id, "execution_profile": "CHALLENGE_1_V2",
+                "market_data_proof": record.get("market_data_proof"),
+                "contract_specs": {
+                    key: contract.get(key) for key in
+                    ("instId", "contractValue", "minSize", "lotSize", "tickSize")
+                },
+                "aggregate_risk_preview": aggregate,
+            },
+            result={
+                "status": "DRY_RUN_ORDER_PLAN_READY",
+                "environment": "BLOFIN_DEMO",
+                "execution_profile": "CHALLENGE_1_V2",
+                "signal": record.get("signal"),
+                "signal_id": record.get("signal_id"),
+                "order_plan": plan,
+                "aggregate_risk_preview": aggregate,
+                "learning_experience_id": experience_id,
+                "orders_submitted": False,
+                "trade_executed": False,
+                "execution_method": "READ_ONLY_DRY_RUN_NO_ORDER_WRITE",
+            },
+        )
+    except Exception as exc:
+        reason = (
+            str(exc)[:500]
+            if isinstance(exc, (BloFinDemoExecutionBlocked, Challenge1V2DataBlocked, ValueError))
+            else f"V2 orchestration failed closed ({type(exc).__name__})."
+        )
+        _set_blofin_execution_job(
+            job_id, "completed", stage="V2_BLOCKED",
+            message_fa="مسیر V2 به‌دلیل داده، شواهد یا کنترل ریسک نامعتبر متوقف شد: " + reason,
+            result={
+                "status": "BLOCKED", "environment": "BLOFIN_DEMO",
+                "execution_profile": "CHALLENGE_1_V2",
+                "reason_fa": reason, "error_type": type(exc).__name__,
+                "orders_submitted": False, "trade_executed": False,
+            },
+        )
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
 def _run_blofin_demo_execution_job(
     job_id: str, instrument_id: str = "BTC-USDT",
     execution_profile: str = "CHALLENGE_1",
@@ -4294,6 +4714,9 @@ def _run_blofin_demo_execution_job(
     try:
         instrument_id = str(instrument_id or "").strip().upper()
         execution_profile = str(execution_profile or "").strip().upper()
+        if execution_profile == "CHALLENGE_1_V2":
+            _run_blofin_demo_v2_readonly_job(job_id, instrument_id, selection_context)
+            return
         if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
             raise BloFinDemoExecutionBlocked("Invalid BloFin USDT perpetual instrument.")
         if execution_profile != "CHALLENGE_1":
@@ -5785,7 +6208,15 @@ class Handler(BaseHTTPRequestHandler):
                 })
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
-            payload["execution_profile"] = "CHALLENGE_1"
+            configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+            payload["execution_profile"] = (
+                configured_profile
+                if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+                else "CHALLENGE_1"
+            )
+            payload["v2_orchestration_enabled"] = (
+                os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() == "true"
+            )
             with LOCK:
                 payload["runtime_controlled_by_dashboard"] = BLOFIN_AUTOPILOT_RUNTIME_OVERRIDE is not None
             payload["readiness"] = _blofin_demo_execution_readiness()
@@ -8371,15 +8802,37 @@ async function loadBlofinInstruments(){
                         "message_fa": "توقف ثبت شد؛ چرخه جاری قطع نمی‌شود و پس از پایان آن چرخه جدیدی آغاز نخواهد شد.",
                     }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
-                readiness = _blofin_demo_execution_readiness()
-                if readiness.get("status") != "READY":
-                    return self._send(409, json.dumps({
-                        "status": "BLOCKED",
-                        "message_fa": readiness.get("message_fa"),
-                        "blockers": readiness.get("blockers") or [],
-                        "blockers_fa": readiness.get("blockers_fa") or [],
-                        "readiness": readiness,
-                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+                configured_profile = (
+                    configured_profile
+                    if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+                    else "CHALLENGE_1"
+                )
+                if configured_profile == "CHALLENGE_1_V2":
+                    if os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() != "true":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_ORCHESTRATION_FEATURE_FLAG_DISABLED",
+                            "message_fa": "پروفایل AutoPilot روی V2 تنظیم شده اما Feature Flag مسیر مستقل خاموش است.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if storage_backend() != "TURSO_CLOUD_SQLITE":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                            "message_fa": "ذخیره‌سازی پایدار Turso برای چرخه V2 آماده نیست.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                else:
+                    readiness = _blofin_demo_execution_readiness()
+                    if readiness.get("status") != "READY":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "message_fa": readiness.get("message_fa"),
+                            "blockers": readiness.get("blockers") or [],
+                            "blockers_fa": readiness.get("blockers_fa") or [],
+                            "readiness": readiness,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
                 if role != "WEB":
                     return self._send(409, json.dumps({
@@ -8493,15 +8946,31 @@ async function loadBlofinInstruments(){
                 if (
                     form.get("confirm", [""])[0] != "1"
                     or not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id)
-                    or execution_profile != "CHALLENGE_1"
+                    or execution_profile not in {"CHALLENGE_1", "CHALLENGE_1_V2"}
                 ):
                     return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
-                readiness = _blofin_demo_execution_readiness()
-                if readiness.get("status") != "READY":
-                    return self._send(409, json.dumps({
-                        "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
-                        "readiness": readiness,
-                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if execution_profile == "CHALLENGE_1_V2":
+                    if os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() != "true":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_ORCHESTRATION_FEATURE_FLAG_DISABLED",
+                            "message_fa": "مسیر مستقل V2 با Feature Flag خاموش است؛ هیچ سفارش یا چرخه‌ای شروع نشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if storage_backend() != "TURSO_CLOUD_SQLITE":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                            "message_fa": "برای اجرای V2 فقط‌خواندنی، دفتر ثبت پایدار Turso باید قابل دسترسی باشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                else:
+                    readiness = _blofin_demo_execution_readiness()
+                    if readiness.get("status") != "READY":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
+                            "readiness": readiness,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 with BLOFIN_EXECUTION_GUARD:
                     with LOCK:
                         active = any(
@@ -8791,7 +9260,12 @@ def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
     ))
     if not instrument_ids:
         instrument_ids = DEFAULT_CHALLENGE1_INSTRUMENTS
-    execution_profile = "CHALLENGE_1"
+    configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+    execution_profile = (
+        configured_profile
+        if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+        else "CHALLENGE_1"
+    )
     instrument_id = instrument_ids[0]
     completed_cycles = 0
     with LOCK:
@@ -9329,7 +9803,11 @@ def _run_challenge1_supervisor_reviews(
     expected_side = str(getattr(signal_value, "value", signal_value) or "UNKNOWN").upper()
     metrics = getattr(analysis, "metrics", {})
     metrics = metrics if isinstance(metrics, dict) else {}
-    evidence = metrics.get("challenge1_evidence")
+    execution_profile = str(metrics.get("execution_profile") or "").upper()
+    if execution_profile == "CHALLENGE_1_V2":
+        evidence = metrics.get("challenge1_v2_evidence")
+    else:
+        evidence = metrics.get("challenge1_evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
     wave = evidence.get("elliott_wave")
     wave = wave if isinstance(wave, dict) else {}

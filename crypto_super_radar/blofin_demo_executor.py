@@ -37,6 +37,7 @@ from .blofin_demo_readonly import (
 )
 from .database import connect_database, storage_backend
 from .challenge1_strategy import challenge1_entry_evidence_ready
+from .challenge1_v2 import challenge1_v2_execution_evidence_ready
 from .learning_experience_memory import LearningExperienceMemory
 
 
@@ -46,6 +47,10 @@ class BloFinDemoExecutionBlocked(RuntimeError):
 
 class BloFinDemoExecutionUnknown(RuntimeError):
     """An order request may have reached BloFin; reconcile before any retry."""
+
+
+class BloFinDemoOrderRejected(BloFinDemoResponseError):
+    """BloFin returned an explicit non-zero business code for the order request."""
 
 
 _TRADE_WRITE_LOCK = threading.Lock()
@@ -105,11 +110,23 @@ def _analysis_record(signal: Any) -> dict[str, Any]:
 
 
 def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
-    """Require two independent, live, verified AI approvals before Demo writes."""
-    evidence = record.get("challenge1_evidence")
-    evidence = evidence if isinstance(evidence, Mapping) else {}
-    wave = evidence.get("elliott_wave")
-    wave = wave if isinstance(wave, Mapping) else {}
+    """Require two independent, live, verified AI approvals bound to one Challenge 1 signal."""
+    execution_profile = str(record.get("execution_profile") or "").strip().upper()
+    if execution_profile == "CHALLENGE_1_V2":
+        ready, reason = challenge1_v2_execution_evidence_ready(record)
+        if not ready:
+            return False, "V2 analysis evidence is incomplete: " + reason
+        evidence = record.get("challenge1_v2_evidence")
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        wave = evidence.get("elliott_wave")
+        wave = wave if isinstance(wave, Mapping) else {}
+    elif execution_profile == "CHALLENGE_1":
+        evidence = record.get("challenge1_evidence")
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        wave = evidence.get("elliott_wave")
+        wave = wave if isinstance(wave, Mapping) else {}
+    else:
+        return False, "Unknown Challenge 1 execution profile."
     side = str(record.get("signal") or "").strip().upper()
     wave_phase = str(wave.get("phase") or "").strip().upper()
     wave_direction = str(wave.get("pattern") or "").strip().upper()
@@ -229,6 +246,35 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     return True, "Both independent live AI reviewers approved the same signal and Elliott phase."
 
 
+def _challenge1_v2_experience_id(instrument_id: str, challenge_record: Mapping[str, Any]) -> str:
+    """Return a stable identity for one immutable V2 multi-timeframe evidence packet."""
+    evidence = challenge_record.get("challenge1_v2_evidence")
+    if not isinstance(evidence, Mapping):
+        raise ValueError("Challenge 1 V2 evidence is required for learning memory.")
+    signal_id = str(challenge_record.get("signal_id") or "").strip()
+    if not signal_id or evidence.get("signal_id") != signal_id:
+        raise ValueError("V2 signal_id is required and must match its evidence packet.")
+    identity = {
+        "engine_version": str(evidence.get("decision_engine_version") or "CHALLENGE1_V2_UNKNOWN"),
+        "instrument_id": str(instrument_id).strip().upper(),
+        "signal_id": signal_id,
+        "signal_candle_open_utc": evidence.get("signal_candle_open_utc"),
+        "context_1h_candle_open_utc": evidence.get("context_1h_candle_open_utc"),
+        "context_4h_candle_open_utc": evidence.get("context_4h_candle_open_utc"),
+        "data_asof_utc": evidence.get("data_asof_utc"),
+        "elliott_wave": evidence.get("elliott_wave"),
+        "funding_rate": evidence.get("funding_rate"),
+        "funding_kind": evidence.get("funding_kind"),
+        "funding_event_time_ms": evidence.get("funding_event_time_ms"),
+        "funding_max_age_ms": evidence.get("funding_max_age_ms"),
+    }
+    canonical = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    )
+    return "blofin-ch1v2-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
 def _challenge1_experience_id(instrument_id: str, challenge_record: Mapping[str, Any]) -> str:
     """Return a stable identity for one instrument's immutable closed-candle evidence."""
     evidence = challenge_record.get("challenge1_evidence")
@@ -306,8 +352,8 @@ class BloFinDemoRiskPolicy:
             raise ValueError("Minimum seconds between Demo orders must be between 0 and 86400")
         if isinstance(self.max_leverage, bool) or not 1 <= int(self.max_leverage) <= 3:
             raise ValueError("Demo test leverage is restricted to 1x through 3x")
-        if not 1 <= int(self.max_concurrent_positions) <= 3:
-            raise ValueError("Concurrent positions must be between 1 and 3")
+        if isinstance(self.max_concurrent_positions, bool) or not 1 <= int(self.max_concurrent_positions) <= 4:
+            raise ValueError("Concurrent positions must be between 1 and 4")
         if self.min_reward_risk < 1.0 or self.max_entry_deviation_pct <= 0:
             raise ValueError("Reward/risk or entry-deviation policy is invalid")
         if not 0 <= self.taker_fee_rate <= 0.01:
@@ -339,51 +385,27 @@ def build_demo_order_plan(
         raise BloFinDemoExecutionBlocked("A stable signal_id or signal_bar is required for idempotency.")
 
     execution_profile = str(record.get("execution_profile") or "").strip().upper()
-    if execution_profile != "CHALLENGE_1":
-        raise BloFinDemoExecutionBlocked("Only Challenge 1 strategy evidence is allowed for BloFin Demo orders.")
     if execution_profile == "CHALLENGE_1":
         eligible, reason = challenge1_entry_evidence_ready(record)
         if not eligible:
             raise BloFinDemoExecutionBlocked(
                 "Challenge 1 5m-only pattern evidence is incomplete or inconsistent: " + reason
             )
-    else:
-        profile_rules = {
-            "EASY": {"required": {1, 2, 3, 4, 5, 6, 9}, "minimum_pass": 7, "minimum_score": 55.0},
-            "STANDARD": {"required": {1, 2, 3, 4, 5, 6, 8, 9}, "minimum_pass": 9, "minimum_score": 65.0},
-            "STRICT": {"required": set(range(1, 13)), "minimum_pass": 12, "minimum_score": 75.0},
-        }
-        if execution_profile not in profile_rules:
-            raise BloFinDemoExecutionBlocked("Unknown execution profile; select CHALLENGE_1, EASY, STANDARD or STRICT.")
-        profile_rule = profile_rules[execution_profile]
-        score = _finite(record.get("confirmation_score"), "confirmation_score")
-        risk_score = _finite(record.get("estimated_risk_score"), "estimated_risk_score")
-        minimum_score = max(float(profile_rule["minimum_score"]), float(policy.min_confirmation_score))
-        if score < minimum_score or risk_score > policy.max_risk_score:
-            raise BloFinDemoExecutionBlocked("Signal score/risk score did not pass the selected execution profile.")
-
-        raw_gates = record.get("gates")
-        if not isinstance(raw_gates, list) or len(raw_gates) != 12:
-            raise BloFinDemoExecutionBlocked("The execution profile requires a complete 12-row gate report; missing evidence is not fabricated.")
-        gate_statuses: dict[int, str] = {}
-        for gate in raw_gates:
-            if not isinstance(gate, Mapping):
-                raise BloFinDemoExecutionBlocked("Gate report contains an invalid row.")
-            gate_id = gate.get("gate_id")
-            if isinstance(gate_id, bool) or not isinstance(gate_id, int) or gate_id in gate_statuses or gate_id not in range(1, 13):
-                raise BloFinDemoExecutionBlocked("Gate IDs must be unique and within 1-12.")
-            gate_statuses[gate_id] = str(gate.get("status", "")).upper()
-        if set(gate_statuses) != set(range(1, 13)):
-            raise BloFinDemoExecutionBlocked("The gate report is incomplete.")
-        gate_pass = sum(value == "PASS" for value in gate_statuses.values())
-        gate_fail = sum(value == "FAIL" for value in gate_statuses.values())
-        gate_unknown = sum(value == "UNKNOWN" for value in gate_statuses.values())
-        failed_required = sorted(gate_id for gate_id in profile_rule["required"] if gate_statuses[gate_id] != "PASS")
-        if failed_required or gate_pass < int(profile_rule["minimum_pass"]):
+    elif execution_profile == "CHALLENGE_1_V2":
+        eligible, reason = challenge1_v2_execution_evidence_ready(record)
+        if not eligible:
             raise BloFinDemoExecutionBlocked(
-                f"{execution_profile} profile blocked: required gates not PASS={failed_required}; "
-                f"observed PASS={gate_pass}, FAIL={gate_fail}, UNKNOWN={gate_unknown}."
+                "Challenge 1 V2 multi-timeframe evidence is incomplete or inconsistent: " + reason
             )
+        score = _finite(record.get("confidence_score"), "confidence_score")
+        if score < max(70.0, float(policy.min_confirmation_score)):
+            raise BloFinDemoExecutionBlocked(
+                "Challenge 1 V2 confluence score is below the configured Demo minimum."
+            )
+    else:
+        raise BloFinDemoExecutionBlocked(
+            "Only the explicitly validated CHALLENGE_1 or CHALLENGE_1_V2 profiles are allowed."
+        )
 
     if instrument.get("instId") != inst_id or instrument.get("apiPermission") != "full":
         raise BloFinDemoExecutionBlocked("Contract is not explicitly marked apiPermission=full.")
@@ -392,7 +414,10 @@ def build_demo_order_plan(
     if instrument.get("settleCurrency") != "USDT":
         raise BloFinDemoExecutionBlocked("Only USDT-settled linear contracts are supported in this phase.")
 
-    signal_entry = _decimal(record.get("entry_price_usd", record.get("entry_price")), "entry")
+    signal_entry = _decimal(
+        record.get("entry_price_usd", record.get("entry_price", record.get("entry"))),
+        "entry",
+    )
     if market_quote is not None:
         bid = _decimal(market_quote.get("bidPrice"), "best_bid")
         ask = _decimal(market_quote.get("askPrice"), "best_ask")
@@ -676,7 +701,23 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
             raise BloFinDemoResponseError("BloFin Demo returned invalid JSON.") from exc
         if not isinstance(payload, dict):
             raise BloFinDemoResponseError("BloFin Demo response must be a JSON object.")
-        _check_response_codes(payload)
+        try:
+            _check_response_codes(payload)
+        except BloFinDemoResponseError as exc:
+            data = payload.get("data")
+            rows = data if isinstance(data, list) else [data]
+            top_code = payload.get("code")
+            explicit_nonzero = top_code not in (None, "", "0", 0, "401", 401)
+            explicit_nonzero = explicit_nonzero or any(
+                isinstance(row, Mapping)
+                and row.get("code") not in (None, "", "0", 0, "401", 401)
+                for row in rows
+            )
+            if explicit_nonzero:
+                raise BloFinDemoOrderRejected(
+                    "BloFin returned an explicit non-zero order business code."
+                ) from exc
+            raise
         if "data" not in payload:
             raise BloFinDemoResponseError("BloFin Demo response is missing data.")
         return payload
@@ -780,8 +821,12 @@ class BloFinDemoEventStore:
                     outcome_recorded_at INTEGER,
                     position_history_id TEXT,
                     position_id TEXT,
+                    position_side TEXT,
+                    filled_size TEXT,
+                    critical_reason TEXT,
                     reserved_risk_usdt TEXT,
                     reserved_margin_usdt TEXT,
+                    notional_usdt TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
@@ -795,8 +840,12 @@ class BloFinDemoEventStore:
                 ("outcome_recorded_at", "INTEGER"),
                 ("position_history_id", "TEXT"),
                 ("position_id", "TEXT"),
+                ("position_side", "TEXT"),
+                ("filled_size", "TEXT"),
+                ("critical_reason", "TEXT"),
                 ("reserved_risk_usdt", "TEXT"),
                 ("reserved_margin_usdt", "TEXT"),
+                ("notional_usdt", "TEXT"),
             ):
                 if column_name not in order_columns:
                     self._db.execute(
@@ -825,6 +874,15 @@ class BloFinDemoEventStore:
                 CREATE TABLE IF NOT EXISTS blofin_demo_autopilot_state (
                     state_key TEXT PRIMARY KEY,
                     state_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS blofin_demo_single_shot_lock (
+                    lock_name TEXT PRIMARY KEY,
+                    max_lifetime_orders INTEGER NOT NULL,
+                    consumed_orders INTEGER NOT NULL,
+                    client_order_id TEXT,
                     updated_at INTEGER NOT NULL
                 )
             """)
@@ -893,6 +951,78 @@ class BloFinDemoEventStore:
                 dataset_version="BLOFIN_DEMO_COMPLETED_CANDLES",
             )
         return experience_id
+
+    def record_challenge1_v2_decision(
+        self, *, instrument_id: str, challenge_record: Mapping[str, Any],
+    ) -> str:
+        """Persist one immutable V2 1H/4H/15m decision with its funding proof."""
+        if not isinstance(challenge_record, Mapping):
+            raise TypeError("challenge_record must be a mapping")
+        ready, reason = challenge1_v2_execution_evidence_ready(challenge_record)
+        if not ready:
+            raise ValueError("Challenge 1 V2 evidence cannot be journalled as a qualified decision: " + reason)
+        quorum_ready, quorum_reason = _challenge1_two_reviewer_approval_ready(challenge_record)
+        if not quorum_ready:
+            raise ValueError("Challenge 1 V2 decision lacks two independent live approvals: " + quorum_reason)
+        experience_id = _challenge1_v2_experience_id(instrument_id, challenge_record)
+        evidence = challenge_record.get("challenge1_v2_evidence")
+        if not isinstance(evidence, Mapping):
+            raise ValueError("Challenge 1 V2 evidence mapping is missing.")
+        signal = str(challenge_record.get("signal") or "NO_TRADE").strip().upper()
+        signal_bar = str(evidence.get("signal_candle_open_utc") or "")
+        decision = {
+            "signal": signal,
+            "side": signal if signal in {"LONG", "SHORT"} else None,
+            "signal_id": challenge_record.get("signal_id"),
+            "entry_price": challenge_record.get("entry"),
+            "stop_loss": challenge_record.get("stop_loss"),
+            "take_profit": challenge_record.get("take_profit"),
+            "confidence_score": challenge_record.get("confidence_score"),
+            "reason": str(challenge_record.get("reason") or ""),
+        }
+        input_snapshot = {
+            "instrument_id": str(instrument_id).strip().upper(),
+            "signal_bar_open_utc": signal_bar,
+            "setup_timeframe": "15m",
+            "context_timeframes": ["1H", "4H"],
+            "completed_candles_only": True,
+            "data_asof_utc": evidence.get("data_asof_utc"),
+            "future_data_in_input": False,
+            "challenge1_v2_evidence": dict(evidence),
+            "ai_consensus": dict(challenge_record.get("ai_consensus") or {}),
+            "ai_reviews": [
+                {
+                    "reviewer_id": str(item.get("reviewer_id") or ""),
+                    "review": dict(item.get("review") or {}),
+                }
+                for item in challenge_record.get("ai_reviews", [])
+                if isinstance(item, Mapping) and isinstance(item.get("review"), Mapping)
+            ],
+            "funding_rate": challenge_record.get("funding_rate"),
+            "funding_kind": challenge_record.get("funding_kind"),
+            "funding_event_time_ms": challenge_record.get("funding_event_time_ms"),
+            "funding_max_age_ms": challenge_record.get("funding_max_age_ms"),
+            "features": dict(challenge_record.get("features") or {}),
+        }
+        with self._lock, self._db:
+            self.learning_memory.record_decision(
+                experience_id=experience_id,
+                event_id=experience_id + "-decision",
+                engine_id="BLOFIN_DEMO_CHALLENGE1_V2",
+                challenge_id="CHALLENGE_1_V2_BLOFIN_DEMO",
+                cycle_id=experience_id,
+                decision_mode="BOT_ONLY",
+                environment="BLOFIN_DEMO",
+                decision=decision,
+                input_snapshot=input_snapshot,
+                market="CEX_FUTURES",
+                symbol=str(instrument_id).strip().upper(),
+                timeframe="15M",
+                model_version=str(evidence.get("decision_engine_version") or "CHALLENGE1_V2_1H_4H_15M"),
+                dataset_version="BLOFIN_DEMO_V2_COMPLETED_CANDLES_AND_FUNDING",
+            )
+        return experience_id
+
 
     def record_challenge1_analysis_failure(
         self, *, cycle_id: str, instrument_id: str, failure_stage: str,
@@ -1010,6 +1140,57 @@ class BloFinDemoEventStore:
             (event_id, key, client_order_id, event_type, now, payload),
         )
 
+    def single_shot_lock_status(self) -> dict[str, Any]:
+        """Return the durable one-shot reservation state without changing it."""
+        row = self._db.execute(
+            "SELECT lock_name, max_lifetime_orders, consumed_orders, "
+            "client_order_id, updated_at FROM blofin_demo_single_shot_lock "
+            "WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
+        ).fetchone()
+        if row is None:
+            return {
+                "enabled": False, "locked": False, "max_lifetime_orders": 1,
+                "consumed_orders": 0, "client_order_id": None,
+            }
+        maximum = int(row["max_lifetime_orders"])
+        consumed = int(row["consumed_orders"])
+        return {
+            "enabled": True, "locked": consumed >= maximum,
+            "max_lifetime_orders": maximum, "consumed_orders": consumed,
+            "client_order_id": row["client_order_id"],
+            "updated_at": row["updated_at"],
+        }
+
+    def reset_single_shot_lock(self, *, manual_confirmation: bool = False) -> dict[str, Any]:
+        """Reset the lifetime lock only after an explicit manual operator confirmation."""
+        if manual_confirmation is not True:
+            raise BloFinDemoExecutionBlocked(
+                "Single-shot lock reset requires explicit manual_confirmation=True."
+            )
+        now = int(time.time())
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    """INSERT INTO blofin_demo_single_shot_lock
+                       (lock_name, max_lifetime_orders, consumed_orders, client_order_id, updated_at)
+                       VALUES ('SINGLE_SHOT_DEMO_TEST', 1, 0, NULL, ?)
+                       ON CONFLICT(lock_name) DO UPDATE SET
+                         max_lifetime_orders=1, consumed_orders=0,
+                         client_order_id=NULL, updated_at=excluded.updated_at""",
+                    (now,),
+                )
+                reset_event_id = f"SINGLE_SHOT_DEMO_TEST_RESET_{now}_{uuid.uuid4().hex[:8]}"
+                self._append_event(
+                    reset_event_id, "SINGLE_SHOT_LOCK_RESET",
+                    {"manual_confirmation": True, "max_lifetime_orders": 1},
+                )
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return self.single_shot_lock_status()
+
     def reserve_order(
         self,
         plan: Mapping[str, Any],
@@ -1017,6 +1198,8 @@ class BloFinDemoEventStore:
         max_concurrent_positions: int = 1,
         external_open_positions: int = 0,
         external_pending_orders: int = 0,
+        single_shot: bool = False,
+        max_lifetime_orders: int = 1,
     ) -> bool:
         """Atomically reserve one account-wide slot across independent DB connections.
 
@@ -1031,22 +1214,37 @@ class BloFinDemoEventStore:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field} must be a non-negative integer.")
-        if not 1 <= max_concurrent_positions <= 3:
-            raise ValueError("max_concurrent_positions must be between 1 and 3.")
+        if not 1 <= max_concurrent_positions <= 4:
+            raise ValueError("max_concurrent_positions must be between 1 and 4.")
+        if single_shot and (
+            isinstance(max_lifetime_orders, bool)
+            or not isinstance(max_lifetime_orders, int)
+            or max_lifetime_orders != 1
+        ):
+            raise ValueError("Single-shot Demo execution is restricted to max_lifetime_orders=1.")
 
         now = int(time.time())
         order_id = str(plan["client_order_id"])
         try:
             new_risk = _decimal(plan.get("reserved_risk_usdt"), "reserved_risk_usdt")
             new_margin = _decimal(plan.get("reserved_margin_usdt"), "reserved_margin_usdt")
+            leverage_value = _decimal(plan.get("leverage"), "leverage")
+            if leverage_value != leverage_value.to_integral_value() or leverage_value <= 0:
+                raise ValueError("leverage must be a positive integer")
+            expected_notional = new_margin * leverage_value
+            notional_value = _decimal(
+                plan.get("notional_usdt", expected_notional), "notional_usdt"
+            )
             risk_cap = _decimal(plan.get("aggregate_risk_limit_usdt"), "aggregate_risk_limit_usdt")
             margin_cap = _decimal(plan.get("aggregate_margin_limit_usdt"), "aggregate_margin_limit_usdt")
         except Exception as exc:
             raise BloFinDemoExecutionBlocked(
                 "Validated aggregate risk and margin reservations are required."
             ) from exc
-        if min(new_risk, new_margin, risk_cap, margin_cap) <= 0:
-            raise BloFinDemoExecutionBlocked("Aggregate risk and margin reservations must be positive.")
+        if min(new_risk, new_margin, notional_value, risk_cap, margin_cap) <= 0:
+            raise BloFinDemoExecutionBlocked("Aggregate risk, margin and notional reservations must be positive.")
+        if abs(notional_value - expected_notional) > max(expected_notional, Decimal("1")) * Decimal("0.00000001"):
+            raise BloFinDemoExecutionBlocked("Notional does not reconcile to reserved margin multiplied by leverage.")
 
         # External positions/orders have no trusted local stop-risk and margin ledger.
         # Fail closed rather than undercounting exposure when those are present.
@@ -1055,7 +1253,7 @@ class BloFinDemoEventStore:
 
         active_statuses = (
             "'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',"
-            "'ACCEPTED','PARTIALLY_FILLED','FILLED'"
+            "'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'"
         )
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
@@ -1068,6 +1266,41 @@ class BloFinDemoEventStore:
                 if existing is not None:
                     self._db.rollback()
                     return False
+
+                lock_row = self._db.execute(
+                    "SELECT max_lifetime_orders, consumed_orders FROM "
+                    "blofin_demo_single_shot_lock WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
+                ).fetchone()
+                if lock_row is not None:
+                    try:
+                        lock_maximum = int(lock_row["max_lifetime_orders"])
+                        lock_consumed = int(lock_row["consumed_orders"])
+                    except (TypeError, ValueError, OverflowError):
+                        self._db.rollback()
+                        return False
+                    if lock_maximum != 1 or lock_consumed >= lock_maximum or lock_consumed < 0:
+                        self._db.rollback()
+                        return False
+                if single_shot:
+                    if lock_row is None:
+                        self._db.execute(
+                            """INSERT INTO blofin_demo_single_shot_lock
+                               (lock_name, max_lifetime_orders, consumed_orders, client_order_id, updated_at)
+                               VALUES ('SINGLE_SHOT_DEMO_TEST', 1, 1, ?, ?)""",
+                            (order_id, now),
+                        )
+                    else:
+                        self._db.execute(
+                            """UPDATE blofin_demo_single_shot_lock
+                               SET consumed_orders=consumed_orders+1,
+                                   client_order_id=?, updated_at=?
+                               WHERE lock_name='SINGLE_SHOT_DEMO_TEST'
+                                 AND consumed_orders=0 AND max_lifetime_orders=1""",
+                            (order_id, now),
+                        )
+                        if self._db.execute("SELECT changes()").fetchone()[0] != 1:
+                            self._db.rollback()
+                            return False
 
                 active_rows = self._db.execute(
                     f"""SELECT client_order_id, reserved_risk_usdt, reserved_margin_usdt
@@ -1104,14 +1337,17 @@ class BloFinDemoEventStore:
                     """INSERT INTO blofin_demo_orders
                     (client_order_id, signal_id, instrument_id, side, quantity, entry_price,
                      stop_loss, take_profit, leverage, status, exchange_order_id, experience_id,
-                     reserved_risk_usdt, reserved_margin_usdt, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, ?, ?, ?)""",
+                     position_side, filled_size, critical_reason,
+                     reserved_risk_usdt, reserved_margin_usdt, notional_usdt, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)""",
                     (
                         order_id, str(plan["signal_id"]), str(plan["inst_id"]), str(plan["side"]),
                         str(plan["quantity"]), float(plan["entry_reference_price"]),
                         float(plan["stop_loss"]), float(plan["take_profit"]), int(plan["leverage"]),
                         str(plan.get("experience_id") or "") or None,
-                        _format_decimal(new_risk), _format_decimal(new_margin), now, now,
+                        str(plan.get("position_side") or plan.get("position_side_long_short") or "net"),
+                        _format_decimal(new_risk), _format_decimal(new_margin),
+                        _format_decimal(notional_value), now, now,
                     ),
                 )
                 self._append_event(order_id, "RESERVED", {
@@ -1119,11 +1355,14 @@ class BloFinDemoEventStore:
                     "quantity": plan["quantity"], "leverage": plan["leverage"],
                     "reserved_risk_usdt": _format_decimal(new_risk),
                     "reserved_margin_usdt": _format_decimal(new_margin),
+                    "notional_usdt": _format_decimal(notional_value),
                     "aggregate_reserved_risk_usdt_after": _format_decimal(reserved_risk + new_risk),
                     "aggregate_reserved_margin_usdt_after": _format_decimal(reserved_margin + new_margin),
                     "aggregate_risk_limit_usdt": _format_decimal(risk_cap),
                     "aggregate_margin_limit_usdt": _format_decimal(margin_cap),
                     "learning_experience_id_present": bool(plan.get("experience_id")),
+                    "single_shot_lock_claimed": bool(single_shot),
+                    "single_shot_max_lifetime_orders": 1 if single_shot else None,
                     "capacity_snapshot": {
                         "local_active_reservations": local_active,
                         "exchange_open_positions": external_open_positions,
@@ -1137,21 +1376,41 @@ class BloFinDemoEventStore:
                 self._db.rollback()
                 raise
 
-    def update_order(self, client_order_id: str, status: str, *, exchange_order_id: str | None = None) -> None:
+    def update_order(
+        self, client_order_id: str, status: str, *,
+        exchange_order_id: str | None = None,
+        position_id: str | None = None,
+        filled_size: str | None = None,
+        critical_reason: str | None = None,
+    ) -> None:
         allowed = {
-            "LEVERAGE_SET", "PENDING_RECONCILE", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
-            "CANCELED", "REJECTED", "UNKNOWN", "CLOSED",
+            "LEVERAGE_SET", "PENDING_RECONCILE", "ACCEPTED", "PARTIALLY_FILLED",
+            "FILLED", "CRITICAL_UNPROTECTED", "CANCELED", "REJECTED",
+            "UNKNOWN", "CLOSED",
         }
         if status not in allowed:
             raise ValueError("Unsupported order status update.")
+        if filled_size is not None:
+            filled_size = _format_decimal(_decimal(filled_size, "filled_size"))
         now = int(time.time())
         with self._lock, self._db:
             self._db.execute(
-                """UPDATE blofin_demo_orders SET status=?, exchange_order_id=COALESCE(?, exchange_order_id),
-                updated_at=? WHERE client_order_id=?""",
-                (status, exchange_order_id, now, client_order_id),
+                """UPDATE blofin_demo_orders
+                   SET status=?,
+                       exchange_order_id=COALESCE(?, exchange_order_id),
+                       position_id=COALESCE(?, position_id),
+                       filled_size=COALESCE(?, filled_size),
+                       critical_reason=COALESCE(?, critical_reason),
+                       updated_at=?
+                   WHERE client_order_id=?""",
+                (status, exchange_order_id, position_id, filled_size, critical_reason, now, client_order_id),
             )
-            self._append_event(client_order_id, status, {"exchange_order_id_present": bool(exchange_order_id)})
+            self._append_event(client_order_id, status, {
+                "exchange_order_id_present": bool(exchange_order_id),
+                "position_id_present": bool(position_id),
+                "filled_size": filled_size,
+                "critical_reason": critical_reason,
+            })
 
     def equity_guard(self, equity_usdt: float, *, now: int | None = None) -> dict[str, float]:
         equity = _finite(equity_usdt, "equity_usdt", minimum=0.0000001)
@@ -1364,14 +1623,15 @@ class BloFinDemoEventStore:
             ).fetchone()
             unresolved_row = self._db.execute(
                 "SELECT COUNT(*) FROM blofin_demo_orders "
-                "WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')"
+                "WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE',"
+                "'ACCEPTED','PARTIALLY_FILLED','CRITICAL_UNPROTECTED')"
             ).fetchone()
             active_exposure_rows = self._db.execute(
                 """SELECT reserved_risk_usdt, reserved_margin_usdt
                    FROM blofin_demo_orders
                    WHERE status IN (
                        'RESERVED','LEVERAGE_SET','PENDING_RECONCILE','UNKNOWN',
-                       'ACCEPTED','PARTIALLY_FILLED','FILLED'
+                       'ACCEPTED','PARTIALLY_FILLED','FILLED','CRITICAL_UNPROTECTED'
                    )"""
             ).fetchall()
         orders_today = int(today_row[0] or 0)
@@ -1489,7 +1749,10 @@ class BloFinDemoEventStore:
         with self._lock:
             rows = self._db.execute(
                 """SELECT * FROM blofin_demo_orders
-                   WHERE status IN ('UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE')
+                   WHERE status IN (
+                       'UNKNOWN','RESERVED','LEVERAGE_SET','PENDING_RECONCILE',
+                       'ACCEPTED','PARTIALLY_FILLED','CRITICAL_UNPROTECTED'
+                   )
                    ORDER BY created_at ASC, client_order_id ASC
                    LIMIT ?""",
                 (bounded,),
@@ -1889,46 +2152,213 @@ class BloFinDemoExecutor:
         configured = os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true"
         self.trading_enabled = configured if trading_enabled is None else bool(trading_enabled)
 
-    def reconcile_unknown_order(self, *, inst_id: str, client_order_id: str) -> dict[str, Any]:
-        """Read order state by client id. This method never places or retries an order."""
-        order = self.store.get_order(client_order_id)
-        if order is None or order.get("instrument_id") != inst_id:
-            raise BloFinDemoExecutionBlocked("No matching locally reserved order exists.")
-        if order.get("status") not in {"UNKNOWN", "RESERVED", "LEVERAGE_SET", "PENDING_RECONCILE"}:
-            return {"status": order["status"], "client_order_id": client_order_id}
-        detail = self.client.get_order_detail(inst_id, client_order_id=client_order_id)
-        if isinstance(detail, list):
-            detail = next((row for row in detail if isinstance(row, Mapping)), None)
-        if not isinstance(detail, Mapping):
-            return {"status": "UNKNOWN", "client_order_id": client_order_id,
-                    "reconciliation": "NO_MATCH; no retry was sent"}
-        echoed_id = str(detail.get("clientOrderId") or "")
-        exchange_order_id = str(detail.get("orderId") or "")
-        state = str(detail.get("state") or "").lower()
-        if echoed_id != client_order_id or not exchange_order_id:
-            return {"status": "UNKNOWN", "client_order_id": client_order_id,
-                    "reconciliation": "INCOMPLETE_RECEIPT; no retry was sent"}
-        state_map = {
-            "live": "ACCEPTED",
-            "partially_filled": "PARTIALLY_FILLED",
-            "filled": "FILLED",
-            "canceled": "CANCELED",
-            "order_failed": "REJECTED",
-        }
-        mapped = state_map.get(state)
-        if mapped is None:
-            return {"status": "UNKNOWN", "client_order_id": client_order_id,
-                    "reconciliation": "UNRECOGNIZED_EXCHANGE_STATE; no retry was sent"}
-        self.store.update_order(
-            client_order_id, mapped, exchange_order_id=exchange_order_id
-        )
+    @staticmethod
+    def _response_rows(value: Any) -> list[Mapping[str, Any]]:
+        if isinstance(value, Mapping):
+            if isinstance(value.get("data"), list):
+                value = value["data"]
+            elif isinstance(value.get("data"), Mapping):
+                value = [value["data"]]
+            else:
+                value = [value]
+        if not isinstance(value, list):
+            return []
+        return [row for row in value if isinstance(row, Mapping)]
+
+    @staticmethod
+    def _same_decimal(left: Any, right: Any, field: str) -> bool:
+        try:
+            return _decimal(left, field) == _decimal(right, field)
+        except Exception:
+            return False
+
+    def _verify_filled_position_and_protection(
+        self, *, order: Mapping[str, Any], detail: Mapping[str, Any],
+        filled_size: Decimal, client_order_id: str,
+    ) -> dict[str, Any]:
+        """Read-only exact-position and TP/SL verification; never repairs by writing."""
+        inst_id = str(order.get("instrument_id") or "").upper()
+        side = str(order.get("side") or "").upper()
+        expected_position_side = str(order.get("position_side") or "net").lower()
+        expected_tp = str(order.get("take_profit") or "")
+        expected_sl = str(order.get("stop_loss") or "")
+        detail_position_id = str(detail.get("positionId") or "").strip()
+        try:
+            position_rows = self._response_rows(self.client.get_positions(inst_id=inst_id))
+        except Exception as exc:
+            return {"verified": False, "reason": "POSITION_READ_FAILED",
+                    "error_type": type(exc).__name__, "position_id": None}
+        matching_positions = []
+        for row in position_rows:
+            if str(row.get("instId") or "").upper() != inst_id:
+                continue
+            if str(row.get("positionSide") or "").lower() != expected_position_side:
+                continue
+            position_id = str(row.get("positionId") or "").strip()
+            if not position_id or position_id == "0":
+                continue
+            if detail_position_id and position_id != detail_position_id:
+                continue
+            try:
+                signed_size = _decimal(row.get("positions"), "position_size")
+            except Exception:
+                continue
+            if signed_size == 0 or abs(signed_size) != filled_size:
+                continue
+            if expected_position_side == "net":
+                if (side == "LONG" and signed_size <= 0) or (side == "SHORT" and signed_size >= 0):
+                    continue
+            elif expected_position_side != side.lower():
+                continue
+            matching_positions.append(position_id)
+        if len(matching_positions) != 1:
+            return {"verified": False, "reason": "EXACT_POSITION_ID_NOT_PROVEN",
+                    "position_id": None, "matching_position_count": len(matching_positions)}
+        position_id = matching_positions[0]
+        close_side = "sell" if side == "LONG" else "buy"
+        try:
+            tpsl_rows = self._response_rows(self.client.get_open_tpsl_orders(
+                inst_id=inst_id, client_order_id=client_order_id, limit=100,
+            ))
+        except Exception as exc:
+            return {"verified": False, "reason": "TPSL_READ_FAILED",
+                    "error_type": type(exc).__name__, "position_id": position_id}
+        tp_verified = False
+        sl_verified = False
+        matched_rows = 0
+        for row in tpsl_rows:
+            if str(row.get("instId") or "").upper() != inst_id:
+                continue
+            if str(row.get("positionId") or "").strip() != position_id:
+                continue
+            if str(row.get("positionSide") or "").lower() != expected_position_side:
+                continue
+            if str(row.get("side") or "").lower() != close_side:
+                continue
+            if str(row.get("state") or "").lower() != "live":
+                continue
+            returned_client_id = str(row.get("clientOrderId") or "").strip()
+            if returned_client_id and returned_client_id != client_order_id:
+                continue
+            raw_sizes = [v for v in (row.get("size"), row.get("actualSize")) if v not in (None, "")]
+            if not raw_sizes or any(not self._same_decimal(v, filled_size, "tpsl_size") for v in raw_sizes):
+                continue
+            row_tp, row_sl = row.get("tpTriggerPrice"), row.get("slTriggerPrice")
+            category, generic = str(row.get("orderCategory") or "").lower(), row.get("triggerPrice")
+            tp_type = str(row.get("tpTriggerPriceType") or row.get("triggerPriceType") or "").lower()
+            sl_type = str(row.get("slTriggerPriceType") or row.get("triggerPriceType") or "").lower()
+            if row_tp not in (None, ""):
+                if self._same_decimal(row_tp, expected_tp, "tp_trigger") and tp_type == "mark":
+                    tp_verified = True
+            elif category == "tp" and generic not in (None, ""):
+                if self._same_decimal(generic, expected_tp, "tp_trigger") and tp_type == "mark":
+                    tp_verified = True
+            if row_sl not in (None, ""):
+                if self._same_decimal(row_sl, expected_sl, "sl_trigger") and sl_type == "mark":
+                    sl_verified = True
+            elif category == "sl" and generic not in (None, ""):
+                if self._same_decimal(generic, expected_sl, "sl_trigger") and sl_type == "mark":
+                    sl_verified = True
+            if tp_verified or sl_verified:
+                matched_rows += 1
         return {
-            "status": mapped,
-            "environment": "BLOFIN_DEMO",
-            "client_order_id": client_order_id,
-            "exchange_order_id": exchange_order_id,
-            "reconciliation": "READ_ONLY",
+            "verified": tp_verified and sl_verified,
+            "reason": "VERIFIED" if tp_verified and sl_verified else "TP_OR_SL_MISSING_OR_MISMATCHED",
+            "position_id": position_id, "tp_verified": tp_verified,
+            "sl_verified": sl_verified, "matched_tpsl_rows": matched_rows,
+            "filled_size": _format_decimal(filled_size),
         }
+
+    def reconcile_unknown_order(self, *, inst_id: str, client_order_id: str) -> dict[str, Any]:
+        """Read-only order reconciliation, including fill, exact position and both protective triggers."""
+        order = self.store.get_order(client_order_id)
+        if order is None or str(order.get("instrument_id") or "").upper() != inst_id.upper():
+            raise BloFinDemoExecutionBlocked("No matching locally reserved order exists.")
+        if order.get("status") in {"REJECTED", "CANCELED", "CLOSED"}:
+            return {"status": order["status"], "client_order_id": client_order_id}
+        try:
+            detail_value = self.client.get_order_detail(inst_id, client_order_id=client_order_id)
+        except Exception as exc:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "ORDER_DETAIL_READ_FAILED",
+                    "error_type": type(exc).__name__, "orders_submitted": False}
+        detail_rows = self._response_rows(detail_value)
+        detail = next((row for row in detail_rows if str(row.get("clientOrderId") or "") == client_order_id), None)
+        if detail is None:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "NO_EXACT_ORDER_DETAIL_MATCH", "orders_submitted": False}
+        exchange_order_id = str(detail.get("orderId") or "").strip()
+        state = str(detail.get("state") or "").lower()
+        expected_side = "buy" if str(order.get("side") or "").upper() == "LONG" else "sell"
+        if (not exchange_order_id
+            or str(detail.get("instId") or "").upper() != inst_id.upper()
+            or str(detail.get("side") or "").lower() != expected_side):
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "ORDER_IDENTITY_MISMATCH", "orders_submitted": False}
+        known_exchange_id = str(order.get("exchange_order_id") or "").strip()
+        if known_exchange_id and known_exchange_id != exchange_order_id:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE")
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "reconciliation": "EXCHANGE_ORDER_ID_MISMATCH", "orders_submitted": False}
+        try:
+            requested_size = _decimal(order.get("quantity"), "requested_size")
+            raw_filled = detail.get("filledSize")
+            if raw_filled in (None, ""):
+                raise ValueError("filledSize is missing")
+            filled_size = _decimal(raw_filled, "filledSize")
+        except Exception:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE", exchange_order_id=exchange_order_id)
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "exchange_order_id": exchange_order_id,
+                    "reconciliation": "FILL_QUANTITY_UNAVAILABLE", "orders_submitted": False}
+        if filled_size < 0 or requested_size <= 0 or filled_size > requested_size:
+            self.store.update_order(client_order_id, "PENDING_RECONCILE", exchange_order_id=exchange_order_id)
+            return {"status": "PENDING_RECONCILE", "client_order_id": client_order_id,
+                    "exchange_order_id": exchange_order_id,
+                    "reconciliation": "INVALID_FILL_QUANTITY", "orders_submitted": False}
+        if filled_size == 0:
+            if state in {"order_failed", "rejected", "failed"}:
+                mapped = "REJECTED"
+            elif state == "canceled":
+                mapped = "CANCELED"
+            elif state == "live":
+                mapped = "ACCEPTED"
+            else:
+                mapped = "PENDING_RECONCILE"
+            self.store.update_order(client_order_id, mapped, exchange_order_id=exchange_order_id, filled_size="0")
+            return {"status": mapped, "environment": "BLOFIN_DEMO",
+                    "client_order_id": client_order_id, "exchange_order_id": exchange_order_id,
+                    "filled_size": "0", "reconciliation": "READ_ONLY", "orders_submitted": False}
+        verification = self._verify_filled_position_and_protection(
+            order=order, detail=detail, filled_size=filled_size,
+            client_order_id=client_order_id,
+        )
+        if not verification.get("verified"):
+            reason = str(verification.get("reason") or "POST_FILL_VERIFICATION_FAILED")
+            self.store.update_order(
+                client_order_id, "CRITICAL_UNPROTECTED",
+                exchange_order_id=exchange_order_id, position_id=verification.get("position_id"),
+                filled_size=_format_decimal(filled_size), critical_reason=reason,
+            )
+            return {"status": "CRITICAL_UNPROTECTED", "environment": "BLOFIN_DEMO",
+                    "client_order_id": client_order_id, "exchange_order_id": exchange_order_id,
+                    "filled_size": _format_decimal(filled_size), "position_id": verification.get("position_id"),
+                    "protection": verification, "reconciliation": "READ_ONLY_FAIL_CLOSED",
+                    "new_entries_blocked": True, "orders_submitted": False}
+        mapped = "FILLED" if filled_size == requested_size else "PARTIALLY_FILLED"
+        self.store.update_order(
+            client_order_id, mapped, exchange_order_id=exchange_order_id,
+            position_id=verification["position_id"], filled_size=_format_decimal(filled_size),
+            critical_reason="",
+        )
+        return {"status": mapped, "environment": "BLOFIN_DEMO",
+                "client_order_id": client_order_id, "exchange_order_id": exchange_order_id,
+                "filled_size": _format_decimal(filled_size), "requested_size": _format_decimal(requested_size),
+                "position_id": verification["position_id"], "protection": verification,
+                "reconciliation": "READ_ONLY_VERIFIED", "orders_submitted": False}
 
     def reconcile_unresolved_orders(self, *, limit: int = 50) -> dict[str, Any]:
         """Read-only sweep of every locally unresolved order; never creates or retries orders."""
@@ -1972,6 +2402,10 @@ class BloFinDemoExecutor:
             "results": results,
         }
 
+    def recover_unresolved_orders_from_journal(self, *, limit: int = 50) -> dict[str, Any]:
+        """Startup hook: reconcile unresolved durable journal entries using GET-only calls."""
+        return self.reconcile_unresolved_orders(limit=limit)
+
     def execute(
         self,
         signal: Any,
@@ -1982,7 +2416,12 @@ class BloFinDemoExecutor:
         minimum_size_only: bool = False,
         cancel_check: Any | None = None,
         submission_lock: Any | None = None,
+        single_shot: bool | None = None,
     ) -> dict[str, Any]:
+        single_shot_enabled = (
+            single_shot is True
+            or os.getenv("SINGLE_SHOT_DEMO_TEST", "").strip().lower() == "true"
+        )
         if not allow_demo_orders or not self.trading_enabled:
             raise BloFinDemoExecutionBlocked("Demo order execution is disabled by the two-key safety gate.")
         if self.client.base_url != DEMO_REST_URL:
@@ -1990,7 +2429,9 @@ class BloFinDemoExecutor:
         if self.store.backend != "TURSO_CLOUD_SQLITE":
             raise BloFinDemoExecutionBlocked("Durable Turso storage is required before Demo trading.")
         record = _analysis_record(signal)
-        is_challenge1 = str(record.get("execution_profile") or "").strip().upper() == "CHALLENGE_1"
+        execution_profile = str(record.get("execution_profile") or "").strip().upper()
+        is_challenge1 = execution_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+        is_challenge1_v2 = execution_profile == "CHALLENGE_1_V2"
         if is_challenge1:
             quorum_ready, quorum_reason = _challenge1_two_reviewer_approval_ready(record)
             if not quorum_ready:
@@ -2009,6 +2450,11 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
+        single_shot_status = self.store.single_shot_lock_status()
+        if single_shot_status.get("locked"):
+            raise BloFinDemoExecutionBlocked(
+                "Single-shot Demo lifetime order allowance is already consumed; manual reset is required."
+            )
         # A pending realized-outcome label is an audit/learning task, not proof of
         # current exchange exposure. Do not let an incomplete history record freeze
         # every market indefinitely. The fresh account-wide positions and open-orders
@@ -2053,15 +2499,21 @@ class BloFinDemoExecutor:
         if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
             raise BloFinDemoExecutionBlocked("BloFin best bid/ask quote is invalid; no order was sent.")
         market_quote = {"bidPrice": str(best_bid), "askPrice": str(best_ask)}
-        signal_entry = _finite(record.get("entry_price_usd", record.get("entry_price")), "entry_price", minimum=0.0000001)
+        signal_entry = _finite(
+            record.get("entry_price_usd", record.get("entry_price", record.get("entry"))),
+            "entry_price",
+            minimum=0.0000001,
+        )
         deviation = abs(last_price - signal_entry) / signal_entry
         if deviation > self.policy.max_entry_deviation_pct:
             raise BloFinDemoExecutionBlocked("Market price moved too far from the signal entry reference.")
 
         mode = self.client.get_position_mode()
         position_mode = mode.get("positionMode")
-        if position_mode not in {"net_mode", "long_short_mode"}:
-            raise BloFinDemoExecutionBlocked("Position mode could not be confirmed.")
+        if position_mode != "net_mode":
+            raise BloFinDemoExecutionBlocked(
+                "Demo order execution requires explicit One-Way net_mode; Hedge mode is rejected."
+            )
         instrument = self.client.get_tradable_instrument(inst_id)
         balance = self.client.get_futures_balance(product_type="USDT-FUTURES")
         equity = _equity_from_balance(balance)
@@ -2075,7 +2527,8 @@ class BloFinDemoExecutor:
         # Account-wide pending orders can fill on another symbol and consume the
         # concurrency/margin budget, so the safety check is intentionally global.
         pending = self.client.get_open_orders()
-        if _active_position_count(positions) >= self.policy.max_concurrent_positions:
+        effective_position_limit = 1 if single_shot_enabled else self.policy.max_concurrent_positions
+        if _active_position_count(positions) >= effective_position_limit:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")
         if _active_order_count(pending) > 0:
             raise BloFinDemoExecutionBlocked("Pending orders exist; reconcile them before a new entry.")
@@ -2087,11 +2540,15 @@ class BloFinDemoExecutor:
         if is_challenge1:
             experience_id = str(record.get("learning_experience_id") or "").strip()
             if not experience_id:
-                # The Executor also owns durable 5m decision linkage when called
-                # directly, not only when invoked through the web worker.
-                experience_id = self.store.record_challenge1_decision(
-                    instrument_id=inst_id, challenge_record=record,
-                )
+                if is_challenge1_v2:
+                    experience_id = self.store.record_challenge1_v2_decision(
+                        instrument_id=inst_id, challenge_record=record,
+                    )
+                else:
+                    # The legacy 5m path retains its own immutable evidence schema.
+                    experience_id = self.store.record_challenge1_decision(
+                        instrument_id=inst_id, challenge_record=record,
+                    )
                 record["learning_experience_id"] = experience_id
             plan["experience_id"] = experience_id
         else:
@@ -2130,17 +2587,20 @@ class BloFinDemoExecutor:
         plan = apply_demo_execution_cost_gate(
             plan, instrument, market_quote, policy=self.policy,
         )
+        position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
+        plan["position_side"] = position_side
         if not self.store.reserve_order(
             plan,
-            max_concurrent_positions=self.policy.max_concurrent_positions,
+            max_concurrent_positions=effective_position_limit,
             external_open_positions=_active_position_count(positions),
             external_pending_orders=_active_order_count(pending),
+            single_shot=single_shot_enabled,
+            max_lifetime_orders=1,
         ):
             raise BloFinDemoExecutionBlocked(
                 "Duplicate signal, unresolved legacy exposure, external exposure, or aggregate risk/margin budget is already reserved; entry blocked."
             )
 
-        position_side = "net" if position_mode == "net_mode" else plan["position_side_long_short"]
         exchange_side = "buy" if plan["side"] == "LONG" else "sell"
         try:
             self.client.set_futures_leverage(
@@ -2173,10 +2633,15 @@ class BloFinDemoExecutor:
                     stop_loss=plan["stop_loss"],
                     margin_mode="isolated",
                 )
+            except BloFinDemoOrderRejected as exc:
+                self.store.update_order(plan["client_order_id"], "REJECTED")
+                raise BloFinDemoExecutionBlocked(
+                    "BloFin explicitly rejected the Demo order; no retry was sent."
+                ) from exc
             except Exception as exc:
-                self.store.update_order(plan["client_order_id"], "UNKNOWN")
+                self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
                 raise BloFinDemoExecutionUnknown(
-                    "Order outcome is unknown. Do not retry; reconcile with BloFin using clientOrderId."
+                    "Order outcome is unknown after POST. Do not retry; reconcile by clientOrderId."
                 ) from exc
 
         if submission_lock is None:
@@ -2189,24 +2654,30 @@ class BloFinDemoExecutor:
         if isinstance(data, list):
             data = data[0] if data and isinstance(data[0], Mapping) else {}
         if not isinstance(data, Mapping):
-            self.store.update_order(plan["client_order_id"], "UNKNOWN")
-            raise BloFinDemoExecutionUnknown("BloFin accepted a response without a usable order receipt.")
+            self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
+            raise BloFinDemoExecutionUnknown("BloFin response had no usable receipt; reconcile before retry.")
         order_id = data.get("orderId")
         if not order_id:
-            self.store.update_order(plan["client_order_id"], "UNKNOWN")
+            self.store.update_order(plan["client_order_id"], "PENDING_RECONCILE")
             raise BloFinDemoExecutionUnknown("Order ID is missing; reconcile before retrying.")
-        self.store.update_order(plan["client_order_id"], "ACCEPTED", exchange_order_id=str(order_id))
+        self.store.update_order(
+            plan["client_order_id"], "PENDING_RECONCILE", exchange_order_id=str(order_id),
+        )
+        reconciliation = self.reconcile_unknown_order(
+            inst_id=inst_id, client_order_id=plan["client_order_id"],
+        )
+        if reconciliation["status"] == "PENDING_RECONCILE":
+            raise BloFinDemoExecutionUnknown(
+                "Post-submit exchange state is not conclusive; journal remains PENDING_RECONCILE."
+            )
         return {
-            "status": "ACCEPTED",
-            "environment": "BLOFIN_DEMO",
+            **reconciliation,
             "instrument_id": inst_id,
             "side": plan["side"],
             "quantity_contracts": plan["quantity"],
             "leverage": int(leverage),
             "stop_loss": plan["stop_loss"],
             "take_profit": plan["take_profit"],
-            "client_order_id": plan["client_order_id"],
-            "exchange_order_id": str(order_id),
             "risk_budget_usdt": plan["risk_budget_usdt"],
             "notional_usdt": plan["notional_usdt"],
             "entry_reference_price": plan["entry_reference_price"],

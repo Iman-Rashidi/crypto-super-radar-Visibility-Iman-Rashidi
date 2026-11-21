@@ -1,0 +1,145 @@
+name: challenge1-v2-historical-replay
+
+on:
+  push:
+    branches:
+      - feature/v2-demo-adapter-contract-2026-11-20
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: challenge1-v2-historical-replay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout PR #71 branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install free runner dependencies
+        run: python -m pip install --disable-pip-version-check numpy pandas requests
+
+      - name: Compile Replay and V2 modules
+        run: |
+          python -m compileall -q \
+            crypto_super_radar/market_replay.py \
+            crypto_super_radar/ai_sandbox.py \
+            crypto_super_radar/virtual_blofin.py \
+            crypto_super_radar/challenge1_v2.py \
+            crypto_super_radar/adaptive_brain.py \
+            tests/test_challenge1_v2_risk_brain_replay.py \
+            tests/test_challenge1_v2_time_exit_and_lookahead.py \
+            crypto_super_radar/funding_schema_probe.py
+
+      - name: Run V2 risk, funding, blackout and look-ahead regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
+          python -m unittest discover -s tests -p 'test_challenge1_v2_time_exit_and_lookahead.py' -v
+
+      - name: Probe live BloFin Demo public funding schema (read-only)
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          python -m crypto_super_radar.funding_schema_probe --output artifacts/funding_schema_probe.json
+          cat artifacts/funding_schema_probe.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download seven months of public BloFin market data
+        id: download
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p artifacts
+          python -m crypto_super_radar.market_replay \
+            --months 7 \
+            --db artifacts/blofin_replay.sqlite3 \
+            > artifacts/downloader.log 2>&1
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 0 ]; then
+            echo "Download completed; the Sandbox still validates all five symbols and the common blackout." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Download failed closed; no synthetic funding, prices or interpolation were substituted." >> "$GITHUB_STEP_SUMMARY"
+            tail -n 120 artifacts/downloader.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          exit 0
+
+      - name: Run six-month Purged Walk-Forward replay
+        id: sandbox
+        if: steps.download.outputs.exit_code == '0'
+        continue-on-error: true
+        run: |
+          set +e
+          set -o pipefail
+          python -m crypto_super_radar.ai_sandbox \
+            --db artifacts/blofin_replay.sqlite3 \
+            --equity 1000 \
+            --spread 0.0002 \
+            --output artifacts/ai_sandbox_report.json \
+            --brain artifacts/trained_brain.json \
+            2>&1 | tee artifacts/sandbox.log
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 0 ]; then
+            echo "Sandbox completed; report validity, unresolved positions and OOS metrics remain subject to audit." >> "$GITHUB_STEP_SUMMARY"
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path("artifacts/ai_sandbox_report.json")
+          report = json.loads(p.read_text(encoding="utf-8"))
+          print("### Replay report summary")
+          for key in ("periods", "equity", "trade_metrics", "quantitative_metrics",
+                      "shadow_book_metrics", "funding_data_quality", "model_calibration",
+                      "walk_forward_audit", "empirical_verdict"):
+              if key in report:
+                  print(f"**{key}**")
+                  print("`json")
+                  print(json.dumps(report[key], ensure_ascii=False, indent=2))
+                  print("`")
+          PY
+          else
+            echo "Sandbox failed closed; no OOS profitability claim is permitted." >> "$GITHUB_STEP_SUMMARY"
+            tail -n 120 artifacts/sandbox.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          exit 0
+
+      - name: Record execution metadata
+        if: always()
+        run: |
+          mkdir -p artifacts
+          cat > artifacts/execution_status.json <<JSON
+          {
+            "workflow": "challenge1-v2-historical-replay",
+            "branch": "${GITHUB_REF_NAME}",
+            "commit": "${GITHUB_SHA}",
+            "download_exit_code": "${{ steps.download.outputs.exit_code }}",
+            "sandbox_exit_code": "${{ steps.sandbox.outputs.exit_code }}",
+            "funding_policy": "explicit API Kind=0 or missing-Kind timestamps only at UTC 00:00/08:00/16:00 boundaries ±10s; fixed 8-hour cadence and exact blackout only",
+            "funding_schema_probe": "public Demo API history/current funding metadata probe is included in the artifact; current interval is not substituted for historical per-event kind",
+            "blackout_policy": "block new entries in the exact common funding-data gap; positions overlapping it retain UNKNOWN net PnL",
+            "data_policy": "public BloFin Demo market data only; no credentials; no order writes; no synthetic data or interpolation",
+            "spread_policy": "0.0002 modelled spread scenario; not historical order-book spread"
+          }
+          JSON
+          echo "Branch: ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Downloader exit code: ${{ steps.download.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Sandbox exit code: ${{ steps.sandbox.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Replay database, logs and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenge1-v2-historical-replay
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
