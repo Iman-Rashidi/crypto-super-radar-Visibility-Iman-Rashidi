@@ -103,9 +103,24 @@ class PriceCandleBlackoutTests(unittest.TestCase):
             last_missing_ms=hourly["last_missing_ms"],
             missing_count=5, mark_price=False,
         ))
+        four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[2])
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="4H",
+            first_missing_ms=four_hour["start_ms"],
+            last_missing_ms=four_hour["last_missing_ms"],
+            missing_count=2, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="1H",
+            first_missing_ms=four_hour["start_ms"],
+            last_missing_ms=four_hour["last_missing_ms"],
+            missing_count=2, mark_price=False,
+        ))
 
     def test_blackout_interval_uses_inclusive_first_and_exclusive_end(self):
         hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[1])
+        four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[2])
+        self.assertIsNotNone(_is_price_candle_blackout(four_hour["start_ms"]))
         self.assertIsNotNone(_is_price_candle_blackout(hourly["start_ms"]))
         self.assertIsNotNone(_is_price_candle_blackout(self.window["last_missing_ms"]))
         self.assertIsNone(_is_price_candle_blackout(self.window["end_exclusive_ms"]))
