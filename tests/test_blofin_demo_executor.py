@@ -678,7 +678,7 @@ class BloFinDemoTradeClientTests(unittest.TestCase):
         self._configure_net_position()
         active = [{
             "tpslId": "tpsl-1", "instId": "BTC-USDT", "positionSide": "net",
-            "positionId": "position-1", "state": "live", "slTriggerPrice": "98",
+            "positionId": "position-1", "state": "live", "slTriggerPrice": "98", "size": "2", "actualSize": "2",
         }]
         amended = [{**active[0], "slTriggerPrice": "100.2"}]
         self.client.get_open_tpsl_orders = Mock(side_effect=[active, amended])
@@ -725,7 +725,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         try:
             initial = {
                 "position_id": "position-v2-1",
-                "client_order_id": "entryclient0000000000000000000001",
+                "client_order_id": "0123456789abcdef0123456789abcdef",
                 "instrument_id": "BTC-USDT",
                 "side": "LONG",
                 "entry_price": "100",
@@ -759,7 +759,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         try:
             state = {
                 "position_id": "position-v2-2",
-                "client_order_id": "entryclient0000000000000000000002",
+                "client_order_id": "fedcba9876543210fedcba9876543210",
                 "instrument_id": "ETH-USDT", "side": "SHORT",
                 "entry_price": "200", "initial_stop_loss": "204",
                 "original_size": "3", "remaining_size": "3",
@@ -767,7 +767,7 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
             store.save_v2_position_exit_state(state)
             with self.assertRaises(BloFinDemoExecutionBlocked):
                 store.save_v2_position_exit_state({
-                    **state, "client_order_id": "anotherentryclient000000000000001",
+                    **state, "client_order_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 })
         finally:
             store.close()
