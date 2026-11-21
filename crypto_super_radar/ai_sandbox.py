@@ -738,6 +738,13 @@ def run_sandbox(
 
     # Validate once and build causal indicator/pivot caches outside the 15m loop.
     btc_frame_15m = market["BTC-USDT"]["frames"]["15m"]
+    price_blackout_windows = list(market["BTC-USDT"].get("price_candle_blackouts") or [])
+    price_blackout_window = price_blackout_windows[0] if price_blackout_windows else None
+    price_blackout_recovery_ts = (
+        pd.to_datetime(int(price_blackout_window["end_exclusive_ms"]), unit="ms", utc=True)
+        if price_blackout_window else None
+    )
+    signal_frames = {symbol: dict(item["frames"]) for symbol, item in market.items()}
     prepared_contexts = {
         symbol: prepare_signal_context(
             item["frames"]["1H"], item["frames"]["4H"],
@@ -745,6 +752,7 @@ def run_sandbox(
         )
         for symbol, item in market.items()
     }
+    price_blackout_context_rewarmed = price_blackout_window is None
     # Selected markets must cover the same six-calendar-month replay horizon.
     # The downloader and loader fail closed on missing candles or funding events.
     start_time = max(item["source_start"] for item in market.values())
@@ -784,6 +792,8 @@ def run_sandbox(
     shadow_trades: list[dict[str, Any]] = []
     unknown_pnl_trades: list[dict[str, Any]] = []
     unknown_shadow_pnl_trades: list[dict[str, Any]] = []
+    ambiguous_price_gap_positions: list[dict[str, Any]] = []
+    ambiguous_shadow_price_gap_positions: list[dict[str, Any]] = []
     closed_training_trades = 0
     training_candle_count = 0
     last_train_candle = 0
@@ -825,6 +835,38 @@ def run_sandbox(
             survivors: list[dict[str, Any]] = []
             for order in collection:
                 symbol = str(order["symbol"])
+                if (
+                    price_blackout_window is not None
+                    and symbol == str(price_blackout_window["instrument_id"])
+                    and int(stamp.timestamp() * 1000) >= int(price_blackout_window["end_exclusive_ms"])
+                    and int(order.get("submitted_ts_ms") or 0) < int(price_blackout_window["start_ms"])
+                ):
+                    ambiguous_record = {
+                        "signal_id": order["signal_id"],
+                        "instrument_id": symbol,
+                        "direction": order["direction"],
+                        "phase": order["phase"],
+                        "status": "AMBIGUOUS_PRICE_CANDLE_BLACKOUT",
+                        "position_state_before_gap": "FILLED_OR_OPEN" if order.get("entry_checked") else "ENTRY_PENDING",
+                        "entry_checked_before_gap": bool(order.get("entry_checked")),
+                        "entry_ts_ms": order.get("entry_ts_ms"),
+                        "submitted_ts_ms": order.get("submitted_ts_ms"),
+                        "last_observed_through_ts_ms": order.get("last_observed_through_ts_ms"),
+                        "blackout_start_ms": int(price_blackout_window["start_ms"]),
+                        "blackout_end_exclusive_ms": int(price_blackout_window["end_exclusive_ms"]),
+                        "exit_ts_ms": None,
+                        "exit_price": None,
+                        "net_pnl_usdt": None,
+                        "synthetic_candles_used": False,
+                        "reason": "Price path is absent; stop/target/fill outcome cannot be inferred.",
+                    }
+                    if is_shadow:
+                        ambiguous_shadow_price_gap_positions.append(ambiguous_record)
+                        counts["price_blackout_ambiguous_shadow_positions"] += 1
+                    else:
+                        ambiguous_price_gap_positions.append(ambiguous_record)
+                        counts["price_blackout_ambiguous_positions"] += 1
+                    continue
                 if order["phase"] != phase and not order.get("phase_boundary_crossed"):
                     order["phase_boundary_crossed"] = True
                     counts["cross_boundary_positions"] += 1
@@ -1170,6 +1212,37 @@ def run_sandbox(
             if model_freeze_train_count is None: model_freeze_train_count=brain.train_count
             elif brain.train_count!=model_freeze_train_count: raise SandboxDataError("model weights changed after the TRAIN phase freeze")
 
+        if price_blackout_window is not None and not price_blackout_context_rewarmed:
+            recovery_ms = int(price_blackout_window["end_exclusive_ms"])
+            if asof_ms >= recovery_ms:
+                btc_post_gap = btc_frame_15m.loc[btc_frame_15m.index >= price_blackout_recovery_ts]
+                btc_post_gap_closed = int(
+                    ((btc_post_gap.index + pd.Timedelta(minutes=15)) <= asof).sum()
+                )
+                if btc_post_gap_closed >= 70:
+                    refreshed_contexts: dict[str, dict[str, Any]] = {}
+                    refreshed_signal_frames: dict[str, dict[str, pd.DataFrame]] = {}
+                    for refresh_symbol, refresh_item in market.items():
+                        active_frames = dict(refresh_item["frames"])
+                        if refresh_symbol == "BTC-USDT":
+                            active_frames["15m"] = active_frames["15m"].loc[
+                                active_frames["15m"].index >= price_blackout_recovery_ts
+                            ].copy()
+                        refreshed_signal_frames[refresh_symbol] = active_frames
+                        refreshed_contexts[refresh_symbol] = prepare_signal_context(
+                            active_frames["1H"], active_frames["4H"],
+                            active_frames["15m"], btc_post_gap,
+                        )
+                    prepared_contexts = refreshed_contexts
+                    signal_frames = refreshed_signal_frames
+                    pattern_lifecycle = {
+                        key: value for key, value in pattern_lifecycle.items()
+                        if value.get("instrument_id") != "BTC-USDT"
+                    }
+                    price_blackout_context_rewarmed = True
+                    counts["price_blackout_indicator_rewarm_completed"] += 1
+                    counts["price_blackout_indicator_rewarm_btc_15m_closed_bars"] = btc_post_gap_closed
+
         for symbol in symbols:
             item = market[symbol]
             row_index = index_maps[symbol].get(stamp)
@@ -1180,6 +1253,23 @@ def run_sandbox(
                 else validation_end_ms if phase == "VALIDATION"
                 else None
             )
+            price_gap_active = (
+                price_blackout_window is not None
+                and _is_price_candle_blackout(asof_ms) is not None
+            )
+            price_gap_rewarm = (
+                price_blackout_window is not None
+                and asof_ms >= int(price_blackout_window["end_exclusive_ms"])
+                and not price_blackout_context_rewarmed
+            )
+            if price_gap_active or price_gap_rewarm:
+                counts["price_blackout_new_entry_blocks"] += 1
+                _record_block_reason(
+                    block_reasons, block_reasons_by_symbol, symbol,
+                    "PRICE_CANDLE_BLACKOUT: NEW_ENTRY_BLOCKED" if price_gap_active
+                    else "PRICE_CANDLE_BLACKOUT_INDICATOR_REWARM: NEW_ENTRY_BLOCKED",
+                )
+                continue
             if _funding_blackout_for_timestamp(asof_ms) is not None:
                 counts["funding_blackout_new_entry_blocks"] += 1
                 _record_block_reason(
@@ -1224,10 +1314,13 @@ def run_sandbox(
             try:
                 signal = analyze_signal(
                     instrument_id=symbol,
-                    frame_1h=item["frames"]["1H"],
-                    frame_4h=item["frames"]["4H"],
-                    frame_15m=item["frames"]["15m"],
-                    btc_15m=btc_frame_15m,
+                    frame_1h=signal_frames[symbol]["1H"],
+                    frame_4h=signal_frames[symbol]["4H"],
+                    frame_15m=signal_frames[symbol]["15m"],
+                    btc_15m=(
+                        signal_frames["BTC-USDT"]["15m"]
+                        if price_blackout_context_rewarmed else btc_frame_15m
+                    ),
                     asof=asof,
                     funding_rate=funding_rate,
                     funding_kind=funding_kind,
@@ -1254,7 +1347,7 @@ def run_sandbox(
             counts["qualified_signals"] += 1
             features=dict(signal["features"])
             try:
-                snapshot=analyze_unified_patterns_v3(instrument_id=symbol,frames=item["frames"],asof=asof,expected_direction=signal["signal"],lifecycle_state=pattern_lifecycle)
+                snapshot=analyze_unified_patterns_v3(instrument_id=symbol,frames=signal_frames[symbol],asof=asof,expected_direction=signal["signal"],lifecycle_state=pattern_lifecycle)
                 pattern_features=dict(snapshot["features"]); pattern_features.update(snapshot.get("pattern_name_features") or {})
                 pattern_family_keys=dict(snapshot["family_lifecycle_keys"]); pattern_detections=list(snapshot["detections"]); pattern_market_regime=snapshot.get("market_regime","UNKNOWN")
             except (ValueError,KeyError,TypeError,IndexError):
