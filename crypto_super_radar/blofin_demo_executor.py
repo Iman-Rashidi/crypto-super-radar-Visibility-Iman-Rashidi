@@ -622,7 +622,10 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     ORDER_PATH = "/api/v1/trade/order"
     LEVERAGE_PATH = "/api/v1/account/set-leverage"
     CLOSE_POSITION_PATH = "/api/v1/trade/close-position"
-    ALLOWED_POST_PATHS = frozenset({ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH})
+    AMEND_TPSL_PATH = "/api/v1/trade/amend-tpsl"
+    ALLOWED_POST_PATHS = frozenset({
+        ORDER_PATH, LEVERAGE_PATH, CLOSE_POSITION_PATH, AMEND_TPSL_PATH,
+    })
 
     def __init__(self, **kwargs: Any) -> None:
         # Prefer a dedicated Demo Trade override. Otherwise use the unified
@@ -796,6 +799,172 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
         if position_id:
             body["positionId"] = position_id
         return self._post(self.CLOSE_POSITION_PATH, body)
+
+    @staticmethod
+    def _exit_client_id(value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9]{1,32}", value or ""):
+            raise ValueError("client_order_id must be 1-32 alphanumeric characters.")
+        return value
+
+    def _net_position_for_exit(
+        self, *, inst_id: str, position_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id or ""):
+            raise ValueError("Only a USDT linear Demo perpetual is supported.")
+        mode = self.get_position_mode()
+        if mode.get("positionMode") != "net_mode":
+            raise BloFinDemoExecutionBlocked(
+                "reduceOnly exits are blocked outside One-Way net_mode; BloFin ignores reduceOnly in Hedge mode."
+            )
+        rows = self.get_positions(inst_id=inst_id)
+        if not isinstance(rows, list):
+            raise BloFinDemoResponseError("Position response is not a list.")
+        matches = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            if str(row.get("instId") or "").upper() != inst_id:
+                continue
+            if str(row.get("positionSide") or "").lower() != "net":
+                continue
+            returned_id = str(row.get("positionId") or "").strip()
+            if position_id and returned_id != position_id:
+                continue
+            size = _decimal(row.get("positions"), "position_size")
+            if size != 0:
+                matches.append((dict(row), size))
+        if len(matches) != 1:
+            raise BloFinDemoExecutionBlocked(
+                "An exact single open net position could not be identified; exit request blocked."
+            )
+        row, signed_size = matches[0]
+        if position_id and str(row.get("positionId") or "").strip() != position_id:
+            raise BloFinDemoExecutionBlocked("Exchange position identity does not match the journal.")
+        row["_signed_size_decimal"] = signed_size
+        return row
+
+    def partial_close_reduce_only(
+        self, *, inst_id: str, client_order_id: str,
+        position_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Close exactly half of one net-mode Demo position, or fail closed."""
+        self._exit_client_id(client_order_id)
+        position = self._net_position_for_exit(inst_id=inst_id, position_id=position_id)
+        signed_size = position["_signed_size_decimal"]
+        instrument = self.get_tradable_instrument(inst_id)
+        lot = _decimal(instrument.get("lotSize"), "lotSize")
+        minimum = _decimal(instrument.get("minSize"), "minSize")
+        half = abs(signed_size) / Decimal("2")
+        quantity = (half / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
+        if quantity != half or quantity < minimum:
+            raise BloFinDemoExecutionBlocked(
+                "An exact 50% partial close cannot be represented at this contract's lotSize/minSize."
+            )
+        side = "sell" if signed_size > 0 else "buy"
+        body = {
+            "instId": inst_id,
+            "marginMode": str(position.get("marginMode") or "isolated"),
+            "positionSide": "net",
+            "side": side,
+            "orderType": "market",
+            "size": _format_decimal(quantity),
+            "reduceOnly": "true",
+            "clientOrderId": client_order_id,
+        }
+        return self._post(self.ORDER_PATH, body)
+
+    def amend_or_replace_sl(
+        self, *, inst_id: str, tpsl_id: str, new_stop_loss: str,
+        request_id: str, position_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Amend the existing exchange SL in place; never cancel first and expose the position."""
+        self._exit_client_id(request_id)
+        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", tpsl_id or ""):
+            raise ValueError("tpsl_id is invalid.")
+        stop = _decimal(new_stop_loss, "new_stop_loss")
+        if stop <= 0:
+            raise ValueError("new_stop_loss must be positive.")
+        position = self._net_position_for_exit(inst_id=inst_id, position_id=position_id)
+        active = self.get_open_tpsl_orders(inst_id=inst_id, limit=100)
+        if not isinstance(active, list):
+            raise BloFinDemoResponseError("Active TP/SL response is not a list.")
+        matches = [
+            row for row in active
+            if isinstance(row, Mapping)
+            and str(row.get("tpslId") or "") == tpsl_id
+            and str(row.get("instId") or "").upper() == inst_id
+            and str(row.get("positionSide") or "").lower() == "net"
+            and str(row.get("state") or "").lower() == "live"
+            and (
+                not position_id
+                or str(row.get("positionId") or "").strip() == position_id
+            )
+        ]
+        if len(matches) != 1 or not matches[0].get("slTriggerPrice"):
+            raise BloFinDemoExecutionBlocked(
+                "The exact active protective SL could not be proven; amendment blocked."
+            )
+        payload = self._post(self.AMEND_TPSL_PATH, {
+            "instId": inst_id,
+            "tpslId": tpsl_id,
+            "requestId": request_id,
+            "newSlTriggerPrice": _format_decimal(stop),
+        })
+        verified = self.get_open_tpsl_orders(inst_id=inst_id, limit=100)
+        if not isinstance(verified, list):
+            raise BloFinDemoExecutionUnknown(
+                "SL amendment was submitted but active protection could not be re-read."
+            )
+        exact = [
+            row for row in verified
+            if isinstance(row, Mapping)
+            and str(row.get("tpslId") or "") == tpsl_id
+            and str(row.get("instId") or "").upper() == inst_id
+            and str(row.get("positionSide") or "").lower() == "net"
+            and str(row.get("state") or "").lower() == "live"
+            and _decimal(row.get("slTriggerPrice"), "verified_stop_loss") == stop
+        ]
+        if len(exact) != 1:
+            raise BloFinDemoExecutionUnknown(
+                "SL amendment receipt was returned but the active exchange stop could not be verified."
+            )
+        return {**payload, "sl_verified": True, "tpsl_id": tpsl_id}
+
+    def place_limit_exit_reduce_only(
+        self, *, inst_id: str, limit_price: str, client_order_id: str,
+        position_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Place a reduce-only limit for the full remaining net-mode Demo position."""
+        self._exit_client_id(client_order_id)
+        price = _decimal(limit_price, "limit_price")
+        if price <= 0:
+            raise ValueError("limit_price must be positive.")
+        position = self._net_position_for_exit(inst_id=inst_id, position_id=position_id)
+        signed_size = position["_signed_size_decimal"]
+        instrument = self.get_tradable_instrument(inst_id)
+        lot = _decimal(instrument.get("lotSize"), "lotSize")
+        minimum = _decimal(instrument.get("minSize"), "minSize")
+        quantity = abs(signed_size)
+        if quantity < minimum or quantity % lot != 0:
+            raise BloFinDemoExecutionBlocked(
+                "The remaining position size violates the contract lotSize/minSize."
+            )
+        tick = _decimal(instrument.get("tickSize"), "tickSize")
+        if price % tick != 0:
+            raise BloFinDemoExecutionBlocked("Limit exit price does not align with tickSize.")
+        side = "sell" if signed_size > 0 else "buy"
+        body = {
+            "instId": inst_id,
+            "marginMode": str(position.get("marginMode") or "isolated"),
+            "positionSide": "net",
+            "side": side,
+            "orderType": "limit",
+            "price": _format_decimal(price),
+            "size": _format_decimal(quantity),
+            "reduceOnly": "true",
+            "clientOrderId": client_order_id,
+        }
+        return self._post(self.ORDER_PATH, body)
 
 
 class BloFinDemoEventStore:
