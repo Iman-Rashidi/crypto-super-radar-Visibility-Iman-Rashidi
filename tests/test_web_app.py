@@ -544,16 +544,16 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertNotIn("JSON.stringify(job,null,2)", page)
         self.assertNotIn('id="blofin-execution-result"', page)
 
-    def test_challenge1_dashboard_text_matches_5m_two_reviewer_architecture(self):
+    def test_manual_dashboard_is_fixed_to_challenge1_v2_single_shot(self):
         status, _, body = self.request("GET", "/")
         page = body.decode("utf-8")
         self.assertEqual(status, 200)
-        self.assertIn("هر کندل بسته‌شدهٔ ۵ دقیقه‌ای حداکثر یک سیگنال یکتا می‌سازد", page)
-        self.assertIn("هر دو ناظر مستقل AI", page)
-        self.assertIn("تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند", page)
-        self.assertNotIn("Challenge 1 فقط کندل بسته‌شدهٔ ۱۵ دقیقه‌ای", page)
-        self.assertNotIn("ساختار موج از تایم‌فریم یک‌ساعته", page)
-        self.assertNotIn("تأیید ۱۵ دقیقه/۱ ساعت", page)
+        self.assertIn("استراتژی اجرای دستی CHALLENGE_1_V2", page)
+        self.assertIn("کندل‌های بسته‌شدهٔ ۱۵ دقیقه، ۱ ساعت و ۴ ساعت", page)
+        self.assertIn("هر دو ناظر مستقل و معتبر AI", page)
+        self.assertIn("اجرای دستی یک چرخه نسخه جدید (CHALLENGE_1_V2 Single-Shot)", page)
+        self.assertIn("const selectedProfile='CHALLENGE_1_V2';", page)
+        self.assertIn("حالت اتوماتیک · Challenge 1", page)
 
     def test_trade_permission_block_does_not_block_analysis_when_durable_storage_is_ready(self):
         readiness = {
