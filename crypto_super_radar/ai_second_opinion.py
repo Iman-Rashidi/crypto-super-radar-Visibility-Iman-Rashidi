@@ -959,6 +959,73 @@ def _extract_json(content: str) -> dict[str, Any]:
 
 
 
+def _message_content_candidates(message: Any) -> list[str]:
+    """Return bounded text/JSON candidates from OpenRouter message variants.
+
+    Final content has priority. Reasoning fields are only fallbacks and are
+    accepted downstream only if they contain a schema-valid JSON review.
+    """
+    if not isinstance(message, dict):
+        return []
+    candidates: list[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value not in candidates:
+                candidates.append(value)
+        elif isinstance(value, dict):
+            rendered = json.dumps(value, ensure_ascii=False)
+            if rendered not in candidates:
+                candidates.append(rendered)
+
+    content = message.get("content")
+    if isinstance(content, str):
+        add(content)
+    elif isinstance(content, dict):
+        add(content)
+    elif isinstance(content, list):
+        text_parts: list[str] = []
+        json_parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                text_parts.append(part)
+            elif isinstance(part, dict):
+                part_type = str(part.get("type") or "").lower()
+                if isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    text_parts.append(part["content"])
+                elif part_type in {"json", "output_json"}:
+                    value = part.get("json", part.get("value"))
+                    if isinstance(value, dict):
+                        json_parts.append(json.dumps(value, ensure_ascii=False))
+        compact = "".join(text_parts).strip()
+        separated = "\n".join(item.strip() for item in text_parts if item.strip()).strip()
+        add(compact)
+        if separated != compact:
+            add(separated)
+        for item in json_parts:
+            add(item)
+
+    # Reasoning is not treated as an approval unless JSON extraction and the
+    # normal review-schema validation both succeed.
+    add(message.get("output_text"))
+    add(message.get("reasoning"))
+    details = message.get("reasoning_details")
+    if isinstance(details, list):
+        add("".join(
+            item.get("text", "") for item in details
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ))
+        add("\n".join(
+            item.get("text", "") for item in details
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ))
+    return candidates
+
+
+
 def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
     """Make one tiny, fixed-prompt connectivity probe; never evaluates a trade."""
     key = _api_key()
@@ -1380,17 +1447,25 @@ def run_free_ai_second_opinion(
         message = choices[0].get("message")
         if not isinstance(message, dict):
             raise ValueError("Missing AI response message")
-        content = message.get("content")
-        if isinstance(content, list):
-            content = "\\n".join(
-                part.get("text", "") for part in content
-                if isinstance(part, dict) and isinstance(part.get("text"), str)
-            )
-        if not isinstance(content, str):
+        content_candidates = _message_content_candidates(message)
+        if not content_candidates:
             raise ValueError("AI message content is not text")
-        if len(content) > MAX_RESPONSE_CHARS:
-            raise ValueError("AI response exceeded the maximum accepted size")
-        parsed = _extract_json(content)
+        parsed = None
+        oversized = False
+        parse_errors = []
+        for candidate in content_candidates:
+            if len(candidate) > MAX_RESPONSE_CHARS:
+                oversized = True
+                continue
+            try:
+                parsed = _extract_json(candidate)
+                break
+            except (TypeError, ValueError) as exc:
+                parse_errors.append(type(exc).__name__)
+        if parsed is None:
+            if oversized:
+                raise ValueError("AI response exceeded the maximum accepted size")
+            raise ValueError("No JSON object returned")
         returned_model = body.get("model") if isinstance(body, dict) else None
         if not isinstance(returned_model, str) or not returned_model.strip():
             return {
