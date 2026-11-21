@@ -120,3 +120,16 @@ After the ETH-USDT 4H blackout was registered, the next fresh download reached S
 The partial SQLite has 83,714 candles for BTC-USDT and ETH-USDT only, plus 906 funding rows for those two instruments. It is structurally valid but not the approved five-symbol dataset. SHA-256: `b127a0484f22ebb2d67b93120891f57d68b79a2c63d7f30bb05e9ba0a8e7f787`. Independent A-E was not run. Replay #109 A-E completed with the same results as before.
 
 The exact SOL window has been added to the evidence-backed blackout registry, with tests for its scope, gap match, interval count, observed neighbors, and per-instrument aggregation. This is a separate SOL window, not a global wildcard.
+
+
+## Supplemental finding from downloader Run #150 — 21 November 2026
+
+After the exact SOL-USDT 15m gap was registered, the next download identified a further SOL-USDT 1H price gap:
+
+- `SOL-USDT / 1H`
+- `missing_from_utc=2026-03-09T07:00:00+00:00`
+- `missing_to_utc=2026-03-09T11:00:00+00:00`
+- 5 missing hourly candles; observed left/right candles at 06:00 and 12:00 UTC.
+- Evidence: Run #150 artifact `14715653809`, `downloader.log`.
+
+This was registered as a separate SOL-USDT 1H blackout with tests. The next download must resume from a clean database; no incomplete DB is accepted. The prior partial Run #150 database had BTC and ETH only (83,714 candles) and was rejected as an independent dataset. No independent A-E results exist for Run #150.
