@@ -471,12 +471,42 @@ def _v3_pattern_shadow_observation(
     }
 
 
+def _v3_pattern_research_observation(
+    *,
+    detections: list[Mapping[str, Any]],
+    expected_direction: str,
+    brain_evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Explicit opt-in research mode; this result is used only in offline replay."""
+    suggestion = _v3_pattern_entry_gate(
+        detections=detections,
+        expected_direction=expected_direction,
+        brain_evaluation=brain_evaluation,
+    )
+    would_veto = suggestion["decision"] == "VETO"
+    return {
+        **suggestion,
+        "decision": "RESEARCH_FILTER",
+        "reason": "V3_RESEARCH_FILTER_VETO" if would_veto else "V3_RESEARCH_FILTER_ALLOW",
+        "suggested_decision": suggestion["decision"],
+        "suggested_reason": suggestion["reason"],
+        "would_veto": would_veto,
+        "telemetry_only": False,
+        "research_only": True,
+    }
+
+
 def _actual_entry_veto(
     *,
     model_veto: bool,
     pattern_observation: Mapping[str, Any],
+    v3_research_filter: bool = False,
 ) -> bool:
-    """Only the existing V2 model may veto; V3 must remain telemetry-only."""
+    """V3 vetoes are accepted only behind the explicit offline research switch."""
+    if v3_research_filter:
+        if pattern_observation.get("decision") != "RESEARCH_FILTER":
+            raise ValueError("V3 research observation must use RESEARCH_FILTER mode")
+        return bool(model_veto or pattern_observation.get("would_veto"))
     if pattern_observation.get("decision") != "SHADOW_ONLY":
         raise ValueError("V3 pattern observation must be SHADOW_ONLY")
     return bool(model_veto)
@@ -642,6 +672,7 @@ def run_sandbox(
     tp1_reward_r_multiple: float = 1.2,
     tp1_fraction: float = 0.5,
     stop_atr_multiplier_overrides: Mapping[str, float] | None = None,
+    v3_research_filter: bool = False,
 ) -> dict[str, Any]:
     stop_overrides: dict[str, float] = {}
     for raw_symbol, raw_multiplier in (stop_atr_multiplier_overrides or {}).items():
@@ -705,6 +736,8 @@ def run_sandbox(
     closed_pattern_training_trades = 0
     last_pattern_brain_train_examples = 0
     pattern_brain_freeze_train_count: int | None = None
+    pattern_brain_freeze_metadata: dict[str, Any] | None = None
+    v3_capacity_releases: list[dict[str, Any]] = []
     equity = float(initial_equity)
     active_orders: list[dict[str, Any]] = []
     shadow_orders: list[dict[str, Any]] = []
@@ -1026,6 +1059,8 @@ def run_sandbox(
                 "tp1_fee_usdt": float(result.diagnostics.get("tp1_fee_usdt", 0.0)),
                 "net_rr_at_entry": result.net_rr_at_entry,
                 "model_decision": order["model_decision"],
+                "capacity_replacement_for_signal_id": order.get("capacity_replacement_for_signal_id"),
+                "capacity_released_by_v3_at_ms": order.get("capacity_released_by_v3_at_ms"),
                 "pattern_features": dict(order.get("pattern_features") or {}),
                 "pattern_detections": list(order.get("pattern_detections") or []),
                 "market_regime": order.get("pattern_market_regime","UNKNOWN"),
@@ -1091,6 +1126,7 @@ def run_sandbox(
                 if not pattern_brain.trained and len(pattern_brain.examples)>=pattern_brain.warmup_trades:
                     train_state=pattern_brain.train()
                     if train_state.get("status")=="TRAINED": counts["pattern_training_rounds"]+=1
+                pattern_brain_freeze_metadata = pattern_brain.freeze()
                 pattern_brain_freeze_train_count=pattern_brain.train_count
             elif pattern_brain.train_count!=pattern_brain_freeze_train_count: raise SandboxDataError("V3 pattern brain changed after TRAIN freeze")
             if model_freeze_train_count is None: model_freeze_train_count=brain.train_count
@@ -1181,7 +1217,8 @@ def run_sandbox(
             features=dict(signal["features"])
             try:
                 snapshot=analyze_unified_patterns_v3(instrument_id=symbol,frames=item["frames"],asof=asof,expected_direction=signal["signal"],lifecycle_state=pattern_lifecycle)
-                pattern_features=dict(snapshot["features"]); pattern_family_keys=dict(snapshot["family_lifecycle_keys"]); pattern_detections=list(snapshot["detections"]); pattern_market_regime=snapshot.get("market_regime","UNKNOWN")
+                pattern_features=dict(snapshot["features"]); pattern_features.update(snapshot.get("pattern_name_features") or {})
+                pattern_family_keys=dict(snapshot["family_lifecycle_keys"]); pattern_detections=list(snapshot["detections"]); pattern_market_regime=snapshot.get("market_regime","UNKNOWN")
             except (ValueError,KeyError,TypeError,IndexError):
                 counts["pattern_analysis_errors"]+=1; pattern_features={x:0 for x in PATTERN_FAMILIES}; pattern_family_keys={x:[] for x in PATTERN_FAMILIES}; pattern_detections=[]; pattern_market_regime="UNKNOWN"
             pattern_brain_evaluation=pattern_brain.evaluate(pattern_features); counts["pattern_shadow_observations"]+=1
@@ -1201,19 +1238,27 @@ def run_sandbox(
             # Learn only from matured TRAIN outcomes, then freeze before
             # Validation/OOS. The V3 score is uncalibrated, not a probability.
             if phase != "TRAIN" and pattern_brain.trained:
-                pattern_gate = _v3_pattern_shadow_observation(
-                    detections=pattern_detections,
-                    expected_direction=signal["signal"],
-                    brain_evaluation=pattern_brain_evaluation,
-                )
+                if v3_research_filter:
+                    pattern_gate = _v3_pattern_research_observation(
+                        detections=pattern_detections,
+                        expected_direction=signal["signal"],
+                        brain_evaluation=pattern_brain_evaluation,
+                    )
+                else:
+                    pattern_gate = _v3_pattern_shadow_observation(
+                        detections=pattern_detections,
+                        expected_direction=signal["signal"],
+                        brain_evaluation=pattern_brain_evaluation,
+                    )
             else:
                 pattern_gate = {
-                    "decision": "SHADOW_ONLY",
-                    "reason": "TELEMETRY_ONLY_NO_ENTRY_VETO",
+                    "decision": "RESEARCH_FILTER" if v3_research_filter else "SHADOW_ONLY",
+                    "reason": "V3_RESEARCH_FILTER_NOT_READY" if v3_research_filter else "TELEMETRY_ONLY_NO_ENTRY_VETO",
                     "suggested_decision": "NOT_EVALUATED",
                     "suggested_reason": "TRAINING_OR_PATTERN_BRAIN_NOT_READY",
                     "would_veto": False,
-                    "telemetry_only": True,
+                    "telemetry_only": not v3_research_filter,
+                    "research_only": bool(v3_research_filter),
                     "toxic_patterns": [], "liquidity_sweeps": [],
                     "priority_patterns": [], "priority_bonus": 0.0,
                     "brain_score": pattern_brain_evaluation.get("score_0_1"),
@@ -1221,17 +1266,27 @@ def run_sandbox(
                     "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
                 }
             pattern_veto_suggestion = bool(pattern_gate.get("would_veto"))
-            # Scientific ablation: V3 recommendations are telemetry only.
-            # They cannot suppress, prioritize, size, or otherwise alter entries.
             veto = _actual_entry_veto(
                 model_veto=model_veto,
                 pattern_observation=pattern_gate,
+                v3_research_filter=v3_research_filter,
             )
             veto_sources = []
             if model_veto:
                 veto_sources.append("V2_META_BRAIN")
+            if v3_research_filter and pattern_veto_suggestion:
+                veto_sources.append("V3_RESEARCH_FILTER")
             if pattern_veto_suggestion:
                 counts["v3_pattern_veto_suggestions"] += 1
+                if v3_research_filter:
+                    counts["v3_research_filter_entry_vetoes"] += 1
+                    if len(active_orders) < 2:
+                        v3_capacity_releases.append({
+                            "signal_id": signal["signal_id"],
+                            "released_ts_ms": asof_ms,
+                            "symbol": symbol,
+                        })
+                        counts["v3_research_filter_capacity_slots_released"] += 1
                 if pattern_gate.get("toxic_patterns") or pattern_gate.get("liquidity_sweeps"):
                     counts["v3_toxic_pattern_veto_suggestions"] += 1
                 elif pattern_gate.get("suggested_reason") == "V3_PATTERN_BRAIN_LOW_SCORE":
@@ -1291,11 +1346,20 @@ def run_sandbox(
                 "veto_source":veto_source,
                 "veto_reason":model_decision if model_veto else None,
                 "pattern_veto_suggestion_reason":pattern_gate.get("suggested_reason") if pattern_veto_suggestion else None,
+                "capacity_replacement_for_signal_id":None,
+                "capacity_released_by_v3_at_ms":None,
             }
             if veto:
                 counts["vetoed_signals"] += 1
+                if v3_research_filter and pattern_veto_suggestion:
+                    order["veto_reason"] = pattern_gate.get("suggested_reason")
                 shadow_orders.append(order)
             else:
+                if v3_research_filter and not model_veto and v3_capacity_releases:
+                    released = v3_capacity_releases.pop(0)
+                    order["capacity_replacement_for_signal_id"] = released["signal_id"]
+                    order["capacity_released_by_v3_at_ms"] = released["released_ts_ms"]
+                    counts["v3_replacement_entries"] += 1
                 active_orders.append(order)
 
     cross_boundary_open_positions = sum(
