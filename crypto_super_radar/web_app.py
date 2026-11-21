@@ -2958,7 +2958,11 @@ def _blofin_demo_execution_readiness() -> dict:
             store = BloFinDemoEventStore()
             try:
                 budget = store.trade_budget_status()
-                single_shot_lock = store.single_shot_lock_status()
+                try:
+                    single_shot_lock = store.single_shot_lock_status()
+                except Exception:
+                    # Keep general event-store readability separate from lock observability.
+                    single_shot_lock = None
             finally:
                 store.close()
         except Exception:
@@ -6462,13 +6466,14 @@ class Handler(BaseHTTPRequestHandler):
               <div>
                 <label for="blofin-engine-profile">استراتژی معامله Demo</label>
                 <select id="blofin-engine-profile">
+                  <option value="CHALLENGE_1" disabled>CHALLENGE_1 · مسیر قدیمی AutoPilot (غیرفعال در اجرای دستی)</option>
                   <option value="CHALLENGE_1_V2" selected>CHALLENGE_1_V2 · نسخه چندبازه‌ای Single-Shot</option>
                 </select>
               </div>
             </div>
             <p id="blofin-instrument-status" class="muted" aria-live="polite">قراردادهای زنده با مجوز Full برای بازکردن موقعیت در حال دریافت‌اند.</p>
             <p class="muted"><a href="https://blofin.com/trade/en/futures/BTC-USDT" target="_blank" rel="noopener">بازار BTC-USDT Perpetual در BloFin</a> · <a href="https://blofin.com/market/derivatives" target="_blank" rel="noopener">فهرست بازارهای مشتقه</a> · <a href="https://blofin.com/en/support/FAQ/Futures-Trading/11742286589455-What-is-Demo-Trading" target="_blank" rel="noopener">راهنمای رسمی ورود به BloFin Demo</a></p>
-            <p class="muted">استراتژی اصلی Challenge 1: تحلیل کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای شامل الگوهای تک‌کندلی و چندکندلی، ساختار نمودار و شکست معتبر؛ سپس تحلیل موج الیوت، فاز/جهت موج و سطح ابطال و تطبیق موج با ساختار قیمت، حجم و شواهد مکمل. ورود فقط پس از دریافت پاسخ معتبر APPROVED از هر دو ناظر مستقل AI با Provider و Model متفاوت، توافق بر جهت و فاز موج و عبور از کنترل ریسک مجاز است. VETO، UNKNOWN، ERROR، قطع ارتباط یا اختلاف ناظران ورود را مسدود می‌کند. تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. ۱۲ فیلتر عمومی فقط نظارتی‌اند و شرط ورود نیستند. سفارش فقط در BloFin Demo اجرا می‌شود؛ کنترل‌های حساب، قرارداد، مارجین، حدضرر و ریسک همچنان اجباری‌اند.</p>
+            <p class="muted">استراتژی اجرای دستی CHALLENGE_1_V2: تحلیل فقط‌خواندنی کندل‌های بسته‌شدهٔ ۱۵ دقیقه، ۱ ساعت و ۴ ساعت، تأیید BTC در ۱۵ دقیقه، Funding و مشخصات قرارداد؛ سپس بررسی الگوهای ساختاری، جهت و فاز موج و شواهد چندبازه‌ای. ورود فقط پس از دو تأیید مستقل و معتبر AI، هم‌جهتی تصمیم‌ها و عبور از کنترل‌های حساب و ریسک مجاز است. VETO، UNKNOWN، ERROR، داده ناقص یا اختلاف ناظران ورود را مسدود می‌کند. AutoPilot قدیمی مسیر جداگانه‌ای دارد و این دکمه آن را روشن نمی‌کند. سفارش فقط در BloFin Demo و با قفل یک‌بارمصرف مجاز است؛ اهرم ایزوله 1x و TP/SL اجباری‌اند.</p>
             <p id="blofin-execution-readiness" class="muted" aria-live="polite">در حال بررسی پیش‌نیازهای Demo...</p>
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای دستی یک چرخه نسخه جدید (CHALLENGE_1_V2 Single-Shot)</button>
             <div class="metric" id="blofin-autopilot-panel" style="margin-top:14px;border-color:#2d6470">
