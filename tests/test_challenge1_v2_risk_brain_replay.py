@@ -40,10 +40,15 @@ from crypto_super_radar.market_replay import (
     _is_price_candle_blackout,
     _classify_funding_schedule_events,
     _is_observed_blackout_gap,
+    _funding_blackout_window_applicability,
     _parse_funding_event,
     _record_unique_timestamp,
     _subtract_calendar_months,
     download_candles,
+)
+from crypto_super_radar.research_v3_experiments import (
+    _effective_phase_months,
+    _scenario_specs,
 )
 from crypto_super_radar.virtual_blofin import (
     CostModel,
@@ -1364,3 +1369,50 @@ class AlphaDiscoveryHypothesisTests(unittest.TestCase):
             {"signal":"LONG","entry":float("nan"),"stop_loss":98,"take_profit":104},
             contract_value=1.0,costs=CostModel(),
         ))
+
+
+
+class FundingBlackoutWindowApplicabilityTests(unittest.TestCase):
+    def test_window_ending_before_registered_blackout_does_not_require_it(self):
+        start = int(pd.Timestamp("2025-10-31T09:00:00Z").timestamp() * 1000)
+        end = int(pd.Timestamp("2026-03-09T00:00:00Z").timestamp() * 1000)
+        self.assertEqual(
+            _funding_blackout_window_applicability(start, end),
+            "NOT_APPLICABLE_OUTSIDE_REQUESTED_WINDOW",
+        )
+
+    def test_window_covering_entire_registered_blackout_requires_five_symbol_verification(self):
+        start = 1782316800000
+        end = 1782576000000
+        self.assertEqual(_funding_blackout_window_applicability(start, end), "REQUIRED")
+
+    def test_partial_overlap_with_registered_blackout_fails_closed(self):
+        start = 1782403200000
+        end = 1782446400000
+        with self.assertRaisesRegex(ReplayDownloadError, "partially overlaps"):
+            _funding_blackout_window_applicability(start, end)
+
+
+class V3CostThresholdResearchTests(unittest.TestCase):
+    def test_cost_threshold_scenarios_are_one_variable_variants_of_scenario_b(self):
+        specs = {row["id"]: row for row in _scenario_specs()}
+        for scenario_id, threshold in (("H", 4.5), ("I", 5.5)):
+            settings = specs[scenario_id]["settings"]
+            self.assertTrue(settings["cost_friction_guard"])
+            self.assertEqual(settings["minimum_gross_to_fee_ratio"], threshold)
+            self.assertEqual(settings["max_holding_bars"], 12)
+            self.assertTrue(settings["tp1_enabled"])
+            self.assertEqual(settings["tp1_reward_r_multiple"], 1.2)
+            self.assertEqual(settings["tp1_fraction"], 0.5)
+            self.assertEqual(settings["risk_fraction"], 0.0025)
+            self.assertEqual(settings["stop_atr_multiplier_overrides"], {
+                "SOL-USDT": 2.25, "ETH-USDT": 1.625,
+            })
+            self.assertNotIn("v3_research_filter", settings)
+            self.assertNotIn("four_hour_regime_alignment", settings)
+
+    def test_explicit_independent_holdout_disables_train_and_validation(self):
+        self.assertEqual(_effective_phase_months(
+            "2025-11-30T09:00:00+00:00", 4, 5,
+        ), (0, 0))
+        self.assertEqual(_effective_phase_months(None, 4, 5), (4, 5))

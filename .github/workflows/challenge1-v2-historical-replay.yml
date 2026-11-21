@@ -92,16 +92,16 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           exit 0
 
-      - name: Download independent five-month dataset with technical indicator pre-roll
+      - name: Download independent dataset with one-month warm-up and three-plus-month holdout
         id: download
         continue-on-error: true
         run: |
           set +e
           mkdir -p artifacts
           python -m crypto_super_radar.market_replay \
-            --months 6 \
-            --start-utc "2025-09-25T00:00:00Z" \
-            --funding-start-utc "2025-09-25T00:00:00Z" \
+            --months 5 \
+            --start-utc "2025-10-31T09:00:00Z" \
+            --funding-start-utc "2025-10-31T09:00:00Z" \
             --end-utc "2026-03-09T00:00:00Z" \
             --db artifacts/independent_5m.sqlite3 \
             > artifacts/downloader.log 2>&1
@@ -110,8 +110,8 @@ jobs:
           if [ "$code" -eq 0 ]; then
             sha=$(sha256sum artifacts/independent_5m.sqlite3 | awk '{print $1}')
             echo "Independent source range downloaded and hashed: $sha" >> "$GITHUB_STEP_SUMMARY"
-            echo "Download: 2025-09-25T00:00:00Z to 2026-03-09T00:00:00Z exclusive." >> "$GITHUB_STEP_SUMMARY"
-            echo "Warm-up: 2025-09-25 to 2025-10-25. Unseen scored window: 2025-10-25 to 2026-03-09T00:00:00Z exclusive." >> "$GITHUB_STEP_SUMMARY"
+            echo "Download: 2025-10-31T09:00:00Z to 2026-03-09T00:00:00Z exclusive; last included 15m candle opens 2026-03-08T23:45:00Z." >> "$GITHUB_STEP_SUMMARY"
+            echo "Warm-up: 2025-10-31T09:00:00Z to 2025-11-30T09:00:00Z. Unseen scored holdout: 2025-11-30T09:00:00Z to 2026-03-09T00:00:00Z exclusive." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Independent dataset download failed closed; no synthetic candles, prices, funding or interpolation were substituted." >> "$GITHUB_STEP_SUMMARY"
             tail -n 160 artifacts/downloader.log >> "$GITHUB_STEP_SUMMARY" || true
@@ -131,7 +131,7 @@ jobs:
           )
           if [ "${{ steps.download.outputs.exit_code }}" = "0" ]; then
             args+=(--independent-db artifacts/independent_5m.sqlite3)
-            args+=(--independent-start-utc "2025-10-25T00:00:00+00:00")
+            args+=(--independent-start-utc "2025-11-30T09:00:00+00:00")
             args+=(--independent-end-utc "2026-03-09T00:00:00+00:00")
           fi
           python -m crypto_super_radar.research_v3_experiments "${args[@]}" \
@@ -159,7 +159,7 @@ jobs:
             "blackout_policy": "block entries during registered BTC price gaps and post-gap indicator rewarm; BTC positions spanning missing price paths are AMBIGUOUS with no synthetic price or PnL; funding blackouts remain independent",
             "data_policy": "public BloFin Demo market data only; no credentials; no order writes; no synthetic data or interpolation",
             "spread_policy": "0.0002 modelled spread scenario; not historical order-book spread",
-            "independent_window": "Download 2025-09-25 to 2026-03-09T00:00Z exclusive; warm-up to 2025-10-25; holdout scored strictly OUT_OF_SAMPLE without training or validation",
+            "independent_window": "Download 2025-10-31T09:00:00Z to 2026-03-09T00:00:00Z exclusive; one-month warm-up to 2025-11-30T09:00:00Z; holdout scored strictly OUT_OF_SAMPLE without training or validation; final included 15m open is 2026-03-08T23:45:00Z",
             "no_order_writes": true
           }
           JSON

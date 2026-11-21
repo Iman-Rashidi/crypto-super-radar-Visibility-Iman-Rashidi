@@ -215,6 +215,27 @@ class ReplayDownloadError(RuntimeError):
     pass
 
 
+def _funding_blackout_window_applicability(start_ms: int, end_ms: int) -> str:
+    """Decide whether the known funding blackout must be verified in this window.
+
+    A window wholly outside the documented outage must not fail validation for
+    not containing it. A partial overlap is ambiguous and therefore fails closed.
+    """
+    start, end = int(start_ms), int(end_ms)
+    if end <= start:
+        raise ValueError("funding window end must be after its start")
+    blackout_start = int(OBSERVED_FUNDING_BLACKOUTS[0]["start_ms"])
+    blackout_end = int(OBSERVED_FUNDING_BLACKOUTS[0]["end_ms"])
+    if end <= blackout_start or start >= blackout_end:
+        return "NOT_APPLICABLE_OUTSIDE_REQUESTED_WINDOW"
+    if start <= blackout_start and end >= blackout_end:
+        return "REQUIRED"
+    raise ReplayDownloadError(
+        "requested funding window partially overlaps the registered common blackout; "
+        "expand the window to include both verified boundaries or exclude it entirely"
+    )
+
+
 def _record_unique_timestamp(
     seen: dict[int, tuple[Any, ...]],
     timestamp: int,
@@ -778,8 +799,19 @@ def download_watchlist(
                 1 for item in funding if item[4] == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY"
             )
             report["symbols"][symbol] = result
-        _validate_common_funding_blackout(funding_by_symbol)
-        report["common_blackout_verified_for_all_symbols"] = True
+        effective_funding_start = funding_start_utc or start_utc
+        if effective_funding_start is None:
+            effective_funding_start = _subtract_calendar_months(datetime.now(timezone.utc), months)
+        effective_funding_end = end_utc or datetime.now(timezone.utc)
+        blackout_applicability = _funding_blackout_window_applicability(
+            _utc_ms(effective_funding_start), _utc_ms(effective_funding_end)
+        )
+        report["common_blackout_verification"] = blackout_applicability
+        if blackout_applicability == "REQUIRED":
+            _validate_common_funding_blackout(funding_by_symbol)
+            report["common_blackout_verified_for_all_symbols"] = True
+        else:
+            report["common_blackout_verified_for_all_symbols"] = None
     finally:
         connection.close()
     return report

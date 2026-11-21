@@ -119,6 +119,13 @@ def _cost_friction_audit_from_baseline(report_path: Path, minimum_ratio: float) 
     }
 
 
+def _effective_phase_months(
+    replay_end_utc: str | None, training_months: int, validation_months: int,
+) -> tuple[int, int]:
+    """Explicit independent holdouts must never fit on their own observations."""
+    return (0, 0) if replay_end_utc is not None else (int(training_months), int(validation_months))
+
+
 def _scenario_specs() -> list[dict[str, Any]]:
     base = {
         "max_holding_bars": 12,
@@ -148,6 +155,16 @@ def _scenario_specs() -> list[dict[str, Any]]:
             "name": "Scenario E with strict closed-4H regime alignment",
             "settings": dict(e, four_hour_regime_alignment=True),
         },
+        {
+            "id": "H",
+            "name": "Scenario E with Cost-Friction Guard >= 4.5",
+            "settings": dict(e, cost_friction_guard=True, minimum_gross_to_fee_ratio=4.5),
+        },
+        {
+            "id": "I",
+            "name": "Scenario E with Cost-Friction Guard >= 5.5",
+            "settings": dict(e, cost_friction_guard=True, minimum_gross_to_fee_ratio=5.5),
+        },
     ]
 
 
@@ -170,6 +187,9 @@ def run_experiment_set(
     if dataset_name == "independent_5m" and not manifest["complete_five_symbol_coverage"]:
         raise RuntimeError(f"independent dataset manifest is incomplete: {manifest}")
     runs: list[dict[str, Any]] = []
+    effective_training_months, effective_validation_months = _effective_phase_months(
+        replay_end_utc, training_months, validation_months
+    )
 
     for spec in _scenario_specs():
         scenario_id = spec["id"]
@@ -183,8 +203,8 @@ def run_experiment_set(
             replay_start_utc=replay_start_utc,
             replay_end_utc=replay_end_utc,
             replay_months=replay_months,
-            training_months=training_months,
-            validation_months=validation_months,
+            training_months=effective_training_months,
+            validation_months=effective_validation_months,
             **settings,
         )
         if report.get("network_order_writes") is not False:
@@ -228,6 +248,12 @@ def run_experiment_set(
             run["cost_friction_audit"] = _cost_friction_audit_from_baseline(
                 report_path, minimum_ratio=3.0
             )
+            run["cost_friction_audits"] = {
+                str(threshold): _cost_friction_audit_from_baseline(
+                    report_path, minimum_ratio=threshold
+                )
+                for threshold in (3.0, 4.5, 5.5)
+            }
         runs.append(run)
 
     # B and C intentionally repeat the same deterministic Shadow setup.
@@ -244,9 +270,9 @@ def run_experiment_set(
             "start_utc": replay_start_utc,
             "end_exclusive_utc": replay_end_utc,
             "replay_months": replay_months if replay_end_utc is None else None,
-            "training_months": training_months,
-            "validation_months": validation_months - training_months,
-            "out_of_sample_months": replay_months - validation_months if replay_end_utc is None else None,
+            "training_months": effective_training_months,
+            "validation_months": effective_validation_months - effective_training_months,
+            "out_of_sample_months": replay_months - effective_validation_months if replay_end_utc is None else None,
             "explicit_independent_holdout": replay_end_utc is not None,
         },
         "scenarios": runs,
@@ -283,7 +309,7 @@ def main() -> None:
             validation_months=0,
         )
     output = {
-        "report_version": "V3_RESEARCH_FILTER_A_TO_E_V1",
+        "report_version": "V3_RESEARCH_FILTER_A_TO_I_V2",
         "environment": "OFFLINE_VIRTUAL_BLOFIN_DEMO_MODEL",
         "network_order_writes": False,
         "scenario_policy": {
@@ -294,6 +320,8 @@ def main() -> None:
             "E": "Scenario E with opt-in V3 Research Filter and 0.125% per-position risk; two-slot nominal portfolio cap 0.25%.",
             "F": "Scenario E with signal-time modeled gross-to-fee ratio >= 3.0.",
             "G": "Scenario E with strict alignment to fully closed 4H regime candles.",
+            "H": "Scenario E with signal-time modeled gross-to-fee ratio >= 4.5.",
+            "I": "Scenario E with signal-time modeled gross-to-fee ratio >= 5.5.",
         },
         "replay109": replay109,
         "independent_5m": independent,
@@ -313,11 +341,11 @@ def main() -> None:
                     else False
                 ),
             }
-            for scenario in ("B", "C", "D", "E", "F", "G")
+            for scenario in ("B", "C", "D", "E", "F", "G", "H", "I")
         },
     }
     root.mkdir(parents=True, exist_ok=True)
-    path = root / "v3_research_a_to_e.json"
+    path = root / "v3_research_a_to_i.json"
     path.write_text(json.dumps(output, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(json.dumps({
         "report_file": str(path),
