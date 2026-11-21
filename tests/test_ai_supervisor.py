@@ -6,7 +6,9 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from crypto_super_radar.ai_supervisor import ai_supervisor_status, run_ai_supervisor
+from crypto_super_radar.ai_supervisor import (
+    _message_text_candidates, ai_supervisor_status, run_ai_supervisor,
+)
 from crypto_super_radar.ai_second_opinion import DEFAULT_FREE_MODEL
 from test_ai_second_opinion import valid_result, valid_document
 
@@ -31,6 +33,42 @@ class MultiProviderSupervisorTests(unittest.TestCase):
         with ai_supervisor._REQUEST_LOCK:
             ai_supervisor._DAILY_CALLS.clear()
             ai_supervisor._MINUTE_CALLS.clear()
+
+    def test_extracts_json_split_across_structured_content_text_parts(self):
+        document = valid_document()
+        serialized = json.dumps(document, ensure_ascii=False)
+        split_at = len(serialized) // 2
+        candidates = _message_text_candidates({
+            "content": [
+                {"type": "text", "text": serialized[:split_at]},
+                {"type": "text", "text": serialized[split_at:]},
+                {"type": "image", "image_url": {"url": "ignored"}},
+            ],
+            "reasoning": "This must not replace valid final content.",
+        })
+        self.assertTrue(candidates)
+        from crypto_super_radar.ai_second_opinion import _extract_json
+        self.assertEqual(_extract_json(candidates[0]), document)
+
+    def test_uses_reasoning_json_only_when_final_content_is_empty(self):
+        document = valid_document()
+        candidates = _message_text_candidates({
+            "content": None,
+            "reasoning": json.dumps(document, ensure_ascii=False),
+        })
+        self.assertTrue(candidates)
+        from crypto_super_radar.ai_second_opinion import _extract_json
+        self.assertEqual(_extract_json(candidates[0]), document)
+
+    def test_ignores_non_text_content_parts_and_plain_reasoning(self):
+        candidates = _message_text_candidates({
+            "content": [{"type": "image", "image_url": {"url": "ignored"}}],
+            "reasoning": "I considered the market but have no final JSON.",
+        })
+        from crypto_super_radar.ai_second_opinion import _extract_json
+        self.assertTrue(candidates)
+        with self.assertRaises(ValueError):
+            _extract_json(candidates[-1])
 
     def test_status_counts_configured_providers_without_exposing_secrets(self):
         with patch.dict(os.environ, {
