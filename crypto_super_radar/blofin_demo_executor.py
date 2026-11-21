@@ -37,6 +37,7 @@ from .blofin_demo_readonly import (
 )
 from .database import connect_database, storage_backend
 from .challenge1_strategy import challenge1_entry_evidence_ready
+from .challenge1_v2_trade_controls import v2_entry_capacity
 from .challenge1_v2 import challenge1_v2_execution_evidence_ready
 from .learning_experience_memory import LearningExperienceMemory
 
@@ -1270,7 +1271,7 @@ class BloFinDemoEventStore:
                 lock_row = self._db.execute(
                     "SELECT max_lifetime_orders, consumed_orders FROM "
                     "blofin_demo_single_shot_lock WHERE lock_name='SINGLE_SHOT_DEMO_TEST'"
-                ).fetchone()
+                ).fetchone() if single_shot else None
                 if lock_row is not None:
                     try:
                         lock_maximum = int(lock_row["max_lifetime_orders"])
@@ -1303,9 +1304,14 @@ class BloFinDemoEventStore:
                             return False
 
                 active_rows = self._db.execute(
-                    f"""SELECT client_order_id, reserved_risk_usdt, reserved_margin_usdt
+                    f"""SELECT client_order_id, instrument_id, reserved_risk_usdt, reserved_margin_usdt
                         FROM blofin_demo_orders WHERE status IN ({active_statuses})"""
                 ).fetchall()
+                candidate_symbol = str(plan.get("inst_id") or "").strip().upper()
+                if any(str(row["instrument_id"] or "").strip().upper() == candidate_symbol
+                       for row in active_rows):
+                    self._db.rollback()
+                    return False
                 local_active = len(active_rows)
                 observed_total = local_active + external_open_positions + external_pending_orders
                 if observed_total >= max_concurrent_positions:
@@ -2450,8 +2456,12 @@ class BloFinDemoExecutor:
             raise BloFinDemoExecutionBlocked("The configured daily Demo order limit has been reached.")
         if budget["unresolved_orders"] > 0:
             raise BloFinDemoExecutionBlocked("An earlier Demo order has an unresolved outcome; reconcile it before another entry.")
+        v2_autopilot_enabled = (
+            is_challenge1_v2
+            and os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+        )
         single_shot_status = self.store.single_shot_lock_status()
-        if single_shot_status.get("locked"):
+        if single_shot_status.get("locked") and not v2_autopilot_enabled:
             raise BloFinDemoExecutionBlocked(
                 "Single-shot Demo lifetime order allowance is already consumed; manual reset is required."
             )
@@ -2527,7 +2537,17 @@ class BloFinDemoExecutor:
         # Account-wide pending orders can fill on another symbol and consume the
         # concurrency/margin budget, so the safety check is intentionally global.
         pending = self.client.get_open_orders()
-        effective_position_limit = 1 if single_shot_enabled else self.policy.max_concurrent_positions
+        effective_position_limit = (
+            4 if v2_autopilot_enabled else
+            1 if single_shot_enabled else self.policy.max_concurrent_positions
+        )
+        if v2_autopilot_enabled:
+            allowed, capacity_reason = v2_entry_capacity(
+                self._response_rows(positions), self._response_rows(pending),
+                candidate_symbol=inst_id, max_concurrent_positions=4,
+            )
+            if not allowed:
+                raise BloFinDemoExecutionBlocked("V2 entry capacity blocked: " + capacity_reason)
         if _active_position_count(positions) >= effective_position_limit:
             raise BloFinDemoExecutionBlocked("Maximum concurrent-position limit has been reached.")
         if _active_order_count(pending) > 0:
