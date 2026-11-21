@@ -35,6 +35,24 @@ from .market_replay import (
 
 
 
+def _combine_price_candle_blackout_windows(
+    instrument_id: str, windows: list[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Combine only the evidence-backed windows for one instrument."""
+    selected = [
+        dict(window) for window in windows
+        if str(window.get("instrument_id") or "").upper() == str(instrument_id).upper()
+    ]
+    if not selected:
+        return None
+    return {
+        "instrument_id": str(instrument_id).upper(),
+        "start_ms": min(int(window["start_ms"]) for window in selected),
+        "end_exclusive_ms": max(int(window["end_exclusive_ms"]) for window in selected),
+        "timeframe_windows": selected,
+    }
+
+
 def _price_candle_entry_block_status(
     timestamp_ms: int, blackout_window: Mapping[str, Any] | None,
     *, indicator_rewarm_complete: bool,
@@ -235,7 +253,11 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         bad_positions = np.flatnonzero((gaps != interval).to_numpy())
         if len(bad_positions):
             approved = False
-            if symbol == "BTC-USDT" and label in {"15m", "1H", "4H", "MARK_15m", "ALIGNED_15m"} and len(bad_positions) == 1:
+            approved_symbols = {
+                str(window["instrument_id"]).upper()
+                for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+            }
+            if symbol in approved_symbols and label in {"15m", "1H", "4H", "MARK_15m", "ALIGNED_15m"} and len(bad_positions) == 1:
                 position = int(bad_positions[0])
                 left_ms = int(frame.index[position].timestamp() * 1000)
                 right_ms = int(frame.index[position + 1].timestamp() * 1000)
@@ -810,20 +832,24 @@ def run_sandbox(
 
     # Validate once and build causal indicator/pivot caches outside the 15m loop.
     btc_frame_15m = market["BTC-USDT"]["frames"]["15m"]
-    price_blackout_windows = list(market["BTC-USDT"].get("price_candle_blackouts") or [])
-    price_blackout_window = (
-        {
-            "instrument_id": "BTC-USDT",
-            "start_ms": min(int(window["start_ms"]) for window in price_blackout_windows),
-            "end_exclusive_ms": max(int(window["end_exclusive_ms"]) for window in price_blackout_windows),
-            "timeframe_windows": price_blackout_windows,
-        }
-        if price_blackout_windows else None
-    )
-    price_blackout_recovery_ts = (
-        pd.to_datetime(int(price_blackout_window["end_exclusive_ms"]), unit="ms", utc=True)
-        if price_blackout_window else None
-    )
+    price_blackout_windows_by_symbol = {
+        symbol: list(item.get("price_candle_blackouts") or [])
+        for symbol, item in market.items()
+    }
+    price_blackout_windows = [
+        window for windows in price_blackout_windows_by_symbol.values()
+        for window in windows
+    ]
+    price_blackout_window_by_symbol = {
+        symbol: _combine_price_candle_blackout_windows(symbol, windows)
+        for symbol, windows in price_blackout_windows_by_symbol.items()
+    }
+    btc_price_blackout_window = price_blackout_window_by_symbol.get("BTC-USDT")
+    btc_price_blackout_context_rewarmed = btc_price_blackout_window is None
+    price_blackout_context_rewarmed_by_symbol = {
+        symbol: window is None
+        for symbol, window in price_blackout_window_by_symbol.items()
+    }
     signal_frames = {symbol: dict(item["frames"]) for symbol, item in market.items()}
     prepared_contexts = {
         symbol: prepare_signal_context(
@@ -832,7 +858,6 @@ def run_sandbox(
         )
         for symbol, item in market.items()
     }
-    price_blackout_context_rewarmed = price_blackout_window is None
     # Selected markets must cover the explicitly requested calendar window.
     # Indicators remain causal: frames are cut by each as-of timestamp at use.
     source_start = max(item["source_start"] for item in market.values())
@@ -934,8 +959,9 @@ def run_sandbox(
             survivors: list[dict[str, Any]] = []
             for order in collection:
                 symbol = str(order["symbol"])
-                ambiguous_record = _ambiguous_price_candle_position(order, price_blackout_window)
-                if ambiguous_record is not None and int(stamp.timestamp() * 1000) >= int(price_blackout_window["end_exclusive_ms"]):
+                order_blackout_window = price_blackout_window_by_symbol.get(symbol)
+                ambiguous_record = _ambiguous_price_candle_position(order, order_blackout_window)
+                if ambiguous_record is not None and int(stamp.timestamp() * 1000) >= int(order_blackout_window["end_exclusive_ms"]):
                     if is_shadow:
                         ambiguous_shadow_price_gap_positions.append(ambiguous_record)
                         counts["price_blackout_ambiguous_shadow_positions"] += 1
@@ -1288,50 +1314,60 @@ def run_sandbox(
             if model_freeze_train_count is None: model_freeze_train_count=brain.train_count
             elif brain.train_count!=model_freeze_train_count: raise SandboxDataError("model weights changed after the TRAIN phase freeze")
 
-        if price_blackout_window is not None and not price_blackout_context_rewarmed:
-            recovery_ms = int(price_blackout_window["end_exclusive_ms"])
-            if asof_ms >= recovery_ms:
-                btc_post_gap = btc_frame_15m.loc[btc_frame_15m.index >= price_blackout_recovery_ts]
-                btc_post_gap_closed = int(
-                    ((btc_post_gap.index + pd.Timedelta(minutes=15)) <= asof).sum()
+        contexts_need_refresh = False
+        for blackout_symbol, blackout_window in price_blackout_window_by_symbol.items():
+            if blackout_window is None or price_blackout_context_rewarmed_by_symbol.get(blackout_symbol, True):
+                continue
+            recovery_ms = int(blackout_window["end_exclusive_ms"])
+            if asof_ms < recovery_ms:
+                continue
+            recovery_ts = pd.to_datetime(recovery_ms, unit="ms", utc=True)
+            source_15m = market[blackout_symbol]["frames"]["15m"]
+            post_gap_15m = source_15m.loc[source_15m.index >= recovery_ts]
+            post_gap_closed = int(
+                ((post_gap_15m.index + pd.Timedelta(minutes=15)) <= asof).sum()
+            )
+            if post_gap_closed < 70:
+                continue
+            active_frames = dict(market[blackout_symbol]["frames"])
+            for timeframe in ("15m", "1H", "4H"):
+                matching = [
+                    window for window in price_blackout_windows_by_symbol[blackout_symbol]
+                    if window["bar"] == timeframe and window["source"] == "LAST"
+                ]
+                if matching:
+                    timeframe_recovery = pd.to_datetime(
+                        max(int(window["end_exclusive_ms"]) for window in matching),
+                        unit="ms", utc=True,
+                    )
+                    active_frames[timeframe] = active_frames[timeframe].loc[
+                        active_frames[timeframe].index >= timeframe_recovery
+                    ].copy()
+            signal_frames[blackout_symbol] = active_frames
+            price_blackout_context_rewarmed_by_symbol[blackout_symbol] = True
+            contexts_need_refresh = True
+            pattern_lifecycle = {
+                key: value for key, value in pattern_lifecycle.items()
+                if value.get("instrument_id") != blackout_symbol
+            }
+            counts["price_blackout_indicator_rewarm_completed"] += 1
+            counts[f"price_blackout_{blackout_symbol.lower().replace('-', '_')}_15m_closed_bars"] = post_gap_closed
+
+        btc_price_blackout_context_rewarmed = price_blackout_context_rewarmed_by_symbol.get("BTC-USDT", True)
+        if contexts_need_refresh:
+            btc_context_frame = (
+                signal_frames["BTC-USDT"]["15m"]
+                if btc_price_blackout_context_rewarmed else btc_frame_15m
+            )
+            prepared_contexts = {
+                refresh_symbol: prepare_signal_context(
+                    signal_frames[refresh_symbol]["1H"],
+                    signal_frames[refresh_symbol]["4H"],
+                    signal_frames[refresh_symbol]["15m"],
+                    btc_context_frame,
                 )
-                if btc_post_gap_closed >= 70:
-                    refreshed_contexts: dict[str, dict[str, Any]] = {}
-                    refreshed_signal_frames: dict[str, dict[str, pd.DataFrame]] = {}
-                    btc_active_frames = dict(market["BTC-USDT"]["frames"])
-                    for timeframe in ("15m", "1H", "4H"):
-                        matching = [
-                            window for window in price_blackout_windows
-                            if window["bar"] == timeframe and window["source"] == "LAST"
-                        ]
-                        if matching:
-                            timeframe_recovery = pd.to_datetime(
-                                max(int(window["end_exclusive_ms"]) for window in matching),
-                                unit="ms", utc=True,
-                            )
-                            btc_active_frames[timeframe] = btc_active_frames[timeframe].loc[
-                                btc_active_frames[timeframe].index >= timeframe_recovery
-                            ].copy()
-                    btc_post_gap = btc_active_frames["15m"]
-                    for refresh_symbol, refresh_item in market.items():
-                        active_frames = (
-                            dict(btc_active_frames) if refresh_symbol == "BTC-USDT"
-                            else dict(refresh_item["frames"])
-                        )
-                        refreshed_signal_frames[refresh_symbol] = active_frames
-                        refreshed_contexts[refresh_symbol] = prepare_signal_context(
-                            active_frames["1H"], active_frames["4H"],
-                            active_frames["15m"], btc_post_gap,
-                        )
-                    prepared_contexts = refreshed_contexts
-                    signal_frames = refreshed_signal_frames
-                    pattern_lifecycle = {
-                        key: value for key, value in pattern_lifecycle.items()
-                        if value.get("instrument_id") != "BTC-USDT"
-                    }
-                    price_blackout_context_rewarmed = True
-                    counts["price_blackout_indicator_rewarm_completed"] += 1
-                    counts["price_blackout_indicator_rewarm_btc_15m_closed_bars"] = btc_post_gap_closed
+                for refresh_symbol in market
+            }
 
         for symbol in symbols:
             item = market[symbol]
@@ -1343,10 +1379,15 @@ def run_sandbox(
                 else validation_end_ms if phase == "VALIDATION"
                 else None
             )
-            price_entry_block = _price_candle_entry_block_status(
-                asof_ms, price_blackout_window,
-                indicator_rewarm_complete=price_blackout_context_rewarmed,
+            btc_master_block = _price_candle_entry_block_status(
+                asof_ms, btc_price_blackout_window,
+                indicator_rewarm_complete=btc_price_blackout_context_rewarmed,
             )
+            symbol_price_block = _price_candle_entry_block_status(
+                asof_ms, price_blackout_window_by_symbol.get(symbol),
+                indicator_rewarm_complete=price_blackout_context_rewarmed_by_symbol.get(symbol, True),
+            )
+            price_entry_block = btc_master_block or symbol_price_block
             if price_entry_block is not None:
                 counts["price_blackout_new_entry_blocks"] += 1
                 _record_block_reason(
@@ -1403,7 +1444,7 @@ def run_sandbox(
                     frame_15m=signal_frames[symbol]["15m"],
                     btc_15m=(
                         signal_frames["BTC-USDT"]["15m"]
-                        if price_blackout_context_rewarmed else btc_frame_15m
+                        if btc_price_blackout_context_rewarmed else btc_frame_15m
                     ),
                     asof=asof,
                     funding_rate=funding_rate,
@@ -1873,10 +1914,11 @@ def run_sandbox(
         "closed_shadow_positions_with_unknown_net_pnl": unknown_shadow_pnl_trades,
         "price_candle_blackout_audit": {
             "windows": price_blackout_windows,
-            "entry_block_window": price_blackout_window,
+            "entry_block_windows_by_symbol": price_blackout_window_by_symbol,
+            "master_btc_context_rewarm_completed": bool(btc_price_blackout_context_rewarmed),
+            "indicator_rewarm_completed_by_symbol": dict(price_blackout_context_rewarmed_by_symbol),
             "new_entry_blocks": counts["price_blackout_new_entry_blocks"],
-            "indicator_rewarm_completed": bool(price_blackout_context_rewarmed),
-            "indicator_rewarm_minimum_closed_btc_15m_bars": 70,
+            "indicator_rewarm_minimum_closed_15m_bars": 70,
             "ambiguous_actual_positions": ambiguous_price_gap_positions,
             "ambiguous_shadow_positions": ambiguous_shadow_price_gap_positions,
             "synthetic_candles_used": False,
