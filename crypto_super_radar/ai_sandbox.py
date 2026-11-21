@@ -35,6 +35,57 @@ from .market_replay import (
 
 
 
+def _price_candle_entry_block_status(
+    timestamp_ms: int, blackout_window: Mapping[str, Any] | None,
+    *, indicator_rewarm_complete: bool,
+) -> str | None:
+    """Return why a new simulated entry must be blocked during a price gap or rewarm."""
+    if blackout_window is None:
+        return None
+    stamp = int(timestamp_ms)
+    start = int(blackout_window["start_ms"])
+    end = int(blackout_window["end_exclusive_ms"])
+    if start <= stamp < end:
+        return "PRICE_CANDLE_BLACKOUT"
+    if stamp >= end and not indicator_rewarm_complete:
+        return "PRICE_CANDLE_BLACKOUT_INDICATOR_REWARM"
+    return None
+
+
+def _ambiguous_price_candle_position(
+    order: Mapping[str, Any], blackout_window: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Mark a pre-gap order Ambiguous, without inventing fill, exit, or PnL."""
+    if blackout_window is None:
+        return None
+    symbol = str(order.get("symbol") or "").upper()
+    submitted_ms = int(order.get("submitted_ts_ms") or 0)
+    if symbol != str(blackout_window["instrument_id"]).upper():
+        return None
+    if submitted_ms >= int(blackout_window["start_ms"]):
+        return None
+    return {
+        "signal_id": order.get("signal_id"),
+        "instrument_id": symbol,
+        "direction": order.get("direction"),
+        "phase": order.get("phase"),
+        "status": "AMBIGUOUS_PRICE_CANDLE_BLACKOUT",
+        "position_state_before_gap": "FILLED_OR_OPEN" if order.get("entry_checked") else "ENTRY_PENDING",
+        "entry_checked_before_gap": bool(order.get("entry_checked")),
+        "entry_ts_ms": order.get("entry_ts_ms"),
+        "submitted_ts_ms": submitted_ms,
+        "last_observed_through_ts_ms": order.get("last_observed_through_ts_ms"),
+        "blackout_start_ms": int(blackout_window["start_ms"]),
+        "blackout_end_exclusive_ms": int(blackout_window["end_exclusive_ms"]),
+        "exit_ts_ms": None,
+        "exit_price": None,
+        "net_pnl_usdt": None,
+        "synthetic_candles_used": False,
+        "reason": "Price path is absent; stop/target/fill outcome cannot be inferred.",
+    }
+
+
+
 def _pattern_trade_excursions(bars:list[dict[str,Any]],*,direction:str,entry_price:float,entry_ts_ms:int,exit_ts_ms:int)->dict[str,float|None]:
     """Closed Mark-candle MFE/MAE proxies over the observed holding interval."""
     if not np.isfinite(entry_price) or entry_price<=0: return {"mfe_pct":None,"mae_pct":None,"excursion_bars":0}
@@ -835,31 +886,8 @@ def run_sandbox(
             survivors: list[dict[str, Any]] = []
             for order in collection:
                 symbol = str(order["symbol"])
-                if (
-                    price_blackout_window is not None
-                    and symbol == str(price_blackout_window["instrument_id"])
-                    and int(stamp.timestamp() * 1000) >= int(price_blackout_window["end_exclusive_ms"])
-                    and int(order.get("submitted_ts_ms") or 0) < int(price_blackout_window["start_ms"])
-                ):
-                    ambiguous_record = {
-                        "signal_id": order["signal_id"],
-                        "instrument_id": symbol,
-                        "direction": order["direction"],
-                        "phase": order["phase"],
-                        "status": "AMBIGUOUS_PRICE_CANDLE_BLACKOUT",
-                        "position_state_before_gap": "FILLED_OR_OPEN" if order.get("entry_checked") else "ENTRY_PENDING",
-                        "entry_checked_before_gap": bool(order.get("entry_checked")),
-                        "entry_ts_ms": order.get("entry_ts_ms"),
-                        "submitted_ts_ms": order.get("submitted_ts_ms"),
-                        "last_observed_through_ts_ms": order.get("last_observed_through_ts_ms"),
-                        "blackout_start_ms": int(price_blackout_window["start_ms"]),
-                        "blackout_end_exclusive_ms": int(price_blackout_window["end_exclusive_ms"]),
-                        "exit_ts_ms": None,
-                        "exit_price": None,
-                        "net_pnl_usdt": None,
-                        "synthetic_candles_used": False,
-                        "reason": "Price path is absent; stop/target/fill outcome cannot be inferred.",
-                    }
+                ambiguous_record = _ambiguous_price_candle_position(order, price_blackout_window)
+                if ambiguous_record is not None and int(stamp.timestamp() * 1000) >= int(price_blackout_window["end_exclusive_ms"]):
                     if is_shadow:
                         ambiguous_shadow_price_gap_positions.append(ambiguous_record)
                         counts["price_blackout_ambiguous_shadow_positions"] += 1
@@ -1253,21 +1281,15 @@ def run_sandbox(
                 else validation_end_ms if phase == "VALIDATION"
                 else None
             )
-            price_gap_active = (
-                price_blackout_window is not None
-                and _is_price_candle_blackout(asof_ms) is not None
+            price_entry_block = _price_candle_entry_block_status(
+                asof_ms, price_blackout_window,
+                indicator_rewarm_complete=price_blackout_context_rewarmed,
             )
-            price_gap_rewarm = (
-                price_blackout_window is not None
-                and asof_ms >= int(price_blackout_window["end_exclusive_ms"])
-                and not price_blackout_context_rewarmed
-            )
-            if price_gap_active or price_gap_rewarm:
+            if price_entry_block is not None:
                 counts["price_blackout_new_entry_blocks"] += 1
                 _record_block_reason(
                     block_reasons, block_reasons_by_symbol, symbol,
-                    "PRICE_CANDLE_BLACKOUT: NEW_ENTRY_BLOCKED" if price_gap_active
-                    else "PRICE_CANDLE_BLACKOUT_INDICATOR_REWARM: NEW_ENTRY_BLOCKED",
+                    f"{price_entry_block}: NEW_ENTRY_BLOCKED",
                 )
                 continue
             if _funding_blackout_for_timestamp(asof_ms) is not None:
