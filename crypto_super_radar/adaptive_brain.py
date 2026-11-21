@@ -307,3 +307,44 @@ class OnlineMetaBrain:
         if expected_hash is not None and expected_hash != model.model_sha256():
             raise MetaBrainError("stored model SHA-256 does not match its contents")
         return model
+
+
+class ShadowPatternBrain:
+    """Separate six-feature learner for V3 research; it never gates V2."""
+    FEATURES=("candle_reversal","candle_continuation","structure_reversal","structure_continuation","elliott_alignment","liquidity_sweep")
+    def __init__(self,*,warmup_trades:int=20,min_per_class:int=5)->None:
+        if warmup_trades<20 or min_per_class<5: raise ValueError("requires >=20 samples and >=5 per class")
+        self.warmup_trades=warmup_trades; self.min_per_class=min_per_class; self.examples=[]; self.weights=[0.0]*len(self.FEATURES); self.bias=0.; self.trained=False; self.train_count=0
+    def add_finalized_outcome(self,*,signal_id:str,instrument_id:str,candle_time_utc:str,features:Mapping[str,Any],net_pnl_usdt:Any,fees_complete:bool,funding_complete:bool)->dict[str,Any]:
+        if fees_complete is not True or funding_complete is not True: return {"status":"PENDING_RECONCILIATION","inserted":False}
+        sid=str(signal_id or "").strip(); symbol=str(instrument_id or "").strip().upper()
+        if not sid or not symbol: raise MetaBrainError("pattern outcome requires identifiers")
+        if any(x["signal_id"]==sid for x in self.examples): return {"status":"DUPLICATE","inserted":False}
+        stamp=datetime.fromisoformat(str(candle_time_utc).replace("Z","+00:00"))
+        if stamp.tzinfo is None: raise MetaBrainError("pattern timestamp needs timezone")
+        pnl=float(net_pnl_usdt)
+        if not math.isfinite(pnl): raise MetaBrainError("pattern PnL must be finite")
+        vector=[]
+        for key in self.FEATURES:
+            raw=(features or {}).get(key,0); raw=int(raw) if isinstance(raw,bool) else raw; v=float(raw)
+            if not math.isfinite(v) or v not in (0.,1.): raise MetaBrainError(key+" must be binary")
+            vector.append(v)
+        self.examples.append({"signal_id":sid,"instrument_id":symbol,"candle_time_utc":stamp.astimezone(timezone.utc).isoformat(),"features":vector,"net_pnl_usdt":pnl,"label":1 if pnl>0 else 0})
+        return {"status":"RECORDED","inserted":True}
+    def train(self)->dict[str,Any]:
+        wins=sum(int(x["label"]) for x in self.examples); losses=len(self.examples)-wins
+        if len(self.examples)<self.warmup_trades or min(wins,losses)<self.min_per_class:
+            self.trained=False; return {"status":"MODEL_NOT_READY","samples":len(self.examples),"wins":wins,"losses":losses}
+        self.weights=[0.]*len(self.FEATURES); self.bias=0.
+        for _ in range(8):
+            for row in self.examples:
+                x=row["features"]; z=max(-30.,min(30.,sum(w*v for w,v in zip(self.weights,x))+self.bias)); score=1/(1+math.exp(-z)); err=score-int(row["label"])
+                self.weights=[w-.04*(err*v+.002*w) for w,v in zip(self.weights,x)]; self.bias-=.04*err
+        self.trained=True; self.train_count+=1
+        return {"status":"TRAINED","samples":len(self.examples),"wins":wins,"losses":losses,"round":self.train_count}
+    def evaluate(self,features:Mapping[str,Any])->dict[str,Any]:
+        if not self.trained: return {"mode":"SHADOW_ONLY","status":"MODEL_NOT_READY","score_0_1":None}
+        x=[float((features or {}).get(k,0)) for k in self.FEATURES]; z=max(-30.,min(30.,sum(w*v for w,v in zip(self.weights,x))+self.bias))
+        return {"mode":"SHADOW_ONLY","status":"READY","score_0_1":round(1/(1+math.exp(-z)),6),"semantics":"Uncalibrated model score; not a probability or trade instruction."}
+    def feature_weights(self)->list[dict[str,Any]]:
+        return [{"feature":k,"weight":round(v,8)} for k,v in zip(self.FEATURES,self.weights)]
