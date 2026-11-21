@@ -37,7 +37,7 @@ class MultiProviderSupervisorTests(unittest.TestCase):
     def test_extracts_json_split_across_structured_content_text_parts(self):
         document = valid_document()
         serialized = json.dumps(document, ensure_ascii=False)
-        split_at = serialized.index(',"final_rating"') + 1
+        split_at = serialized.index('"final_rating"')
         candidates = _message_text_candidates({
             "content": [
                 {"type": "text", "text": serialized[:split_at]},
