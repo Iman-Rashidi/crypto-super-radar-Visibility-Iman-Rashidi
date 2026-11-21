@@ -550,7 +550,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("استراتژی اجرای دستی CHALLENGE_1_V2", page)
         self.assertIn("کندل‌های بسته‌شدهٔ ۱۵ دقیقه، ۱ ساعت و ۴ ساعت", page)
-        self.assertIn("هر دو ناظر مستقل و معتبر AI", page)
+        self.assertIn("دو تأیید مستقل و معتبر AI", page)
         self.assertIn("اجرای دستی یک چرخه نسخه جدید (CHALLENGE_1_V2 Single-Shot)", page)
         self.assertIn("const selectedProfile='CHALLENGE_1_V2';", page)
         self.assertIn("حالت اتوماتیک · Challenge 1", page)
@@ -577,6 +577,13 @@ class WebAppHttpTests(unittest.TestCase):
             def trade_budget_status(self):
                 return {"orders_today": 0, "orders_total": 0, "unresolved_orders": 0}
 
+            def single_shot_lock_status(self):
+                return {
+                    "enabled": True, "locked": False,
+                    "max_lifetime_orders": 1, "consumed_orders": 0,
+                    "client_order_id": None,
+                }
+
             def close(self):
                 pass
 
@@ -598,6 +605,8 @@ class WebAppHttpTests(unittest.TestCase):
 
         self.assertFalse(result["durable_storage"])
         self.assertTrue(result["event_store_readable"])
+        self.assertEqual(result["single_shot_lock"]["consumed_orders"], 0)
+        self.assertFalse(result["single_shot_lock"]["locked"])
         self.assertEqual(result["status"], "BLOCKED")
 
     def test_dashboard_does_not_label_risk_circuit_breaker_as_trade_permission(self):
