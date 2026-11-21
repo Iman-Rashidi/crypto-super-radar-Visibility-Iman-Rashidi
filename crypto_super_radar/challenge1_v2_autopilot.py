@@ -32,7 +32,31 @@ def preflight_errors(environ: Mapping[str, str] | None = None) -> list[str]:
         errors.append("missing TURSO_AUTH_TOKEN")
     if _enabled(env.get("BLOFIN_DEMO_SMOKE_TEST_ENABLED")):
         errors.append("BLOFIN_DEMO_SMOKE_TEST_ENABLED must remain false")
+    if _enabled(env.get("BLOFIN_DEMO_TRADING_ENABLED")):
+        if str(env.get("BLOFIN_DEMO_AUTOPILOT_ENABLED", "")).strip().lower() != "false":
+            errors.append("legacy BLOFIN_DEMO_AUTOPILOT_ENABLED must remain false")
+        from .blofin_demo_readonly import DEMO_TRADE_CREDENTIAL_ENV
+        missing = [
+            field for field, aliases in DEMO_TRADE_CREDENTIAL_ENV.items()
+            if not any(str(env.get(alias, "")).strip() for alias in aliases)
+        ]
+        if missing:
+            errors.append("missing BloFin Demo trade credentials: " + ",".join(missing))
     return errors
+
+
+def build_v2_demo_risk_policy():
+    """Return the explicit four-slot V2 Demo policy with conservative 1x risk caps."""
+    from .blofin_demo_executor import BloFinDemoRiskPolicy
+    return BloFinDemoRiskPolicy(
+        risk_per_trade_pct=0.0025,
+        daily_loss_limit_pct=0.01,
+        max_drawdown_pct=0.05,
+        max_margin_usage_pct=0.10,
+        max_aggregate_risk_pct=0.005,
+        max_leverage=1,
+        max_concurrent_positions=4,
+    )
 
 
 def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -243,7 +267,7 @@ def main() -> int:
         executor=None
         if trading_active:
             from .blofin_demo_executor import BloFinDemoExecutor,BloFinDemoTradeClient
-            executor=BloFinDemoExecutor(client=BloFinDemoTradeClient())
+            executor=BloFinDemoExecutor(client=BloFinDemoTradeClient(),policy=build_v2_demo_risk_policy())
             executor.recover_unresolved_orders_from_journal()
             market_client=executor.client
         connection=connect_database()
