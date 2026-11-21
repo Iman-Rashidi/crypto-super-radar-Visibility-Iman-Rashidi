@@ -879,7 +879,7 @@ class BloFinDemoTradeClient(BloFinDemoReadOnly):
     ) -> dict[str, Any]:
         """Amend the existing exchange SL in place; never cancel first and expose the position."""
         self._exit_client_id(request_id)
-        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", tpsl_id or ""):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tpsl_id or ""):
             raise ValueError("tpsl_id is invalid.")
         stop = _decimal(new_stop_loss, "new_stop_loss")
         if stop <= 0:
@@ -1647,7 +1647,7 @@ class BloFinDemoEventStore:
             raise ValueError("V2 exit state is missing required position identity or sizing fields.")
         position_id = str(state["position_id"]).strip()
         client_order_id = str(state["client_order_id"]).strip()
-        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", position_id):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", position_id):
             raise ValueError("position_id is invalid.")
         BloFinDemoTradeClient._exit_client_id(client_order_id)
         instrument_id = str(state["instrument_id"]).strip().upper()
