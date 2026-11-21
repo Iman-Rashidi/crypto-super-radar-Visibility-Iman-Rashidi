@@ -136,6 +136,13 @@ def run_experiment_set(
                 "capacity_slots_released": diagnostics.get("v3_research_filter_capacity_slots_released", 0),
                 "replacement_entries": diagnostics.get("v3_replacement_entries", 0),
             },
+            "counterfactual": {
+                "available": bool(v3.get("counterfactual", {}).get("available", False)),
+                "closed_vetoed_trades": len(v3.get("counterfactual", {}).get("rejected_candidate_ledger", [])),
+                "replacement_trade_count": len(v3.get("counterfactual", {}).get("replacement_trade_ledger", [])),
+                "rejected_candidate_ledger": v3.get("counterfactual", {}).get("rejected_candidate_ledger", []),
+                "replacement_trade_ledger": v3.get("counterfactual", {}).get("replacement_trade_ledger", []),
+            },
             "price_candle_blackout": report.get("price_candle_blackout_audit"),
             "report_file": report_path.name,
         }
@@ -202,6 +209,23 @@ def main() -> None:
         "replay109": replay109,
         "independent_5m": independent,
         "independent_5m_status": "COMPLETED" if independent is not None else "NOT_RUN_INDEPENDENT_DOWNLOAD_UNAVAILABLE",
+        "profit_factor_thresholds": {
+            scenario: {
+                "profit_factor": next(row for row in replay109["scenarios"] if row["scenario"] == scenario)["metrics"]["profit_factor"],
+                "status": next(row for row in replay109["scenarios"] if row["scenario"] == scenario)["metrics"]["profit_factor_status"],
+                "at_least_1_10": (
+                    (next(row for row in replay109["scenarios"] if row["scenario"] == scenario)["metrics"]["profit_factor"] or 0) >= 1.10
+                    if next(row for row in replay109["scenarios"] if row["scenario"] == scenario)["metrics"]["profit_factor_status"] == "CALCULATED"
+                    else False
+                ),
+                "at_least_1_25": (
+                    (next(row for row in replay109["scenarios"] if row["scenario"] == scenario)["metrics"]["profit_factor"] or 0) >= 1.25
+                    if next(row for row in replay109["scenarios"] if row["scenario"] == scenario)["metrics"]["profit_factor_status"] == "CALCULATED"
+                    else False
+                ),
+            }
+            for scenario in ("B", "C", "D", "E")
+        },
     }
     root.mkdir(parents=True, exist_ok=True)
     path = root / "v3_research_a_to_e.json"
@@ -209,9 +233,9 @@ def main() -> None:
     print(json.dumps({
         "report_file": str(path),
         "replay109_sha256": replay109["database_sha256"],
-        "independent_sha256": independent["database_sha256"],
+        "independent_sha256": independent["database_sha256"] if independent is not None else None,
         "replay109_scenarios": replay109["scenarios"],
-        "independent_scenarios": independent["scenarios"],
+        "independent_scenarios": independent["scenarios"] if independent is not None else None,
     }, ensure_ascii=False, indent=2, default=str))
 
 
