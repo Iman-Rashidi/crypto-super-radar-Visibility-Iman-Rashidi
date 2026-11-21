@@ -166,7 +166,7 @@ def main() -> None:
         description="Isolated offline A-E research comparison; no exchange order path."
     )
     parser.add_argument("--replay109-db", required=True)
-    parser.add_argument("--independent-db", required=True)
+    parser.add_argument("--independent-db", default=None)
     parser.add_argument("--independent-start-utc", default="2025-11-21T16:00:00+00:00")
     parser.add_argument("--output-dir", default="artifacts/v3-research")
     args = parser.parse_args()
@@ -177,15 +177,17 @@ def main() -> None:
         dataset_name="replay109",
         output_dir=root / "replay109",
     )
-    independent = run_experiment_set(
-        db_path=Path(args.independent_db),
-        dataset_name="independent_5m",
-        output_dir=root / "independent_5m",
-        replay_start_utc=args.independent_start_utc,
-        replay_months=5,
-        training_months=1,
-        validation_months=1,
-    )
+    independent = None
+    if args.independent_db:
+        independent = run_experiment_set(
+            db_path=Path(args.independent_db),
+            dataset_name="independent_5m",
+            output_dir=root / "independent_5m",
+            replay_start_utc=args.independent_start_utc,
+            replay_months=5,
+            training_months=1,
+            validation_months=1,
+        )
     output = {
         "report_version": "V3_RESEARCH_FILTER_A_TO_E_V1",
         "environment": "OFFLINE_VIRTUAL_BLOFIN_DEMO_MODEL",
@@ -199,6 +201,7 @@ def main() -> None:
         },
         "replay109": replay109,
         "independent_5m": independent,
+        "independent_5m_status": "COMPLETED" if independent is not None else "NOT_RUN_INDEPENDENT_DOWNLOAD_UNAVAILABLE",
     }
     root.mkdir(parents=True, exist_ok=True)
     path = root / "v3_research_a_to_e.json"
