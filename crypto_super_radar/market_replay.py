@@ -277,6 +277,7 @@ def download_candles(
         if cursor is not None:
             params["after"] = cursor
         payload = _json_get(sess, url, params)
+        pages_read += 1
         rows = payload.get("data")
         if not isinstance(rows, list):
             raise ReplayDownloadError("candle endpoint returned a non-list data field")
@@ -497,6 +498,8 @@ def download_funding_rates(
     url = base_url.rstrip("/") + FUNDING_PATH
     seen: dict[int, tuple[Any, ...]] = {}
     previous_oldest: int | None = None
+    pages_read = 0
+    response_sizes: list[int] = []
     for _ in range(100):
         params: dict[str, Any] = {"instId": symbol, "limit": page_size}
         if cursor is not None:
@@ -510,6 +513,7 @@ def download_funding_rates(
             parsed = _parse_funding_event(row, symbol=symbol)
             if parsed is not None:
                 valid.append(parsed)
+        response_sizes.append(len(rows))
         if not valid:
             break
         for item in valid:
@@ -540,8 +544,21 @@ def download_funding_rates(
     first_max_age = int(classified[0][5] * 1.5)
     last_max_age = int(classified[-1][5] * 1.5)
     funding_times = [int(item[1]) for item in classified]
-    if funding_times[0] - start_ms > first_max_age or end_ms - funding_times[-1] > last_max_age:
-        raise ReplayDownloadError(f"funding history does not cover the requested window for {symbol}")
+    start_gap_ms = funding_times[0] - start_ms
+    end_gap_ms = end_ms - funding_times[-1]
+    if start_gap_ms > first_max_age or end_gap_ms > last_max_age:
+        oldest_utc = datetime.fromtimestamp(funding_times[0] / 1000, timezone.utc).isoformat()
+        newest_utc = datetime.fromtimestamp(funding_times[-1] / 1000, timezone.utc).isoformat()
+        requested_start_utc = datetime.fromtimestamp(start_ms / 1000, timezone.utc).isoformat()
+        requested_end_utc = datetime.fromtimestamp(end_ms / 1000, timezone.utc).isoformat()
+        raise ReplayDownloadError(
+            f"funding history coverage failure for {symbol}: "
+            f"events={len(classified)}, pages={pages_read}, response_sizes={response_sizes}, "
+            f"oldest_event_utc={oldest_utc}, newest_event_utc={newest_utc}, "
+            f"requested_start_utc={requested_start_utc}, requested_end_utc={requested_end_utc}, "
+            f"start_gap_hours={start_gap_ms / 3_600_000:.3f} (allowed={first_max_age / 3_600_000:.3f}), "
+            f"end_gap_hours={end_gap_ms / 3_600_000:.3f} (allowed={last_max_age / 3_600_000:.3f})"
+        )
     return classified
 
 def math_is_finite(value: float) -> bool:
