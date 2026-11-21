@@ -667,45 +667,61 @@ class BloFinDemoEventStoreTests(unittest.TestCase):
         self.assertEqual([row[0] for row in events], ["RESERVED"])
 
     def test_v2_autopilot_bypasses_legacy_single_shot_and_enforces_four_slots(self):
-        # Consume the manual lifetime lock first. V2 autopilot must not inherit it.
+        # Consume the manual lifetime lock first. V2 must bypass it only with
+        # an explicitly enabled V2 profile and complete V2 evidence.
         legacy = self._plan()
         self.assertTrue(self.store.reserve_order(legacy, single_shot=True))
         self.store.update_order(legacy["client_order_id"], "CLOSED")
-        symbols = ("ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
-        plans = []
-        for index, symbol in enumerate(symbols):
-            record = signal_record(bar_offset_minutes=(index + 1) * 5)
-            record["signal_id"] = f"v2-capacity:{symbol}:{index}"
-            plan = build_demo_order_plan(
-                record, instrument_record(), inst_id=symbol, equity_usdt=1000,
+
+        def make_v2_plan(symbol, index):
+            record = v2_signal_record(inst_id=symbol, instrument_id=symbol)
+            signal_id = f"challenge1-v2:{symbol}:15m:capacity-test-{index}:LONG"
+            record["signal_id"] = signal_id
+            evidence = record["challenge1_v2_evidence"]
+            evidence["signal_id"] = signal_id
+            evidence["instrument_id"] = symbol
+            record["ai_consensus"]["reviewed_signal_id"] = signal_id
+            for reviewer in record["ai_reviews"]:
+                reviewer["review"]["reviewed_signal_id"] = signal_id
+            return build_demo_order_plan(
+                record, instrument_record(instId=symbol), inst_id=symbol,
+                equity_usdt=1000, policy=BloFinDemoRiskPolicy(risk_per_trade_pct=0.0001),
             )
-            plans.append(plan)
-        for plan in plans:
-            self.assertTrue(self.store.reserve_order(
-                plan, max_concurrent_positions=4, v2_autopilot=True,
+
+        symbols = ("ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
+        with patch.dict(os.environ, {"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true"}):
+            for index, symbol in enumerate(symbols):
+                plan = make_v2_plan(symbol, index)
+                self.assertEqual(plan["execution_profile"], "CHALLENGE_1_V2")
+                self.assertTrue(self.store.reserve_order(
+                    plan, max_concurrent_positions=4, v2_autopilot=True,
+                ))
+            fifth = make_v2_plan("DOGE-USDT", 5)
+            self.assertFalse(self.store.reserve_order(
+                fifth, max_concurrent_positions=4, v2_autopilot=True,
             ))
-        fifth_record = signal_record(bar_offset_minutes=60)
-        fifth_record["signal_id"] = "v2-capacity:DOGE-USDT:5"
-        fifth = build_demo_order_plan(
-            fifth_record, instrument_record(), inst_id="DOGE-USDT", equity_usdt=1000,
-        )
-        self.assertFalse(self.store.reserve_order(
-            fifth, max_concurrent_positions=4, v2_autopilot=True,
-        ))
 
     def test_v2_autopilot_rejects_duplicate_active_instrument(self):
-        first = self._plan()
-        self.assertTrue(self.store.reserve_order(
-            first, max_concurrent_positions=4, v2_autopilot=True,
-        ))
-        duplicate_record = signal_record(bar_offset_minutes=5)
-        duplicate_record["signal_id"] = "different-signal-same-symbol"
-        duplicate = build_demo_order_plan(
-            duplicate_record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
-        )
-        self.assertFalse(self.store.reserve_order(
-            duplicate, max_concurrent_positions=4, v2_autopilot=True,
-        ))
+        def make_v2_plan(signal_id):
+            record = v2_signal_record()
+            record["signal_id"] = signal_id
+            record["challenge1_v2_evidence"]["signal_id"] = signal_id
+            record["ai_consensus"]["reviewed_signal_id"] = signal_id
+            for reviewer in record["ai_reviews"]:
+                reviewer["review"]["reviewed_signal_id"] = signal_id
+            return build_demo_order_plan(
+                record, instrument_record(), inst_id="BTC-USDT", equity_usdt=1000,
+            )
+
+        first = make_v2_plan("challenge1-v2:BTC-USDT:15m:duplicate-test-1:LONG")
+        duplicate = make_v2_plan("challenge1-v2:BTC-USDT:15m:duplicate-test-2:LONG")
+        with patch.dict(os.environ, {"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true"}):
+            self.assertTrue(self.store.reserve_order(
+                first, max_concurrent_positions=4, v2_autopilot=True,
+            ))
+            self.assertFalse(self.store.reserve_order(
+                duplicate, max_concurrent_positions=4, v2_autopilot=True,
+            ))
 
     def test_has_any_orders_tracks_reserved_order_history(self):
         self.assertFalse(self.store.has_any_orders())
