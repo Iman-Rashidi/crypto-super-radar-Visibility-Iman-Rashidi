@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 import pandas as pd
 from crypto_super_radar.adaptive_brain import ShadowPatternBrain
+from crypto_super_radar.ai_sandbox import _v3_pattern_entry_gate
 from crypto_super_radar.pattern_intelligence_v3 import PATTERN_FAMILIES,advance_pattern_lifecycle,analyze_unified_patterns_v3,closed_frame,normalized_candle_metrics
 
 def frame(rows=100,scale=1.0):
@@ -42,5 +43,54 @@ class PatternBrainTests(unittest.TestCase):
         for i in range(20): b.add_finalized_outcome(signal_id=f"u{i}",instrument_id="X",candle_time_utc=f"2026-02-{i+1:02d}T00:00:00Z",features={k:1 for k in PATTERN_FAMILIES},net_pnl_usdt=1,fees_complete=True,funding_complete=True)
         p=b.add_finalized_outcome(signal_id="p",instrument_id="X",candle_time_utc="2026-03-01T00:00:00Z",features={},net_pnl_usdt=1,fees_complete=False,funding_complete=True)
         self.assertFalse(p["inserted"]); self.assertEqual(b.train()["status"],"MODEL_NOT_READY"); self.assertFalse(b.trained)
+
+
+class ActivePatternGateTests(unittest.TestCase):
+    def _gate(self, detections, side="LONG", score=0.50):
+        return _v3_pattern_entry_gate(
+            detections=detections, expected_direction=side,
+            brain_evaluation={"status": "READY", "score_0_1": score},
+        )
+
+    def test_toxic_patterns_are_vetoed(self):
+        for name in ("Symmetrical Triangle", "Tweezer Bottom", "Rising Wedge"):
+            with self.subTest(name=name):
+                result = self._gate([{"name_en": name, "family": "structure_reversal",
+                                      "direction": "NEUTRAL", "lifecycle_status": "FORMING"}])
+                self.assertEqual(result["decision"], "VETO")
+                self.assertIn("TOXIC_PATTERN", result["reason"])
+
+    def test_liquidity_sweep_is_vetoed(self):
+        result = self._gate([{"name_en": "False Break Liquidity Sweep Low",
+                              "family": "liquidity_sweep", "direction": "BULLISH",
+                              "lifecycle_status": "CONFIRMED"}])
+        self.assertEqual(result["decision"], "VETO")
+        self.assertIn("LIQUIDITY_SWEEP_HIGH_FALSE_BREAK_RATE", result["reason"])
+
+    def test_aligned_priority_pattern_adds_bounded_bonus(self):
+        result = self._gate([{"name_en": "Bullish Engulfing", "family": "candle_reversal",
+                              "direction": "BULLISH", "lifecycle_status": "FORMING"}],
+                            side="LONG", score=0.42)
+        self.assertEqual(result["decision"], "ALLOW")
+        self.assertAlmostEqual(result["priority_bonus"], 0.05)
+        self.assertAlmostEqual(result["adjusted_brain_score"], 0.47)
+
+    def test_opposing_priority_pattern_does_not_add_bonus(self):
+        result = self._gate([{"name_en": "Hanging Man", "family": "candle_reversal",
+                              "direction": "BEARISH", "lifecycle_status": "FORMING"}],
+                            side="LONG", score=0.42)
+        self.assertEqual(result["decision"], "VETO")
+        self.assertEqual(result["priority_bonus"], 0.0)
+
+    def test_unaligned_weak_brain_score_is_vetoed(self):
+        result = self._gate([], side="SHORT", score=0.44)
+        self.assertEqual(result["decision"], "VETO")
+        self.assertEqual(result["reason"], "V3_PATTERN_BRAIN_LOW_SCORE")
+
+    def test_invalidated_toxic_pattern_is_ignored(self):
+        result = self._gate([{"name_en": "Rising Wedge", "family": "structure_reversal",
+                              "direction": "BEARISH", "lifecycle_status": "INVALIDATED"}],
+                            side="SHORT", score=0.50)
+        self.assertEqual(result["decision"], "ALLOW")
 
 if __name__=="__main__": unittest.main()

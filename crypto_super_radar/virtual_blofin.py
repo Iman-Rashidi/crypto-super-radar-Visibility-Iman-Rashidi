@@ -388,7 +388,7 @@ class TradeResult:
 class VirtualBloFin:
     """Candle-driven simulator. It has no real network or order methods."""
 
-    def __init__(self, *, costs: CostModel | None = None, max_holding_bars: int = 12):
+    def __init__(self, *, costs: CostModel | None = None, max_holding_bars: int = 24):
         self.costs = costs or CostModel()
         if not 1 <= max_holding_bars <= 96:
             raise ValueError("max_holding_bars must be 1..96")
@@ -599,7 +599,7 @@ class VirtualBloFin:
                 exit_reason, exit_ts = "SL", close_ts
                 break
 
-            # TIME_EXIT is a resting limit submitted only after the twelfth
+            # TIME_EXIT is a resting limit submitted only after the twenty-fourth
             # completed holding candle. It cannot fill on its submission bar.
             if time_exit_limit_price is not None:
                 time_exit_filled = (

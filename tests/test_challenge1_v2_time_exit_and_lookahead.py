@@ -20,7 +20,7 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
         )
         self.engine = VirtualBloFin(
             costs=CostModel(spread_fraction=0.0002),
-            max_holding_bars=12,
+            max_holding_bars=24,
         )
         self.start_ms = 1_700_000_000_000
 
@@ -66,15 +66,15 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
             spread_fraction=0.0002,
         )
 
-    def test_time_exit_submits_limit_after_exactly_twelve_completed_bars(self) -> None:
+    def test_time_exit_submits_limit_after_exactly_twenty_four_completed_bars(self) -> None:
         for side in ("LONG", "SHORT"):
             with self.subTest(side=side):
-                result = self._simulate(side, self._bars(side, 14))
+                result = self._simulate(side, self._bars(side, 26))
                 self.assertEqual(result.status, "OPEN")
                 self.assertIsNone(result.net_pnl_usdt, "an open position cannot have finalized Net PnL")
                 self.assertIsNone(result.diagnostics["net_pnl_usdt"])
                 self.assertEqual(result.exit_reason, "TIME_EXIT_LIMIT_PENDING")
-                self.assertEqual(result.bars_held, 12)
+                self.assertEqual(result.bars_held, 24)
                 self.assertEqual(result.diagnostics["time_exit_order_type"], "LIMIT")
                 self.assertIsNotNone(result.diagnostics["time_exit_limit_price"])
                 self.assertIsNotNone(result.diagnostics["time_exit_submitted_ts_ms"])
@@ -83,7 +83,7 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
     def test_limit_cannot_fill_on_its_submission_candle(self) -> None:
         for side in ("LONG", "SHORT"):
             with self.subTest(side=side):
-                bars = self._bars(side, 14)
+                bars = self._bars(side, 26)
                 # The twelfth holding candle already spans the calculated
                 # break-even level, but the limit is submitted only at its close.
                 result = self._simulate(side, bars)
@@ -93,7 +93,7 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
     def test_time_exit_limit_fills_only_on_a_later_trade_through(self) -> None:
         for side in ("LONG", "SHORT"):
             with self.subTest(side=side):
-                result = self._simulate(side, self._bars(side, 15))
+                result = self._simulate(side, self._bars(side, 27))
                 self.assertEqual(result.status, "CLOSED")
                 self.assertEqual(result.exit_reason, "TIME_EXIT")
                 self.assertEqual(result.diagnostics["time_exit_order_type"], "LIMIT")

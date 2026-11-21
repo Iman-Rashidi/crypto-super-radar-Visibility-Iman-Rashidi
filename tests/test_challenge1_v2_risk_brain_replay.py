@@ -320,8 +320,8 @@ class WalkForwardAndCalibrationTests(unittest.TestCase):
 
     def test_purge_window_blocks_entries_that_can_overlap_fold_boundary(self) -> None:
         boundary = 2_000_000_000
-        self.assertTrue(_within_purge_window(boundary - 194 * 60_000, boundary))
-        self.assertFalse(_within_purge_window(boundary - 196 * 60_000, boundary))
+        self.assertTrue(_within_purge_window(boundary - 374 * 60_000, boundary))
+        self.assertFalse(_within_purge_window(boundary - 376 * 60_000, boundary))
 
     def test_brier_score_and_calibration_curve_are_calculated(self) -> None:
         report = _calibration_report([

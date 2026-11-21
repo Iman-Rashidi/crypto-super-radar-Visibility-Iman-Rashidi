@@ -351,11 +351,101 @@ def _within_purge_window(
     asof_ms: int,
     boundary_ms: int,
     *,
-    max_holding_bars: int = 12,
+    max_holding_bars: int = 24,
 ) -> bool:
     """Block new fold entries whose maximum modeled life touches the next fold."""
     purge_ms = (max_holding_bars + 1) * BAR_MS
     return asof_ms >= boundary_ms - purge_ms
+
+
+V3_PATTERN_BRAIN_SCORE_FLOOR = 0.45
+V3_TOXIC_PATTERN_NAMES = {
+    "symmetrical triangle",
+    "tweezer bottom",
+    "rising wedge",
+}
+V3_PRIORITY_PATTERN_DIRECTIONS = {
+    "bullish engulfing": "BULLISH",
+    "descending channel": "BEARISH",
+    "three inside up": "BULLISH",
+    "hanging man": "BEARISH",
+}
+
+
+def _v3_pattern_entry_gate(
+    *,
+    detections: list[Mapping[str, Any]],
+    expected_direction: str,
+    brain_evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Causal post-TRAIN filter; it never changes training labels or sizing."""
+    side = str(expected_direction).upper()
+    if side not in {"LONG", "SHORT"}:
+        raise ValueError("expected_direction must be LONG or SHORT")
+    wanted_pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
+    active = [
+        item for item in detections
+        if str(item.get("lifecycle_status") or item.get("state") or "").upper()
+        not in {"INVALIDATED", "EXPIRED"}
+    ]
+    toxic = sorted({
+        str(item.get("name_en") or item.get("name") or "").strip()
+        for item in active
+        if str(item.get("name_en") or item.get("name") or "").strip().lower()
+        in V3_TOXIC_PATTERN_NAMES
+    })
+    sweep = sorted({
+        str(item.get("name_en") or item.get("name") or "Liquidity Sweep").strip()
+        for item in active
+        if str(item.get("family") or "").lower() == "liquidity_sweep"
+        or "liquidity sweep" in str(item.get("name_en") or item.get("name") or "").lower()
+    })
+    score = brain_evaluation.get("score_0_1")
+    try:
+        score_value = float(score) if score is not None else None
+    except (TypeError, ValueError, OverflowError):
+        score_value = None
+    if score_value is not None and not np.isfinite(score_value):
+        score_value = None
+    priority = sorted({
+        name for item in active
+        for name in [str(item.get("name_en") or item.get("name") or "").strip()]
+        if name.lower() in V3_PRIORITY_PATTERN_DIRECTIONS
+        and str(item.get("direction") or "").upper()
+        == V3_PRIORITY_PATTERN_DIRECTIONS[name.lower()]
+        == wanted_pattern_direction
+    })
+    priority_bonus = min(0.10, 0.05 * len(priority))
+    adjusted_score = min(1.0, score_value + priority_bonus) if score_value is not None else None
+
+    if toxic or sweep:
+        reasons = []
+        if toxic:
+            reasons.append("TOXIC_PATTERN:" + ",".join(toxic))
+        if sweep:
+            reasons.append("LIQUIDITY_SWEEP_HIGH_FALSE_BREAK_RATE:" + ",".join(sweep))
+        return {
+            "decision": "VETO", "reason": "|".join(reasons),
+            "toxic_patterns": toxic, "liquidity_sweeps": sweep,
+            "priority_patterns": priority, "priority_bonus": priority_bonus,
+            "brain_score": score_value, "adjusted_brain_score": adjusted_score,
+            "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+        }
+    if adjusted_score is not None and adjusted_score < V3_PATTERN_BRAIN_SCORE_FLOOR:
+        return {
+            "decision": "VETO", "reason": "V3_PATTERN_BRAIN_LOW_SCORE",
+            "toxic_patterns": [], "liquidity_sweeps": [],
+            "priority_patterns": priority, "priority_bonus": priority_bonus,
+            "brain_score": score_value, "adjusted_brain_score": adjusted_score,
+            "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+        }
+    return {
+        "decision": "ALLOW", "reason": "NO_V3_VETO",
+        "toxic_patterns": [], "liquidity_sweeps": [],
+        "priority_patterns": priority, "priority_bonus": priority_bonus,
+        "brain_score": score_value, "adjusted_brain_score": adjusted_score,
+        "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+    }
 
 
 def _calibration_report(observations: list[dict[str, Any]], *, bins: int = 10) -> dict[str, Any]:
@@ -554,7 +644,7 @@ def run_sandbox(
         raise SandboxDataError("replay dataset is too small after six-month window alignment")
 
     costs = CostModel(spread_fraction=spread_scenario)
-    exchange = VirtualBloFin(costs=costs, max_holding_bars=12)
+    exchange = VirtualBloFin(costs=costs, max_holding_bars=24)
     brain = OnlineMetaBrain(warmup_trades=100, min_per_class=20)
     pattern_brain = ShadowPatternBrain(warmup_trades=20, min_per_class=5)
     pattern_lifecycle: dict[str, dict[str, Any]] = {}
@@ -803,6 +893,12 @@ def run_sandbox(
                     "slippage_cost_usdt": float(result.diagnostics["slippage_cost_usdt"]),
                     "veto_correct": result.net_pnl_usdt <= 0,
                     "source": "COUNTERFACTUAL_SHADOW",
+                    "veto_source": order.get("veto_source"),
+                    "veto_reason": order.get("veto_reason"),
+                    "pattern_brain_score": (order.get("pattern_gate") or {}).get("brain_score"),
+                    "pattern_brain_adjusted_score": (order.get("pattern_gate") or {}).get("adjusted_brain_score"),
+                    "pattern_priority_bonus": (order.get("pattern_gate") or {}).get("priority_bonus", 0.0),
+                    "priority_patterns": list((order.get("pattern_gate") or {}).get("priority_patterns") or []),
                 })
                 if (
                     order["phase"] in calibration_observations
@@ -951,12 +1047,12 @@ def run_sandbox(
                 )
                 continue
             if phase_boundary_ms is not None and _within_purge_window(
-                asof_ms, phase_boundary_ms, max_holding_bars=12
+                asof_ms, phase_boundary_ms, max_holding_bars=24
             ):
                 counts["purged_boundary_signal_blocks"] += 1
                 _record_block_reason(
                     block_reasons, block_reasons_by_symbol, symbol,
-                    "PURGED_WALK_FORWARD_195_MINUTE_BOUNDARY",
+                    "PURGED_WALK_FORWARD_375_MINUTE_BOUNDARY",
                 )
                 continue
             precomputed_context = prepared_contexts[symbol]
@@ -1024,15 +1120,49 @@ def run_sandbox(
             decision=brain.evaluate(features)
             model_probability: float | None = None
             if phase == "TRAIN":
-                model_decision, veto = "TRAINING_BASELINE", False
+                model_decision, model_veto = "TRAINING_BASELINE", False
             elif brain.trained and decision.get("status") == "READY":
                 model_decision = str(decision["decision"])
-                veto = model_decision == "VETO"
+                model_veto = model_decision == "VETO"
                 model_probability = float(decision["probability"])
             else:
-                model_decision, veto = "MODEL_NOT_READY_BASELINE", False
+                model_decision, model_veto = "MODEL_NOT_READY_BASELINE", False
                 counts["model_not_ready_signals"] += 1
             model_decisions[model_decision] += 1
+
+            # Learn only from matured TRAIN outcomes, then freeze before
+            # Validation/OOS. The V3 score is uncalibrated, not a probability.
+            if phase != "TRAIN" and pattern_brain.trained:
+                pattern_gate = _v3_pattern_entry_gate(
+                    detections=pattern_detections,
+                    expected_direction=signal["signal"],
+                    brain_evaluation=pattern_brain_evaluation,
+                )
+            else:
+                pattern_gate = {
+                    "decision": "SHADOW_ONLY",
+                    "reason": "TRAINING_OR_PATTERN_BRAIN_NOT_READY",
+                    "toxic_patterns": [], "liquidity_sweeps": [],
+                    "priority_patterns": [], "priority_bonus": 0.0,
+                    "brain_score": pattern_brain_evaluation.get("score_0_1"),
+                    "adjusted_brain_score": pattern_brain_evaluation.get("score_0_1"),
+                    "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+                }
+            pattern_veto = pattern_gate["decision"] == "VETO"
+            veto = bool(model_veto or pattern_veto)
+            veto_sources = []
+            if model_veto:
+                veto_sources.append("V2_META_BRAIN")
+            if pattern_veto:
+                veto_sources.append("V3_PATTERN_BRAIN")
+                counts["v3_pattern_vetoes"] += 1
+                if pattern_gate.get("toxic_patterns") or pattern_gate.get("liquidity_sweeps"):
+                    counts["v3_toxic_pattern_vetoes"] += 1
+                elif pattern_gate.get("reason") == "V3_PATTERN_BRAIN_LOW_SCORE":
+                    counts["v3_brain_low_score_vetoes"] += 1
+            if pattern_gate.get("priority_patterns"):
+                counts["v3_priority_supported_signals"] += 1
+            veto_source = "+".join(veto_sources) if veto_sources else None
 
             # Actual positions and pending actual entry limits share the strict
             # two-slot portfolio cap. Counterfactual Shadow Book orders are
@@ -1078,7 +1208,8 @@ def run_sandbox(
                 "entry_checked": False,
                 "submitted_ts_ms": asof_ms,
                 "pattern_features":pattern_features,"pattern_family_keys":pattern_family_keys,"pattern_detections":pattern_detections,
-                "pattern_market_regime":pattern_market_regime,"pattern_brain_evaluation":pattern_brain_evaluation,"pattern_snapshot_asof":asof.isoformat(),
+                "pattern_market_regime":pattern_market_regime,"pattern_brain_evaluation":pattern_brain_evaluation,"pattern_gate":pattern_gate,"pattern_snapshot_asof":asof.isoformat(),
+                "veto_source":veto_source,"veto_reason":pattern_gate.get("reason") if pattern_veto else model_decision if model_veto else None,
             }
             if veto:
                 counts["vetoed_signals"] += 1
@@ -1141,6 +1272,8 @@ def run_sandbox(
     )
     fee_ratio = totals["fees_usdt"] / gross_positive if gross_positive > 0 else None
     attempts = int(counts["qualified_signals"])
+    v3_pattern_counterfactual = [row for row in shadow_trades if "V3_PATTERN_BRAIN" in str(row.get("veto_source") or "")]
+    v3_counterfactual_pnls = [float(row["net_pnl_usdt"]) for row in v3_pattern_counterfactual if row.get("net_pnl_usdt") is not None]
     report = {
         "report_version": "CHALLENGE1_AI_SANDBOX_V1",
         "environment": "OFFLINE_VIRTUAL_BLOFIN_DEMO_MODEL",
@@ -1182,8 +1315,39 @@ def run_sandbox(
         },
         "quantitative_metrics": _grouped_performance_summary(actual_trades, initial_equity, symbols),
         "shadow_book_metrics": _shadow_book_summary(shadow_trades),
+        "pattern_intelligence_v3_active_calibration": {
+            "mode": "TRAIN_ONLY_LEARNING_THEN_ACTIVE_VALIDATION_OOS_VETO",
+            "training_is_unfiltered": True,
+            "pattern_brain_trained": pattern_brain.trained,
+            "training_examples": len(pattern_brain.examples),
+            "training_wins": sum(1 for row in pattern_brain.examples if row["label"] == 1),
+            "training_losses": sum(1 for row in pattern_brain.examples if row["label"] == 0),
+            "training_rounds": counts["pattern_training_rounds"],
+            "frozen_before_validation_oos": pattern_brain_freeze_train_count is not None,
+            "model_score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+            "score_is_calibrated_probability": False,
+            "toxic_pattern_names": sorted(V3_TOXIC_PATTERN_NAMES),
+            "liquidity_sweep_policy": "VETO_ACTIVE_SWEEPS: prior replay observed 93.33% post-confirmation invalidation; this is intentionally conservative.",
+            "priority_pattern_directions": V3_PRIORITY_PATTERN_DIRECTIONS,
+            "gate_counts": {
+                "pattern_vetoes": counts["v3_pattern_vetoes"],
+                "toxic_or_sweep_vetoes": counts["v3_toxic_pattern_vetoes"],
+                "low_brain_score_vetoes": counts["v3_brain_low_score_vetoes"],
+                "priority_supported_signals": counts["v3_priority_supported_signals"],
+            },
+            "counterfactual": {
+                "closed_vetoed_trades": len(v3_counterfactual_pnls),
+                "losses_avoided_count": sum(1 for value in v3_counterfactual_pnls if value <= 0),
+                "winners_missed_count": sum(1 for value in v3_counterfactual_pnls if value > 0),
+                "estimated_losses_avoided_usdt": sum(abs(value) for value in v3_counterfactual_pnls if value <= 0),
+                "estimated_profit_missed_usdt": sum(value for value in v3_counterfactual_pnls if value > 0),
+                "net_pnl_of_vetoed_counterfactuals_usdt": sum(v3_counterfactual_pnls),
+                "interpretation": "Offline counterfactual only; not exchange fills or realized profit.",
+            },
+            "decision_policy": "TRAIN labels remain unfiltered; V3 vetoes apply only after the trained model is frozen, during VALIDATION and OUT_OF_SAMPLE.",
+        },
         "pattern_intelligence_v3_shadow": {
-            "mode":"SHADOW_ONLY_NO_V2_SIGNAL_OR_RISK_CHANGES","timeframes":["15m","1H","4H"],"completed_candles_only":True,"future_candles_used":False,
+            "mode":"SHADOW_OBSERVATION_WITH_POST_TRAIN_ACTIVE_ENTRY_VETO","timeframes":["15m","1H","4H"],"completed_candles_only":True,"future_candles_used":False,
             "observations":counts["pattern_shadow_observations"],"analysis_errors":counts["pattern_analysis_errors"],
             "training_scope":"Matured TRAIN outcomes only; Validation and OOS do not update weights.",
             "trade_scope":"V2-qualified entries with fully reconciled closed PnL; patterns tagged at entry.",
@@ -1256,7 +1420,7 @@ def run_sandbox(
             "train_end_utc": train_end.isoformat(),
             "validation_end_utc": validation_end.isoformat(),
             "oos_end_utc": oos_end.isoformat(),
-            "purge_window_minutes": 195,
+            "purge_window_minutes": 375,
             "purged_boundary_signal_blocks": counts["purged_boundary_signal_blocks"],
             "cross_boundary_positions": counts["cross_boundary_positions"],
             "cross_boundary_closed_trades": counts["cross_boundary_closed_trades"],
