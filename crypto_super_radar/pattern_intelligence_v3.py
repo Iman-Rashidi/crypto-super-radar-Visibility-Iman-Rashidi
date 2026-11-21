@@ -144,6 +144,26 @@ def _upsert(state:dict[str,dict[str,Any]],symbol:str,tf:str,p:Mapping[str,Any],t
         r["last_updated_asof"]=t.isoformat()
     return key
 
+def pattern_name_feature_key(name: Any) -> str | None:
+    """Return a stable, human-auditable feature key for one detected pattern name."""
+    raw = " ".join(str(name or "").strip().casefold().split())
+    if not raw:
+        return None
+    return "pattern_name::" + raw.replace(" ", "_")
+
+
+def per_pattern_name_features(detections: list[Mapping[str, Any]]) -> dict[str, int]:
+    """Binary features keyed by the exact normalized pattern name, as-of this snapshot."""
+    features: dict[str, int] = {}
+    for item in detections:
+        status = str(item.get("lifecycle_status") or item.get("state") or "").upper()
+        if status in {"INVALIDATED", "EXPIRED"}:
+            continue
+        key = pattern_name_feature_key(item.get("name_en") or item.get("name"))
+        if key:
+            features[key] = 1
+    return dict(sorted(features.items()))
+
 def analyze_unified_patterns_v3(*,instrument_id:str,frames:Mapping[str,pd.DataFrame],asof:Any,expected_direction:str,lifecycle_state:dict[str,dict[str,Any]])->dict[str,Any]:
     t=pd.Timestamp(asof)
     if t.tzinfo is None: raise ValueError("asof must be timezone-aware")
@@ -184,9 +204,11 @@ def analyze_unified_patterns_v3(*,instrument_id:str,frames:Mapping[str,pd.DataFr
     elif "RANG" in raw_regime or "SIDEWAYS" in raw_regime: market_regime="RANGING"
     elif "TREND" in raw_regime: market_regime="TRENDING"
     else: market_regime="UNKNOWN"
+    named_features = per_pattern_name_features(all_patterns)
     return {"version":"UNIFIED_MULTI_TIMEFRAME_PATTERN_INTELLIGENCE_V3","mode":"SHADOW_ONLY","instrument_id":instrument_id,"asof_utc":t.isoformat(),"expected_direction":direction,
-      "completed_candles_only":True,"future_candles_used":False,"timeframes":tf_result,"market_regime":market_regime,"features":features,"family_lifecycle_keys":keys,"detections":all_patterns,
-      "score_semantics":"Binary evidence flags; not a trade score or success probability."}
+      "completed_candles_only":True,"future_candles_used":False,"timeframes":tf_result,"market_regime":market_regime,"features":features,
+      "pattern_name_features":named_features,"family_lifecycle_keys":keys,"detections":all_patterns,
+      "score_semantics":"Binary family and individual pattern-name evidence flags; not a trade score or success probability."}
 
 def lifecycle_outcomes(state:Mapping[str,Mapping[str,Any]],keys:Mapping[str,list[str]])->dict[str,dict[str,Any]]:
     out={}
