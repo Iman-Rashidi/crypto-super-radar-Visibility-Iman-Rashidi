@@ -26,6 +26,115 @@ INSTRUMENTS_PATH = "/api/v1/market/instruments"
 DEFAULT_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 BAR_MS = {"15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
 
+# Evidence-backed price-candle blackout observed in BloFin public Demo data.
+# Candle timestamps are open times; end_exclusive_ms is the close boundary of
+# the final absent 15m candle. Only this exact LAST-price gap is allowlisted.
+OBSERVED_PRICE_CANDLE_BLACKOUTS = ({
+    "instrument_id": "BTC-USDT",
+    "bar": "15m",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T07:45:00+00:00",
+    "missing_to_utc": "2026-03-09T12:30:00+00:00",
+    "missing_intervals": 20,
+    "start_ms": 1773042300000,
+    "last_missing_ms": 1773059400000,
+    "end_exclusive_ms": 1773060300000,
+    "left_candle_utc": "2026-03-09T07:30:00+00:00",
+    "right_candle_utc": "2026-03-09T12:45:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #114 artifact 14711734625, downloader.log",
+}, {
+    "instrument_id": "BTC-USDT",
+    "bar": "1H",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T07:00:00+00:00",
+    "missing_to_utc": "2026-03-09T11:00:00+00:00",
+    "missing_intervals": 5,
+    "start_ms": 1773039600000,
+    "last_missing_ms": 1773054000000,
+    "end_exclusive_ms": 1773057600000,
+    "left_candle_utc": "2026-03-09T06:00:00+00:00",
+    "right_candle_utc": "2026-03-09T12:00:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #115 artifact 14713645678, downloader.log",
+}, {
+    "instrument_id": "BTC-USDT",
+    "bar": "4H",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T04:00:00+00:00",
+    "missing_to_utc": "2026-03-09T08:00:00+00:00",
+    "missing_intervals": 2,
+    "start_ms": 1773028800000,
+    "last_missing_ms": 1773043200000,
+    "end_exclusive_ms": 1773057600000,
+    "left_candle_utc": "2026-03-09T00:00:00+00:00",
+    "right_candle_utc": "2026-03-09T12:00:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #44920261175 artifact 14713811121, downloader.log",
+}, {
+    "instrument_id": "ETH-USDT",
+    "bar": "15m",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T07:45:00+00:00",
+    "missing_to_utc": "2026-03-09T12:30:00+00:00",
+    "missing_intervals": 20,
+    "start_ms": 1773042300000,
+    "last_missing_ms": 1773059400000,
+    "end_exclusive_ms": 1773060300000,
+    "left_candle_utc": "2026-03-09T07:30:00+00:00",
+    "right_candle_utc": "2026-03-09T12:45:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #44923064055 artifact 14714846553, downloader.log",
+}, {
+    "instrument_id": "ETH-USDT",
+    "bar": "1H",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T07:00:00+00:00",
+    "missing_to_utc": "2026-03-09T11:00:00+00:00",
+    "missing_intervals": 5,
+    "start_ms": 1773039600000,
+    "last_missing_ms": 1773054000000,
+    "end_exclusive_ms": 1773057600000,
+    "left_candle_utc": "2026-03-09T06:00:00+00:00",
+    "right_candle_utc": "2026-03-09T12:00:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #44924534407 artifact 14714794789, downloader.log",
+}, {
+    "instrument_id": "ETH-USDT",
+    "bar": "4H",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T04:00:00+00:00",
+    "missing_to_utc": "2026-03-09T08:00:00+00:00",
+    "missing_intervals": 2,
+    "start_ms": 1773028800000,
+    "last_missing_ms": 1773043200000,
+    "end_exclusive_ms": 1773057600000,
+    "left_candle_utc": "2026-03-09T00:00:00+00:00",
+    "right_candle_utc": "2026-03-09T12:00:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #148 artifact 14715766802, downloader.log",
+}, {
+    "instrument_id": "SOL-USDT",
+    "bar": "15m",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T07:45:00+00:00",
+    "missing_to_utc": "2026-03-09T12:30:00+00:00",
+    "missing_intervals": 20,
+    "start_ms": 1773042300000,
+    "last_missing_ms": 1773059400000,
+    "end_exclusive_ms": 1773060300000,
+    "left_candle_utc": "2026-03-09T07:30:00+00:00",
+    "right_candle_utc": "2026-03-09T12:45:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #149 artifact 14716736282, downloader.log",
+}, {
+    "instrument_id": "SOL-USDT",
+    "bar": "1H",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T07:00:00+00:00",
+    "missing_to_utc": "2026-03-09T11:00:00+00:00",
+    "missing_intervals": 5,
+    "start_ms": 1773039600000,
+    "last_missing_ms": 1773054000000,
+    "end_exclusive_ms": 1773057600000,
+    "left_candle_utc": "2026-03-09T06:00:00+00:00",
+    "right_candle_utc": "2026-03-09T12:00:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #150 artifact 14715653809, downloader.log",
+},)
+
 # Challenge 1 accepts missing fundingKind only on the fixed UTC
 # 00:00 / 08:00 / 16:00 regular schedule. Never infer a dynamic cadence.
 REGULAR_FUNDING_INTERVAL_MS = 8 * 60 * 60_000
@@ -40,7 +149,31 @@ OBSERVED_FUNDING_BLACKOUTS = ({
 },)
 
 
-def _is_regular_utc_funding_boundary(timestamp_ms: int) -> bool:
+def _observed_price_candle_gap_matches(
+    *, symbol: str, bar: str, first_missing_ms: int, last_missing_ms: int,
+    missing_count: int, mark_price: bool,
+) -> bool:
+    source = "MARK" if mark_price else "LAST"
+    return any(
+        str(window["instrument_id"]) == str(symbol).upper()
+        and str(window["bar"]) == str(bar)
+        and str(window["source"]) == source
+        and int(window["start_ms"]) == int(first_missing_ms)
+        and int(window["last_missing_ms"]) == int(last_missing_ms)
+        and int(window["missing_intervals"]) == int(missing_count)
+        for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+    )
+
+
+def _is_price_candle_blackout(timestamp_ms: int) -> dict[str, Any] | None:
+    stamp = int(timestamp_ms)
+    return next((
+        dict(window) for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+        if int(window["start_ms"]) <= stamp < int(window["end_exclusive_ms"])
+    ), None)
+
+
+def _is_regular_utc_funding_boundary(timestamp_ms: int):
     """Return True only within ±10s of 00:00, 08:00 or 16:00 UTC."""
     day_offset = int(timestamp_ms) % UTC_DAY_MS
     boundaries = (0, 8 * 60 * 60_000, 16 * 60 * 60_000)
@@ -80,6 +213,27 @@ def _validate_common_funding_blackout(funding_by_symbol: Mapping[str, list[tuple
 
 class ReplayDownloadError(RuntimeError):
     pass
+
+
+def _funding_blackout_window_applicability(start_ms: int, end_ms: int) -> str:
+    """Decide whether the known funding blackout must be verified in this window.
+
+    A window wholly outside the documented outage must not fail validation for
+    not containing it. A partial overlap is ambiguous and therefore fails closed.
+    """
+    start, end = int(start_ms), int(end_ms)
+    if end <= start:
+        raise ValueError("funding window end must be after its start")
+    blackout_start = int(OBSERVED_FUNDING_BLACKOUTS[0]["start_ms"])
+    blackout_end = int(OBSERVED_FUNDING_BLACKOUTS[0]["end_ms"])
+    if end <= blackout_start or start >= blackout_end:
+        return "NOT_APPLICABLE_OUTSIDE_REQUESTED_WINDOW"
+    if start <= blackout_start and end >= blackout_end:
+        return "REQUIRED"
+    raise ReplayDownloadError(
+        "requested funding window partially overlaps the registered common blackout; "
+        "expand the window to include both verified boundaries or exclude it entirely"
+    )
 
 
 def _record_unique_timestamp(
@@ -165,6 +319,8 @@ def download_candles(
     bar: str,
     *,
     months: int = 6,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
     mark_price: bool = False,
     session: requests.Session | None = None,
     base_url: str = DEMO_REST_URL,
@@ -179,15 +335,27 @@ def download_candles(
     symbol = str(inst_id or "").strip().upper()
     if symbol not in DEFAULT_SYMBOLS:
         raise ValueError("instrument is not in the approved Challenge 1 watchlist")
-    if bar not in BAR_MS or not 1 <= months <= 12 or not 1 <= page_size <= 1440:
+    if bar not in BAR_MS or not 1 <= months <= 13 or not 1 <= page_size <= 1440:
         raise ValueError("unsupported bar/months/page_size")
     sess = session or requests.Session()
     now = datetime.now(timezone.utc)
     now_ms = _utc_ms(now)
-    start_ms = _utc_ms(_subtract_calendar_months(now, months))
+    if (start_utc is None) != (end_utc is None):
+        raise ValueError("start_utc and end_utc must be provided together")
+    if start_utc is not None and end_utc is not None:
+        if start_utc.tzinfo is None or end_utc.tzinfo is None:
+            raise ValueError("explicit candle window timestamps must be timezone-aware")
+        start_ms, end_ms = _utc_ms(start_utc), _utc_ms(end_utc)
+        if end_ms <= start_ms or end_ms > now_ms:
+            raise ValueError("explicit candle window must be ordered and end no later than current UTC")
+        # BloFin after cursor returns older candles; start at the exclusive upper boundary.
+        cursor: int | None = end_ms
+    else:
+        start_ms = _utc_ms(_subtract_calendar_months(now, months))
+        end_ms = now_ms
+        cursor = None
     path = MARK_CANDLE_PATH if mark_price else CANDLE_PATH
     url = base_url.rstrip("/") + path
-    cursor: int | None = None
     seen: dict[int, tuple[Any, ...]] = {}
     previous_oldest: int | None = None
     for _ in range(200):
@@ -202,7 +370,7 @@ def download_candles(
         if not parsed:
             break
         for item in parsed:
-            if item[2] >= start_ms:
+            if start_ms <= int(item[2]) < end_ms:
                 _record_unique_timestamp(
                     seen, int(item[2]), item, series=f"{symbol} {bar}"
                 )
@@ -221,17 +389,45 @@ def download_candles(
         raise ReplayDownloadError(f"no completed candles downloaded for {symbol} {bar}")
     result = [seen[key] for key in sorted(seen)]
     interval = BAR_MS[bar]
-    gaps = [b[2] - a[2] for a, b in zip(result, result[1:]) if b[2] - a[2] != interval]
+    gaps = [
+        (int(a[2]), int(b[2]), int((b[2] - a[2]) // interval) - 1)
+        for a, b in zip(result, result[1:])
+        if int(b[2]) - int(a[2]) != interval
+    ]
     if gaps:
-        raise ReplayDownloadError(f"historical candle series contains {len(gaps)} missing {bar} intervals")
+        unregistered = []
+        for left_ms, right_ms, missing_count in gaps:
+            first_missing_ms = left_ms + interval
+            last_missing_ms = right_ms - interval
+            if _observed_price_candle_gap_matches(
+                symbol=symbol, bar=bar, first_missing_ms=first_missing_ms,
+                last_missing_ms=last_missing_ms, missing_count=missing_count,
+                mark_price=mark_price,
+            ):
+                continue
+            first_missing = datetime.fromtimestamp(first_missing_ms / 1000, timezone.utc).isoformat()
+            last_missing = datetime.fromtimestamp(last_missing_ms / 1000, timezone.utc).isoformat()
+            unregistered.append(
+                f"{symbol} {bar}: missing_from_utc={first_missing}, "
+                f"missing_to_utc={last_missing}, missing_intervals={missing_count}, "
+                f"left_candle_utc={datetime.fromtimestamp(left_ms / 1000, timezone.utc).isoformat()}, "
+                f"right_candle_utc={datetime.fromtimestamp(right_ms / 1000, timezone.utc).isoformat()}"
+            )
+        if unregistered:
+            raise ReplayDownloadError(
+                f"historical candle series contains {len(unregistered)} unregistered timestamp gap(s): "
+                + " | ".join(unregistered)
+            )
     if result[0][2] > start_ms + interval:
         raise ReplayDownloadError(
             f"historical candle series for {symbol} {bar} does not cover the requested start"
         )
     latest_close_ms = int(result[-1][2]) + interval
-    if latest_close_ms < now_ms - 2 * interval:
+    if latest_close_ms < end_ms - 2 * interval:
         raise ReplayDownloadError(
-            f"historical candle series for {symbol} {bar} is stale at the end of the requested window"
+            f"historical candle series for {symbol} {bar} does not cover the requested end: "
+            f"latest_close_utc={datetime.fromtimestamp(latest_close_ms / 1000, timezone.utc).isoformat()} "
+            f"requested_end_utc={datetime.fromtimestamp(end_ms / 1000, timezone.utc).isoformat()}"
         )
     return result
 
@@ -317,9 +513,11 @@ def _classify_funding_schedule_events(
             and right_event[3] == "MISSING" and right_event[4] == "MISSING_API_FIELD"
         )
         if both_missing and abs(delta_ms - REGULAR_FUNDING_INTERVAL_MS) > 2 * FUNDING_SCHEDULE_TOLERANCE_MS:
+            left_utc = datetime.fromtimestamp(left / 1000, tz=timezone.utc).isoformat()
+            right_utc = datetime.fromtimestamp(right / 1000, tz=timezone.utc).isoformat()
             raise ReplayDownloadError(
                 f"funding history for {symbol} skips or breaks the fixed 8-hour UTC cadence "
-                f"(delta_ms={delta_ms})"
+                f"(left_utc={left_utc}, right_utc={right_utc}, delta_ms={delta_ms})"
             )
 
     classified = []
@@ -359,26 +557,42 @@ def download_funding_rates(
     inst_id: str,
     *,
     months: int = 6,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
     session: requests.Session | None = None,
     base_url: str = DEMO_REST_URL,
     page_size: int = 100,
 ) -> list[tuple[Any, ...]]:
     symbol = str(inst_id or "").strip().upper()
-    if symbol not in DEFAULT_SYMBOLS or not 1 <= months <= 12 or not 1 <= page_size <= 100:
+    if symbol not in DEFAULT_SYMBOLS or not 1 <= months <= 13 or not 1 <= page_size <= 100:
         raise ValueError("unsupported symbol/months/page_size")
     sess = session or requests.Session()
     now = datetime.now(timezone.utc)
     now_ms = _utc_ms(now)
-    start_ms = _utc_ms(_subtract_calendar_months(now, months))
+    if (start_utc is None) != (end_utc is None):
+        raise ValueError("start_utc and end_utc must be provided together")
+    if start_utc is not None and end_utc is not None:
+        if start_utc.tzinfo is None or end_utc.tzinfo is None:
+            raise ValueError("explicit funding window timestamps must be timezone-aware")
+        start_ms, end_ms = _utc_ms(start_utc), _utc_ms(end_utc)
+        if end_ms <= start_ms or end_ms > now_ms:
+            raise ValueError("explicit funding window must be ordered and end no later than current UTC")
+        cursor: int | None = end_ms
+    else:
+        start_ms = _utc_ms(_subtract_calendar_months(now, months))
+        end_ms = now_ms
+        cursor = None
     url = base_url.rstrip("/") + FUNDING_PATH
-    cursor: int | None = None
     seen: dict[int, tuple[Any, ...]] = {}
     previous_oldest: int | None = None
+    pages_read = 0
+    response_sizes: list[int] = []
     for _ in range(100):
         params: dict[str, Any] = {"instId": symbol, "limit": page_size}
         if cursor is not None:
             params["after"] = cursor
         payload = _json_get(sess, url, params)
+        pages_read += 1
         rows = payload.get("data")
         if not isinstance(rows, list):
             raise ReplayDownloadError("funding endpoint returned a non-list data field")
@@ -387,10 +601,11 @@ def download_funding_rates(
             parsed = _parse_funding_event(row, symbol=symbol)
             if parsed is not None:
                 valid.append(parsed)
+        response_sizes.append(len(rows))
         if not valid:
             break
         for item in valid:
-            if item[1] >= start_ms:
+            if start_ms <= int(item[1]) < end_ms:
                 _record_unique_timestamp(seen, int(item[1]), item, series=f"{symbol} funding")
         oldest = min(item[1] for item in valid)
         if oldest <= start_ms:
@@ -417,8 +632,21 @@ def download_funding_rates(
     first_max_age = int(classified[0][5] * 1.5)
     last_max_age = int(classified[-1][5] * 1.5)
     funding_times = [int(item[1]) for item in classified]
-    if funding_times[0] - start_ms > first_max_age or now_ms - funding_times[-1] > last_max_age:
-        raise ReplayDownloadError(f"funding history does not cover the requested window for {symbol}")
+    start_gap_ms = funding_times[0] - start_ms
+    end_gap_ms = end_ms - funding_times[-1]
+    if start_gap_ms > first_max_age or end_gap_ms > last_max_age:
+        oldest_utc = datetime.fromtimestamp(funding_times[0] / 1000, timezone.utc).isoformat()
+        newest_utc = datetime.fromtimestamp(funding_times[-1] / 1000, timezone.utc).isoformat()
+        requested_start_utc = datetime.fromtimestamp(start_ms / 1000, timezone.utc).isoformat()
+        requested_end_utc = datetime.fromtimestamp(end_ms / 1000, timezone.utc).isoformat()
+        raise ReplayDownloadError(
+            f"funding history coverage failure for {symbol}: "
+            f"events={len(classified)}, pages={pages_read}, response_sizes={response_sizes}, "
+            f"oldest_event_utc={oldest_utc}, newest_event_utc={newest_utc}, "
+            f"requested_start_utc={requested_start_utc}, requested_end_utc={requested_end_utc}, "
+            f"start_gap_hours={start_gap_ms / 3_600_000:.3f} (allowed={first_max_age / 3_600_000:.3f}), "
+            f"end_gap_hours={end_gap_ms / 3_600_000:.3f} (allowed={last_max_age / 3_600_000:.3f})"
+        )
     return classified
 
 def math_is_finite(value: float) -> bool:
@@ -445,6 +673,13 @@ def initialise_store(connection: sqlite3.Connection) -> None:
             funding_interval_ms INTEGER,
             PRIMARY KEY(instrument_id,funding_time)
         );
+        CREATE TABLE IF NOT EXISTS replay_price_blackouts (
+            instrument_id TEXT NOT NULL, bar TEXT NOT NULL, source TEXT NOT NULL,
+            start_ms INTEGER NOT NULL, last_missing_ms INTEGER NOT NULL,
+            end_exclusive_ms INTEGER NOT NULL, missing_intervals INTEGER NOT NULL,
+            evidence TEXT NOT NULL,
+            PRIMARY KEY(instrument_id,bar,source,start_ms,last_missing_ms)
+        );
     """)
     columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(replay_funding)").fetchall()
@@ -455,6 +690,20 @@ def initialise_store(connection: sqlite3.Connection) -> None:
         )
     if "funding_interval_ms" not in columns:
         connection.execute("ALTER TABLE replay_funding ADD COLUMN funding_interval_ms INTEGER")
+    connection.executemany(
+        """INSERT OR REPLACE INTO replay_price_blackouts
+           (instrument_id,bar,source,start_ms,last_missing_ms,end_exclusive_ms,missing_intervals,evidence)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        [
+            (
+                window["instrument_id"], window["bar"], window["source"],
+                int(window["start_ms"]), int(window["last_missing_ms"]),
+                int(window["end_exclusive_ms"]), int(window["missing_intervals"]),
+                window["evidence"],
+            )
+            for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+        ],
+    )
     connection.commit()
 
 
@@ -487,7 +736,15 @@ def save_replay(connection: sqlite3.Connection, candles: list[tuple[Any, ...]], 
         )
 
 
-def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...] = DEFAULT_SYMBOLS) -> dict[str, Any]:
+def download_watchlist(
+    *,
+    db_path: str,
+    months: int = 7,
+    symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
+    funding_start_utc: datetime | None = None,
+) -> dict[str, Any]:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
@@ -498,6 +755,18 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
         "funding_kind_policy": "EXPLICIT_API_OR_PROVENANCE_TAGGED_SCHEDULE_INFERENCE",
         "schedule_inference_is_not_explicit_fundingKind": True,
         "blackout_windows": [dict(window) for window in OBSERVED_FUNDING_BLACKOUTS],
+        "price_candle_blackouts": [dict(window) for window in OBSERVED_PRICE_CANDLE_BLACKOUTS],
+        "price_blackout_policy": "Only exact evidence-backed gaps are allowlisted; no candle is fabricated, interpolated or forward-filled.",
+        "requested_window": {
+            "candle_start_utc": start_utc.astimezone(timezone.utc).isoformat() if start_utc else None,
+            "funding_start_utc": (
+                funding_start_utc.astimezone(timezone.utc).isoformat()
+                if funding_start_utc else
+                (start_utc.astimezone(timezone.utc).isoformat() if start_utc else None)
+            ),
+            "end_utc": end_utc.astimezone(timezone.utc).isoformat() if end_utc else None,
+            "window_mode": "EXPLICIT_RANGE" if start_utc and end_utc else "CALENDAR_LOOKBACK",
+        },
     }
     funding_by_symbol: dict[str, list[tuple[Any, ...]]] = {}
     try:
@@ -505,12 +774,21 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
             result: dict[str, Any] = {}
             all_candles: list[tuple[Any, ...]] = []
             for bar in ("15m", "1H", "4H"):
-                rows = download_candles(symbol, bar, months=months)
+                rows = download_candles(
+                    symbol, bar, months=months, start_utc=start_utc, end_utc=end_utc
+                )
                 all_candles.extend(rows)
                 result[bar] = len(rows)
-            marks = download_candles(symbol, "15m", months=months, mark_price=True)
+            marks = download_candles(
+                symbol, "15m", months=months, start_utc=start_utc, end_utc=end_utc,
+                mark_price=True,
+            )
             all_candles.extend(marks)
-            funding = download_funding_rates(symbol, months=months)
+            funding = download_funding_rates(
+                symbol, months=months,
+                start_utc=funding_start_utc or start_utc,
+                end_utc=end_utc,
+            )
             funding_by_symbol[symbol] = funding
             instrument = download_instrument_rules(symbol)
             save_replay(connection, all_candles, funding, instrument)
@@ -521,8 +799,19 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
                 1 for item in funding if item[4] == "SCHEDULE_INFERRED_UTC_8H_BOUNDARY"
             )
             report["symbols"][symbol] = result
-        _validate_common_funding_blackout(funding_by_symbol)
-        report["common_blackout_verified_for_all_symbols"] = True
+        effective_funding_start = funding_start_utc or start_utc
+        if effective_funding_start is None:
+            effective_funding_start = _subtract_calendar_months(datetime.now(timezone.utc), months)
+        effective_funding_end = end_utc or datetime.now(timezone.utc)
+        blackout_applicability = _funding_blackout_window_applicability(
+            _utc_ms(effective_funding_start), _utc_ms(effective_funding_end)
+        )
+        report["common_blackout_verification"] = blackout_applicability
+        if blackout_applicability == "REQUIRED":
+            _validate_common_funding_blackout(funding_by_symbol)
+            report["common_blackout_verified_for_all_symbols"] = True
+        else:
+            report["common_blackout_verified_for_all_symbols"] = None
     finally:
         connection.close()
     return report
@@ -530,10 +819,27 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download BloFin Demo public replay data; no credentials and no order writes")
-    parser.add_argument("--months", type=int, default=7, help="Calendar months to fetch; one extra month provides indicator warm-up for the six-month walk-forward window.")
+    parser.add_argument("--months", type=int, default=7, help="Calendar months to fetch (maximum 13) when explicit UTC bounds are not supplied.")
+    parser.add_argument("--start-utc", default=None, help="Explicit inclusive candle download start, ISO-8601 with timezone.")
+    parser.add_argument("--funding-start-utc", default=None, help="Optional explicit inclusive funding download start; can differ from candle warm-up start.")
+    parser.add_argument("--end-utc", default=None, help="Explicit exclusive download end, ISO-8601 with timezone.")
     parser.add_argument("--db", default="data/blofin_replay.sqlite3")
     args = parser.parse_args()
-    print(json.dumps(download_watchlist(db_path=args.db, months=args.months), indent=2))
+    def parse_utc(raw: str | None) -> datetime | None:
+        if raw is None:
+            return None
+        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            raise ValueError("explicit UTC timestamps must include timezone information")
+        return value.astimezone(timezone.utc)
+    start_utc = parse_utc(args.start_utc)
+    funding_start_utc = parse_utc(args.funding_start_utc)
+    end_utc = parse_utc(args.end_utc)
+    print(json.dumps(download_watchlist(
+        db_path=args.db, months=args.months,
+        start_utc=start_utc, end_utc=end_utc,
+        funding_start_utc=funding_start_utc,
+    ), indent=2))
 
 
 if __name__ == "__main__":

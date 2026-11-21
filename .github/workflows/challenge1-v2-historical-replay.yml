@@ -4,10 +4,14 @@ on:
   push:
     branches:
       - feature/v2-demo-adapter-contract-2026-11-20
+      - feature/unified-pattern-intelligence-v3
+    paths-ignore:
+      - dist/crypto-super-radar-source.tar.xz
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: challenge1-v2-historical-replay-${{ github.ref }}
@@ -34,17 +38,21 @@ jobs:
           python -m compileall -q \
             crypto_super_radar/market_replay.py \
             crypto_super_radar/ai_sandbox.py \
+            crypto_super_radar/research_v3_experiments.py \
             crypto_super_radar/virtual_blofin.py \
             crypto_super_radar/challenge1_v2.py \
             crypto_super_radar/adaptive_brain.py \
             tests/test_challenge1_v2_risk_brain_replay.py \
             tests/test_challenge1_v2_time_exit_and_lookahead.py \
-            crypto_super_radar/funding_schema_probe.py
+            crypto_super_radar/funding_schema_probe.py \
+            crypto_super_radar/pattern_intelligence_v3.py \
+            tests/test_pattern_intelligence_v3.py
 
       - name: Run V2 risk, funding, blackout and look-ahead regressions
         run: |
           python -m unittest discover -s tests -p 'test_challenge1_v2_risk_brain_replay.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_v2_time_exit_and_lookahead.py' -v
+          python -m unittest discover -s tests -p 'test_pattern_intelligence_v3.py' -v
 
       - name: Probe live BloFin Demo public funding schema (read-only)
         continue-on-error: true
@@ -53,63 +61,84 @@ jobs:
           python -m crypto_super_radar.funding_schema_probe --output artifacts/funding_schema_probe.json
           cat artifacts/funding_schema_probe.json >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Download seven months of public BloFin market data
+
+      - name: Fetch immutable Replay #109 artifact and verify its SQLite hash
+        id: replay109
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          mkdir -p artifacts/replay109
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/14707189176/zip" \
+            -o artifacts/replay109.zip
+          code=$?
+          if [ "$code" -eq 0 ]; then
+            unzip -q artifacts/replay109.zip -d artifacts/replay109
+            db=$(find artifacts/replay109 -name 'blofin_replay.sqlite3' -type f | head -1)
+            if [ -z "$db" ]; then code=1; else
+              actual=$(sha256sum "$db" | awk '{print $1}')
+              expected="98420da9742db289c31aef22a414554fb78c0d8285972c2c56509b159d47c9ca"
+              if [ "$actual" != "$expected" ]; then
+                echo "Replay #109 SHA-256 mismatch: $actual" >&2
+                code=1
+              else
+                cp "$db" artifacts/replay109/replay109_verified.sqlite3
+                echo "Replay #109 immutable data hash verified: $actual" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          fi
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Download independent dataset with one-month warm-up and three-plus-month holdout
         id: download
         continue-on-error: true
         run: |
           set +e
           mkdir -p artifacts
           python -m crypto_super_radar.market_replay \
-            --months 7 \
-            --db artifacts/blofin_replay.sqlite3 \
+            --months 5 \
+            --start-utc "2025-10-31T09:00:00Z" \
+            --funding-start-utc "2025-10-31T09:00:00Z" \
+            --end-utc "2026-03-09T00:00:00Z" \
+            --db artifacts/independent_5m.sqlite3 \
             > artifacts/downloader.log 2>&1
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 0 ]; then
-            echo "Download completed; the Sandbox still validates all five symbols and the common blackout." >> "$GITHUB_STEP_SUMMARY"
+            sha=$(sha256sum artifacts/independent_5m.sqlite3 | awk '{print $1}')
+            echo "Independent source range downloaded and hashed: $sha" >> "$GITHUB_STEP_SUMMARY"
+            echo "Download: 2025-10-31T09:00:00Z to 2026-03-09T00:00:00Z exclusive; last included 15m candle opens 2026-03-08T23:45:00Z." >> "$GITHUB_STEP_SUMMARY"
+            echo "Warm-up: 2025-10-31T09:00:00Z to 2025-11-30T09:00:00Z. Unseen scored holdout: 2025-11-30T09:00:00Z to 2026-03-09T00:00:00Z exclusive." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Download failed closed; no synthetic funding, prices or interpolation were substituted." >> "$GITHUB_STEP_SUMMARY"
-            tail -n 120 artifacts/downloader.log >> "$GITHUB_STEP_SUMMARY" || true
+            echo "Independent dataset download failed closed; no synthetic candles, prices, funding or interpolation were substituted." >> "$GITHUB_STEP_SUMMARY"
+            tail -n 160 artifacts/downloader.log >> "$GITHUB_STEP_SUMMARY" || true
           fi
           exit 0
 
-      - name: Run six-month Purged Walk-Forward replay
-        id: sandbox
-        if: steps.download.outputs.exit_code == '0'
+
+      - name: Run A-G Replay #109 and independent untouched holdout matrix
+        id: research_suite
+        if: steps.replay109.outputs.exit_code == '0'
         continue-on-error: true
         run: |
           set +e
-          set -o pipefail
-          python -m crypto_super_radar.ai_sandbox \
-            --db artifacts/blofin_replay.sqlite3 \
-            --equity 1000 \
-            --spread 0.0002 \
-            --output artifacts/ai_sandbox_report.json \
-            --brain artifacts/trained_brain.json \
-            2>&1 | tee artifacts/sandbox.log
-          code=${PIPESTATUS[0]}
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          if [ "$code" -eq 0 ]; then
-            echo "Sandbox completed; report validity, unresolved positions and OOS metrics remain subject to audit." >> "$GITHUB_STEP_SUMMARY"
-            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json
-          from pathlib import Path
-          p = Path("artifacts/ai_sandbox_report.json")
-          report = json.loads(p.read_text(encoding="utf-8"))
-          print("### Replay report summary")
-          for key in ("periods", "equity", "trade_metrics", "quantitative_metrics",
-                      "shadow_book_metrics", "funding_data_quality", "model_calibration",
-                      "walk_forward_audit", "empirical_verdict"):
-              if key in report:
-                  print(f"**{key}**")
-                  print("`json")
-                  print(json.dumps(report[key], ensure_ascii=False, indent=2))
-                  print("`")
-          PY
-          else
-            echo "Sandbox failed closed; no OOS profitability claim is permitted." >> "$GITHUB_STEP_SUMMARY"
-            tail -n 120 artifacts/sandbox.log >> "$GITHUB_STEP_SUMMARY" || true
+          args=(
+            --replay109-db artifacts/replay109/replay109_verified.sqlite3
+            --output-dir artifacts/v3-research
+          )
+          if [ "${{ steps.download.outputs.exit_code }}" = "0" ]; then
+            args+=(--independent-db artifacts/independent_5m.sqlite3)
+            args+=(--independent-start-utc "2025-11-30T09:00:00+00:00")
+            args+=(--independent-end-utc "2026-03-09T00:00:00+00:00")
           fi
+          python -m crypto_super_radar.research_v3_experiments "${args[@]}" \
+            > artifacts/v3-research-execution.log 2>&1
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          cat artifacts/v3-research-execution.log >> "$GITHUB_STEP_SUMMARY" || true
           exit 0
 
       - name: Record execution metadata
@@ -121,19 +150,25 @@ jobs:
             "workflow": "challenge1-v2-historical-replay",
             "branch": "${GITHUB_REF_NAME}",
             "commit": "${GITHUB_SHA}",
+            "replay109_artifact_exit_code": "${{ steps.replay109.outputs.exit_code }}",
             "download_exit_code": "${{ steps.download.outputs.exit_code }}",
-            "sandbox_exit_code": "${{ steps.sandbox.outputs.exit_code }}",
+            "sandbox_exit_code": "NOT_RUN_SEPARATELY; included in A-E research suite",
+            "research_suite_exit_code": "${{ steps.research_suite.outputs.exit_code }}",
             "funding_policy": "explicit API Kind=0 or missing-Kind timestamps only at UTC 00:00/08:00/16:00 boundaries ±10s; fixed 8-hour cadence and exact blackout only",
             "funding_schema_probe": "public Demo API history/current funding metadata probe is included in the artifact; current interval is not substituted for historical per-event kind",
-            "blackout_policy": "block new entries in the exact common funding-data gap; positions overlapping it retain UNKNOWN net PnL",
+            "blackout_policy": "block entries during registered BTC price gaps and post-gap indicator rewarm; BTC positions spanning missing price paths are AMBIGUOUS with no synthetic price or PnL; funding blackouts remain independent",
             "data_policy": "public BloFin Demo market data only; no credentials; no order writes; no synthetic data or interpolation",
-            "spread_policy": "0.0002 modelled spread scenario; not historical order-book spread"
+            "spread_policy": "0.0002 modelled spread scenario; not historical order-book spread",
+            "independent_window": "Download 2025-10-31T09:00:00Z to 2026-03-09T00:00:00Z exclusive; one-month warm-up to 2025-11-30T09:00:00Z; holdout scored strictly OUT_OF_SAMPLE without training or validation; final included 15m open is 2026-03-08T23:45:00Z",
+            "no_order_writes": true
           }
           JSON
           echo "Branch: ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
           echo "Commit: ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Replay #109 artifact exit code: ${{ steps.replay109.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Downloader exit code: ${{ steps.download.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Sandbox exit code: ${{ steps.sandbox.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Independent five-month dataset exit code: ${{ steps.download.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "V3 A-E research suite exit code: ${{ steps.research_suite.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Replay database, logs and report
         if: always()
@@ -143,3 +178,21 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Enforce truthful replay and research outcome
+        if: always()
+        run: |
+          failed=0
+          if [ "${{ steps.replay109.outputs.exit_code }}" != "0" ]; then
+            echo "Replay #109 artifact could not be verified." >> "$GITHUB_STEP_SUMMARY"
+            failed=1
+          fi
+          if [ "${{ steps.download.outputs.exit_code }}" != "0" ]; then
+            echo "Independent historical data download failed closed; no five-month result is claimed." >> "$GITHUB_STEP_SUMMARY"
+            failed=1
+          fi
+          if [ "${{ steps.research_suite.outputs.exit_code }}" != "0" ]; then
+            echo "A-E V3 research suite did not complete." >> "$GITHUB_STEP_SUMMARY"
+            failed=1
+          fi
+          if [ "$failed" -ne 0 ]; then exit 1; fi

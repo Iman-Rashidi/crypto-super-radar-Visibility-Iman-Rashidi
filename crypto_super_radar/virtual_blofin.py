@@ -388,11 +388,22 @@ class TradeResult:
 class VirtualBloFin:
     """Candle-driven simulator. It has no real network or order methods."""
 
-    def __init__(self, *, costs: CostModel | None = None, max_holding_bars: int = 12):
+    def __init__(
+        self, *, costs: CostModel | None = None, max_holding_bars: int = 12,
+        tp1_enabled: bool = True, tp1_reward_r_multiple: float = 1.2,
+        tp1_fraction: float = 0.5,
+    ):
         self.costs = costs or CostModel()
         if not 1 <= max_holding_bars <= 96:
             raise ValueError("max_holding_bars must be 1..96")
+        if not math.isfinite(tp1_reward_r_multiple) or not 0.1 <= tp1_reward_r_multiple <= 10:
+            raise ValueError("tp1_reward_r_multiple must be between 0.1 and 10")
+        if not math.isfinite(tp1_fraction) or not 0 < tp1_fraction <= 0.9:
+            raise ValueError("tp1_fraction must be between 0 and 0.9")
         self.max_holding_bars = int(max_holding_bars)
+        self.tp1_enabled = bool(tp1_enabled)
+        self.tp1_reward_r_multiple = float(tp1_reward_r_multiple)
+        self.tp1_fraction = float(tp1_fraction)
 
     def simulate_post_only_trade(
         self, *, bars: Iterable[Mapping[str, Any]], start_index: int,
@@ -454,8 +465,13 @@ class VirtualBloFin:
                                entry, None, 0, 0, 0, 1, False, rr_items["net_rr"], rr_items)
 
         qty_total = float(size.quantity_contracts)
-        half_decimal = (size.quantity_contracts * Decimal("0.5") / rules.lot_size).to_integral_value(rounding=ROUND_FLOOR) * rules.lot_size
-        tp1_qty = float(half_decimal) if half_decimal >= rules.min_size else 0.0
+        partial_decimal = (
+            size.quantity_contracts * Decimal(str(self.tp1_fraction)) / rules.lot_size
+        ).to_integral_value(rounding=ROUND_FLOOR) * rules.lot_size
+        tp1_qty = (
+            float(partial_decimal)
+            if self.tp1_enabled and partial_decimal >= rules.min_size else 0.0
+        )
         qty_left = qty_total
         cv = float(rules.contract_value)
         entry_notional = entry * qty_total * cv
@@ -467,11 +483,20 @@ class VirtualBloFin:
         funding_blackouts_encountered: list[dict[str, Any]] = []
         realized_gross = 0.0
         tp1 = False
+        tp1_realized_gross_usdt = 0.0
+        tp1_fee_usdt = 0.0
+        tp1_fill_quantity = 0.0
         current_stop = stop
         initial_risk_per_unit = abs(entry - stop)
         net_risk_per_unit = initial_risk_per_unit + entry * (cc.maker_fee + cc.taker_fee + cc.stop_slippage + cc.spread_fraction + cc.funding_reserve)
-        tp1_net_reward_distance = 1.2 * net_risk_per_unit + entry * (cc.maker_fee + cc.maker_fee + cc.spread_fraction + cc.funding_reserve)
-        tp1_price = entry + tp1_net_reward_distance * (1 if side == "LONG" else -1)
+        tp1_net_reward_distance = (
+            self.tp1_reward_r_multiple * net_risk_per_unit
+            + entry * (cc.maker_fee + cc.maker_fee + cc.spread_fraction + cc.funding_reserve)
+        )
+        tp1_price = (
+            entry + tp1_net_reward_distance * (1 if side == "LONG" else -1)
+            if tp1_qty > 0 else None
+        )
         # The exact TP1 break-even stop is calculated at the partial fill,
         # after its maker fee and every funding event observed so far are known.
         be_stop = None
@@ -599,8 +624,8 @@ class VirtualBloFin:
                 exit_reason, exit_ts = "SL", close_ts
                 break
 
-            # TIME_EXIT is a resting limit submitted only after the twelfth
-            # completed holding candle. It cannot fill on its submission bar.
+            # TIME_EXIT is a resting limit submitted only after the configured
+            # number of completed holding candles. It cannot fill on its submission bar.
             if time_exit_limit_price is not None:
                 time_exit_filled = (
                     last_high >= time_exit_limit_price + tick
@@ -614,13 +639,16 @@ class VirtualBloFin:
                 continue
 
             tp1_hit = tp1_qty > 0 and not tp1 and (
-                last_high >= tp1_price + tick if side == "LONG" else last_low <= tp1_price - tick
+                last_high >= float(tp1_price) + tick if side == "LONG" else last_low <= float(tp1_price) - tick
             )
             target_hit = (last_high >= target + tick) if side == "LONG" else (last_low <= target - tick)
             if not tp1 and tp1_hit:
                 close_qty = min(tp1_qty, qty_left)
-                realized_gross += (tp1_price - entry) * close_qty * cv * (1 if side == "LONG" else -1)
-                fees += tp1_price * close_qty * cv * cc.maker_fee
+                tp1_realized_gross_usdt = (float(tp1_price) - entry) * close_qty * cv * (1 if side == "LONG" else -1)
+                tp1_fee_usdt = float(tp1_price) * close_qty * cv * cc.maker_fee
+                tp1_fill_quantity = close_qty
+                realized_gross += tp1_realized_gross_usdt
+                fees += tp1_fee_usdt
                 qty_left -= close_qty
                 tp1 = True
                 be_stop = _net_breakeven_stop_price(
@@ -684,6 +712,13 @@ class VirtualBloFin:
                 "funding_complete": funding_complete,
                 "funding_blackouts": funding_blackouts_encountered,
                 "gross_realized_pnl_usdt": realized_gross,
+                "tp1_enabled": self.tp1_enabled,
+                "tp1_reward_r_multiple": self.tp1_reward_r_multiple,
+                "tp1_fraction": self.tp1_fraction,
+                "tp1_fill_quantity": tp1_fill_quantity,
+                "tp1_fill_price": float(tp1_price) if tp1 else None,
+                "tp1_realized_gross_pnl_usdt": tp1_realized_gross_usdt,
+                "tp1_fee_usdt": tp1_fee_usdt,
                 "total_fees_usdt": fees,
                 "funding_paid_usdt": funding_total,
                 "spread_cost_usdt": spread_cost,
@@ -726,6 +761,13 @@ class VirtualBloFin:
             "same_bar_tp_sl_precedence": "SL_FIRST",
             "funding_event_count": sum(1 for x in funding if x.get("_applied") is True),
             "gross_realized_pnl_usdt": gross_before_execution_costs,
+            "tp1_enabled": self.tp1_enabled,
+            "tp1_reward_r_multiple": self.tp1_reward_r_multiple,
+            "tp1_fraction": self.tp1_fraction,
+            "tp1_fill_quantity": tp1_fill_quantity,
+            "tp1_fill_price": float(tp1_price) if tp1 else None,
+            "tp1_realized_gross_pnl_usdt": tp1_realized_gross_usdt,
+            "tp1_fee_usdt": tp1_fee_usdt,
             "total_fees_usdt": fees,
             "funding_paid_usdt": funding_total,
             "funding_complete": funding_complete,

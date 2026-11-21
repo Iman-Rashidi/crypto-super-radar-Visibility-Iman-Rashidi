@@ -20,16 +20,99 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-from .adaptive_brain import OnlineMetaBrain
+from .adaptive_brain import OnlineMetaBrain, ShadowPatternBrain
+from .pattern_intelligence_v3 import PATTERN_FAMILIES, advance_pattern_lifecycle, analyze_unified_patterns_v3, lifecycle_outcomes, pattern_family_performance
 from .challenge1_v2 import (
     analyze_signal, atr, prepare_signal_context, prepared_signal_history_ready,
 )
 from .virtual_blofin import CostModel, InstrumentRules, InsufficientEquityForRisk, SimulationError, VirtualBloFin
 from .market_replay import (
     REGULAR_FUNDING_INTERVAL_MS, FUNDING_SCHEDULE_TOLERANCE_MS,
-    OBSERVED_FUNDING_BLACKOUTS, _classify_funding_schedule_events,
-    _is_observed_blackout_gap, _is_regular_utc_funding_boundary,
+    OBSERVED_FUNDING_BLACKOUTS, OBSERVED_PRICE_CANDLE_BLACKOUTS,
+    _classify_funding_schedule_events, _is_observed_blackout_gap,
+    _is_price_candle_blackout, _is_regular_utc_funding_boundary,
 )
+
+
+
+def _combine_price_candle_blackout_windows(
+    instrument_id: str, windows: list[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Combine only the evidence-backed windows for one instrument."""
+    selected = [
+        dict(window) for window in windows
+        if str(window.get("instrument_id") or "").upper() == str(instrument_id).upper()
+    ]
+    if not selected:
+        return None
+    return {
+        "instrument_id": str(instrument_id).upper(),
+        "start_ms": min(int(window["start_ms"]) for window in selected),
+        "end_exclusive_ms": max(int(window["end_exclusive_ms"]) for window in selected),
+        "timeframe_windows": selected,
+    }
+
+
+def _price_candle_entry_block_status(
+    timestamp_ms: int, blackout_window: Mapping[str, Any] | None,
+    *, indicator_rewarm_complete: bool,
+) -> str | None:
+    """Return why a new simulated entry must be blocked during a price gap or rewarm."""
+    if blackout_window is None:
+        return None
+    stamp = int(timestamp_ms)
+    start = int(blackout_window["start_ms"])
+    end = int(blackout_window["end_exclusive_ms"])
+    if start <= stamp < end:
+        return "PRICE_CANDLE_BLACKOUT"
+    if stamp >= end and not indicator_rewarm_complete:
+        return "PRICE_CANDLE_BLACKOUT_INDICATOR_REWARM"
+    return None
+
+
+def _ambiguous_price_candle_position(
+    order: Mapping[str, Any], blackout_window: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Mark a pre-gap order Ambiguous, without inventing fill, exit, or PnL."""
+    if blackout_window is None:
+        return None
+    symbol = str(order.get("symbol") or "").upper()
+    submitted_ms = int(order.get("submitted_ts_ms") or 0)
+    if symbol != str(blackout_window["instrument_id"]).upper():
+        return None
+    if submitted_ms >= int(blackout_window["start_ms"]):
+        return None
+    return {
+        "signal_id": order.get("signal_id"),
+        "instrument_id": symbol,
+        "direction": order.get("direction"),
+        "phase": order.get("phase"),
+        "status": "AMBIGUOUS_PRICE_CANDLE_BLACKOUT",
+        "position_state_before_gap": "FILLED_OR_OPEN" if order.get("entry_checked") else "ENTRY_PENDING",
+        "entry_checked_before_gap": bool(order.get("entry_checked")),
+        "entry_ts_ms": order.get("entry_ts_ms"),
+        "submitted_ts_ms": submitted_ms,
+        "last_observed_through_ts_ms": order.get("last_observed_through_ts_ms"),
+        "blackout_start_ms": int(blackout_window["start_ms"]),
+        "blackout_end_exclusive_ms": int(blackout_window["end_exclusive_ms"]),
+        "exit_ts_ms": None,
+        "exit_price": None,
+        "net_pnl_usdt": None,
+        "synthetic_candles_used": False,
+        "reason": "Price path is absent; stop/target/fill outcome cannot be inferred.",
+    }
+
+
+
+def _pattern_trade_excursions(bars:list[dict[str,Any]],*,direction:str,entry_price:float,entry_ts_ms:int,exit_ts_ms:int)->dict[str,float|None]:
+    """Closed Mark-candle MFE/MAE proxies over the observed holding interval."""
+    if not np.isfinite(entry_price) or entry_price<=0: return {"mfe_pct":None,"mae_pct":None,"excursion_bars":0}
+    visible=[r for r in bars if int(r.get("close_ts") or (int(r["ts"])+BAR_MS))<=exit_ts_ms and int(r.get("close_ts") or (int(r["ts"])+BAR_MS))>entry_ts_ms]
+    hi=[float(r["mark_high"]) for r in visible if r.get("mark_high") is not None]; lo=[float(r["mark_low"]) for r in visible if r.get("mark_low") is not None]
+    if not hi or not lo: return {"mfe_pct":None,"mae_pct":None,"excursion_bars":len(visible)}
+    if direction=="LONG": mfe=max(0,max((v-entry_price)/entry_price for v in hi)); mae=max(0,max((entry_price-v)/entry_price for v in lo))
+    else: mfe=max(0,max((entry_price-v)/entry_price for v in lo)); mae=max(0,max((v-entry_price)/entry_price for v in hi))
+    return {"mfe_pct":round(mfe*100,6),"mae_pct":round(mae*100,6),"excursion_bars":len(visible)}
 
 DEFAULT_WATCHLIST = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 BAR_MS = 15 * 60_000
@@ -155,6 +238,8 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     )
     if len(market) < 70:
         raise SandboxDataError(f"insufficient aligned market/mark candles for {symbol}")
+    price_blackout_observed = False
+    matched_price_blackouts: dict[tuple[str, int], dict[str, Any]] = {}
     for label, frame, interval in (
         ("15m", frames["15m"], pd.Timedelta(minutes=15)),
         ("1H", frames["1H"], pd.Timedelta(hours=1)),
@@ -165,9 +250,57 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
             raise SandboxDataError(f"{symbol} {label} timestamps are duplicated or unordered")
         gaps = frame.index.to_series().diff().dropna()
-        if not gaps.empty and not (gaps == interval).all():
-            raise SandboxDataError(f"{symbol} {label} replay has missing candle intervals")
+        bad_positions = np.flatnonzero((gaps != interval).to_numpy())
+        if len(bad_positions):
+            approved = False
+            approved_symbols = {
+                str(window["instrument_id"]).upper()
+                for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+            }
+            if symbol in approved_symbols and label in {"15m", "1H", "4H", "MARK_15m", "ALIGNED_15m"} and len(bad_positions) == 1:
+                position = int(bad_positions[0])
+                left_ms = int(frame.index[position].timestamp() * 1000)
+                right_ms = int(frame.index[position + 1].timestamp() * 1000)
+                interval_ms = int(interval.total_seconds() * 1000)
+                missing_count = int((right_ms - left_ms) // interval_ms - 1)
+                first_missing_ms = left_ms + interval_ms
+                last_missing_ms = right_ms - interval_ms
+                observed_bar = "15m" if label in {"MARK_15m", "ALIGNED_15m"} else label
+                observed_source = "MARK" if label == "MARK_15m" else "LAST"
+                for window in OBSERVED_PRICE_CANDLE_BLACKOUTS:
+                    if (
+                        window["instrument_id"] == symbol
+                        and window["bar"] == observed_bar
+                        and window["source"] == observed_source
+                        and int(window["start_ms"]) == first_missing_ms
+                        and int(window["last_missing_ms"]) == last_missing_ms
+                        and int(window["missing_intervals"]) == missing_count
+                    ):
+                        matched_price_blackouts[(symbol, first_missing_ms)] = dict(window)
+                        approved = True
+                        price_blackout_observed = True
+                        break
+            if not approved:
+                first_bad = int(bad_positions[0])
+                left = frame.index[first_bad]
+                right = frame.index[first_bad + 1]
+                raise SandboxDataError(
+                    f"{symbol} {label} replay has unregistered missing candle intervals: "
+                    f"left={left.isoformat()} right={right.isoformat()}"
+                )
     market["atr_15m"] = atr(market, 14)
+    if price_blackout_observed:
+        approved_15m_windows = [
+            window for window in matched_price_blackouts.values()
+            if window["bar"] == "15m" and window["source"] == "LAST"
+        ]
+        if approved_15m_windows:
+            recovery_start = pd.to_datetime(
+                max(int(window["end_exclusive_ms"]) for window in approved_15m_windows),
+                unit="ms", utc=True,
+            )
+            post_gap = market.loc[market.index >= recovery_start]
+            market.loc[post_gap.index, "atr_15m"] = atr(post_gap, 14)
     market = market.dropna(subset=["atr_15m"])
     source_start = max(
         market.index[0],
@@ -261,6 +394,7 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         "rules": rules,
         "source_start": source_start,
         "source_end": source_end,
+        "price_candle_blackouts": list(matched_price_blackouts.values()),
     }
 
 
@@ -345,6 +479,160 @@ def _within_purge_window(
     return asof_ms >= boundary_ms - purge_ms
 
 
+V3_PATTERN_BRAIN_SCORE_FLOOR = 0.45
+V3_TOXIC_PATTERN_NAMES = {
+    "symmetrical triangle",
+    "tweezer bottom",
+    "rising wedge",
+}
+V3_PRIORITY_PATTERN_DIRECTIONS = {
+    "bullish engulfing": "BULLISH",
+    "descending channel": "BEARISH",
+    "three inside up": "BULLISH",
+    "hanging man": "BEARISH",
+}
+
+
+def _v3_pattern_entry_gate(
+    *,
+    detections: list[Mapping[str, Any]],
+    expected_direction: str,
+    brain_evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Causal post-TRAIN filter; it never changes training labels or sizing."""
+    side = str(expected_direction).upper()
+    if side not in {"LONG", "SHORT"}:
+        raise ValueError("expected_direction must be LONG or SHORT")
+    wanted_pattern_direction = "BULLISH" if side == "LONG" else "BEARISH"
+    active = [
+        item for item in detections
+        if str(item.get("lifecycle_status") or item.get("state") or "").upper()
+        not in {"INVALIDATED", "EXPIRED"}
+    ]
+    toxic = sorted({
+        str(item.get("name_en") or item.get("name") or "").strip()
+        for item in active
+        if str(item.get("name_en") or item.get("name") or "").strip().lower()
+        in V3_TOXIC_PATTERN_NAMES
+    })
+    sweep = sorted({
+        str(item.get("name_en") or item.get("name") or "Liquidity Sweep").strip()
+        for item in active
+        if str(item.get("family") or "").lower() == "liquidity_sweep"
+        or "liquidity sweep" in str(item.get("name_en") or item.get("name") or "").lower()
+    })
+    score = brain_evaluation.get("score_0_1")
+    try:
+        score_value = float(score) if score is not None else None
+    except (TypeError, ValueError, OverflowError):
+        score_value = None
+    if score_value is not None and not np.isfinite(score_value):
+        score_value = None
+    priority = sorted({
+        name for item in active
+        for name in [str(item.get("name_en") or item.get("name") or "").strip()]
+        if name.lower() in V3_PRIORITY_PATTERN_DIRECTIONS
+        and str(item.get("direction") or "").upper()
+        == V3_PRIORITY_PATTERN_DIRECTIONS[name.lower()]
+        == wanted_pattern_direction
+    })
+    priority_bonus = min(0.10, 0.05 * len(priority))
+    adjusted_score = min(1.0, score_value + priority_bonus) if score_value is not None else None
+
+    if toxic or sweep:
+        reasons = []
+        if toxic:
+            reasons.append("TOXIC_PATTERN:" + ",".join(toxic))
+        if sweep:
+            reasons.append("LIQUIDITY_SWEEP_HIGH_FALSE_BREAK_RATE:" + ",".join(sweep))
+        return {
+            "decision": "VETO", "reason": "|".join(reasons),
+            "toxic_patterns": toxic, "liquidity_sweeps": sweep,
+            "priority_patterns": priority, "priority_bonus": priority_bonus,
+            "brain_score": score_value, "adjusted_brain_score": adjusted_score,
+            "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+        }
+    if adjusted_score is not None and adjusted_score < V3_PATTERN_BRAIN_SCORE_FLOOR:
+        return {
+            "decision": "VETO", "reason": "V3_PATTERN_BRAIN_LOW_SCORE",
+            "toxic_patterns": [], "liquidity_sweeps": [],
+            "priority_patterns": priority, "priority_bonus": priority_bonus,
+            "brain_score": score_value, "adjusted_brain_score": adjusted_score,
+            "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+        }
+    return {
+        "decision": "ALLOW", "reason": "NO_V3_VETO",
+        "toxic_patterns": [], "liquidity_sweeps": [],
+        "priority_patterns": priority, "priority_bonus": priority_bonus,
+        "brain_score": score_value, "adjusted_brain_score": adjusted_score,
+        "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+    }
+
+
+def _v3_pattern_shadow_observation(
+    *,
+    detections: list[Mapping[str, Any]],
+    expected_direction: str,
+    brain_evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Record what V3 would recommend without allowing it to affect entries."""
+    suggestion = _v3_pattern_entry_gate(
+        detections=detections,
+        expected_direction=expected_direction,
+        brain_evaluation=brain_evaluation,
+    )
+    return {
+        **suggestion,
+        "decision": "SHADOW_ONLY",
+        "reason": "TELEMETRY_ONLY_NO_ENTRY_VETO",
+        "suggested_decision": suggestion["decision"],
+        "suggested_reason": suggestion["reason"],
+        "would_veto": suggestion["decision"] == "VETO",
+        "telemetry_only": True,
+    }
+
+
+def _v3_pattern_research_observation(
+    *,
+    detections: list[Mapping[str, Any]],
+    expected_direction: str,
+    brain_evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Explicit opt-in research mode; this result is used only in offline replay."""
+    suggestion = _v3_pattern_entry_gate(
+        detections=detections,
+        expected_direction=expected_direction,
+        brain_evaluation=brain_evaluation,
+    )
+    would_veto = suggestion["decision"] == "VETO"
+    return {
+        **suggestion,
+        "decision": "RESEARCH_FILTER",
+        "reason": "V3_RESEARCH_FILTER_VETO" if would_veto else "V3_RESEARCH_FILTER_ALLOW",
+        "suggested_decision": suggestion["decision"],
+        "suggested_reason": suggestion["reason"],
+        "would_veto": would_veto,
+        "telemetry_only": False,
+        "research_only": True,
+    }
+
+
+def _actual_entry_veto(
+    *,
+    model_veto: bool,
+    pattern_observation: Mapping[str, Any],
+    v3_research_filter: bool = False,
+) -> bool:
+    """V3 vetoes are accepted only behind the explicit offline research switch."""
+    if v3_research_filter:
+        if pattern_observation.get("decision") != "RESEARCH_FILTER":
+            raise ValueError("V3 research observation must use RESEARCH_FILTER mode")
+        return bool(model_veto or pattern_observation.get("would_veto"))
+    if pattern_observation.get("decision") != "SHADOW_ONLY":
+        raise ValueError("V3 pattern observation must be SHADOW_ONLY")
+    return bool(model_veto)
+
+
 def _calibration_report(observations: list[dict[str, Any]], *, bins: int = 10) -> dict[str, Any]:
     valid = []
     for row in observations:
@@ -408,6 +696,59 @@ def _phase(asof_ms: int, train_end_ms: int, validation_end_ms: int) -> str:
     if asof_ms <= validation_end_ms:
         return "VALIDATION"
     return "OUT_OF_SAMPLE"
+
+
+def _gross_to_fee_ratio(signal: Mapping[str, Any], *, contract_value: float,
+                        costs: CostModel, tp1_reward_r_multiple: float = 1.2,
+                        tp1_fraction: float = 0.5) -> float | None:
+    """Signal-time target reward divided by modeled maker fees, spread and funding reserve."""
+    try:
+        entry, stop, target = (float(signal[k]) for k in ("entry", "stop_loss", "take_profit"))
+        cv, fraction, reward_r = float(contract_value), float(tp1_fraction), float(tp1_reward_r_multiple)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(np.isfinite(v) for v in (entry, stop, target, cv, fraction, reward_r)):
+        return None
+    if entry <= 0 or stop <= 0 or target <= 0 or cv <= 0 or not 0 < fraction < 1 or reward_r <= 0:
+        return None
+    direction = str(signal.get("signal") or "").upper()
+    if direction not in {"LONG", "SHORT"}:
+        return None
+    if not ((stop < entry < target) if direction == "LONG" else (target < entry < stop)):
+        return None
+    net_risk = abs(entry - stop) + entry * (
+        costs.maker_fee + costs.taker_fee + costs.stop_slippage
+        + costs.spread_fraction + costs.funding_reserve
+    )
+    tp1_distance = reward_r * net_risk + entry * (
+        2 * costs.maker_fee + costs.spread_fraction + costs.funding_reserve
+    )
+    tp1_price = entry + tp1_distance if direction == "LONG" else entry - tp1_distance
+    gross_reward = cv * (
+        fraction * tp1_distance + (1.0 - fraction) * abs(target - entry)
+    )
+    friction = cv * (
+        entry * costs.maker_fee
+        + fraction * tp1_price * costs.maker_fee
+        + (1.0 - fraction) * target * costs.maker_fee
+        + entry * (costs.spread_fraction + costs.funding_reserve)
+    )
+    if not np.isfinite(gross_reward) or not np.isfinite(friction) or friction <= 0:
+        return None
+    return float(gross_reward / friction)
+
+
+def _passes_cost_friction_guard(ratio: float | None, minimum_ratio: float) -> bool:
+    if not np.isfinite(minimum_ratio) or minimum_ratio <= 0:
+        raise ValueError("minimum gross-to-fee ratio must be finite and positive")
+    return ratio is not None and np.isfinite(ratio) and float(ratio) >= float(minimum_ratio)
+
+
+def _passes_4h_regime_alignment(signal: Mapping[str, Any], enabled: bool) -> bool:
+    if not enabled:
+        return True
+    regime = signal.get("regime")
+    return isinstance(regime, Mapping) and regime.get("aligned_4h") is True
 
 
 def _max_consecutive_losses(trades: list[dict[str, Any]]) -> int:
@@ -500,11 +841,48 @@ def run_sandbox(
     spread_scenario: float = 0.0002,
     output_path: str = "reports/ai_sandbox_report.json",
     brain_path: str = "reports/trained_brain.json",
+    max_holding_bars: int = 12,
+    tp1_enabled: bool = True,
+    tp1_reward_r_multiple: float = 1.2,
+    tp1_fraction: float = 0.5,
+    stop_atr_multiplier_overrides: Mapping[str, float] | None = None,
+    v3_research_filter: bool = False,
+    cost_friction_guard: bool = False,
+    minimum_gross_to_fee_ratio: float = 3.0,
+    four_hour_regime_alignment: bool = False,
+    replay_start_utc: str | None = None,
+    replay_end_utc: str | None = None,
+    replay_months: int = 6,
+    training_months: int = 4,
+    validation_months: int = 5,
+    risk_fraction: float = 0.0025,
 ) -> dict[str, Any]:
+    stop_overrides: dict[str, float] = {}
+    for raw_symbol, raw_multiplier in (stop_atr_multiplier_overrides or {}).items():
+        symbol_key = str(raw_symbol or "").strip().upper()
+        if symbol_key not in symbols:
+            raise ValueError(f"stop ATR override symbol is not in selected watchlist: {symbol_key}")
+        multiplier = float(raw_multiplier)
+        if not np.isfinite(multiplier) or not 0.5 <= multiplier <= 4.0:
+            raise ValueError(f"stop ATR override for {symbol_key} must be between 0.5 and 4.0")
+        stop_overrides[symbol_key] = multiplier
     if not 0 < initial_equity or not np.isfinite(initial_equity):
         raise ValueError("initial_equity must be positive")
     if not 0 <= spread_scenario <= 0.0004:
         raise ValueError("spread_scenario must be between 0 and 0.04%")
+    if not 1 <= max_holding_bars <= 96:
+        raise ValueError("max_holding_bars must be 1..96")
+    if replay_end_utc is None:
+        if not 1 <= replay_months <= 24:
+            raise ValueError("replay_months must be 1..24")
+        if not 1 <= training_months <= validation_months < replay_months:
+            raise ValueError("require 1 <= training_months <= validation_months < replay_months")
+    elif replay_start_utc is None or training_months != 0 or validation_months != 0:
+        raise ValueError("explicit independent holdout requires a start and zero TRAIN/VALIDATION months")
+    if not np.isfinite(minimum_gross_to_fee_ratio) or minimum_gross_to_fee_ratio <= 0:
+        raise ValueError("minimum_gross_to_fee_ratio must be finite and positive")
+    if not np.isfinite(risk_fraction) or not 0.0001 <= risk_fraction <= 0.01:
+        raise ValueError("risk_fraction must be between 0.01% and 1.0% of equity")
     connection = sqlite3.connect(db_path)
     try:
         market = {symbol: _load_symbol(connection, symbol) for symbol in symbols}
@@ -516,6 +894,25 @@ def run_sandbox(
 
     # Validate once and build causal indicator/pivot caches outside the 15m loop.
     btc_frame_15m = market["BTC-USDT"]["frames"]["15m"]
+    price_blackout_windows_by_symbol = {
+        symbol: list(item.get("price_candle_blackouts") or [])
+        for symbol, item in market.items()
+    }
+    price_blackout_windows = [
+        window for windows in price_blackout_windows_by_symbol.values()
+        for window in windows
+    ]
+    price_blackout_window_by_symbol = {
+        symbol: _combine_price_candle_blackout_windows(symbol, windows)
+        for symbol, windows in price_blackout_windows_by_symbol.items()
+    }
+    btc_price_blackout_window = price_blackout_window_by_symbol.get("BTC-USDT")
+    btc_price_blackout_context_rewarmed = btc_price_blackout_window is None
+    price_blackout_context_rewarmed_by_symbol = {
+        symbol: window is None
+        for symbol, window in price_blackout_window_by_symbol.items()
+    }
+    signal_frames = {symbol: dict(item["frames"]) for symbol, item in market.items()}
     prepared_contexts = {
         symbol: prepare_signal_context(
             item["frames"]["1H"], item["frames"]["4H"],
@@ -523,13 +920,45 @@ def run_sandbox(
         )
         for symbol, item in market.items()
     }
-    # All five markets must cover the same six-calendar-month replay horizon.
-    # The downloader and loader fail closed on missing candles or funding events.
-    start_time = max(item["source_start"] for item in market.values())
+    # Selected markets must cover the explicitly requested calendar window.
+    # Indicators remain causal: frames are cut by each as-of timestamp at use.
+    source_start = max(item["source_start"] for item in market.values())
     common_end = min(item["source_end"] for item in market.values())
-    oos_end = _required_replay_end(start_time, common_end)
-    train_end = start_time + pd.DateOffset(months=4)
-    validation_end = start_time + pd.DateOffset(months=5)
+    if replay_start_utc is None:
+        start_time = source_start
+    else:
+        requested_start = pd.Timestamp(replay_start_utc)
+        if requested_start.tzinfo is None:
+            raise ValueError("replay_start_utc must include an explicit timezone")
+        start_time = requested_start.tz_convert("UTC")
+    if start_time < source_start or start_time >= common_end:
+        raise SandboxDataError(
+            f"requested replay start is outside the common dataset: "
+            f"start={start_time.isoformat()} source_start={source_start.isoformat()} "
+            f"common_end={common_end.isoformat()}"
+        )
+    if replay_end_utc is None:
+        oos_end = start_time + pd.DateOffset(months=replay_months)
+        if common_end < oos_end:
+            raise SandboxDataError(
+                f"replay coverage is shorter than requested {replay_months}-month window: "
+                f"start={start_time.isoformat()} end={common_end.isoformat()} "
+                f"required_end_at_least={oos_end.isoformat()}"
+            )
+        train_end = start_time + pd.DateOffset(months=training_months)
+        validation_end = start_time + pd.DateOffset(months=validation_months)
+    else:
+        requested_end = pd.Timestamp(replay_end_utc)
+        if requested_end.tzinfo is None:
+            raise ValueError("replay_end_utc must include an explicit timezone")
+        oos_end = requested_end.tz_convert("UTC")
+        if oos_end <= start_time or oos_end > common_end:
+            raise SandboxDataError(
+                f"explicit holdout end is outside common data: start={start_time.isoformat()} "
+                f"end={oos_end.isoformat()} common_end={common_end.isoformat()}"
+            )
+        train_end = start_time
+        validation_end = start_time
     train_end_ms = int(train_end.timestamp() * 1000)
     validation_end_ms = int(validation_end.timestamp() * 1000)
     times = sorted(
@@ -541,8 +970,19 @@ def run_sandbox(
         raise SandboxDataError("replay dataset is too small after six-month window alignment")
 
     costs = CostModel(spread_fraction=spread_scenario)
-    exchange = VirtualBloFin(costs=costs, max_holding_bars=12)
+    exchange = VirtualBloFin(
+        costs=costs, max_holding_bars=max_holding_bars,
+        tp1_enabled=tp1_enabled, tp1_reward_r_multiple=tp1_reward_r_multiple,
+        tp1_fraction=tp1_fraction,
+    )
     brain = OnlineMetaBrain(warmup_trades=100, min_per_class=20)
+    pattern_brain = ShadowPatternBrain(warmup_trades=20, min_per_class=5)
+    pattern_lifecycle: dict[str, dict[str, Any]] = {}
+    closed_pattern_training_trades = 0
+    last_pattern_brain_train_examples = 0
+    pattern_brain_freeze_train_count: int | None = None
+    pattern_brain_freeze_metadata: dict[str, Any] | None = None
+    v3_capacity_releases: list[dict[str, Any]] = []
     equity = float(initial_equity)
     active_orders: list[dict[str, Any]] = []
     shadow_orders: list[dict[str, Any]] = []
@@ -551,6 +991,8 @@ def run_sandbox(
     shadow_trades: list[dict[str, Any]] = []
     unknown_pnl_trades: list[dict[str, Any]] = []
     unknown_shadow_pnl_trades: list[dict[str, Any]] = []
+    ambiguous_price_gap_positions: list[dict[str, Any]] = []
+    ambiguous_shadow_price_gap_positions: list[dict[str, Any]] = []
     closed_training_trades = 0
     training_candle_count = 0
     last_train_candle = 0
@@ -592,6 +1034,16 @@ def run_sandbox(
             survivors: list[dict[str, Any]] = []
             for order in collection:
                 symbol = str(order["symbol"])
+                order_blackout_window = price_blackout_window_by_symbol.get(symbol)
+                ambiguous_record = _ambiguous_price_candle_position(order, order_blackout_window)
+                if ambiguous_record is not None and int(stamp.timestamp() * 1000) >= int(order_blackout_window["end_exclusive_ms"]):
+                    if is_shadow:
+                        ambiguous_shadow_price_gap_positions.append(ambiguous_record)
+                        counts["price_blackout_ambiguous_shadow_positions"] += 1
+                    else:
+                        ambiguous_price_gap_positions.append(ambiguous_record)
+                        counts["price_blackout_ambiguous_positions"] += 1
+                    continue
                 if order["phase"] != phase and not order.get("phase_boundary_crossed"):
                     order["phase_boundary_crossed"] = True
                     counts["cross_boundary_positions"] += 1
@@ -600,6 +1052,7 @@ def run_sandbox(
                     survivors.append(order)
                     continue
                 item = market[symbol]
+                advance_pattern_lifecycle(pattern_lifecycle, instrument_id=symbol, frames=item["frames"], asof=asof)
                 # The simulator only reads the entry candle and subsequent
                 # holding candles. Rebase that bounded slice to index zero;
                 # every supplied candle is closed by the current as-of time.
@@ -623,7 +1076,7 @@ def run_sandbox(
                         stop_price=order["stop_loss"],
                         target_price=order["take_profit"],
                         equity_usdt=float(order["equity_snapshot"]),
-                        risk_fraction=0.0025,
+                        risk_fraction=risk_fraction,
                         rules=item["rules"],
                         funding_events=item["funding"],
                         spread_fraction=spread_scenario,
@@ -719,6 +1172,8 @@ def run_sandbox(
                         "fees_usdt": result.fees_usdt,
                         "known_funding_usdt": result.funding_usdt,
                         "funding_blackouts": result.diagnostics.get("funding_blackouts", []),
+                        "pattern_features": dict(order.get("pattern_features") or {}),
+                        "pattern_lifecycle_outcomes": lifecycle_outcomes(pattern_lifecycle, order.get("pattern_family_keys") or {}),
                     }
                     if is_shadow:
                         unknown_shadow_pnl_trades.append(record)
@@ -782,6 +1237,13 @@ def run_sandbox(
                     "slippage_cost_usdt": float(result.diagnostics["slippage_cost_usdt"]),
                     "veto_correct": result.net_pnl_usdt <= 0,
                     "source": "COUNTERFACTUAL_SHADOW",
+                    "veto_source": order.get("veto_source"),
+                    "veto_reason": order.get("veto_reason"),
+                    "pattern_brain_score": (order.get("pattern_gate") or {}).get("brain_score"),
+                    "pattern_brain_adjusted_score": (order.get("pattern_gate") or {}).get("adjusted_brain_score"),
+                    "pattern_priority_bonus": (order.get("pattern_gate") or {}).get("priority_bonus", 0.0),
+                    "priority_patterns": list((order.get("pattern_gate") or {}).get("priority_patterns") or []),
+                    "pattern_gate_telemetry": dict(order.get("pattern_gate") or {}),
                 })
                 if (
                     order["phase"] in calibration_observations
@@ -829,6 +1291,15 @@ def run_sandbox(
                 "entry_ts_ms": int(result.diagnostics["entry_ts_ms"]),
                 "exit_ts_ms": exit_ts_ms,
                 "exit_reason": result.exit_reason,
+                "entry_price": float(result.filled_entry or order["entry"]),
+                "stop_loss_price": float(order["stop_loss"]),
+                "take_profit_price": float(order["take_profit"]),
+                "gross_to_fee_ratio_at_signal": order.get("gross_to_fee_ratio_at_signal"),
+                "aligned_4h_at_signal": order.get("aligned_4h_at_signal"),
+                "atr_15m_at_signal": float(order["signal_atr_15m"]),
+                "stop_distance_pct": abs(float(result.filled_entry or order["entry"]) - float(order["stop_loss"])) / float(result.filled_entry or order["entry"]) * 100.0,
+                "stop_distance_atr": abs(float(result.filled_entry or order["entry"]) - float(order["stop_loss"])) / float(order["signal_atr_15m"]) if float(order["signal_atr_15m"]) > 0 else None,
+                "exit_price": float(result.average_exit) if result.average_exit is not None else None,
                 "net_pnl_usdt": result.net_pnl_usdt,
                 "risk_budget_usdt": float(result.diagnostics.get("risk_budget_usdt", 0.0)),
                 "all_in_stop_risk_usdt": float(result.diagnostics.get("all_in_stop_risk_usdt", 0.0)),
@@ -841,8 +1312,21 @@ def run_sandbox(
                 "spread_cost_usdt": spread_cost,
                 "slippage_cost_usdt": slippage_cost,
                 "tp1_filled": result.tp1_filled,
+                "tp1_fill_quantity": float(result.diagnostics.get("tp1_fill_quantity", 0.0)),
+                "tp1_fill_price": result.diagnostics.get("tp1_fill_price"),
+                "tp1_realized_gross_pnl_usdt": float(result.diagnostics.get("tp1_realized_gross_pnl_usdt", 0.0)),
+                "tp1_fee_usdt": float(result.diagnostics.get("tp1_fee_usdt", 0.0)),
                 "net_rr_at_entry": result.net_rr_at_entry,
                 "model_decision": order["model_decision"],
+                "capacity_replacement_for_signal_id": order.get("capacity_replacement_for_signal_id"),
+                "capacity_released_by_v3_at_ms": order.get("capacity_released_by_v3_at_ms"),
+                "pattern_features": dict(order.get("pattern_features") or {}),
+                "pattern_detections": list(order.get("pattern_detections") or []),
+                "market_regime": order.get("pattern_market_regime","UNKNOWN"),
+                "pattern_brain_shadow_score": (order.get("pattern_brain_evaluation") or {}).get("score_0_1"),
+                "pattern_gate_telemetry": dict(order.get("pattern_gate") or {}),
+                "pattern_lifecycle_outcomes": lifecycle_outcomes(pattern_lifecycle, order.get("pattern_family_keys") or {}),
+                **_pattern_trade_excursions(market[order["symbol"]]["bars"],direction=order["direction"],entry_price=float(result.filled_entry or order["entry"]),entry_ts_ms=int(result.diagnostics["entry_ts_ms"]),exit_ts_ms=exit_ts_ms),
             })
             if (
                 order["phase"] in calibration_observations
@@ -874,6 +1358,10 @@ def run_sandbox(
                     source="EXECUTED_TRAINING_TRADE",
                 )
                 closed_training_trades += 1
+                label=pattern_brain.add_finalized_outcome(signal_id=order["signal_id"],instrument_id=order["symbol"],
+                    candle_time_utc=datetime.fromtimestamp(int(result.diagnostics["entry_ts_ms"])/1000,timezone.utc).isoformat(),
+                    features=order.get("pattern_features") or {},net_pnl_usdt=result.net_pnl_usdt,fees_complete=True,funding_complete=True)
+                if label.get("inserted"): closed_pattern_training_trades += 1
 
         # Only matured TRAIN labels can update weights. Retry readiness checks
         # during validation if a training trade crossed the calendar boundary.
@@ -889,11 +1377,74 @@ def run_sandbox(
                 if train_status.get("status") == "TRAINED":
                     counts["training_rounds"] += 1
                 last_train_candle = training_candle_count
-        else:
-            if model_freeze_train_count is None:
-                model_freeze_train_count = brain.train_count
-            elif brain.train_count != model_freeze_train_count:
-                raise SandboxDataError("model weights changed after the TRAIN phase freeze")
+        if phase=="TRAIN" and len(pattern_brain.examples)>=pattern_brain.warmup_trades and len(pattern_brain.examples)-last_pattern_brain_train_examples>=5:
+            train_state=pattern_brain.train()
+            if train_state.get("status")=="TRAINED": counts["pattern_training_rounds"]+=1; last_pattern_brain_train_examples=len(pattern_brain.examples)
+        if phase!="TRAIN":
+            if pattern_brain_freeze_train_count is None:
+                if not pattern_brain.trained and len(pattern_brain.examples)>=pattern_brain.warmup_trades:
+                    train_state=pattern_brain.train()
+                    if train_state.get("status")=="TRAINED": counts["pattern_training_rounds"]+=1
+                pattern_brain_freeze_metadata = pattern_brain.freeze()
+                pattern_brain_freeze_train_count=pattern_brain.train_count
+            elif pattern_brain.train_count!=pattern_brain_freeze_train_count: raise SandboxDataError("V3 pattern brain changed after TRAIN freeze")
+            if model_freeze_train_count is None: model_freeze_train_count=brain.train_count
+            elif brain.train_count!=model_freeze_train_count: raise SandboxDataError("model weights changed after the TRAIN phase freeze")
+
+        contexts_need_refresh = False
+        for blackout_symbol, blackout_window in price_blackout_window_by_symbol.items():
+            if blackout_window is None or price_blackout_context_rewarmed_by_symbol.get(blackout_symbol, True):
+                continue
+            recovery_ms = int(blackout_window["end_exclusive_ms"])
+            if asof_ms < recovery_ms:
+                continue
+            recovery_ts = pd.to_datetime(recovery_ms, unit="ms", utc=True)
+            source_15m = market[blackout_symbol]["frames"]["15m"]
+            post_gap_15m = source_15m.loc[source_15m.index >= recovery_ts]
+            post_gap_closed = int(
+                ((post_gap_15m.index + pd.Timedelta(minutes=15)) <= asof).sum()
+            )
+            if post_gap_closed < 70:
+                continue
+            active_frames = dict(market[blackout_symbol]["frames"])
+            for timeframe in ("15m", "1H", "4H"):
+                matching = [
+                    window for window in price_blackout_windows_by_symbol[blackout_symbol]
+                    if window["bar"] == timeframe and window["source"] == "LAST"
+                ]
+                if matching:
+                    timeframe_recovery = pd.to_datetime(
+                        max(int(window["end_exclusive_ms"]) for window in matching),
+                        unit="ms", utc=True,
+                    )
+                    active_frames[timeframe] = active_frames[timeframe].loc[
+                        active_frames[timeframe].index >= timeframe_recovery
+                    ].copy()
+            signal_frames[blackout_symbol] = active_frames
+            price_blackout_context_rewarmed_by_symbol[blackout_symbol] = True
+            contexts_need_refresh = True
+            pattern_lifecycle = {
+                key: value for key, value in pattern_lifecycle.items()
+                if value.get("instrument_id") != blackout_symbol
+            }
+            counts["price_blackout_indicator_rewarm_completed"] += 1
+            counts[f"price_blackout_{blackout_symbol.lower().replace('-', '_')}_15m_closed_bars"] = post_gap_closed
+
+        btc_price_blackout_context_rewarmed = price_blackout_context_rewarmed_by_symbol.get("BTC-USDT", True)
+        if contexts_need_refresh:
+            btc_context_frame = (
+                signal_frames["BTC-USDT"]["15m"]
+                if btc_price_blackout_context_rewarmed else btc_frame_15m
+            )
+            prepared_contexts = {
+                refresh_symbol: prepare_signal_context(
+                    signal_frames[refresh_symbol]["1H"],
+                    signal_frames[refresh_symbol]["4H"],
+                    signal_frames[refresh_symbol]["15m"],
+                    btc_context_frame,
+                )
+                for refresh_symbol in market
+            }
 
         for symbol in symbols:
             item = market[symbol]
@@ -905,6 +1456,22 @@ def run_sandbox(
                 else validation_end_ms if phase == "VALIDATION"
                 else None
             )
+            btc_master_block = _price_candle_entry_block_status(
+                asof_ms, btc_price_blackout_window,
+                indicator_rewarm_complete=btc_price_blackout_context_rewarmed,
+            )
+            symbol_price_block = _price_candle_entry_block_status(
+                asof_ms, price_blackout_window_by_symbol.get(symbol),
+                indicator_rewarm_complete=price_blackout_context_rewarmed_by_symbol.get(symbol, True),
+            )
+            price_entry_block = btc_master_block or symbol_price_block
+            if price_entry_block is not None:
+                counts["price_blackout_new_entry_blocks"] += 1
+                _record_block_reason(
+                    block_reasons, block_reasons_by_symbol, symbol,
+                    f"{price_entry_block}: NEW_ENTRY_BLOCKED",
+                )
+                continue
             if _funding_blackout_for_timestamp(asof_ms) is not None:
                 counts["funding_blackout_new_entry_blocks"] += 1
                 _record_block_reason(
@@ -913,12 +1480,12 @@ def run_sandbox(
                 )
                 continue
             if phase_boundary_ms is not None and _within_purge_window(
-                asof_ms, phase_boundary_ms, max_holding_bars=12
+                asof_ms, phase_boundary_ms, max_holding_bars=max_holding_bars
             ):
                 counts["purged_boundary_signal_blocks"] += 1
                 _record_block_reason(
                     block_reasons, block_reasons_by_symbol, symbol,
-                    "PURGED_WALK_FORWARD_195_MINUTE_BOUNDARY",
+                    f"PURGED_WALK_FORWARD_{(max_holding_bars + 1) * 15}_MINUTE_BOUNDARY",
                 )
                 continue
             precomputed_context = prepared_contexts[symbol]
@@ -949,10 +1516,13 @@ def run_sandbox(
             try:
                 signal = analyze_signal(
                     instrument_id=symbol,
-                    frame_1h=item["frames"]["1H"],
-                    frame_4h=item["frames"]["4H"],
-                    frame_15m=item["frames"]["15m"],
-                    btc_15m=btc_frame_15m,
+                    frame_1h=signal_frames[symbol]["1H"],
+                    frame_4h=signal_frames[symbol]["4H"],
+                    frame_15m=signal_frames[symbol]["15m"],
+                    btc_15m=(
+                        signal_frames["BTC-USDT"]["15m"]
+                        if btc_price_blackout_context_rewarmed else btc_frame_15m
+                    ),
                     asof=asof,
                     funding_rate=funding_rate,
                     funding_kind=funding_kind,
@@ -961,6 +1531,7 @@ def run_sandbox(
                     spread_fraction=spread_scenario,
                     last_three_results=tuple(last_results[symbol]),
                     tp_r=2.4,
+                    stop_atr_multiplier_override=stop_overrides.get(symbol),
                     precomputed_context=precomputed_context,
                 )
             except (ValueError, KeyError, IndexError) as exc:
@@ -975,20 +1546,111 @@ def run_sandbox(
                     f"STRATEGY_NO_TRADE: {signal.get('reason')}",
                 )
                 continue
+
+            gross_fee_ratio = _gross_to_fee_ratio(
+                signal, contract_value=float(item["rules"].contract_value),
+                costs=costs, tp1_reward_r_multiple=tp1_reward_r_multiple,
+                tp1_fraction=tp1_fraction,
+            )
+            counts["gross_to_fee_ratio_evaluations"] += 1
+            if four_hour_regime_alignment:
+                counts["four_hour_alignment_evaluations"] += 1
+                if not _passes_4h_regime_alignment(signal, True):
+                    counts["four_hour_alignment_entry_blocks"] += 1
+                    _record_block_reason(block_reasons, block_reasons_by_symbol, symbol,
+                                         "RESEARCH_4H_REGIME_NOT_ALIGNED")
+                    continue
+            if cost_friction_guard and not _passes_cost_friction_guard(
+                gross_fee_ratio, minimum_gross_to_fee_ratio
+            ):
+                counts["cost_friction_guard_entry_blocks"] += 1
+                if gross_fee_ratio is None:
+                    counts["cost_friction_guard_unknown_ratio_blocks"] += 1
+                _record_block_reason(block_reasons, block_reasons_by_symbol, symbol,
+                                     "RESEARCH_GROSS_TO_FEE_RATIO_BELOW_THRESHOLD_OR_UNKNOWN")
+                continue
+
             counts["qualified_signals"] += 1
-            features = dict(signal["features"])
-            decision = brain.evaluate(features)
+            features=dict(signal["features"])
+            try:
+                snapshot=analyze_unified_patterns_v3(instrument_id=symbol,frames=signal_frames[symbol],asof=asof,expected_direction=signal["signal"],lifecycle_state=pattern_lifecycle)
+                pattern_features=dict(snapshot["features"]); pattern_features.update(snapshot.get("pattern_name_features") or {})
+                pattern_family_keys=dict(snapshot["family_lifecycle_keys"]); pattern_detections=list(snapshot["detections"]); pattern_market_regime=snapshot.get("market_regime","UNKNOWN")
+            except (ValueError,KeyError,TypeError,IndexError):
+                counts["pattern_analysis_errors"]+=1; pattern_features={x:0 for x in PATTERN_FAMILIES}; pattern_family_keys={x:[] for x in PATTERN_FAMILIES}; pattern_detections=[]; pattern_market_regime="UNKNOWN"
+            pattern_brain_evaluation=pattern_brain.evaluate(pattern_features); counts["pattern_shadow_observations"]+=1
+            decision=brain.evaluate(features)
             model_probability: float | None = None
             if phase == "TRAIN":
-                model_decision, veto = "TRAINING_BASELINE", False
+                model_decision, model_veto = "TRAINING_BASELINE", False
             elif brain.trained and decision.get("status") == "READY":
                 model_decision = str(decision["decision"])
-                veto = model_decision == "VETO"
+                model_veto = model_decision == "VETO"
                 model_probability = float(decision["probability"])
             else:
-                model_decision, veto = "MODEL_NOT_READY_BASELINE", False
+                model_decision, model_veto = "MODEL_NOT_READY_BASELINE", False
                 counts["model_not_ready_signals"] += 1
             model_decisions[model_decision] += 1
+
+            # Learn only from matured TRAIN outcomes, then freeze before
+            # Validation/OOS. The V3 score is uncalibrated, not a probability.
+            if phase != "TRAIN" and pattern_brain.trained:
+                if v3_research_filter:
+                    pattern_gate = _v3_pattern_research_observation(
+                        detections=pattern_detections,
+                        expected_direction=signal["signal"],
+                        brain_evaluation=pattern_brain_evaluation,
+                    )
+                else:
+                    pattern_gate = _v3_pattern_shadow_observation(
+                        detections=pattern_detections,
+                        expected_direction=signal["signal"],
+                        brain_evaluation=pattern_brain_evaluation,
+                    )
+            else:
+                pattern_gate = {
+                    "decision": "RESEARCH_FILTER" if v3_research_filter else "SHADOW_ONLY",
+                    "reason": "V3_RESEARCH_FILTER_NOT_READY" if v3_research_filter else "TELEMETRY_ONLY_NO_ENTRY_VETO",
+                    "suggested_decision": "NOT_EVALUATED",
+                    "suggested_reason": "TRAINING_OR_PATTERN_BRAIN_NOT_READY",
+                    "would_veto": False,
+                    "telemetry_only": not v3_research_filter,
+                    "research_only": bool(v3_research_filter),
+                    "toxic_patterns": [], "liquidity_sweeps": [],
+                    "priority_patterns": [], "priority_bonus": 0.0,
+                    "brain_score": pattern_brain_evaluation.get("score_0_1"),
+                    "adjusted_brain_score": pattern_brain_evaluation.get("score_0_1"),
+                    "score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+                }
+            pattern_veto_suggestion = bool(pattern_gate.get("would_veto"))
+            veto = _actual_entry_veto(
+                model_veto=model_veto,
+                pattern_observation=pattern_gate,
+                v3_research_filter=v3_research_filter,
+            )
+            veto_sources = []
+            if model_veto:
+                veto_sources.append("V2_META_BRAIN")
+            if v3_research_filter and pattern_veto_suggestion:
+                veto_sources.append("V3_RESEARCH_FILTER")
+            if pattern_veto_suggestion:
+                counts["v3_pattern_veto_suggestions"] += 1
+                if v3_research_filter:
+                    counts["v3_research_filter_entry_vetoes"] += 1
+                    if len(active_orders) < 2:
+                        v3_capacity_releases.append({
+                            "signal_id": signal["signal_id"],
+                            "released_ts_ms": asof_ms,
+                            "symbol": symbol,
+                        })
+                        counts["v3_research_filter_capacity_slots_released"] += 1
+                if pattern_gate.get("toxic_patterns") or pattern_gate.get("liquidity_sweeps"):
+                    counts["v3_toxic_pattern_veto_suggestions"] += 1
+                elif pattern_gate.get("suggested_reason") == "V3_PATTERN_BRAIN_LOW_SCORE":
+                    counts["v3_brain_low_score_suggestions"] += 1
+            if pattern_gate.get("priority_patterns"):
+                counts["v3_priority_supported_signals"] += 1
+            veto_source = "+".join(veto_sources) if veto_sources else None
 
             # Actual positions and pending actual entry limits share the strict
             # two-slot portfolio cap. Counterfactual Shadow Book orders are
@@ -1017,6 +1679,8 @@ def run_sandbox(
                     )
                     continue
 
+            atr_row = item["market"].loc[stamp]
+            signal_atr_15m = float(atr_row["atr_15m"])
             order = {
                 "symbol": symbol,
                 "signal_id": signal["signal_id"],
@@ -1024,6 +1688,9 @@ def run_sandbox(
                 "entry": signal["entry"],
                 "stop_loss": signal["stop_loss"],
                 "take_profit": signal["take_profit"],
+                "gross_to_fee_ratio_at_signal": gross_fee_ratio,
+                "aligned_4h_at_signal": bool((signal.get("regime") or {}).get("aligned_4h")),
+                "signal_atr_15m": signal_atr_15m,
                 "start_index": row_index,
                 "equity_snapshot": equity,
                 "features": features,
@@ -1033,11 +1700,25 @@ def run_sandbox(
                 "shadow": bool(veto),
                 "entry_checked": False,
                 "submitted_ts_ms": asof_ms,
+                "pattern_features":pattern_features,"pattern_family_keys":pattern_family_keys,"pattern_detections":pattern_detections,
+                "pattern_market_regime":pattern_market_regime,"pattern_brain_evaluation":pattern_brain_evaluation,"pattern_gate":pattern_gate,"pattern_snapshot_asof":asof.isoformat(),
+                "veto_source":veto_source,
+                "veto_reason":model_decision if model_veto else None,
+                "pattern_veto_suggestion_reason":pattern_gate.get("suggested_reason") if pattern_veto_suggestion else None,
+                "capacity_replacement_for_signal_id":None,
+                "capacity_released_by_v3_at_ms":None,
             }
             if veto:
                 counts["vetoed_signals"] += 1
+                if v3_research_filter and pattern_veto_suggestion:
+                    order["veto_reason"] = pattern_gate.get("suggested_reason")
                 shadow_orders.append(order)
             else:
+                if v3_research_filter and not model_veto and v3_capacity_releases:
+                    released = v3_capacity_releases.pop(0)
+                    order["capacity_replacement_for_signal_id"] = released["signal_id"]
+                    order["capacity_released_by_v3_at_ms"] = released["released_ts_ms"]
+                    counts["v3_replacement_entries"] += 1
                 active_orders.append(order)
 
     cross_boundary_open_positions = sum(
@@ -1101,10 +1782,37 @@ def run_sandbox(
         "network_order_writes": False,
         "data_source": "LOCAL_SQLITE_REPLAY_DOWNLOADED_FROM_BLOFIN_DEMO_PUBLIC_API",
         "spread_assumption": {"fraction": spread_scenario, "quality": "MODELLED_NOT_HISTORICAL_ORDERBOOK"},
+        "experiment_configuration": {
+            "symbols": list(symbols),
+            "max_holding_bars": max_holding_bars,
+            "purge_window_minutes": (max_holding_bars + 1) * 15,
+            "tp1_enabled": bool(tp1_enabled),
+            "tp1_reward_r_multiple": tp1_reward_r_multiple,
+            "tp1_fraction": tp1_fraction,
+            "stop_atr_multiplier_overrides": dict(stop_overrides),
+            "risk_fraction_per_trade": risk_fraction,
+            "maximum_simultaneous_positions": 2,
+            "maximum_nominal_aggregate_risk_fraction": risk_fraction * 2,
+            "v3_pattern_mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "cost_friction_guard_enabled": bool(cost_friction_guard),
+            "minimum_gross_to_fee_ratio": minimum_gross_to_fee_ratio if cost_friction_guard else None,
+            "four_hour_regime_alignment_enabled": bool(four_hour_regime_alignment),
+        },
         "periods": {
             "start_utc": min(times).isoformat(), "end_utc": max(times).isoformat(),
+            "end_exclusive_utc": oos_end.isoformat(),
             "training_end_utc": train_end.isoformat(), "validation_end_utc": validation_end.isoformat(),
-            "phases": "first four months TRAIN; fifth month VALIDATION; sixth month OUT_OF_SAMPLE; model frozen after TRAIN",
+            "requested_replay_months": replay_months if replay_end_utc is None else None,
+            "training_months": training_months,
+            "validation_months": validation_months - training_months,
+            "out_of_sample_months": replay_months - validation_months if replay_end_utc is None else None,
+            "explicit_independent_holdout": replay_end_utc is not None,
+            "phases": (
+                f"first {training_months} months TRAIN; "
+                f"next {validation_months - training_months} months VALIDATION; "
+                f"remaining {replay_months - validation_months} months OUT_OF_SAMPLE; "
+                "model frozen after TRAIN"
+            ) if replay_end_utc is None else "Entire explicit independent window scored as OUT_OF_SAMPLE; no model fitting on this dataset.",
         },
         "equity": {"initial_usdt": initial_equity, "final_realized_usdt": equity, "net_pnl_usdt": equity - initial_equity},
         "trade_metrics": {
@@ -1136,6 +1844,126 @@ def run_sandbox(
         },
         "quantitative_metrics": _grouped_performance_summary(actual_trades, initial_equity, symbols),
         "shadow_book_metrics": _shadow_book_summary(shadow_trades),
+        "pattern_intelligence_v3_shadow_calibration": {
+            "mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "default_mode_unchanged": not bool(v3_research_filter),
+            "training_is_unfiltered": True,
+            "pattern_brain_trained": pattern_brain.trained,
+            "training_examples": len(pattern_brain.examples),
+            "training_wins": sum(1 for row in pattern_brain.examples if row["label"] == 1),
+            "training_losses": sum(1 for row in pattern_brain.examples if row["label"] == 0),
+            "training_rounds": counts["pattern_training_rounds"],
+            "frozen_before_validation_oos": pattern_brain.frozen and pattern_brain_freeze_train_count is not None,
+            "model_version": pattern_brain.MODEL_VERSION,
+            "training_timestamp": pattern_brain.training_timestamp,
+            "model_hash": pattern_brain.model_hash,
+            "model_score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
+            "score_is_calibrated_probability": False,
+            "toxic_pattern_names": sorted(V3_TOXIC_PATTERN_NAMES),
+            "liquidity_sweep_policy": "Pattern-name and sweep veto suggestions are actual replay vetoes only when the research flag is explicitly enabled.",
+            "priority_pattern_directions": V3_PRIORITY_PATTERN_DIRECTIONS,
+            "suggestion_counts": {
+                "hypothetical_veto_suggestions": counts["v3_pattern_veto_suggestions"],
+                "toxic_or_sweep_suggestions": counts["v3_toxic_pattern_veto_suggestions"],
+                "low_brain_score_suggestions": counts["v3_brain_low_score_suggestions"],
+                "priority_supported_signals": counts["v3_priority_supported_signals"],
+                "actual_v3_entry_vetoes": counts["v3_research_filter_entry_vetoes"],
+            },
+            "counterfactual": {
+                "available": bool(v3_research_filter),
+                "closed_vetoed_trades": sum(
+                    1 for row in shadow_trades
+                    if "V3_RESEARCH_FILTER" in str(row.get("veto_source") or "").split("+")
+                ),
+                "interpretation": (
+                    "V3-rejected candidates are retained in a separate counterfactual shadow ledger."
+                    if v3_research_filter else
+                    "Shadow mode does not suppress entries; no V3 entry-veto book is active."
+                ),
+            },
+            "decision_policy": (
+                "Isolated offline research filter may veto V3-suggested entries."
+                if v3_research_filter else
+                "V3 telemetry cannot alter the default entry decision."
+            ),
+        },
+        "pattern_intelligence_v3_shadow": {
+            "mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "research_filter_enabled": bool(v3_research_filter),
+            "default_mode_unchanged": not bool(v3_research_filter),
+            "timeframes": ["15m", "1H", "4H"],
+            "completed_candles_only": True,
+            "future_candles_used": False,
+            "observations": counts["pattern_shadow_observations"],
+            "analysis_errors": counts["pattern_analysis_errors"],
+            "training_scope": "Matured TRAIN outcomes only; named-feature vocabulary and weights are frozen before Validation/OOS.",
+            "trade_scope": "V2-qualified entries with fully reconciled closed PnL; patterns tagged at entry.",
+            "family_performance": {
+                "ALL": pattern_family_performance(actual_trades),
+                "TRAIN": pattern_family_performance(actual_trades, "TRAIN"),
+                "VALIDATION": pattern_family_performance(actual_trades, "VALIDATION"),
+                "OUT_OF_SAMPLE": pattern_family_performance(actual_trades, "OUT_OF_SAMPLE"),
+            },
+            "by_market_regime": {
+                regime: pattern_family_performance(actual_trades, regime=regime)
+                for regime in ("TRENDING", "RANGING", "HIGH_VOLATILITY")
+            },
+            "adaptive_brain": {
+                "model": pattern_brain.MODEL_VERSION,
+                "trained": pattern_brain.trained,
+                "warmup_trades": pattern_brain.warmup_trades,
+                "min_per_class": pattern_brain.min_per_class,
+                "training_examples": len(pattern_brain.examples),
+                "training_closed_trades": closed_pattern_training_trades,
+                "training_rounds": counts["pattern_training_rounds"],
+                "wins": sum(1 for x in pattern_brain.examples if x["label"] == 1),
+                "losses": sum(1 for x in pattern_brain.examples if x["label"] == 0),
+                "feature_weights": pattern_brain.feature_weights(),
+                "feature_names": list(pattern_brain.feature_names),
+                "feature_count": len(pattern_brain.feature_names),
+                "pattern_name_feature_count": sum(name.startswith("pattern_name::") for name in pattern_brain.feature_names),
+                "model_version": pattern_brain.MODEL_VERSION,
+                "training_timestamp": pattern_brain.training_timestamp,
+                "model_hash": pattern_brain.model_hash,
+                "freeze_metadata": pattern_brain_freeze_metadata,
+                "frozen_after_train": pattern_brain.frozen and pattern_brain_freeze_train_count is not None,
+            },
+            "suggestion_counts": {
+                "hypothetical_veto_suggestions": counts["v3_pattern_veto_suggestions"],
+                "toxic_or_sweep_suggestions": counts["v3_toxic_pattern_veto_suggestions"],
+                "low_brain_score_suggestions": counts["v3_brain_low_score_suggestions"],
+                "priority_supported_signals": counts["v3_priority_supported_signals"],
+                "actual_v3_entry_vetoes": counts["v3_research_filter_entry_vetoes"],
+                "capacity_slots_released": counts["v3_research_filter_capacity_slots_released"],
+                "replacement_entries": counts["v3_replacement_entries"],
+            },
+            "counterfactual": {
+                "available": bool(v3_research_filter),
+                "closed_vetoed_trades": sum(
+                    1 for row in shadow_trades
+                    if "V3_RESEARCH_FILTER" in str(row.get("veto_source") or "").split("+")
+                ),
+                "rejected_candidate_ledger": [
+                    row for row in shadow_trades
+                    if "V3_RESEARCH_FILTER" in str(row.get("veto_source") or "").split("+")
+                ],
+                "replacement_trade_ledger": [
+                    row for row in actual_trades
+                    if row.get("capacity_replacement_for_signal_id")
+                ],
+                "interpretation": (
+                    "Rejected V3 candidates are replayed in the separate counterfactual book; later accepted entries can use the freed two-slot portfolio capacity."
+                    if v3_research_filter else
+                    "Not active in the default Shadow mode; suggestions do not alter entries."
+                ),
+            },
+            "decision_policy": (
+                "Isolated offline research filter may veto V3-suggested entries; no exchange order path exists."
+                if v3_research_filter else
+                "V3 patterns, scores, veto suggestions and priority bonuses are telemetry only; actual entries are independent of V3."
+            ),
+            "metric_semantics": "Expectancy=mean net USDT; MFE/MAE=closed Mark-candle excursion %; false-break rate=observed invalidations after confirmation.",
+        },
         "funding_data_quality": {
             "explicit_funding_kind_events": sum(
                 1 for item in market.values() for event in item["funding"]
@@ -1192,12 +2020,23 @@ def run_sandbox(
         "open_shadow_positions_at_dataset_end": unresolved_shadow_positions,
         "closed_positions_with_unknown_net_pnl": unknown_pnl_trades,
         "closed_shadow_positions_with_unknown_net_pnl": unknown_shadow_pnl_trades,
+        "price_candle_blackout_audit": {
+            "windows": price_blackout_windows,
+            "entry_block_windows_by_symbol": price_blackout_window_by_symbol,
+            "master_btc_context_rewarm_completed": bool(btc_price_blackout_context_rewarmed),
+            "indicator_rewarm_completed_by_symbol": dict(price_blackout_context_rewarmed_by_symbol),
+            "new_entry_blocks": counts["price_blackout_new_entry_blocks"],
+            "indicator_rewarm_minimum_closed_15m_bars": 70,
+            "ambiguous_actual_positions": ambiguous_price_gap_positions,
+            "ambiguous_shadow_positions": ambiguous_shadow_price_gap_positions,
+            "synthetic_candles_used": False,
+        },
         "walk_forward_audit": {
             "train_start_utc": start_time.isoformat(),
             "train_end_utc": train_end.isoformat(),
             "validation_end_utc": validation_end.isoformat(),
             "oos_end_utc": oos_end.isoformat(),
-            "purge_window_minutes": 195,
+            "purge_window_minutes": (max_holding_bars + 1) * 15,
             "purged_boundary_signal_blocks": counts["purged_boundary_signal_blocks"],
             "cross_boundary_positions": counts["cross_boundary_positions"],
             "cross_boundary_closed_trades": counts["cross_boundary_closed_trades"],
@@ -1243,9 +2082,42 @@ def main() -> None:
     parser.add_argument("--spread", type=float, default=0.0002, help="MODELED scenario spread fraction, not historical L2")
     parser.add_argument("--output", default="reports/ai_sandbox_report.json")
     parser.add_argument("--brain", default="reports/trained_brain.json")
+    parser.add_argument("--max-holding-bars", type=int, default=12)
+    parser.add_argument("--tp1-disabled", action="store_true")
+    parser.add_argument("--tp1-r", type=float, default=1.2)
+    parser.add_argument("--tp1-fraction", type=float, default=0.5)
+    parser.add_argument("--symbols", default=",".join(DEFAULT_WATCHLIST))
+    parser.add_argument("--start-utc", default=None, help="Optional explicit replay window start, ISO-8601 with timezone")
+    parser.add_argument("--replay-months", type=int, default=6)
+    parser.add_argument("--training-months", type=int, default=4)
+    parser.add_argument("--validation-months", type=int, default=5)
+    parser.add_argument("--risk-fraction", type=float, default=0.0025, help="Per-position equity risk fraction; default remains 0.25%")
+    parser.add_argument("--eth-stop-atr", type=float, default=None)
+    parser.add_argument("--sol-stop-atr", type=float, default=None)
+    parser.add_argument(
+        "--v3-research-filter",
+        action="store_true",
+        help="Enable isolated TRAIN-only V3 entry vetoes in this offline replay only; default remains Shadow.",
+    )
     args = parser.parse_args()
-    report = run_sandbox(db_path=args.db, initial_equity=args.equity,
-                         spread_scenario=args.spread, output_path=args.output, brain_path=args.brain)
+    stop_overrides = {}
+    if args.eth_stop_atr is not None:
+        stop_overrides["ETH-USDT"] = args.eth_stop_atr
+    if args.sol_stop_atr is not None:
+        stop_overrides["SOL-USDT"] = args.sol_stop_atr
+    report = run_sandbox(
+        db_path=args.db, initial_equity=args.equity, symbols=tuple(x.strip() for x in args.symbols.split(",") if x.strip()),
+        spread_scenario=args.spread, output_path=args.output, brain_path=args.brain,
+        max_holding_bars=args.max_holding_bars, tp1_enabled=not args.tp1_disabled,
+        tp1_reward_r_multiple=args.tp1_r, tp1_fraction=args.tp1_fraction,
+        stop_atr_multiplier_overrides=stop_overrides,
+        v3_research_filter=args.v3_research_filter,
+        replay_start_utc=args.start_utc,
+        replay_months=args.replay_months,
+        training_months=args.training_months,
+        validation_months=args.validation_months,
+        risk_fraction=args.risk_fraction,
+    )
     print(json.dumps({
         "equity": report["equity"],
         "trade_metrics": report["trade_metrics"],

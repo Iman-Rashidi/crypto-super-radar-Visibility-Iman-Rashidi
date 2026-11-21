@@ -10,6 +10,24 @@ from crypto_super_radar.virtual_blofin import CostModel, InstrumentRules, Virtua
 
 
 class VirtualTimeExitLimitTests(unittest.TestCase):
+    def test_default_simulator_uses_twelve_bar_exit_and_tp1_12r_half_size(self) -> None:
+        engine = VirtualBloFin()
+        self.assertEqual(engine.max_holding_bars, 12)
+        self.assertTrue(engine.tp1_enabled)
+        self.assertEqual(engine.tp1_reward_r_multiple, 1.2)
+        self.assertEqual(engine.tp1_fraction, 0.5)
+
+    def test_tp1_configuration_is_independently_adjustable(self) -> None:
+        engine = VirtualBloFin(
+            max_holding_bars=12,
+            tp1_enabled=False,
+            tp1_reward_r_multiple=1.5,
+            tp1_fraction=0.5,
+        )
+        self.assertEqual(engine.max_holding_bars, 12)
+        self.assertFalse(engine.tp1_enabled)
+        self.assertEqual(engine.tp1_reward_r_multiple, 1.5)
+
     def setUp(self) -> None:
         self.rules = InstrumentRules(
             inst_id="BTC-USDT",
@@ -83,10 +101,10 @@ class VirtualTimeExitLimitTests(unittest.TestCase):
     def test_limit_cannot_fill_on_its_submission_candle(self) -> None:
         for side in ("LONG", "SHORT"):
             with self.subTest(side=side):
-                bars = self._bars(side, 14)
+                bars = self._bars(side, 26)
                 # The twelfth holding candle already spans the calculated
                 # break-even level, but the limit is submitted only at its close.
-                result = self._simulate(side, bars)
+                result = self._simulate(side, bars[:14])
                 self.assertEqual(result.status, "OPEN")
                 self.assertEqual(result.exit_reason, "TIME_EXIT_LIMIT_PENDING")
 

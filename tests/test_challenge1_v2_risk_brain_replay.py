@@ -12,6 +12,7 @@ import pandas as pd
 from crypto_super_radar.adaptive_brain import OnlineMetaBrain
 from crypto_super_radar.challenge1_v2 import (
     _elliott_wave_1h_evidence,
+    _resolve_stop_atr_multiplier,
     analyze_signal,
     challenge1_v2_execution_evidence_ready,
 )
@@ -28,15 +29,26 @@ from crypto_super_radar.ai_sandbox import (
     _required_replay_end,
     _within_purge_window,
     _datetime_index_to_epoch_ms,
+    _price_candle_entry_block_status,
+    _ambiguous_price_candle_position,
+    _combine_price_candle_blackout_windows,
 )
 from crypto_super_radar.market_replay import (
     ReplayDownloadError,
+    OBSERVED_PRICE_CANDLE_BLACKOUTS,
+    _observed_price_candle_gap_matches,
+    _is_price_candle_blackout,
     _classify_funding_schedule_events,
     _is_observed_blackout_gap,
+    _funding_blackout_window_applicability,
     _parse_funding_event,
     _record_unique_timestamp,
     _subtract_calendar_months,
     download_candles,
+)
+from crypto_super_radar.research_v3_experiments import (
+    _effective_phase_months,
+    _scenario_specs,
 )
 from crypto_super_radar.virtual_blofin import (
     CostModel,
@@ -48,6 +60,273 @@ from crypto_super_radar.virtual_blofin import (
     _snap_trade_prices,
     size_position,
 )
+class PriceCandleBlackoutTests(unittest.TestCase):
+    def setUp(self):
+        self.window = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[0])
+
+    def test_registered_btc_gap_has_exact_timestamp_and_count(self):
+        self.assertEqual(self.window["instrument_id"], "BTC-USDT")
+        self.assertEqual(self.window["bar"], "15m")
+        self.assertEqual(self.window["missing_from_utc"], "2026-03-09T07:45:00+00:00")
+        self.assertEqual(self.window["missing_to_utc"], "2026-03-09T12:30:00+00:00")
+        self.assertEqual(self.window["missing_intervals"], 20)
+
+    def test_only_exact_last_price_gap_is_allowlisted(self):
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="ETH-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="SOL-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=19, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="15m",
+            first_missing_ms=self.window["start_ms"],
+            last_missing_ms=self.window["last_missing_ms"],
+            missing_count=20, mark_price=True,
+        ))
+        hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[1])
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="1H",
+            first_missing_ms=hourly["start_ms"],
+            last_missing_ms=hourly["last_missing_ms"],
+            missing_count=5, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="4H",
+            first_missing_ms=hourly["start_ms"],
+            last_missing_ms=hourly["last_missing_ms"],
+            missing_count=5, mark_price=False,
+        ))
+        four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[2])
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="4H",
+            first_missing_ms=four_hour["start_ms"],
+            last_missing_ms=four_hour["last_missing_ms"],
+            missing_count=2, mark_price=False,
+        ))
+        eth_hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[4])
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="ETH-USDT", bar="1H",
+            first_missing_ms=eth_hourly["start_ms"],
+            last_missing_ms=eth_hourly["last_missing_ms"],
+            missing_count=5, mark_price=False,
+        ))
+        self.assertFalse(_observed_price_candle_gap_matches(
+            symbol="BTC-USDT", bar="1H",
+            first_missing_ms=four_hour["start_ms"],
+            last_missing_ms=four_hour["last_missing_ms"],
+            missing_count=2, mark_price=False,
+        ))
+
+    def test_eth_blackout_is_registered_and_exactly_scoped(self):
+        eth = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[3])
+        self.assertEqual(eth["instrument_id"], "ETH-USDT")
+        self.assertEqual(eth["bar"], "15m")
+        self.assertEqual(eth["source"], "LAST")
+        self.assertEqual(eth["missing_intervals"], 20)
+        self.assertEqual(eth["missing_from_utc"], self.window["missing_from_utc"])
+        self.assertEqual(eth["missing_to_utc"], self.window["missing_to_utc"])
+        eth_hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[4])
+        self.assertEqual(eth_hourly["instrument_id"], "ETH-USDT")
+        self.assertEqual(eth_hourly["bar"], "1H")
+        self.assertEqual(eth_hourly["missing_intervals"], 5)
+        self.assertEqual(eth_hourly["missing_from_utc"], "2026-03-09T07:00:00+00:00")
+        self.assertEqual(eth_hourly["missing_to_utc"], "2026-03-09T11:00:00+00:00")
+        eth_four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[5])
+        self.assertEqual(eth_four_hour["instrument_id"], "ETH-USDT")
+        self.assertEqual(eth_four_hour["bar"], "4H")
+        self.assertEqual(eth_four_hour["source"], "LAST")
+        self.assertEqual(eth_four_hour["missing_intervals"], 2)
+        self.assertEqual(eth_four_hour["missing_from_utc"], "2026-03-09T04:00:00+00:00")
+        self.assertEqual(eth_four_hour["missing_to_utc"], "2026-03-09T08:00:00+00:00")
+        self.assertEqual(eth_four_hour["left_candle_utc"], "2026-03-09T00:00:00+00:00")
+        self.assertEqual(eth_four_hour["right_candle_utc"], "2026-03-09T12:00:00+00:00")
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="ETH-USDT", bar="4H",
+            first_missing_ms=eth_four_hour["start_ms"],
+            last_missing_ms=eth_four_hour["last_missing_ms"],
+            missing_count=2, mark_price=False,
+        ))
+
+    def test_sol_blackout_is_registered_and_exactly_scoped(self):
+        sol = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[6])
+        self.assertEqual(sol["instrument_id"], "SOL-USDT")
+        self.assertEqual(sol["bar"], "15m")
+        self.assertEqual(sol["source"], "LAST")
+        self.assertEqual(sol["missing_intervals"], 20)
+        self.assertEqual(sol["missing_from_utc"], "2026-03-09T07:45:00+00:00")
+        self.assertEqual(sol["missing_to_utc"], "2026-03-09T12:30:00+00:00")
+        self.assertEqual(sol["left_candle_utc"], "2026-03-09T07:30:00+00:00")
+        self.assertEqual(sol["right_candle_utc"], "2026-03-09T12:45:00+00:00")
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="SOL-USDT", bar="15m",
+            first_missing_ms=sol["start_ms"],
+            last_missing_ms=sol["last_missing_ms"],
+            missing_count=20, mark_price=False,
+        ))
+        self.assertIsNotNone(_is_price_candle_blackout(sol["start_ms"]))
+        sol_hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[7])
+        self.assertEqual(sol_hourly["instrument_id"], "SOL-USDT")
+        self.assertEqual(sol_hourly["bar"], "1H")
+        self.assertEqual(sol_hourly["source"], "LAST")
+        self.assertEqual(sol_hourly["missing_intervals"], 5)
+        self.assertEqual(sol_hourly["missing_from_utc"], "2026-03-09T07:00:00+00:00")
+        self.assertEqual(sol_hourly["missing_to_utc"], "2026-03-09T11:00:00+00:00")
+        self.assertEqual(sol_hourly["left_candle_utc"], "2026-03-09T06:00:00+00:00")
+        self.assertEqual(sol_hourly["right_candle_utc"], "2026-03-09T12:00:00+00:00")
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="SOL-USDT", bar="1H",
+            first_missing_ms=sol_hourly["start_ms"],
+            last_missing_ms=sol_hourly["last_missing_ms"],
+            missing_count=5, mark_price=False,
+        ))
+        self.assertIsNotNone(_is_price_candle_blackout(sol_hourly["start_ms"]))
+
+    def test_combined_blackout_windows_are_scoped_per_instrument(self):
+        btc = _combine_price_candle_blackout_windows(
+            "BTC-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)
+        )
+        eth = _combine_price_candle_blackout_windows(
+            "ETH-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)
+        )
+        self.assertEqual(btc["instrument_id"], "BTC-USDT")
+        self.assertEqual(eth["instrument_id"], "ETH-USDT")
+        self.assertEqual(len(btc["timeframe_windows"]), 3)
+        self.assertEqual(len(eth["timeframe_windows"]), 3)
+        sol = _combine_price_candle_blackout_windows(
+            "SOL-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)
+        )
+        self.assertEqual(sol["instrument_id"], "SOL-USDT")
+        self.assertEqual(len(sol["timeframe_windows"]), 2)
+
+    def test_blackout_interval_uses_inclusive_first_and_exclusive_end(self):
+        hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[1])
+        four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[2])
+        self.assertIsNotNone(_is_price_candle_blackout(four_hour["start_ms"]))
+        eth_four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[5])
+        self.assertIsNotNone(_is_price_candle_blackout(eth_four_hour["start_ms"]))
+        self.assertIsNotNone(_is_price_candle_blackout(hourly["start_ms"]))
+        self.assertIsNotNone(_is_price_candle_blackout(self.window["last_missing_ms"]))
+        sol_hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[7])
+        self.assertIsNotNone(_is_price_candle_blackout(sol_hourly["start_ms"]))
+        self.assertIsNone(_is_price_candle_blackout(self.window["end_exclusive_ms"]))
+
+    def test_new_entries_block_during_gap_and_until_rewarm_completes(self):
+        self.assertEqual(
+            _price_candle_entry_block_status(self.window["start_ms"], self.window, indicator_rewarm_complete=False),
+            "PRICE_CANDLE_BLACKOUT",
+        )
+        self.assertEqual(
+            _price_candle_entry_block_status(self.window["end_exclusive_ms"], self.window, indicator_rewarm_complete=False),
+            "PRICE_CANDLE_BLACKOUT_INDICATOR_REWARM",
+        )
+        self.assertIsNone(
+            _price_candle_entry_block_status(self.window["end_exclusive_ms"], self.window, indicator_rewarm_complete=True)
+        )
+
+    def test_pre_gap_btc_position_becomes_ambiguous_without_fabricated_exit(self):
+        order = {
+            "symbol": "BTC-USDT", "signal_id": "gap-crossing",
+            "direction": "LONG", "phase": "TRAIN", "entry_checked": True,
+            "submitted_ts_ms": self.window["start_ms"] - 900_000,
+            "entry_ts_ms": self.window["start_ms"] - 1_800_000,
+            "last_observed_through_ts_ms": self.window["start_ms"],
+        }
+        result = _ambiguous_price_candle_position(order, self.window)
+        self.assertEqual(result["status"], "AMBIGUOUS_PRICE_CANDLE_BLACKOUT")
+        self.assertIsNone(result["exit_ts_ms"])
+        self.assertIsNone(result["exit_price"])
+        self.assertIsNone(result["net_pnl_usdt"])
+        self.assertFalse(result["synthetic_candles_used"])
+
+    def test_other_symbol_and_orders_created_after_gap_are_not_marked_ambiguous(self):
+        order = {"symbol": "ETH-USDT", "submitted_ts_ms": self.window["start_ms"] - 1, "signal_id": "eth"}
+        self.assertIsNone(_ambiguous_price_candle_position(order, self.window))
+        order["symbol"] = "BTC-USDT"
+        order["submitted_ts_ms"] = self.window["end_exclusive_ms"] + 1
+        self.assertIsNone(_ambiguous_price_candle_position(order, self.window))
+
+
+    def test_unregistered_single_candle_gap_reports_exact_symbol_timeframe_and_utc(self):
+        start = pd.Timestamp("2026-01-01T00:00:00Z")
+        end = pd.Timestamp("2026-01-01T00:45:00Z")
+        start_ms = int(start.timestamp() * 1000)
+
+        def candle(ts_ms):
+            return [str(ts_ms), "100", "101", "99", "100", "1000", "0", "0", "1"]
+
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"code": "0", "data": [
+                    candle(start_ms + 30 * 60_000),
+                    candle(start_ms),
+                ]}
+
+        class Session:
+            def get(self, *args, **kwargs):
+                return Response()
+
+        with self.assertRaises(ReplayDownloadError) as raised:
+            download_candles(
+                "LINK-USDT", "15m",
+                start_utc=start.to_pydatetime(),
+                end_utc=end.to_pydatetime(),
+                session=Session(),
+                page_size=1440,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("LINK-USDT 15m", message)
+        self.assertIn("missing_from_utc=2026-01-01T00:15:00+00:00", message)
+        self.assertIn("missing_to_utc=2026-01-01T00:15:00+00:00", message)
+        self.assertIn("missing_intervals=1", message)
+        self.assertIn("left_candle_utc=2026-01-01T00:00:00+00:00", message)
+        self.assertIn("right_candle_utc=2026-01-01T00:30:00+00:00", message)
+
+class StopAtrMultiplierConfigurationTests(unittest.TestCase):
+    def test_winning_b_core_symbol_defaults_are_applied(self):
+        self.assertEqual(_resolve_stop_atr_multiplier("BTC-USDT"), 1.3)
+        self.assertEqual(_resolve_stop_atr_multiplier("ETH-USDT"), 1.625)
+        self.assertEqual(_resolve_stop_atr_multiplier("SOL-USDT"), 2.25)
+        self.assertEqual(_resolve_stop_atr_multiplier("XRP-USDT"), 1.8)
+        self.assertEqual(_resolve_stop_atr_multiplier("LINK-USDT"), 1.8)
+
+    def test_research_override_changes_only_the_requested_symbol(self):
+        self.assertEqual(_resolve_stop_atr_multiplier("ETH-USDT", 1.625), 1.625)
+        self.assertEqual(_resolve_stop_atr_multiplier("SOL-USDT", 2.25), 2.25)
+        self.assertEqual(_resolve_stop_atr_multiplier("BTC-USDT"), 1.3)
+
+    def test_invalid_stop_override_fails_closed(self):
+        for value in (0.0, 0.49, 4.01, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    _resolve_stop_atr_multiplier("ETH-USDT", value)
+
+
 class BloFinFundingSchemaProbeTests(unittest.TestCase):
     def test_history_probe_counts_explicit_and_missing_kind_separately(self):
         report = summarize_history_payload({
@@ -388,8 +667,10 @@ class ReplayDownloaderCompletenessTests(unittest.TestCase):
     class Session:
         def __init__(self, rows):
             self.rows = rows
+            self.last_params = None
 
         def get(self, *args, **kwargs):
+            self.last_params = kwargs.get("params")
             return ReplayDownloaderCompletenessTests.Response(self.rows)
 
     def test_six_calendar_months_uses_calendar_arithmetic(self) -> None:
@@ -398,6 +679,36 @@ class ReplayDownloaderCompletenessTests(unittest.TestCase):
             _subtract_calendar_months(value, 6),
             datetime(2026, 2, 28, 12, 0, tzinfo=timezone.utc),
         )
+
+    def test_explicit_historical_window_filters_newer_rows_and_seeds_after_cursor(self) -> None:
+        start = datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 4, 21, 16, 0, tzinfo=timezone.utc)
+        interval = 15 * 60_000
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        row = lambda ts: [
+            str(ts), "100", "101", "99", "100", "1", "1", "100", "1"
+        ]
+        session = self.Session([
+            row(end_ms + interval),
+            row(end_ms),
+            row(end_ms - interval),
+            row(start_ms + 2 * interval),
+            row(start_ms + interval),
+            row(start_ms),
+            row(start_ms - interval),
+        ])
+        result = download_candles(
+            "BTC-USDT", "15m", months=6,
+            start_utc=start, end_utc=end,
+            session=session, base_url="https://example.invalid", page_size=100,
+        )
+        self.assertEqual([item[2] for item in result], [
+            start_ms, start_ms + interval, start_ms + 2 * interval,
+            start_ms + 3 * interval,
+        ])
+        self.assertEqual(session.last_params["after"], end_ms)
+
 
     def test_short_recent_candle_response_is_not_mistaken_for_six_month_coverage(self) -> None:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -1016,3 +1327,93 @@ class V2HigherTimeframeWaveEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class AlphaDiscoveryHypothesisTests(unittest.TestCase):
+    def test_gross_to_fee_ratio_uses_signal_time_inputs_and_costs(self):
+        from crypto_super_radar.ai_sandbox import (
+            _gross_to_fee_ratio, _passes_cost_friction_guard, _passes_4h_regime_alignment,
+        )
+        from crypto_super_radar.virtual_blofin import CostModel
+
+        signal = {"signal": "LONG", "entry": 100.0, "stop_loss": 98.0, "take_profit": 104.8}
+        ratio = _gross_to_fee_ratio(
+            signal, contract_value=1.0, costs=CostModel(spread_fraction=0.0002),
+            tp1_reward_r_multiple=1.2, tp1_fraction=0.5,
+        )
+        self.assertIsNotNone(ratio)
+        self.assertGreater(ratio, 3.0)
+        self.assertTrue(_passes_cost_friction_guard(ratio, 3.0))
+        self.assertFalse(_passes_cost_friction_guard(None, 3.0))
+
+        higher_cost_ratio = _gross_to_fee_ratio(
+            signal, contract_value=1.0,
+            costs=CostModel(spread_fraction=0.0004, maker_fee=0.0006, taker_fee=0.001),
+            tp1_reward_r_multiple=1.2, tp1_fraction=0.5,
+        )
+        self.assertLess(higher_cost_ratio, ratio)
+        self.assertTrue(_passes_4h_regime_alignment({"regime":{"aligned_4h":False}}, False))
+        self.assertTrue(_passes_4h_regime_alignment({"regime":{"aligned_4h":True}}, True))
+        self.assertFalse(_passes_4h_regime_alignment({"regime":{"aligned_4h":False}}, True))
+        self.assertFalse(_passes_4h_regime_alignment({}, True))
+
+    def test_gross_to_fee_ratio_rejects_invalid_trade_geometry(self):
+        from crypto_super_radar.ai_sandbox import _gross_to_fee_ratio
+        from crypto_super_radar.virtual_blofin import CostModel
+
+        self.assertIsNone(_gross_to_fee_ratio(
+            {"signal":"LONG","entry":100,"stop_loss":101,"take_profit":104},
+            contract_value=1.0,costs=CostModel(),
+        ))
+        self.assertIsNone(_gross_to_fee_ratio(
+            {"signal":"LONG","entry":float("nan"),"stop_loss":98,"take_profit":104},
+            contract_value=1.0,costs=CostModel(),
+        ))
+
+
+
+class FundingBlackoutWindowApplicabilityTests(unittest.TestCase):
+    def test_window_ending_before_registered_blackout_does_not_require_it(self):
+        start = int(pd.Timestamp("2025-10-31T09:00:00Z").timestamp() * 1000)
+        end = int(pd.Timestamp("2026-03-09T00:00:00Z").timestamp() * 1000)
+        self.assertEqual(
+            _funding_blackout_window_applicability(start, end),
+            "NOT_APPLICABLE_OUTSIDE_REQUESTED_WINDOW",
+        )
+
+    def test_window_covering_entire_registered_blackout_requires_five_symbol_verification(self):
+        start = 1782316800000
+        end = 1782576000000
+        self.assertEqual(_funding_blackout_window_applicability(start, end), "REQUIRED")
+
+    def test_partial_overlap_with_registered_blackout_fails_closed(self):
+        start = 1782403200000
+        end = 1782446400000
+        with self.assertRaisesRegex(ReplayDownloadError, "partially overlaps"):
+            _funding_blackout_window_applicability(start, end)
+
+
+class V3CostThresholdResearchTests(unittest.TestCase):
+    def test_cost_threshold_scenarios_are_one_variable_variants_of_scenario_b(self):
+        specs = {row["id"]: row for row in _scenario_specs()}
+        for scenario_id, threshold in (("H", 4.5), ("I", 5.5)):
+            settings = specs[scenario_id]["settings"]
+            self.assertTrue(settings["cost_friction_guard"])
+            self.assertEqual(settings["minimum_gross_to_fee_ratio"], threshold)
+            self.assertEqual(settings["max_holding_bars"], 12)
+            self.assertTrue(settings["tp1_enabled"])
+            self.assertEqual(settings["tp1_reward_r_multiple"], 1.2)
+            self.assertEqual(settings["tp1_fraction"], 0.5)
+            self.assertEqual(settings["risk_fraction"], 0.0025)
+            self.assertEqual(settings["stop_atr_multiplier_overrides"], {
+                "SOL-USDT": 2.25, "ETH-USDT": 1.625,
+            })
+            self.assertNotIn("v3_research_filter", settings)
+            self.assertNotIn("four_hour_regime_alignment", settings)
+
+    def test_explicit_independent_holdout_disables_train_and_validation(self):
+        self.assertEqual(_effective_phase_months(
+            "2025-11-30T09:00:00+00:00", 4, 5,
+        ), (0, 0))
+        self.assertEqual(_effective_phase_months(None, 4, 5), (4, 5))
