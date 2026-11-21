@@ -655,6 +655,7 @@ def download_watchlist(
     symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
+    funding_start_utc: datetime | None = None,
 ) -> dict[str, Any]:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -669,7 +670,12 @@ def download_watchlist(
         "price_candle_blackouts": [dict(window) for window in OBSERVED_PRICE_CANDLE_BLACKOUTS],
         "price_blackout_policy": "Only exact evidence-backed gaps are allowlisted; no candle is fabricated, interpolated or forward-filled.",
         "requested_window": {
-            "start_utc": start_utc.astimezone(timezone.utc).isoformat() if start_utc else None,
+            "candle_start_utc": start_utc.astimezone(timezone.utc).isoformat() if start_utc else None,
+            "funding_start_utc": (
+                funding_start_utc.astimezone(timezone.utc).isoformat()
+                if funding_start_utc else
+                (start_utc.astimezone(timezone.utc).isoformat() if start_utc else None)
+            ),
             "end_utc": end_utc.astimezone(timezone.utc).isoformat() if end_utc else None,
             "window_mode": "EXPLICIT_RANGE" if start_utc and end_utc else "CALENDAR_LOOKBACK",
         },
@@ -691,7 +697,9 @@ def download_watchlist(
             )
             all_candles.extend(marks)
             funding = download_funding_rates(
-                symbol, months=months, start_utc=start_utc, end_utc=end_utc
+                symbol, months=months,
+                start_utc=funding_start_utc or start_utc,
+                end_utc=end_utc,
             )
             funding_by_symbol[symbol] = funding
             instrument = download_instrument_rules(symbol)
@@ -713,8 +721,9 @@ def download_watchlist(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download BloFin Demo public replay data; no credentials and no order writes")
     parser.add_argument("--months", type=int, default=7, help="Calendar months to fetch (maximum 13) when explicit UTC bounds are not supplied.")
-    parser.add_argument("--start-utc", default=None, help="Explicit inclusive UTC download start, ISO-8601 with timezone.")
-    parser.add_argument("--end-utc", default=None, help="Explicit exclusive UTC download end, ISO-8601 with timezone.")
+    parser.add_argument("--start-utc", default=None, help="Explicit inclusive candle download start, ISO-8601 with timezone.")
+    parser.add_argument("--funding-start-utc", default=None, help="Optional explicit inclusive funding download start; can differ from candle warm-up start.")
+    parser.add_argument("--end-utc", default=None, help="Explicit exclusive download end, ISO-8601 with timezone.")
     parser.add_argument("--db", default="data/blofin_replay.sqlite3")
     args = parser.parse_args()
     def parse_utc(raw: str | None) -> datetime | None:
@@ -725,10 +734,12 @@ def main() -> None:
             raise ValueError("explicit UTC timestamps must include timezone information")
         return value.astimezone(timezone.utc)
     start_utc = parse_utc(args.start_utc)
+    funding_start_utc = parse_utc(args.funding_start_utc)
     end_utc = parse_utc(args.end_utc)
     print(json.dumps(download_watchlist(
         db_path=args.db, months=args.months,
         start_utc=start_utc, end_utc=end_utc,
+        funding_start_utc=funding_start_utc,
     ), indent=2))
 
 
