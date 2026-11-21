@@ -50,7 +50,7 @@ from .challenge1_v2 import challenge1_v2_execution_evidence_ready
 from .challenge1_v2_orchestration import (
     Challenge1V2DataBlocked, analyze_challenge1_v2_market, get_fresh_execution_quote,
 )
-from .database import storage_backend
+from .database import connect_database, storage_backend
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
 from .notion_event_sync import NotionEventOutbox
@@ -679,6 +679,155 @@ def _blofin_dashboard_token_valid(auth_header: str, expected_token: str) -> bool
         and supplied
         and hmac.compare_digest(supplied, expected_token)
     )
+
+
+V2_AUTOPILOT_RUN_LOCK = threading.Lock()
+V2_AUTOPILOT_RUN_STATE = {
+    "status": "IDLE", "job_id": None, "started_at_utc": None,
+    "finished_at_utc": None, "result": None, "error_type": None,
+}
+
+
+def _run_challenge1_v2_dashboard_cycle(job_id: str) -> None:
+    """Run the same Turso-backed V2 run_cycle used by the scheduled worker."""
+    connection = None
+    store = None
+    try:
+        from .challenge1_v2_autopilot import build_v2_demo_risk_policy, preflight_errors, run_cycle
+        from .blofin_demo_readonly import DEMO_REST_URL
+        if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "false":
+            raise BloFinDemoExecutionBlocked("Legacy AutoPilot must remain explicitly false.")
+        errors = preflight_errors()
+        if errors:
+            raise BloFinDemoExecutionBlocked("; ".join(errors))
+        if not _enabled_v2_env("BLOFIN_DEMO_TRADING_ENABLED"):
+            raise BloFinDemoExecutionBlocked("BLOFIN_DEMO_TRADING_ENABLED is not true.")
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise BloFinDemoExecutionBlocked("Durable Turso storage is required.")
+        if os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() != "WEB":
+            raise BloFinDemoExecutionBlocked("This Render process is not the WEB execution role.")
+        client = BloFinDemoTradeClient(timeout=10.0)
+        if str(getattr(client, "base_url", "")).rstrip("/") != DEMO_REST_URL.rstrip("/"):
+            raise BloFinDemoExecutionBlocked("BloFin endpoint is not the fixed Demo REST host.")
+        store = BloFinDemoEventStore()
+        executor = BloFinDemoExecutor(
+            client=client, store=store, policy=build_v2_demo_risk_policy(),
+            trading_enabled=True,
+        )
+        executor.recover_unresolved_orders_from_journal()
+        connection = connect_database()
+        with LOCK:
+            V2_AUTOPILOT_RUN_STATE.update({
+                "status": "RUNNING", "job_id": job_id,
+                "started_at_utc": datetime.now(timezone.utc).isoformat(),
+                "finished_at_utc": None, "result": None, "error_type": None,
+            })
+        result = run_cycle(client, connection, executor=executor, environ=os.environ)
+        with LOCK:
+            V2_AUTOPILOT_RUN_STATE.update({
+                "status": result.get("status", "UNKNOWN"), "result": result,
+                "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+            })
+    except Exception as exc:
+        with LOCK:
+            V2_AUTOPILOT_RUN_STATE.update({
+                "status": "BLOCKED_OR_ERROR", "error_type": type(exc).__name__,
+                "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                "result": {"status": "BLOCKED_OR_ERROR", "orders_submitted": False},
+            })
+        print("CSR_V2_DASHBOARD_CYCLE " + json.dumps({
+            "job_id": job_id, "status": "BLOCKED_OR_ERROR",
+            "error_type": type(exc).__name__,
+        }, sort_keys=True), flush=True)
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+        V2_AUTOPILOT_RUN_LOCK.release()
+
+
+def _enabled_v2_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() == "true"
+
+
+def _blofin_v2_cycle_snapshot() -> dict:
+    """Return a secret-free recent V2 cycle and open-exit-state snapshot from Turso."""
+    connection = None
+    store = None
+    try:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise RuntimeError("DURABLE_TURSO_NOT_CONFIGURED")
+        connection = connect_database()
+        rows = connection.execute(
+            "SELECT cycle_id,symbol,started_at_utc,finished_at_utc,mode,status,signal,reason,orders_submitted,payload_json "
+            "FROM challenge1_v2_autopilot_cycles ORDER BY finished_at_utc DESC LIMIT 25"
+        ).fetchall()
+        cycles = []
+        for row in rows:
+            item = dict(row)
+            try:
+                payload = json.loads(item.pop("payload_json") or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            reviews = payload.get("ai_reviews") if isinstance(payload.get("ai_reviews"), list) else []
+            votes = []
+            for entry in reviews[:2]:
+                if not isinstance(entry, dict):
+                    continue
+                review = entry.get("review") if isinstance(entry.get("review"), dict) else entry
+                votes.append({
+                    "reviewer_id": entry.get("reviewer_id") or review.get("reviewer_id"),
+                    "status": review.get("status") or "UNKNOWN",
+                    "verified": review.get("model_verified") is True and review.get("response_validated") is True,
+                    "returned_model": review.get("returned_model") or review.get("model"),
+                })
+            item["ai_votes"] = votes
+            item["ai_consensus"] = payload.get("ai_consensus") or {}
+            item["exit_manager"] = payload.get("exit_manager_summary") or []
+            cycles.append(item)
+        store = BloFinDemoEventStore()
+        raw_positions = store.list_v2_position_exit_states(active_only=True, limit=100)
+        positions = []
+        for wrapped in raw_positions:
+            state = dict(wrapped.get("payload") or wrapped)
+            positions.append({
+                "position_id": state.get("position_id"),
+                "instrument_id": state.get("instrument_id"),
+                "side": state.get("side"),
+                "status": state.get("status"),
+                "tp1_executed": state.get("tp1_executed"),
+                "candles_elapsed": state.get("candles_elapsed"),
+                "remaining_size": state.get("remaining_size"),
+            })
+        with LOCK:
+            run_state = copy.deepcopy(V2_AUTOPILOT_RUN_STATE)
+        return {
+            "status": "OK", "environment": "BLOFIN_DEMO",
+            "run_state": run_state, "cycles": cycles, "open_exit_positions": positions,
+        }
+    except Exception as exc:
+        return {
+            "status": "UNAVAILABLE", "environment": "BLOFIN_DEMO",
+            "error_type": type(exc).__name__, "cycles": [], "open_exit_positions": [],
+        }
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
 
 
 def _blofin_demo_account_snapshot() -> dict:
@@ -6189,6 +6338,14 @@ class Handler(BaseHTTPRequestHandler):
                     outbox.close()
                 if activity_journal is not None:
                     activity_journal.close()
+        if parsed.path == "/api/blofin/demo/v2-autopilot/cycles":
+            expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            payload = _blofin_v2_cycle_snapshot()
+            return self._send(200 if payload.get("status") == "OK" else 503,
+                              json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/position-manager/status":
             with LOCK:
                 payload = copy.deepcopy(BLOFIN_POSITION_MANAGER_STATE)
@@ -6502,6 +6659,13 @@ class Handler(BaseHTTPRequestHandler):
             <div id="blofin-execution-report" class="execution-report" aria-live="polite" style="margin-top:14px">
               <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
             </div>
+            <div class="metric" id="blofin-v2-autopilot-panel" style="margin-top:14px;border-color:#2d6470">
+              <h3>اجرای مستقیم V2 · پنج بازار و دو ناظر مستقل</h3>
+              <p class="muted">این دکمه مستقیماً چرخهٔ مشترک challenge1_v2_autopilot.run_cycle را در Render اجرا می‌کند. قبل از ارسال درخواست، توکن پنل لازم است. هر سفارش احتمالی فقط به BloFin Demo و با تأیید هر دو ناظر، حد ضرر/سود و سقف چهار پوزیشن می‌رود.</p>
+              <button id="blofin-v2-run-once" type="button">اجرای یک چرخه V2 در BloFin Demo</button>
+              <p id="blofin-v2-cycle-status" class="muted" aria-live="polite">برای اجرای دستی، توکن پنل را وارد کن.</p>
+              <div id="blofin-v2-cycle-history" style="overflow-x:auto"></div>
+            </div>
           </div>
           <div class="metric" id="blofin-smoke-test-panel" style="margin-top:16px;border-color:#2d6470">
             <h3>تست ربات در محیط دمو صرافی</h3>
@@ -6545,11 +6709,14 @@ class Handler(BaseHTTPRequestHandler):
             const instrumentStatus=document.getElementById('blofin-instrument-status');
             const executionReadiness=document.getElementById('blofin-execution-readiness');
             const executionReport=document.getElementById('blofin-execution-report');
+            const v2RunButton=document.getElementById('blofin-v2-run-once');
+            const v2CycleStatus=document.getElementById('blofin-v2-cycle-status');
+            const v2CycleHistory=document.getElementById('blofin-v2-cycle-history');
             const monitorToggle=document.getElementById('blofin-demo-monitor-toggle');
             const monitorStatus=document.getElementById('blofin-monitor-status');
             const monitorView=document.getElementById('blofin-monitor-view');
             const monitorEvents=document.getElementById('blofin-monitor-events');
-            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!autopilotStartButton||!autopilotStopButton||!autopilotStatus||!smokeButton||!smokeRefreshButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
+            if(!checkButton||!status||!accountButton||!clearButton||!tokenInput||!accountStatus||!accountView||!safety||!executeButton||!autopilotStartButton||!autopilotStopButton||!autopilotStatus||!smokeButton||!smokeRefreshButton||!smokeReadiness||!smokeStatus||!smokeReport||!instrumentSelect||!profileSelect||!instrumentStatus||!executionReadiness||!executionReport||!v2RunButton||!v2CycleStatus||!v2CycleHistory||!monitorToggle||!monitorStatus||!monitorView||!monitorEvents)return;
 
             checkButton.addEventListener('click',async function(){
               checkButton.disabled=true;
@@ -7247,6 +7414,89 @@ async function loadBlofinInstruments(){
                 executionReadiness.textContent='از فشردن دوباره دکمه خودداری کن تا وضعیت درخواست روشن شود.';
               }
             });
+            function renderV2CycleSnapshot(payload){
+              v2CycleHistory.replaceChildren();
+              const run=payload.run_state||{};
+              v2CycleStatus.textContent='وضعیت اجرای آخر: '+(run.status||'UNKNOWN')
+                +' · شناسه: '+(run.job_id||'—')
+                +(run.error_type?' · خطا: '+run.error_type:'');
+              function add(parent,tag,value){
+                const node=document.createElement(tag);
+                node.textContent=value===null||value===undefined||value===''?'—':String(value);
+                parent.appendChild(node);return node;
+              }
+              const cycles=Array.isArray(payload.cycles)?payload.cycles:[];
+              add(v2CycleHistory,'h4','آخرین چرخه‌های ثبت‌شده در Turso · حداکثر ۲۵ نماد');
+              if(!cycles.length)add(v2CycleHistory,'p','هنوز چرخه‌ای در جدول V2 ثبت نشده است.');
+              cycles.forEach(item=>{
+                const card=document.createElement('article');card.className='metric';card.style.margin='8px 0';
+                add(card,'strong',(item.symbol||'نماد نامشخص')+' · '+(item.status||'UNKNOWN')+' · '+(item.signal||'UNKNOWN'));
+                add(card,'p','چرخه: '+(item.cycle_id||'—')+' · حالت: '+(item.mode||'—')+' · شروع: '+(item.started_at_utc||'—'));
+                const votes=Array.isArray(item.ai_votes)?item.ai_votes:[];
+                add(card,'p','Nemotron: '+(votes.find(x=>x.reviewer_id==='nemotron')?.status||'NOT_RECORDED')
+                  +' · Groq/ناظر دوم: '+(votes.find(x=>x.reviewer_id==='second_ai')?.status||'NOT_RECORDED')
+                  +' · اجماع: '+((item.ai_consensus||{}).status||'UNKNOWN'));
+                add(card,'p','سفارش ارسال شد: '+(item.orders_submitted?'بله، Demo':'خیر')
+                  +' · دلیل/وضعیت: '+(item.reason||'—'));
+                v2CycleHistory.appendChild(card);
+              });
+              const positions=Array.isArray(payload.open_exit_positions)?payload.open_exit_positions:[];
+              add(v2CycleHistory,'h4','وضعیت خروج پوزیشن‌های باز ثبت‌شده در Turso');
+              if(!positions.length)add(v2CycleHistory,'p','پوزیشن V2 بازی در دفتر خروج ثبت نشده است.');
+              positions.forEach(item=>{
+                const card=document.createElement('article');card.className='metric';card.style.margin='8px 0';
+                add(card,'strong',(item.instrument_id||'—')+' · '+(item.side||'—')+' · '+(item.status||'UNKNOWN'));
+                add(card,'p','Position ID: '+(item.position_id||'—')+' · TP1: '+(item.tp1_executed?'انجام شده':'انجام نشده')
+                  +' · کندل‌های بسته: '+(item.candles_elapsed??'—')+' · حجم باقی‌مانده: '+(item.remaining_size??'—'));
+                v2CycleHistory.appendChild(card);
+              });
+            }
+            async function refreshV2CycleSnapshot(){
+              const token=tokenInput.value.trim();
+              if(!token){v2CycleStatus.textContent='برای مشاهده گزارش خصوصی، توکن پنل را وارد کن.';return null;}
+              try{
+                const response=await fetch('/api/blofin/demo/v2-autopilot/cycles',{
+                  cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                });
+                const payload=await response.json();
+                if(!response.ok)throw new Error(payload.status||('HTTP '+response.status));
+                renderV2CycleSnapshot(payload);return payload;
+              }catch(error){
+                v2CycleStatus.textContent='گزارش V2 از Turso دریافت نشد؛ وضعیت نامشخص است و اجرای دوباره انجام نده.';
+                return null;
+              }
+            }
+            async function pollV2Cycle(jobId,attempt){
+              const payload=await refreshV2CycleSnapshot();
+              const run=payload&&payload.run_state||{};
+              if(run.job_id===jobId&&run.status!=='QUEUED'&&run.status!=='RUNNING')return;
+              if(attempt<180)setTimeout(()=>pollV2Cycle(jobId,attempt+1),4000);
+              else v2CycleStatus.textContent='مهلت نمایش تمام شد؛ همان شناسه چرخه را بررسی کن و درخواست جدید نفرست: '+jobId;
+            }
+            v2RunButton.addEventListener('click',async function(){
+              const token=tokenInput.value.trim();
+              if(!token){v2CycleStatus.textContent='ابتدا توکن پنل را وارد کن.';return;}
+              if(!window.confirm('یک چرخه کامل CHALLENGE_1_V2 روی پنج بازار در BloFin Demo اجرا می‌شود. اگر هر دو ناظر تأیید معتبر بدهند و همه کنترل‌های ریسک عبور کنند، سفارش واقعی Demo ممکن است ارسال شود. هیچ سفارش Live مجاز نیست. ادامه؟'))return;
+              v2RunButton.disabled=true;v2CycleStatus.textContent='درخواست چرخه V2 به Render Staging ارسال شد...';
+              try{
+                const response=await fetch('/api/blofin/demo/v2-autopilot/run-once',{
+                  method:'POST',cache:'no-store',
+                  headers:{'Authorization':'Bearer '+token,'Content-Type':'application/x-www-form-urlencoded'},
+                  body:new URLSearchParams({confirm:'1'})
+                });
+                const started=await response.json();
+                if(!response.ok||!started.job_id){
+                  v2CycleStatus.textContent=started.message_fa||started.blocker||'چرخه آغاز نشد؛ هیچ سفارش جدیدی فرض نکن.';
+                  await refreshV2CycleSnapshot();return;
+                }
+                v2CycleStatus.textContent='چرخه V2 آغاز شد؛ شناسه: '+started.job_id;
+                pollV2Cycle(started.job_id,0);
+              }catch(error){
+                v2CycleStatus.textContent='نتیجه درخواست نامشخص است؛ پیش از تلاش دوباره وضعیت همان چرخه را بررسی کن.';
+              }finally{v2RunButton.disabled=false;}
+            });
+            refreshV2CycleSnapshot();
+            setInterval(refreshV2CycleSnapshot,30000);
             loadBlofinInstruments().then(refreshExecutionReadiness);
             refreshExecutionReadiness();
             refreshAutopilotStatus();
@@ -8778,7 +9028,7 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
-        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/blofin/demo/autopilot/control"}:
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/blofin/demo/autopilot/control", "/api/blofin/demo/v2-autopilot/run-once"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
         request_host = self.headers.get("Host", "")
@@ -8792,6 +9042,74 @@ async function loadBlofinInstruments(){
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            if route == "/api/blofin/demo/v2-autopilot/run-once":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({
+                        "status": "UNAUTHORIZED", "message_fa": "توکن پنل معتبر نیست."
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                if os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true" or not _enabled_v2_env("BLOFIN_DEMO_TRADING_ENABLED"):
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "blocker": "V2_DEMO_FLAGS_DISABLED",
+                        "message_fa": "دو کلید ایمنی V2 و BloFin Demo باید در Render فعال باشند؛ هیچ چرخه‌ای آغاز نشد.",
+                        "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "false":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "blocker": "LEGACY_AUTOPILOT_NOT_FALSE",
+                        "message_fa": "اتوپایلوت قدیمی باید صریحاً خاموش باشد.",
+                        "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if storage_backend() != "TURSO_CLOUD_SQLITE":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                        "message_fa": "ذخیره‌سازی پایدار Turso آماده نیست.",
+                        "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() != "WEB":
+                    return self._send(409, json.dumps({
+                        "status": "ROLE_BLOCKED", "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with V2_AUTOPILOT_RUN_LOCK:
+                    with LOCK:
+                        active = V2_AUTOPILOT_RUN_STATE.get("status") == "RUNNING"
+                    if active:
+                        return self._send(409, json.dumps({
+                            "status": "ALREADY_RUNNING",
+                            "job_id": V2_AUTOPILOT_RUN_STATE.get("job_id"),
+                            "message_fa": "یک چرخه V2 در حال اجراست؛ همان چرخه را دنبال کن.",
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    job_id = uuid.uuid4().hex
+                    with LOCK:
+                        V2_AUTOPILOT_RUN_STATE.update({
+                            "status": "QUEUED", "job_id": job_id,
+                            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+                            "finished_at_utc": None, "result": None, "error_type": None,
+                        })
+                    worker = threading.Thread(
+                        target=_run_challenge1_v2_dashboard_cycle,
+                        args=(job_id,), daemon=True, name="challenge1-v2-dashboard-cycle",
+                    )
+                    try:
+                        worker.start()
+                    except Exception:
+                        V2_AUTOPILOT_RUN_LOCK.release()
+                        with LOCK:
+                            V2_AUTOPILOT_RUN_STATE.update({"status": "WORKER_START_FAILED", "error_type": "ThreadStartError"})
+                        return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "QUEUED", "job_id": job_id,
+                    "message_fa": "چرخه واقعی CHALLENGE_1_V2 در محیط BloFin Demo آغاز شد؛ ورود فقط با تأیید هر دو ناظر و کنترل‌های ریسک مجاز است.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
             if route == "/api/blofin/demo/autopilot/control":
                 if (
                     not origin
