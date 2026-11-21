@@ -1696,32 +1696,47 @@ def run_sandbox(
         "quantitative_metrics": _grouped_performance_summary(actual_trades, initial_equity, symbols),
         "shadow_book_metrics": _shadow_book_summary(shadow_trades),
         "pattern_intelligence_v3_shadow_calibration": {
-            "mode": "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
+            "default_mode_unchanged": not bool(v3_research_filter),
             "training_is_unfiltered": True,
             "pattern_brain_trained": pattern_brain.trained,
             "training_examples": len(pattern_brain.examples),
             "training_wins": sum(1 for row in pattern_brain.examples if row["label"] == 1),
             "training_losses": sum(1 for row in pattern_brain.examples if row["label"] == 0),
             "training_rounds": counts["pattern_training_rounds"],
-            "frozen_before_validation_oos": pattern_brain_freeze_train_count is not None,
+            "frozen_before_validation_oos": pattern_brain.frozen and pattern_brain_freeze_train_count is not None,
+            "model_version": pattern_brain.MODEL_VERSION,
+            "training_timestamp": pattern_brain.training_timestamp,
+            "model_hash": pattern_brain.model_hash,
             "model_score_floor": V3_PATTERN_BRAIN_SCORE_FLOOR,
             "score_is_calibrated_probability": False,
             "toxic_pattern_names": sorted(V3_TOXIC_PATTERN_NAMES),
-            "liquidity_sweep_policy": "OBSERVE_ONLY: candidate sweep and toxic-pattern flags are logged but never block an entry.",
+            "liquidity_sweep_policy": "Pattern-name and sweep veto suggestions are actual replay vetoes only when the research flag is explicitly enabled.",
             "priority_pattern_directions": V3_PRIORITY_PATTERN_DIRECTIONS,
             "suggestion_counts": {
                 "hypothetical_veto_suggestions": counts["v3_pattern_veto_suggestions"],
                 "toxic_or_sweep_suggestions": counts["v3_toxic_pattern_veto_suggestions"],
                 "low_brain_score_suggestions": counts["v3_brain_low_score_suggestions"],
                 "priority_supported_signals": counts["v3_priority_supported_signals"],
-                "actual_v3_entry_vetoes": 0,
+                "actual_v3_entry_vetoes": counts["v3_research_filter_entry_vetoes"],
             },
             "counterfactual": {
-                "available": False,
-                "closed_vetoed_trades": 0,
-                "interpretation": "Not generated because V3 is telemetry-only and no V3-suggested entry is suppressed.",
+                "available": bool(v3_research_filter),
+                "closed_vetoed_trades": sum(
+                    1 for row in shadow_trades
+                    if "V3_RESEARCH_FILTER" in str(row.get("veto_source") or "").split("+")
+                ),
+                "interpretation": (
+                    "V3-rejected candidates are retained in a separate counterfactual shadow ledger."
+                    if v3_research_filter else
+                    "Shadow mode does not suppress entries; no V3 entry-veto book is active."
+                ),
             },
-            "decision_policy": "V3 patterns, scores, veto suggestions, and priority bonuses are telemetry only; the actual entry decision is independent of all V3 outputs.",
+            "decision_policy": (
+                "Isolated offline research filter may veto V3-suggested entries."
+                if v3_research_filter else
+                "V3 telemetry cannot alter the default entry decision."
+            ),
         },
         "pattern_intelligence_v3_shadow": {
             "mode": "RESEARCH_FILTER_ISOLATED_TRAIN_ONLY" if v3_research_filter else "SHADOW_TELEMETRY_ONLY_NO_ENTRY_VETO",
@@ -1922,6 +1937,11 @@ def main() -> None:
     parser.add_argument("--tp1-r", type=float, default=1.2)
     parser.add_argument("--tp1-fraction", type=float, default=0.5)
     parser.add_argument("--symbols", default=",".join(DEFAULT_WATCHLIST))
+    parser.add_argument("--start-utc", default=None, help="Optional explicit replay window start, ISO-8601 with timezone")
+    parser.add_argument("--replay-months", type=int, default=6)
+    parser.add_argument("--training-months", type=int, default=4)
+    parser.add_argument("--validation-months", type=int, default=5)
+    parser.add_argument("--risk-fraction", type=float, default=0.0025, help="Per-position equity risk fraction; default remains 0.25%")
     parser.add_argument("--eth-stop-atr", type=float, default=None)
     parser.add_argument("--sol-stop-atr", type=float, default=None)
     parser.add_argument(
@@ -1942,6 +1962,11 @@ def main() -> None:
         tp1_reward_r_multiple=args.tp1_r, tp1_fraction=args.tp1_fraction,
         stop_atr_multiplier_overrides=stop_overrides,
         v3_research_filter=args.v3_research_filter,
+        replay_start_utc=args.start_utc,
+        replay_months=args.replay_months,
+        training_months=args.training_months,
+        validation_months=args.validation_months,
+        risk_fraction=args.risk_fraction,
     )
     print(json.dumps({
         "equity": report["equity"],
