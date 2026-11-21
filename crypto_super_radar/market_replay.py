@@ -492,9 +492,11 @@ def _classify_funding_schedule_events(
             and right_event[3] == "MISSING" and right_event[4] == "MISSING_API_FIELD"
         )
         if both_missing and abs(delta_ms - REGULAR_FUNDING_INTERVAL_MS) > 2 * FUNDING_SCHEDULE_TOLERANCE_MS:
+            left_utc = datetime.fromtimestamp(left / 1000, tz=timezone.utc).isoformat()
+            right_utc = datetime.fromtimestamp(right / 1000, tz=timezone.utc).isoformat()
             raise ReplayDownloadError(
                 f"funding history for {symbol} skips or breaks the fixed 8-hour UTC cadence "
-                f"(delta_ms={delta_ms})"
+                f"(left_utc={left_utc}, right_utc={right_utc}, delta_ms={delta_ms})"
             )
 
     classified = []
