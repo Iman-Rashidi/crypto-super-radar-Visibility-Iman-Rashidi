@@ -27,7 +27,7 @@ class Challenge1V2AutopilotDryRunTests(unittest.TestCase):
 class FakeStore:
     def __init__(self,state): self.state=dict(state)
     def list_v2_position_exit_states(self,active_only=True,limit=100):
-        return [dict(self.state,payload=dict(self.state))]
+        return [dict(self.state,payload=dict(self.state))] if self.state else []
     def save_v2_position_exit_state(self,state): self.state=dict(state); return self.state
 
 class FakeExchange:
@@ -35,6 +35,8 @@ class FakeExchange:
     def get_positions(self,inst_id=None):
         return [{"instId":"BTC-USDT","positionId":"pos-1","positionSide":"net","positions":"2"}]
     def get_mark_price(self,*,inst_id): return [{"markPrice":self.mark}]
+    def get_open_tpsl_orders(self,*,inst_id,client_order_id,limit):
+        return [{"positionId":"pos-1","state":"live","slTriggerPrice":"98","tpslId":"tpsl-1"}]
     def partial_close_reduce_only(self,**kw): self.calls.append(("partial",kw)); return {"data":[{"orderId":"tp1"}]}
     def get_order_detail(self,inst_id,*,client_order_id):
         return [{"clientOrderId":client_order_id,"state":"filled","filledSize":"1"}]
@@ -61,5 +63,35 @@ class Challenge1V2ExitManagerTests(unittest.TestCase):
         out=manage_open_positions(exchange,store,now_ms=1_800_020_000_000)
         self.assertEqual(out["results"][0]["status"],"TIME_EXIT_SUBMITTED")
         self.assertEqual(exchange.calls[0][0],"time_exit"); self.assertEqual(store.state["status"],"TIME_EXIT_PENDING")
+
+
+class FakeEntryExecutor:
+    def __init__(self,store): self.store=store; self.called=0
+    def execute(self,signal,*,inst_id,allow_demo_orders,leverage):
+        self.called+=1
+        assert signal["ai_consensus"]["status"]=="APPROVED_BY_BOTH"
+        assert allow_demo_orders is True
+        return {"position_id":"pos-1","client_order_id":"entry123","instrument_id":inst_id,
+          "side":"LONG","entry_price":"100","entry_reference_price":"100","stop_loss":"98",
+          "quantity_contracts":"2","filled_size":"2","net_break_even_price":"100.15"}
+
+
+class Challenge1V2EntryIntegrationTests(unittest.TestCase):
+    def test_two_reviewer_approval_enters_executor_and_persists_exit_state(self):
+        db=sqlite3.connect(":memory:")
+        store=FakeStore({})
+        executor=FakeEntryExecutor(store)
+        exchange=FakeExchange(mark="100")
+        signal={"execution_profile":"CHALLENGE_1_V2","instrument_id":"BTC-USDT","signal":"LONG",
+          "status":"SIGNAL_READY","ai_consensus":{"status":"APPROVED_BY_BOTH"}}
+        env={"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED":"true","BLOFIN_DEMO_TRADING_ENABLED":"true"}
+        out=run_cycle(exchange,db,analyzer=lambda *_:signal,symbols=("BTC-USDT",),
+                      executor=executor,environ=env)
+        self.assertEqual(executor.called,1)
+        self.assertTrue(out["orders_submitted"])
+        self.assertEqual(store.state["position_id"],"pos-1")
+        self.assertEqual(store.state["net_break_even_price"],"100.15")
+        self.assertEqual(store.state["sl_tpsl_id"],"tpsl-1")
+        db.close()
 
 if __name__=="__main__": unittest.main()
