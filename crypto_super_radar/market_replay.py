@@ -277,7 +277,6 @@ def download_candles(
         if cursor is not None:
             params["after"] = cursor
         payload = _json_get(sess, url, params)
-        pages_read += 1
         rows = payload.get("data")
         if not isinstance(rows, list):
             raise ReplayDownloadError("candle endpoint returned a non-list data field")
@@ -505,6 +504,7 @@ def download_funding_rates(
         if cursor is not None:
             params["after"] = cursor
         payload = _json_get(sess, url, params)
+        pages_read += 1
         rows = payload.get("data")
         if not isinstance(rows, list):
             raise ReplayDownloadError("funding endpoint returned a non-list data field")
