@@ -1080,6 +1080,25 @@ class BloFinDemoEventStore:
                 )
             """)
             self._db.execute("""
+                CREATE TABLE IF NOT EXISTS challenge1_v2_position_exit_state (
+                    position_id TEXT PRIMARY KEY,
+                    client_order_id TEXT NOT NULL UNIQUE,
+                    instrument_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    entry_price TEXT NOT NULL,
+                    initial_stop_loss TEXT NOT NULL,
+                    original_size TEXT NOT NULL,
+                    remaining_size TEXT NOT NULL,
+                    tp1_executed INTEGER NOT NULL DEFAULT 0,
+                    candles_elapsed INTEGER NOT NULL DEFAULT 0,
+                    exit_order_id TEXT,
+                    sl_tpsl_id TEXT,
+                    status TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+            """)
+            self._db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_blofin_demo_events_order
                 ON blofin_demo_execution_events(client_order_id, sequence)
             """)
@@ -1617,6 +1636,117 @@ class BloFinDemoEventStore:
                 "filled_size": filled_size,
                 "critical_reason": critical_reason,
             })
+
+    def save_v2_position_exit_state(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        """Durably upsert the V2 exit state for one exact exchange position."""
+        required = (
+            "position_id", "client_order_id", "instrument_id", "side",
+            "entry_price", "initial_stop_loss", "original_size", "remaining_size",
+        )
+        if not isinstance(state, Mapping) or any(not str(state.get(key) or "").strip() for key in required):
+            raise ValueError("V2 exit state is missing required position identity or sizing fields.")
+        position_id = str(state["position_id"]).strip()
+        client_order_id = str(state["client_order_id"]).strip()
+        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", position_id):
+            raise ValueError("position_id is invalid.")
+        BloFinDemoTradeClient._exit_client_id(client_order_id)
+        instrument_id = str(state["instrument_id"]).strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+            raise ValueError("instrument_id is invalid.")
+        side = str(state["side"]).strip().upper()
+        if side not in {"LONG", "SHORT"}:
+            raise ValueError("side must be LONG or SHORT.")
+        entry = _decimal(state["entry_price"], "entry_price")
+        stop = _decimal(state["initial_stop_loss"], "initial_stop_loss")
+        original = _decimal(state["original_size"], "original_size")
+        remaining = _decimal(state["remaining_size"], "remaining_size")
+        if min(entry, stop, original, remaining) <= 0 or remaining > original:
+            raise ValueError("V2 exit state prices or sizes are outside the permitted range.")
+        tp1 = state.get("tp1_executed") is True
+        bars = state.get("candles_elapsed", 0)
+        if isinstance(bars, bool) or not isinstance(bars, int) or bars < 0:
+            raise ValueError("candles_elapsed must be a non-negative integer.")
+        exit_order_id = str(state.get("exit_order_id") or "").strip() or None
+        sl_tpsl_id = str(state.get("sl_tpsl_id") or "").strip() or None
+        status = str(state.get("status") or "OPEN").strip().upper()
+        if status not in {"OPEN", "TP1_PENDING", "TP1_EXECUTED", "TIME_EXIT_PENDING", "CLOSED", "HALTED"}:
+            raise ValueError("Unsupported V2 exit state status.")
+        safe = dict(state)
+        safe.update({
+            "position_id": position_id, "client_order_id": client_order_id,
+            "instrument_id": instrument_id, "side": side,
+            "entry_price": _format_decimal(entry),
+            "initial_stop_loss": _format_decimal(stop),
+            "original_size": _format_decimal(original),
+            "remaining_size": _format_decimal(remaining),
+            "tp1_executed": tp1, "candles_elapsed": bars,
+            "exit_order_id": exit_order_id, "sl_tpsl_id": sl_tpsl_id,
+            "status": status,
+        })
+        now = int(time.time())
+        with self._lock, self._db:
+            existing = self._db.execute(
+                "SELECT client_order_id, instrument_id, side FROM challenge1_v2_position_exit_state WHERE position_id=?",
+                (position_id,),
+            ).fetchone()
+            if existing is not None and (
+                str(existing["client_order_id"]) != client_order_id
+                or str(existing["instrument_id"]) != instrument_id
+                or str(existing["side"]).upper() != side
+            ):
+                raise BloFinDemoExecutionBlocked("V2 exit state identity cannot be reassigned to another order.")
+            self._db.execute("""
+                INSERT INTO challenge1_v2_position_exit_state (
+                    position_id, client_order_id, instrument_id, side, entry_price,
+                    initial_stop_loss, original_size, remaining_size, tp1_executed,
+                    candles_elapsed, exit_order_id, sl_tpsl_id, status, updated_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(position_id) DO UPDATE SET
+                    remaining_size=excluded.remaining_size,
+                    tp1_executed=excluded.tp1_executed,
+                    candles_elapsed=excluded.candles_elapsed,
+                    exit_order_id=COALESCE(excluded.exit_order_id, challenge1_v2_position_exit_state.exit_order_id),
+                    sl_tpsl_id=COALESCE(excluded.sl_tpsl_id, challenge1_v2_position_exit_state.sl_tpsl_id),
+                    status=excluded.status, updated_at=excluded.updated_at,
+                    payload_json=excluded.payload_json
+            """, (
+                position_id, client_order_id, instrument_id, side,
+                safe["entry_price"], safe["initial_stop_loss"], safe["original_size"],
+                safe["remaining_size"], int(tp1), bars, exit_order_id, sl_tpsl_id,
+                status, now, json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str),
+            ))
+        return safe
+
+    def get_v2_position_exit_state(self, position_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM challenge1_v2_position_exit_state WHERE position_id=?",
+                (str(position_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["payload"] = json.loads(result.pop("payload_json"))
+        except (TypeError, ValueError):
+            raise BloFinDemoExecutionBlocked("Persisted V2 exit state JSON is corrupt.")
+        result["tp1_executed"] = bool(result["tp1_executed"])
+        return result
+
+    def list_v2_position_exit_states(self, *, active_only: bool = True, limit: int = 100) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500.")
+        query = (
+            "SELECT position_id FROM challenge1_v2_position_exit_state "
+            + ("WHERE status != 'CLOSED' " if active_only else "")
+            + "ORDER BY updated_at DESC LIMIT ?"
+        )
+        with self._lock:
+            ids = self._db.execute(query, (limit,)).fetchall()
+        return [
+            state for row in ids
+            if (state := self.get_v2_position_exit_state(str(row["position_id"]))) is not None
+        ]
 
     def equity_guard(self, equity_usdt: float, *, now: int | None = None) -> dict[str, float]:
         equity = _finite(equity_usdt, "equity_usdt", minimum=0.0000001)
