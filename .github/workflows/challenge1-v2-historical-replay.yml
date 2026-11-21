@@ -79,14 +79,15 @@ jobs:
         continue-on-error: true
         run: |
           set +e
+          set -o pipefail
           python -m crypto_super_radar.ai_sandbox \
             --db artifacts/blofin_replay.sqlite3 \
             --equity 1000 \
             --spread 0.0002 \
             --output artifacts/ai_sandbox_report.json \
             --brain artifacts/trained_brain.json \
-            > artifacts/sandbox.log 2>&1
-          code=$?
+            2>&1 | tee artifacts/sandbox.log
+          code=${PIPESTATUS[0]}
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 0 ]; then
             echo "Sandbox completed; report validity, unresolved positions and OOS metrics remain subject to audit." >> "$GITHUB_STEP_SUMMARY"

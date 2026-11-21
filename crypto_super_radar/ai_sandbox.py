@@ -21,7 +21,9 @@ import numpy as np
 import pandas as pd
 
 from .adaptive_brain import OnlineMetaBrain
-from .challenge1_v2 import analyze_signal, atr
+from .challenge1_v2 import (
+    analyze_signal, atr, prepare_signal_context, prepared_signal_history_ready,
+)
 from .virtual_blofin import CostModel, InstrumentRules, InsufficientEquityForRisk, SimulationError, VirtualBloFin
 from .market_replay import (
     REGULAR_FUNDING_INTERVAL_MS, FUNDING_SCHEDULE_TOLERANCE_MS,
@@ -496,6 +498,16 @@ def run_sandbox(
 
     if "BTC-USDT" not in market:
         raise SandboxDataError("BTC-USDT is required as the master-guard market")
+
+    # Validate once and build causal indicator/pivot caches outside the 15m loop.
+    btc_frame_15m = market["BTC-USDT"]["frames"]["15m"]
+    prepared_contexts = {
+        symbol: prepare_signal_context(
+            item["frames"]["1H"], item["frames"]["4H"],
+            item["frames"]["15m"], btc_frame_15m,
+        )
+        for symbol, item in market.items()
+    }
     # All five markets must cover the same six-calendar-month replay horizon.
     # The downloader and loader fail closed on missing candles or funding events.
     start_time = max(item["source_start"] for item in market.values())
@@ -542,7 +554,17 @@ def run_sandbox(
     index_maps = {symbol: {stamp: i for i, stamp in enumerate(item["market"].index)} for symbol, item in market.items()}
     last_indices = {symbol: len(item["bars"]) - 1 for symbol, item in market.items()}
 
-    for stamp in times:
+    next_progress_pct = 10
+    print(f"[WALK_FORWARD_PROGRESS] 0% (0/{len(times)} timestamps)", flush=True)
+    for time_index, stamp in enumerate(times, start=1):
+        progress_pct = int(time_index * 100 / len(times))
+        while progress_pct >= next_progress_pct:
+            print(
+                f"[WALK_FORWARD_PROGRESS] {next_progress_pct}% "
+                f"({time_index}/{len(times)} timestamps)",
+                flush=True,
+            )
+            next_progress_pct += 10
         asof = stamp + pd.Timedelta(minutes=15)
         asof_ms = int(asof.timestamp() * 1000)
         phase = _phase(asof_ms, train_end_ms, validation_end_ms)
@@ -563,11 +585,24 @@ def run_sandbox(
                     survivors.append(order)
                     continue
                 item = market[symbol]
-                observed_bars = _visible_bars(item["bars"][:row_index + 1], asof_ms)
+                # The simulator only reads the entry candle and subsequent
+                # holding candles. Rebase that bounded slice to index zero;
+                # every supplied candle is closed by the current as-of time.
+                order_start_index = int(order["start_index"])
+                observed_bars = item["bars"][order_start_index:row_index + 1]
+                if (
+                    not observed_bars
+                    or int(observed_bars[-1].get("close_ts") or (
+                        int(observed_bars[-1]["ts"]) + BAR_MS
+                    )) > asof_ms
+                ):
+                    raise SandboxDataError(
+                        f"virtual position received a candle beyond as-of for {symbol}"
+                    )
                 try:
                     result = exchange.simulate_post_only_trade(
                         bars=observed_bars,
-                        start_index=int(order["start_index"]),
+                        start_index=0,
                         direction=str(order["direction"]),
                         limit_price=order["entry"],
                         stop_price=order["stop_loss"],
@@ -871,13 +906,8 @@ def run_sandbox(
                     "PURGED_WALK_FORWARD_195_MINUTE_BOUNDARY",
                 )
                 continue
-            frame_1h = _visible_frame(item["frames"]["1H"], asof, pd.Timedelta(hours=1))
-            frame_4h = _visible_frame(item["frames"]["4H"], asof, pd.Timedelta(hours=4))
-            frame_15m = _visible_frame(item["frames"]["15m"], asof, pd.Timedelta(minutes=15))
-            btc_15m = _visible_frame(
-                market["BTC-USDT"]["frames"]["15m"], asof, pd.Timedelta(minutes=15)
-            )
-            if not _strategy_history_ready(frame_1h, frame_4h, frame_15m, btc_15m):
+            precomputed_context = prepared_contexts[symbol]
+            if not prepared_signal_history_ready(precomputed_context, asof):
                 counts["indicator_warmup_blocks"] += 1
                 _record_block_reason(
                     block_reasons, block_reasons_by_symbol, symbol,
@@ -904,10 +934,10 @@ def run_sandbox(
             try:
                 signal = analyze_signal(
                     instrument_id=symbol,
-                    frame_1h=frame_1h,
-                    frame_4h=frame_4h,
-                    frame_15m=frame_15m,
-                    btc_15m=btc_15m,
+                    frame_1h=item["frames"]["1H"],
+                    frame_4h=item["frames"]["4H"],
+                    frame_15m=item["frames"]["15m"],
+                    btc_15m=btc_frame_15m,
                     asof=asof,
                     funding_rate=funding_rate,
                     funding_kind=funding_kind,
@@ -916,6 +946,7 @@ def run_sandbox(
                     spread_fraction=spread_scenario,
                     last_three_results=tuple(last_results[symbol]),
                     tp_r=2.4,
+                    precomputed_context=precomputed_context,
                 )
             except (ValueError, KeyError, IndexError) as exc:
                 counts["strategy_data_errors"] += 1

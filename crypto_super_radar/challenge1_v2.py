@@ -94,14 +94,164 @@ def _swing_structure(frame: pd.DataFrame, direction: str, radius: int = 2) -> bo
     return pivot_highs[-1] < pivot_highs[-2] and pivot_lows[-1] < pivot_lows[-2]
 
 
-def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) -> dict[str, Any]:
-    h1 = _closed(_validate(frame_1h, "1H", 205), asof, pd.Timedelta(hours=1))
-    h4 = _closed(_validate(frame_4h, "4H", 205), asof, pd.Timedelta(hours=4))
+def _closed_count(frame: pd.DataFrame, asof: pd.Timestamp, duration: pd.Timedelta) -> int:
+    """Count only candles whose close timestamp is no later than the UTC cutoff."""
+    cutoff = asof.tz_convert("UTC") - duration
+    return int(frame.index.searchsorted(cutoff, side="right"))
+
+
+def _closed_prefix(
+    frame: pd.DataFrame, asof: pd.Timestamp, duration: pd.Timedelta,
+) -> tuple[pd.DataFrame, int]:
+    """Return a zero-copy positional prefix of fully closed candles."""
+    end = _closed_count(frame, asof, duration)
+    return frame.iloc[:end], end
+
+
+def _precompute_swing_pivots(frame: pd.DataFrame, radius: int = 2) -> dict[str, np.ndarray]:
+    """Precompute confirmed local pivots with the exact legacy comparison rule."""
+    highs = frame["high"].to_numpy(dtype=float)
+    lows = frame["low"].to_numpy(dtype=float)
+    high_values: list[float] = []
+    high_confirmed_at: list[int] = []
+    low_values: list[float] = []
+    low_confirmed_at: list[int] = []
+    neighbours = np.arange(2 * radius + 1) != radius
+    for center in range(radius, len(frame) - radius):
+        local_highs = highs[center - radius:center + radius + 1]
+        local_lows = lows[center - radius:center + radius + 1]
+        if highs[center] > np.max(local_highs[neighbours]):
+            high_values.append(float(highs[center]))
+            high_confirmed_at.append(center + radius)
+        if lows[center] < np.min(local_lows[neighbours]):
+            low_values.append(float(lows[center]))
+            low_confirmed_at.append(center + radius)
+    return {
+        "high_values": np.asarray(high_values, dtype=float),
+        "high_confirmed_at": np.asarray(high_confirmed_at, dtype=np.int64),
+        "low_values": np.asarray(low_values, dtype=float),
+        "low_confirmed_at": np.asarray(low_confirmed_at, dtype=np.int64),
+    }
+
+
+def _cached_swing_structure(
+    pivots: Mapping[str, np.ndarray], visible_rows: int, direction: str,
+) -> bool:
+    """Use only pivots whose right-hand confirmation candles are closed as-of."""
+    last_visible_index = int(visible_rows) - 1
+    high_end = int(np.searchsorted(
+        pivots["high_confirmed_at"], last_visible_index, side="right"
+    ))
+    low_end = int(np.searchsorted(
+        pivots["low_confirmed_at"], last_visible_index, side="right"
+    ))
+    pivot_highs = pivots["high_values"][:high_end]
+    pivot_lows = pivots["low_values"][:low_end]
+    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        return False
+    if direction == "LONG":
+        return pivot_highs[-1] > pivot_highs[-2] and pivot_lows[-1] > pivot_lows[-2]
+    return pivot_highs[-1] < pivot_highs[-2] and pivot_lows[-1] < pivot_lows[-2]
+
+
+def prepare_signal_context(
+    frame_1h: pd.DataFrame,
+    frame_4h: pd.DataFrame,
+    frame_15m: pd.DataFrame,
+    btc_15m: pd.DataFrame,
+) -> dict[str, Any]:
+    """Validate once and precompute causal indicators for the offline walk-forward loop.
+
+    Pandas EWM and rolling values at index t depend only on rows <= t. Swing
+    pivots additionally store their confirmation row, preventing a pivot from
+    becoming visible before its complete right-hand confirmation window.
+    """
+    frames = {
+        "1H": _validate(frame_1h, "1H", 205),
+        "4H": _validate(frame_4h, "4H", 205),
+        "15M": _validate(frame_15m, "15M", 70),
+        "BTC_15M": _validate(btc_15m, "BTC 15M", 40),
+    }
+    h1, h4, m15, btc = (
+        frames["1H"], frames["4H"], frames["15M"], frames["BTC_15M"]
+    )
+    atr_15m = atr(m15, 14)
+    indicators = {
+        "1H": {
+            "ema21": ema(h1["close"], 21),
+            "ema55": ema(h1["close"], 55),
+            "ema200": ema(h1["close"], 200),
+            "adx14": adx(h1, 14),
+        },
+        "4H": {
+            "ema50": ema(h4["close"], 50),
+            "ema200": ema(h4["close"], 200),
+        },
+        "15M": {
+            "ema21": ema(m15["close"], 21),
+            "ema55": ema(m15["close"], 55),
+            "rsi14": rsi(m15["close"], 14),
+            "atr14": atr_15m,
+            "atr14_valid": atr_15m.dropna(),
+            "volume_sma20": m15["volume"].rolling(20, min_periods=20).mean(),
+        },
+        "BTC_15M": {
+            "ema21": ema(btc["close"], 21),
+        },
+    }
+    return {
+        "version": 1,
+        "frames": frames,
+        "indicators": indicators,
+        "swings": {"1H": _precompute_swing_pivots(h1)},
+    }
+
+
+def prepared_signal_history_ready(
+    context: Mapping[str, Any], asof: pd.Timestamp,
+) -> bool:
+    """Fast equivalent of the legacy closed-history warm-up checks."""
+    frames = context["frames"]
+    return (
+        _closed_count(frames["1H"], asof, pd.Timedelta(hours=1)) >= 205
+        and _closed_count(frames["4H"], asof, pd.Timedelta(hours=4)) >= 205
+        and _closed_count(frames["15M"], asof, pd.Timedelta(minutes=15)) >= 70
+        and _closed_count(frames["BTC_15M"], asof, pd.Timedelta(minutes=15)) >= 40
+    )
+
+
+def _regime(
+    frame_1h: pd.DataFrame,
+    frame_4h: pd.DataFrame,
+    asof: pd.Timestamp,
+    *,
+    precomputed_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if precomputed_context is None:
+        h1 = _closed(_validate(frame_1h, "1H", 205), asof, pd.Timedelta(hours=1))
+        h4 = _closed(_validate(frame_4h, "4H", 205), asof, pd.Timedelta(hours=4))
+        h1_end, h4_end = len(h1), len(h4)
+    else:
+        frames = precomputed_context["frames"]
+        h1, h1_end = _closed_prefix(frames["1H"], asof, pd.Timedelta(hours=1))
+        h4, h4_end = _closed_prefix(frames["4H"], asof, pd.Timedelta(hours=4))
     if len(h1) < 205:
         return {"status": "UNKNOWN", "direction": "NONE", "reason": "1H closed-candle history is insufficient"}
     close = h1["close"]
-    e21, e55, e200 = ema(close, 21), ema(close, 55), ema(close, 200)
-    adx14 = adx(h1, 14)
+    if precomputed_context is None:
+        e21, e55, e200 = ema(close, 21), ema(close, 55), ema(close, 200)
+        adx14 = adx(h1, 14)
+        swing_long = _swing_structure(h1, "LONG")
+        swing_short = _swing_structure(h1, "SHORT")
+    else:
+        h1_indicators = precomputed_context["indicators"]["1H"]
+        e21 = h1_indicators["ema21"].iloc[:h1_end]
+        e55 = h1_indicators["ema55"].iloc[:h1_end]
+        e200 = h1_indicators["ema200"].iloc[:h1_end]
+        adx14 = h1_indicators["adx14"].iloc[:h1_end]
+        swing_cache = precomputed_context["swings"]["1H"]
+        swing_long = _cached_swing_structure(swing_cache, h1_end, "LONG")
+        swing_short = _cached_swing_structure(swing_cache, h1_end, "SHORT")
     row = h1.iloc[-1]
     vals = [e21.iloc[-1], e55.iloc[-1], e200.iloc[-1], adx14.iloc[-1]]
     if any(pd.isna(x) or not math.isfinite(float(x)) for x in vals):
@@ -118,20 +268,25 @@ def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) 
         and e21.iloc[-1] > e55.iloc[-1]
         and ema21_slope > 0
         and ema55_slope > 0
-        and _swing_structure(h1, "LONG")
+        and swing_long
     )
     short_ok = (
         row["close"] < e200.iloc[-1]
         and e21.iloc[-1] < e55.iloc[-1]
         and ema21_slope < 0
         and ema55_slope < 0
-        and _swing_structure(h1, "SHORT")
+        and swing_short
     )
     direction = "LONG" if long_ok else "SHORT" if short_ok else "NONE"
     aligned_4h = False
     if len(h4) >= 205:
         c4 = h4["close"]
-        e50_4h, e200_4h = ema(c4, 50), ema(c4, 200)
+        if precomputed_context is None:
+            e50_4h, e200_4h = ema(c4, 50), ema(c4, 200)
+        else:
+            h4_indicators = precomputed_context["indicators"]["4H"]
+            e50_4h = h4_indicators["ema50"].iloc[:h4_end]
+            e200_4h = h4_indicators["ema200"].iloc[:h4_end]
         if direction == "LONG" and not pd.isna(e50_4h.iloc[-4]) and not pd.isna(e200_4h.iloc[-1]):
             aligned_4h = c4.iloc[-1] > e200_4h.iloc[-1] and e50_4h.iloc[-1] > e50_4h.iloc[-4]
         elif direction == "SHORT" and not pd.isna(e50_4h.iloc[-4]) and not pd.isna(e200_4h.iloc[-1]):
@@ -149,20 +304,28 @@ def _regime(frame_1h: pd.DataFrame, frame_4h: pd.DataFrame, asof: pd.Timestamp) 
         "reason": "1H trend, EMA structure and HH/HL or LL/LH hard gate",
     }
 
-
 def _elliott_wave_1h_evidence(
-    frame_1h: pd.DataFrame, asof: pd.Timestamp, *, expected_direction: str
+    frame_1h: pd.DataFrame,
+    asof: pd.Timestamp,
+    *,
+    expected_direction: str,
+    precomputed_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Capture structural wave evidence from completed 1H candles only.
 
     This is evidence metadata, not a direction/probability override. The V2
     strategy's existing signal gates and score remain unchanged.
     """
-    closed = _closed(
-        _validate(frame_1h, "1H", 205),
-        asof,
-        pd.Timedelta(hours=1),
-    )
+    if precomputed_context is None:
+        closed = _closed(
+            _validate(frame_1h, "1H", 205),
+            asof,
+            pd.Timedelta(hours=1),
+        )
+    else:
+        closed, _ = _closed_prefix(
+            precomputed_context["frames"]["1H"], asof, pd.Timedelta(hours=1)
+        )
     wave = monitor_elliott_waves(closed)
     pattern = str(wave.get("pattern") or "AMBIGUOUS").upper()
     phase = str(wave.get("phase") or "INSUFFICIENT_DATA").upper()
@@ -379,13 +542,16 @@ def analyze_signal(
     spread_fraction: float | None,
     last_three_results: tuple[int, int, int] = (-1, -1, -1),
     tp_r: float = 2.4,
+    precomputed_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a completed-candle decision plus ML feature vector source values."""
     if asof.tzinfo is None:
         raise ValueError("asof must be timezone-aware")
     asof = asof.tz_convert("UTC")
     symbol = str(instrument_id).upper()
-    regime = _regime(frame_1h, frame_4h, asof)
+    regime = _regime(
+        frame_1h, frame_4h, asof, precomputed_context=precomputed_context
+    )
     if regime["direction"] not in {"LONG", "SHORT"}:
         return {"signal": "NO_TRADE", "reason": regime.get("reason"), "regime": regime}
     if funding_rate is None or spread_fraction is None:
@@ -413,13 +579,27 @@ def analyze_signal(
     if (direction == "LONG" and funding > 0.0005) or (direction == "SHORT" and funding < -0.0005):
         return {"signal": "NO_TRADE", "reason": "Funding crowding guard blocked entry", "regime": regime}
 
-    m15 = _closed(_validate(frame_15m, "15M", 70), asof, pd.Timedelta(minutes=15))
-    if len(m15) < 60:
-        return {"signal": "NO_TRADE", "reason": "15M history insufficient", "regime": regime}
-    close = m15["close"]
-    e21, e55 = ema(close, 21), ema(close, 55)
-    rsi14, atr14 = rsi(close, 14), atr(m15, 14)
-    vol_sma = m15["volume"].rolling(20, min_periods=20).mean()
+    if precomputed_context is None:
+        m15 = _closed(_validate(frame_15m, "15M", 70), asof, pd.Timedelta(minutes=15))
+        m15_end = len(m15)
+        if len(m15) < 60:
+            return {"signal": "NO_TRADE", "reason": "15M history insufficient", "regime": regime}
+        close = m15["close"]
+        e21, e55 = ema(close, 21), ema(close, 55)
+        rsi14, atr14 = rsi(close, 14), atr(m15, 14)
+        vol_sma = m15["volume"].rolling(20, min_periods=20).mean()
+    else:
+        m15, m15_end = _closed_prefix(
+            precomputed_context["frames"]["15M"], asof, pd.Timedelta(minutes=15)
+        )
+        if len(m15) < 60:
+            return {"signal": "NO_TRADE", "reason": "15M history insufficient", "regime": regime}
+        m15_indicators = precomputed_context["indicators"]["15M"]
+        e21 = m15_indicators["ema21"].iloc[:m15_end]
+        e55 = m15_indicators["ema55"].iloc[:m15_end]
+        rsi14 = m15_indicators["rsi14"].iloc[:m15_end]
+        atr14 = m15_indicators["atr14"].iloc[:m15_end]
+        vol_sma = m15_indicators["volume_sma20"].iloc[:m15_end]
     last, previous = m15.iloc[-1], m15.iloc[-2]
     vals = [e21.iloc[-1], e55.iloc[-1], rsi14.iloc[-1], atr14.iloc[-1], vol_sma.iloc[-1]]
     if any(pd.isna(x) or not math.isfinite(float(x)) for x in vals):
@@ -436,7 +616,12 @@ def analyze_signal(
         return {"signal": "NO_TRADE", "reason": "15M value zone, RSI, close-break or 1.2x volume hard gate failed", "regime": regime,
                 "setup": {"value_zone": value_zone, "rsi_15m": rsi_value, "volume_ratio": volume_ratio, "trigger": trigger}}
 
-    atr_series = atr14.dropna()
+    if precomputed_context is None:
+        atr_series = atr14.dropna()
+    else:
+        atr_valid = precomputed_context["indicators"]["15M"]["atr14_valid"]
+        atr_valid_end = int(atr_valid.index.searchsorted(m15.index[-1], side="right"))
+        atr_series = atr_valid.iloc[:atr_valid_end]
     if len(atr_series) < 25:
         return {"signal": "NO_TRADE", "reason": "ATR shock baseline unavailable", "regime": regime}
     prior_mean = float(atr_series.iloc[-21:-1].mean())
@@ -444,10 +629,18 @@ def analyze_signal(
     if prior_mean <= 0 or current_atr > 2.5 * prior_mean:
         return {"signal": "NO_TRADE", "reason": "15M ATR shock exceeds 2.5x its 20-bar baseline", "regime": regime}
 
-    btc = _closed(_validate(btc_15m, "BTC 15M", 40), asof, pd.Timedelta(minutes=15))
-    if len(btc) < 25:
-        return {"signal": "NO_TRADE", "reason": "BTC master feed unavailable", "regime": regime}
-    btc_ema21 = ema(btc["close"], 21)
+    if precomputed_context is None:
+        btc = _closed(_validate(btc_15m, "BTC 15M", 40), asof, pd.Timedelta(minutes=15))
+        if len(btc) < 25:
+            return {"signal": "NO_TRADE", "reason": "BTC master feed unavailable", "regime": regime}
+        btc_ema21 = ema(btc["close"], 21)
+    else:
+        btc, btc_end = _closed_prefix(
+            precomputed_context["frames"]["BTC_15M"], asof, pd.Timedelta(minutes=15)
+        )
+        if len(btc) < 25:
+            return {"signal": "NO_TRADE", "reason": "BTC master feed unavailable", "regime": regime}
+        btc_ema21 = precomputed_context["indicators"]["BTC_15M"]["ema21"].iloc[:btc_end]
     btc_change = float(btc["close"].iloc[-1] / btc["close"].iloc[-2] - 1.0)
     if symbol != "BTC-USDT":
         btc_ok = (float(btc["close"].iloc[-1]) > float(btc_ema21.iloc[-1]) and btc_change > -0.008) if direction == "LONG" else (
@@ -499,7 +692,8 @@ def analyze_signal(
     signal_time = m15.index[-1].isoformat()
     signal_id = f"challenge1-v2:{symbol}:15m:{signal_time}:{direction}"
     wave_evidence = _elliott_wave_1h_evidence(
-        frame_1h, asof, expected_direction=direction
+        frame_1h, asof, expected_direction=direction,
+        precomputed_context=precomputed_context,
     )
     v2_evidence = {
         "decision_engine_version": "CHALLENGE_1_V2_1H_4H_15M",
