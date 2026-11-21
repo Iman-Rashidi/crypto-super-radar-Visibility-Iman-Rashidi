@@ -101,6 +101,7 @@ jobs:
           python -m crypto_super_radar.market_replay \
             --months 6 \
             --start-utc "2025-10-15T00:00:00Z" \
+            --funding-start-utc "2025-11-21T16:00:00Z" \
             --end-utc "2026-04-21T16:00:00Z" \
             --db artifacts/independent_5m.sqlite3 \
             > artifacts/downloader.log 2>&1
