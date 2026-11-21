@@ -1253,7 +1253,9 @@ def run_sandbox(
                 "submitted_ts_ms": asof_ms,
                 "pattern_features":pattern_features,"pattern_family_keys":pattern_family_keys,"pattern_detections":pattern_detections,
                 "pattern_market_regime":pattern_market_regime,"pattern_brain_evaluation":pattern_brain_evaluation,"pattern_gate":pattern_gate,"pattern_snapshot_asof":asof.isoformat(),
-                "veto_source":veto_source,"veto_reason":pattern_gate.get("reason") if pattern_veto else model_decision if model_veto else None,
+                "veto_source":veto_source,
+                "veto_reason":model_decision if model_veto else None,
+                "pattern_veto_suggestion_reason":pattern_gate.get("suggested_reason") if pattern_veto_suggestion else None,
             }
             if veto:
                 counts["vetoed_signals"] += 1
