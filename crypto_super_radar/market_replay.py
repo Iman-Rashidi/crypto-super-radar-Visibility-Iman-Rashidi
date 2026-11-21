@@ -26,6 +26,24 @@ INSTRUMENTS_PATH = "/api/v1/market/instruments"
 DEFAULT_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
 BAR_MS = {"15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
 
+# Evidence-backed price-candle blackout observed in BloFin public Demo data.
+# Candle timestamps are open times; end_exclusive_ms is the close boundary of
+# the final absent 15m candle. Only this exact LAST-price gap is allowlisted.
+OBSERVED_PRICE_CANDLE_BLACKOUTS = ({
+    "instrument_id": "BTC-USDT",
+    "bar": "15m",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T07:45:00+00:00",
+    "missing_to_utc": "2026-03-09T12:30:00+00:00",
+    "missing_intervals": 20,
+    "start_ms": 1773042300000,
+    "last_missing_ms": 1773059400000,
+    "end_exclusive_ms": 1773060300000,
+    "left_candle_utc": "2026-03-09T07:30:00+00:00",
+    "right_candle_utc": "2026-03-09T12:45:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #114 artifact 14711734625, downloader.log",
+},)
+
 # Challenge 1 accepts missing fundingKind only on the fixed UTC
 # 00:00 / 08:00 / 16:00 regular schedule. Never infer a dynamic cadence.
 REGULAR_FUNDING_INTERVAL_MS = 8 * 60 * 60_000
@@ -40,7 +58,31 @@ OBSERVED_FUNDING_BLACKOUTS = ({
 },)
 
 
-def _is_regular_utc_funding_boundary(timestamp_ms: int) -> bool:
+def _observed_price_candle_gap_matches(
+    *, symbol: str, bar: str, first_missing_ms: int, last_missing_ms: int,
+    missing_count: int, mark_price: bool,
+) -> bool:
+    source = "MARK" if mark_price else "LAST"
+    return any(
+        str(window["instrument_id"]) == str(symbol).upper()
+        and str(window["bar"]) == str(bar)
+        and str(window["source"]) == source
+        and int(window["start_ms"]) == int(first_missing_ms)
+        and int(window["last_missing_ms"]) == int(last_missing_ms)
+        and int(window["missing_intervals"]) == int(missing_count)
+        for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+    )
+
+
+def _is_price_candle_blackout(timestamp_ms: int) -> dict[str, Any] | None:
+    stamp = int(timestamp_ms)
+    return next((
+        dict(window) for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+        if int(window["start_ms"]) <= stamp < int(window["end_exclusive_ms"])
+    ), None)
+
+
+def _is_regular_utc_funding_boundary(timestamp_ms: int):
     """Return True only within ±10s of 00:00, 08:00 or 16:00 UTC."""
     day_offset = int(timestamp_ms) % UTC_DAY_MS
     boundaries = (0, 8 * 60 * 60_000, 16 * 60 * 60_000)
@@ -227,22 +269,29 @@ def download_candles(
         if int(b[2]) - int(a[2]) != interval
     ]
     if gaps:
-        details = []
+        unregistered = []
         for left_ms, right_ms, missing_count in gaps:
             first_missing_ms = left_ms + interval
             last_missing_ms = right_ms - interval
+            if _observed_price_candle_gap_matches(
+                symbol=symbol, bar=bar, first_missing_ms=first_missing_ms,
+                last_missing_ms=last_missing_ms, missing_count=missing_count,
+                mark_price=mark_price,
+            ):
+                continue
             first_missing = datetime.fromtimestamp(first_missing_ms / 1000, timezone.utc).isoformat()
             last_missing = datetime.fromtimestamp(last_missing_ms / 1000, timezone.utc).isoformat()
-            details.append(
+            unregistered.append(
                 f"{symbol} {bar}: missing_from_utc={first_missing}, "
                 f"missing_to_utc={last_missing}, missing_intervals={missing_count}, "
                 f"left_candle_utc={datetime.fromtimestamp(left_ms / 1000, timezone.utc).isoformat()}, "
                 f"right_candle_utc={datetime.fromtimestamp(right_ms / 1000, timezone.utc).isoformat()}"
             )
-        raise ReplayDownloadError(
-            f"historical candle series contains {len(gaps)} timestamp gap(s): "
-            + " | ".join(details)
-        )
+        if unregistered:
+            raise ReplayDownloadError(
+                f"historical candle series contains {len(unregistered)} unregistered timestamp gap(s): "
+                + " | ".join(unregistered)
+            )
     if result[0][2] > start_ms + interval:
         raise ReplayDownloadError(
             f"historical candle series for {symbol} {bar} does not cover the requested start"
@@ -464,6 +513,13 @@ def initialise_store(connection: sqlite3.Connection) -> None:
             funding_interval_ms INTEGER,
             PRIMARY KEY(instrument_id,funding_time)
         );
+        CREATE TABLE IF NOT EXISTS replay_price_blackouts (
+            instrument_id TEXT NOT NULL, bar TEXT NOT NULL, source TEXT NOT NULL,
+            start_ms INTEGER NOT NULL, last_missing_ms INTEGER NOT NULL,
+            end_exclusive_ms INTEGER NOT NULL, missing_intervals INTEGER NOT NULL,
+            evidence TEXT NOT NULL,
+            PRIMARY KEY(instrument_id,bar,source,start_ms,last_missing_ms)
+        );
     """)
     columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(replay_funding)").fetchall()
@@ -474,6 +530,20 @@ def initialise_store(connection: sqlite3.Connection) -> None:
         )
     if "funding_interval_ms" not in columns:
         connection.execute("ALTER TABLE replay_funding ADD COLUMN funding_interval_ms INTEGER")
+    connection.executemany(
+        """INSERT OR REPLACE INTO replay_price_blackouts
+           (instrument_id,bar,source,start_ms,last_missing_ms,end_exclusive_ms,missing_intervals,evidence)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        [
+            (
+                window["instrument_id"], window["bar"], window["source"],
+                int(window["start_ms"]), int(window["last_missing_ms"]),
+                int(window["end_exclusive_ms"]), int(window["missing_intervals"]),
+                window["evidence"],
+            )
+            for window in OBSERVED_PRICE_CANDLE_BLACKOUTS
+        ],
+    )
     connection.commit()
 
 
@@ -517,6 +587,8 @@ def download_watchlist(*, db_path: str, months: int = 7, symbols: tuple[str, ...
         "funding_kind_policy": "EXPLICIT_API_OR_PROVENANCE_TAGGED_SCHEDULE_INFERENCE",
         "schedule_inference_is_not_explicit_fundingKind": True,
         "blackout_windows": [dict(window) for window in OBSERVED_FUNDING_BLACKOUTS],
+        "price_candle_blackouts": [dict(window) for window in OBSERVED_PRICE_CANDLE_BLACKOUTS],
+        "price_blackout_policy": "Only exact evidence-backed gaps are allowlisted; no candle is fabricated, interpolated or forward-filled.",
     }
     funding_by_symbol: dict[str, list[tuple[Any, ...]]] = {}
     try:
