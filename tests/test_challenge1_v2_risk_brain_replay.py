@@ -145,6 +145,21 @@ class PriceCandleBlackoutTests(unittest.TestCase):
         self.assertEqual(eth_hourly["missing_intervals"], 5)
         self.assertEqual(eth_hourly["missing_from_utc"], "2026-03-09T07:00:00+00:00")
         self.assertEqual(eth_hourly["missing_to_utc"], "2026-03-09T11:00:00+00:00")
+        eth_four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[5])
+        self.assertEqual(eth_four_hour["instrument_id"], "ETH-USDT")
+        self.assertEqual(eth_four_hour["bar"], "4H")
+        self.assertEqual(eth_four_hour["source"], "LAST")
+        self.assertEqual(eth_four_hour["missing_intervals"], 2)
+        self.assertEqual(eth_four_hour["missing_from_utc"], "2026-03-09T04:00:00+00:00")
+        self.assertEqual(eth_four_hour["missing_to_utc"], "2026-03-09T08:00:00+00:00")
+        self.assertEqual(eth_four_hour["left_candle_utc"], "2026-03-09T00:00:00+00:00")
+        self.assertEqual(eth_four_hour["right_candle_utc"], "2026-03-09T12:00:00+00:00")
+        self.assertTrue(_observed_price_candle_gap_matches(
+            symbol="ETH-USDT", bar="4H",
+            first_missing_ms=eth_four_hour["start_ms"],
+            last_missing_ms=eth_four_hour["last_missing_ms"],
+            missing_count=2, mark_price=False,
+        ))
 
     def test_combined_blackout_windows_are_scoped_per_instrument(self):
         btc = _combine_price_candle_blackout_windows(
@@ -156,13 +171,15 @@ class PriceCandleBlackoutTests(unittest.TestCase):
         self.assertEqual(btc["instrument_id"], "BTC-USDT")
         self.assertEqual(eth["instrument_id"], "ETH-USDT")
         self.assertEqual(len(btc["timeframe_windows"]), 3)
-        self.assertEqual(len(eth["timeframe_windows"]), 2)
+        self.assertEqual(len(eth["timeframe_windows"]), 3)
         self.assertIsNone(_combine_price_candle_blackout_windows("SOL-USDT", list(OBSERVED_PRICE_CANDLE_BLACKOUTS)))
 
     def test_blackout_interval_uses_inclusive_first_and_exclusive_end(self):
         hourly = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[1])
         four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[2])
         self.assertIsNotNone(_is_price_candle_blackout(four_hour["start_ms"]))
+        eth_four_hour = dict(OBSERVED_PRICE_CANDLE_BLACKOUTS[5])
+        self.assertIsNotNone(_is_price_candle_blackout(eth_four_hour["start_ms"]))
         self.assertIsNotNone(_is_price_candle_blackout(hourly["start_ms"]))
         self.assertIsNotNone(_is_price_candle_blackout(self.window["last_missing_ms"]))
         self.assertIsNone(_is_price_candle_blackout(self.window["end_exclusive_ms"]))

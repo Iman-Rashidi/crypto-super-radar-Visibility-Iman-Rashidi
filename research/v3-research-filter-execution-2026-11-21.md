@@ -88,3 +88,20 @@ Neither is accepted as a five-month independent dataset; neither was replayed. `
 
 - Single missing 15m candle diagnostic test: asserts exact symbol, timeframe, UTC timestamp, missing count, and neighbor candle timestamps.
 - Per-pattern-name learner test: proves a separately named feature receives a learned TRAIN-only coefficient.
+
+
+## Supplemental finding from fresh download Run #148 — 21 November 2026
+
+The fresh historical workflow reached the downloader but correctly refused the independent dataset because it found an additional unregistered price gap in the approved watchlist:
+
+- Instrument: `ETH-USDT`
+- Timeframe: `4H`
+- Missing candles: `2026-03-09T04:00:00Z` and `2026-03-09T08:00:00Z` (2 intervals)
+- Left candle: `2026-03-09T00:00:00Z`; right candle: `2026-03-09T12:00:00Z`
+- Evidence: Run #148 artifact `14715766802`, `downloader.log`
+
+The partial file `independent_5m.sqlite3` is only 8,151,040 bytes, has 41,857 price candles all for BTC-USDT, 453 funding rows, one instrument record, and passes SQLite quick_check. Its SHA-256 is `3608f3638844e6796f65e6e1ecaac97327719f09c7ef6f8b30d82fcb9f340638`. It is **not** accepted as an independent dataset because it does not contain the full five-symbol basket.
+
+The workflow intentionally preserved the Replay #109 matrix after download failure: `download_exit_code=1`, `research_suite_exit_code=0`, `independent_5m_status=NOT_RUN_INDEPENDENT_DOWNLOAD_UNAVAILABLE`; the final enforcement gate then correctly failed the overall historical workflow. Replay #109 A-E ran and reproduced the previously reported metrics. No independent A-E result exists in this run.
+
+The exact ETH-USDT 4H window has now been added as a separate evidence-backed Price-Candle Blackout. It remains isolated from other symbols and timeframes; no missing candle was synthesized. The corresponding tests assert exact bounds, count, left/right observations and blackout lookup. Re-run of the downloader is required before claiming an independent dataset.

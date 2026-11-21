@@ -94,6 +94,19 @@ OBSERVED_PRICE_CANDLE_BLACKOUTS = ({
     "left_candle_utc": "2026-03-09T06:00:00+00:00",
     "right_candle_utc": "2026-03-09T12:00:00+00:00",
     "evidence": "BloFin public Demo historical downloader Run #44924534407 artifact 14714794789, downloader.log",
+}, {
+    "instrument_id": "ETH-USDT",
+    "bar": "4H",
+    "source": "LAST",
+    "missing_from_utc": "2026-03-09T04:00:00+00:00",
+    "missing_to_utc": "2026-03-09T08:00:00+00:00",
+    "missing_intervals": 2,
+    "start_ms": 1773028800000,
+    "last_missing_ms": 1773043200000,
+    "end_exclusive_ms": 1773057600000,
+    "left_candle_utc": "2026-03-09T00:00:00+00:00",
+    "right_candle_utc": "2026-03-09T12:00:00+00:00",
+    "evidence": "BloFin public Demo historical downloader Run #148 artifact 14715766802, downloader.log",
 },)
 
 # Challenge 1 accepts missing fundingKind only on the fixed UTC
