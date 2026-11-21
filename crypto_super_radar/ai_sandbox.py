@@ -235,18 +235,21 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
         bad_positions = np.flatnonzero((gaps != interval).to_numpy())
         if len(bad_positions):
             approved = False
-            if symbol == "BTC-USDT" and label in {"15m", "ALIGNED_15m"} and len(bad_positions) == 1:
+            if symbol == "BTC-USDT" and label in {"15m", "1H", "4H", "MARK_15m", "ALIGNED_15m"} and len(bad_positions) == 1:
                 position = int(bad_positions[0])
                 left_ms = int(frame.index[position].timestamp() * 1000)
                 right_ms = int(frame.index[position + 1].timestamp() * 1000)
-                missing_count = int((right_ms - left_ms) // int(interval.total_seconds() * 1000) - 1)
-                first_missing_ms = left_ms + int(interval.total_seconds() * 1000)
-                last_missing_ms = right_ms - int(interval.total_seconds() * 1000)
+                interval_ms = int(interval.total_seconds() * 1000)
+                missing_count = int((right_ms - left_ms) // interval_ms - 1)
+                first_missing_ms = left_ms + interval_ms
+                last_missing_ms = right_ms - interval_ms
+                observed_bar = "15m" if label in {"MARK_15m", "ALIGNED_15m"} else label
+                observed_source = "MARK" if label == "MARK_15m" else "LAST"
                 for window in OBSERVED_PRICE_CANDLE_BLACKOUTS:
                     if (
                         window["instrument_id"] == symbol
-                        and window["bar"] == "15m"
-                        and window["source"] == "LAST"
+                        and window["bar"] == observed_bar
+                        and window["source"] == observed_source
                         and int(window["start_ms"]) == first_missing_ms
                         and int(window["last_missing_ms"]) == last_missing_ms
                         and int(window["missing_intervals"]) == missing_count
@@ -265,10 +268,17 @@ def _load_symbol(connection: sqlite3.Connection, symbol: str) -> dict[str, Any]:
                 )
     market["atr_15m"] = atr(market, 14)
     if price_blackout_observed:
-        approved_window = next(iter(matched_price_blackouts.values()))
-        recovery_start = pd.to_datetime(int(approved_window["end_exclusive_ms"]), unit="ms", utc=True)
-        post_gap = market.loc[market.index >= recovery_start]
-        market.loc[post_gap.index, "atr_15m"] = atr(post_gap, 14)
+        approved_15m_windows = [
+            window for window in matched_price_blackouts.values()
+            if window["bar"] == "15m" and window["source"] == "LAST"
+        ]
+        if approved_15m_windows:
+            recovery_start = pd.to_datetime(
+                max(int(window["end_exclusive_ms"]) for window in approved_15m_windows),
+                unit="ms", utc=True,
+            )
+            post_gap = market.loc[market.index >= recovery_start]
+            market.loc[post_gap.index, "atr_15m"] = atr(post_gap, 14)
     market = market.dropna(subset=["atr_15m"])
     source_start = max(
         market.index[0],
@@ -790,7 +800,15 @@ def run_sandbox(
     # Validate once and build causal indicator/pivot caches outside the 15m loop.
     btc_frame_15m = market["BTC-USDT"]["frames"]["15m"]
     price_blackout_windows = list(market["BTC-USDT"].get("price_candle_blackouts") or [])
-    price_blackout_window = price_blackout_windows[0] if price_blackout_windows else None
+    price_blackout_window = (
+        {
+            "instrument_id": "BTC-USDT",
+            "start_ms": min(int(window["start_ms"]) for window in price_blackout_windows),
+            "end_exclusive_ms": max(int(window["end_exclusive_ms"]) for window in price_blackout_windows),
+            "timeframe_windows": price_blackout_windows,
+        }
+        if price_blackout_windows else None
+    )
     price_blackout_recovery_ts = (
         pd.to_datetime(int(price_blackout_window["end_exclusive_ms"]), unit="ms", utc=True)
         if price_blackout_window else None
@@ -1250,12 +1268,26 @@ def run_sandbox(
                 if btc_post_gap_closed >= 70:
                     refreshed_contexts: dict[str, dict[str, Any]] = {}
                     refreshed_signal_frames: dict[str, dict[str, pd.DataFrame]] = {}
-                    for refresh_symbol, refresh_item in market.items():
-                        active_frames = dict(refresh_item["frames"])
-                        if refresh_symbol == "BTC-USDT":
-                            active_frames["15m"] = active_frames["15m"].loc[
-                                active_frames["15m"].index >= price_blackout_recovery_ts
+                    btc_active_frames = dict(market["BTC-USDT"]["frames"])
+                    for timeframe in ("15m", "1H", "4H"):
+                        matching = [
+                            window for window in price_blackout_windows
+                            if window["bar"] == timeframe and window["source"] == "LAST"
+                        ]
+                        if matching:
+                            timeframe_recovery = pd.to_datetime(
+                                max(int(window["end_exclusive_ms"]) for window in matching),
+                                unit="ms", utc=True,
+                            )
+                            btc_active_frames[timeframe] = btc_active_frames[timeframe].loc[
+                                btc_active_frames[timeframe].index >= timeframe_recovery
                             ].copy()
+                    btc_post_gap = btc_active_frames["15m"]
+                    for refresh_symbol, refresh_item in market.items():
+                        active_frames = (
+                            dict(btc_active_frames) if refresh_symbol == "BTC-USDT"
+                            else dict(refresh_item["frames"])
+                        )
                         refreshed_signal_frames[refresh_symbol] = active_frames
                         refreshed_contexts[refresh_symbol] = prepare_signal_context(
                             active_frames["1H"], active_frames["4H"],
