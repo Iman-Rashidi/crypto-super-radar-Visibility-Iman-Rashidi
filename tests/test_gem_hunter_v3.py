@@ -68,10 +68,12 @@ class GemHunterV3Tests(unittest.TestCase):
 
     def test_catema_style_high_volume_early_alpha_is_visible_as_tier2(self):
         candidate = {
-            "chain": "base", "liquidity_usd": 55_000, "volume_24h_usd": 435_000,
+            "chain": "solana", "liquidity_usd": 55_000, "volume_24h_usd": 435_000,
             "volume_to_liquidity_24h": 7.91, "buy_volume_share_pct": 62,
             "buys_24h": 620, "sells_24h": 380,
-            "security_evidence": {"status": "PASS", "flags": {"is_honeypot": False}},
+            "security_evidence": {"status": "UNKNOWN", "mint_authority_active": False,
+                                  "freeze_authority_active": False, "honeypot_detected": False,
+                                  "sell_tax_pct": 0, "transfer_simulation_status": "UNKNOWN"},
             "market_reconciliation": {"status": "UNKNOWN"},
             "exit_slippage_evidence": {"status": "UNKNOWN"},
         }
@@ -82,6 +84,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "smart_money_evidence_status": "NOT_AVAILABLE",
         })
         self.assertEqual(tier["tier"], "TIER_2_EARLY_ALPHA")
+        self.assertEqual(tier["tier_base_security_status"], "PASS")
         self.assertTrue(tier["tier_cautions_fa"])
         self.assertEqual(tier["tier_data_confidence"], "LIMITED")
 
