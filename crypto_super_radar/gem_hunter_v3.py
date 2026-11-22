@@ -256,9 +256,11 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     if not inserted:
         return {"status": "DUPLICATE_SUPPRESSED", "candidate_id": candidate_id}
     token = bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
-    destination = chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID")
+    destination = chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
     if not token or not destination:
         return {"status": "NOT_CONFIGURED", "reason": "Telegram bot token or chat id is missing."}
+    # Reserve the stable per-token key only after configuration is complete.
+    # A missing chat id must not consume the one-time alert slot.
     momentum = candidate.get("short_term_momentum_smart_money_score")
     text = (
         "🔎 <b>QUALIFIED GEM · RESEARCH ONLY</b>\n"
