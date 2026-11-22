@@ -162,8 +162,8 @@ def _score(candidate,previous=None):
         status="REJECT"
     elif security.get("status")!="PASS" or liquidity is None or liquidity<MIN_LIQUIDITY_USD or candidate.get("gecko_match") is not True or score<70:
         status="WATCH"
-    elif score>=85 and int(candidate.get("consecutive_scans") or 1)>=2:
-        status="STRONG GEM"
+    elif score>=85:
+        status="STRONG GEM" if int(candidate.get("consecutive_scans") or 1)>=2 else "WATCH"
     else:
         status="EARLY GEM"
     return {"score":score,"score_parts":parts,"status":status,"hard_reject_reasons":hard,"buy_sell_ratio":round((buys+1)/(sells+1),3) if buys is not None and sells is not None else None}
