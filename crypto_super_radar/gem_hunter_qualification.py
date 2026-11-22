@@ -47,7 +47,7 @@ def _finite_number(value: Any) -> Optional[float]:
 def _valid_token_identity(chain: str, address: Any) -> bool:
     if not isinstance(address, str):
         return False
-    if chain == "base":
+    if chain in {"base", "ethereum"}:
         return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", address))
     if chain == "solana":
         return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address))
