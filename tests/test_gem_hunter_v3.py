@@ -38,15 +38,30 @@ class GemHunterV3Tests(unittest.TestCase):
 
     def test_three_scores_are_separate_and_research_only(self):
         result = score_candidate_v3({
-            "pool_trade_evidence": {"buy_volume_usd": 8000, "sell_volume_usd": 2000, "coverage_status": "COMPLETE"},
+            "pool_trade_evidence": {"buy_volume_usd": 8000, "sell_volume_usd": 2000, "coverage_status": "COMPLETE", "unique_buyers_count": 3, "unique_sellers_count": 1, "wallet_attribution_status": "COMPLETE_FOR_RETURNED_SAMPLE"},
             "technical_evidence": {"coverage_status": "COMPLETE", "filters": {"trend": "PASS", "momentum": "PASS"}},
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 20},
             "market_reconciliation": {"status": "PASS"},
         })
-        self.assertEqual(result["short_term_momentum_smart_money_score"], 90)
+        self.assertEqual(result["short_term_momentum_smart_money_score"], 88.75)
+        self.assertEqual(result["short_term_momentum_score"], 88.75)
+        self.assertEqual(result["smart_money_evidence_status"], "NOT_AVAILABLE")
+        self.assertEqual(result["new_buyer_cohort_status"], "NOT_AVAILABLE")
+        self.assertEqual(result["wallet_breadth_evidence_status"], "VERIFIED_FOR_RETURNED_SAMPLE")
         self.assertEqual(result["candidate_status"], "QUALIFIED_GEM")
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
+
+    def test_qualified_gem_requires_wallet_breadth_evidence(self):
+        result = score_candidate_v3({
+            "pool_trade_evidence": {"buy_volume_usd": 9000, "sell_volume_usd": 1000, "coverage_status": "COMPLETE"},
+            "technical_evidence": {"coverage_status": "COMPLETE", "filters": {"trend": "PASS", "momentum": "PASS"}},
+            "security_evidence": {"status": "PASS"},
+            "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 10},
+            "market_reconciliation": {"status": "PASS"},
+        })
+        self.assertEqual(result["candidate_status"], "RESEARCH_WATCH")
+        self.assertEqual(result["wallet_breadth_evidence_status"], "UNKNOWN")
 
     def test_three_scores_do_not_invent_missing_evidence(self):
         result = score_candidate_v3({})
