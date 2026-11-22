@@ -295,7 +295,7 @@ def _ai_dry_run_safe_diagnostic(payload: dict) -> dict:
                     "reviewer_id", "status", "provider", "model", "returned_model",
                     "request_attempted", "response_source", "response_validated",
                     "model_verified", "http_status", "latency_ms",
-                    "skip_reason_code", "error_type", "error_code",
+                    "skip_reason_code", "error_type", "error_code", "parser_diagnostic",
                 )
                 if review.get(key) is not None
             })
