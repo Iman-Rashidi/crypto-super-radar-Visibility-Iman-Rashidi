@@ -123,7 +123,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         result = discover_gem_candidates(http, now=self.now)
         sol = next(item for item in result["candidates"] if item["chain"] == "solana")
         self.assertEqual(sol["sources"], ["GECKOTERMINAL_NEW_POOLS_SOLANA", "GECKOTERMINAL_TRENDING_POOLS_SOLANA"])
-        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["candidate_count"], 3)
 
     def test_zero_liquidity_candidate_is_unknown_and_never_tradeable(self):
         zero = pool("solana", "PoolZero", f"solana_{SOL_TOKEN}", "2026-11-10T10:00:00Z", liquidity="0")
@@ -168,6 +168,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         responses = dict(self.responses)
         responses["solana_new_pools"] = response
         responses["base_new_pools"] = {"data": [], "included": []}
+        responses["eth_new_pools"] = {"data": [], "included": []}
         result = discover_gem_candidates(FakeHttp(responses), now=self.now)
         self.assertEqual(result["candidate_count"], 0)
 
