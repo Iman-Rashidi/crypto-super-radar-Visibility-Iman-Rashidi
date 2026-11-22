@@ -23,19 +23,26 @@ jobs:
         run: |
           import json
           import os
+          import urllib.error
           import urllib.request
 
           base = os.environ["STAGING_URL"].rstrip("/")
           for path in ("/health", "/api/blofin/demo/v2-autopilot/latest-public"):
               request = urllib.request.Request(base + path, headers={"Accept": "application/json"})
-              with urllib.request.urlopen(request, timeout=25) as response:
+              try:
+                  response = urllib.request.urlopen(request, timeout=25)
+              except urllib.error.HTTPError as error:
+                  body = json.loads(error.read().decode("utf-8"))
+                  print(json.dumps({"path": path, "http_status": error.code, "body": body}, ensure_ascii=False))
+                  raise
+              with response:
                   body = json.loads(response.read().decode("utf-8"))
                   print(json.dumps({"path": path, "http_status": response.status, "body": body}, ensure_ascii=False))
                   assert response.status == 200
                   if path == "/health":
                       assert body.get("status") == "ok"
                   else:
-                      assert body.get("status") == "OK"
+                      assert body.get("status") == "OK", body
                       symbols = [row.get("symbol") for row in body.get("cycles", [])]
                       assert symbols == ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT"], symbols
                       assert body.get("latest_cycle_id")
