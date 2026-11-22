@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: challenge1-v2-demo-autopilot
@@ -94,6 +95,49 @@ jobs:
           finally:
               connection.close()
           PY
+      - name: Publish verified Demo cycle to Staging dashboard Turso
+        if: success()
+        env:
+          STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
+          OIDC_AUDIENCE: csr-staging-cycle-sync
+        shell: python
+        run: |
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          token_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          token_url += ("&" if "?" in token_url else "?") + urllib.parse.urlencode({
+              "audience": os.environ["OIDC_AUDIENCE"]
+          })
+          token_request = urllib.request.Request(
+              token_url,
+              headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+          )
+          with urllib.request.urlopen(token_request, timeout=20) as response:
+              oidc_token = json.loads(response.read().decode("utf-8"))["value"]
+
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "challenge1-v2-cycle.json"), encoding="utf-8") as handle:
+              cycle = json.load(handle)
+          body = json.dumps(cycle, ensure_ascii=False).encode("utf-8")
+          request = urllib.request.Request(
+              os.environ["STAGING_URL"].rstrip("/") + "/api/blofin/demo/v2-autopilot/publish",
+              data=body,
+              headers={
+                  "Authorization": "Bearer " + oidc_token,
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=45) as response:
+              result = json.loads(response.read().decode("utf-8"))
+              print(json.dumps(result, ensure_ascii=False))
+              assert response.status == 200
+              assert result.get("status") == "PUBLISHED"
+              assert result.get("rows_written") == 5
+
       - name: Upload non-secret V2 cycle report
         if: always()
         uses: actions/upload-artifact@v4
