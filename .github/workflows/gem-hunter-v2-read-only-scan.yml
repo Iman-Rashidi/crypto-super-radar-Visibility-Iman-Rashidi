@@ -44,6 +44,7 @@ jobs:
       - name: Sync Top 10 snapshot into Render-side Turso
         env:
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
         run: |
           set -euo pipefail
@@ -64,6 +65,7 @@ jobs:
               "candidates": scan.get("candidates", [])[:10],
               "read_only": True,
               "trade_authorization": "NO_TRADE",
+              "source_database_url": __import__("os").environ["TURSO_DATABASE_URL"],
           }
           with open("/tmp/gem-hunter-ingest.json", "w", encoding="utf-8") as f:
               json.dump(payload, f, ensure_ascii=False)
