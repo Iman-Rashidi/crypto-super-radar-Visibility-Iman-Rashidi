@@ -250,16 +250,15 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     address = str(candidate.get("token_address") or "")
     candidate_id = f"{chain}:{address if chain == 'solana' else address.lower()}"
     event_key = f"TELEGRAM_QUALIFIED_GEM:{candidate_id}"
+    token = bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+    destination = chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not destination:
+        return {"status": "NOT_CONFIGURED", "reason": "Telegram bot token or chat id is missing."}
     inserted = store.append_event(candidate_id, "TELEGRAM_ALERT_RESERVED", {
         "candidate_status": status, "trade_authorization": "NO_TRADE"
     }, event_key=event_key)
     if not inserted:
         return {"status": "DUPLICATE_SUPPRESSED", "candidate_id": candidate_id}
-    token = bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
-    destination = chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not destination:
-        return {"status": "NOT_CONFIGURED", "reason": "Telegram bot token or chat id is missing."}
-    # Reserve the stable per-token key only after configuration is complete.
     # A missing chat id must not consume the one-time alert slot.
     momentum = candidate.get("short_term_momentum_smart_money_score")
     text = (
