@@ -843,6 +843,115 @@ def _blofin_v2_cycle_snapshot() -> dict:
                 pass
 
 
+
+def _verify_staging_github_oidc_token(authorization: str) -> dict:
+    """Verify a short-lived GitHub Actions OIDC token for this Staging workflow only."""
+    prefix = "Bearer "
+    if not isinstance(authorization, str) or not authorization.startswith(prefix):
+        raise PermissionError("OIDC_BEARER_REQUIRED")
+    token = authorization[len(prefix):].strip()
+    if not token or len(token) > 12_000:
+        raise PermissionError("OIDC_TOKEN_INVALID")
+    try:
+        import jwt
+        client = jwt.PyJWKClient(
+            "https://token.actions.githubusercontent.com/.well-known/jwks",
+            timeout=8,
+        )
+        signing_key = client.get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience="csr-staging-cycle-sync",
+            issuer="https://token.actions.githubusercontent.com",
+            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+        )
+    except Exception as exc:
+        raise PermissionError("OIDC_TOKEN_VERIFICATION_FAILED") from exc
+    expected_repo = "Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi"
+    expected_ref = "refs/heads/staging/challenge1-integration-2026-11-16"
+    expected_workflow = (
+        expected_repo + "/.github/workflows/challenge1-v2-demo-autopilot.yml@" + expected_ref
+    )
+    if (
+        claims.get("repository") != expected_repo
+        or claims.get("ref") != expected_ref
+        or claims.get("workflow_ref") != expected_workflow
+        or claims.get("event_name") not in {"push", "workflow_dispatch"}
+    ):
+        raise PermissionError("OIDC_WORKFLOW_SCOPE_MISMATCH")
+    return {
+        "repository": expected_repo,
+        "ref": expected_ref,
+        "workflow_ref": expected_workflow,
+        "run_id": str(claims.get("run_id") or "")[:40],
+    }
+
+
+def _publish_blofin_v2_cycle_report(report: dict) -> dict:
+    """Persist a verified, read-only Staging Demo cycle report into this app's Turso DB."""
+    if not isinstance(report, dict):
+        raise ValueError("CYCLE_REPORT_INVALID")
+    if report.get("environment") != "BLOFIN_DEMO":
+        raise ValueError("CYCLE_ENVIRONMENT_NOT_DEMO")
+    cycle_id = str(report.get("cycle_id") or "").strip()
+    if not re.fullmatch(r"[a-fA-F0-9]{16,64}", cycle_id):
+        raise ValueError("CYCLE_ID_INVALID")
+    symbols = report.get("symbols")
+    expected = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT"]
+    if not isinstance(symbols, list) or [str(row.get("symbol") or "") for row in symbols if isinstance(row, dict)] != expected:
+        raise ValueError("CYCLE_SYMBOL_SET_INVALID")
+    if len(symbols) != 5 or any(not isinstance(row, dict) for row in symbols):
+        raise ValueError("CYCLE_SYMBOL_ROWS_INVALID")
+    if storage_backend() != "TURSO_CLOUD_SQLITE":
+        raise RuntimeError("DURABLE_TURSO_NOT_CONFIGURED")
+
+    connection = connect_database()
+    finished_at = datetime.now(timezone.utc).isoformat()
+    try:
+        connection.execute("""CREATE TABLE IF NOT EXISTS challenge1_v2_autopilot_cycles (
+            cycle_id TEXT NOT NULL, symbol TEXT NOT NULL, started_at_utc TEXT NOT NULL,
+            finished_at_utc TEXT NOT NULL, environment TEXT NOT NULL, mode TEXT NOT NULL,
+            status TEXT NOT NULL, signal TEXT, reason TEXT, orders_submitted INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL, PRIMARY KEY (cycle_id, symbol))""")
+        for row in symbols:
+            proof = row.get("market_data_proof") if isinstance(row.get("market_data_proof"), dict) else {}
+            started_at = str(proof.get("asof_utc") or report.get("started_at_utc") or finished_at)
+            payload = {
+                "ai_reviews": report.get("ai_reviews") if isinstance(report.get("ai_reviews"), list) else [],
+                "ai_consensus": report.get("ai_consensus") if isinstance(report.get("ai_consensus"), dict) else {},
+                "ai_reviews_performed": report.get("ai_reviews_performed") is True,
+                "market_data_proof": proof,
+                "regime": row.get("regime") if isinstance(row.get("regime"), dict) else {},
+                "entry_skipped_reason": row.get("entry_skipped_reason"),
+                "cycle_status": report.get("status"),
+                "source": "GITHUB_ACTIONS_OIDC_VERIFIED_STAGING_WORKER",
+            }
+            connection.execute(
+                """INSERT OR REPLACE INTO challenge1_v2_autopilot_cycles
+                (cycle_id,symbol,started_at_utc,finished_at_utc,environment,mode,status,signal,reason,orders_submitted,payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    cycle_id, str(row.get("symbol")), started_at, finished_at,
+                    "BLOFIN_DEMO", str(row.get("mode") or report.get("mode") or "DEMO_AUTOPILOT"),
+                    str(row.get("status") or "UNKNOWN"), str(row.get("signal") or "NO_TRADE"),
+                    str(row.get("reason") or "")[:500],
+                    1 if row.get("orders_submitted") is True or report.get("orders_submitted") is True else 0,
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
+                ),
+            )
+        if hasattr(connection, "commit"):
+            connection.commit()
+        return {
+            "status": "PUBLISHED", "environment": "BLOFIN_DEMO",
+            "cycle_id": cycle_id, "rows_written": 5,
+            "finished_at_utc": finished_at,
+        }
+    finally:
+        connection.close()
+
+
 def _blofin_v2_public_cycle_snapshot() -> dict:
     """Read and expose only the latest five public market rows from Turso."""
     connection = None
@@ -908,7 +1017,7 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
                 "status": row.get("status"),
                 "signal": row.get("signal"),
                 "reason": str(row.get("reason") or "")[:500],
-                "orders_submitted": row.get("orders_submitted") is True,
+                "orders_submitted": bool(row.get("orders_submitted")),
                 "ai_votes": row.get("ai_votes") if isinstance(row.get("ai_votes"), list) else [],
                 "ai_consensus": row.get("ai_consensus") if isinstance(row.get("ai_consensus"), dict) else {},
             })
