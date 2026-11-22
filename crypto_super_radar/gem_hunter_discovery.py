@@ -179,7 +179,8 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
         token_address = token.get("address") or (str(base_id).split("_", 1)[1] if isinstance(base_id, str) and "_" in base_id else None)
         if not _valid_address(chain, token_address):
             continue
-        if token_address in BASE_QUOTE_ADDRESSES[chain]:
+        is_quote = (token_address in BASE_QUOTE_ADDRESSES[chain]) if chain == "solana" else str(token_address).lower() in {item.lower() for item in BASE_QUOTE_ADDRESSES[chain]}
+        if is_quote:
             continue
         pool_address = attrs.get("address")
         if not isinstance(pool_address, str) or not pool_address.strip():
