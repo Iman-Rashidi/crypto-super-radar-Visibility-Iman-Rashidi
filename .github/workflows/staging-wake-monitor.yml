@@ -45,6 +45,26 @@ jobs:
           printf '%s\n' "$response"
           python -c 'import json,sys; data=json.load(sys.stdin); assert data.get("status") == "ok", f"Unexpected health response: {data!r}"; print("Staging health check: PASS")' <<< "$response"
 
+      - name: Verify the mobile dashboard page and independent AI configuration
+        shell: bash
+        env:
+          BASE_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
+        run: |
+          set -euo pipefail
+          dashboard="$(curl --fail --silent --show-error --connect-timeout 15 --max-time 45 "$BASE_URL/")"
+          grep -q 'blofin-v2-run-once' <<< "$dashboard"
+          echo "Staging dashboard page and V2 panel: PASS"
+          ai_status="$(curl --fail --silent --show-error --connect-timeout 15 --max-time 45 "$BASE_URL/api/ai/challenge1-status")"
+          python - <<'PY' <<< "$ai_status"
+          import json, sys
+          payload = json.load(sys.stdin)
+          second = payload.get("second_supervisor") or {}
+          assert second.get("configured") is True, second.get("configuration_issues")
+          assert second.get("provider") == "Groq", second
+          assert second.get("model") == "openai/gpt-oss-120b", second
+          print("Staging independent Groq reviewer configuration: PASS")
+          PY
+
       - name: One-time guarded V2 Demo verification dispatch after refreshed Staging worker
         if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[run-v2-demo-verification]') }}
         env:
