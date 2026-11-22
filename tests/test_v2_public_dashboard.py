@@ -87,3 +87,65 @@ class V2PublicDashboardSnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class V2CyclePublisherTests(unittest.TestCase):
+    def test_verified_demo_report_is_persisted_as_five_rows(self):
+        writes = []
+
+        class FakeConnection:
+            def execute(self, sql, params=()):
+                if "INSERT OR REPLACE" in sql:
+                    writes.append((sql, params))
+                return self
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        report = {
+            "cycle_id": "323eb3e75ebc45cdb9d40a07abc9b6ee",
+            "environment": "BLOFIN_DEMO",
+            "mode": "DEMO_AUTOPILOT",
+            "status": "CYCLE_COMPLETED",
+            "orders_submitted": False,
+            "symbols": [
+                {
+                    "symbol": symbol, "status": "NO_TRADE", "signal": "NO_TRADE",
+                    "reason": "Test gate", "mode": "DRY_RUN",
+                    "market_data_proof": {
+                        "asof_utc": "2026-11-22T01:18:05+00:00",
+                        "funding_classification": "STANDARD_CRYPTO_FUNDING",
+                    },
+                    "regime": {"status": "NEUTRAL"},
+                }
+                for symbol in ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT")
+            ],
+        }
+        with (
+            patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
+            patch.object(web_app, "connect_database", return_value=FakeConnection()),
+        ):
+            result = web_app._publish_blofin_v2_cycle_report(report)
+
+        self.assertEqual(result["status"], "PUBLISHED")
+        self.assertEqual(result["rows_written"], 5)
+        self.assertEqual(len(writes), 5)
+        self.assertEqual([entry[1][1] for entry in writes], [
+            "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT",
+        ])
+        self.assertTrue(all(entry[1][4] == "BLOFIN_DEMO" for entry in writes))
+        self.assertTrue(all(entry[1][9] == 0 for entry in writes))
+
+    def test_non_demo_cycle_is_rejected_before_database_access(self):
+        report = {
+            "cycle_id": "323eb3e75ebc45cdb9d40a07abc9b6ee",
+            "environment": "LIVE",
+            "symbols": [],
+        }
+        with patch.object(web_app, "connect_database") as connect:
+            with self.assertRaisesRegex(ValueError, "CYCLE_ENVIRONMENT_NOT_DEMO"):
+                web_app._publish_blofin_v2_cycle_report(report)
+        connect.assert_not_called()
