@@ -7818,8 +7818,8 @@ async function loadBlofinInstruments(){
           <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
           <p class="muted">Gem Hunter V3 یک موتور مستقل و سبک برای کشف زودهنگام توکن‌های Solana، Base و Ethereum است؛ از ۶ معیار اختصاصی استفاده می‌کند و به ۱۲ فیلتر سنگین Spot/Futures یا بکتست چندماهه وابسته نیست. خروجی فقط نامزد پژوهشی است و هرگز سفارش یا سیگنال BUY صادر نمی‌کند. اطلاعات ناقص با NOT_AVAILABLE مشخص می‌شود و نامزدهای دارای امنیت پایهٔ تأییدشده می‌توانند با هشدارهای روشن در Tier 2 نمایش داده شوند.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
-            <button id="gem-hunter-run" type="button">شروع کشف کاندیداها</button>
-            <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن کشف اجرا نشده است.</span>
+            <button id="gem-hunter-run" type="button">اجرای اسکن زنده Gem Hunter V3</button>
+            <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن Gem Hunter V3 اجرا نشده است.</span>
           </div>
           <div id="gem-hunter-results" style="overflow-x:auto">
             <p class="muted">برای اجرای اسکن زندهٔ Gem Hunter V3 دکمهٔ کشف را بزنید؛ نامزدهای Tier 1 و Tier 2 با نقاط قوت و احتیاط نمایش داده می‌شوند.</p>
