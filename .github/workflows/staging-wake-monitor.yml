@@ -54,3 +54,5 @@ jobs:
           set -euo pipefail
           gh api --method POST "repos/${GH_REPO}/actions/workflows/challenge1-v2-demo-dry-run-autopilot.yml/dispatches" \
             -f ref=staging/challenge1-integration-2026-11-16
+
+# V2 guarded Demo verification remains fail-closed on data and reviewer errors.
