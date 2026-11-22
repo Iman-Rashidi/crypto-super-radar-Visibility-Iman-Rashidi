@@ -275,7 +275,7 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
     if market.get("status") == "FAIL":
         return {
             "tier": "REVIEW_REQUIRED", "tier_label_fa": "در انتظار رفع اختلاف منابع",
-            "tier_strengths_fa": [], "tier_cautions_fa": ["منابع مستقل دربارهٔ هویت Pool یا دادهٔ بازار اختلاف دارند؛ تا رفع اختلاف به Tier 2 ارتقا نمی‌یابد."],
+            "tier_strengths_fa": [], "tier_cautions_fa": ["دادهٔ بازار هنگام اعتبارسنجی با Snapshot اولیه یا هویت Pool سازگار نیست؛ تا تطبیق مجدد به Tier 2 ارتقا نمی‌یابد."],
             "tier_data_confidence": "CONFLICTED",
         }
     if exit_gate.get("status") == "FAIL":
