@@ -1,0 +1,1 @@
+This file exists only to trigger the default-branch Gem Hunter V2 Staging smoke workflow. The workflow always checks out staging/challenge1-integration-2026-11-16 and performs read-only checks. It does not contain production code or trading logic.
