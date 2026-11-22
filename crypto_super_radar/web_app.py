@@ -51,7 +51,7 @@ from .challenge1_v2 import challenge1_v2_execution_evidence_ready
 from .challenge1_v2_orchestration import (
     Challenge1V2DataBlocked, analyze_challenge1_v2_market, get_fresh_execution_quote,
 )
-from .database import connect_database, storage_backend
+from .database import connect_database, connect_turso_database, storage_backend
 from .challenge1_audit import Challenge1AuditRecorder
 from .ai_second_opinion import ai_connection_status, second_ai_connection_status, run_openrouter_connection_diagnostic, run_free_ai_second_opinion, run_independent_ai_supervisor
 from .notion_event_sync import NotionEventOutbox
@@ -9301,10 +9301,10 @@ async function loadBlofinInstruments(){
         global SCAN_RUNNING
         route = urlparse(self.path).path
         if route == "/api/gem-hunter/v2/ingest":
-            expected_token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
             supplied = self.headers.get("Authorization", "")
-            if not expected_token or not hmac.compare_digest(supplied, f"Bearer {expected_token}"):
+            if not supplied.startswith("Bearer ") or len(supplied) <= 7:
                 return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            source_token = supplied[7:].strip()
             if self.headers.get("Origin"):
                 return self._send(403, b'{"status":"SERVER_TO_SERVER_ONLY"}', "application/json; charset=utf-8")
             if "application/json" not in self.headers.get("Content-Type", "").lower():
@@ -9319,6 +9319,12 @@ async function loadBlofinInstruments(){
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 if not isinstance(payload, dict) or payload.get("read_only") is not True or payload.get("trade_authorization") != "NO_TRADE":
                     return self._send(422, b'{"status":"READ_ONLY_SNAPSHOT_REQUIRED"}', "application/json; charset=utf-8")
+                source_url = str(payload.get("source_database_url") or "").strip()
+                source_db = connect_turso_database(source_url, source_token)
+                try:
+                    source_db.execute("SELECT 1").fetchone()
+                finally:
+                    source_db.close()
                 candidates = payload.get("candidates")
                 saved = gem_hunter_v2_ingest_candidates(candidates)
                 result = {
