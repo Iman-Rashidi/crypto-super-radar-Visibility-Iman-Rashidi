@@ -10,6 +10,7 @@ on:
     paths:
       - "crypto_super_radar/gem_hunter_v2.py"
       - ".github/workflows/gem-hunter-v2-read-only-scan.yml"
+      - "docs/gem-hunter-v2-smoke-trigger.md"
 permissions:
   contents: read
 concurrency:
