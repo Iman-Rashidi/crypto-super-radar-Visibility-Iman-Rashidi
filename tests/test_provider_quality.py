@@ -17,10 +17,17 @@ from crypto_super_radar.providers import (
     PublicHttpClient,
     _finite_float,
     _ohlcv_frame,
+    NETWORKS,
+    DEX_CHAINS,
 )
 
 
 class NumericNormalizationTests(unittest.TestCase):
+    def test_ethereum_network_alias_maps_to_gecko_and_dexscreener(self):
+        self.assertEqual(NETWORKS["ethereum"], "eth")
+        self.assertEqual(DEX_CHAINS["ethereum"], "ethereum")
+
+
     def test_signed_funding_is_finite_and_preserved(self):
         self.assertEqual(_finite_float("-0.0003"), -0.0003)
         self.assertEqual(_finite_float("0.0002"), 0.0002)

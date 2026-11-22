@@ -123,6 +123,33 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("MARKET_DATA_DISAGREEMENT", result["reason_codes"])
 
+    def test_data_type_disagreement_thresholds_are_separate(self):
+        self.assertTrue(validation._ratio_conflict([1.0, 1.06], validation.MAX_PRICE_DISAGREEMENT_RATIO))
+        self.assertFalse(validation._ratio_conflict([100.0, 110.0], validation.MAX_LIQUIDITY_DISAGREEMENT_RATIO))
+        self.assertFalse(validation._ratio_conflict([100.0, 140.0], validation.MAX_VOLUME_DISAGREEMENT_RATIO))
+
+    def test_ethereum_gecko_network_slug_is_eth(self):
+        class EthereumHttp:
+            def get(self, url, params=None):
+                self_url = url
+                return {
+                    "data": {
+                        "id": "eth_" + POOL,
+                        "attributes": {"address": POOL, "reserve_in_usd": "100000",
+                                       "volume_usd": {"h24": "200000"}, "base_token_price_usd": "0.01"},
+                        "relationships": {
+                            "base_token": {"data": {"id": "eth_token"}},
+                            "quote_token": {"data": {"id": "eth_quote"}},
+                        },
+                    },
+                    "included": [
+                        {"id": "eth_token", "attributes": {"address": TOKEN}},
+                        {"id": "eth_quote", "attributes": {"address": "0x" + "3" * 40}},
+                    ],
+                }
+        snapshot = validation._gecko_snapshot(EthereumHttp(), "ethereum", TOKEN, POOL)
+        self.assertEqual(snapshot["provider"], "GECKOTERMINAL")
+
     def test_sources_that_disagree_fail(self):
         result = reconcile_candidate_market_data(
             candidate(), FakeHttp(dex_liquidity=100000, gecko_liquidity=1000)

@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 BASE_URL = "https://api.geckoterminal.com/api/v2"
-NETWORKS = frozenset({"solana", "base"})
+NETWORKS = frozenset({"solana", "base", "ethereum"})
+GECKO_NETWORK_SLUGS = {"solana": "solana", "base": "base", "ethereum": "eth"}
 INCLUDE = "base_token,quote_token,dex"
 MAX_CANDIDATES = 50
 MAX_POOL_AGE_HOURS = 168.0
@@ -76,6 +77,11 @@ BASE_QUOTE_ADDRESSES = {
         "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
         "0x0000000000000000000000000000000000000000",
     },
+    "ethereum": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "0x0000000000000000000000000000000000000000",
+    },
 }
 
 
@@ -104,7 +110,7 @@ def _timestamp(value: Any) -> Optional[datetime]:
 def _valid_address(chain: str, address: Any) -> bool:
     if not isinstance(address, str):
         return False
-    if chain == "base":
+    if chain in {"base", "ethereum"}:
         return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", address))
     return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address))
 
@@ -158,7 +164,8 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
         if not isinstance(pool, dict):
             continue
         pool_id = str(pool.get("id") or "")
-        chain = pool_id.split("_", 1)[0].lower()
+        network_slug = pool_id.split("_", 1)[0].lower()
+        chain = {"eth": "ethereum"}.get(network_slug, network_slug)
         if chain not in NETWORKS:
             continue
         attrs = pool.get("attributes") or {}
@@ -172,7 +179,8 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
         token_address = token.get("address") or (str(base_id).split("_", 1)[1] if isinstance(base_id, str) and "_" in base_id else None)
         if not _valid_address(chain, token_address):
             continue
-        if token_address in BASE_QUOTE_ADDRESSES[chain]:
+        is_quote = (token_address in BASE_QUOTE_ADDRESSES[chain]) if chain == "solana" else str(token_address).lower() in {item.lower() for item in BASE_QUOTE_ADDRESSES[chain]}
+        if is_quote:
             continue
         pool_address = attrs.get("address")
         if not isinstance(pool_address, str) or not pool_address.strip():
@@ -436,6 +444,147 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
         })
     return candidates, detail_errors
 
+
+_DEXSCREENER_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _get_cached_dexscreener_payload(http, url: str, source: str,
+                                    now: datetime) -> tuple[Any, dict[str, Any]]:
+    current = time.monotonic()
+    cached = _DEXSCREENER_SOURCE_CACHE.get(source)
+    if cached and cached.get("expires_at", 0.0) > current:
+        age = max(0.0, (now - cached["fetched_at"]).total_seconds())
+        if cached.get("status") == "PASS":
+            return copy.deepcopy(cached["payload"]), {"cached": True, "data_age_seconds": round(age, 1)}
+        raise RuntimeError(f"Cached DexScreener cooldown: {cached.get('error', 'source unavailable')}")
+    try:
+        payload = http.get(url)
+    except Exception as exc:
+        _DEXSCREENER_SOURCE_CACHE[source] = {
+            "status": "UNKNOWN", "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+            "fetched_at": now, "expires_at": current + _TRENDING_ERROR_COOLDOWN_SECONDS,
+        }
+        raise
+    _DEXSCREENER_SOURCE_CACHE[source] = {
+        "status": "PASS", "payload": copy.deepcopy(payload), "fetched_at": now,
+        "expires_at": current + _TRENDING_CACHE_TTL_SECONDS,
+    }
+    return payload, {"cached": False, "data_age_seconds": 0.0}
+
+
+def _dexscreener_ethereum_discovery_rows(http, now: datetime, *, limit: int = 5) -> list[dict[str, Any]]:
+    """Supplement GeckoTerminal with latest Ethereum token profiles and exact DEX pairs."""
+    source = "DEXSCREENER_NEW_TOKEN_PROFILES_ETHEREUM"
+    profiles, _ = _get_cached_dexscreener_payload(
+        http, "https://api.dexscreener.com/token-profiles/latest/v1", source, now,
+    )
+    if not isinstance(profiles, list):
+        raise ValueError("DexScreener token profile response schema is invalid")
+    rows: list[dict[str, Any]] = []
+    seen = set()
+    for profile in profiles:
+        if not isinstance(profile, dict) or str(profile.get("chainId") or "").lower() != "ethereum":
+            continue
+        token_address = profile.get("tokenAddress")
+        if not _valid_address("ethereum", token_address):
+            continue
+        token_key = str(token_address).lower()
+        if token_key in seen or token_key in {item.lower() for item in BASE_QUOTE_ADDRESSES["ethereum"]}:
+            continue
+        seen.add(token_key)
+        pairs_source = f"DEXSCREENER_ETHEREUM_PAIRS_{token_key}"
+        try:
+            pairs, _ = _get_cached_dexscreener_payload(
+                http, f"https://api.dexscreener.com/token-pairs/v1/ethereum/{token_address}",
+                pairs_source, now,
+            )
+        except Exception:
+            continue
+        if isinstance(pairs, dict):
+            pairs = pairs.get("pairs") or []
+        if not isinstance(pairs, list):
+            continue
+        for pair in pairs:
+            if not isinstance(pair, dict) or str(pair.get("chainId") or "").lower() != "ethereum":
+                continue
+            base = pair.get("baseToken") or {}
+            quote = pair.get("quoteToken") or {}
+            if not isinstance(base, dict) or not isinstance(quote, dict):
+                continue
+            base_is_token = str(base.get("address") or "").lower() == token_key
+            quote_is_token = str(quote.get("address") or "").lower() == token_key
+            if not (base_is_token or quote_is_token):
+                continue
+            pool_address = pair.get("pairAddress")
+            if not _valid_address("ethereum", pool_address):
+                continue
+            price = _number(pair.get("priceUsd")) if base_is_token else None
+            if quote_is_token:
+                base_price = _number(pair.get("priceUsd"))
+                native_ratio = _number(pair.get("priceNative"))
+                if base_price is not None and base_price > 0 and native_ratio is not None and native_ratio > 0:
+                    price = base_price / native_ratio
+            liquidity = _number((pair.get("liquidity") or {}).get("usd"))
+            volume = _number((pair.get("volume") or {}).get("h24"))
+            tx = pair.get("txns") or {}
+            h1 = tx.get("h1") or {} if isinstance(tx, dict) else {}
+            h24 = tx.get("h24") or {} if isinstance(tx, dict) else {}
+            buys = _number(h1.get("buys")) if isinstance(h1, dict) else None
+            sells = _number(h1.get("sells")) if isinstance(h1, dict) else None
+            buys_24h = _number(h24.get("buys")) if isinstance(h24, dict) else None
+            sells_24h = _number(h24.get("sells")) if isinstance(h24, dict) else None
+            created = None
+            created_ms = _number(pair.get("pairCreatedAt"))
+            if created_ms is not None and created_ms > 0:
+                try:
+                    created = datetime.fromtimestamp(created_ms / 1000.0, tz=timezone.utc)
+                except (OverflowError, OSError, ValueError):
+                    created = None
+            age = (now - created).total_seconds() / 3600.0 if created else None
+            if age is not None and (age < -5 or age > MAX_POOL_AGE_HOURS):
+                continue
+            change = _number((pair.get("priceChange") or {}).get("h1")) if isinstance(pair.get("priceChange"), dict) else None
+            ratio = volume / liquidity if volume is not None and liquidity is not None and liquidity > 0 else None
+            flags = []
+            if price is None or price <= 0:
+                flags.append("PRICE_UNAVAILABLE")
+            if liquidity is None or liquidity <= 0:
+                flags.append("LIQUIDITY_UNAVAILABLE")
+            elif liquidity < 25_000:
+                flags.append("LOW_LIQUIDITY")
+            if volume is None:
+                flags.append("VOLUME_UNAVAILABLE")
+            if age is None:
+                flags.append("POOL_AGE_UNKNOWN")
+            if (buys or 0) + (sells or 0) < 20:
+                flags.append("LOW_1H_ACTIVITY")
+            score = _score(age, liquidity, volume, buys, sells, None, None, change, ratio)
+            rows.append({
+                "asset": f"ethereum:{token_address}", "chain": "ethereum",
+                "token_address": token_address,
+                "token_name": (base if base_is_token else quote).get("name") or profile.get("description"),
+                "token_symbol": (base if base_is_token else quote).get("symbol"),
+                "token_decimals": None, "pool_address": pool_address,
+                "pool_name": f"{base.get('symbol') or 'TOKEN'} / {quote.get('symbol') or 'QUOTE'}",
+                "dex": pair.get("dexId"), "price_usd": price if price and price > 0 else None,
+                "liquidity_usd": liquidity, "volume_1h_usd": _number((pair.get("volume") or {}).get("h1")),
+                "volume_24h_usd": volume, "volume_to_liquidity_24h": round(ratio, 4) if ratio is not None else None,
+                "buys_1h": buys, "sells_1h": sells, "unique_buyers_1h": None, "unique_sellers_1h": None,
+                "buys_24h": buys_24h, "sells_24h": sells_24h, "price_change_1h_pct": change,
+                "pool_created_at_utc": created.isoformat().replace("+00:00", "Z") if created else None,
+                "pool_age_hours": round(age, 2) if age is not None else None,
+                "source": source, "sources": [source], "discovery_priority_score": score,
+                "score_semantics": "DexScreener latest token-profile discovery; a discovery input, not a security verdict.",
+                "candidate_status": "UNSCREENED" if score is not None else "UNKNOWN",
+                "trade_authorization": "NO_TRADE", "risk_flags": flags,
+                "evidence_caveat": "Latest profile feed is a supplemental discovery source; pair-level data requires independent GeckoTerminal reconciliation and security screening.",
+            })
+            break
+        if len(rows) >= max(1, min(int(limit), 5)):
+            break
+    return rows
+
+
 def discover_gem_candidates(http, *, limit: int = 20,
                             now: Optional[datetime] = None) -> dict[str, Any]:
     """Fetch bounded new/trending pools and return normalized Solana/Base candidates."""
@@ -459,7 +608,7 @@ def discover_gem_candidates(http, *, limit: int = 20,
             ("TRENDING_POOLS", "trending_pools"),
         ):
             source = f"GECKOTERMINAL_{source_suffix}_{network.upper()}"
-            url = f"{BASE_URL}/networks/{network}/{endpoint}"
+            url = f"{BASE_URL}/networks/{GECKO_NETWORK_SLUGS[network]}/{endpoint}"
             try:
                 params = {"page": 1, "include": INCLUDE}
                 payload, cache_metadata = _get_cached_geckoterminal_payload(
@@ -486,6 +635,28 @@ def discover_gem_candidates(http, *, limit: int = 20,
                     "status": "UNKNOWN",
                     "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
                 }
+    # Supplemental Ethereum token discovery from DexScreener latest profiles.
+    # GeckoTerminal remains the primary new/trending pool source; this feed adds
+    # candidate coverage but never upgrades independent validation or safety.
+    try:
+        dex_rows = _dexscreener_ethereum_discovery_rows(http, now, limit=5)
+        sources["DEXSCREENER_NEW_TOKEN_PROFILES_ETHEREUM"] = {
+            "status": "PASS", "candidate_rows": len(dex_rows),
+            "coverage": "SUPPLEMENTAL_LATEST_TOKEN_PROFILES_NOT_COMPLETE_CHAIN_COVERAGE",
+        }
+        for row in dex_rows:
+            key = row["asset"].lower()
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = row
+            else:
+                existing["sources"] = sorted(set(existing.get("sources", []) + row["sources"]))
+    except Exception as exc:
+        sources["DEXSCREENER_NEW_TOKEN_PROFILES_ETHEREUM"] = {
+            "status": "UNKNOWN", "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
+            "coverage": "SUPPLEMENTAL_FEED_UNAVAILABLE",
+        }
+
     # Recover limited coverage on whichever chain has a missing GeckoTerminal feed.
     # A secondary feed never upgrades the primary GeckoTerminal completeness state.
     for network in sorted(NETWORKS):

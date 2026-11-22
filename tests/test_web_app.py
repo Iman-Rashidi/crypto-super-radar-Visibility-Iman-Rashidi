@@ -225,13 +225,15 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(handler._send(200, b"response"))
         self.assertTrue(handler.close_connection)
 
-    def test_home_page_is_persian_and_separates_gem_hunter_v2_from_twelve_gates(self):
+    def test_home_page_is_persian_and_separates_gem_hunter_v3_from_twelve_gates(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
         self.assertEqual(status, 200)
         self.assertIn('lang="fa" dir="rtl"', page)
         self.assertIn("۱۲ فیلتر اجباری", page)
-        self.assertIn("Gem Hunter V2 یک موتور مستقل و سبک", page)
+        self.assertIn("Gem Hunter V3 یک موتور مستقل و سبک", page)
+        self.assertIn("Solana، Base و Ethereum", page)
+        self.assertIn("Tier 2", page)
         self.assertNotIn("حداقل ۹ فیلتر از ۱۲", page)
         self.assertIn("کشف‌شده:", page)
         self.assertIn("وضعیت منابع داده", page)

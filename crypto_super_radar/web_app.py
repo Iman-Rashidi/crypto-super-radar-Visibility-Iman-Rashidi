@@ -34,6 +34,7 @@ from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
+from .gem_hunter_v3 import process_gem_hunter_v3_candidates
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
@@ -1224,7 +1225,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         progress_payload.update({
             "status": result.get("status", "UNKNOWN"),
             "generated_at_utc": result.get("generated_at_utc"),
-            "networks": copy.deepcopy(result.get("networks") or ["base", "solana"]),
+            "networks": copy.deepcopy(result.get("networks") or ["base", "solana", "ethereum"]),
             "source_count": result.get("source_count", 0),
             "sources": copy.deepcopy(result.get("sources") or {}),
             "discovered_candidate_count": len(raw_candidates),
@@ -1263,6 +1264,9 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         raw_candidates, ENGINE.data, limit=1,
     )
     raw_candidates = evaluate_discovery_candidates(raw_candidates)
+    # V3 adds research-only scores, persistent lifecycle snapshots and optional
+    # deduplicated Telegram alerts. It never creates a Futures/spot order.
+    raw_candidates = process_gem_hunter_v3_candidates(raw_candidates, notify=True)
     discovered_count = len(raw_candidates)
     evaluation_records = [
         item.get("qualification")
@@ -1351,6 +1355,11 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result.pop("trade_authorization", None)
     result.pop("available_candidate_count", None)
     result["candidates"] = qualified
+    result["gem_hunter_v3_tier1_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "TIER_1_VERIFIED_GEM")
+    result["gem_hunter_v3_tier2_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "TIER_2_EARLY_ALPHA")
+    result["gem_hunter_v3_review_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "REVIEW_REQUIRED")
+    result["gem_hunter_v3_blocked_count"] = sum(1 for item in raw_candidates if str(item.get("gem_hunter_v3_status") or "").startswith("BLOCKED_"))
+    result["gem_hunter_v3_qualified_count"] = result["gem_hunter_v3_tier1_count"] + result["gem_hunter_v3_tier2_count"]
     result["candidate_count"] = len(qualified)
     result["discovered_candidate_count"] = discovered_count
     result["evaluation_record_count"] = evaluation_record_count
@@ -1369,6 +1378,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     if include_diagnostics:
         # Separate research-only report; this never upgrades a candidate to BUY.
         result["diagnostic_candidates"] = copy.deepcopy(raw_candidates[:limit])
+        result["gem_hunter_v3_candidates"] = copy.deepcopy(raw_candidates[:limit])
     result["progress_stage"] = "COMPLETE"
     result["diagnostic_freshness"] = "CURRENT_SCAN"
     result["public_policy"] = {
@@ -1586,6 +1596,7 @@ def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = Fals
         cached["public_policy"]["discovery_candidates_exposed"] = True
     else:
         cached.pop("diagnostic_candidates", None)
+        cached.pop("gem_hunter_v3_candidates", None)
         cached["public_policy"] = dict(cached.get("public_policy") or {})
         cached["public_policy"]["discovery_candidates_exposed"] = False
     return cached
@@ -7803,7 +7814,7 @@ async function loadBlofinInstruments(){
         <section class="card" id="gem-hunter-panel">
           <!--RADAR_GEM_HUNTER-->
           <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
-          <p class="muted">Gem Hunter V2 یک موتور مستقل و سبک برای کشف زودهنگام توکن‌های Solana و Base است؛ از ۶ معیار اختصاصی استفاده می‌کند و به ۱۲ فیلتر سنگین Spot/Futures یا بکتست چندماهه وابسته نیست. خروجی فقط نامزد پژوهشی است و هرگز سفارش یا سیگنال BUY صادر نمی‌کند. اطلاعات ناقص با NOT_AVAILABLE مشخص می‌شود.</p>
+          <p class="muted">Gem Hunter V3 یک موتور مستقل و سبک برای کشف زودهنگام توکن‌های Solana، Base و Ethereum است؛ از ۶ معیار اختصاصی استفاده می‌کند و به ۱۲ فیلتر سنگین Spot/Futures یا بکتست چندماهه وابسته نیست. خروجی فقط نامزد پژوهشی است و هرگز سفارش یا سیگنال BUY صادر نمی‌کند. اطلاعات ناقص با NOT_AVAILABLE مشخص می‌شود و نامزدهای دارای امنیت پایهٔ تأییدشده می‌توانند با هشدارهای روشن در Tier 2 نمایش داده شوند.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="gem-hunter-run" type="button">شروع کشف کاندیداها</button>
             <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن کشف اجرا نشده است.</span>
@@ -7975,7 +7986,7 @@ async function loadBlofinInstruments(){
               card.appendChild(el('p', (item.chain || 'شبکه نامشخص').toUpperCase() + ' · ' + (item.token_address || item.reference_url || 'بدون آدرس'), 'candidate-meta'));
               const links = document.createElement('div'); links.className = 'gem-links';
               if (item.reference_url) addLink(links, 'لینک ذخیره‌شده ↗', item.reference_url);
-              if (item.token_address && ['solana','base'].includes(item.chain)) addLink(links, 'اکسپلورر ↗', explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address));
+              if (item.token_address && ['solana','base','ethereum'].includes(item.chain)) addLink(links, 'اکسپلورر ↗', explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address));
               if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'DEX Screener ↗', 'https://dexscreener.com/' + item.chain + '/' + encodeURIComponent(item.pool_address));
               card.appendChild(links);
               const timeLabel = el('label', 'زمان بررسی بعدی');
@@ -8004,8 +8015,15 @@ async function loadBlofinInstruments(){
             const filters = q.filters || {}; const gates = q.critical_gates || {};
             const card = document.createElement('article'); card.className = 'gem-candidate';
             card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
-            card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · نامزد مرحلهٔ کشف · ' + (item.candidate_status || 'UNKNOWN') + ' · ' + (item.trade_authorization || 'NO_TRADE'), 'candidate-meta'));
-            card.appendChild(el('p', 'امتیاز Gem Hunter V2: ' + (item.discovery_priority_score ?? 'ناموجود') + '/100 · وضعیت: ' + (item.candidate_status || 'WATCH') + ' · امنیت: ' + ((item.security_evidence || {}).status || 'NOT_AVAILABLE') + ' · بازار: ' + ((item.cex || {}).status || 'NOT_VERIFIED') + ' (' + (((item.cex || {}).exchanges || []).join(', ') || 'DEX') + ')', 'candidate-meta'));
+            const tier = item.gem_hunter_v3_status || item.tier || 'RESEARCH_WATCH';
+            const tierLabel = item.tier_label_fa || ({TIER_1_VERIFIED_GEM:'⭐ ستاره طلایی · Tier 1',TIER_2_EARLY_ALPHA:'🔥 فرصت اولیه · Tier 2',BLOCKED_SCAM:'مسدود · خطر فروش/کلاهبرداری',BLOCKED_LOW_LIQUIDITY:'مسدود · نقدینگی بسیار کم',REVIEW_REQUIRED:'در انتظار بررسی امنیت',RESEARCH_WATCH:'پایش پژوهشی'}[tier] || tier);
+            card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · ' + tierLabel + ' · مجوز: NO_TRADE', 'candidate-meta'));
+            card.appendChild(el('p', 'امتیاز کشف V2: ' + (item.discovery_priority_score ?? 'ناموجود') + '/100 · امنیت: ' + ((item.security_evidence || {}).status || 'UNKNOWN') + ' · بازار: ' + ((item.market_reconciliation || {}).status || 'UNKNOWN'), 'candidate-meta'));
+            const exit = item.exit_slippage_evidence || {};
+            card.appendChild(el('p', 'مومنتوم مشاهده‌شده: ' + (item.short_term_momentum_score ?? item.short_term_momentum_smart_money_score ?? 'ناموجود') + '/100 · ایمنی/خروج: ' + (item.safety_exit_liquidity_score ?? 'ناموجود') + '/100 · اعتماد داده: ' + (item.data_confidence_score ?? 'ناموجود') + '/100 · لغزش خروج: ' + (exit.estimated_slippage_bps ?? 'UNKNOWN') + ' bps (' + (exit.status || 'UNKNOWN') + ')', 'candidate-meta'));
+            (item.tier_strengths_fa || []).forEach(reason => card.appendChild(el('p', 'نقطه قوت: ' + reason, 'candidate-meta')));
+            (item.tier_cautions_fa || []).forEach(reason => card.appendChild(el('p', 'نکته احتیاط: ' + reason, 'candidate-meta')));
+            card.appendChild(el('p', 'Turso: ' + (item.gem_hunter_storage_status || 'UNKNOWN') + ' · هشدار تلگرام: ' + ((item.telegram_alert_status || {}).status || 'NOT_SENT') + ' · مجوز معامله: NO_TRADE', 'candidate-meta'));
             card.appendChild(el('p', 'Read-Only · هیچ دسترسی سفارش‌گذاری وجود ندارد · ' + (item.eu_mica_warning || 'بررسی مجوز MiCA و دسترسی آلمان مستقل است.'), 'candidate-meta'));
             const facts = document.createElement('div'); facts.className = 'gem-facts';
             const reconciliation = item.market_reconciliation || q.market_reconciliation || {};
@@ -8034,7 +8052,8 @@ async function loadBlofinInstruments(){
               ' · زمان ایجاد استخر: ' + (item.pool_created_at_utc || 'نامشخص') + ' · منبع کشف: ' + (item.source || 'نامشخص'), 'candidate-meta'));
             const links = document.createElement('div'); links.className = 'gem-links';
             if (item.token_address && ['solana','base'].includes(item.chain)) addLink(links, 'اکسپلورر توکن ↗', tokenExplorer(item));
-            if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'بازار در DEX Screener ↗', poolUrl(item));
+            if (item.token_address && item.chain === 'ethereum') addLink(links, 'اکسپلورر توکن ↗', 'https://etherscan.io/token/' + encodeURIComponent(item.token_address));
+            if (item.pool_address && ['solana','base','ethereum'].includes(item.chain)) addLink(links, 'بازار در DEX Screener ↗', poolUrl(item));
             card.appendChild(links);
             const details = document.createElement('details');
             const reportKey = candidateReportKey(item);
@@ -8217,8 +8236,8 @@ async function loadBlofinInstruments(){
           };
           button.addEventListener('click', async () => {
             button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت ۱۰ نامزد برتر ذخیره‌شده در Turso و گزارش شش معیار Gem Hunter V2...'));
-             window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana و Base...');
-            status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
+             window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana، Base و Ethereum...');
+            status.textContent = 'در حال کشف و اعتبارسنجی Solana، Base و Ethereum...';
             try {
               let data = null;
               for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -8271,7 +8290,22 @@ async function loadBlofinInstruments(){
               results.appendChild(el('h3', 'گزارش نامزدهای کشف‌شده · فقط برای بررسی و زیر نظر گرفتن'));
               results.appendChild(el('p', 'نامزدهای زیر BUY نیستند. وضعیت UNKNOWN یا پروندهٔ ناقص به معنی رد قطعی یا تأیید خرید نیست.', 'muted'));
               const list = document.createElement('div'); list.className = 'gem-report-list';
-              candidates.forEach(item => list.appendChild(renderCandidate(item)));
+              const tierGroups = [
+                ['TIER_1_VERIFIED_GEM', '⭐ Tier 1 · ستاره‌های طلایی'],
+                ['TIER_2_EARLY_ALPHA', '🔥 Tier 2 · فرصت‌های اولیه / واچ‌لیست داغ'],
+                ['REVIEW_REQUIRED', 'در انتظار بررسی امنیت'],
+                ['RESEARCH_WATCH', 'پایش پژوهشی'],
+                ['BLOCKED_SCAM', 'مسدود · خطر قطعی فروش'],
+                ['BLOCKED_LOW_LIQUIDITY', 'مسدود · نقدینگی بسیار کم']
+              ];
+              const rendered = new Set();
+              tierGroups.forEach(([key, title]) => {
+                const group = candidates.filter(item => (item.gem_hunter_v3_status || item.tier || 'RESEARCH_WATCH') === key);
+                if (!group.length) return;
+                results.appendChild(el('h3', title + ' (' + group.length + ')'));
+                group.forEach(item => { list.appendChild(renderCandidate(item)); rendered.add(item); });
+              });
+              candidates.filter(item => !rendered.has(item)).forEach(item => list.appendChild(renderCandidate(item)));
               if (!candidates.length) list.appendChild(el('p', 'در این اسکن نامزدی برای گزارش دریافت نشد.', 'muted'));
               results.appendChild(list);
               results.appendChild(el('p', 'زمان گزارش UTC: ' + (data.generated_at_utc || data.updated_at_utc || 'در دسترس نیست') +

@@ -74,6 +74,10 @@ def analyze_pool_trade_evidence(
         "sample_cap": MAX_TRADES_PER_RESPONSE,
         "trade_count": 0,
         "unique_trader_count": None,
+        "unique_buyers_count": None,
+        "unique_sellers_count": None,
+        "buyer_seller_wallet_ratio": None,
+        "smart_money_attribution_status": "NOT_AVAILABLE",
         "buy_count": 0,
         "sell_count": 0,
         "buy_volume_usd": None,
@@ -91,7 +95,7 @@ def analyze_pool_trade_evidence(
         "reason_codes": [],
         "reason_fa": [],
     }
-    if chain not in {"base", "solana"} or not token_address or not pool_address:
+    if chain not in {"base", "solana", "ethereum"} or not token_address or not pool_address:
         result["reason_codes"].append("INVALID_POOL_CONTEXT")
         result["reason_fa"].append("هویت شبکه، توکن یا Pool برای تحلیل معاملات معتبر نیست.")
         return result
@@ -180,6 +184,11 @@ def analyze_pool_trade_evidence(
         len(traders) if traders else None
     )
     if traders:
+        buyer_wallets = {wallet for wallet, kinds in traders.items() if "buy" in kinds}
+        seller_wallets = {wallet for wallet, kinds in traders.items() if "sell" in kinds}
+        result["unique_buyers_count"] = len(buyer_wallets)
+        result["unique_sellers_count"] = len(seller_wallets)
+        result["buyer_seller_wallet_ratio"] = round(len(buyer_wallets) / max(1, len(seller_wallets)), 4)
         repeat_events = sum(len(kinds) for kinds in traders.values() if len(kinds) > 1)
         round_trips = sum(1 for kinds in traders.values() if "buy" in kinds and "sell" in kinds)
         wallet_observations = sum(len(kinds) for kinds in traders.values())
@@ -257,7 +266,7 @@ def enrich_discovery_candidates_with_pool_trades(
         and not isinstance(row.get("qualification"), dict)
         and isinstance(row.get("token_address"), str)
         and isinstance(row.get("pool_address"), str)
-        and row.get("chain") in {"base", "solana"}
+        and row.get("chain") in {"base", "solana", "ethereum"}
     ]
     if not eligible:
         return rows

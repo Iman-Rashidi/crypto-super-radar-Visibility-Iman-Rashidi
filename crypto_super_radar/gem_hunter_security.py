@@ -49,7 +49,7 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
         return {"status": "UNKNOWN", "provider": "UNAVAILABLE",
                 "reason_fa": ["آدرس توکن یا سرویس داده برای بررسی قرارداد موجود نیست."]}
 
-    if chain == "base":
+    if chain in {"base", "ethereum"}:
         http = getattr(data_service, "http", None)
         if http is None:
             return {"status": "UNKNOWN", "provider": "GOPLUS_SOURCIFY",
@@ -57,7 +57,7 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
         try:
             config = getattr(http, "config", None)
             result = screen_evm_token(
-                "base", address,
+                chain, address,
                 timeout=float(getattr(config, "request_timeout_seconds", 12.0)),
                 limiter=getattr(http, "limiter", None),
                 cache={},
@@ -100,8 +100,22 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
             freeze_active = result.get("freeze_authority_active")
             concentration = result.get("top10_token_account_concentration_pct")
             active = mint_active is True or freeze_active is True
-            # Revoked authorities alone cannot prove honeypot/transfer safety.
-            status = "FAIL" if active else "UNKNOWN"
+            honeypot = result.get("honeypot_detected")
+            sell_tax = result.get("sell_tax_pct")
+            transfer_status = result.get("transfer_simulation_status")
+            holder_concentration = result.get("top10_independent_holder_concentration_pct")
+            # Authority revocation alone cannot prove that selling works.
+            malicious_sell = honeypot is True or (
+                isinstance(sell_tax, (int, float)) and sell_tax > 5.0
+            )
+            complete_transfer_check = (
+                honeypot is False
+                and isinstance(sell_tax, (int, float)) and 0 <= sell_tax <= 5.0
+                and transfer_status == "PASS"
+                and isinstance(holder_concentration, (int, float))
+                and 0 <= holder_concentration <= 100
+            )
+            status = "FAIL" if active or malicious_sell else "PASS" if not active and complete_transfer_check else "UNKNOWN"
             reasons = []
             if mint_active is True:
                 reasons.append("اختیار ضرب توکن هنوز فعال است.")
@@ -109,14 +123,24 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
                 reasons.append("اختیار مسدودسازی حساب‌ها هنوز فعال است.")
             if concentration is not None:
                 reasons.append(f"تمرکز ۱۰ حساب برتر توکن {concentration:.2f}% است؛ این معادل مالکیت ۱۰ کیف‌پول مستقل نیست.")
-            if not active:
-                reasons.append("اختیارات Mint و Freeze غیرفعال‌اند، اما Honeypot و امنیت انتقال با این داده‌ها اثبات نمی‌شوند.")
+            if honeypot is True:
+                reasons.append("شواهد RPC نشانه Honeypot را گزارش کرده است.")
+            if isinstance(sell_tax, (int, float)) and sell_tax > 5.0:
+                reasons.append(f"مالیات فروش {sell_tax:.2f}% از حد ۵٪ بیشتر است.")
+            if not active and not complete_transfer_check:
+                reasons.append("Mint و Freeze غیرفعال‌اند، اما شبیه‌سازی فروش، مالیات فروش یا تمرکز هولدر مستقل کامل نیست؛ وضعیت UNKNOWN می‌ماند.")
+            if status == "PASS":
+                reasons.append("اختیارات Mint/Freeze، شبیه‌سازی فروش، مالیات فروش و تمرکز هولدر مستقل از آستانه عبور کردند.")
             return _store(key, {
                 "status": status,
                 "provider": "SOLANA_RPC",
                 "mint_authority_active": mint_active,
                 "freeze_authority_active": freeze_active,
                 "top10_token_account_concentration_pct": concentration,
+                "honeypot_detected": honeypot,
+                "sell_tax_pct": sell_tax,
+                "transfer_simulation_status": transfer_status,
+                "top10_independent_holder_concentration_pct": holder_concentration,
                 "reason_fa": reasons,
                 "coverage_note": result.get("scope_note"),
             })

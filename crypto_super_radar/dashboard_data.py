@@ -235,3 +235,46 @@ def build_dashboard_frames(
         "whale_sentiment": whale_sentiment_dataframe(result),
         "market_ranges": ranges,
     }
+
+
+def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
+    """Build a mobile-friendly Gem Hunter V3 view without trade authorization."""
+    rows = []
+    for item in candidates if isinstance(candidates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        exit_gate = item.get("exit_slippage_evidence") or {}
+        rows.append({
+            "توکن": item.get("token_name") or item.get("token_symbol") or "نامشخص",
+            "طبقهٔ کشف": item.get("tier_label_fa", item.get("tier", item.get("gem_hunter_v3_status", "RESEARCH_WATCH"))),
+            "نقاط قوت": "؛ ".join(item.get("tier_strengths_fa") or []),
+            "نکات احتیاط": "؛ ".join(item.get("tier_cautions_fa") or []),
+            "اعتماد دادهٔ طبقه": item.get("tier_data_confidence", "LIMITED"),
+            "شبکه": item.get("chain"),
+            "قرارداد": item.get("token_address"),
+            "قیمت": item.get("price_usd"),
+            "نقدینگی تأییدشده": (item.get("market_reconciliation") or {}).get("verified_liquidity_usd") or item.get("liquidity_usd"),
+            "حجم ۲۴ساعته": (item.get("market_reconciliation") or {}).get("verified_volume_24h_usd") or item.get("volume_24h_usd"),
+            "حجم به نقدینگی": item.get("volume_to_liquidity_24h"),
+            "امتیاز مومنتوم": item.get("short_term_momentum_score", item.get("short_term_momentum_smart_money_score")),
+            "پوشش شواهد مومنتوم (%)": item.get("momentum_evidence_coverage_pct"),
+            "پهنای خریداران مشاهده‌شده": item.get("wallet_breadth_evidence_status", "UNKNOWN"),
+            "انتساب پول هوشمند": item.get("smart_money_evidence_status", "NOT_AVAILABLE"),
+            "شناسایی خریداران جدید": item.get("new_buyer_cohort_status", "NOT_AVAILABLE"),
+            "وضعیت هشدار تلگرام": (item.get("telegram_alert_status") or {}).get("status", "NOT_SENT"),
+            "امتیاز ایمنی": item.get("safety_exit_liquidity_score"),
+            "اعتماد داده": item.get("data_confidence_score"),
+            "لغزش خروج (bps)": exit_gate.get("estimated_slippage_bps"),
+            "وضعیت خروج": exit_gate.get("status", "UNKNOWN"),
+            "وضعیت Gem Hunter V3": item.get("gem_hunter_v3_status", "RESEARCH_WATCH"),
+            "وضعیت ذخیره‌سازی": item.get("gem_hunter_storage_status", "UNKNOWN"),
+            "مجوز معامله": "NO_TRADE",
+        })
+    return pd.DataFrame(rows, columns=[
+        "توکن", "طبقهٔ کشف", "نقاط قوت", "نکات احتیاط", "اعتماد دادهٔ طبقه",
+        "شبکه", "قرارداد", "قیمت", "نقدینگی تأییدشده", "حجم ۲۴ساعته", "حجم به نقدینگی",
+        "امتیاز مومنتوم", "پوشش شواهد مومنتوم (%)", "پهنای خریداران مشاهده‌شده",
+        "انتساب پول هوشمند", "شناسایی خریداران جدید", "وضعیت هشدار تلگرام",
+        "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",
+        "وضعیت خروج", "وضعیت Gem Hunter V3", "وضعیت ذخیره‌سازی", "مجوز معامله",
+    ])

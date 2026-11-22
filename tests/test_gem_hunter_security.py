@@ -59,6 +59,50 @@ class GemHunterSecurityTests(unittest.TestCase):
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertEqual(result["top10_token_account_concentration_pct"], 42.0)
 
+    def test_ethereum_uses_goplus_and_sourcify(self):
+        data = SimpleNamespace(http=SimpleNamespace(config=SimpleNamespace(request_timeout_seconds=5), limiter="limiter"))
+        fake = SimpleNamespace(
+            status="PASS", reasons=[], source_verified=True, flags={"is_honeypot": False},
+            buy_tax_pct=0.0, sell_tax_pct=0.0, top10_holder_pct=15.0, evidence={},
+        )
+        with patch.object(security, "screen_evm_token", return_value=fake) as screen:
+            result = security.screen_discovery_candidate(
+                {"chain": "ethereum", "token_address": "0x" + "3" * 40}, data
+            )
+        self.assertEqual(result["status"], "PASS")
+        screen.assert_called_once()
+        self.assertEqual(screen.call_args.args[0], "ethereum")
+
+    def test_solana_complete_sell_and_holder_evidence_can_pass(self):
+        class CompleteRpc(FakeSolanaRpc):
+            def token_security(self, address):
+                row = super().token_security(address)
+                row.update({
+                    "honeypot_detected": False,
+                    "sell_tax_pct": 1.0,
+                    "transfer_simulation_status": "PASS",
+                    "top10_independent_holder_concentration_pct": 25.0,
+                })
+                return row
+        result = security.screen_discovery_candidate(
+            {"chain": "solana", "token_address": "11111111111111111111111111111111"},
+            SimpleNamespace(solana_rpc=CompleteRpc()),
+        )
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["sell_tax_pct"], 1.0)
+
+    def test_solana_honeypot_or_high_sell_tax_fails(self):
+        class HoneypotRpc(FakeSolanaRpc):
+            def token_security(self, address):
+                row = super().token_security(address)
+                row.update({"honeypot_detected": True, "sell_tax_pct": 20.0})
+                return row
+        result = security.screen_discovery_candidate(
+            {"chain": "solana", "token_address": "11111111111111111111111111111111"},
+            SimpleNamespace(solana_rpc=HoneypotRpc()),
+        )
+        self.assertEqual(result["status"], "FAIL")
+
     def test_solana_active_authority_fails_security_gate(self):
         data = SimpleNamespace(solana_rpc=FakeSolanaRpc(mint_active=True))
         result = security.screen_discovery_candidate(
