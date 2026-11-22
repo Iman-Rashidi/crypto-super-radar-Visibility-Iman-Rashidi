@@ -1000,7 +1000,7 @@ class WebAppHttpTests(unittest.TestCase):
     def test_gem_hunter_pending_payload_includes_all_three_networks(self):
         result = web_app._gem_hunter_pending_payload(refreshing=True)
         self.assertEqual(set(result["networks"]), {"solana", "base", "ethereum"})
-        self.assertEqual(result["trade_authorization"] if "trade_authorization" in result else "NO_TRADE", "NO_TRADE")
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
     def test_gem_hunter_never_serves_expired_buy_evidence_during_refresh(self):
         web_app.GEM_HUNTER_RESULT_CACHE.update(
