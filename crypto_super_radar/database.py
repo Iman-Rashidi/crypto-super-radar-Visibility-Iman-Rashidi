@@ -174,17 +174,26 @@ def connect_turso_database(database_url: str, auth_token: str):
     return _ConnectionAdapter(remote)
 
 
-def connect_database(path: str | None = None):
+def connect_database(path: str | None = None, *, url: str | None = None,
+                     token: str | None = None):
     """Open Turso Cloud over HTTP when configured; otherwise retain local SQLite.
 
     Explicit ':memory:' paths always stay local so isolated tests remain isolated.
+    Optional explicit credentials support authenticated read-only dashboard
+    connections without persisting Turso secrets in the Render environment.
     """
     if path == ":memory:":
         connection = sqlite3.connect(":memory:", check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
 
-    url, token = _credentials()
+    if url is None and token is None:
+        url, token = _credentials()
+    else:
+        url = (url or "").strip()
+        token = (token or "").strip()
+        if not url or not token:
+            raise RuntimeError("Both explicit Turso URL and auth token are required.")
     if url and token:
         try:
             import turso_serverless
