@@ -203,7 +203,7 @@ def discover_and_score(limit_per_chain=10):
             h1,h24=tx.get("h1") or {},tx.get("h24") or {}
             created=_number(pair.get("pairCreatedAt"))
             age=max(0.0,(_now().timestamp()-created/1000)/3600) if created else None
-            candidate={"candidate_id":f"{chain}:{token.lower()}:{str(pair.get('pairAddress') or '').lower()}","chain":chain,"token_address":token,"token_name":base.get("name"),"token_symbol":base.get("symbol"),"pool_address":pair.get("pairAddress"),"dex":pair.get("dexId"),"price_usd":_number(pair.get("priceUsd")),"liquidity_usd":liq,"volume_24h_usd":_number((pair.get("volume") or {}).get("h24")),"buys_1h":_number(h1.get("buys")),"sells_1h":_number(h1.get("sells")),"buys_24h":_number(h24.get("buys")),"sells_24h":_number(h24.get("sells")),"pool_age_hours":round(age,2) if age is not None else None,"gecko_match":match,"gecko_liquidity_usd":gecko_liq,"security":_security(chain,token),"holders":_holders(chain,token),"cex":_cex_listing(base.get("symbol"),cex),"sources":["DEX_SCREENER"]+(["GECKOTERMINAL"] if gecko else []),"observed_at_utc":_iso(),"trade_authorization":"NO_TRADE","read_only":True}
+            candidate={"candidate_id":f"{chain}:{token.lower()}:{str(pair.get('pairAddress') or '').lower()}","chain":chain,"token_address":token,"token_name":base.get("name"),"token_symbol":base.get("symbol"),"pool_address":pair.get("pairAddress"),"dex":pair.get("dexId"),"price_usd":_number(pair.get("priceUsd")),"liquidity_usd":liq,"volume_1h_usd":_number((pair.get("volume") or {}).get("h1")),"volume_24h_usd":_number((pair.get("volume") or {}).get("h24")),"buys_1h":_number(h1.get("buys")),"sells_1h":_number(h1.get("sells")),"buys_24h":_number(h24.get("buys")),"sells_24h":_number(h24.get("sells")),"pool_age_hours":round(age,2) if age is not None else None,"gecko_match":match,"gecko_liquidity_usd":gecko_liq,"security":_security(chain,token),"holders":_holders(chain,token),"cex":_cex_listing(base.get("symbol"),cex),"sources":["DEX_SCREENER"]+(["GECKOTERMINAL"] if gecko else []),"observed_at_utc":_iso(),"trade_authorization":"NO_TRADE","read_only":True}
             rows[candidate["candidate_id"]]=candidate
             counts[chain]+=1
             break
@@ -257,7 +257,6 @@ def public_snapshot(*,connection=None):
             if storage_backend()!="TURSO_CLOUD_SQLITE":
                 return {"status":"NOT_CONFIGURED","candidates":[],"message_fa":"اتصال Turso برای Gem Hunter V2 تنظیم نشده است.","read_only":True,"trade_authorization":"NO_TRADE"}
             db=connect_database()
-        initialize_schema(db)
         rows=db.execute("SELECT payload_json FROM gem_hunter_v2_candidates WHERE expires_at_utc>=? ORDER BY score DESC,last_seen_utc DESC LIMIT 10",(_iso(),)).fetchall()
         candidates=[json.loads(row["payload_json"]) for row in rows]
         return {"status":"OK","generated_at_utc":_iso(),"candidate_count":len(candidates),"candidates":candidates,"read_only":True,"trade_authorization":"NO_TRADE","scope":"GEM_HUNTER_V2_ONLY"}
