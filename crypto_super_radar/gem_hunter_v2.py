@@ -242,8 +242,8 @@ def save_top10(candidates,*,connection=None,now=None):
         prepared=prepared[:MAX_STORED]
         for item in prepared:
             db.execute("""INSERT INTO gem_hunter_v2_candidates (candidate_id,chain,token_address,pool_address,score,status,consecutive_scans,liquidity_usd,payload_json,first_seen_utc,last_seen_utc,expires_at_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id) DO UPDATE SET score=excluded.score,status=excluded.status,consecutive_scans=excluded.consecutive_scans,liquidity_usd=excluded.liquidity_usd,payload_json=excluded.payload_json,last_seen_utc=excluded.last_seen_utc,expires_at_utc=excluded.expires_at_utc""",(item["candidate_id"],item["chain"],item["token_address"],item["pool_address"],item["score"],item["status"],item["consecutive_scans"],item.get("liquidity_usd"),json.dumps(item,ensure_ascii=False,separators=(",",":")),item["first_seen_utc"],item["last_seen_utc"],item["expires_at_utc"]))
-        db.execute("""DELETE FROM gem_hunter_v2_candidates WHERE candidate_id NOT IN (SELECT candidate_id FROM gem_hunter_v2_candidates ORDER BY score DESC,last_seen_utc DESC LIMIT 10)""")
         db.execute("DELETE FROM gem_hunter_v2_candidates WHERE expires_at_utc<?",(stamp,))
+        db.execute("""DELETE FROM gem_hunter_v2_candidates WHERE candidate_id NOT IN (SELECT candidate_id FROM gem_hunter_v2_candidates ORDER BY score DESC,last_seen_utc DESC LIMIT 10)""")
         db.commit()
         return prepared
     finally:
