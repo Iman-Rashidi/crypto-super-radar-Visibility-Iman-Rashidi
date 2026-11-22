@@ -113,6 +113,7 @@ class FakeBloFinReadOnly:
         self.now_ms = now_ms or int(time.time() * 1000)
         self.missing_bar = missing_bar
         self.funding_rows = funding_rows if funding_rows is not None else [{
+            "instId": "BTC-USDT",
             "fundingTime": self.now_ms - 60 * 60_000,
             "fundingRate": "0.0001",
             "fundingKind": "0",
@@ -353,6 +354,7 @@ class Challenge1V2MarketIngestionTests(unittest.TestCase):
 
     def test_stale_funding_fails_closed_before_analysis(self):
         self.client.funding_rows = [{
+            "instId": "BTC-USDT",
             "fundingTime": self.client.now_ms - v2_orchestration.FUNDING_MAX_AGE_MS - 1,
             "fundingRate": "0.0001", "fundingKind": "0",
         }]
@@ -365,8 +367,8 @@ class Challenge1V2MarketIngestionTests(unittest.TestCase):
 
     def test_latest_non_regular_funding_never_falls_back_to_older_regular_event(self):
         self.client.funding_rows = [
-            {"fundingTime": self.client.now_ms - 60 * 60_000, "fundingRate": "0.0001", "fundingKind": "0"},
-            {"fundingTime": self.client.now_ms - 10 * 60_000, "fundingRate": "0.1", "fundingKind": "1"},
+            {"instId": "BTC-USDT", "fundingTime": self.client.now_ms - 60 * 60_000, "fundingRate": "0.0001", "fundingKind": "0"},
+            {"instId": "BTC-USDT", "fundingTime": self.client.now_ms - 10 * 60_000, "fundingRate": "0.1", "fundingKind": "1"},
         ]
         with patch.object(v2_orchestration, "analyze_signal") as analyze:
             with self.assertRaisesRegex(v2_orchestration.Challenge1V2DataBlocked, "not regular"):
