@@ -1182,6 +1182,28 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertNotIn("available_candidate_count", result)
         self.assertNotIn("61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP", json.dumps(result))
 
+    def test_gem_hunter_report_route_requests_v3_research_diagnostics_and_refresh(self):
+        expected = {
+            "status": "PASS",
+            "diagnostic_candidates": [],
+            "gem_hunter_v3_candidates": [],
+            "gem_hunter_v3_tier1_count": 0,
+            "gem_hunter_v3_tier2_count": 0,
+            "trade_authorization": "NO_TRADE",
+        }
+        with patch.object(web_app, "_gem_hunter_api_payload", return_value=expected) as build:
+            status, headers, payload = self.request(
+                "GET", "/api/gem-hunter/report?limit=10&refresh=1",
+            )
+        result = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["report_mode"], "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL")
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
+        self.assertEqual(result["gem_hunter_v3_tier1_count"], 0)
+        self.assertEqual(result["gem_hunter_v3_tier2_count"], 0)
+        build.assert_called_once_with(limit=10, include_diagnostics=True, force_refresh=True)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+
     def test_gem_hunter_report_force_refresh_starts_a_fresh_scan_even_when_cache_is_valid(self):
         web_app.GEM_HUNTER_RESULT_CACHE.update(
             expires_at=web_app.time.monotonic() + 300,
