@@ -1355,7 +1355,6 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result.pop("trade_authorization", None)
     result.pop("available_candidate_count", None)
     result["candidates"] = qualified
-    result["gem_hunter_v3_candidates"] = copy.deepcopy(raw_candidates[:limit])
     result["gem_hunter_v3_qualified_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "QUALIFIED_GEM")
     result["candidate_count"] = len(qualified)
     result["discovered_candidate_count"] = discovered_count
@@ -1375,6 +1374,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     if include_diagnostics:
         # Separate research-only report; this never upgrades a candidate to BUY.
         result["diagnostic_candidates"] = copy.deepcopy(raw_candidates[:limit])
+        result["gem_hunter_v3_candidates"] = copy.deepcopy(raw_candidates[:limit])
     result["progress_stage"] = "COMPLETE"
     result["diagnostic_freshness"] = "CURRENT_SCAN"
     result["public_policy"] = {
