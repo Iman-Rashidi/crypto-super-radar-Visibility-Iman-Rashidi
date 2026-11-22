@@ -108,9 +108,35 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertEqual({item["chain"] for item in result["candidates"]}, {"solana", "base", "ethereum"})
         self.assertTrue(all(item["candidate_status"] == "UNSCREENED" for item in result["candidates"]))
         self.assertTrue(all(item["discovery_priority_score"] is not None for item in result["candidates"]))
-        self.assertEqual(len(http.calls), 6)
+        self.assertEqual(len(http.calls), 7)
         self.assertTrue(all(call[1]["include"] == "base_token,quote_token,dex" for call in http.calls))
         self.assertEqual(result["candidate_counts_by_network"], {"base": 1, "ethereum": 1, "solana": 1})
+
+    def test_dexscreener_latest_ethereum_profiles_discover_exact_pool(self):
+        class DexScreenerHttp:
+            def get(self, url):
+                if "token-profiles/latest" in url:
+                    return [{"chainId": "ethereum", "tokenAddress": "0x" + "4" * 40}]
+                if "token-pairs/v1/ethereum" in url:
+                    return [{
+                        "chainId": "ethereum", "pairAddress": "0x" + "5" * 40,
+                        "baseToken": {"address": "0x" + "4" * 40, "name": "Fresh Token", "symbol": "FRESH"},
+                        "quoteToken": {"address": "0x" + "6" * 40, "name": "WETH", "symbol": "WETH"},
+                        "priceUsd": "0.02", "liquidity": {"usd": 100000},
+                        "volume": {"h1": 10000, "h24": 200000},
+                        "txns": {"h1": {"buys": 80, "sells": 20}, "h24": {"buys": 300, "sells": 120}},
+                        "pairCreatedAt": int(self.now.timestamp() * 1000) - 7200000,
+                        "priceChange": {"h1": 7.5},
+                    }]
+                raise AssertionError(url)
+            now = self.now
+        dex_http = DexScreenerHttp()
+        rows = discovery._dexscreener_ethereum_discovery_rows(dex_http, self.now, limit=5)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["chain"], "ethereum")
+        self.assertEqual(rows[0]["token_symbol"], "FRESH")
+        self.assertEqual(rows[0]["pool_address"], "0x" + "5" * 40)
+        self.assertEqual(rows[0]["trade_authorization"], "NO_TRADE")
 
     def test_deduplicates_token_across_sources_and_merges_provenance(self):
         trending = {
