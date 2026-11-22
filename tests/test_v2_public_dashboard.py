@@ -69,7 +69,7 @@ class V2PublicDashboardSnapshotTests(unittest.TestCase):
         ):
             result = web_app._blofin_v2_public_cycle_snapshot()
 
-        self.assertEqual(result["status"], "OK")
+        self.assertEqual(result["status"], "OK", result)
         self.assertEqual(result["environment"], "BLOFIN_DEMO")
         self.assertEqual(result["latest_cycle_id"], "latest-cycle")
         self.assertEqual(len(result["cycles"]), 5)
