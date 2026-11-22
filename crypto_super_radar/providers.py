@@ -111,6 +111,14 @@ class PublicHttpClient:
     def get(self, url: str, params: Optional[dict] = None) -> Any:
         return self.request_json("GET", url, params=params)
 
+    def get_with_timeout(self, url: str, params: Optional[dict] = None, *,
+                         timeout: float = 8.0) -> Any:
+        """GET with a bounded per-call timeout, without changing global provider settings."""
+        return self.request_json(
+            "GET", url, params=params, timeout=max(1.0, min(float(timeout), 8.0)),
+            max_retries=1,
+        )
+
     def post(self, url: str, payload: dict, *, timeout: Optional[float] = None,
              max_retries: Optional[int] = None) -> Any:
         options: Dict[str, Any] = {
