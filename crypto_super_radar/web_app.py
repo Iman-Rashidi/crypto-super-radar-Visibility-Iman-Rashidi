@@ -1270,10 +1270,10 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     # before constructing qualification gates. The bounded shortlist and cache
     # prevent an unbounded burst against public APIs; unchecked rows remain explicit.
     evaluation_candidates = reconcile_discovery_candidates(
-        evaluation_candidates, getattr(ENGINE.data, "http", None), limit=GEM_HUNTER_EVALUATION_LIMIT,
+        evaluation_candidates, getattr(ENGINE.data, "http", None),
     )
     evaluation_candidates = screen_discovery_candidates(
-        evaluation_candidates, ENGINE.data, limit=GEM_HUNTER_EVALUATION_LIMIT,
+        evaluation_candidates, ENGINE.data,
     )
     # Fetch a bounded sample of exact-pool OHLCV and BTC/ETH daily benchmarks.
     # The technical module caches complete evidence and rotates one candidate

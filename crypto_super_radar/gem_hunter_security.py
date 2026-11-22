@@ -155,7 +155,7 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
             "reason_fa": ["شبکه برای بررسی امنیت قرارداد پشتیبانی نمی‌شود."]}
 
 
-def screen_discovery_candidates(candidates: Any, data_service, *, limit: int = 5) -> list[dict]:
+def screen_discovery_candidates(candidates: Any, data_service, *, limit: int = 10) -> list[dict]:
     if not isinstance(candidates, list):
         return []
     valid = [dict(row) for row in candidates if isinstance(row, dict)]
