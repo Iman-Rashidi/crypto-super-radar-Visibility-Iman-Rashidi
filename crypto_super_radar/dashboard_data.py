@@ -235,3 +235,32 @@ def build_dashboard_frames(
         "whale_sentiment": whale_sentiment_dataframe(result),
         "market_ranges": ranges,
     }
+
+
+def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
+    """Build a mobile-friendly Gem Hunter V3 view without trade authorization."""
+    rows = []
+    for item in candidates if isinstance(candidates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        exit_gate = item.get("exit_slippage_evidence") or {}
+        rows.append({
+            "توکن": item.get("token_name") or item.get("token_symbol") or "نامشخص",
+            "شبکه": item.get("chain"),
+            "قرارداد": item.get("token_address"),
+            "قیمت": item.get("price_usd"),
+            "نقدینگی تأییدشده": (item.get("market_reconciliation") or {}).get("verified_liquidity_usd"),
+            "امتیاز مومنتوم": item.get("short_term_momentum_smart_money_score"),
+            "امتیاز ایمنی": item.get("safety_exit_liquidity_score"),
+            "اعتماد داده": item.get("data_confidence_score"),
+            "لغزش خروج (bps)": exit_gate.get("estimated_slippage_bps"),
+            "وضعیت خروج": exit_gate.get("status", "UNKNOWN"),
+            "وضعیت Gem Hunter V3": item.get("gem_hunter_v3_status", "RESEARCH_WATCH"),
+            "وضعیت ذخیره‌سازی": item.get("gem_hunter_storage_status", "UNKNOWN"),
+            "مجوز معامله": "NO_TRADE",
+        })
+    return pd.DataFrame(rows, columns=[
+        "توکن", "شبکه", "قرارداد", "قیمت", "نقدینگی تأییدشده",
+        "امتیاز مومنتوم", "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",
+        "وضعیت خروج", "وضعیت Gem Hunter V3", "وضعیت ذخیره‌سازی", "مجوز معامله",
+    ])
