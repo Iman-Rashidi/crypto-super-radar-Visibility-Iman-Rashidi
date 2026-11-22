@@ -1552,10 +1552,20 @@ def run_free_ai_second_opinion(
 
 def second_ai_connection_status() -> dict[str, Any]:
     """Expose only non-secret configuration facts for an independent free-tier reviewer."""
-    key = (os.getenv("CSR_SECOND_AI_API_KEY") or "").strip()
-    model = (os.getenv("CSR_SECOND_AI_MODEL") or "").strip()
-    provider = (os.getenv("CSR_SECOND_AI_PROVIDER") or "").strip()
-    endpoint = (os.getenv("CSR_SECOND_AI_API_URL") or "").strip()
+    # The Staging runtime already stores the independent Groq credential as
+    # GROQ_API_KEY. Accept it directly and supply only the approved free-plan
+    # Groq defaults; explicit CSR_SECOND_AI_* settings still take precedence.
+    groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+    key = (os.getenv("CSR_SECOND_AI_API_KEY") or groq_key).strip()
+    model = (os.getenv("CSR_SECOND_AI_MODEL") or (
+        "openai/gpt-oss-120b" if groq_key else ""
+    )).strip()
+    provider = (os.getenv("CSR_SECOND_AI_PROVIDER") or (
+        "Groq" if groq_key else ""
+    )).strip()
+    endpoint = (os.getenv("CSR_SECOND_AI_API_URL") or (
+        "https://api.groq.com/openai/v1/chat/completions" if groq_key else ""
+    )).strip()
     reasons = []
     if not key:
         reasons.append("CSR_SECOND_AI_API_KEY_MISSING")
