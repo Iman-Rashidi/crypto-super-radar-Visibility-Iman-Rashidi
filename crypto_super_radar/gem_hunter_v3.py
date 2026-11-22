@@ -12,6 +12,8 @@ from typing import Any, Mapping, Optional
 
 import requests
 
+from .database import connect_database, storage_backend
+
 
 SCHEMA_VERSION = "gem-hunter-v3"
 DEFAULT_EXIT_ORDER_USD = 500.0
@@ -124,58 +126,33 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class TursoGemHunterStore:
-    """Minimal Turso HTTP pipeline adapter; requires TURSO_DATABASE_URL/TURSO_AUTH_TOKEN."""
+    """Gem Hunter tables on the repository's shared Turso DB-API adapter."""
 
-    def __init__(self, database_url: Optional[str] = None, auth_token: Optional[str] = None,
-                 session: Any = None, timeout: float = 12.0):
-        raw = database_url or os.getenv("TURSO_DATABASE_URL")
-        self.auth_token = auth_token or os.getenv("TURSO_AUTH_TOKEN")
-        if not raw or not self.auth_token:
-            raise RuntimeError("Turso credentials are not configured")
-        self.url = raw.replace("libsql://", "https://").rstrip("/") + "/v2/pipeline"
-        self.session = session or requests.Session()
-        self.timeout = timeout
+    def __init__(self, connection: Any = None):
+        if connection is None:
+            backend = storage_backend()
+            if backend != "TURSO_CLOUD_SQLITE":
+                raise RuntimeError("Persistent Gem Hunter storage requires configured Turso Cloud.")
+            connection = connect_database()
+        self._db = connection
 
-    @staticmethod
-    def _arg(value: Any) -> dict[str, str]:
-        if value is None:
-            return {"type": "null"}
-        if isinstance(value, bool):
-            return {"type": "integer", "value": "1" if value else "0"}
-        if isinstance(value, int):
-            return {"type": "integer", "value": str(value)}
-        if isinstance(value, float):
-            return {"type": "float", "value": repr(value)}
-        return {"type": "text", "value": str(value)}
-
-    def execute(self, sql: str, args: tuple[Any, ...] = ()) -> dict[str, Any]:
-        statement = {"sql": sql, "args": [self._arg(item) for item in args]}
-        response = self.session.post(
-            self.url,
-            headers={"Authorization": f"Bearer {self.auth_token}", "Content-Type": "application/json"},
-            json={"requests": [{"type": "execute", "stmt": statement}, {"type": "close"}]},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        result = (payload.get("results") or [{}])[0].get("response", {}).get("result", {})
-        if not isinstance(result, dict):
-            raise RuntimeError("Unexpected Turso response")
-        return result
+    def execute(self, sql: str, args: tuple[Any, ...] = ()):
+        return self._db.execute(sql, args)
 
     def initialize(self) -> None:
-        self.execute("""CREATE TABLE IF NOT EXISTS gem_hunter_candidates (
-            candidate_id TEXT PRIMARY KEY, chain TEXT NOT NULL, token_address TEXT NOT NULL,
-            first_seen_utc TEXT NOT NULL, first_price_usd REAL, latest_price_usd REAL,
-            latest_liquidity_usd REAL, candidate_status TEXT NOT NULL,
-            evidence_json TEXT NOT NULL, updated_at_utc TEXT NOT NULL
-        )""")
-        self.execute("""CREATE TABLE IF NOT EXISTS gem_hunter_lifecycle_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE,
-            candidate_id TEXT NOT NULL, event_type TEXT NOT NULL,
-            event_at_utc TEXT NOT NULL, payload_json TEXT NOT NULL
-        )""")
-        self.execute("CREATE INDEX IF NOT EXISTS idx_gem_hunter_events_candidate ON gem_hunter_lifecycle_events(candidate_id, event_at_utc)")
+        with self._db:
+            self.execute("""CREATE TABLE IF NOT EXISTS gem_hunter_candidates (
+                candidate_id TEXT PRIMARY KEY, chain TEXT NOT NULL, token_address TEXT NOT NULL,
+                first_seen_utc TEXT NOT NULL, first_price_usd REAL, latest_price_usd REAL,
+                latest_liquidity_usd REAL, candidate_status TEXT NOT NULL,
+                evidence_json TEXT NOT NULL, updated_at_utc TEXT NOT NULL
+            )""")
+            self.execute("""CREATE TABLE IF NOT EXISTS gem_hunter_lifecycle_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE,
+                candidate_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                event_at_utc TEXT NOT NULL, payload_json TEXT NOT NULL
+            )""")
+            self.execute("CREATE INDEX IF NOT EXISTS idx_gem_hunter_events_candidate ON gem_hunter_lifecycle_events(candidate_id, event_at_utc)")
 
     def upsert_candidate(self, candidate: Mapping[str, Any]) -> None:
         chain = str(candidate.get("chain") or "").lower()
@@ -188,33 +165,38 @@ class TursoGemHunterStore:
         liquidity = _finite(candidate.get("liquidity_usd"))
         status = str(candidate.get("candidate_status") or "DISCOVERED")
         evidence = json.dumps(dict(candidate), ensure_ascii=False, sort_keys=True, default=str)
-        self.execute(
-            """INSERT INTO gem_hunter_candidates
-            (candidate_id, chain, token_address, first_seen_utc, first_price_usd,
-             latest_price_usd, latest_liquidity_usd, candidate_status, evidence_json, updated_at_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(candidate_id) DO UPDATE SET
-            latest_price_usd=excluded.latest_price_usd,
-            latest_liquidity_usd=excluded.latest_liquidity_usd,
-            candidate_status=excluded.candidate_status,
-            evidence_json=excluded.evidence_json, updated_at_utc=excluded.updated_at_utc""",
-            (candidate_id, chain, address, now, price, price, liquidity, status, evidence, now),
-        )
+        with self._db:
+            self.execute(
+                """INSERT INTO gem_hunter_candidates
+                (candidate_id, chain, token_address, first_seen_utc, first_price_usd,
+                 latest_price_usd, latest_liquidity_usd, candidate_status, evidence_json, updated_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                latest_price_usd=excluded.latest_price_usd,
+                latest_liquidity_usd=excluded.latest_liquidity_usd,
+                candidate_status=excluded.candidate_status,
+                evidence_json=excluded.evidence_json, updated_at_utc=excluded.updated_at_utc""",
+                (candidate_id, chain, address, now, price, price, liquidity, status, evidence, now),
+            )
 
     def append_event(self, candidate_id: str, event_type: str, payload: Mapping[str, Any],
                      event_key: Optional[str] = None) -> bool:
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        result = self.execute(
-            """INSERT OR IGNORE INTO gem_hunter_lifecycle_events
-            (event_key, candidate_id, event_type, event_at_utc, payload_json)
-            VALUES (?, ?, ?, ?, ?)""",
-            (event_key, candidate_id, event_type, now,
-             json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, default=str)),
-        )
-        affected = result.get("rows_affected")
-        if affected is None:
-            raise RuntimeError("Turso did not confirm rows_affected; refusing to assume event was stored")
-        return int(affected) == 1
+        with self._db:
+            cursor = self.execute(
+                """INSERT OR IGNORE INTO gem_hunter_lifecycle_events
+                (event_key, candidate_id, event_type, event_at_utc, payload_json)
+                VALUES (?, ?, ?, ?, ?)""",
+                (event_key, candidate_id, event_type, now,
+                 json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, default=str)),
+            )
+            affected = getattr(cursor, "rowcount", None)
+            if affected is None or int(affected) < 0:
+                raise RuntimeError("Turso did not confirm rows_affected; refusing to assume event was stored")
+            return int(affected) == 1
+
+    def close(self) -> None:
+        self._db.close()
 
 
 def persist_candidate_lifecycle(store: Any, candidate: Mapping[str, Any],
@@ -292,14 +274,14 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
     rows = [dict(row) for row in candidates if isinstance(row, Mapping)] if isinstance(candidates, list) else []
     store = None
     storage_status = "NOT_CONFIGURED"
-    if os.getenv("TURSO_DATABASE_URL") and os.getenv("TURSO_AUTH_TOKEN"):
-        try:
+    try:
+        if storage_backend() == "TURSO_CLOUD_SQLITE":
             store = TursoGemHunterStore()
             store.initialize()
             storage_status = "READY"
-        except Exception as exc:
-            store = None
-            storage_status = f"UNKNOWN:{type(exc).__name__}"
+    except Exception as exc:
+        store = None
+        storage_status = f"UNKNOWN:{type(exc).__name__}"
 
     for row in rows:
         reconciliation = row.get("market_reconciliation") or {}
@@ -333,4 +315,6 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
                 row["telegram_alert_status"] = {"status": "ERROR", "reason": type(exc).__name__}
         else:
             row["telegram_alert_status"] = {"status": "NOT_SENT"}
+    if store is not None:
+        store.close()
     return rows
