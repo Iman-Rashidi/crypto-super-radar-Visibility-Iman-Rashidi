@@ -25,36 +25,27 @@ jobs:
     steps:
       - name: Checkout isolated research branch
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install local analysis dependencies
         run: python -m pip install --disable-pip-version-check numpy pandas
-
       - name: Download immutable historical research artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/source research_output
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/14722912486/zip" \
-            -o artifacts/source/replay156.zip
+          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/14722912486/zip" -o artifacts/source/replay156.zip
           unzip -q artifacts/source/replay156.zip -d artifacts/source/unpacked
           replay_db="artifacts/source/unpacked/replay109/replay109_verified.sqlite3"
           independent_db="artifacts/source/unpacked/independent_5m.sqlite3"
           echo "98420da9742db289c31aef22a414554fb78c0d8285972c2c56509b159d47c9ca  ${replay_db}" | sha256sum -c -
           echo "f2dc555dad89a5e1a9cbf1470547fe25f95946f1947e097395b3899c671887ba  ${independent_db}" | sha256sum -c -
-          echo "Replay #109 and independent source hashes verified." >> "$GITHUB_STEP_SUMMAR"
-
+          echo "Replay #109 and independent source hashes verified." >> "${GITHUB_STEP_SUMMARY}"
       - name: Run isolated unit tests
         run: python -m unittest discover -s tests -p 'test_range_mean_reversion.py' -v
-
       - name: Run both immutable datasets and the three-engine ablation
         run: |
           python -m crypto_super_radar.range_mean_reversion \
@@ -62,11 +53,9 @@ jobs:
             --replay109-baseline artifacts/source/unpacked/replay109/ai_sandbox_report.json \
             --independent-db artifacts/source/unpacked/independent_5m.sqlite3 \
             --independent-baseline artifacts/source/unpacked/v3-research/independent_5m/independent_5m_A_report.json \
-            --output-dir research_output \
-            | tee research_output/execution.log
-          cat research/range_mean_reversion_report.md >> "$GITHUB_STEP_SUMMARY"
+            --output-dir research_output | tee research_output/execution.log
+          cat research/range_mean_reversion_report.md >> "${GITHUB_STEP_SUMMARY}"
           cp research/range_mean_reversion_report.md research_output/range_mean_reversion_report.md
-
       - name: Record safety metadata
         if: always()
         run: |
@@ -84,7 +73,6 @@ jobs:
             "range_engine_enabled_in_runtime": false
           }
           JSON
-
       - name: Upload reproducible research outputs
         if: always()
         uses: actions/upload-artifact@v4
