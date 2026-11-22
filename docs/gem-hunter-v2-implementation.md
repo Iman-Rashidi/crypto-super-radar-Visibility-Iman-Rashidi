@@ -25,3 +25,6 @@
 - The public `GET /api/gem-hunter/v2/candidates` route remains unauthenticated and read-only. The private `POST /api/gem-hunter/v2/ingest` route rejects browser-origin requests, non-JSON payloads, more than 10 records, non-read-only candidates, and any order-related fields.
 - Snapshot mirroring preserves the scanner's consecutive-scan count; the mirror operation itself cannot manufacture a second stability observation.
 - No trade keys, BloFin credentials, Telegram credentials, or order APIs are accepted by either route.
+
+
+- CI trigger marker for the final Render-side Turso bridge review; this line has no runtime effect.
