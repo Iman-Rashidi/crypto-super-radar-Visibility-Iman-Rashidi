@@ -244,7 +244,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('cdn.simpleicons.org/binance', page)
         self.assertIn('cdn.simpleicons.org/bybit', page)
         self.assertIn('cdn.simpleicons.org/okx', page)
-        self.assertIn('/api/gem-hunter/report?limit=10', page)
+        self.assertIn('/api/gem-hunter/report?limit=10&refresh=1', page)
         self.assertNotIn('/api/gem-hunter/v2/candidates?limit=10', page)
         self.assertIn('Tier 1', page)
         self.assertIn('Tier 2', page)
@@ -1178,6 +1178,26 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(result["public_policy"]["discovery_candidates_exposed"])
         self.assertNotIn("available_candidate_count", result)
         self.assertNotIn("61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP", json.dumps(result))
+
+    def test_gem_hunter_report_force_refresh_starts_a_fresh_scan_even_when_cache_is_valid(self):
+        web_app.GEM_HUNTER_RESULT_CACHE.update(
+            expires_at=web_app.time.monotonic() + 300,
+            payload={"status": "PASS", "diagnostic_candidates": [], "candidates": []},
+            refreshing=False, last_error=None,
+        )
+
+        def mark_refreshing():
+            with web_app.GEM_HUNTER_RESULT_CACHE_LOCK:
+                web_app.GEM_HUNTER_RESULT_CACHE["refreshing"] = True
+
+        with patch.object(web_app, "_start_gem_hunter_refresh", side_effect=mark_refreshing) as start:
+            result = web_app._gem_hunter_api_payload(limit=10, include_diagnostics=True, force_refresh=True)
+
+        start.assert_called_once_with()
+        self.assertTrue(result["refreshing"])
+        self.assertEqual(result["signal_status"], "REFRESHING")
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["qualified_buy_count"], 0)
 
     def test_gem_hunter_report_exposes_research_candidates_separately_from_public_buy_api(self):
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
