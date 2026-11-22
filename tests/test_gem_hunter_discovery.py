@@ -110,7 +110,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
         self.assertTrue(all(item["candidate_status"] == "UNSCREENED" for item in result["candidates"]))
         self.assertTrue(all(item["discovery_priority_score"] is not None for item in result["candidates"]))
         self.assertEqual(len(http.calls), 7)
-        self.assertTrue(all(call[1]["include"] == "base_token,quote_token,dex" for call in http.calls))
+        self.assertTrue(all(params is None or params.get("include") == "base_token,quote_token,dex" for _, params in http.calls))
         self.assertEqual(result["candidate_counts_by_network"], {"base": 1, "ethereum": 1, "solana": 1})
 
     def test_dexscreener_latest_ethereum_profiles_discover_exact_pool(self):
