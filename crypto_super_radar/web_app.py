@@ -6734,7 +6734,17 @@ class Handler(BaseHTTPRequestHandler):
             payload = GLOBAL_MARKET_BOARD.get_board(force_refresh=refresh)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
-        if parsed.path in {"/api/gem-hunter/report", "/api/gem-hunter/v2/candidates"}:
+        if parsed.path == "/api/gem-hunter/report":
+            raw_limit = parse_qs(parsed.query).get("limit", ["50"])[0]
+            try:
+                limit = max(1, min(int(raw_limit), 50))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"error":"limit must be an integer from 1 to 50"}', "application/json")
+            payload = _gem_hunter_api_payload(limit=limit, include_diagnostics=True)
+            payload["report_mode"] = "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL"
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if parsed.path == "/api/gem-hunter/v2/candidates":
             payload = gem_hunter_v2_public_snapshot()
             candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
             mapped = []
@@ -8137,7 +8147,7 @@ async function loadBlofinInstruments(){
             let lastError = null;
             for (let retry = 0; retry < 4; retry += 1) {
               try {
-                const response = await fetch('/api/gem-hunter/report?limit=50', {
+                const response = await fetch('/api/gem-hunter/v2/candidates?limit=10', {
                   cache: 'no-store',
                   credentials: 'same-origin',
                   headers: { 'Accept': 'application/json' }
