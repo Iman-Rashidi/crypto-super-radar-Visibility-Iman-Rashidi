@@ -97,7 +97,7 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
     chain_id = {"base": "base", "solana": "solana", "ethereum": "ethereum"}.get(chain)
     if not chain_id:
         raise ValueError("Unsupported chain for exact-pool reconciliation")
-    payload = http.get(f"{DEX_BASE}/token-pairs/v1/{chain_id}/{token}")
+    payload = http.get(f"{DEX_BASE}/latest/dex/tokens/{token}")
     return _dex_snapshot_from_payload(payload, chain, token, pool)
 
 
