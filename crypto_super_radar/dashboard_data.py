@@ -279,3 +279,13 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
         "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",
         "وضعیت خروج", "وضعیت Gem Hunter V3", "وضعیت ذخیره‌سازی", "مجوز معامله",
     ])
+
+
+def gem_hunter_v3_report_dataframe(report: Any) -> pd.DataFrame:
+    """Convert the latest Turso worker report into the existing Persian V3 table."""
+    if not isinstance(report, dict):
+        return gem_hunter_v3_dataframe([])
+    candidates = report.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = report.get("gem_hunter_v3_candidates") or report.get("diagnostic_candidates") or []
+    return gem_hunter_v3_dataframe(candidates)
