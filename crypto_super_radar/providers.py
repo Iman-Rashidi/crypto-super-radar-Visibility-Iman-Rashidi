@@ -56,6 +56,7 @@ class PublicHttpClient:
         return min(max(delay, 0.0), 30.0)
 
     def request_json(self, method: str, url: str, **kwargs: Any) -> Any:
+        retry_budget = kwargs.pop("max_retries", None)
         kwargs.setdefault("timeout", self.config.request_timeout_seconds)
         headers = dict(self.headers)
         headers.update(kwargs.pop("headers", {}) or {})
@@ -63,7 +64,9 @@ class PublicHttpClient:
         # A 429 is handed to the discovery-level cooldown/cache and fallback
         # rather than retrying the same throttled host several times in one scan.
         host = urlparse(url).netloc.lower()
-        attempts = 1 if host == "api.geckoterminal.com" else max(1, int(self.config.max_http_retries))
+        attempts = 1 if host == "api.geckoterminal.com" else max(1, int(
+            retry_budget if retry_budget is not None else self.config.max_http_retries
+        ))
         last_error: Optional[Exception] = None
         for attempt in range(attempts):
             self.limiter.wait(url)
@@ -108,8 +111,17 @@ class PublicHttpClient:
     def get(self, url: str, params: Optional[dict] = None) -> Any:
         return self.request_json("GET", url, params=params)
 
-    def post(self, url: str, payload: dict) -> Any:
-        return self.request_json("POST", url, json=payload, headers={"Content-Type": "application/json"})
+    def post(self, url: str, payload: dict, *, timeout: Optional[float] = None,
+             max_retries: Optional[int] = None) -> Any:
+        options: Dict[str, Any] = {
+            "json": payload,
+            "headers": {"Content-Type": "application/json"},
+        }
+        if timeout is not None:
+            options["timeout"] = timeout
+        if max_retries is not None:
+            options["max_retries"] = max_retries
+        return self.request_json("POST", url, **options)
 
 
 class GeckoTerminalProvider:
@@ -440,7 +452,10 @@ class SolanaRpcProvider:
         self.http = http
 
     def _rpc(self, method: str, params: list) -> Any:
-        payload = self.http.post(self.URL, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        payload = self.http.post(
+            self.URL, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            timeout=6, max_retries=1,
+        )
         if not isinstance(payload, dict):
             raise DataProviderError(f"Solana RPC {method} returned an unreadable response")
         if payload.get("error"):
@@ -459,7 +474,10 @@ class SolanaRpcProvider:
             raise DataProviderError("Solana RPC did not return a parsed mint account")
         mint_authority = info.get("mintAuthority")
         freeze_authority = info.get("freezeAuthority")
-        supply_payload = self.http.post(self.URL, {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]})
+        supply_payload = self.http.post(
+            self.URL, {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]},
+            timeout=6, max_retries=1,
+        )
         if not isinstance(supply_payload, dict) or supply_payload.get("error"):
             raise DataProviderError("Solana RPC getTokenSupply returned an API error or unreadable response")
         supply_value = ((supply_payload.get("result") or {}).get("value") or {})
