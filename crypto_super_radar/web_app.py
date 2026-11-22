@@ -35,6 +35,7 @@ from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
 from .gem_hunter_v3 import process_gem_hunter_v3_candidates
+from .gem_hunter_worker import latest_report_from_turso
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
@@ -6770,6 +6771,25 @@ class Handler(BaseHTTPRequestHandler):
             payload = GLOBAL_MARKET_BOARD.get_board(force_refresh=refresh)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/gem-hunter/v3/latest":
+            try:
+                payload = latest_report_from_turso()
+                payload["report_mode"] = "GEM_HUNTER_V3_READ_ONLY_NO_TRADE"
+                payload["trade_authorization"] = "NO_TRADE"
+                payload["read_only"] = True
+                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {
+                    "status": "UNAVAILABLE",
+                    "message_fa": "خواندن گزارش ذخیره‌شده از Turso ممکن نشد.",
+                    "error_type": type(exc).__name__,
+                    "candidates": [],
+                    "trade_authorization": "NO_TRADE",
+                    "read_only": True,
+                }
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
         if parsed.path == "/api/gem-hunter/report":
             raw_limit = parse_qs(parsed.query).get("limit", ["50"])[0]
             try:
@@ -8192,7 +8212,7 @@ async function loadBlofinInstruments(){
             let lastError = null;
             for (let retry = 0; retry < 4; retry += 1) {
               try {
-                const response = await fetch('/api/gem-hunter/report?limit=10&refresh=1', {
+                const response = await fetch('/api/gem-hunter/v3/latest', {
                   cache: 'no-store',
                   credentials: 'same-origin',
                   headers: { 'Accept': 'application/json' }
