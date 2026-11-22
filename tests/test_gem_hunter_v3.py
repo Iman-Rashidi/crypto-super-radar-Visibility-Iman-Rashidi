@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 from crypto_super_radar.dashboard_data import gem_hunter_v3_dataframe
 from crypto_super_radar.gem_hunter_v3 import (
     estimate_exit_slippage, score_candidate_v3, persist_candidate_lifecycle,
-    notify_qualified_gem, TursoGemHunterStore,
+    notify_qualified_gem, TursoGemHunterStore, classify_gem_tier,
 )
 
 
@@ -66,6 +66,59 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(result["candidate_status"], "RESEARCH_WATCH")
         self.assertEqual(result["wallet_breadth_evidence_status"], "UNKNOWN")
 
+    def test_catema_style_high_volume_early_alpha_is_visible_as_tier2(self):
+        candidate = {
+            "chain": "base", "liquidity_usd": 55_000, "volume_24h_usd": 435_000,
+            "volume_to_liquidity_24h": 7.91, "buy_volume_share_pct": 62,
+            "buys_24h": 620, "sells_24h": 380,
+            "security_evidence": {"status": "PASS", "flags": {"is_honeypot": False}},
+            "market_reconciliation": {"status": "UNKNOWN"},
+            "exit_slippage_evidence": {"status": "UNKNOWN"},
+        }
+        tier = classify_gem_tier(candidate, {
+            "short_term_momentum_score": 62,
+            "momentum_evidence_coverage_pct": 50,
+            "momentum_score_components": {"pool_buy_volume_share": 62},
+            "smart_money_evidence_status": "NOT_AVAILABLE",
+        })
+        self.assertEqual(tier["tier"], "TIER_2_EARLY_ALPHA")
+        self.assertTrue(tier["tier_cautions_fa"])
+        self.assertEqual(tier["tier_data_confidence"], "LIMITED")
+
+    def test_honeypot_is_blocked_but_missing_secondary_evidence_is_not_scam(self):
+        scam = classify_gem_tier({
+            "security_evidence": {"status": "FAIL", "honeypot_detected": True},
+        }, {})
+        unknown = classify_gem_tier({
+            "liquidity_usd": 55_000, "volume_24h_usd": 435_000,
+            "security_evidence": {"status": "UNKNOWN"},
+        }, {})
+        self.assertEqual(scam["tier"], "BLOCKED_SCAM")
+        self.assertEqual(unknown["tier"], "REVIEW_REQUIRED")
+
+    def test_low_liquidity_is_blocked_without_calling_it_scam(self):
+        tier = classify_gem_tier({
+            "liquidity_usd": 1000, "volume_24h_usd": 50000,
+            "security_evidence": {"status": "PASS"},
+        }, {})
+        self.assertEqual(tier["tier"], "BLOCKED_LOW_LIQUIDITY")
+
+    def test_tier1_requires_full_market_security_and_exit_evidence(self):
+        candidate = {
+            "liquidity_usd": 100000, "volume_24h_usd": 500000,
+            "volume_to_liquidity_24h": 5, "buy_volume_share_pct": 70,
+            "security_evidence": {"status": "PASS"},
+            "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000,
+                                      "verified_volume_24h_usd": 500000},
+            "exit_slippage_evidence": {"status": "PASS"},
+        }
+        tier = classify_gem_tier(candidate, {
+            "short_term_momentum_score": 80, "momentum_evidence_coverage_pct": 80,
+            "momentum_score_components": {"pool_buy_volume_share": 70},
+            "safety_exit_liquidity_score": 90,
+        })
+        self.assertEqual(tier["tier"], "TIER_1_VERIFIED_GEM")
+
     def test_three_scores_do_not_invent_missing_evidence(self):
         result = score_candidate_v3({})
         self.assertIsNone(result["short_term_momentum_smart_money_score"])
@@ -85,7 +138,8 @@ class GemHunterV3Tests(unittest.TestCase):
         store = FakeStore()
         candidate = {
             "chain": "base", "token_address": "0x" + "1" * 40,
-            "candidate_status": "QUALIFIED_GEM", "trade_authorization": "NO_TRADE",
+            "candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
+            "gem_hunter_v3_status": "TIER_1_VERIFIED_GEM", "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS"},
             "market_reconciliation": {"status": "PASS"},
@@ -103,7 +157,8 @@ class GemHunterV3Tests(unittest.TestCase):
         store = FakeStore()
         candidate = {
             "chain": "base", "token_address": "0x" + "1" * 40,
-            "candidate_status": "QUALIFIED_GEM", "trade_authorization": "NO_TRADE",
+            "candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
+            "gem_hunter_v3_status": "TIER_1_VERIFIED_GEM", "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS"},
             "market_reconciliation": {"status": "PASS"},
