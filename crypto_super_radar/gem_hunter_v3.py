@@ -388,9 +388,9 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
                          session: Any = None, bot_token: Optional[str] = None,
                          chat_id: Optional[str] = None, timeout: float = 10.0) -> dict[str, Any]:
     """Send one Telegram research alert per token, only after all required gates pass."""
-    status = candidate.get("candidate_status")
-    if candidate.get("gem_hunter_v3_status", status) != "QUALIFIED_GEM" or candidate.get("gem_hunter_v3_trade_authorization", candidate.get("trade_authorization")) != "NO_TRADE":
-        return {"status": "SKIPPED", "reason": "Candidate is not a research-qualified gem."}
+    status = candidate.get("gem_hunter_v3_status", candidate.get("candidate_status"))
+    if status not in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA"} or candidate.get("gem_hunter_v3_trade_authorization", "NO_TRADE") != "NO_TRADE":
+        return {"status": "SKIPPED", "reason": "Candidate is not in a Telegram research tier."}
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     market = candidate.get("market_reconciliation") or {}
@@ -399,7 +399,7 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     chain = str(candidate.get("chain") or "").lower()
     address = str(candidate.get("token_address") or "")
     candidate_id = f"{chain}:{address if chain == 'solana' else address.lower()}"
-    event_key = f"TELEGRAM_QUALIFIED_GEM:{candidate_id}"
+    event_key = f"TELEGRAM_{status}:{candidate_id}"
     token = bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
     destination = chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
     if not token or not destination:
