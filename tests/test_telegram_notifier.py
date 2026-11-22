@@ -67,11 +67,11 @@ class TelegramNotifierTests(unittest.TestCase):
                      "chat": {"id": 1042}}}]})
             raise OSError("network down")
         notifier = TelegramNotifier(token="test-token", connection=self.db, http_post=post)
-        self.assertEqual(notifier.send_once("trade:closed:pos-2", "closed")["status"], "DUPLICATE_SKIPPED")
-        row = self.db.execute("SELECT status FROM telegram_notification_outbox WHERE event_key='trade:closed:pos-2'").fetchone()
-        self.assertEqual(row[0], "FAILED")
         with self.assertRaises(TelegramNotificationError):
             notifier.send_once("trade:closed:pos-2", "closed")
+        row = self.db.execute("SELECT status FROM telegram_notification_outbox WHERE event_key='trade:closed:pos-2'").fetchone()
+        self.assertEqual(row[0], "FAILED")
+        self.assertEqual(notifier.send_once("trade:closed:pos-2", "closed")["status"], "DUPLICATE_SKIPPED")
 
 
 if __name__ == "__main__":
