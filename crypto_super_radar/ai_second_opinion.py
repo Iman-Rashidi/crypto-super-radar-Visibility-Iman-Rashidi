@@ -921,7 +921,10 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "You may not waive, reinterpret, or override any FAIL or UNKNOWN value on a required gate. "
         "A missing/contradictory input on a required gate means insufficient evidence. "
         + direction_rule + "Be conservative. Do not promise profit. "
-        "Return exactly one JSON object and no markdown or text outside it, with this schema: "
+        "Return exactly one complete, valid JSON object. Never put reasoning, markdown, code fences, "
+        "or explanatory text before or after the JSON object. Do not truncate the object. "
+        "Use double-quoted JSON keys and string values, valid JSON booleans/null, and no trailing commas. "
+        "Return no text outside the JSON object. Required schema: "
         "{"
         "\"specialist_views\":{"
         "\"market_regime\":{\"view\":\"BULLISH|BEARISH|NEUTRAL|UNKNOWN\",\"reason_fa\":\"...\"},"
@@ -946,16 +949,25 @@ def _prompt_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _extract_json(content: str) -> dict[str, Any]:
+    """Safely extract the first complete JSON object from prose/reasoning.
+
+    The provider may wrap its final decision in markdown or explanatory text.
+    Decode candidate objects one by one; never use eval or accept non-dicts.
+    """
     text = content.strip()
-    text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```\s*$", "", text)
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
+    if not text:
         raise ValueError("No JSON object returned")
-    parsed = json.loads(text[start:end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("AI response is not a JSON object")
-    return parsed
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[start:])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("No JSON object returned")
 
 
 
@@ -1012,6 +1024,8 @@ def _message_content_candidates(message: Any) -> list[str]:
     # normal review-schema validation both succeed.
     add(message.get("output_text"))
     add(message.get("reasoning"))
+    add(message.get("reasoning_content"))
+    add(message.get("analysis"))
     details = message.get("reasoning_details")
     if isinstance(details, list):
         add("".join(
@@ -1398,7 +1412,7 @@ def run_free_ai_second_opinion(
         "model": model,
         "messages": _prompt_messages(evidence),
         "temperature": 0.1,
-        "max_tokens": 1_800,
+        "max_tokens": 2_400,
     }
     headers = {
         "Authorization": f"Bearer {key}",
