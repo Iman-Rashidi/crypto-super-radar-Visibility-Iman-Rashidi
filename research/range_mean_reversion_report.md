@@ -30,7 +30,7 @@ No live/demo order writes. Main, staging, Render and active CHALLENGE_1_V2 were 
 - Entry: Bollinger(20,2) wick penetration with close reclaim, RSI(14)<32 / >68, plus engulfing or hammer/shooting-star confirmation.
 - Guard: completed 4H true-range shock >2.5 x prior ATR(14) blocks entries. SL 1.5 ATR. Mid-band TP only when >=1.5R; otherwise skip. Time exit after 10 bars.
 - Stops trigger on aligned MARK candles; TP/time exits use LAST candles. Same-bar stop/target ties resolve as stop first. Maximum four concurrent positions, no overlapping same-symbol positions.
-- Costs: maker 0.02%, taker 0.06%, modelled spread 0.02%, adverse slippage 0.03% on market exits; historical funding rates applied. FundingKind provenance is schedule-inferred, not explicit exchange metadata.
+- Costs are model assumptions, not a verified account-specific BloFin fee tier: maker 0.02%, taker 0.06%, modelled spread 0.02%, adverse slippage 0.03% on market exits. Historical funding rates are applied to entry notional (not re-marked to each funding-time mark price); FundingKind provenance is schedule-inferred, not explicit exchange metadata.
 - Range risk uses fixed 0.25% of initial 1,000 USDT per trade; trend baseline retains original V2 sizing. Baseline trend entries were checked and were all in ADX>=22 regime.
 - Replay #109 SHA-256: 98420da9742db289c31aef22a414554fb78c0d8285972c2c56509b159d47c9ca.
 - Independent SHA-256: f2dc555dad89a5e1a9cbf1470547fe25f95946f1947e097395b3899c671887ba.
