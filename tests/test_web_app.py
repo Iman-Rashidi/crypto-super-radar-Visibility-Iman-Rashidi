@@ -225,13 +225,14 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(handler._send(200, b"response"))
         self.assertTrue(handler.close_connection)
 
-    def test_home_page_is_persian_and_lists_twelve_gates(self):
+    def test_home_page_is_persian_and_separates_gem_hunter_v2_from_twelve_gates(self):
         status, headers, payload = self.request("GET", "/")
         page = payload.decode("utf-8")
         self.assertEqual(status, 200)
         self.assertIn('lang="fa" dir="rtl"', page)
         self.assertIn("۱۲ فیلتر اجباری", page)
-        self.assertIn("فقط BUYهایی نمایش داده می‌شوند", page)
+        self.assertIn("Gem Hunter V2 یک موتور مستقل و سبک", page)
+        self.assertNotIn("حداقل ۹ فیلتر از ۱۲", page)
         self.assertIn("کشف‌شده:", page)
         self.assertIn("وضعیت منابع داده", page)
         self.assertIn("Paper Research", page)
@@ -241,7 +242,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('cdn.simpleicons.org/binance', page)
         self.assertIn('cdn.simpleicons.org/bybit', page)
         self.assertIn('cdn.simpleicons.org/okx', page)
-        self.assertIn('/api/gem-hunter/report?limit=50', page)
+        self.assertIn('/api/gem-hunter/v2/candidates?limit=10', page)
         self.assertIn('crypto-super-radar.gem-hunter-watchlist.v1', page)
         self.assertIn("crypto-super-radar.gem-hunter-open-reports.v1", page)
         self.assertIn("persistExpandedReportKeys", page)

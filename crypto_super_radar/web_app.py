@@ -33,6 +33,7 @@ from .gem_hunter_pool_trades import enrich_discovery_candidates_with_pool_trades
 from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
+from .gem_hunter_v2 import public_snapshot as gem_hunter_v2_public_snapshot
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
@@ -6743,6 +6744,48 @@ class Handler(BaseHTTPRequestHandler):
             payload["report_mode"] = "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL"
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/gem-hunter/v2/candidates":
+            payload = gem_hunter_v2_public_snapshot()
+            candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
+            mapped = []
+            for item in candidates:
+                row = dict(item)
+                parts = row.get("score_parts") or {}
+                security_state = "PASS" if (row.get("security") or {}).get("status") == "PASS" else "FAIL" if (row.get("security") or {}).get("status") == "FAIL" else "UNKNOWN"
+                filters_v2 = {
+                    "contract_security": security_state,
+                    "liquidity_depth": "PASS" if (parts.get("liquidity") or 0) >= 12 else "UNKNOWN",
+                    "buy_sell_momentum": "PASS" if (parts.get("buy_sell_momentum") or 0) >= 10 else "UNKNOWN",
+                    "holder_distribution": "PASS" if (row.get("holders") or {}).get("status") == "AVAILABLE" else "NOT_AVAILABLE",
+                    "age_activity": "PASS" if (parts.get("age_activity") or 0) >= 6 else "UNKNOWN",
+                    "pool_quality": "PASS" if row.get("gecko_match") else "UNKNOWN",
+                }
+                row["candidate_status"] = row.get("status", "WATCH")
+                row["discovery_priority_score"] = row.get("score")
+                row["trade_authorization"] = "NO_TRADE"
+                row["qualification"] = {
+                    "filters": filters_v2,
+                    "critical_gates": {"security": security_state, "liquidity": filters_v2["liquidity_depth"], "data_quality": filters_v2["pool_quality"], "exit": "UNKNOWN"},
+                    "critical_gate_reasons": {"security": (row.get("security") or {}).get("reason", "Security evidence unavailable."), "liquidity": "DEX pool liquidity is not guaranteed executable depth.", "data_quality": "Exact pool comparison with GeckoTerminal.", "exit": "No execution/slippage simulation is performed."},
+                    "market_metrics": {"holder_count": None, "top10_independent_holders_pct": (row.get("holders") or {}).get("top10_pct"), "buy_volume_share_pct": None, "price_usd": row.get("price_usd"), "liquidity_usd": row.get("liquidity_usd"), "volume_24h_usd": row.get("volume_24h_usd")},
+                    "opportunity_score": row.get("score"), "risk_score": None, "evaluation_status": row.get("status"), "market_data_sources": row.get("sources", []), "data_as_of_utc": row.get("observed_at_utc"), "whale_evidence": {"status": "NOT_AVAILABLE", "coverage_status": "NOT_CONFIGURED", "events": []},
+                }
+                row["security_evidence"] = row.get("security") or {"status": "NOT_AVAILABLE", "provider": "NOT_CONFIGURED"}
+                row["market_reconciliation"] = {"status": "PASS" if row.get("gecko_match") else "UNKNOWN", "verified_liquidity_usd": row.get("gecko_liquidity_usd"), "sources": row.get("sources", [])}
+                mapped.append(row)
+            payload["diagnostic_candidates"] = mapped
+            payload["candidates"] = []
+            payload["discovered_candidate_count"] = len(mapped)
+            payload["evaluation_record_count"] = len(mapped)
+            payload["complete_evaluation_count"] = sum(1 for x in mapped if x.get("security", {}).get("status") == "PASS")
+            payload["incomplete_evaluation_count"] = len(mapped) - payload["complete_evaluation_count"]
+            payload["unassessed_candidate_count"] = 0
+            payload["qualified_buy_count"] = 0
+            payload["refreshing"] = False
+            payload["diagnostic_freshness"] = "LATEST_STORED_TOP_10"
+            payload["diagnostic_fa"] = "Gem Hunter V2 مستقل و فقط‌خواندنی است؛ امتیازدهی سبک شش‌معیاره انجام شده و هیچ سفارش یا سیگنال BUY صادر نمی‌شود."
+            payload["report_mode"] = "GEM_HUNTER_V2_READ_ONLY_NO_TRADE"
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/gem-hunter/discover":
             raw_limit = parse_qs(parsed.query).get("limit", ["20"])[0]
             try:
@@ -7760,7 +7803,7 @@ async function loadBlofinInstruments(){
         <section class="card" id="gem-hunter-panel">
           <!--RADAR_GEM_HUNTER-->
           <h2>Gem Hunter · کشف زودهنگام توکن‌ها</h2>
-          <p class="muted">توکن‌های تازهٔ Solana و Base را در مرحلهٔ کشف شناسایی می‌کند. فقط BUYهایی نمایش داده می‌شوند که پروندهٔ ارزیابی نسخه‌دار، حداقل ۹ فیلتر از ۱۲، عبور همهٔ ۴ گیت حیاتی و شواهد تازه و قابل‌ردیابی بازار و Swapهای واقعی نهنگ را داشته باشند. نامزدهای کشف‌شده نیز جداگانه در فهرست پژوهشی نمایش داده می‌شوند؛ حتی اگر هنوز ارزیابی نشده، رد شده یا دارای دادهٔ ناقص باشند. این فهرست سیگنال خرید نیست و دادهٔ قدیمی با برچسب مشخص می‌شود. در هر نوبت حداکثر ۱۰ استخر و ۵ قرارداد به‌صورت چرخشی بررسی می‌شوند؛ بقیه در صف بررسی نوبت‌های بعدی می‌مانند.</p>
+          <p class="muted">Gem Hunter V2 یک موتور مستقل و سبک برای کشف زودهنگام توکن‌های Solana و Base است؛ از ۶ معیار اختصاصی استفاده می‌کند و به ۱۲ فیلتر سنگین Spot/Futures یا بکتست چندماهه وابسته نیست. خروجی فقط نامزد پژوهشی است و هرگز سفارش یا سیگنال BUY صادر نمی‌کند. اطلاعات ناقص با NOT_AVAILABLE مشخص می‌شود.</p>
           <div class="grid" style="align-items:center;margin:12px 0">
             <button id="gem-hunter-run" type="button">شروع کشف کاندیداها</button>
             <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن کشف اجرا نشده است.</span>
@@ -7804,12 +7847,12 @@ async function loadBlofinInstruments(){
           if (!button || !status || !results || !watchEntries || !watchForm) return;
           const STORAGE_KEY = 'crypto-super-radar.gem-hunter-watchlist.v1';
           const filterLabels = {
-            trend:'روند', momentum:'شتاب', relative_strength:'قدرت نسبی',
-            volume_confirmation:'تأیید حجم', buy_sell_pressure:'فشار خرید/فروش',
-            capital_flow:'جریان سرمایه', whale_activity:'فعالیت نهنگ',
-            liquidity_depth:'عمق نقدینگی', market_integrity:'سلامت معاملات',
-            contract_security:'امنیت قرارداد', holder_distribution:'توزیع هولدرها',
-            market_regime_validation:'تأیید رژیم بازار'
+            contract_security:'امنیت قرارداد و اختیارات',
+            liquidity_depth:'عمق و پایداری نقدینگی',
+            buy_sell_momentum:'نسبت خرید به فروش',
+            holder_distribution:'توزیع هولدرها',
+            age_activity:'سن و فعالیت بازار',
+            pool_quality:'کیفیت استخر و تأیید داده'
           };
           const gateLabels = {security:'امنیت', liquidity:'نقدینگی', data_quality:'کیفیت داده', exit:'امکان خروج'};
           // Persist expanded reports across polling DOM replacement and page refreshes.
@@ -7962,7 +8005,8 @@ async function loadBlofinInstruments(){
             const card = document.createElement('article'); card.className = 'gem-candidate';
             card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
             card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · نامزد مرحلهٔ کشف · ' + (item.candidate_status || 'UNKNOWN') + ' · ' + (item.trade_authorization || 'NO_TRADE'), 'candidate-meta'));
-            card.appendChild(el('p', 'امتیاز اولویت پژوهشی، نه احتمال موفقیت و نه سیگنال خرید: ' + (item.discovery_priority_score ?? 'ناموجود'), 'candidate-meta'));
+            card.appendChild(el('p', 'امتیاز Gem Hunter V2: ' + (item.discovery_priority_score ?? 'ناموجود') + '/100 · وضعیت: ' + (item.candidate_status || 'WATCH') + ' · امنیت: ' + ((item.security_evidence || {}).status || 'NOT_AVAILABLE') + ' · بازار: ' + ((item.cex || {}).status || 'NOT_VERIFIED') + ' (' + (((item.cex || {}).exchanges || []).join(', ') || 'DEX') + ')', 'candidate-meta'));
+            card.appendChild(el('p', 'Read-Only · هیچ دسترسی سفارش‌گذاری وجود ندارد · ' + (item.eu_mica_warning || 'بررسی مجوز MiCA و دسترسی آلمان مستقل است.'), 'candidate-meta'));
             const facts = document.createElement('div'); facts.className = 'gem-facts';
             const reconciliation = item.market_reconciliation || q.market_reconciliation || {};
             fact(facts, 'قیمت گزارش کشف (USD)', item.price_usd);
@@ -8002,8 +8046,8 @@ async function loadBlofinInstruments(){
               else expandedReportKeys.delete(reportKey);
               persistExpandedReportKeys();
             });
-            details.appendChild(el('summary', 'گزارش کامل ۱۲ فیلتر و ۴ گیت'));
-            details.appendChild(el('h4', '۱۲ فیلتر مستقل'));
+            details.appendChild(el('summary', 'گزارش کامل ۶ معیار Gem Hunter V2 و ۴ کنترل ایمنی'));
+            details.appendChild(el('h4', '۶ معیار مستقل Gem Hunter V2'));
             const filterGrid = document.createElement('div'); filterGrid.className = 'gem-detail-grid';
             Object.keys(filterLabels).forEach(key => {
               const state = filters[key] || 'UNKNOWN'; const row = document.createElement('div'); row.className = 'gem-detail';
@@ -8103,7 +8147,7 @@ async function loadBlofinInstruments(){
             let lastError = null;
             for (let retry = 0; retry < 4; retry += 1) {
               try {
-                const response = await fetch('/api/gem-hunter/report?limit=50', {
+                const response = await fetch('/api/gem-hunter/v2/candidates?limit=10', {
                   cache: 'no-store',
                   credentials: 'same-origin',
                   headers: { 'Accept': 'application/json' }
@@ -8172,7 +8216,7 @@ async function loadBlofinInstruments(){
               'candidate-meta'));
           };
           button.addEventListener('click', async () => {
-            button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت نامزدها و ساخت گزارش فارسی ۱۲ فیلتر و ۴ گیت...'));
+            button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت ۱۰ نامزد برتر ذخیره‌شده در Turso و گزارش شش معیار Gem Hunter V2...'));
              window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana و Base...');
             status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
             try {
