@@ -239,7 +239,7 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
                          chat_id: Optional[str] = None, timeout: float = 10.0) -> dict[str, Any]:
     """Send one Telegram research alert per token, only after all required gates pass."""
     status = candidate.get("candidate_status")
-    if candidate.get("gem_hunter_v3_status", status) != "QUALIFIED_GEM" or candidate.get("trade_authorization") != "NO_TRADE":
+    if candidate.get("gem_hunter_v3_status", status) != "QUALIFIED_GEM" or candidate.get("gem_hunter_v3_trade_authorization", candidate.get("trade_authorization")) != "NO_TRADE":
         return {"status": "SKIPPED", "reason": "Candidate is not a research-qualified gem."}
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
@@ -316,7 +316,7 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
         row.update(scores)
         row["gem_hunter_v3_status"] = scores.get("candidate_status")
         row["candidate_status"] = original_status
-        row["trade_authorization"] = "NO_TRADE"
+        row["gem_hunter_v3_trade_authorization"] = "NO_TRADE"
         row["gem_hunter_storage_status"] = storage_status
         if store is not None:
             try:
