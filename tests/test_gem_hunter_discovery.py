@@ -57,6 +57,8 @@ class DexOnlyHttp:
                 {"chainId": chain, "tokenAddress": token}
                 for chain, token in self.rows
             ]
+        if "/latest/dex/search?" in url:
+            return [row for (chain, _), row in self.rows.items() if chain in {"base", "ethereum"}]
         if "/tokens/v1/" in url:
             _, tail = url.split("/tokens/v1/", 1)
             chain, addresses = tail.split("/", 1)
@@ -71,6 +73,17 @@ class DexOnlyHttp:
         if "geckoterminal" in url:
             raise AssertionError("GeckoTerminal must not be called on the primary path")
         raise AssertionError(f"Unexpected URL: {url}")
+
+
+class LatestSolanaOnlyHttp(DexOnlyHttp):
+    def get(self, url, params=None):
+        if url.endswith("/token-boosts/latest/v1") or url.endswith("/token-profiles/latest/v1"):
+            self.calls.append((url, params))
+            return [
+                {"chainId": chain, "tokenAddress": token}
+                for chain, token in self.rows if chain == "solana"
+            ]
+        return super().get(url, params)
 
 
 class GemHunterDexDiscoveryTests(unittest.TestCase):
@@ -91,6 +104,17 @@ class GemHunterDexDiscoveryTests(unittest.TestCase):
         self.assertTrue(all("GECKOTERMINAL" not in str(item) for item in result["sources"]))
         self.assertTrue(all(row["source"] == "DEXSCREENER_PRIMARY" for row in result["candidates"]))
         self.assertTrue(all(row["trade_authorization"] == "NO_TRADE" for row in result["candidates"]))
+
+    def test_search_supplements_missing_base_and_ethereum_latest_feeds(self):
+        http = LatestSolanaOnlyHttp()
+        result = discover_gem_candidates(http, limit=50, now=NOW)
+        counts = result["candidate_counts_by_network"]
+        self.assertGreater(counts["solana"], 0)
+        self.assertGreater(counts["base"], 0)
+        self.assertGreater(counts["ethereum"], 0)
+        self.assertTrue(any("/latest/dex/search?" in url for url, _ in http.calls))
+        self.assertEqual(result["primary_source"], "DEXSCREENER")
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
     def test_dexscreener_batch_size_never_exceeds_thirty(self):
         http = DexOnlyHttp()
