@@ -1,7 +1,8 @@
-"""Conservative Solana/Base DEX candidate discovery for Gem Hunter.
+"""DEX Screener-primary discovery for Solana, Base and Ethereum Gem Hunter candidates.
 
-This module discovers pools; it does not certify token safety or authorize trades.
-GeckoTerminal new/trending lists are attention/discovery inputs, not endorsements.
+This module discovers and ranks pools; it does not certify token safety or authorize trades.
+DEX Screener batch token-pair data is the primary feed. GeckoTerminal helpers remain
+available only for optional enrichment outside the hot-path discovery/validation flow.
 """
 from __future__ import annotations
 
@@ -474,7 +475,7 @@ def _get_cached_dexscreener_payload(http, url: str, source: str,
 
 
 def _dexscreener_ethereum_discovery_rows(http, now: datetime, *, limit: int = 5) -> list[dict[str, Any]]:
-    """Supplement GeckoTerminal with latest Ethereum token profiles and exact DEX pairs."""
+    """Legacy Ethereum-only profile helper; the primary path uses batched multi-chain DEX feeds."""
     source = "DEXSCREENER_NEW_TOKEN_PROFILES_ETHEREUM"
     profiles, _ = _get_cached_dexscreener_payload(
         http, "https://api.dexscreener.com/token-profiles/latest/v1", source, now,
