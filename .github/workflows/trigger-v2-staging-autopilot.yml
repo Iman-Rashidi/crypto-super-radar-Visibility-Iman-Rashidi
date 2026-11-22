@@ -1,4 +1,4 @@
-name: trigger-v2-staging-autopilot
+name: challenge1-v2-demo-autopilot-scheduler
 
 on:
   schedule:
@@ -10,19 +10,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: trigger-v2-staging-autopilot
+  group: challenge1-v2-demo-autopilot-scheduler
   cancel-in-progress: false
 
 jobs:
-  dispatch-staging:
-    if: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED == 'true' }}
+  dispatch-staging-v2:
+    # Enabled by default; setting the variable to the literal string false is the kill switch.
+    if: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Dispatch the Staging V2 workflow
+      - name: Dispatch the full Challenge 1 V2 Demo worker on Staging
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           gh api --method POST "repos/${GH_REPO}/actions/workflows/challenge1-v2-demo-dry-run-autopilot.yml/dispatches" \
             -f ref=staging/challenge1-integration-2026-11-16
