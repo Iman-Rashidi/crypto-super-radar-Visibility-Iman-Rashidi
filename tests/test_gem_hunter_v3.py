@@ -80,6 +80,20 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(second["status"], "DUPLICATE_SUPPRESSED")
         self.assertEqual(client.post.call_count, 1)
 
+    def test_v3_permission_is_separate_from_legacy_candidate_authorization(self):
+        from unittest.mock import patch
+        from crypto_super_radar.gem_hunter_v3 import process_gem_hunter_v3_candidates
+        candidate = {
+            "chain": "base", "token_address": "0x" + "1" * 40,
+            "candidate_status": "BUY", "trade_authorization": "BUY",
+            "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000},
+            "security_evidence": {"status": "UNKNOWN"},
+        }
+        with patch.dict("os.environ", {}, clear=True):
+            result = process_gem_hunter_v3_candidates([candidate], notify=False)[0]
+        self.assertEqual(result["trade_authorization"], "BUY")
+        self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
+
     def test_telegram_requires_all_critical_gates(self):
         store = FakeStore()
         candidate = {"candidate_status": "QUALIFIED_GEM", "trade_authorization": "NO_TRADE",
