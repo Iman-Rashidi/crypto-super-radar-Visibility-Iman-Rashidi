@@ -86,14 +86,14 @@ def run_symbol(conn,s,c,score_start=None,score_end=None):
         if not np.isfinite(atr) or atr<=0 or not np.isfinite(mid): continue
         stop=raw-c.stop_atr*atr if side=='LONG' else raw+c.stop_atr*atr
         reward=mid-raw if side=='LONG' else raw-mid; risk=abs(raw-stop)
-        if reward<=0 or reward/risk<c.min_target_r: blocks['target_below_1_5R']+1; continue
+        if reward<=0 or reward/risk<c.min_target_r: blocks['target_below_1_5R']+=1; continue
         spec=json.loads(conn.execute('SELECT raw_json FROM replay_instruments WHERE instrument_id=?',(s,)).fetchone()[0])
         cv=float(spec['contractValue']); lot=float(spec['lotSize']); tick=float(spec['tickSize'])
         if side=='LONG': entry=math.floor(raw/tick)*tick; stop=math.floor(stop/tick)*tick; target=math.ceil(mid/tick)*tick
         else: entry=math.ceil(raw/tick)*tick; stop=math.ceil(stop/tick)*tick; target=math.floor(mid/tick)*tick
         if not ((stop<entry<target) if side=='LONG' else (target<entry<stop)): continue
         actual_r=(target-entry)/abs(entry-stop) if side=='LONG' else (entry-target)/abs(entry-stop)
-        if actual_r<c.min_target_r: blocks['target_below_1_5R+=1; continue
+        if actual_r<c.min_target_r: blocks['target_below_1_5R']+=1; continue
         slip= c.stop_slippage; stop_fill=stop*(1-slip if side=='LONG' else 1+slip)
         loss_per=(abs(entry-stop_fill)*cv+entry*cv*c.maker_fee+stop*cv*c.taker_fee+entry*cv*(c.spread_fraction+0.0002))
         qty=math.floor((c.initial_equity*c.risk_fraction/loss_per)/lot)*lot if loss_per>0 else 0
