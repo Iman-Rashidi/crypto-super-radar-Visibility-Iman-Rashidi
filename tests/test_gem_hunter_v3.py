@@ -45,7 +45,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "technical_evidence": {"coverage_status": "COMPLETE", "filters": {"trend": "PASS", "momentum": "PASS"}},
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 20},
-            "market_reconciliation": {"status": "PASS"},
+            "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000, "verified_volume_24h_usd": 500000},
         })
         self.assertEqual(result["short_term_momentum_smart_money_score"], 83.75)
         self.assertEqual(result["short_term_momentum_score"], 83.75)
@@ -55,15 +55,15 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(result["candidate_status"], "QUALIFIED_GEM")
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
-    def test_qualified_gem_requires_wallet_breadth_evidence(self):
+    def test_verified_gem_does_not_require_wallet_breadth_when_core_evidence_passes(self):
         result = score_candidate_v3({
             "pool_trade_evidence": {"buy_volume_usd": 9000, "sell_volume_usd": 1000, "coverage_status": "COMPLETE"},
             "technical_evidence": {"coverage_status": "COMPLETE", "filters": {"trend": "PASS", "momentum": "PASS"}},
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 10},
-            "market_reconciliation": {"status": "PASS"},
+            "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000, "verified_volume_24h_usd": 500000},
         })
-        self.assertEqual(result["candidate_status"], "RESEARCH_WATCH")
+        self.assertEqual(result["candidate_status"], "QUALIFIED_GEM")
         self.assertEqual(result["wallet_breadth_evidence_status"], "UNKNOWN")
 
     def test_catema_style_high_volume_early_alpha_is_visible_as_tier2(self):
