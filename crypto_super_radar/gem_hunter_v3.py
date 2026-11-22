@@ -128,7 +128,12 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
 
     confidence_parts = []
     if reconciliation.get("status") in {"PASS", "FAIL"}:
-        confidence_parts.append(100.0 if reconciliation.get("status") == "PASS" else 0.0)
+        if reconciliation.get("status") == "FAIL":
+            confidence_parts.append(0.0)
+        elif reconciliation.get("verification_level") == "DEXSCREENER_PRIMARY_SINGLE_SOURCE":
+            confidence_parts.append(50.0)
+        else:
+            confidence_parts.append(100.0)
     if technical.get("coverage_status") in {"COMPLETE", "PARTIAL"}:
         confidence_parts.append(100.0 if technical.get("coverage_status") == "COMPLETE" else 50.0)
     if trades.get("coverage_status") in {"COMPLETE", "PARTIAL"}:
@@ -151,6 +156,7 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
         and confidence is not None and confidence >= 75.0
         and security_status == "PASS" and exit_status == "PASS"
         and reconciliation.get("status") == "PASS"
+        and reconciliation.get("verification_level") == "INDEPENDENT_CROSS_SOURCE"
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -291,6 +297,7 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
 
     if (
         market.get("status") == "PASS"
+        and market.get("verification_level") == "INDEPENDENT_CROSS_SOURCE"
         and exit_gate.get("status") == "PASS"
         and liquidity is not None and liquidity >= 50_000
         and volume is not None and volume >= 100_000
@@ -321,6 +328,8 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
             cautions.append("کنترل‌های پایهٔ Honeypot و مالیات فروش عبور کرده‌اند، اما بررسی تکمیلی فروش/هولدرها هنوز کامل نیست.")
         if market.get("status") != "PASS":
             cautions.append("تطبیق مستقل دو منبع هنوز کامل نیست؛ قیمت/حجم ممکن است نیازمند تأیید باشد.")
+        if market.get("verification_level") == "DEXSCREENER_PRIMARY_SINGLE_SOURCE":
+            cautions.append("قیمت، نقدینگی و حجم فعلاً فقط از DEX Screener تأیید شده‌اند؛ منبع مستقل دوم هنوز بررسی نشده است.")
         if exit_gate.get("status") != "PASS":
             cautions.append("لغزش خروج هنوز تأیید نشده؛ این طبقه مجوز معامله نیست.")
         if momentum is None or _finite(scores.get("momentum_evidence_coverage_pct")) is None or _finite(scores.get("momentum_evidence_coverage_pct")) < 75:
