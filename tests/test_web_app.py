@@ -235,6 +235,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("اجرای اسکن زنده Gem Hunter V3", page)
         self.assertIn("Solana، Base و Ethereum", page)
         self.assertIn("Tier 2", page)
+        self.assertIn("BUY معاملاتی: صفر (NO_TRADE)", page)
         self.assertNotIn("حداقل ۹ فیلتر از ۱۲", page)
         self.assertIn("کشف‌شده:", page)
         self.assertIn("وضعیت منابع داده", page)
