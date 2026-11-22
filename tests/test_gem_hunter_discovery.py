@@ -53,6 +53,7 @@ class FakeHttp:
 class GemHunterDiscoveryTests(unittest.TestCase):
     def setUp(self):
         discovery._TRENDING_SOURCE_CACHE.clear()
+        discovery._DEXSCREENER_SOURCE_CACHE.clear()
         self.now = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
         self.sol_pool = pool(
             "solana", "PoolSol", f"solana_{SOL_TOKEN}",
