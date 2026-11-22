@@ -45,11 +45,16 @@ jobs:
         run: |
           python -m compileall -q crypto_super_radar/challenge1_v2_autopilot.py crypto_super_radar/challenge1_v2_orchestration.py crypto_super_radar/challenge1_v2.py crypto_super_radar/challenge1_v2_trade_controls.py tests/test_challenge1_v2_autopilot.py tests/test_challenge1_v2_trade_controls.py
       - name: Run V2 worker and trade-control tests
+        env:
+          # Unit tests must exercise the no-order path even when the live Demo cycle is enabled.
+          BLOFIN_DEMO_TRADING_ENABLED: 'false'
         run: |
           python -m unittest discover -s tests -p 'test_challenge1_v2_autopilot.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_v2_trade_controls.py' -v
           python -m unittest discover -s tests -p 'test_challenge1_v2_web_orchestration.py' -v
       - name: Execute full guarded BloFin Demo V2 cycle and persist to Turso
+        env:
+          BLOFIN_DEMO_TRADING_ENABLED: ${{ vars.BLOFIN_DEMO_TRADING_ENABLED || 'true' }}
         shell: bash
         run: |
           set -euo pipefail
