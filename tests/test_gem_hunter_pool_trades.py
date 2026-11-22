@@ -42,6 +42,20 @@ class GemHunterPoolTradeTests(unittest.TestCase):
         self.assertAlmostEqual(result["net_swap_flow_usd"], 2200)
         self.assertAlmostEqual(result["buy_volume_share_pct"], 2700 / 3200 * 100)
         self.assertEqual(result["buy_sell_pressure_status"], "UNKNOWN")
+        self.assertEqual(result["unique_buyers_count"], 3)
+        self.assertEqual(result["unique_sellers_count"], 1)
+        self.assertEqual(result["wallet_attribution_status"], "COMPLETE_FOR_RETURNED_SAMPLE")
+
+    def test_ethereum_pool_trade_evidence_is_supported(self):
+        result = analyze_pool_trade_evidence(
+            [trade("buy", 200, 1), trade("sell", 100, 2)],
+            chain="ethereum", token_address=TOKEN, pool_address=POOL,
+            liquidity_usd=80_000, now=NOW,
+        )
+        self.assertEqual(result["chain"], "ethereum")
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["unique_buyers_count"], 1)
+        self.assertEqual(result["unique_sellers_count"], 1)
 
     def test_minimum_sample_and_share_threshold_classify_buy_pressure(self):
         rows = [trade("buy", 100, i, minutes_ago=i + 1) for i in range(24)]
