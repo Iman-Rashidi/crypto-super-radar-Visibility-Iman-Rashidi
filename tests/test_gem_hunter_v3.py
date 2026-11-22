@@ -153,6 +153,26 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(second["status"], "DUPLICATE_SUPPRESSED")
         self.assertEqual(client.post.call_count, 1)
 
+    def test_tier2_telegram_alert_can_send_with_exit_and_market_pending(self):
+        store = FakeStore()
+        candidate = {
+            "chain": "base", "token_address": "0x" + "2" * 40,
+            "candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
+            "gem_hunter_v3_status": "TIER_2_EARLY_ALPHA",
+            "gem_hunter_v3_trade_authorization": "NO_TRADE",
+            "security_evidence": {"status": "PASS"},
+            "exit_slippage_evidence": {"status": "UNKNOWN"},
+            "market_reconciliation": {"status": "UNKNOWN"},
+            "tier_strengths_fa": ["حجم و فشار خرید اولیه"],
+            "tier_cautions_fa": ["تطبیق بازار و لغزش خروج در انتظار است."],
+        }
+        client = Mock()
+        client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 9}}
+        client.post.return_value.raise_for_status.return_value = None
+        result = notify_qualified_gem(candidate, store, session=client, bot_token="t", chat_id="c")
+        self.assertEqual(result["status"], "SENT")
+        self.assertIn("TIER_2_EARLY_ALPHA", next(iter(store.events)))
+
     def test_telegram_failed_delivery_releases_deduplication_reservation(self):
         store = FakeStore()
         candidate = {
@@ -238,6 +258,10 @@ class GemHunterV3Tests(unittest.TestCase):
         frame = gem_hunter_v3_dataframe([{
             "chain": "ethereum", "token_address": "0x1",
             "short_term_momentum_score": 72, "momentum_evidence_coverage_pct": 75,
+            "gem_hunter_v3_status": "TIER_2_EARLY_ALPHA",
+            "tier_label_fa": "فرصت اولیه: واچ‌لیست داغ",
+            "tier_strengths_fa": ["حجم بالا"], "tier_cautions_fa": ["تطبیق بازار در انتظار است."],
+            "tier_data_confidence": "LIMITED",
             "wallet_breadth_evidence_status": "VERIFIED_FOR_RETURNED_SAMPLE",
             "smart_money_evidence_status": "NOT_AVAILABLE",
             "new_buyer_cohort_status": "NOT_AVAILABLE",
@@ -245,6 +269,9 @@ class GemHunterV3Tests(unittest.TestCase):
             "trade_authorization": "BUY",
         }])
         self.assertEqual(frame.iloc[0]["امتیاز مومنتوم"], 72)
+        self.assertEqual(frame.iloc[0]["طبقهٔ کشف"], "فرصت اولیه: واچ‌لیست داغ")
+        self.assertEqual(frame.iloc[0]["نقاط قوت"], "حجم بالا")
+        self.assertEqual(frame.iloc[0]["نکات احتیاط"], "تطبیق بازار در انتظار است.")
         self.assertEqual(frame.iloc[0]["پوشش شواهد مومنتوم (%)"], 75)
         self.assertEqual(frame.iloc[0]["انتساب پول هوشمند"], "NOT_AVAILABLE")
         self.assertEqual(frame.iloc[0]["وضعیت هشدار تلگرام"], "NOT_SENT")
