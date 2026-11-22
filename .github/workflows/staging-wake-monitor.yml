@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: read
 
 concurrency:
@@ -43,3 +44,13 @@ jobs:
             "$HEALTH_URL")"
           printf '%s\n' "$response"
           python -c 'import json,sys; data=json.load(sys.stdin); assert data.get("status") == "ok", f"Unexpected health response: {data!r}"; print("Staging health check: PASS")' <<< "$response"
+
+      - name: One-time guarded V2 Demo verification dispatch
+        if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[run-v2-demo-verification]') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${GH_REPO}/actions/workflows/challenge1-v2-demo-dry-run-autopilot.yml/dispatches" \
+            -f ref=staging/challenge1-integration-2026-11-16
