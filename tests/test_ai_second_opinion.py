@@ -655,6 +655,19 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertFalse(result["paper_entry_eligible"])
         self.assertNotIn("primary-key", json.dumps(result))
 
+    def test_existing_groq_api_key_supplies_independent_reviewer_defaults(self):
+        env = {
+            "OPENROUTER_API_KEY": "primary-openrouter-key",
+            "GROQ_API_KEY": "gsk_existing-groq-key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            status = second_ai_connection_status()
+        self.assertTrue(status["configured"], status["configuration_issues"])
+        self.assertEqual(status["provider"], "Groq")
+        self.assertEqual(status["model"], "openai/gpt-oss-120b")
+        self.assertTrue(status["credential_format_valid"])
+        self.assertNotIn(env["GROQ_API_KEY"], json.dumps(status))
+
     def test_second_supervisor_rejects_reused_key_or_model(self):
         common = {
             "OPENROUTER_API_KEY": "same-key",
