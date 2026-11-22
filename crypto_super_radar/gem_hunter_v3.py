@@ -453,8 +453,10 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     market = candidate.get("market_reconciliation") or {}
-    if security.get("status") != "PASS":
-        return {"status": "BLOCKED", "reason": "Base security gate is not PASS."}
+    if status == "TIER_1_VERIFIED_GEM" and security.get("status") != "PASS":
+        return {"status": "BLOCKED", "reason": "Tier 1 requires complete security PASS."}
+    if status == "TIER_2_EARLY_ALPHA" and security.get("status") != "PASS" and candidate.get("tier_base_security_status") != "PASS":
+        return {"status": "BLOCKED", "reason": "Tier 2 requires explicit base anti-honeypot/sellability PASS."}
     if status == "TIER_1_VERIFIED_GEM" and (exit_gate.get("status") != "PASS" or market.get("status") != "PASS"):
         return {"status": "BLOCKED", "reason": "Tier 1 requires confirmed market reconciliation and exit gate."}
     chain = str(candidate.get("chain") or "").lower()
