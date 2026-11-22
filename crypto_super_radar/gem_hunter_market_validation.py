@@ -42,11 +42,10 @@ def _same_address(left: Any, right: Any, chain: str) -> bool:
     return left == right if chain == "solana" else left.lower() == right.lower()
 
 
-def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
+def _dex_snapshot_from_payload(payload: Any, chain: str, token: str, pool: str) -> dict[str, Any]:
     chain_id = {"base": "base", "solana": "solana", "ethereum": "ethereum"}.get(chain)
     if not chain_id:
         raise ValueError("Unsupported chain for exact-pool reconciliation")
-    payload = http.get(f"{DEX_BASE}/token-pairs/v1/{chain_id}/{token}")
     if isinstance(payload, dict):
         payload = payload.get("pairs") or []
     if not isinstance(payload, list):
@@ -75,8 +74,6 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
                 price = candidate_price
                 price_source = "BASE_PRICE_USD"
         elif quote_is_token:
-            # DexScreener priceNative is base-token units of the quote token.
-            # Derive the quote token USD price only when both inputs are valid.
             base_price_usd = _number(pair.get("priceUsd"))
             base_per_quote = _number(pair.get("priceNative"))
             if (base_price_usd is not None and base_price_usd > 0
@@ -86,19 +83,22 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
                     price = derived_price
                     price_source = "DERIVED_QUOTE_PRICE_USD"
         matches.append({
-            "provider": "DEXSCREENER",
-            "pool_address": pair.get("pairAddress"),
-            "token_identity_verified": True,
-            "liquidity_usd": liquidity,
-            "volume_24h_usd": volume,
-            "price_usd": price,
-            "price_source": price_source,
-            "dex_id": pair.get("dexId"),
-            "url": pair.get("url"),
+            "provider": "DEXSCREENER", "pool_address": pair.get("pairAddress"),
+            "token_identity_verified": True, "liquidity_usd": liquidity,
+            "volume_24h_usd": volume, "price_usd": price, "price_source": price_source,
+            "dex_id": pair.get("dexId"), "url": pair.get("url"),
         })
     if not matches:
         raise LookupError("DexScreener did not return the exact pool with matching token identity")
     return matches[0]
+
+
+def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
+    chain_id = {"base": "base", "solana": "solana", "ethereum": "ethereum"}.get(chain)
+    if not chain_id:
+        raise ValueError("Unsupported chain for exact-pool reconciliation")
+    payload = http.get(f"{DEX_BASE}/token-pairs/v1/{chain_id}/{token}")
+    return _dex_snapshot_from_payload(payload, chain, token, pool)
 
 
 def _gecko_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
@@ -152,7 +152,7 @@ def _ratio_conflict(values: list[float], max_ratio: float = MAX_SOURCE_RATIO) ->
     return max(positive) / min(positive) > max_ratio
 
 
-def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
+def reconcile_candidate_market_data(candidate: dict, http, *, dex_snapshot: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Validate exact-pool DEX Screener primary evidence without mutating discovery values."""
     chain = str(candidate.get("chain") or "").lower()
     token = candidate.get("token_address")
@@ -194,7 +194,7 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
     # DEX Screener is the primary and sufficient market-data provider. GeckoTerminal
     # is intentionally not called in the hot path; its 429s cannot block evaluation.
     try:
-        snapshot = _dex_snapshot(http, chain, token, pool)
+        snapshot = dict(dex_snapshot) if isinstance(dex_snapshot, dict) else _dex_snapshot(http, chain, token, pool)
     except Exception as exc:
         base["source_errors"] = [f"{type(exc).__name__}: {str(exc)[:160]}"]
         base["reason_codes"].append("DEXSCREENER_PRIMARY_UNAVAILABLE")
@@ -263,9 +263,48 @@ def reconcile_discovery_candidates(candidates: Any, http, *, limit: int = MAX_CA
         if valid and bounded:
             _SCAN_OFFSET = (start + bounded) % len(valid)
     selected = {(start + offset) % len(valid) for offset in range(bounded)} if valid else set()
+    selected_rows = [valid[index] for index in sorted(selected)]
+    batch_snapshots: dict[str, dict[str, Any]] = {}
+    # Fetch exact token/pool market rows once per chain (up to 30 token addresses
+    # per request) rather than issuing ten serial token-pairs requests.
+    by_chain: dict[str, list[dict[str, Any]]] = {}
+    for row in selected_rows:
+        by_chain.setdefault(str(row.get("chain") or "").lower(), []).append(row)
+    for chain, chain_rows in by_chain.items():
+        addresses = []
+        for row in chain_rows:
+            token = row.get("token_address")
+            if isinstance(token, str) and token and token not in addresses:
+                addresses.append(token)
+        if not addresses:
+            continue
+        try:
+            payload = http.get(
+                f"{DEX_BASE}/tokens/v1/{chain}/" + ",".join(addresses[:30])
+            )
+            for row in chain_rows:
+                token, pool = row.get("token_address"), row.get("pool_address")
+                if not isinstance(token, str) or not isinstance(pool, str):
+                    continue
+                try:
+                    snapshot = _dex_snapshot_from_payload(payload, chain, token, pool)
+                    cache_token = token if chain == "solana" else token.lower()
+                    cache_pool = pool if chain == "solana" else pool.lower()
+                    batch_snapshots[f"{chain}:{cache_token}:{cache_pool}"] = snapshot
+                except Exception:
+                    continue
+        except Exception:
+            # Individual exact-token fallback below is DEX Screener only.
+            pass
     for index, row in enumerate(valid):
         if index in selected:
-            row["market_reconciliation"] = reconcile_candidate_market_data(row, http)
+            token, pool = row.get("token_address"), row.get("pool_address")
+            cache_token = token if str(row.get("chain") or "").lower() == "solana" else str(token or "").lower()
+            cache_pool = pool if str(row.get("chain") or "").lower() == "solana" else str(pool or "").lower()
+            cache_key = f"{str(row.get('chain') or '').lower()}:{cache_token}:{cache_pool}"
+            row["market_reconciliation"] = reconcile_candidate_market_data(
+                row, http, dex_snapshot=batch_snapshots.get(cache_key)
+            )
         else:
             row["market_reconciliation"] = {
                 "status": "NOT_CHECKED_BUDGET",
