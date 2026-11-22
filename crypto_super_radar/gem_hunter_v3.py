@@ -310,7 +310,11 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
             liquidity_usd=verified_liquidity,
             order_usd=_finite(os.getenv("GEM_HUNTER_EXIT_ORDER_USD")) or DEFAULT_EXIT_ORDER_USD,
         )
-        row.update(score_candidate_v3(row))
+        original_status = row.get("candidate_status")
+        scores = score_candidate_v3(row)
+        row.update(scores)
+        row["gem_hunter_v3_status"] = scores.get("candidate_status")
+        row["candidate_status"] = original_status
         row["trade_authorization"] = "NO_TRADE"
         row["gem_hunter_storage_status"] = storage_status
         if store is not None:
