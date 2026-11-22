@@ -232,6 +232,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('lang="fa" dir="rtl"', page)
         self.assertIn("۱۲ فیلتر اجباری", page)
         self.assertIn("Gem Hunter V3 یک موتور مستقل و سبک", page)
+        self.assertIn("اجرای اسکن زنده Gem Hunter V3", page)
         self.assertIn("Solana، Base و Ethereum", page)
         self.assertIn("Tier 2", page)
         self.assertNotIn("حداقل ۹ فیلتر از ۱۲", page)
