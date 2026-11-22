@@ -664,7 +664,7 @@ def _dexscreener_primary_discovery_rows(http, now: datetime, *, limit: int) -> t
         batch_errors = []
         for batch_index, batch in enumerate(batches):
             source = f"DEXSCREENER_BATCH_{chain.upper()}_{batch_index}"
-            url = f"https://api.dexscreener.com/tokens/v1/{chain}/" + ",".join(batch)
+            url = f"https://api.dexscreener.com/latest/dex/tokens/" + ",".join(batch)
             try:
                 payload, metadata = _get_cached_dexscreener_payload(http, url, source, now)
                 if isinstance(payload, dict):
