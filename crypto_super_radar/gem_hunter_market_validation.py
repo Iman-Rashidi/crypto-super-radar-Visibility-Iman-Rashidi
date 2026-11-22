@@ -153,7 +153,7 @@ def _ratio_conflict(values: list[float], max_ratio: float = MAX_SOURCE_RATIO) ->
 
 
 def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
-    """Return exact-pool cross-source evidence without mutating discovery values."""
+    """Validate exact-pool DEX Screener primary evidence without mutating discovery values."""
     chain = str(candidate.get("chain") or "").lower()
     token = candidate.get("token_address")
     pool = candidate.get("pool_address")
