@@ -8,6 +8,7 @@ from crypto_super_radar.gem_hunter_discovery import discover_gem_candidates
 
 SOL_TOKEN = "61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP"
 BASE_TOKEN = "0x1111111111111111111111111111111111111111"
+ETH_TOKEN = "0x2222222222222222222222222222222222222222"
 
 
 def pool(chain, address, token_id, created, liquidity="50000", volume="100000"):
@@ -61,6 +62,10 @@ class GemHunterDiscoveryTests(unittest.TestCase):
             "base", "0x" + "2" * 40, f"base_{BASE_TOKEN}",
             "2026-11-09T12:00:00Z",
         )
+        self.eth_pool = pool(
+            "eth", "0x" + "3" * 40, f"eth_{ETH_TOKEN}",
+            "2026-11-10T09:00:00Z",
+        )
         sol_response = {
             "data": [self.sol_pool],
             "included": [
@@ -77,25 +82,35 @@ class GemHunterDiscoveryTests(unittest.TestCase):
                 {"id": "test-dex", "type": "dex", "attributes": {"name": "Test DEX"}},
             ],
         }
+        eth_response = {
+            "data": [self.eth_pool],
+            "included": [
+                {"id": f"eth_{ETH_TOKEN}", "type": "token",
+                 "attributes": {"address": ETH_TOKEN, "name": "Ethereum Test", "symbol": "ET", "decimals": 18}},
+                {"id": "test-dex", "type": "dex", "attributes": {"name": "Test DEX"}},
+            ],
+        }
         empty = {"data": [], "included": []}
         self.responses = {
             "solana_new_pools": sol_response,
             "solana_trending_pools": empty,
             "base_new_pools": base_response,
             "base_trending_pools": empty,
+            "eth_new_pools": eth_response,
+            "eth_trending_pools": empty,
         }
 
-    def test_discovers_only_supported_chains_and_normalizes_evidence(self):
+    def test_discovers_solana_base_and_ethereum_and_normalizes_evidence(self):
         http = FakeHttp(self.responses)
         result = discover_gem_candidates(http, limit=20, now=self.now)
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
-        self.assertEqual({item["chain"] for item in result["candidates"]}, {"solana", "base"})
+        self.assertEqual({item["chain"] for item in result["candidates"]}, {"solana", "base", "ethereum"})
         self.assertTrue(all(item["candidate_status"] == "UNSCREENED" for item in result["candidates"]))
         self.assertTrue(all(item["discovery_priority_score"] is not None for item in result["candidates"]))
-        self.assertEqual(len(http.calls), 4)
+        self.assertEqual(len(http.calls), 6)
         self.assertTrue(all(call[1]["include"] == "base_token,quote_token,dex" for call in http.calls))
-        self.assertEqual(result["candidate_counts_by_network"], {"base": 1, "solana": 1})
+        self.assertEqual(result["candidate_counts_by_network"], {"base": 1, "ethereum": 1, "solana": 1})
 
     def test_deduplicates_token_across_sources_and_merges_provenance(self):
         trending = {
@@ -148,7 +163,7 @@ class GemHunterDiscoveryTests(unittest.TestCase):
 
     def test_rejects_invalid_token_address_and_unsupported_chain(self):
         invalid = pool("solana", "PoolBad", "solana_not-an-address", "2026-11-10T10:00:00Z")
-        unsupported = pool("ethereum", "PoolEth", "ethereum_" + "0x" + "1" * 40, "2026-11-10T10:00:00Z")
+        unsupported = pool("polygon", "PoolPolygon", "polygon_" + "0x" + "1" * 40, "2026-11-10T10:00:00Z")
         response = {"data": [invalid, unsupported], "included": []}
         responses = dict(self.responses)
         responses["solana_new_pools"] = response
