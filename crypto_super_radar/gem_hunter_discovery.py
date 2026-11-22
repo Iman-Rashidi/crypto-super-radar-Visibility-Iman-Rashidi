@@ -623,7 +623,7 @@ def _dexscreener_primary_discovery_rows(http, now: datetime, *, limit: int) -> t
     # Latest profile/boost feeds can be temporarily chain-skewed. Supplement
     # missing network coverage with DEX Screener's public pair-search endpoint,
     # then still fetch the canonical token batch for exact market fields.
-    search_queries = ("PEPE", "BRETT", "TOSHI", "VIRTUAL", "AAVE", "LINK")
+    search_queries = ("PEPE", "BRETT", "BONK")
     for query in search_queries:
         source = f"DEXSCREENER_SEARCH_{query}"
         try:
