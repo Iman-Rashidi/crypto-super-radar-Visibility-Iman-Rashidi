@@ -164,14 +164,19 @@ def run_scan(limit: int = 50) -> dict[str, Any]:
     payload["read_only"] = True
     payload["report_source"] = "GITHUB_ACTIONS_WORKER"
     _save_report(payload)
+    alert_counts: dict[str, int] = {}
+    for row in rows:
+        alert_status = str((row.get("telegram_alert_status") or {}).get("status") or "NOT_SENT")
+        alert_counts[alert_status] = alert_counts.get(alert_status, 0) + 1
     return {
         "status": "OK",
         "report_id": payload["report_id"],
         "discovered": payload.get("discovered_candidate_count", len(rows)),
         "tier1": payload.get("gem_hunter_v3_tier1_count", 0),
         "tier2": payload.get("gem_hunter_v3_tier2_count", 0),
-        "persisted_candidates": len(rows),
-        "telegram_sent": sum(1 for row in rows if (row.get("telegram_alert_status") or {}).get("status") == "SENT"),
+        "evaluated_persisted_candidates": len(evaluated_rows) - len(failed),
+        "persisted_candidate_rows": sum(1 for row in rows if row.get("gem_hunter_storage_status") == "PERSISTED"),
+        "telegram_alert_status_counts": alert_counts,
         "trade_authorization": "NO_TRADE",
     }
 
