@@ -9256,6 +9256,30 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
+        if route == "/api/blofin/demo/v2-autopilot/publish":
+            try:
+                _verify_staging_github_oidc_token(self.headers.get("Authorization", ""))
+            except PermissionError:
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 131_072:
+                return self._send(413, b'{"status":"INVALID_REPORT_SIZE"}', "application/json; charset=utf-8")
+            try:
+                report = json.loads(self.rfile.read(length).decode("utf-8"))
+                result = _publish_blofin_v2_cycle_report(report)
+                return self._send(200, json.dumps(result, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except (ValueError, RuntimeError) as exc:
+                return self._send(422, json.dumps({
+                    "status": "REJECTED", "reason": str(exc)[:120],
+                }).encode(), "application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(503, json.dumps({
+                    "status": "UNAVAILABLE", "error_type": type(exc).__name__,
+                }).encode(), "application/json; charset=utf-8")
         if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/blofin/demo/autopilot/control", "/api/blofin/demo/v2-autopilot/run-once"}:
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         origin = self.headers.get("Origin")
