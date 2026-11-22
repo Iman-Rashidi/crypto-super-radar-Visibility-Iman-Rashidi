@@ -210,7 +210,9 @@ class GemHunterV3Tests(unittest.TestCase):
 
     def test_telegram_requires_all_critical_gates(self):
         store = FakeStore()
-        candidate = {"candidate_status": "QUALIFIED_GEM", "trade_authorization": "NO_TRADE",
+        candidate = {"candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
+                     "gem_hunter_v3_status": "TIER_1_VERIFIED_GEM",
+                     "gem_hunter_v3_trade_authorization": "NO_TRADE",
                      "security_evidence": {"status": "PASS"},
                      "exit_slippage_evidence": {"status": "UNKNOWN"},
                      "market_reconciliation": {"status": "PASS"}}
