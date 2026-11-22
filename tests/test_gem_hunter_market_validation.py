@@ -1,4 +1,4 @@
-"""Tests for exact-pool cross-source market-data reconciliation."""
+"""Tests for DEX Screener-primary exact-pool market validation."""
 import unittest
 
 import crypto_super_radar.gem_hunter_market_validation as validation
@@ -13,74 +13,35 @@ POOL = "0x" + "2" * 40
 WETH = "0x4200000000000000000000000000000000000006"
 
 
-class FakeHttp:
-    def __init__(self, *, dex_liquidity=100000, gecko_liquidity=100000,
-                 dex_volume=200000, gecko_volume=200000, dex_pool=POOL,
-                 dex_price="0.01", gecko_price="0.01",
-                 dex_target_side="base", dex_price_native="1"):
-        self.dex_liquidity = dex_liquidity
-        self.gecko_liquidity = gecko_liquidity
-        self.dex_volume = dex_volume
-        self.gecko_volume = gecko_volume
-        self.dex_pool = dex_pool
-        self.dex_price = dex_price
-        self.gecko_price = gecko_price
-        self.dex_target_side = dex_target_side
-        self.dex_price_native = dex_price_native
+def candidate(liquidity=100000, volume=200000):
+    return {
+        "chain": "base", "token_address": TOKEN, "pool_address": POOL,
+        "liquidity_usd": liquidity, "volume_24h_usd": volume,
+        "price_usd": 0.01, "discovery_priority_score": 50,
+    }
+
+
+class DexOnlyHttp:
+    def __init__(self, *, liquidity=100000, volume=200000, price="0.01",
+                 pool=POOL, fail=False):
+        self.liquidity, self.volume, self.price, self.pool, self.fail = liquidity, volume, price, pool, fail
         self.calls = []
 
     def get(self, url, params=None):
         self.calls.append((url, params))
-        if "token-pairs" in url:
-            return [{
-                "chainId": "base",
-                "pairAddress": self.dex_pool,
-                "baseToken": {
-                    "address": TOKEN if self.dex_target_side == "base" else WETH,
-                    "name": "Test" if self.dex_target_side == "base" else "WETH",
-                    "symbol": "TST" if self.dex_target_side == "base" else "WETH",
-                },
-                "quoteToken": {
-                    "address": WETH if self.dex_target_side == "base" else TOKEN,
-                    "name": "WETH" if self.dex_target_side == "base" else "Test",
-                    "symbol": "WETH" if self.dex_target_side == "base" else "TST",
-                },
-                "liquidity": {"usd": str(self.dex_liquidity)},
-                "volume": {"h24": str(self.dex_volume)},
-                "priceUsd": self.dex_price,
-                "priceNative": self.dex_price_native,
-                "dexId": "uniswap",
-            }]
-        return {
-            "data": {
-                "id": "base_" + POOL,
-                "attributes": {
-                    "address": POOL,
-                    "reserve_in_usd": str(self.gecko_liquidity),
-                    "volume_usd": {"h24": str(self.gecko_volume)},
-                    "base_token_price_usd": self.gecko_price,
-                },
-                "relationships": {
-                    "base_token": {"data": {"id": "base_token"}},
-                    "quote_token": {"data": {"id": "base_quote"}},
-                },
-            },
-            "included": [
-                {"id": "base_token", "attributes": {"address": TOKEN}},
-                {"id": "base_quote", "attributes": {"address": WETH}},
-            ],
-        }
-
-
-def candidate(liquidity=100000, volume=200000):
-    return {
-        "chain": "base",
-        "token_address": TOKEN,
-        "pool_address": POOL,
-        "liquidity_usd": liquidity,
-        "volume_24h_usd": volume,
-        "discovery_priority_score": 50,
-    }
+        if "geckoterminal" in url:
+            raise AssertionError("GeckoTerminal is not part of the primary validation path")
+        if "/token-pairs/v1/" not in url:
+            raise AssertionError(url)
+        if self.fail:
+            raise RuntimeError("HTTP 429")
+        return [{
+            "chainId": "base", "pairAddress": self.pool,
+            "baseToken": {"address": TOKEN, "name": "Test", "symbol": "TST"},
+            "quoteToken": {"address": WETH, "name": "WETH", "symbol": "WETH"},
+            "liquidity": {"usd": self.liquidity}, "volume": {"h24": self.volume},
+            "priceUsd": self.price, "priceNative": "1", "dexId": "uniswap",
+        }]
 
 
 class GemHunterMarketValidationTests(unittest.TestCase):
@@ -88,104 +49,78 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         validation._CACHE.clear()
         validation._SCAN_OFFSET = 0
 
+    def test_primary_exact_pool_match_passes_with_explicit_single_source_label(self):
+        http = DexOnlyHttp()
+        result = reconcile_candidate_market_data(candidate(), http)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["source_count"], 1)
+        self.assertEqual(result["verification_level"], "DEXSCREENER_PRIMARY_SINGLE_SOURCE")
+        self.assertEqual(result["independent_confirmation"], "NOT_PERFORMED")
+        self.assertEqual(result["verified_liquidity_usd"], 100000)
+        self.assertEqual(result["verified_volume_24h_usd"], 200000)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_gecko_429_or_unavailability_cannot_block_primary_validation(self):
+        http = DexOnlyHttp()
+        result = reconcile_candidate_market_data(candidate(), http)
+        self.assertEqual(result["status"], "PASS")
+        self.assertFalse(any("geckoterminal" in url for url, _ in http.calls))
+
+    def test_primary_429_fails_closed_without_gecko_fallback(self):
+        http = DexOnlyHttp(fail=True)
+        result = reconcile_candidate_market_data(candidate(), http)
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIn("DEXSCREENER_PRIMARY_UNAVAILABLE", result["reason_codes"])
+        self.assertFalse(any("geckoterminal" in url for url, _ in http.calls))
+
+    def test_primary_liquidity_below_floor_fails(self):
+        result = reconcile_candidate_market_data(
+            candidate(100, 100), DexOnlyHttp(liquidity=100, volume=100)
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn("PRIMARY_LIQUIDITY_BELOW_FLOOR", result["reason_codes"])
+
+    def test_discovery_metrics_mismatch_fails_closed(self):
+        result = reconcile_candidate_market_data(
+            candidate(190000, 200000), DexOnlyHttp(liquidity=100000, volume=200000)
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn("MARKET_LIQUIDITY_MISMATCH", result["reason_codes"])
+
+    def test_exact_pool_identity_mismatch_is_unknown_not_substituted(self):
+        result = reconcile_candidate_market_data(
+            candidate(), DexOnlyHttp(pool="0x" + "3" * 40)
+        )
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["source_count"], 0)
+
     def test_evm_addresses_are_case_insensitive_but_solana_base58_is_not(self):
         self.assertTrue(validation._same_address("0xAbCd", "0xabcd", "base"))
         self.assertFalse(validation._same_address("AbCd", "abcd", "solana"))
 
-    def test_matching_exact_pool_sources_pass(self):
-        result = reconcile_candidate_market_data(candidate(), FakeHttp())
-        self.assertEqual(result["status"], "PASS")
-        self.assertEqual(result["source_count"], 2)
-        self.assertEqual(result["verified_liquidity_usd"], 100000)
-        self.assertEqual(result["verified_volume_24h_usd"], 200000)
-
-    def test_discovery_liquidity_conflict_fails_closed(self):
-        # Reproduces the critical CLAUDIA-class defect: discovery says $190k,
-        # while both exact-pool sources report effectively no liquidity.
-        http = FakeHttp(dex_liquidity=0.0004, gecko_liquidity=0.000436)
-        result = reconcile_candidate_market_data(candidate(190295, 13761), http)
-        self.assertEqual(result["status"], "FAIL")
-        self.assertIn("MARKET_DATA_DISAGREEMENT", result["reason_codes"])
-        self.assertLess(result["verified_liquidity_usd"], 1)
-
     def test_dexscreener_quote_side_price_is_derived_from_base_usd_and_native_ratio(self):
-        snapshot = validation._dex_snapshot(
-            FakeHttp(dex_target_side="quote", dex_price="2000", dex_price_native="2000"),
-            "base", TOKEN, POOL,
-        )
+        class QuoteSideHttp(DexOnlyHttp):
+            def get(inner, url, params=None):
+                inner.calls.append((url, params))
+                return [{
+                    "chainId": "base", "pairAddress": POOL,
+                    "baseToken": {"address": WETH, "name": "WETH", "symbol": "WETH"},
+                    "quoteToken": {"address": TOKEN, "name": "Test", "symbol": "TST"},
+                    "liquidity": {"usd": 100000}, "volume": {"h24": 200000},
+                    "priceUsd": "2000", "priceNative": "2000", "dexId": "uniswap",
+                }]
+        snapshot = validation._dex_snapshot(QuoteSideHttp(), "base", TOKEN, POOL)
         self.assertAlmostEqual(snapshot["price_usd"], 1.0)
         self.assertEqual(snapshot["price_source"], "DERIVED_QUOTE_PRICE_USD")
 
-    def test_independent_price_disagreement_fails(self):
-        result = reconcile_candidate_market_data(
-            candidate(), FakeHttp(dex_price="0.01", gecko_price="0.10")
-        )
-        self.assertEqual(result["status"], "FAIL")
-        self.assertIn("MARKET_DATA_DISAGREEMENT", result["reason_codes"])
-
-    def test_data_type_disagreement_thresholds_are_separate(self):
-        self.assertTrue(validation._ratio_conflict([1.0, 1.06], validation.MAX_PRICE_DISAGREEMENT_RATIO))
-        self.assertFalse(validation._ratio_conflict([100.0, 110.0], validation.MAX_LIQUIDITY_DISAGREEMENT_RATIO))
-        self.assertFalse(validation._ratio_conflict([100.0, 140.0], validation.MAX_VOLUME_DISAGREEMENT_RATIO))
-
-    def test_ethereum_gecko_network_slug_is_eth(self):
-        class EthereumHttp:
-            def get(self, url, params=None):
-                self_url = url
-                return {
-                    "data": {
-                        "id": "eth_" + POOL,
-                        "attributes": {"address": POOL, "reserve_in_usd": "100000",
-                                       "volume_usd": {"h24": "200000"}, "base_token_price_usd": "0.01"},
-                        "relationships": {
-                            "base_token": {"data": {"id": "eth_token"}},
-                            "quote_token": {"data": {"id": "eth_quote"}},
-                        },
-                    },
-                    "included": [
-                        {"id": "eth_token", "attributes": {"address": TOKEN}},
-                        {"id": "eth_quote", "attributes": {"address": "0x" + "3" * 40}},
-                    ],
-                }
-        snapshot = validation._gecko_snapshot(EthereumHttp(), "ethereum", TOKEN, POOL)
-        self.assertEqual(snapshot["provider"], "GECKOTERMINAL")
-
-    def test_sources_that_disagree_fail(self):
-        result = reconcile_candidate_market_data(
-            candidate(), FakeHttp(dex_liquidity=100000, gecko_liquidity=1000)
-        )
-        self.assertEqual(result["status"], "FAIL")
-        self.assertIn("MARKET_DATA_DISAGREEMENT", result["reason_codes"])
-
-    def test_exact_pool_identity_mismatch_is_unknown_not_substituted(self):
-        result = reconcile_candidate_market_data(
-            candidate(), FakeHttp(dex_pool="0x" + "3" * 40)
-        )
-        self.assertEqual(result["status"], "UNKNOWN")
-        self.assertEqual(result["source_count"], 1)
-
-    def test_matching_sources_below_liquidity_floor_fail(self):
-        result = reconcile_candidate_market_data(
-            candidate(100, 100), FakeHttp(dex_liquidity=100, gecko_liquidity=100,
-                                           dex_volume=100, gecko_volume=100)
-        )
-        self.assertEqual(result["status"], "FAIL")
-        self.assertIn("VERIFIED_LIQUIDITY_BELOW_FLOOR", result["reason_codes"])
-
     def test_scan_budget_rotates_to_candidates_beyond_first_batch(self):
-        validation._SCAN_OFFSET = 0
-        rows = [candidate(), dict(candidate(), token_address="0x" + "4" * 40)]
-        first = reconcile_discovery_candidates(rows, FakeHttp(), limit=1)
+        rows = [candidate(), dict(candidate(), token_address="0x" + "4" * 40,
+                                   pool_address="0x" + "5" * 40)]
+        first = reconcile_discovery_candidates(rows, DexOnlyHttp(), limit=1)
         self.assertEqual(first[0]["market_reconciliation"]["status"], "PASS")
         self.assertEqual(first[1]["market_reconciliation"]["status"], "NOT_CHECKED_BUDGET")
-        second = reconcile_discovery_candidates(rows, FakeHttp(), limit=1)
+        second = reconcile_discovery_candidates(rows, DexOnlyHttp(), limit=1)
         self.assertNotEqual(second[1]["market_reconciliation"]["status"], "NOT_CHECKED_BUDGET")
-
-    def test_scan_budget_is_explicit_and_bounded(self):
-        rows = [candidate(), dict(candidate(), token_address="0x" + "4" * 40)]
-        result = reconcile_discovery_candidates(rows, FakeHttp(), limit=1)
-        self.assertEqual(result[0]["market_reconciliation"]["status"], "PASS")
-        self.assertEqual(result[1]["market_reconciliation"]["status"], "NOT_CHECKED_BUDGET")
 
 
 if __name__ == "__main__":
