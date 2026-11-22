@@ -246,10 +246,16 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
         exit_gate = item.get("exit_slippage_evidence") or {}
         rows.append({
             "توکن": item.get("token_name") or item.get("token_symbol") or "نامشخص",
+            "طبقهٔ کشف": item.get("tier_label_fa", item.get("tier", item.get("gem_hunter_v3_status", "RESEARCH_WATCH"))),
+            "نقاط قوت": "؛ ".join(item.get("tier_strengths_fa") or []),
+            "نکات احتیاط": "؛ ".join(item.get("tier_cautions_fa") or []),
+            "اعتماد دادهٔ طبقه": item.get("tier_data_confidence", "LIMITED"),
             "شبکه": item.get("chain"),
             "قرارداد": item.get("token_address"),
             "قیمت": item.get("price_usd"),
-            "نقدینگی تأییدشده": (item.get("market_reconciliation") or {}).get("verified_liquidity_usd"),
+            "نقدینگی تأییدشده": (item.get("market_reconciliation") or {}).get("verified_liquidity_usd") or item.get("liquidity_usd"),
+            "حجم ۲۴ساعته": (item.get("market_reconciliation") or {}).get("verified_volume_24h_usd") or item.get("volume_24h_usd"),
+            "حجم به نقدینگی": item.get("volume_to_liquidity_24h"),
             "امتیاز مومنتوم": item.get("short_term_momentum_score", item.get("short_term_momentum_smart_money_score")),
             "پوشش شواهد مومنتوم (%)": item.get("momentum_evidence_coverage_pct"),
             "پهنای خریداران مشاهده‌شده": item.get("wallet_breadth_evidence_status", "UNKNOWN"),
@@ -265,7 +271,8 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
             "مجوز معامله": "NO_TRADE",
         })
     return pd.DataFrame(rows, columns=[
-        "توکن", "شبکه", "قرارداد", "قیمت", "نقدینگی تأییدشده",
+        "توکن", "طبقهٔ کشف", "نقاط قوت", "نکات احتیاط", "اعتماد دادهٔ طبقه",
+        "شبکه", "قرارداد", "قیمت", "نقدینگی تأییدشده", "حجم ۲۴ساعته", "حجم به نقدینگی",
         "امتیاز مومنتوم", "پوشش شواهد مومنتوم (%)", "پهنای خریداران مشاهده‌شده",
         "انتساب پول هوشمند", "شناسایی خریداران جدید", "وضعیت هشدار تلگرام",
         "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",
