@@ -4,10 +4,23 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
+from urllib.parse import urlencode
 from datetime import datetime, timezone
 from typing import Any
 
 from .database import connect_database, storage_backend
+
+
+_TURSO_READ_CREDENTIALS: dict[str, str] = {}
+_TURSO_READ_CREDENTIALS_LOCK = threading.Lock()
+GEM_HUNTER_RENDER_URL = "https://crypto-super-radar-unlimited-demo-staging.onrender.com"
+GITHUB_REPOSITORY = "Iman-Rashidi/crypto-super-radar-Visibility-Iman-Rashidi"
+GITHUB_WORKFLOW_PATH = ".github/workflows/gem-hunter-v3-live-worker.yml"
+GITHUB_ALLOWED_REFS = {
+    "refs/heads/main",
+    "refs/heads/staging/challenge1-integration-2026-11-16",
+}
 
 
 def _utc_now() -> str:
@@ -46,10 +59,16 @@ def _save_report(payload: dict[str, Any]) -> None:
 
 
 def latest_report_from_turso() -> dict[str, Any]:
-    """Read the latest completed worker snapshot; never call DEX APIs from Render."""
-    if storage_backend() != "TURSO_CLOUD_SQLITE":
-        return {"status": "UNAVAILABLE", "message_fa": "اتصال پایدار Turso تنظیم نشده است.", "candidates": [], "trade_authorization": "NO_TRADE"}
-    db = connect_database()
+    """Read the latest completed worker snapshot directly from Turso, never DEX APIs."""
+    with _TURSO_READ_CREDENTIALS_LOCK:
+        cached_url = _TURSO_READ_CREDENTIALS.get("url")
+        cached_token = _TURSO_READ_CREDENTIALS.get("token")
+    if cached_url and cached_token:
+        db = connect_database(url=cached_url, token=cached_token)
+    else:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            return {"status": "UNAVAILABLE", "message_fa": "اتصال امن Turso هنوز از GitHub Actions دریافت نشده است.", "candidates": [], "trade_authorization": "NO_TRADE"}
+        db = connect_database()
     try:
         try:
             row = db.execute(
@@ -68,6 +87,89 @@ def latest_report_from_turso() -> dict[str, Any]:
         return payload
     finally:
         db.close()
+
+
+def cache_turso_credentials_from_github_actions(
+    oidc_token: str, database_url: str, auth_token: str,
+) -> dict[str, Any]:
+    """Verify GitHub Actions OIDC and keep Turso read credentials in process memory only."""
+    if not isinstance(database_url, str) or not database_url.startswith("libsql://"):
+        raise ValueError("Only the configured libsql:// Turso endpoint is accepted.")
+    if not isinstance(auth_token, str) or len(auth_token.strip()) < 20:
+        raise ValueError("A valid Turso auth token is required.")
+    try:
+        import jwt
+        import requests
+        jwks = jwt.PyJWKClient("https://token.actions.githubusercontent.com/.well-known/jwks")
+        signing_key = jwks.get_signing_key_from_jwt(oidc_token).key
+        claims = jwt.decode(
+            oidc_token, signing_key, algorithms=["RS256"],
+            audience="gem-hunter-v3-render",
+            issuer="https://token.actions.githubusercontent.com",
+        )
+    except Exception as exc:
+        raise PermissionError("GitHub Actions OIDC verification failed.") from exc
+
+    workflow_ref = str(claims.get("workflow_ref") or "")
+    expected_prefix = f"{GITHUB_REPOSITORY}/{GITHUB_WORKFLOW_PATH}@"
+    if (
+        claims.get("repository") != GITHUB_REPOSITORY
+        or claims.get("ref") not in GITHUB_ALLOWED_REFS
+        or not workflow_ref.startswith(expected_prefix)
+        or workflow_ref.rsplit("@", 1)[-1] not in GITHUB_ALLOWED_REFS
+        or claims.get("event_name") not in {"push", "schedule", "workflow_dispatch"}
+    ):
+        raise PermissionError("OIDC token is not from the authorized Gem Hunter V3 workflow.")
+
+    with _TURSO_READ_CREDENTIALS_LOCK:
+        _TURSO_READ_CREDENTIALS["url"] = database_url.strip()
+        _TURSO_READ_CREDENTIALS["token"] = auth_token.strip()
+        _TURSO_READ_CREDENTIALS["verified_at_utc"] = _utc_now()
+
+    report = latest_report_from_turso()
+    if report.get("status") in {"UNAVAILABLE", "NOT_SCANNED"}:
+        raise RuntimeError("Turso credentials were verified but no saved Gem Hunter report is readable.")
+    return {
+        "status": "OK",
+        "report_id": report.get("report_id"),
+        "report_source": report.get("report_source"),
+        "discovered": report.get("discovered_candidate_count", 0),
+        "tier1": report.get("gem_hunter_v3_tier1_count", 0),
+        "tier2": report.get("gem_hunter_v3_tier2_count", 0),
+        "trade_authorization": "NO_TRADE",
+    }
+
+
+def _publish_turso_credentials_to_render() -> dict[str, Any]:
+    """Use GitHub OIDC to let Render read Turso without storing secrets in Render env."""
+    import requests
+    request_url = os.getenv("ACTIONS_ID_TOKEN_REQUEST_URL", "").strip()
+    request_token = os.getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "").strip()
+    database_url = os.getenv("TURSO_DATABASE_URL", "").strip()
+    auth_token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+    if not all((request_url, request_token, database_url, auth_token)):
+        raise RuntimeError("GitHub OIDC or Turso credentials are unavailable to the worker.")
+    separator = "&" if "?" in request_url else "?"
+    oidc_response = requests.get(
+        request_url + separator + urlencode({"audience": "gem-hunter-v3-render"}),
+        headers={"Authorization": f"Bearer {request_token}"},
+        timeout=15,
+    )
+    oidc_response.raise_for_status()
+    oidc_token = oidc_response.json().get("value")
+    if not oidc_token:
+        raise RuntimeError("GitHub did not issue a dashboard OIDC token.")
+    response = requests.post(
+        f"{GEM_HUNTER_RENDER_URL}/api/gem-hunter/v3/refresh",
+        headers={"Authorization": f"Bearer {oidc_token}", "Content-Type": "application/json"},
+        json={"database_url": database_url, "auth_token": auth_token},
+        timeout=30,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if result.get("status") != "OK":
+        raise RuntimeError("Render could not read the latest Turso snapshot.")
+    return result
 
 
 def _resolve_telegram_recipient() -> str:
@@ -164,6 +266,7 @@ def run_scan(limit: int = 50) -> dict[str, Any]:
     payload["read_only"] = True
     payload["report_source"] = "GITHUB_ACTIONS_WORKER"
     _save_report(payload)
+    render_dashboard_sync = _publish_turso_credentials_to_render()
     alert_counts: dict[str, int] = {}
     for row in rows:
         alert_status = str((row.get("telegram_alert_status") or {}).get("status") or "NOT_SENT")
@@ -177,6 +280,7 @@ def run_scan(limit: int = 50) -> dict[str, Any]:
         "evaluated_persisted_candidates": len(evaluated_rows) - len(failed),
         "persisted_candidate_rows": sum(1 for row in rows if row.get("gem_hunter_storage_status") == "PERSISTED"),
         "telegram_alert_status_counts": alert_counts,
+        "render_dashboard_sync": render_dashboard_sync,
         "trade_authorization": "NO_TRADE",
     }
 
