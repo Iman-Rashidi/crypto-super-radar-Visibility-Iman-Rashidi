@@ -5,10 +5,12 @@ on:
     - cron: "17 */2 * * *"
   push:
     branches:
+      - main
       - staging/challenge1-integration-2026-11-16
     paths:
       - "crypto_super_radar/gem_hunter_v2.py"
       - ".github/workflows/gem-hunter-v2-read-only-scan.yml"
+      - "docs/gem-hunter-v2-smoke-trigger.md"
 permissions:
   contents: read
 concurrency:
@@ -37,3 +39,38 @@ jobs:
             exit 0
           fi
           python -m crypto_super_radar.gem_hunter_v2 --scan
+      - name: Verify public Staging health and read-only Gem Hunter endpoint
+        env:
+          STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
+        run: |
+          set -euo pipefail
+          for attempt in {1..10}; do
+            if curl --silent --show-error --fail "$STAGING_URL/health" >/tmp/gem-hunter-health.json; then
+              break
+            fi
+            if [[ "$attempt" == "10" ]]; then
+              echo "Staging health endpoint did not return HTTP 200."
+              exit 1
+            fi
+            sleep 10
+          done
+          curl --silent --show-error --fail "$STAGING_URL/api/gem-hunter/v2/candidates" >/tmp/gem-hunter-candidates.json
+          python - <<'PY'
+          import json
+          with open("/tmp/gem-hunter-health.json", encoding="utf-8") as f:
+              health = json.load(f)
+          with open("/tmp/gem-hunter-candidates.json", encoding="utf-8") as f:
+              payload = json.load(f)
+          assert health.get("status") == "ok", health
+          assert payload.get("status") == "OK", payload
+          assert payload.get("read_only") is True, payload
+          assert payload.get("trade_authorization") == "NO_TRADE", payload
+          assert payload.get("candidate_count", 0) <= 10, payload
+          print(json.dumps({
+              "health": health.get("status"),
+              "gem_hunter_status": payload.get("status"),
+              "candidate_count": payload.get("candidate_count"),
+              "read_only": payload.get("read_only"),
+              "trade_authorization": payload.get("trade_authorization")
+          }, ensure_ascii=False))
+          PY
