@@ -38,7 +38,37 @@ jobs:
             echo "::warning::Turso secrets are not configured; scan skipped safely."
             exit 0
           fi
-          python -m crypto_super_radar.gem_hunter_v2 --scan
+          python -m crypto_super_radar.gem_hunter_v2 --scan > /tmp/gem-hunter-scan.json
+          cat /tmp/gem-hunter-scan.json
+      - name: Sync Top 10 snapshot into Render-side Turso
+        env:
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
+        run: |
+          set -euo pipefail
+          if [[ -z "$TURSO_AUTH_TOKEN" ]]; then
+            echo "::warning::Turso token missing; Render snapshot sync skipped."
+            exit 0
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/gem-hunter-scan.json", encoding="utf-8") as f:
+              scan = json.load(f)
+          if scan.get("status") != "OK":
+              raise SystemExit("Gem Hunter scan did not complete successfully.")
+          payload = {
+              "candidates": scan.get("candidates", [])[:10],
+              "read_only": True,
+              "trade_authorization": "NO_TRADE",
+          }
+          with open("/tmp/gem-hunter-ingest.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False)
+          PY
+          curl --silent --show-error --fail --max-time 30 \
+            -X POST "$STAGING_URL/api/gem-hunter/v2/ingest" \
+            -H "Authorization: Bearer $TURSO_AUTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/gem-hunter-ingest.json
       - name: Verify public Staging health and read-only Gem Hunter endpoint
         env:
           STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
