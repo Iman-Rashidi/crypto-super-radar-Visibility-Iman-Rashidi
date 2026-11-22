@@ -1642,8 +1642,11 @@ def run_independent_ai_supervisor(
     config = second_ai_connection_status()
     provider = config.get("provider") or ""
     model = config.get("model") or ""
-    endpoint = (os.getenv("CSR_SECOND_AI_API_URL") or "").strip()
-    key = (os.getenv("CSR_SECOND_AI_API_KEY") or "").strip()
+    groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+    endpoint = (os.getenv("CSR_SECOND_AI_API_URL") or (
+        "https://api.groq.com/openai/v1/chat/completions" if groq_key else ""
+    )).strip()
+    key = (os.getenv("CSR_SECOND_AI_API_KEY") or groq_key).strip()
     if not config["configured"]:
         return {
             "reviewer_id": "second_ai",
