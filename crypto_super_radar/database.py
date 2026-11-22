@@ -160,6 +160,20 @@ class _ConnectionAdapter:
         return getattr(self._connection, name)
 
 
+def connect_turso_database(database_url: str, auth_token: str):
+    """Open a Turso connection using explicit credentials without mutating process env."""
+    if not database_url or not auth_token:
+        raise ValueError("Turso URL and auth token are required.")
+    if not (database_url.startswith("libsql://") or database_url.startswith("https://")):
+        raise ValueError("Unsupported Turso database URL.")
+    try:
+        import turso_serverless
+    except ImportError as exc:
+        raise RuntimeError("turso_serverless is not installed.") from exc
+    remote = turso_serverless.connect(database_url, auth_token=auth_token)
+    return _ConnectionAdapter(remote)
+
+
 def connect_database(path: str | None = None):
     """Open Turso Cloud over HTTP when configured; otherwise retain local SQLite.
 
