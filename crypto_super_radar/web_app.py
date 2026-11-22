@@ -1528,8 +1528,8 @@ def _start_gem_hunter_refresh() -> None:
             GEM_HUNTER_RESULT_CACHE["last_error"] = type(exc).__name__
 
 
-def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = False) -> dict:
-    """Return a cached Gem Hunter result immediately and refresh expired data in a worker."""
+def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = False, force_refresh: bool = False) -> dict:
+    """Return a cached Gem Hunter result immediately and optionally refresh it in a worker."""
     limit = max(1, min(int(limit), 50))
     now = time.monotonic()
     with GEM_HUNTER_RESULT_CACHE_LOCK:
@@ -1537,7 +1537,7 @@ def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = Fals
         expires_at = GEM_HUNTER_RESULT_CACHE.get("expires_at", 0.0)
         refreshing = GEM_HUNTER_RESULT_CACHE.get("refreshing", False)
 
-    if (cached is None or expires_at <= now) and not refreshing:
+    if (force_refresh or cached is None or expires_at <= now) and not refreshing:
         _start_gem_hunter_refresh()
 
     with GEM_HUNTER_RESULT_CACHE_LOCK:
@@ -6752,7 +6752,8 @@ class Handler(BaseHTTPRequestHandler):
                 limit = max(1, min(int(raw_limit), 50))
             except (TypeError, ValueError):
                 return self._send(400, b'{"error":"limit must be an integer from 1 to 50"}', "application/json")
-            payload = _gem_hunter_api_payload(limit=limit, include_diagnostics=True)
+            force_refresh = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
+            payload = _gem_hunter_api_payload(limit=limit, include_diagnostics=True, force_refresh=force_refresh)
             payload["report_mode"] = "RESEARCH_ONLY_NOT_A_TRADE_SIGNAL"
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
@@ -8066,8 +8067,8 @@ async function loadBlofinInstruments(){
               else expandedReportKeys.delete(reportKey);
               persistExpandedReportKeys();
             });
-            details.appendChild(el('summary', 'گزارش کامل ۶ معیار Gem Hunter V2 و ۴ کنترل ایمنی'));
-            details.appendChild(el('h4', '۶ معیار مستقل Gem Hunter V2'));
+            details.appendChild(el('summary', 'گزارش کامل Gem Hunter V3: امتیاز فرصت، ایمنی و اعتماد داده'));
+            details.appendChild(el('h4', 'سه امتیاز مستقل Gem Hunter V3'));
             const filterGrid = document.createElement('div'); filterGrid.className = 'gem-detail-grid';
             Object.keys(filterLabels).forEach(key => {
               const state = filters[key] || 'UNKNOWN'; const row = document.createElement('div'); row.className = 'gem-detail';
@@ -8167,7 +8168,7 @@ async function loadBlofinInstruments(){
             let lastError = null;
             for (let retry = 0; retry < 4; retry += 1) {
               try {
-                const response = await fetch('/api/gem-hunter/report?limit=10', {
+                const response = await fetch('/api/gem-hunter/report?limit=10&refresh=1', {
                   cache: 'no-store',
                   credentials: 'same-origin',
                   headers: { 'Accept': 'application/json' }
