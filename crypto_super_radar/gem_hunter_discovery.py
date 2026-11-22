@@ -635,6 +635,10 @@ def _dexscreener_primary_discovery_rows(http, now: datetime, *, limit: int) -> t
                     payload = payload.get("pairs") or []
                 if not isinstance(payload, list):
                     raise ValueError("DEX Screener batched token response schema is invalid")
+                batch_lookup = {
+                    (address if chain == "solana" else address.lower()): address
+                    for address in batch
+                }
                 for pair in payload:
                     if not isinstance(pair, dict) or str(pair.get("chainId") or "").lower() != chain:
                         continue
@@ -643,11 +647,13 @@ def _dexscreener_primary_discovery_rows(http, now: datetime, *, limit: int) -> t
                     if not isinstance(base, dict) or not isinstance(quote, dict):
                         continue
                     base_address, quote_address = base.get("address"), quote.get("address")
-                    base_match = base_address in batch
-                    quote_match = quote_address in batch
+                    base_key = (base_address if chain == "solana" else str(base_address or "").lower())
+                    quote_key = (quote_address if chain == "solana" else str(quote_address or "").lower())
+                    base_match = base_key in batch_lookup
+                    quote_match = quote_key in batch_lookup
                     if not (base_match or quote_match):
                         continue
-                    token_address = base_address if base_match else quote_address
+                    token_address = batch_lookup[base_key] if base_match else batch_lookup[quote_key]
                     if str(token_address).lower() in {value.lower() for value in BASE_QUOTE_ADDRESSES[chain]}:
                         continue
                     pool_address = pair.get("pairAddress")
