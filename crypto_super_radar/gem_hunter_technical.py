@@ -325,7 +325,7 @@ def enrich_discovery_candidates_with_technicals(candidates: Any, data_service,
         and not isinstance(row.get("qualification"), dict)
         and isinstance(row.get("token_address"), str)
         and isinstance(row.get("pool_address"), str)
-        and row.get("chain") in {"base", "solana"}
+        and row.get("chain") in {"base", "solana", "ethereum"}
     ]
     if not eligible:
         return rows
