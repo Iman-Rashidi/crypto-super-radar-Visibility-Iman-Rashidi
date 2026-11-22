@@ -46,7 +46,7 @@ class V2PublicDashboardSnapshotTests(unittest.TestCase):
             })
         rows.append({
             "cycle_id": "older-cycle", "symbol": "BTC-USDT",
-            "started_at_utc": "older", "status": "OLD",
+            "started_at_utc": "older", "status": "OLD", "payload_json": "{}",
         })
         class FakeResult:
             def fetchall(self):
