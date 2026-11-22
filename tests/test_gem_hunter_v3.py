@@ -21,6 +21,8 @@ class FakeStore:
         if event_key:
             self.events.add(event_key)
         return True
+    def release_event(self, event_key):
+        self.events.discard(event_key)
 
 
 class GemHunterV3Tests(unittest.TestCase):
@@ -95,6 +97,26 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(first["status"], "SENT")
         self.assertEqual(second["status"], "DUPLICATE_SUPPRESSED")
         self.assertEqual(client.post.call_count, 1)
+
+    def test_telegram_failed_delivery_releases_deduplication_reservation(self):
+        store = FakeStore()
+        candidate = {
+            "chain": "base", "token_address": "0x" + "1" * 40,
+            "candidate_status": "QUALIFIED_GEM", "trade_authorization": "NO_TRADE",
+            "security_evidence": {"status": "PASS"},
+            "exit_slippage_evidence": {"status": "PASS"},
+            "market_reconciliation": {"status": "PASS"},
+        }
+        failed_client = Mock()
+        failed_client.post.side_effect = RuntimeError("temporary Telegram failure")
+        with self.assertRaisesRegex(RuntimeError, "temporary Telegram failure"):
+            notify_qualified_gem(candidate, store, session=failed_client, bot_token="t", chat_id="c")
+        self.assertEqual(len(store.events), 0)
+        successful_client = Mock()
+        successful_client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 8}}
+        successful_client.post.return_value.raise_for_status.return_value = None
+        result = notify_qualified_gem(candidate, store, session=successful_client, bot_token="t", chat_id="c")
+        self.assertEqual(result["status"], "SENT")
 
     def test_v3_permission_is_separate_from_legacy_candidate_authorization(self):
         from unittest.mock import patch
