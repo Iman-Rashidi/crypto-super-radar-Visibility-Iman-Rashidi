@@ -31,6 +31,16 @@ class DexOnlyHttp:
         self.calls.append((url, params))
         if "geckoterminal" in url:
             raise AssertionError("GeckoTerminal is not part of the primary validation path")
+        if "/tokens/v1/" in url:
+            if self.fail:
+                raise RuntimeError("HTTP 429")
+            return [{
+                "chainId": "base", "pairAddress": self.pool,
+                "baseToken": {"address": TOKEN, "name": "Test", "symbol": "TST"},
+                "quoteToken": {"address": WETH, "name": "WETH", "symbol": "WETH"},
+                "liquidity": {"usd": self.liquidity}, "volume": {"h24": self.volume},
+                "priceUsd": self.price, "priceNative": "1", "dexId": "uniswap",
+            }]
         if "/token-pairs/v1/" not in url:
             raise AssertionError(url)
         if self.fail:
