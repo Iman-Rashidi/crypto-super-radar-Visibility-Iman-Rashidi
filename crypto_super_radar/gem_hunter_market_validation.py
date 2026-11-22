@@ -280,7 +280,7 @@ def reconcile_discovery_candidates(candidates: Any, http, *, limit: int = MAX_CA
             continue
         try:
             payload = http.get(
-                f"{DEX_BASE}/tokens/v1/{chain}/" + ",".join(addresses[:30])
+                f"{DEX_BASE}/latest/dex/tokens/" + ",".join(addresses[:30])
             )
             for row in chain_rows:
                 token, pool = row.get("token_address"), row.get("pool_address")
