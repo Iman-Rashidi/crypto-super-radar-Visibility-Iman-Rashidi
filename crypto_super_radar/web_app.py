@@ -850,6 +850,11 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
         if storage_backend() != "TURSO_CLOUD_SQLITE":
             raise RuntimeError("DURABLE_TURSO_NOT_CONFIGURED")
         connection = connect_database()
+        connection.execute("""CREATE TABLE IF NOT EXISTS challenge1_v2_autopilot_cycles (
+            cycle_id TEXT NOT NULL, symbol TEXT NOT NULL, started_at_utc TEXT NOT NULL,
+            finished_at_utc TEXT NOT NULL, environment TEXT NOT NULL, mode TEXT NOT NULL,
+            status TEXT NOT NULL, signal TEXT, reason TEXT, orders_submitted INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL, PRIMARY KEY (cycle_id, symbol))""")
         rows = connection.execute(
             "SELECT cycle_id,symbol,started_at_utc,finished_at_utc,mode,status,signal,reason,orders_submitted,payload_json "
             "FROM challenge1_v2_autopilot_cycles ORDER BY finished_at_utc DESC LIMIT 25"
