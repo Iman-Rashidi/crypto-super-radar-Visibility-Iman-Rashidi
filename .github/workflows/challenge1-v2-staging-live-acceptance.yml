@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  staging-acceptance:
+  public-dashboard-snapshot:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -50,6 +50,12 @@ jobs:
                       assert body.get("latest_cycle_id")
                       assert len(body.get("cycles", [])) == 5
 
+  live-ai-reviewers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
+    steps:
       - name: Run simultaneous independent live AI reviewer dry-run
         shell: python
         run: |
