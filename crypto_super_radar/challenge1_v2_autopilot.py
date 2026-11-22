@@ -237,8 +237,12 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             elif trading_active:
                 safe["entry_skipped_reason"]="TWO_REVIEWER_APPROVAL_NOT_PRESENT"
         except Exception as exc:
+            # Preserve a sanitized, actionable provider/data error in the audit record.
+            # Known adapters already emit credential-free messages; never serialize headers or env.
+            detail = " ".join(str(exc).split())[:240]
             safe={"execution_profile":"CHALLENGE_1_V2","signal":"NO_TRADE","status":"DATA_BLOCKED",
-                "reason":type(exc).__name__,"orders_submitted":False,"mode":"DRY_RUN"}
+                "reason":f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__,
+                "orders_submitted":False,"mode":"DRY_RUN"}
         finished_at=_utc_now()
         persist_result(connection,cycle_id=cycle_id,symbol=symbol,result=safe,
             started_at=started_at,finished_at=finished_at)
