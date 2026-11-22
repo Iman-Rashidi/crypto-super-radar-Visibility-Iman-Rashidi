@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -20,36 +21,52 @@ class V2PublicDashboardSnapshotTests(unittest.TestCase):
                 "signal": "HOLD",
                 "reason": "No confirmed trend",
                 "orders_submitted": False,
-                "ai_votes": [
-                    {
-                        "reviewer_id": "nemotron", "provider": "OpenRouter",
-                        "status": "UNKNOWN", "opinion": "UNKNOWN",
-                        "reason_fa": "No reviewer call in this cycle",
-                        "verified": False, "returned_model": "Nemotron",
-                    },
-                    {
-                        "reviewer_id": "second_ai", "provider": "Groq",
-                        "status": "NOT_CALLED", "opinion": "NOT_CALLED",
-                        "reason_fa": "", "verified": False, "returned_model": "Groq",
-                    },
-                ],
-                "ai_consensus": {"status": "UNKNOWN"},
+                "payload_json": json.dumps({
+                    "ai_reviews": [
+                        {
+                            "reviewer_id": "nemotron",
+                            "review": {
+                                "provider": "OpenRouter", "status": "UNKNOWN",
+                                "reason_fa": "No reviewer call in this cycle",
+                                "model": "Nemotron", "response_validated": False,
+                                "model_verified": False,
+                            },
+                        },
+                        {
+                            "reviewer_id": "second_ai",
+                            "review": {
+                                "provider": "Groq", "status": "NOT_CALLED",
+                                "model": "Groq", "response_validated": False,
+                                "model_verified": False,
+                            },
+                        },
+                    ],
+                    "ai_consensus": {"status": "UNKNOWN"},
+                }),
             })
         rows.append({
             "cycle_id": "older-cycle", "symbol": "BTC-USDT",
             "started_at_utc": "older", "status": "OLD",
         })
-        snapshot = {
-            "status": "OK", "environment": "BLOFIN_DEMO",
-            "cycles": rows,
-            "run_state": {
+        class FakeResult:
+            def fetchall(self):
+                return rows
+
+        class FakeConnection:
+            def execute(self, *_args, **_kwargs):
+                return FakeResult()
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
+            patch.object(web_app, "connect_database", return_value=FakeConnection()),
+            patch.object(web_app, "V2_AUTOPILOT_RUN_STATE", {
                 "status": "IDLE", "job_id": "job-1",
                 "api_key": "must-not-leak", "token": "must-not-leak",
-            },
-            "open_exit_positions": [{"position_id": "private-position"}],
-        }
-
-        with patch.object(web_app, "_blofin_v2_cycle_snapshot", return_value=snapshot):
+            }),
+        ):
             result = web_app._blofin_v2_public_cycle_snapshot()
 
         self.assertEqual(result["status"], "OK")
