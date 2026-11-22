@@ -242,13 +242,71 @@ def save_top10(candidates,*,connection=None,now=None):
         prepared=prepared[:MAX_STORED]
         for item in prepared:
             db.execute("""INSERT INTO gem_hunter_v2_candidates (candidate_id,chain,token_address,pool_address,score,status,consecutive_scans,liquidity_usd,payload_json,first_seen_utc,last_seen_utc,expires_at_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id) DO UPDATE SET score=excluded.score,status=excluded.status,consecutive_scans=excluded.consecutive_scans,liquidity_usd=excluded.liquidity_usd,payload_json=excluded.payload_json,last_seen_utc=excluded.last_seen_utc,expires_at_utc=excluded.expires_at_utc""",(item["candidate_id"],item["chain"],item["token_address"],item["pool_address"],item["score"],item["status"],item["consecutive_scans"],item.get("liquidity_usd"),json.dumps(item,ensure_ascii=False,separators=(",",":")),item["first_seen_utc"],item["last_seen_utc"],item["expires_at_utc"]))
-        db.execute("""DELETE FROM gem_hunter_v2_candidates WHERE candidate_id NOT IN (SELECT candidate_id FROM gem_hunter_v2_candidates ORDER BY score DESC,last_seen_utc DESC LIMIT 10)""")
         db.execute("DELETE FROM gem_hunter_v2_candidates WHERE expires_at_utc<?",(stamp,))
+        db.execute("""DELETE FROM gem_hunter_v2_candidates WHERE candidate_id NOT IN (SELECT candidate_id FROM gem_hunter_v2_candidates ORDER BY score DESC,last_seen_utc DESC LIMIT 10)""")
         db.commit()
         return prepared
     finally:
         if own:
             db.close()
+
+def ingest_candidates(candidates,*,connection=None,now=None):
+    """Copy a validated read-only snapshot into the Render-side Turso database.
+
+    This is an authenticated server-to-server ingestion path. It preserves the
+    scan count supplied by the scanner so a mirrored write cannot count as a
+    second independent scan.
+    """
+    own,db=connection is None,connection or connect_database()
+    now=now or _now()
+    stamp,default_expiry=_iso(now),_iso(now+timedelta(days=RETENTION_DAYS))
+    try:
+        initialize_schema(db)
+        prepared=[]
+        if not isinstance(candidates,list) or len(candidates)>MAX_STORED:
+            raise ValueError("Candidate list must contain at most 10 records.")
+        for source in candidates:
+            if not isinstance(source,dict):
+                raise ValueError("Candidate record must be an object.")
+            item=dict(source)
+            if item.get("chain") not in {"solana","base"}:
+                raise ValueError("Unsupported chain.")
+            for key in ("candidate_id","token_address","pool_address"):
+                if not isinstance(item.get(key),str) or not item[key].strip():
+                    raise ValueError(f"Missing {key}.")
+            if item.get("read_only") is not True or item.get("trade_authorization")!="NO_TRADE":
+                raise ValueError("Only explicitly read-only candidates can be ingested.")
+            if any(key in item for key in ("order","orders","order_id","order_payload","execute_order","signed_transaction")):
+                raise ValueError("Order-related fields are not accepted.")
+            score=_number(item.get("score"))
+            if score is None or score<0 or score>100:
+                raise ValueError("Invalid score.")
+            if item.get("status") not in {"EARLY GEM","STRONG GEM","WATCH","REJECT"}:
+                raise ValueError("Invalid candidate status.")
+            try:
+                consecutive=max(1,int(item.get("consecutive_scans") or 1))
+            except (TypeError,ValueError):
+                consecutive=1
+            first_seen=item.get("first_seen_utc") or stamp
+            last_seen=item.get("last_seen_utc") or stamp
+            expires=item.get("expires_at_utc") or default_expiry
+            item["consecutive_scans"]=consecutive
+            item["first_seen_utc"],item["last_seen_utc"],item["expires_at_utc"]=first_seen,last_seen,expires
+            item["market_access"]=(item.get("cex") or {}).get("status",item.get("market_access","NOT_VERIFIED"))
+            item["eu_mica_warning"]="CEX listing is not MiCA authorization. Verify the legal entity, Germany access and token availability separately."
+            prepared.append(item)
+        prepared.sort(key=lambda x:(x["status"]!="REJECT",float(x["score"])),reverse=True)
+        prepared=prepared[:MAX_STORED]
+        for item in prepared:
+            db.execute("""INSERT INTO gem_hunter_v2_candidates (candidate_id,chain,token_address,pool_address,score,status,consecutive_scans,liquidity_usd,payload_json,first_seen_utc,last_seen_utc,expires_at_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id) DO UPDATE SET score=excluded.score,status=excluded.status,consecutive_scans=excluded.consecutive_scans,liquidity_usd=excluded.liquidity_usd,payload_json=excluded.payload_json,first_seen_utc=excluded.first_seen_utc,last_seen_utc=excluded.last_seen_utc,expires_at_utc=excluded.expires_at_utc""",(item["candidate_id"],item["chain"],item["token_address"],item["pool_address"],float(item["score"]),item["status"],item["consecutive_scans"],item.get("liquidity_usd"),json.dumps(item,ensure_ascii=False,separators=(",",":")),item["first_seen_utc"],item["last_seen_utc"],item["expires_at_utc"]))
+        db.execute("DELETE FROM gem_hunter_v2_candidates WHERE expires_at_utc<?",(stamp,))
+        db.execute("""DELETE FROM gem_hunter_v2_candidates WHERE candidate_id NOT IN (SELECT candidate_id FROM gem_hunter_v2_candidates ORDER BY score DESC,last_seen_utc DESC LIMIT 10)""")
+        db.commit()
+        return prepared
+    finally:
+        if own:
+            db.close()
+
 
 def public_snapshot(*,connection=None):
     own,db=connection is None,connection
@@ -280,7 +338,7 @@ def run_scan():
     if storage_backend()!="TURSO_CLOUD_SQLITE":
         return {"status":"SKIPPED","reason":"Turso credentials are not configured.","trade_authorization":"NO_TRADE"}
     saved=save_top10(discover_and_score())
-    return {"status":"OK","discovered":len(saved),"saved":len(saved),"top_statuses":{s:sum(1 for x in saved if x["status"]==s) for s in ("EARLY GEM","STRONG GEM","WATCH","REJECT")},"trade_authorization":"NO_TRADE"}
+    return {"status":"OK","discovered":len(saved),"saved":len(saved),"candidates":saved,"top_statuses":{s:sum(1 for x in saved if x["status"]==s) for s in ("EARLY GEM","STRONG GEM","WATCH","REJECT")},"read_only":True,"trade_authorization":"NO_TRADE"}
 
 def main():
     parser=argparse.ArgumentParser(description="Read-only Gem Hunter V2 scan")

@@ -33,7 +33,7 @@ from .gem_hunter_pool_trades import enrich_discovery_candidates_with_pool_trades
 from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
-from .gem_hunter_v2 import public_snapshot as gem_hunter_v2_public_snapshot
+from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
@@ -9300,6 +9300,37 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
+        if route == "/api/gem-hunter/v2/ingest":
+            expected_token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+            supplied = self.headers.get("Authorization", "")
+            if not expected_token or not hmac.compare_digest(supplied, f"Bearer {expected_token}"):
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            if self.headers.get("Origin"):
+                return self._send(403, b'{"status":"SERVER_TO_SERVER_ONLY"}', "application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type", "").lower():
+                return self._send(415, b'{"status":"JSON_REQUIRED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 524_288:
+                return self._send(413, b'{"status":"INVALID_SNAPSHOT_SIZE"}', "application/json; charset=utf-8")
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload, dict) or payload.get("read_only") is not True or payload.get("trade_authorization") != "NO_TRADE":
+                    return self._send(422, b'{"status":"READ_ONLY_SNAPSHOT_REQUIRED"}', "application/json; charset=utf-8")
+                candidates = payload.get("candidates")
+                saved = gem_hunter_v2_ingest_candidates(candidates)
+                result = {
+                    "status": "OK", "ingested": len(saved),
+                    "candidate_count": len(saved), "read_only": True,
+                    "trade_authorization": "NO_TRADE",
+                }
+                return self._send(200, json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            except (ValueError, TypeError, KeyError) as exc:
+                return self._send(422, json.dumps({"status":"REJECTED","reason":str(exc)[:120]},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(503, json.dumps({"status":"UNAVAILABLE","error_type":type(exc).__name__},ensure_ascii=False).encode(),"application/json; charset=utf-8")
         if route == "/api/blofin/demo/v2-autopilot/publish":
             try:
                 _verify_staging_github_oidc_token(self.headers.get("Authorization", ""))
