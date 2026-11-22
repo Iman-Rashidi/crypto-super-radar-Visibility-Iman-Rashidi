@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 BASE_URL = "https://api.geckoterminal.com/api/v2"
-NETWORKS = frozenset({"solana", "base"})
+NETWORKS = frozenset({"solana", "base", "ethereum"})
+GECKO_NETWORK_SLUGS = {"solana": "solana", "base": "base", "ethereum": "eth"}
 INCLUDE = "base_token,quote_token,dex"
 MAX_CANDIDATES = 50
 MAX_POOL_AGE_HOURS = 168.0
@@ -76,6 +77,11 @@ BASE_QUOTE_ADDRESSES = {
         "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
         "0x0000000000000000000000000000000000000000",
     },
+    "ethereum": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "0x0000000000000000000000000000000000000000",
+    },
 }
 
 
@@ -104,7 +110,7 @@ def _timestamp(value: Any) -> Optional[datetime]:
 def _valid_address(chain: str, address: Any) -> bool:
     if not isinstance(address, str):
         return False
-    if chain == "base":
+    if chain in {"base", "ethereum"}:
         return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", address))
     return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address))
 
@@ -158,7 +164,8 @@ def _rows(payload: Any, source: str, now: datetime) -> list[dict[str, Any]]:
         if not isinstance(pool, dict):
             continue
         pool_id = str(pool.get("id") or "")
-        chain = pool_id.split("_", 1)[0].lower()
+        network_slug = pool_id.split("_", 1)[0].lower()
+        chain = {"eth": "ethereum"}.get(network_slug, network_slug)
         if chain not in NETWORKS:
             continue
         attrs = pool.get("attributes") or {}
@@ -459,7 +466,7 @@ def discover_gem_candidates(http, *, limit: int = 20,
             ("TRENDING_POOLS", "trending_pools"),
         ):
             source = f"GECKOTERMINAL_{source_suffix}_{network.upper()}"
-            url = f"{BASE_URL}/networks/{network}/{endpoint}"
+            url = f"{BASE_URL}/networks/{GECKO_NETWORK_SLUGS[network]}/{endpoint}"
             try:
                 params = {"page": 1, "include": INCLUDE}
                 payload, cache_metadata = _get_cached_geckoterminal_payload(
