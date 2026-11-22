@@ -261,7 +261,17 @@ def public_snapshot(*,connection=None):
         candidates=[json.loads(row["payload_json"]) for row in rows]
         return {"status":"OK","generated_at_utc":_iso(),"candidate_count":len(candidates),"candidates":candidates,"read_only":True,"trade_authorization":"NO_TRADE","scope":"GEM_HUNTER_V2_ONLY"}
     except Exception as exc:
-        return {"status":"UNAVAILABLE","candidates":[],"error_type":type(exc).__name__,"read_only":True,"trade_authorization":"NO_TRADE"}
+        detail = str(exc).lower()
+        if "no such table" in detail:
+            error_code = "SCHEMA_MISSING"
+        elif "unauthorized" in detail or "401" in detail or "authentication" in detail:
+            error_code = "AUTH_FAILED"
+        elif "connect" in detail or "timeout" in detail or "network" in detail:
+            error_code = "CONNECTION_FAILED"
+        else:
+            error_code = "DATABASE_OPERATION_FAILED"
+        return {"status":"UNAVAILABLE","candidates":[],"error_type":type(exc).__name__,
+                "error_code":error_code,"read_only":True,"trade_authorization":"NO_TRADE"}
     finally:
         if own and db is not None:
             db.close()
