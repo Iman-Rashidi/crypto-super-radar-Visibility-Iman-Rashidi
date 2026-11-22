@@ -70,15 +70,77 @@ def latest_report_from_turso() -> dict[str, Any]:
         db.close()
 
 
+def _resolve_telegram_recipient() -> str:
+    """Resolve the already-authorized @Germany004 private recipient via getUpdates."""
+    explicit = (os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    if explicit:
+        return explicit
+    token = (os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("Telegram bot token is missing.")
+    db = connect_database()
+    try:
+        with db:
+            db.execute("""CREATE TABLE IF NOT EXISTS gem_hunter_telegram_recipients (
+                username TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                verified_at_utc TEXT NOT NULL
+            )""")
+            saved = db.execute(
+                "SELECT chat_id FROM gem_hunter_telegram_recipients WHERE username=?",
+                ("Germany004",),
+            ).fetchone()
+            if saved:
+                return str(saved[0] if not isinstance(saved, dict) else saved.get("chat_id"))
+    finally:
+        db.close()
+
+    import requests
+    response = requests.get(
+        f"https://api.telegram.org/bot{token}/getUpdates",
+        params={"limit": 100, "allowed_updates": json.dumps(["message", "my_chat_member"])},
+        timeout=15,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if not body.get("ok"):
+        raise RuntimeError("Telegram getUpdates did not return ok=true.")
+    matches = []
+    for update in body.get("result") or []:
+        message = update.get("message") or update.get("my_chat_member") or {}
+        sender = message.get("from") or {}
+        chat = message.get("chat") or {}
+        if str(sender.get("username") or "").lstrip("@").lower() == "germany004" and chat.get("type") == "private":
+            matches.append((str(chat.get("id")), str(sender.get("id"))))
+    if not matches:
+        raise RuntimeError("No private Telegram update from the authorized @Germany004 account was found; no recipient was guessed.")
+    chat_id, user_id = matches[-1]
+    db = connect_database()
+    try:
+        with db:
+            db.execute(
+                """INSERT INTO gem_hunter_telegram_recipients (username, chat_id, user_id, verified_at_utc)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET chat_id=excluded.chat_id,
+                user_id=excluded.user_id, verified_at_utc=excluded.verified_at_utc""",
+                ("Germany004", chat_id, user_id, _utc_now()),
+            )
+    finally:
+        db.close()
+    return chat_id
+
+
 def run_scan(limit: int = 50) -> dict[str, Any]:
     required = ("TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN")
     missing = [key for key in required if not os.getenv(key, "").strip()]
     if missing:
         raise RuntimeError("Missing required secrets: " + ", ".join(missing))
-    if not (os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")):
+    token = (os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
         raise RuntimeError("Telegram bot token is missing.")
-    if not (os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")):
-        raise RuntimeError("Telegram destination chat id is missing.")
+    os.environ["GEM_HUNTER_TELEGRAM_BOT_TOKEN"] = token
+    os.environ["GEM_HUNTER_TELEGRAM_CHAT_ID"] = _resolve_telegram_recipient()
 
     # Importing the established V3 pipeline keeps its exact discovery, cross-source
     # reconciliation, security, technical, trade-flow, tier and alert rules.
