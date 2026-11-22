@@ -730,6 +730,29 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(status["configured"], status["configuration_issues"])
         self.assertEqual(status["model"], "openai/gpt-oss-120b")
 
+    def test_existing_groq_secret_is_used_for_live_independent_review(self):
+        captured = {}
+        model = "openai/gpt-oss-120b"
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            captured.update({"url": url, "headers": headers, "payload": json})
+            return FakeResponse(document=valid_document(), model=model)
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-openrouter-key",
+            "GROQ_API_KEY": "gsk_existing-groq-key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            review = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"), http_post=fake_post
+            )
+        self.assertEqual(captured["url"], "https://api.groq.com/openai/v1/chat/completions")
+        self.assertEqual(captured["payload"]["model"], model)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer " + env["GROQ_API_KEY"])
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["request_attempted"])
+        self.assertTrue(review["model_verified"])
+
     def test_groq_rejects_paid_or_unlisted_models_and_nonofficial_endpoint(self):
         base = {
             "OPENROUTER_API_KEY": "primary-key",
