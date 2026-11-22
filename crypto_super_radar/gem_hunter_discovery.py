@@ -26,6 +26,7 @@ _GECKOTERMINAL_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
 # Backward-compatible alias used by existing tests and diagnostics.
 _TRENDING_SOURCE_CACHE = _GECKOTERMINAL_SOURCE_CACHE
 _TRENDING_CACHE_TTL_SECONDS = 120.0
+_DEXSCREENER_CACHE_TTL_SECONDS = 60.0
 _TRENDING_ERROR_COOLDOWN_SECONDS = 120.0
 
 
@@ -462,12 +463,12 @@ def _get_cached_dexscreener_payload(http, url: str, source: str,
     except Exception as exc:
         _DEXSCREENER_SOURCE_CACHE[source] = {
             "status": "UNKNOWN", "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-            "fetched_at": now, "expires_at": current + _TRENDING_ERROR_COOLDOWN_SECONDS,
+            "fetched_at": now, "expires_at": current + _DEXSCREENER_CACHE_TTL_SECONDS,
         }
         raise
     _DEXSCREENER_SOURCE_CACHE[source] = {
         "status": "PASS", "payload": copy.deepcopy(payload), "fetched_at": now,
-        "expires_at": current + _TRENDING_CACHE_TTL_SECONDS,
+        "expires_at": current + _DEXSCREENER_CACHE_TTL_SECONDS,
     }
     return payload, {"cached": False, "data_age_seconds": 0.0}
 
@@ -585,146 +586,188 @@ def _dexscreener_ethereum_discovery_rows(http, now: datetime, *, limit: int = 5)
     return rows
 
 
+def _dexscreener_primary_discovery_rows(http, now: datetime, *, limit: int) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Discover all supported chains from DEX Screener feeds and batched token-pair lookups."""
+    feeds: dict[str, dict[str, Any]] = {}
+    token_sets: dict[str, set[str]] = {network: set() for network in NETWORKS}
+    for feed_name, url in (
+        ("DEXSCREENER_TOKEN_BOOSTS_LATEST", "https://api.dexscreener.com/token-boosts/latest/v1"),
+        ("DEXSCREENER_TOKEN_PROFILES_LATEST", "https://api.dexscreener.com/token-profiles/latest/v1"),
+    ):
+        try:
+            payload, metadata = _get_cached_dexscreener_payload(http, url, feed_name, now)
+            if not isinstance(payload, list):
+                raise ValueError("DEX Screener latest feed schema is invalid")
+            accepted = 0
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                chain = str(item.get("chainId") or "").lower()
+                address = item.get("tokenAddress")
+                if chain not in NETWORKS or not _valid_address(chain, address):
+                    continue
+                if str(address).lower() in {value.lower() for value in BASE_QUOTE_ADDRESSES[chain]}:
+                    continue
+                token_sets[chain].add(address)
+                accepted += 1
+            feeds[feed_name] = {"status": "PASS", "candidate_token_count": accepted, **metadata}
+        except Exception as exc:
+            feeds[feed_name] = {"status": "UNKNOWN", "reason": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+    merged: dict[str, dict[str, Any]] = {}
+    for chain in sorted(NETWORKS):
+        addresses = sorted(token_sets[chain])[:max(30, min(300, limit * 10))]
+        if not addresses:
+            feeds[f"DEXSCREENER_BATCH_{chain.upper()}"] = {
+                "status": "UNKNOWN", "candidate_rows": 0, "reason": "No token addresses in latest feeds",
+            }
+            continue
+        batches = [addresses[index:index + 30] for index in range(0, len(addresses), 30)]
+        rows_seen = 0
+        batch_errors = []
+        for batch_index, batch in enumerate(batches):
+            source = f"DEXSCREENER_BATCH_{chain.upper()}_{batch_index}"
+            url = f"https://api.dexscreener.com/tokens/v1/{chain}/" + ",".join(batch)
+            try:
+                payload, metadata = _get_cached_dexscreener_payload(http, url, source, now)
+                if isinstance(payload, dict):
+                    payload = payload.get("pairs") or []
+                if not isinstance(payload, list):
+                    raise ValueError("DEX Screener batched token response schema is invalid")
+                for pair in payload:
+                    if not isinstance(pair, dict) or str(pair.get("chainId") or "").lower() != chain:
+                        continue
+                    base = pair.get("baseToken") or {}
+                    quote = pair.get("quoteToken") or {}
+                    if not isinstance(base, dict) or not isinstance(quote, dict):
+                        continue
+                    base_address, quote_address = base.get("address"), quote.get("address")
+                    base_match = base_address in batch
+                    quote_match = quote_address in batch
+                    if not (base_match or quote_match):
+                        continue
+                    token_address = base_address if base_match else quote_address
+                    if str(token_address).lower() in {value.lower() for value in BASE_QUOTE_ADDRESSES[chain]}:
+                        continue
+                    pool_address = pair.get("pairAddress")
+                    if not _valid_address(chain, pool_address):
+                        continue
+                    price = _number(pair.get("priceUsd")) if base_match else None
+                    if quote_match:
+                        base_price, native_ratio = _number(pair.get("priceUsd")), _number(pair.get("priceNative"))
+                        if base_price is not None and base_price > 0 and native_ratio is not None and native_ratio > 0:
+                            price = base_price / native_ratio
+                    liquidity = _number((pair.get("liquidity") or {}).get("usd"))
+                    volume = _number((pair.get("volume") or {}).get("h24"))
+                    tx = pair.get("txns") or {}
+                    h1 = tx.get("h1") or {} if isinstance(tx, dict) else {}
+                    h24 = tx.get("h24") or {} if isinstance(tx, dict) else {}
+                    buys = _number(h1.get("buys")) if isinstance(h1, dict) else None
+                    sells = _number(h1.get("sells")) if isinstance(h1, dict) else None
+                    buys24 = _number(h24.get("buys")) if isinstance(h24, dict) else None
+                    sells24 = _number(h24.get("sells")) if isinstance(h24, dict) else None
+                    created_ms = _number(pair.get("pairCreatedAt"))
+                    created = None
+                    if created_ms is not None and created_ms > 0:
+                        try:
+                            created = datetime.fromtimestamp(created_ms / 1000.0, tz=timezone.utc)
+                        except (OverflowError, OSError, ValueError):
+                            created = None
+                    age = (now - created).total_seconds() / 3600.0 if created else None
+                    if age is not None and (age < -5 or age > MAX_POOL_AGE_HOURS):
+                        continue
+                    change = _number((pair.get("priceChange") or {}).get("h1")) if isinstance(pair.get("priceChange"), dict) else None
+                    ratio = volume / liquidity if volume is not None and liquidity is not None and liquidity > 0 else None
+                    flags = []
+                    if price is None or price <= 0: flags.append("PRICE_UNAVAILABLE")
+                    if liquidity is None or liquidity <= 0: flags.append("LIQUIDITY_UNAVAILABLE")
+                    elif liquidity < 25_000: flags.append("LOW_LIQUIDITY")
+                    if volume is None: flags.append("VOLUME_UNAVAILABLE")
+                    elif volume < 10_000: flags.append("LOW_24H_VOLUME")
+                    if age is None: flags.append("POOL_AGE_UNKNOWN")
+                    if (buys or 0) + (sells or 0) < 20: flags.append("LOW_1H_ACTIVITY")
+                    if buys is not None and sells is not None and sells > buys: flags.append("SELLS_EXCEED_BUYS")
+                    if ratio is not None and ratio > 10: flags.append("EXTREME_VOLUME_LIQUIDITY_RATIO")
+                    if change is not None and change <= -20: flags.append("SHARP_1H_DRAWDOWN")
+                    elif change is not None and change >= 50: flags.append("SHARP_1H_PUMP")
+                    score = _score(age, liquidity, volume, buys, sells, None, None, change, ratio)
+                    token_meta = base if base_match else quote
+                    row = {
+                        "asset": f"{chain}:{token_address}", "chain": chain, "token_address": token_address,
+                        "token_name": token_meta.get("name"), "token_symbol": token_meta.get("symbol"),
+                        "token_decimals": None, "pool_address": pool_address,
+                        "pool_name": f"{base.get('symbol') or 'TOKEN'} / {quote.get('symbol') or 'QUOTE'}",
+                        "dex": pair.get("dexId"), "price_usd": price if price is not None and price > 0 else None,
+                        "liquidity_usd": liquidity, "volume_1h_usd": _number((pair.get("volume") or {}).get("h1")),
+                        "volume_24h_usd": volume, "volume_to_liquidity_24h": round(ratio, 4) if ratio is not None else None,
+                        "buys_1h": buys, "sells_1h": sells, "unique_buyers_1h": None, "unique_sellers_1h": None,
+                        "buys_24h": buys24, "sells_24h": sells24, "price_change_1h_pct": change,
+                        "pool_created_at_utc": created.isoformat().replace("+00:00", "Z") if created else None,
+                        "pool_age_hours": round(age, 2) if age is not None else None,
+                        "source": "DEXSCREENER_PRIMARY", "sources": ["DEXSCREENER"],
+                        "discovery_priority_score": score,
+                        "score_semantics": "DEX Screener discovery ordering heuristic; not a probability, security verdict, or trade signal.",
+                        "candidate_status": "UNSCREENED" if score is not None and price and liquidity and liquidity > 0 else "UNKNOWN",
+                        "trade_authorization": "NO_TRADE", "risk_flags": flags,
+                        "evidence_caveat": "DEX Screener is the primary single market-data source. Contract security, holder concentration, wash trading and independent-source confirmation remain separate gates.",
+                    }
+                    key = f"{chain}:{str(token_address).lower()}"
+                    previous = merged.get(key)
+                    if previous is None or (row.get("liquidity_usd") or 0) > (previous.get("liquidity_usd") or 0):
+                        merged[key] = row
+                    rows_seen += 1
+                feeds[source] = {"status": "PASS", "candidate_rows": rows_seen, "batch_size": len(batch), **metadata}
+            except Exception as exc:
+                batch_errors.append(f"{type(exc).__name__}: {str(exc)[:120]}")
+                feeds[source] = {"status": "UNKNOWN", "reason": batch_errors[-1], "batch_size": len(batch)}
+        if batch_errors and not rows_seen:
+            feeds[f"DEXSCREENER_BATCH_{chain.upper()}"] = {"status": "UNKNOWN", "errors": batch_errors}
+    return list(merged.values()), feeds
+
+
 def discover_gem_candidates(http, *, limit: int = 20,
                             now: Optional[datetime] = None) -> dict[str, Any]:
-    """Fetch bounded new/trending pools and return normalized Solana/Base candidates."""
+    """Discover Solana, Base and Ethereum candidates from DEX Screener only."""
     limit = max(1, min(int(limit), MAX_CANDIDATES))
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     now = now.astimezone(timezone.utc)
-    sources: dict[str, dict[str, Any]] = {}
-    merged: dict[str, dict[str, Any]] = {}
     if http is None or not callable(getattr(http, "get", None)):
         return {
             "status": "UNKNOWN", "generated_at_utc": now.isoformat().replace("+00:00", "Z"),
-            "candidate_count": 0, "candidates": [], "sources": {},
-            "trade_authorization": "NO_TRADE",
-            "reason": "Market data HTTP client is unavailable.",
+            "candidate_count": 0, "candidates": [], "sources": {}, "primary_source": "DEXSCREENER",
+            "trade_authorization": "NO_TRADE", "reason": "Market data HTTP client is unavailable.",
         }
-    for network in sorted(NETWORKS):
-        for source_suffix, endpoint in (
-            ("NEW_POOLS", "new_pools"),
-            ("TRENDING_POOLS", "trending_pools"),
-        ):
-            source = f"GECKOTERMINAL_{source_suffix}_{network.upper()}"
-            url = f"{BASE_URL}/networks/{GECKO_NETWORK_SLUGS[network]}/{endpoint}"
-            try:
-                params = {"page": 1, "include": INCLUDE}
-                payload, cache_metadata = _get_cached_geckoterminal_payload(
-                    http, url, params, source, now
-                )
-                rows = _rows(payload, source, now)
-                sources[source] = {"status": "PASS", "candidate_rows": len(rows), **cache_metadata}
-                for row in rows:
-                    key = row["asset"].lower()
-                    existing = merged.get(key)
-                    if existing is None:
-                        merged[key] = row
-                        continue
-                    combined_sources = sorted(set(existing["sources"] + row["sources"]))
-                    old_liq = existing.get("liquidity_usd") or 0.0
-                    new_liq = row.get("liquidity_usd") or 0.0
-                    if new_liq > old_liq:
-                        row["sources"] = combined_sources
-                        merged[key] = row
-                    else:
-                        existing["sources"] = combined_sources
-            except Exception as exc:
-                sources[source] = {
-                    "status": "UNKNOWN",
-                    "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
-                }
-    # Supplemental Ethereum token discovery from DexScreener latest profiles.
-    # GeckoTerminal remains the primary new/trending pool source; this feed adds
-    # candidate coverage but never upgrades independent validation or safety.
-    try:
-        dex_rows = _dexscreener_ethereum_discovery_rows(http, now, limit=5)
-        sources["DEXSCREENER_NEW_TOKEN_PROFILES_ETHEREUM"] = {
-            "status": "PASS", "candidate_rows": len(dex_rows),
-            "coverage": "SUPPLEMENTAL_LATEST_TOKEN_PROFILES_NOT_COMPLETE_CHAIN_COVERAGE",
-        }
-        for row in dex_rows:
-            key = row["asset"].lower()
-            existing = merged.get(key)
-            if existing is None:
-                merged[key] = row
-            else:
-                existing["sources"] = sorted(set(existing.get("sources", []) + row["sources"]))
-    except Exception as exc:
-        sources["DEXSCREENER_NEW_TOKEN_PROFILES_ETHEREUM"] = {
-            "status": "UNKNOWN", "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
-            "coverage": "SUPPLEMENTAL_FEED_UNAVAILABLE",
-        }
-
-    # Recover limited coverage on whichever chain has a missing GeckoTerminal feed.
-    # A secondary feed never upgrades the primary GeckoTerminal completeness state.
-    for network in sorted(NETWORKS):
-        gecko_sources = (
-            f"GECKOTERMINAL_NEW_POOLS_{network.upper()}",
-            f"GECKOTERMINAL_TRENDING_POOLS_{network.upper()}",
-        )
-        if all(sources.get(name, {}).get("status") == "PASS" for name in gecko_sources):
-            continue
-        fallback_source = f"DEXPAPRIKA_{network.upper()}_RECOVERY"
-        try:
-            fallback_rows, detail_errors = _dexpaprika_recovery_rows(http, network, now, limit=2)
-            sources[fallback_source] = {
-                "status": "UNKNOWN" if detail_errors else "PASS",
-                "candidate_rows": len(fallback_rows),
-                "detail_errors": detail_errors,
-                "detail_limit": 2,
-                "coverage": "LIMITED_TOP_2_RECOVERY_NOT_COMPLETE_NEW_POOL_COVERAGE",
-                "freshness_caveat": "Keyless coverage may omit pools younger than one hour.",
-            }
-            for row in fallback_rows:
-                key = row["asset"].lower()
-                existing = merged.get(key)
-                if existing is None:
-                    merged[key] = row
-                else:
-                    existing["sources"] = sorted(set(existing.get("sources", []) + row["sources"]))
-                    if (row.get("liquidity_usd") or 0) > (existing.get("liquidity_usd") or 0):
-                        row["sources"] = existing["sources"]
-                        merged[key] = row
-        except Exception as exc:
-            sources[fallback_source] = {
-                "status": "UNKNOWN",
-                "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
-                "coverage": "LIMITED_RECOVERY_NOT_COMPLETE_NEW_POOL_COVERAGE",
-            }
-
-    statuses = [item["status"] for item in sources.values()]
-    expected_sources = len(NETWORKS) * 2
-    gecko_statuses = [status for name, status in (
-        (name, item["status"]) for name, item in sources.items()
-        if name.startswith("GECKOTERMINAL_")
-    )]
-    gecko_complete = len(gecko_statuses) == expected_sources and all(status == "PASS" for status in gecko_statuses)
-    overall = "PASS" if gecko_complete else "PARTIAL" if any(s == "PASS" for s in statuses) else "UNKNOWN"
-    candidates = sorted(
-        merged.values(),
+    candidates, sources = _dexscreener_primary_discovery_rows(http, now, limit=limit)
+    candidates.sort(
         key=lambda item: (
             item.get("discovery_priority_score") is not None,
             item.get("discovery_priority_score") or -1,
+            item.get("volume_24h_usd") or -1,
             item.get("liquidity_usd") or -1,
-        ),
-        reverse=True,
-    )[:limit]
+        ), reverse=True,
+    )
+    candidates = candidates[:limit]
+    successful_batches = [
+        item for name, item in sources.items()
+        if name.startswith("DEXSCREENER_BATCH_") and item.get("status") == "PASS"
+    ]
+    overall = "PASS" if successful_batches else "UNKNOWN"
     return {
         "status": overall,
         "generated_at_utc": now.isoformat().replace("+00:00", "Z"),
         "networks": sorted(NETWORKS),
         "source_count": len(sources),
         "sources": sources,
-        "gecko_terminal_complete": gecko_complete,
-        "fallback_coverage_note": "DexPaprika is a limited recovery sample only; it never replaces complete GeckoTerminal coverage or authorizes trading." if any(name.startswith("DEXPAPRIKA_") for name in sources) else None,
+        "primary_source": "DEXSCREENER",
+        "fallback_sources_enabled": False,
+        "gecko_terminal_complete": False,
         "candidate_counts_by_network": {
-            network: sum(1 for item in merged.values() if item.get("chain") == network)
+            network: sum(1 for item in candidates if item.get("chain") == network)
             for network in sorted(NETWORKS)
         },
-        "candidate_count": len(candidates),
-        "candidates": candidates,
+        "candidate_count": len(candidates), "candidates": candidates,
         "trade_authorization": "NO_TRADE",
-        "score_semantics": "Risk-adjusted discovery ordering only; candidates require independent market validation and security gates before any paper evaluation.",
+        "score_semantics": "DEX Screener primary-source research ordering only; independent security and execution checks remain mandatory.",
     }
