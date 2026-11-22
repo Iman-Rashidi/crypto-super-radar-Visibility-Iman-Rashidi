@@ -615,6 +615,42 @@ def _dexscreener_primary_discovery_rows(http, now: datetime, *, limit: int) -> t
         except Exception as exc:
             feeds[feed_name] = {"status": "UNKNOWN", "reason": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
+    # Latest profile/boost feeds can be temporarily chain-skewed. Supplement
+    # missing network coverage with DEX Screener's public pair-search endpoint,
+    # then still fetch the canonical token batch for exact market fields.
+    search_queries = ("PEPE", "BRETT", "TOSHI", "VIRTUAL", "AAVE", "LINK")
+    for query in search_queries:
+        source = f"DEXSCREENER_SEARCH_{query}"
+        try:
+            payload, metadata = _get_cached_dexscreener_payload(
+                http, f"https://api.dexscreener.com/latest/dex/search?q={query}",
+                source, now,
+            )
+            pairs = payload.get("pairs") if isinstance(payload, dict) else None
+            if not isinstance(pairs, list):
+                raise ValueError("DEX Screener search response has an invalid schema")
+            accepted = 0
+            for pair in pairs:
+                if not isinstance(pair, dict):
+                    continue
+                chain = str(pair.get("chainId") or "").lower()
+                if chain not in NETWORKS:
+                    continue
+                for token_meta in (pair.get("baseToken") or {}, pair.get("quoteToken") or {}):
+                    if not isinstance(token_meta, dict):
+                        continue
+                    address = token_meta.get("address")
+                    if not _valid_address(chain, address):
+                        continue
+                    if str(address).lower() in {value.lower() for value in BASE_QUOTE_ADDRESSES[chain]}:
+                        continue
+                    if address not in token_sets[chain]:
+                        token_sets[chain].add(address)
+                        accepted += 1
+            feeds[source] = {"status": "PASS", "candidate_token_count": accepted, **metadata}
+        except Exception as exc:
+            feeds[source] = {"status": "UNKNOWN", "reason": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
     merged: dict[str, dict[str, Any]] = {}
     for chain in sorted(NETWORKS):
         addresses = sorted(token_sets[chain])[:max(30, min(300, limit * 10))]
