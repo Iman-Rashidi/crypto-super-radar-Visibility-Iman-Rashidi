@@ -394,8 +394,10 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     market = candidate.get("market_reconciliation") or {}
-    if security.get("status") != "PASS" or exit_gate.get("status") != "PASS" or market.get("status") != "PASS":
-        return {"status": "BLOCKED", "reason": "Security, exit-liquidity or market validation is not PASS."}
+    if security.get("status") != "PASS":
+        return {"status": "BLOCKED", "reason": "Base security gate is not PASS."}
+    if status == "TIER_1_VERIFIED_GEM" and (exit_gate.get("status") != "PASS" or market.get("status") != "PASS"):
+        return {"status": "BLOCKED", "reason": "Tier 1 requires confirmed market reconciliation and exit gate."}
     chain = str(candidate.get("chain") or "").lower()
     address = str(candidate.get("token_address") or "")
     candidate_id = f"{chain}:{address if chain == 'solana' else address.lower()}"
@@ -412,16 +414,16 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     # A missing chat id must not consume the one-time alert slot.
     momentum = candidate.get("short_term_momentum_score", candidate.get("short_term_momentum_smart_money_score"))
     text = (
-        "🔎 <b>QUALIFIED GEM · RESEARCH ONLY</b>\n"
-        f"<b>Token:</b> {candidate.get('token_name') or 'Unknown'} ({candidate.get('token_symbol') or '?'})\n"
-        f"<b>Network:</b> {chain}\n<b>Contract:</b> <code>{address}</code>\n"
-        f"<b>Price:</b> {candidate.get('price_usd') or 'UNKNOWN'} USD\n"
-        f"<b>Liquidity:</b> {candidate.get('liquidity_usd') or 'UNKNOWN'} USD\n"
-        f"<b>Momentum:</b> {momentum if momentum is not None else 'UNKNOWN'}/100\n"
-        f"<b>Wallet breadth:</b> {candidate.get('wallet_breadth_evidence_status', 'UNKNOWN')}\n"
-        f"<b>Smart-money attribution:</b> {candidate.get('smart_money_evidence_status', 'NOT_AVAILABLE')}\n"
-        f"<b>Reason:</b> {candidate.get('qualification_reason') or 'Security, exit-liquidity and market evidence passed.'}\n"
-        "<i>No order has been placed. Research alert only.</i>"
+        f"🔎 <b>{'⭐ TIER 1 · ستاره طلایی' if status == 'TIER_1_VERIFIED_GEM' else '🔥 TIER 2 · فرصت اولیه / واچ‌لیست داغ'} · فقط پژوهشی</b>\\n"
+        f"<b>توکن:</b> {candidate.get('token_name') or 'Unknown'} ({candidate.get('token_symbol') or '?'})\\n"
+        f"<b>شبکه:</b> {chain}\\n<b>قرارداد:</b> <code>{address}</code>\\n"
+        f"<b>قیمت:</b> {candidate.get('price_usd') or 'UNKNOWN'} USD\\n"
+        f"<b>نقدینگی:</b> {candidate.get('liquidity_usd') or 'UNKNOWN'} USD\\n"
+        f"<b>مومنتوم مشاهده‌شده:</b> {momentum if momentum is not None else 'UNKNOWN'}/100\\n"
+        f"<b>نقاط قوت:</b> {' | '.join(candidate.get('tier_strengths_fa') or []) or 'شواهد اولیه موجود است.'}\\n"
+        f"<b>احتیاط:</b> {' | '.join(candidate.get('tier_cautions_fa') or []) or 'بررسی تکمیلی لازم است.'}\\n"
+        f"<b>اعتماد داده:</b> {candidate.get('tier_data_confidence', 'LIMITED')}\\n"
+        "<i>هیچ سفارشی ارسال نشده است. هشدار پژوهشی، NO_TRADE.</i>"
     )
     client = session or requests
     try:
