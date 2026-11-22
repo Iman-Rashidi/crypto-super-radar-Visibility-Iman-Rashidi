@@ -151,27 +151,23 @@ class TelegramNotifier:
         close_db = db is not self.connection
         try:
             self._ensure_schema(db)
-            db.execute(
-                "INSERT OR IGNORE INTO telegram_notification_outbox(event_key,payload_text,status) VALUES(?,?,'CLAIMED')",
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO telegram_notification_outbox(event_key,payload_text,status) VALUES(?,?,'SENDING')",
                 (key, text),
             )
+            inserted = int(getattr(cursor, "rowcount", 0) or 0) == 1
             db.commit()
             row = db.execute(
                 "SELECT payload_text,status FROM telegram_notification_outbox WHERE event_key=?", (key,)
             ).fetchone()
             if row is None:
                 raise TelegramNotificationError("Notification idempotency record could not be read back.")
-            if str(row[1]) != "CLAIMED":
-                return {"status": "DUPLICATE_SKIPPED", "event_key": key}
             if str(row[0]) != text:
                 raise TelegramNotificationError("An idempotency key was reused with a different message.")
-            # Claim is committed before the external side effect. A process crash
-            # cannot cause a duplicate send on the next cycle.
-            db.execute(
-                "UPDATE telegram_notification_outbox SET status='SENDING' WHERE event_key=? AND status='CLAIMED'",
-                (key,),
-            )
-            db.commit()
+            if not inserted:
+                return {"status": "DUPLICATE_SKIPPED", "event_key": key}
+            # The unique-key insert is the atomic claim. Exactly one concurrent
+            # worker can own the external send for this event key.
         finally:
             if close_db:
                 db.close()

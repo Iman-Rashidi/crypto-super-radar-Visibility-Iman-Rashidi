@@ -296,7 +296,7 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
                         f"challenge1-v2:entry:{entry_state['position_id']}",
                         f"🚀 معامله جدید تأیید شد: {inst}\\nجهت: {entry_state['side']}\\n"
                         f"قیمت ورود: {entry_state['entry_price']}\\nحد ضرر SL: {entry_state['initial_stop_loss']}\\n"
-                        f"هدف اول TP1: {result.get('take_profit') or result.get('take_profit_1') or 'ثبت‌شده در برنامه خروج'}\\n"
+                        f"هدف اول TP1: {format((Decimal(entry_state['entry_price']) + (Decimal(entry_state['entry_price']) - Decimal(entry_state['initial_stop_loss'])) * Decimal('1.2') if entry_state['side'] == 'LONG' else Decimal(entry_state['entry_price']) - (Decimal(entry_state['initial_stop_loss']) - Decimal(entry_state['entry_price'])) * Decimal('1.2')).normalize(), 'f')}\\n"
                         f"شناسه موقعیت: {entry_state['position_id']}\\nسفارش حفاظتی SL: فعال و تأییدشده",
                     )
                 safe.update(execution_result=dict(execution),orders_submitted=True,mode="DEMO_AUTOPILOT")
