@@ -49,7 +49,7 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
         return {"status": "UNKNOWN", "provider": "UNAVAILABLE",
                 "reason_fa": ["آدرس توکن یا سرویس داده برای بررسی قرارداد موجود نیست."]}
 
-    if chain == "base":
+    if chain in {"base", "ethereum"}:
         http = getattr(data_service, "http", None)
         if http is None:
             return {"status": "UNKNOWN", "provider": "GOPLUS_SOURCIFY",
@@ -57,7 +57,7 @@ def screen_discovery_candidate(candidate: dict, data_service) -> dict[str, Any]:
         try:
             config = getattr(http, "config", None)
             result = screen_evm_token(
-                "base", address,
+                chain, address,
                 timeout=float(getattr(config, "request_timeout_seconds", 12.0)),
                 limiter=getattr(http, "limiter", None),
                 cache={},
