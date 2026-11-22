@@ -104,9 +104,10 @@ class GemHunterV3Tests(unittest.TestCase):
         result = notify_qualified_gem(candidate, store, session=Mock(), bot_token="t", chat_id="c")
         self.assertEqual(result["status"], "BLOCKED")
 
-    def test_turso_requires_credentials(self):
-        with self.assertRaises(RuntimeError):
-            TursoGemHunterStore(database_url=None, auth_token=None)
+    def test_turso_requires_cloud_backend(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(RuntimeError):
+                TursoGemHunterStore()
 
     def test_turso_schema_and_candidate_upsert_create_persistent_tables(self):
         connection = sqlite3.connect(":memory:")
