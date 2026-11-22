@@ -35,7 +35,7 @@ from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
 from .gem_hunter_v3 import process_gem_hunter_v3_candidates
-from .gem_hunter_worker import latest_report_from_turso
+from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials_from_github_actions
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
@@ -9381,6 +9381,35 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
+        if route == "/api/gem-hunter/v3/refresh":
+            supplied = self.headers.get("Authorization", "")
+            if not supplied.startswith("Bearer ") or len(supplied) <= 7:
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            if self.headers.get("Origin"):
+                return self._send(403, b'{"status":"SERVER_TO_SERVER_ONLY"}', "application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type", "").lower():
+                return self._send(415, b'{"status":"JSON_REQUIRED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 16_384:
+                return self._send(413, b'{"status":"INVALID_REFRESH_PAYLOAD_SIZE"}', "application/json; charset=utf-8")
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                result = cache_turso_credentials_from_github_actions(
+                    supplied[7:].strip(),
+                    body.get("database_url"),
+                    body.get("auth_token"),
+                )
+                return self._send(200, json.dumps(result, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except PermissionError:
+                return self._send(403, b'{"status":"OIDC_FORBIDDEN"}', "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status": "REFRESH_FAILED", "error_type": type(exc).__name__}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
         if route == "/api/gem-hunter/v2/ingest":
             supplied = self.headers.get("Authorization", "")
             if not supplied.startswith("Bearer ") or len(supplied) <= 7:
