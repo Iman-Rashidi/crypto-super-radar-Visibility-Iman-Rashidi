@@ -244,7 +244,10 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('cdn.simpleicons.org/binance', page)
         self.assertIn('cdn.simpleicons.org/bybit', page)
         self.assertIn('cdn.simpleicons.org/okx', page)
-        self.assertIn('/api/gem-hunter/v2/candidates?limit=10', page)
+        self.assertIn('/api/gem-hunter/report?limit=10', page)
+        self.assertNotIn('/api/gem-hunter/v2/candidates?limit=10', page)
+        self.assertIn('Tier 1', page)
+        self.assertIn('Tier 2', page)
         self.assertIn('crypto-super-radar.gem-hunter-watchlist.v1', page)
         self.assertIn("crypto-super-radar.gem-hunter-open-reports.v1", page)
         self.assertIn("persistExpandedReportKeys", page)
@@ -993,6 +996,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 0)
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["qualified_buy_count"], 0)
+
+    def test_gem_hunter_pending_payload_includes_all_three_networks(self):
+        result = web_app._gem_hunter_pending_payload(refreshing=True)
+        self.assertEqual(set(result["networks"]), {"solana", "base", "ethereum"})
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
     def test_gem_hunter_never_serves_expired_buy_evidence_during_refresh(self):
         web_app.GEM_HUNTER_RESULT_CACHE.update(

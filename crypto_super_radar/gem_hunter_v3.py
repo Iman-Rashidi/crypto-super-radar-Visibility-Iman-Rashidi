@@ -175,12 +175,44 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _base_security_status(chain: str, security: Mapping[str, Any]) -> str:
+    """Assess only explicit anti-honeypot/sellability basics; do not require secondary analytics."""
+    if security.get("status") == "PASS":
+        return "PASS"
+    flags = security.get("flags") or {}
+    sell_tax = _finite(security.get("sell_tax_pct"))
+    if chain == "solana":
+        checks = (
+            security.get("mint_authority_active") is False,
+            security.get("freeze_authority_active") is False,
+            security.get("honeypot_detected") is False,
+            sell_tax is not None and 0 <= sell_tax <= 5.0,
+        )
+        return "PASS" if all(checks) else "UNKNOWN"
+    if chain in {"base", "ethereum"}:
+        required_false = (
+            "is_honeypot", "cannot_sell_all", "is_blacklisted", "is_mintable",
+            "transfer_pausable", "hidden_owner", "owner_change_balance",
+            "can_take_back_ownership", "selfdestruct",
+        )
+        checks = [flags.get(key) is False for key in required_false]
+        checks.extend([
+            security.get("source_verified") is True,
+            sell_tax is not None and 0 <= sell_tax <= 5.0,
+        ])
+        return "PASS" if all(checks) else "UNKNOWN"
+    return "UNKNOWN"
+
+
 def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -> dict[str, Any]:
     """Keep promising but incomplete discoveries visible without weakening hard safety gates."""
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     market = candidate.get("market_reconciliation") or {}
     flags = security.get("flags") or {}
+    chain = str(candidate.get("chain") or "").lower()
+    base_security_status = _base_security_status(chain, security)
     liquidity = _finite(
         market.get("verified_liquidity_usd") if market.get("status") == "PASS"
         else candidate.get("liquidity_usd")
@@ -224,12 +256,14 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
             "tier": "BLOCKED_SCAM", "tier_label_fa": "مسدود: خطر قطعی فروش/کلاهبرداری",
             "tier_strengths_fa": [], "tier_cautions_fa": ["منبع امنیتی نشانهٔ صریح Honeypot، محدودیت فروش یا مالیات فروش مخرب گزارش کرده است."],
             "tier_data_confidence": "SOURCE_CONFIRMED",
+            "tier_base_security_status": "FAIL",
         }
     if liquidity is not None and liquidity < 5_000:
         return {
             "tier": "BLOCKED_LOW_LIQUIDITY", "tier_label_fa": "مسدود: نقدینگی بسیار کم",
             "tier_strengths_fa": [], "tier_cautions_fa": ["نقدینگی کمتر از کف ۵٬۰۰۰ دلار است؛ این برچسب به‌معنی اثبات کلاهبرداری نیست."],
             "tier_data_confidence": "OBSERVED",
+            "tier_base_security_status": base_security_status,
         }
 
     if market.get("status") == "FAIL":
@@ -246,12 +280,13 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
         }
 
     security_status = security.get("status")
-    if security_status != "PASS":
+    if base_security_status != "PASS" or security_status == "FAIL":
         return {
             "tier": "REVIEW_REQUIRED", "tier_label_fa": "در انتظار بررسی امنیت",
             "tier_strengths_fa": (["شتاب حجم و نقدینگی قابل توجه است."] if volume and liquidity and liquidity > 0 and volume / liquidity >= 3 else []),
-            "tier_cautions_fa": ["گیت امنیتی هنوز PASS نشده است؛ UNKNOWN یا بررسی‌نشده به معنی سالم بودن قرارداد نیست."],
+            "tier_cautions_fa": ["شواهد پایهٔ ضد Honeypot/فروش هنوز کامل و قابل تأیید نیست؛ UNKNOWN به معنی سالم بودن قرارداد نیست."],
             "tier_data_confidence": "INCOMPLETE",
+            "tier_base_security_status": base_security_status,
         }
 
     if (
@@ -271,6 +306,7 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
             "tier_strengths_fa": ["امنیت پایه تأیید شده است.", "نقدینگی و حجم از دو منبع مستقل تطبیق شده‌اند.", "فشار خرید و امکان خروج تخمینی از آستانه عبور کرده‌اند."],
             "tier_cautions_fa": ["امتیاز رشد تضمین سود نیست؛ لغزش خروج هنوز تخمینی است."],
             "tier_data_confidence": "HIGH",
+            "tier_base_security_status": base_security_status,
         }
 
     if (
@@ -281,6 +317,8 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
         and (momentum is None or momentum >= 50)
     ):
         cautions = []
+        if security_status != "PASS":
+            cautions.append("کنترل‌های پایهٔ Honeypot و مالیات فروش عبور کرده‌اند، اما بررسی تکمیلی فروش/هولدرها هنوز کامل نیست.")
         if market.get("status") != "PASS":
             cautions.append("تطبیق مستقل دو منبع هنوز کامل نیست؛ قیمت/حجم ممکن است نیازمند تأیید باشد.")
         if exit_gate.get("status") != "PASS":
@@ -293,7 +331,8 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
             "tier": "TIER_2_EARLY_ALPHA", "tier_label_fa": "فرصت اولیه: واچ‌لیست داغ",
             "tier_strengths_fa": ["گیت امنیت پایه PASS شده است.", f"نسبت حجم به نقدینگی {ratio:.2f} برابر است.", "حجم و فشار خرید اولیه از آستانهٔ واچ‌لیست عبور کرده‌اند."],
             "tier_cautions_fa": cautions or ["فرصت اولیه است و هنوز تأیید کامل Tier 1 را ندارد."],
-            "tier_data_confidence": "MEDIUM" if market.get("status") == "PASS" else "LIMITED",
+            "tier_data_confidence": "MEDIUM" if market.get("status") == "PASS" and security_status == "PASS" else "LIMITED",
+            "tier_base_security_status": base_security_status,
         }
 
     return {
@@ -301,6 +340,7 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
         "tier_strengths_fa": (["امنیت پایه PASS شده است."] if security_status == "PASS" else []),
         "tier_cautions_fa": ["نامزد حذف نشده است؛ برای ارتقا به Tier 2 به نقدینگی، حجم و فشار خرید قابل‌اندازه‌گیری نیاز دارد."],
         "tier_data_confidence": "LIMITED",
+        "tier_base_security_status": base_security_status,
     }
 
 
@@ -413,8 +453,10 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     market = candidate.get("market_reconciliation") or {}
-    if security.get("status") != "PASS":
-        return {"status": "BLOCKED", "reason": "Base security gate is not PASS."}
+    if status == "TIER_1_VERIFIED_GEM" and security.get("status") != "PASS":
+        return {"status": "BLOCKED", "reason": "Tier 1 requires complete security PASS."}
+    if status == "TIER_2_EARLY_ALPHA" and security.get("status") != "PASS" and candidate.get("tier_base_security_status") != "PASS":
+        return {"status": "BLOCKED", "reason": "Tier 2 requires explicit base anti-honeypot/sellability PASS."}
     if status == "TIER_1_VERIFIED_GEM" and (exit_gate.get("status") != "PASS" or market.get("status") != "PASS"):
         return {"status": "BLOCKED", "reason": "Tier 1 requires confirmed market reconciliation and exit gate."}
     chain = str(candidate.get("chain") or "").lower()

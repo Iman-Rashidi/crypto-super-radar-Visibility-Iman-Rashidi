@@ -250,6 +250,7 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
             "نقاط قوت": "؛ ".join(item.get("tier_strengths_fa") or []),
             "نکات احتیاط": "؛ ".join(item.get("tier_cautions_fa") or []),
             "اعتماد دادهٔ طبقه": item.get("tier_data_confidence", "LIMITED"),
+            "امنیت پایه": item.get("tier_base_security_status", "UNKNOWN"),
             "شبکه": item.get("chain"),
             "قرارداد": item.get("token_address"),
             "قیمت": item.get("price_usd"),
@@ -272,7 +273,7 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
         })
     return pd.DataFrame(rows, columns=[
         "توکن", "طبقهٔ کشف", "نقاط قوت", "نکات احتیاط", "اعتماد دادهٔ طبقه",
-        "شبکه", "قرارداد", "قیمت", "نقدینگی تأییدشده", "حجم ۲۴ساعته", "حجم به نقدینگی",
+        "امنیت پایه", "شبکه", "قرارداد", "قیمت", "نقدینگی تأییدشده", "حجم ۲۴ساعته", "حجم به نقدینگی",
         "امتیاز مومنتوم", "پوشش شواهد مومنتوم (%)", "پهنای خریداران مشاهده‌شده",
         "انتساب پول هوشمند", "شناسایی خریداران جدید", "وضعیت هشدار تلگرام",
         "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",

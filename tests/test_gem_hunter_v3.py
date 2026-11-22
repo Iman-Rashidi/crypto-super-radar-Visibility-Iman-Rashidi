@@ -68,10 +68,12 @@ class GemHunterV3Tests(unittest.TestCase):
 
     def test_catema_style_high_volume_early_alpha_is_visible_as_tier2(self):
         candidate = {
-            "chain": "base", "liquidity_usd": 55_000, "volume_24h_usd": 435_000,
+            "chain": "solana", "liquidity_usd": 55_000, "volume_24h_usd": 435_000,
             "volume_to_liquidity_24h": 7.91, "buy_volume_share_pct": 62,
             "buys_24h": 620, "sells_24h": 380,
-            "security_evidence": {"status": "PASS", "flags": {"is_honeypot": False}},
+            "security_evidence": {"status": "UNKNOWN", "mint_authority_active": False,
+                                  "freeze_authority_active": False, "honeypot_detected": False,
+                                  "sell_tax_pct": 0, "transfer_simulation_status": "UNKNOWN"},
             "market_reconciliation": {"status": "UNKNOWN"},
             "exit_slippage_evidence": {"status": "UNKNOWN"},
         }
@@ -82,6 +84,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "smart_money_evidence_status": "NOT_AVAILABLE",
         })
         self.assertEqual(tier["tier"], "TIER_2_EARLY_ALPHA")
+        self.assertEqual(tier["tier_base_security_status"], "PASS")
         self.assertTrue(tier["tier_cautions_fa"])
         self.assertEqual(tier["tier_data_confidence"], "LIMITED")
 
@@ -160,7 +163,8 @@ class GemHunterV3Tests(unittest.TestCase):
             "candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
             "gem_hunter_v3_status": "TIER_2_EARLY_ALPHA",
             "gem_hunter_v3_trade_authorization": "NO_TRADE",
-            "security_evidence": {"status": "PASS"},
+            "security_evidence": {"status": "UNKNOWN"},
+            "tier_base_security_status": "PASS",
             "exit_slippage_evidence": {"status": "UNKNOWN"},
             "market_reconciliation": {"status": "UNKNOWN"},
             "tier_strengths_fa": ["حجم و فشار خرید اولیه"],
@@ -263,7 +267,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "gem_hunter_v3_status": "TIER_2_EARLY_ALPHA",
             "tier_label_fa": "فرصت اولیه: واچ‌لیست داغ",
             "tier_strengths_fa": ["حجم بالا"], "tier_cautions_fa": ["تطبیق بازار در انتظار است."],
-            "tier_data_confidence": "LIMITED",
+            "tier_data_confidence": "LIMITED", "tier_base_security_status": "PASS",
             "wallet_breadth_evidence_status": "VERIFIED_FOR_RETURNED_SAMPLE",
             "smart_money_evidence_status": "NOT_AVAILABLE",
             "new_buyer_cohort_status": "NOT_AVAILABLE",
@@ -274,6 +278,7 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(frame.iloc[0]["طبقهٔ کشف"], "فرصت اولیه: واچ‌لیست داغ")
         self.assertEqual(frame.iloc[0]["نقاط قوت"], "حجم بالا")
         self.assertEqual(frame.iloc[0]["نکات احتیاط"], "تطبیق بازار در انتظار است.")
+        self.assertEqual(frame.iloc[0]["امنیت پایه"], "PASS")
         self.assertEqual(frame.iloc[0]["پوشش شواهد مومنتوم (%)"], 75)
         self.assertEqual(frame.iloc[0]["انتساب پول هوشمند"], "NOT_AVAILABLE")
         self.assertEqual(frame.iloc[0]["وضعیت هشدار تلگرام"], "NOT_SENT")
