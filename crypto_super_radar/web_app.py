@@ -1592,6 +1592,7 @@ def _gem_hunter_api_payload(limit: int = 20, *, include_diagnostics: bool = Fals
         cached["public_policy"]["discovery_candidates_exposed"] = True
     else:
         cached.pop("diagnostic_candidates", None)
+        cached.pop("gem_hunter_v3_candidates", None)
         cached["public_policy"] = dict(cached.get("public_policy") or {})
         cached["public_policy"]["discovery_candidates_exposed"] = False
     return cached
