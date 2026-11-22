@@ -839,64 +839,98 @@ def _blofin_v2_cycle_snapshot() -> dict:
 
 
 def _blofin_v2_public_cycle_snapshot() -> dict:
-    """Expose only the latest five public market scan rows; never expose controls or positions."""
-    snapshot = _blofin_v2_cycle_snapshot()
-    if snapshot.get("status") != "OK":
+    """Read and expose only the latest five public market rows from Turso."""
+    connection = None
+    try:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise RuntimeError("DURABLE_TURSO_NOT_CONFIGURED")
+        connection = connect_database()
+        rows = connection.execute(
+            "SELECT cycle_id,symbol,started_at_utc,finished_at_utc,mode,status,signal,reason,orders_submitted,payload_json "
+            "FROM challenge1_v2_autopilot_cycles ORDER BY finished_at_utc DESC LIMIT 25"
+        ).fetchall()
+        decoded = []
+        for row in rows:
+            item = dict(row)
+            try:
+                payload = json.loads(item.pop("payload_json") or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            reviews = payload.get("ai_reviews") if isinstance(payload.get("ai_reviews"), list) else []
+            votes = []
+            for entry in reviews[:2]:
+                if not isinstance(entry, dict):
+                    continue
+                review = entry.get("review") if isinstance(entry.get("review"), dict) else entry
+                votes.append({
+                    "reviewer_id": entry.get("reviewer_id") or review.get("reviewer_id"),
+                    "provider": review.get("provider") or entry.get("provider"),
+                    "status": review.get("status") or entry.get("status") or "UNKNOWN",
+                    "opinion": (
+                        review.get("decision") or review.get("verdict")
+                        or review.get("final_rating") or review.get("proposal")
+                        or review.get("recommendation") or review.get("status")
+                        or entry.get("status") or "UNKNOWN"
+                    ),
+                    "reason_fa": str(review.get("reason_fa") or review.get("status_fa") or "")[:320],
+                    "verified": review.get("model_verified") is True and review.get("response_validated") is True,
+                    "returned_model": review.get("returned_model") or review.get("model") or entry.get("model"),
+                })
+            item["ai_votes"] = votes
+            item["ai_consensus"] = payload.get("ai_consensus") if isinstance(payload.get("ai_consensus"), dict) else {}
+            decoded.append(item)
+
+        latest_cycle_id = decoded[0].get("cycle_id") if decoded else None
+        latest_rows = [
+            row for row in decoded
+            if latest_cycle_id and row.get("cycle_id") == latest_cycle_id
+        ]
+        symbol_order = {"BTC-USDT": 0, "ETH-USDT": 1, "SOL-USDT": 2, "XRP-USDT": 3, "LINK-USDT": 4}
+        latest_rows.sort(key=lambda row: symbol_order.get(str(row.get("symbol") or ""), 99))
+        public_rows = []
+        for row in latest_rows[:5]:
+            public_rows.append({
+                "cycle_id": row.get("cycle_id"),
+                "symbol": row.get("symbol"),
+                "started_at_utc": row.get("started_at_utc"),
+                "finished_at_utc": row.get("finished_at_utc"),
+                "mode": row.get("mode"),
+                "status": row.get("status"),
+                "signal": row.get("signal"),
+                "reason": str(row.get("reason") or "")[:500],
+                "orders_submitted": row.get("orders_submitted") is True,
+                "ai_votes": row.get("ai_votes") if isinstance(row.get("ai_votes"), list) else [],
+                "ai_consensus": row.get("ai_consensus") if isinstance(row.get("ai_consensus"), dict) else {},
+            })
+        with LOCK:
+            state = copy.deepcopy(V2_AUTOPILOT_RUN_STATE)
+        return {
+            "status": "OK", "environment": "BLOFIN_DEMO",
+            "latest_cycle_id": latest_cycle_id,
+            "scan_time_utc": (
+                public_rows[0].get("finished_at_utc") or public_rows[0].get("started_at_utc")
+            ) if public_rows else None,
+            "cycles": public_rows,
+            "run_state": {
+                "status": state.get("status") or "UNKNOWN",
+                "job_id": state.get("job_id"),
+                "started_at_utc": state.get("started_at_utc"),
+                "finished_at_utc": state.get("finished_at_utc"),
+            },
+        }
+    except Exception as exc:
         return {
             "status": "UNAVAILABLE", "environment": "BLOFIN_DEMO",
+            "error_type": type(exc).__name__,
             "cycles": [], "latest_cycle_id": None,
             "run_state": {"status": "UNKNOWN"},
         }
-    rows = snapshot.get("cycles") if isinstance(snapshot.get("cycles"), list) else []
-    latest_cycle_id = rows[0].get("cycle_id") if rows and isinstance(rows[0], dict) else None
-    latest_rows = [
-        row for row in rows
-        if isinstance(row, dict) and latest_cycle_id and row.get("cycle_id") == latest_cycle_id
-    ]
-    symbol_order = {"BTC-USDT": 0, "ETH-USDT": 1, "SOL-USDT": 2, "XRP-USDT": 3, "LINK-USDT": 4}
-    latest_rows.sort(key=lambda row: symbol_order.get(str(row.get("symbol") or ""), 99))
-    public_rows = []
-    for row in latest_rows[:5]:
-        votes = row.get("ai_votes") if isinstance(row.get("ai_votes"), list) else []
-        public_votes = []
-        for vote in votes[:2]:
-            if not isinstance(vote, dict):
-                continue
-            public_votes.append({
-                "reviewer_id": vote.get("reviewer_id"),
-                "provider": vote.get("provider"),
-                "status": vote.get("status") or "UNKNOWN",
-                "opinion": vote.get("opinion") or vote.get("status") or "UNKNOWN",
-                "reason_fa": str(vote.get("reason_fa") or "")[:320],
-                "verified": vote.get("verified") is True,
-                "returned_model": vote.get("returned_model"),
-            })
-        public_rows.append({
-            "cycle_id": row.get("cycle_id"),
-            "symbol": row.get("symbol"),
-            "started_at_utc": row.get("started_at_utc"),
-            "finished_at_utc": row.get("finished_at_utc"),
-            "mode": row.get("mode"),
-            "status": row.get("status"),
-            "signal": row.get("signal"),
-            "reason": str(row.get("reason") or "")[:500],
-            "orders_submitted": row.get("orders_submitted") is True,
-            "ai_votes": public_votes,
-            "ai_consensus": row.get("ai_consensus") if isinstance(row.get("ai_consensus"), dict) else {},
-        })
-    run_state = snapshot.get("run_state") if isinstance(snapshot.get("run_state"), dict) else {}
-    return {
-        "status": "OK", "environment": "BLOFIN_DEMO",
-        "latest_cycle_id": latest_cycle_id,
-        "scan_time_utc": (public_rows[0].get("finished_at_utc") or public_rows[0].get("started_at_utc")) if public_rows else None,
-        "cycles": public_rows,
-        "run_state": {
-            "status": run_state.get("status") or "UNKNOWN",
-            "job_id": run_state.get("job_id"),
-            "started_at_utc": run_state.get("started_at_utc"),
-            "finished_at_utc": run_state.get("finished_at_utc"),
-        },
-    }
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def _blofin_demo_account_snapshot() -> dict:
