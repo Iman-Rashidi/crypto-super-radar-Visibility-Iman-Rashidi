@@ -1428,6 +1428,7 @@ def run_free_ai_second_opinion(
     started = time.monotonic()
     latency_ms = 0
     http_status = None
+    parser_diagnostic: dict[str, Any] = {}
     try:
         response = post(
             OPENROUTER_URL,
@@ -1464,6 +1465,18 @@ def run_free_ai_second_opinion(
         if not isinstance(message, dict):
             raise ValueError("Missing AI response message")
         content_candidates = _message_content_candidates(message)
+        usage_meta = body.get("usage") if isinstance(body, dict) else None
+        parser_diagnostic = {
+            "message_keys": sorted(str(key) for key in message.keys())[:20],
+            "content_type": type(message.get("content")).__name__,
+            "content_length": len(message.get("content")) if isinstance(message.get("content"), str) else None,
+            "reasoning_type": type(message.get("reasoning")).__name__,
+            "reasoning_length": len(message.get("reasoning")) if isinstance(message.get("reasoning"), str) else None,
+            "candidate_count": len(content_candidates),
+            "candidate_lengths": [len(candidate) for candidate in content_candidates[:6]],
+            "finish_reason": str(choices[0].get("finish_reason") or "")[:80],
+            "completion_tokens": usage_meta.get("completion_tokens") if isinstance(usage_meta, dict) else None,
+        }
         if not content_candidates:
             raise ValueError("AI message content is not text")
         parsed = None
@@ -1554,6 +1567,7 @@ def run_free_ai_second_opinion(
             "status_fa": "پاسخ معتبر از هوش مصنوعی دریافت نشد؛ ورود جدید متوقف شد.",
             "reason": "Free AI request or response validation failed.",
             "error_type": type(exc).__name__, "error_code": _safe_ai_error_code(exc),
+            "parser_diagnostic": parser_diagnostic,
             "http_status": http_status,
             "latency_ms": int((time.monotonic() - started) * 1000),
             "request_attempted": True, "response_source": "LIVE_API",
