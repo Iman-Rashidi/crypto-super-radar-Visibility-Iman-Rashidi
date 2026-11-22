@@ -1,8 +1,8 @@
-"""Independent, exact-pool market-data reconciliation for Gem Hunter.
+"""Primary DEX Screener exact-pool market-data validation for Gem Hunter.
 
-A discovery aggregate is never trusted as executable liquidity. This module
-compares the exact token/pool identity and pool-level liquidity across
-DexScreener and GeckoTerminal. It is deliberately read-only and fail-closed.
+DEX Screener is the hot-path source. GeckoTerminal is not called here; a 429
+from that optional provider cannot block the read-only evaluation pipeline.
+Single-source market validation is explicitly labelled as such.
 """
 from __future__ import annotations
 
@@ -191,81 +191,56 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
         if cached and cached[0] > time.monotonic():
             return dict(cached[1])
 
-    snapshots = []
-    errors = []
-    for loader in (_dex_snapshot, _gecko_snapshot):
-        try:
-            snapshots.append(loader(http, chain, token, pool))
-        except Exception as exc:
-            errors.append(f"{type(exc).__name__}")
-    base["sources"] = snapshots
-    base["source_count"] = len(snapshots)
-
-    if len(snapshots) < 2:
-        base["reason_codes"].append("CROSS_SOURCE_CONFIRMATION_MISSING")
-        base["reason_fa"].append("تطبیق هم‌زمان همان Pool در دو منبع مستقل کامل نشد؛ دادهٔ نقدینگی تأییدنشده است.")
-        if errors:
-            base["source_errors"] = errors
+    # DEX Screener is the primary and sufficient market-data provider. GeckoTerminal
+    # is intentionally not called in the hot path; its 429s cannot block evaluation.
+    try:
+        snapshot = _dex_snapshot(http, chain, token, pool)
+    except Exception as exc:
+        base["source_errors"] = [f"{type(exc).__name__}: {str(exc)[:160]}"]
+        base["reason_codes"].append("DEXSCREENER_PRIMARY_UNAVAILABLE")
+        base["reason_fa"].append("منبع اصلی DEX Screener برای همین توکن/استخر پاسخ معتبر نداد.")
         result = base
     else:
-        prices = [row["price_usd"] for row in snapshots]
-        liquidities = [row["liquidity_usd"] for row in snapshots]
-        volumes = [row["volume_24h_usd"] for row in snapshots]
-        if any(value is None or value <= 0 for value in prices):
-            base["reason_codes"].append("SOURCE_PRICE_MISSING")
-            base["reason_fa"].append("قیمت معتبر توکن در هر دو منبع مستقل برای همین Pool موجود نیست.")
-            result = base
-        elif any(value is None or value < 0 for value in liquidities):
-            base["reason_codes"].append("SOURCE_LIQUIDITY_MISSING")
-            base["reason_fa"].append("حداقل یکی از منابع نقدینگی معتبر برای Pool ارائه نکرده است.")
-            result = base
-        elif any(value is None or value < 0 for value in volumes):
-            base["reason_codes"].append("SOURCE_VOLUME_MISSING")
-            base["reason_fa"].append("حجم ۲۴ساعتهٔ هر دو منبع برای مقایسه موجود نیست.")
-            result = base
+        base["sources"] = [snapshot]
+        base["source_count"] = 1
+        base["verification_level"] = "DEXSCREENER_PRIMARY_SINGLE_SOURCE"
+        base["independent_confirmation"] = "NOT_PERFORMED"
+        price = snapshot.get("price_usd")
+        liquidity = snapshot.get("liquidity_usd")
+        volume = snapshot.get("volume_24h_usd")
+        base["verified_price_usd"] = price
+        base["verified_liquidity_usd"] = liquidity
+        base["verified_volume_24h_usd"] = volume
+        conflicts = []
+        if price is None or price <= 0:
+            conflicts.append("SOURCE_PRICE_MISSING")
+        elif reported_price is not None and reported_price > 0 and _ratio_conflict([reported_price, price], MAX_PRICE_DISAGREEMENT_RATIO):
+            conflicts.append("MARKET_PRICE_MISMATCH")
+        if liquidity is None or liquidity < 0:
+            conflicts.append("SOURCE_LIQUIDITY_MISSING")
+        elif reported_liquidity is not None and reported_liquidity >= 0 and _ratio_conflict([reported_liquidity, liquidity], MAX_LIQUIDITY_DISAGREEMENT_RATIO):
+            conflicts.append("MARKET_LIQUIDITY_MISMATCH")
+        if volume is None or volume < 0:
+            conflicts.append("SOURCE_VOLUME_MISSING")
+        elif reported_volume is not None and reported_volume >= 0 and _ratio_conflict([reported_volume, volume], MAX_VOLUME_DISAGREEMENT_RATIO):
+            conflicts.append("MARKET_VOLUME_MISMATCH")
+        if conflicts:
+            base["status"] = "FAIL"
+            base["reason_codes"].extend(conflicts)
+            base["reason_fa"].append("دادهٔ DEX Screener با دادهٔ کشف یا الزامات پایه سازگار نیست.")
+        elif liquidity < 50_000:
+            base["status"] = "FAIL"
+            base["reason_codes"].append("PRIMARY_LIQUIDITY_BELOW_FLOOR")
+            base["reason_fa"].append("نقدینگی گزارش‌شده توسط منبع اصلی کمتر از کف ۵۰ هزار دلار است.")
+        elif volume <= 0:
+            base["status"] = "FAIL"
+            base["reason_codes"].append("PRIMARY_VOLUME_NOT_POSITIVE")
+            base["reason_fa"].append("حجم ۲۴ساعته معتبر و مثبت نیست.")
         else:
-            price_conflict = _ratio_conflict(prices, MAX_PRICE_DISAGREEMENT_RATIO)
-            reported_price_conflict = (
-                reported_price is not None
-                and reported_price > 0
-                and _ratio_conflict([reported_price, *prices], MAX_PRICE_DISAGREEMENT_RATIO)
-            )
-            liquidity_conflict = _ratio_conflict(liquidities, MAX_LIQUIDITY_DISAGREEMENT_RATIO)
-            volume_conflict = _ratio_conflict(volumes, MAX_VOLUME_DISAGREEMENT_RATIO)
-            reported_volume_conflict = (
-                reported_volume is not None
-                and reported_volume >= 0
-                and _ratio_conflict([reported_volume, *volumes], MAX_VOLUME_DISAGREEMENT_RATIO)
-            )
-            reported_conflict = (
-                reported_liquidity is not None
-                and reported_liquidity >= 0
-                and _ratio_conflict([reported_liquidity, *liquidities], MAX_LIQUIDITY_DISAGREEMENT_RATIO)
-            )
-            ratios = []
-            for values in ([*liquidities, reported_liquidity] if reported_liquidity is not None else liquidities,):
-                positives = [value for value in values if value > 0]
-                if len(positives) == len(values) and positives:
-                    ratios.append(max(positives) / min(positives))
-                elif len(set(values)) > 1:
-                    ratios.append(float("inf"))
-            base["max_source_disagreement_ratio"] = max(ratios) if ratios else 1.0
-            base["verified_liquidity_usd"] = min(liquidities)
-            base["verified_volume_24h_usd"] = min(volumes)
-            base["verified_price_usd"] = min(prices)
-            if price_conflict or reported_price_conflict or liquidity_conflict or volume_conflict or reported_conflict or reported_volume_conflict:
-                base["status"] = "FAIL"
-                base["reason_codes"].append("MARKET_DATA_DISAGREEMENT")
-                base["reason_fa"].append("قیمت، نقدینگی یا حجم گزارش کشف با منابع مستقل همان استخر اختلاف بیش از حد مجاز دارد.")
-            elif min(liquidities) < 50_000:
-                base["status"] = "FAIL"
-                base["reason_codes"].append("VERIFIED_LIQUIDITY_BELOW_FLOOR")
-                base["reason_fa"].append("نقدینگی تأییدشدهٔ Pool از حداقل ۵۰ هزار دلار کمتر است.")
-            else:
-                base["status"] = "PASS"
-                base["reason_codes"].append("EXACT_POOL_CROSS_SOURCE_MATCH")
-                base["reason_fa"].append("هویت توکن و Pool و قیمت، نقدینگی و حجم در دو منبع مستقل تطبیق داده شد.")
-            result = base
+            base["status"] = "PASS"
+            base["reason_codes"].append("DEXSCREENER_PRIMARY_EXACT_POOL_MATCH")
+            base["reason_fa"].append("هویت توکن و استخر و معیارهای بازار از منبع اصلی DEX Screener تطبیق داده شد؛ تأیید مستقل منبع دوم انجام نشده است.")
+        result = base
 
     with _CACHE_LOCK:
         _CACHE[key] = (time.monotonic() + CACHE_TTL_SECONDS, dict(result))
