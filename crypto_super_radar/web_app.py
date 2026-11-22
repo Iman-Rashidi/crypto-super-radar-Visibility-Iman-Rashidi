@@ -784,9 +784,17 @@ def _blofin_v2_cycle_snapshot() -> dict:
                 review = entry.get("review") if isinstance(entry.get("review"), dict) else entry
                 votes.append({
                     "reviewer_id": entry.get("reviewer_id") or review.get("reviewer_id"),
-                    "status": review.get("status") or "UNKNOWN",
+                    "provider": review.get("provider") or entry.get("provider"),
+                    "status": review.get("status") or entry.get("status") or "UNKNOWN",
+                    "opinion": (
+                        review.get("decision") or review.get("verdict")
+                        or review.get("final_rating") or review.get("proposal")
+                        or review.get("recommendation") or review.get("status")
+                        or entry.get("status") or "UNKNOWN"
+                    ),
+                    "reason_fa": str(review.get("reason_fa") or review.get("status_fa") or "")[:320],
                     "verified": review.get("model_verified") is True and review.get("response_validated") is True,
-                    "returned_model": review.get("returned_model") or review.get("model"),
+                    "returned_model": review.get("returned_model") or review.get("model") or entry.get("model"),
                 })
             item["ai_votes"] = votes
             item["ai_consensus"] = payload.get("ai_consensus") or {}
@@ -828,6 +836,67 @@ def _blofin_v2_cycle_snapshot() -> dict:
                 store.close()
             except Exception:
                 pass
+
+
+def _blofin_v2_public_cycle_snapshot() -> dict:
+    """Expose only the latest five public market scan rows; never expose controls or positions."""
+    snapshot = _blofin_v2_cycle_snapshot()
+    if snapshot.get("status") != "OK":
+        return {
+            "status": "UNAVAILABLE", "environment": "BLOFIN_DEMO",
+            "cycles": [], "latest_cycle_id": None,
+            "run_state": {"status": "UNKNOWN"},
+        }
+    rows = snapshot.get("cycles") if isinstance(snapshot.get("cycles"), list) else []
+    latest_cycle_id = rows[0].get("cycle_id") if rows and isinstance(rows[0], dict) else None
+    latest_rows = [
+        row for row in rows
+        if isinstance(row, dict) and latest_cycle_id and row.get("cycle_id") == latest_cycle_id
+    ]
+    symbol_order = {"BTC-USDT": 0, "ETH-USDT": 1, "SOL-USDT": 2, "XRP-USDT": 3, "LINK-USDT": 4}
+    latest_rows.sort(key=lambda row: symbol_order.get(str(row.get("symbol") or ""), 99))
+    public_rows = []
+    for row in latest_rows[:5]:
+        votes = row.get("ai_votes") if isinstance(row.get("ai_votes"), list) else []
+        public_votes = []
+        for vote in votes[:2]:
+            if not isinstance(vote, dict):
+                continue
+            public_votes.append({
+                "reviewer_id": vote.get("reviewer_id"),
+                "provider": vote.get("provider"),
+                "status": vote.get("status") or "UNKNOWN",
+                "opinion": vote.get("opinion") or vote.get("status") or "UNKNOWN",
+                "reason_fa": str(vote.get("reason_fa") or "")[:320],
+                "verified": vote.get("verified") is True,
+                "returned_model": vote.get("returned_model"),
+            })
+        public_rows.append({
+            "cycle_id": row.get("cycle_id"),
+            "symbol": row.get("symbol"),
+            "started_at_utc": row.get("started_at_utc"),
+            "finished_at_utc": row.get("finished_at_utc"),
+            "mode": row.get("mode"),
+            "status": row.get("status"),
+            "signal": row.get("signal"),
+            "reason": str(row.get("reason") or "")[:500],
+            "orders_submitted": row.get("orders_submitted") is True,
+            "ai_votes": public_votes,
+            "ai_consensus": row.get("ai_consensus") if isinstance(row.get("ai_consensus"), dict) else {},
+        })
+    run_state = snapshot.get("run_state") if isinstance(snapshot.get("run_state"), dict) else {}
+    return {
+        "status": "OK", "environment": "BLOFIN_DEMO",
+        "latest_cycle_id": latest_cycle_id,
+        "scan_time_utc": (public_rows[0].get("finished_at_utc") or public_rows[0].get("started_at_utc")) if public_rows else None,
+        "cycles": public_rows,
+        "run_state": {
+            "status": run_state.get("status") or "UNKNOWN",
+            "job_id": run_state.get("job_id"),
+            "started_at_utc": run_state.get("started_at_utc"),
+            "finished_at_utc": run_state.get("finished_at_utc"),
+        },
+    }
 
 
 def _blofin_demo_account_snapshot() -> dict:
@@ -6338,6 +6407,11 @@ class Handler(BaseHTTPRequestHandler):
                     outbox.close()
                 if activity_journal is not None:
                     activity_journal.close()
+        if parsed.path == "/api/blofin/demo/v2-autopilot/latest-public":
+            payload = _blofin_v2_public_cycle_snapshot()
+            return self._send(200 if payload.get("status") == "OK" else 503,
+                              json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                              "application/json; charset=utf-8")
         if parsed.path == "/api/blofin/demo/v2-autopilot/cycles":
             expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
             if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
@@ -7417,52 +7491,53 @@ async function loadBlofinInstruments(){
             function renderV2CycleSnapshot(payload){
               v2CycleHistory.replaceChildren();
               const run=payload.run_state||{};
-              v2CycleStatus.textContent='وضعیت اجرای آخر: '+(run.status||'UNKNOWN')
-                +' · شناسه: '+(run.job_id||'—')
-                +(run.error_type?' · خطا: '+run.error_type:'');
+              v2CycleStatus.textContent='آخرین اسکن: '+(payload.scan_time_utc||'هنوز ثبت نشده')
+                +' · وضعیت اتوپایلوت: '+(run.status||'UNKNOWN')
+                +' · چرخه: '+(payload.latest_cycle_id||'—');
               function add(parent,tag,value){
                 const node=document.createElement(tag);
                 node.textContent=value===null||value===undefined||value===''?'—':String(value);
                 parent.appendChild(node);return node;
               }
               const cycles=Array.isArray(payload.cycles)?payload.cycles:[];
-              add(v2CycleHistory,'h4','آخرین چرخه‌های ثبت‌شده در Turso · حداکثر ۲۵ نماد');
-              if(!cycles.length)add(v2CycleHistory,'p','هنوز چرخه‌ای در جدول V2 ثبت نشده است.');
+              add(v2CycleHistory,'h4','آخرین چرخهٔ ذخیره‌شده در Turso · فقط‌خواندنی · پنج بازار');
+              if(!cycles.length){
+                add(v2CycleHistory,'p','هنوز چرخه‌ای در جدول V2 ثبت نشده است.');
+                return;
+              }
+              const table=document.createElement('table');
+              table.style.width='100%';table.style.borderCollapse='collapse';
+              const headers=['نماد','وضعیت','سیگنال','دلیل','Nemotron','Groq'];
+              const thead=document.createElement('thead'),headRow=document.createElement('tr');
+              headers.forEach(label=>{const th=add(headRow,'th',label);th.style.padding='8px';th.style.textAlign='right';});
+              thead.appendChild(headRow);table.appendChild(thead);
+              const tbody=document.createElement('tbody');
               cycles.forEach(item=>{
-                const card=document.createElement('article');card.className='metric';card.style.margin='8px 0';
-                add(card,'strong',(item.symbol||'نماد نامشخص')+' · '+(item.status||'UNKNOWN')+' · '+(item.signal||'UNKNOWN'));
-                add(card,'p','چرخه: '+(item.cycle_id||'—')+' · حالت: '+(item.mode||'—')+' · شروع: '+(item.started_at_utc||'—'));
+                const tr=document.createElement('tr');
                 const votes=Array.isArray(item.ai_votes)?item.ai_votes:[];
-                add(card,'p','Nemotron: '+(votes.find(x=>x.reviewer_id==='nemotron')?.status||'NOT_RECORDED')
-                  +' · Groq/ناظر دوم: '+(votes.find(x=>x.reviewer_id==='second_ai')?.status||'NOT_RECORDED')
-                  +' · اجماع: '+((item.ai_consensus||{}).status||'UNKNOWN'));
-                add(card,'p','سفارش ارسال شد: '+(item.orders_submitted?'بله، Demo':'خیر')
-                  +' · دلیل/وضعیت: '+(item.reason||'—'));
-                v2CycleHistory.appendChild(card);
+                const nemotron=votes.find(x=>x.reviewer_id==='nemotron'||String(x.provider||'').toLowerCase().includes('openrouter'))||{};
+                const groq=votes.find(x=>x.reviewer_id==='second_ai'||String(x.provider||'').toLowerCase().includes('groq'))||{};
+                const opinion=x=>[x.status||'NOT_RECORDED',x.opinion&&x.opinion!==x.status?x.opinion:''].filter(Boolean).join(' · ');
+                [item.symbol,item.status,item.signal,item.reason,
+                 opinion(nemotron),opinion(groq)].forEach(value=>{
+                  const td=add(tr,'td',value);td.style.padding='8px';td.style.borderTop='1px solid rgba(128,128,128,.25)';
+                });
+                tbody.appendChild(tr);
               });
-              const positions=Array.isArray(payload.open_exit_positions)?payload.open_exit_positions:[];
-              add(v2CycleHistory,'h4','وضعیت خروج پوزیشن‌های باز ثبت‌شده در Turso');
-              if(!positions.length)add(v2CycleHistory,'p','پوزیشن V2 بازی در دفتر خروج ثبت نشده است.');
-              positions.forEach(item=>{
-                const card=document.createElement('article');card.className='metric';card.style.margin='8px 0';
-                add(card,'strong',(item.instrument_id||'—')+' · '+(item.side||'—')+' · '+(item.status||'UNKNOWN'));
-                add(card,'p','Position ID: '+(item.position_id||'—')+' · TP1: '+(item.tp1_executed?'انجام شده':'انجام نشده')
-                  +' · کندل‌های بسته: '+(item.candles_elapsed??'—')+' · حجم باقی‌مانده: '+(item.remaining_size??'—'));
-                v2CycleHistory.appendChild(card);
-              });
+              table.appendChild(tbody);v2CycleHistory.appendChild(table);
+              add(v2CycleHistory,'p','زمان اسکن (UTC): '+(payload.scan_time_utc||'—')
+                +' · Cycle ID: '+(payload.latest_cycle_id||'—')+' · محیط: BloFin Demo');
             }
             async function refreshV2CycleSnapshot(){
-              const token=tokenInput.value.trim();
-              if(!token){v2CycleStatus.textContent='برای مشاهده گزارش خصوصی، توکن پنل را وارد کن.';return null;}
               try{
-                const response=await fetch('/api/blofin/demo/v2-autopilot/cycles',{
-                  cache:'no-store',headers:{'Authorization':'Bearer '+token}
+                const response=await fetch('/api/blofin/demo/v2-autopilot/latest-public',{
+                  cache:'no-store'
                 });
                 const payload=await response.json();
                 if(!response.ok)throw new Error(payload.status||('HTTP '+response.status));
                 renderV2CycleSnapshot(payload);return payload;
               }catch(error){
-                v2CycleStatus.textContent='گزارش V2 از Turso دریافت نشد؛ وضعیت نامشخص است و اجرای دوباره انجام نده.';
+                v2CycleStatus.textContent='گزارش فقط‌خواندنی V2 از Turso در دسترس نیست؛ اجرای مجدد انجام نده.';
                 return null;
               }
             }
