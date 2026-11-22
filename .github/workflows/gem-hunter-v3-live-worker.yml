@@ -1,0 +1,44 @@
+name: gem-hunter-v3-live-worker
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+  push:
+    branches:
+      - staging/challenge1-integration-2026-11-16
+    paths:
+      - "crypto_super_radar/gem_hunter_v3.py"
+      - "crypto_super_radar/gem_hunter_worker.py"
+      - "crypto_super_radar/gem_hunter_discovery.py"
+      - ".github/workflows/gem-hunter-v3-live-worker.yml"
+permissions:
+  contents: read
+concurrency:
+  group: gem-hunter-v3-live-worker
+  cancel-in-progress: false
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging/challenge1-integration-2026-11-16
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and worker dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Run Gem Hunter V3 on GitHub runner and persist to Turso
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          GEM_HUNTER_TELEGRAM_BOT_TOKEN: ${{ secrets.GEM_HUNTER_TELEGRAM_BOT_TOKEN }}
+          GEM_HUNTER_TELEGRAM_CHAT_ID: ${{ secrets.GEM_HUNTER_TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEM_HUNTER_EXIT_ORDER_USD: "100"
+        run: python -m crypto_super_radar.gem_hunter_worker --limit 50
