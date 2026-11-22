@@ -58,7 +58,7 @@ class DexOnlyHttp:
                 for chain, token in self.rows
             ]
         if "/latest/dex/search?" in url:
-            return [row for (chain, _), row in self.rows.items() if chain in {"base", "ethereum"}]
+            return {"pairs": [row for (chain, _), row in self.rows.items() if chain in {"base", "ethereum"}]}
         if "/tokens/v1/" in url:
             _, tail = url.split("/tokens/v1/", 1)
             chain, addresses = tail.split("/", 1)
