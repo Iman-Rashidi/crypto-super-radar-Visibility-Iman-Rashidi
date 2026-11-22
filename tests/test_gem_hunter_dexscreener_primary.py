@@ -47,15 +47,12 @@ class DexOnlyHttp:
             raise AssertionError("GeckoTerminal must not be needed for this pipeline")
         if url.endswith("/token-boosts/latest/v1") or url.endswith("/token-profiles/latest/v1"):
             return [{"chainId": chain, "tokenAddress": token} for chain, token in self.pairs]
-        if "/tokens/v1/" in url:
-            chain, addresses = url.split("/tokens/v1/", 1)[1].split("/", 1)
+        if "/latest/dex/tokens/" in url:
+            addresses = url.split("/latest/dex/tokens/", 1)[1]
             wanted = set(addresses.split(","))
-            return [pair for (network, token), pair in self.pairs.items()
-                    if network == chain and token in wanted]
-        if "/token-pairs/v1/" in url:
-            chain, token = url.split("/token-pairs/v1/", 1)[1].split("/", 1)
-            pair = self.pairs.get((chain, token))
-            return [pair] if pair else []
+            return {"pairs": [pair for (network, token), pair in self.pairs.items()
+                    if token in wanted]}
+
         raise AssertionError(url)
 
 
