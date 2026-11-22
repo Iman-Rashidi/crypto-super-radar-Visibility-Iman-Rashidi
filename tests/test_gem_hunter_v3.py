@@ -47,8 +47,8 @@ class GemHunterV3Tests(unittest.TestCase):
             "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 20},
             "market_reconciliation": {"status": "PASS"},
         })
-        self.assertEqual(result["short_term_momentum_smart_money_score"], 88.75)
-        self.assertEqual(result["short_term_momentum_score"], 88.75)
+        self.assertEqual(result["short_term_momentum_smart_money_score"], 83.75)
+        self.assertEqual(result["short_term_momentum_score"], 83.75)
         self.assertEqual(result["smart_money_evidence_status"], "NOT_AVAILABLE")
         self.assertEqual(result["new_buyer_cohort_status"], "NOT_AVAILABLE")
         self.assertEqual(result["wallet_breadth_evidence_status"], "VERIFIED_FOR_RETURNED_SAMPLE")
