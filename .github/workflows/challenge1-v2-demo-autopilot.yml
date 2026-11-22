@@ -1,6 +1,11 @@
 name: Challenge 1 V2 Demo autopilot worker
 
 on:
+  push:
+    branches:
+      - staging/challenge1-integration-2026-11-16
+    paths:
+      - .github/workflows/challenge1-v2-demo-autopilot.yml
   workflow_dispatch:
 
 permissions:
