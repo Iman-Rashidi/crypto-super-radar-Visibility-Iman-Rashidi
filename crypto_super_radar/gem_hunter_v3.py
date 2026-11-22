@@ -239,7 +239,7 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
                          chat_id: Optional[str] = None, timeout: float = 10.0) -> dict[str, Any]:
     """Send one Telegram research alert per token, only after all required gates pass."""
     status = candidate.get("candidate_status")
-    if status != "QUALIFIED_GEM" or candidate.get("trade_authorization") != "NO_TRADE":
+    if candidate.get("gem_hunter_v3_status", status) != "QUALIFIED_GEM" or candidate.get("trade_authorization") != "NO_TRADE":
         return {"status": "SKIPPED", "reason": "Candidate is not a research-qualified gem."}
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
@@ -281,3 +281,49 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     if not payload.get("ok"):
         raise RuntimeError("Telegram API did not confirm the message")
     return {"status": "SENT", "candidate_id": candidate_id, "message_id": (payload.get("result") or {}).get("message_id")}
+
+
+
+def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) -> list[dict[str, Any]]:
+    """Enrich a discovery batch, persist its lifecycle when Turso is configured,
+    and send deduplicated research alerts. This path never authorizes a trade.
+    """
+    rows = [dict(row) for row in candidates if isinstance(row, Mapping)] if isinstance(candidates, list) else []
+    store = None
+    storage_status = "NOT_CONFIGURED"
+    if os.getenv("TURSO_DATABASE_URL") and os.getenv("TURSO_AUTH_TOKEN"):
+        try:
+            store = TursoGemHunterStore()
+            store.initialize()
+            storage_status = "READY"
+        except Exception as exc:
+            store = None
+            storage_status = f"UNKNOWN:{type(exc).__name__}"
+
+    for row in rows:
+        reconciliation = row.get("market_reconciliation") or {}
+        verified_liquidity = (
+            reconciliation.get("verified_liquidity_usd")
+            if reconciliation.get("status") == "PASS" else None
+        )
+        row["exit_slippage_evidence"] = estimate_exit_slippage(
+            liquidity_usd=verified_liquidity,
+            order_usd=_finite(os.getenv("GEM_HUNTER_EXIT_ORDER_USD")) or DEFAULT_EXIT_ORDER_USD,
+        )
+        row.update(score_candidate_v3(row))
+        row["trade_authorization"] = "NO_TRADE"
+        row["gem_hunter_storage_status"] = storage_status
+        if store is not None:
+            try:
+                persist_candidate_lifecycle(store, row)
+                row["gem_hunter_storage_status"] = "PERSISTED"
+            except Exception as exc:
+                row["gem_hunter_storage_status"] = f"UNKNOWN:{type(exc).__name__}"
+        if notify and store is not None and row.get("gem_hunter_v3_status") == "QUALIFIED_GEM":
+            try:
+                row["telegram_alert_status"] = notify_qualified_gem(row, store)
+            except Exception as exc:
+                row["telegram_alert_status"] = {"status": "ERROR", "reason": type(exc).__name__}
+        else:
+            row["telegram_alert_status"] = {"status": "NOT_SENT"}
+    return rows
