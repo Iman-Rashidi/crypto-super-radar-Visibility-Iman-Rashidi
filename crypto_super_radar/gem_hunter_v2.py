@@ -127,6 +127,7 @@ def _score(candidate,previous=None):
     security=candidate.get("security") or {}
     liquidity=_number(candidate.get("liquidity_usd"))
     buys,sells=_number(candidate.get("buys_1h")),_number(candidate.get("sells_1h"))
+    volume_1h,volume_24h=_number(candidate.get("volume_1h_usd")),_number(candidate.get("volume_24h_usd"))
     age=_number(candidate.get("pool_age_hours"))
     parts={"contract_security":25 if security.get("status")=="PASS" else 0,"liquidity":0,"buy_sell_momentum":0,"holder_distribution":0,"age_activity":0,"pool_quality":0}
     hard=[]
@@ -146,7 +147,10 @@ def _score(candidate,previous=None):
         parts["liquidity"]=6
     if buys is not None and sells is not None and buys+sells>0:
         ratio=(buys+1.0)/(sells+1.0)
-        parts["buy_sell_momentum"]=(20 if ratio>=2 and buys+sells>=30 else 15 if ratio>=1.3 and buys+sells>=15 else 10 if ratio>=1 and buys+sells>=8 else 4 if ratio>=.75 else 0)
+        parts["buy_sell_momentum"]=(15 if ratio>=2 and buys+sells>=30 else 11 if ratio>=1.3 and buys+sells>=15 else 7 if ratio>=1 and buys+sells>=8 else 3 if ratio>=.75 else 0)
+    velocity=(volume_1h*24/volume_24h) if volume_1h is not None and volume_24h and volume_24h>0 else None
+    if velocity is not None:
+        parts["buy_sell_momentum"]+=5 if velocity>=1.5 else 3 if velocity>=1.0 else 0
     holders=candidate.get("holders") or {}
     top10=_number(holders.get("top10_pct"))
     if holders.get("status")=="AVAILABLE" and top10 is not None:
@@ -166,7 +170,7 @@ def _score(candidate,previous=None):
         status="STRONG GEM" if int(candidate.get("consecutive_scans") or 1)>=2 else "WATCH"
     else:
         status="EARLY GEM"
-    return {"score":score,"score_parts":parts,"status":status,"hard_reject_reasons":hard,"buy_sell_ratio":round((buys+1)/(sells+1),3) if buys is not None and sells is not None else None}
+    return {"score":score,"score_parts":parts,"status":status,"hard_reject_reasons":hard,"buy_sell_ratio":round((buys+1)/(sells+1),3) if buys is not None and sells is not None else None,"volume_velocity_ratio":round(velocity,3) if velocity is not None else None}
 
 def discover_and_score(limit_per_chain=10):
     profiles=_get_json(f"{DEX_BASE}/token-profiles/latest/v1")
