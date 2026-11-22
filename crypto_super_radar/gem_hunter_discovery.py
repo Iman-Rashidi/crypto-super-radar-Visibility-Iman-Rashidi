@@ -450,6 +450,11 @@ def _dexpaprika_recovery_rows(http, network: str, now: datetime, *, limit: int =
 _DEXSCREENER_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
 
 
+def _dexscreener_get(http, url: str) -> Any:
+    bounded = getattr(http, "get_with_timeout", None)
+    return bounded(url, timeout=8.0) if callable(bounded) else http.get(url)
+
+
 def _get_cached_dexscreener_payload(http, url: str, source: str,
                                     now: datetime) -> tuple[Any, dict[str, Any]]:
     current = time.monotonic()
@@ -460,7 +465,7 @@ def _get_cached_dexscreener_payload(http, url: str, source: str,
             return copy.deepcopy(cached["payload"]), {"cached": True, "data_age_seconds": round(age, 1)}
         raise RuntimeError(f"Cached DexScreener cooldown: {cached.get('error', 'source unavailable')}")
     try:
-        payload = http.get(url)
+        payload = _dexscreener_get(http, url)
     except Exception as exc:
         _DEXSCREENER_SOURCE_CACHE[source] = {
             "status": "UNKNOWN", "error": f"{type(exc).__name__}: {str(exc)[:160]}",
