@@ -1184,18 +1184,37 @@ CRYPTO_MARKET_CACHE_LOCK = threading.Lock()
 LIVE_MARKET_RADAR_CACHE: dict[tuple[str, str], dict] = {}
 LIVE_MARKET_RADAR_CACHE_TTL_SECONDS = 8
 LIVE_MARKET_RADAR_CACHE_LOCK = threading.RLock()
-GEM_HUNTER_CACHE_TTL_SECONDS = 60
+GEM_HUNTER_CACHE_TTL_SECONDS = 120
 GEM_HUNTER_CACHE = {"expires_at": 0.0, "payload": None}
 GEM_HUNTER_CACHE_LOCK = threading.Lock()
-GEM_HUNTER_RESULT_CACHE_TTL_SECONDS = 90
+GEM_HUNTER_RESULT_CACHE_TTL_SECONDS = 120
 GEM_HUNTER_RESULT_CACHE = {
     "expires_at": 0.0, "payload": None, "refreshing": False, "last_error": None,
 }
 GEM_HUNTER_RESULT_CACHE_LOCK = threading.Lock()
 
 
+GEM_HUNTER_EVALUATION_LIMIT = 10
+
+def _rank_gem_hunter_candidates(candidates: Any, *, limit: int = GEM_HUNTER_EVALUATION_LIMIT) -> tuple[list[dict], list[dict]]:
+    """Select a deterministic, cross-chain top-N by observed 24h volume then liquidity."""
+    rows = [copy.deepcopy(row) for row in candidates if isinstance(row, dict)] if isinstance(candidates, list) else []
+    def rank(row: dict) -> tuple[float, float, float]:
+        def number(value: Any) -> float:
+            try:
+                parsed = float(value)
+                return parsed if math.isfinite(parsed) and parsed > 0 else 0.0
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+        return (number(row.get("volume_24h_usd")), number(row.get("liquidity_usd")),
+                number(row.get("discovery_priority_score")))
+    rows.sort(key=rank, reverse=True)
+    bounded = max(1, min(int(limit), GEM_HUNTER_EVALUATION_LIMIT))
+    return rows[:bounded], rows[bounded:]
+
+
 def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool = False, progress_callback=None) -> dict:
-    """Return strict BUYs and optionally publish discovery-only progress before validation."""
+    """Return BUYs and V3 research tiers after a bounded, rate-limit-aware evaluation."""
     limit = max(1, min(int(limit), 50))
     with GEM_HUNTER_CACHE_LOCK:
         now = time.monotonic()
@@ -1238,41 +1257,46 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
             ),
         })
         progress_payload["public_policy"]["discovery_candidates_exposed"] = True
-        progress_payload["public_policy"]["unknown_or_incomplete_candidates_hidden"] = True
+        progress_payload["public_policy"]["unknown_or_incomplete_candidates_hidden"] = False
         progress_callback(progress_payload)
+    # Evaluate only the best ten candidates across all supported chains. This
+    # bounds provider fan-out and prevents a single 429 from starving a large batch.
+    evaluation_candidates, deferred_candidates = _rank_gem_hunter_candidates(raw_candidates)
     # Discovery and qualification are separate stages. Attach an explicit,
-    # evidence-bounded first-stage record to every raw discovery candidate.
+    # evidence-bounded first-stage record to the bounded shortlist.
     # This evaluator deliberately leaves unavailable security/holder/whale/
     # slippage evidence UNKNOWN and can never authorize a BUY.
     # Validate the exact discovered token/pool against independent market sources
     # before constructing qualification gates. The bounded shortlist and cache
     # prevent an unbounded burst against public APIs; unchecked rows remain explicit.
-    raw_candidates = reconcile_discovery_candidates(
-        raw_candidates, getattr(ENGINE.data, "http", None),
+    evaluation_candidates = reconcile_discovery_candidates(
+        evaluation_candidates, getattr(ENGINE.data, "http", None), limit=GEM_HUNTER_EVALUATION_LIMIT,
     )
-    raw_candidates = screen_discovery_candidates(
-        raw_candidates, ENGINE.data,
+    evaluation_candidates = screen_discovery_candidates(
+        evaluation_candidates, ENGINE.data, limit=GEM_HUNTER_EVALUATION_LIMIT,
     )
     # Fetch a bounded sample of exact-pool OHLCV and BTC/ETH daily benchmarks.
     # The technical module caches complete evidence and rotates one candidate
     # per scan to respect the free public GeckoTerminal request budget.
-    raw_candidates = enrich_discovery_candidates_with_technicals(
-        raw_candidates, ENGINE.data, limit=1,
+    evaluation_candidates = enrich_discovery_candidates_with_technicals(
+        evaluation_candidates, ENGINE.data, limit=1,
     )
     # Collect a separate bounded sample of actual swaps for the same validated Pool.
-    raw_candidates = enrich_discovery_candidates_with_pool_trades(
-        raw_candidates, ENGINE.data, limit=1,
+    evaluation_candidates = enrich_discovery_candidates_with_pool_trades(
+        evaluation_candidates, ENGINE.data, limit=1,
     )
-    raw_candidates = evaluate_discovery_candidates(raw_candidates)
-    # V3 adds research-only scores, persistent lifecycle snapshots and optional
-    # deduplicated Telegram alerts. It never creates a Futures/spot order.
-    raw_candidates = process_gem_hunter_v3_candidates(raw_candidates, notify=True)
+    evaluation_candidates = evaluate_discovery_candidates(evaluation_candidates)
+    # V3 processing is restricted to the bounded shortlist; deferred rows stay
+    # visible as discoveries but are never mislabeled as evaluated.
+    evaluation_candidates = process_gem_hunter_v3_candidates(evaluation_candidates, notify=True)
+    raw_candidates = evaluation_candidates + deferred_candidates
     discovered_count = len(raw_candidates)
     evaluation_records = [
         item.get("qualification")
-        for item in raw_candidates
+        for item in evaluation_candidates
         if isinstance(item, dict) and isinstance(item.get("qualification"), dict)
     ]
+    evaluation_target_count = len(evaluation_candidates)
     complete_evaluation_count = 0
     for qualification in evaluation_records:
         filters = qualification.get("filters")
@@ -1293,7 +1317,6 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
             and isinstance(metrics, dict)
             and bool(qualification.get("data_as_of_utc"))
             and isinstance(sources, list)
-            and len({str(value).strip() for value in sources if str(value).strip()}) >= 2
             and isinstance(whale_evidence, dict)
         )
         if complete:
@@ -1337,10 +1360,10 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
             "بنابراین هنوز نمی‌توان گفت این کوین‌ها رد شده‌اند یا واجد BUY هستند."
         )
         engine_status = "NOT_WIRED"
-    elif complete_evaluation_count < discovered_count:
+    elif complete_evaluation_count < evaluation_target_count:
         signal_status = "EVALUATION_INCOMPLETE"
         diagnostic_fa = (
-            f"{discovered_count} نامزد کشف شد؛ {complete_evaluation_count} پرونده با ساختار ارزیابی کامل، "
+            f"از {evaluation_target_count} نامزد منتخب برای ارزیابی عمیق، {complete_evaluation_count} پرونده با ساختار ارزیابی کامل، "
             f"{incomplete_evaluation_count} پروندهٔ ناقص و {unassessed_count} نامزدِ ارزیابی‌نشده وجود دارد. "
             "تا تکمیل شواهد، هیچ سیگنال BUY صادر نمی‌شود."
         )
@@ -1348,7 +1371,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     else:
         signal_status = "NO_QUALIFIED_BUY"
         diagnostic_fa = (
-            f"ساختار پروندهٔ ارزیابی برای هر {complete_evaluation_count} نامزد کامل است، اما شواهد یا شروط هیچ‌کدام BUY را تأیید نمی‌کند."
+            f"ساختار پروندهٔ ارزیابی برای هر {complete_evaluation_count} نامزد منتخب کامل است، اما شواهد یا شروط هیچ‌کدام BUY را تأیید نمی‌کند."
         )
         engine_status = "COMPLETE"
 
@@ -1363,6 +1386,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result["candidate_count"] = len(qualified)
     result["discovered_candidate_count"] = discovered_count
     result["evaluation_record_count"] = evaluation_record_count
+    result["evaluation_target_count"] = evaluation_target_count
     result["market_reconciliation_counts"] = {
         "checked": reconciliation_counts["PASS"] + reconciliation_counts["FAIL"] + reconciliation_counts["UNKNOWN"],
         **reconciliation_counts,
@@ -1382,12 +1406,12 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result["progress_stage"] = "COMPLETE"
     result["diagnostic_freshness"] = "CURRENT_SCAN"
     result["public_policy"] = {
-        "qualification_schema": SCHEMA_VERSION,
+        "qualification_schema": "gem-hunter-v3",
         "minimum_passed_filters": 9,
         "total_filters": len(FILTER_IDS),
         "minimum_opportunity_score": 80,
         "critical_gates": list(CRITICAL_GATES),
-        "unknown_or_incomplete_candidates_hidden": True,
+        "unknown_or_incomplete_candidates_hidden": False,
         "discovery_candidates_exposed": bool(include_diagnostics),
         "aggregate_pipeline_diagnostics_exposed": True,
         "diagnostic_candidates_are_trade_signals": False,

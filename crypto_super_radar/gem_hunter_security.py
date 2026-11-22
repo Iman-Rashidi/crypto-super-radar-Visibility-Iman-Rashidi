@@ -159,7 +159,7 @@ def screen_discovery_candidates(candidates: Any, data_service, *, limit: int = 5
     if not isinstance(candidates, list):
         return []
     valid = [dict(row) for row in candidates if isinstance(row, dict)]
-    bounded = max(0, min(int(limit), 5, len(valid)))
+    bounded = max(0, min(int(limit), 10, len(valid)))
     global _SCAN_OFFSET
     with _CACHE_LOCK:
         start = (_SCAN_OFFSET % len(valid)) if valid and bounded else 0
