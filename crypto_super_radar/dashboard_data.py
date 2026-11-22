@@ -250,7 +250,12 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
             "قرارداد": item.get("token_address"),
             "قیمت": item.get("price_usd"),
             "نقدینگی تأییدشده": (item.get("market_reconciliation") or {}).get("verified_liquidity_usd"),
-            "امتیاز مومنتوم": item.get("short_term_momentum_smart_money_score"),
+            "امتیاز مومنتوم": item.get("short_term_momentum_score", item.get("short_term_momentum_smart_money_score")),
+            "پوشش شواهد مومنتوم (%)": item.get("momentum_evidence_coverage_pct"),
+            "پهنای خریداران مشاهده‌شده": item.get("wallet_breadth_evidence_status", "UNKNOWN"),
+            "انتساب پول هوشمند": item.get("smart_money_evidence_status", "NOT_AVAILABLE"),
+            "شناسایی خریداران جدید": item.get("new_buyer_cohort_status", "NOT_AVAILABLE"),
+            "وضعیت هشدار تلگرام": (item.get("telegram_alert_status") or {}).get("status", "NOT_SENT"),
             "امتیاز ایمنی": item.get("safety_exit_liquidity_score"),
             "اعتماد داده": item.get("data_confidence_score"),
             "لغزش خروج (bps)": exit_gate.get("estimated_slippage_bps"),
@@ -261,6 +266,8 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
         })
     return pd.DataFrame(rows, columns=[
         "توکن", "شبکه", "قرارداد", "قیمت", "نقدینگی تأییدشده",
-        "امتیاز مومنتوم", "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",
+        "امتیاز مومنتوم", "پوشش شواهد مومنتوم (%)", "پهنای خریداران مشاهده‌شده",
+        "انتساب پول هوشمند", "شناسایی خریداران جدید", "وضعیت هشدار تلگرام",
+        "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",
         "وضعیت خروج", "وضعیت Gem Hunter V3", "وضعیت ذخیره‌سازی", "مجوز معامله",
     ])
