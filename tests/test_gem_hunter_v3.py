@@ -1,6 +1,7 @@
 """Offline tests for Gem Hunter V3 research-only primitives."""
+import sqlite3
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from crypto_super_radar.gem_hunter_v3 import (
     estimate_exit_slippage, score_candidate_v3, persist_candidate_lifecycle,
@@ -107,34 +108,37 @@ class GemHunterV3Tests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             TursoGemHunterStore(database_url=None, auth_token=None)
 
-    def test_turso_schema_and_candidate_upsert_are_sent_to_http_pipeline(self):
-        session = Mock()
-        session.post.return_value.json.return_value = {
-            "results": [{"response": {"result": {"rows_affected": 1}}}]
-        }
-        session.post.return_value.raise_for_status.return_value = None
-        store = TursoGemHunterStore(database_url="libsql://example.turso.io", auth_token="secret", session=session)
+    def test_turso_schema_and_candidate_upsert_create_persistent_tables(self):
+        connection = sqlite3.connect(":memory:")
+        store = TursoGemHunterStore(connection=connection)
         store.initialize()
         store.upsert_candidate({
             "chain": "base", "token_address": "0x" + "1" * 40,
             "price_usd": 0.01, "liquidity_usd": 90000, "candidate_status": "DISCOVERED",
         })
-        sent = [call.kwargs["json"]["requests"][0]["stmt"]["sql"] for call in session.post.call_args_list]
-        self.assertTrue(any("CREATE TABLE IF NOT EXISTS gem_hunter_candidates" in sql for sql in sent))
-        self.assertTrue(any("CREATE TABLE IF NOT EXISTS gem_hunter_lifecycle_events" in sql for sql in sent))
-        self.assertTrue(any("INSERT INTO gem_hunter_candidates" in sql for sql in sent))
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        self.assertIn("gem_hunter_candidates", tables)
+        self.assertIn("gem_hunter_lifecycle_events", tables)
+        stored = connection.execute(
+            "SELECT first_price_usd, latest_price_usd, latest_liquidity_usd FROM gem_hunter_candidates"
+        ).fetchone()
+        self.assertEqual(stored, (0.01, 0.01, 90000.0))
+        store.close()
 
-    def test_turso_event_deduplication_uses_rows_affected(self):
-        session = Mock()
-        session.post.return_value.raise_for_status.return_value = None
-        session.post.return_value.json.side_effect = [
-            {"results": [{"response": {"result": {"rows_affected": 1}}}]},
-            {"results": [{"response": {"result": {"rows_affected": 0}}}]},
-        ]
-        store = TursoGemHunterStore(database_url="libsql://example.turso.io", auth_token="secret", session=session)
+    def test_turso_event_deduplication_uses_unique_event_key(self):
+        connection = sqlite3.connect(":memory:")
+        store = TursoGemHunterStore(connection=connection)
+        store.initialize()
         event = {"candidate_id": "base:0x1"}
         self.assertTrue(store.append_event("base:0x1", "ALERT", event, event_key="once"))
         self.assertFalse(store.append_event("base:0x1", "ALERT", event, event_key="once"))
+        count = connection.execute(
+            "SELECT COUNT(*) FROM gem_hunter_lifecycle_events WHERE event_key='once'"
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+        store.close()
 
     def test_dashboard_status_never_authorizes_trading(self):
         result = score_candidate_v3({"security_evidence": {"status": "PASS"},
