@@ -67,25 +67,55 @@ def estimate_exit_slippage(
 
 
 def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    """Return independent momentum, safety and data-confidence scores."""
+    """Score observable momentum; never mislabel bounded wallet data as smart money."""
     trades = candidate.get("pool_trade_evidence") or {}
     technical = candidate.get("technical_evidence") or {}
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     reconciliation = candidate.get("market_reconciliation") or {}
 
-    momentum_parts = []
+    components: dict[str, float] = {}
     buy = _finite(trades.get("buy_volume_usd"))
     sell = _finite(trades.get("sell_volume_usd"))
-    if buy is not None and sell is not None and buy >= 0 and sell >= 0 and buy + sell > 0:
-        momentum_parts.append(max(0.0, min(100.0, 100.0 * buy / (buy + sell))))
+    if (trades.get("coverage_status") in {"COMPLETE", "PARTIAL"}
+            and buy is not None and sell is not None and buy >= 0 and sell >= 0 and buy + sell > 0):
+        components["pool_buy_volume_share"] = round(100.0 * buy / (buy + sell), 2)
+
+    unique_buyers = _finite(trades.get("unique_buyers_count"))
+    unique_sellers = _finite(trades.get("unique_sellers_count"))
+    wallet_sample_verified = (
+        trades.get("wallet_attribution_status") == "COMPLETE_FOR_RETURNED_SAMPLE"
+        and unique_buyers is not None and unique_sellers is not None
+        and unique_buyers >= 0 and unique_sellers >= 0
+        and unique_buyers + unique_sellers > 0
+    )
+    if wallet_sample_verified:
+        components["observed_buyer_wallet_share"] = round(
+            100.0 * unique_buyers / (unique_buyers + unique_sellers), 2
+        )
+
     filters = technical.get("filters") if isinstance(technical, Mapping) else {}
-    if isinstance(filters, Mapping):
-        known = [filters.get(key) for key in ("trend", "momentum")]
-        known = [100.0 if item == "PASS" else 0.0 for item in known if item in {"PASS", "FAIL"}]
-        if known:
-            momentum_parts.append(sum(known) / len(known))
-    momentum = round(sum(momentum_parts) / len(momentum_parts), 2) if momentum_parts else None
+    technical_parts = [
+        100.0 if filters.get(key) == "PASS" else 0.0
+        for key in ("trend", "momentum") if filters.get(key) in {"PASS", "FAIL"}
+    ] if isinstance(filters, Mapping) else []
+    if technical_parts and technical.get("coverage_status") in {"COMPLETE", "PARTIAL"}:
+        components["technical_trend_momentum"] = round(sum(technical_parts) / len(technical_parts), 2)
+
+    # Explicit weights; missing evidence is excluded from the denominator and
+    # separately exposed as coverage. Unique wallet counts are sample breadth,
+    # not new-buyer cohorts, beneficial-owner identities, or smart-money proof.
+    weights = {
+        "pool_buy_volume_share": 0.50,
+        "observed_buyer_wallet_share": 0.25,
+        "technical_trend_momentum": 0.25,
+    }
+    available_weight = sum(weights[key] for key in components)
+    momentum = (
+        round(sum(components[key] * weights[key] for key in components) / available_weight, 2)
+        if available_weight > 0 else None
+    )
+    momentum_coverage_pct = round(available_weight * 100.0, 2)
 
     security_status = security.get("status")
     exit_status = exit_gate.get("status")
@@ -103,12 +133,15 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
         confidence_parts.append(100.0 if technical.get("coverage_status") == "COMPLETE" else 50.0)
     if trades.get("coverage_status") in {"COMPLETE", "PARTIAL"}:
         confidence_parts.append(100.0 if trades.get("coverage_status") == "COMPLETE" else 50.0)
+    if wallet_sample_verified:
+        confidence_parts.append(100.0)
     if security_status in {"PASS", "FAIL"}:
         confidence_parts.append(100.0)
     confidence = round(sum(confidence_parts) / len(confidence_parts), 2) if confidence_parts else None
 
     qualified = (
-        momentum is not None and momentum >= 70.0
+        momentum is not None and momentum >= 70.0 and momentum_coverage_pct >= 75.0
+        and wallet_sample_verified
         and safety is not None and safety >= 70.0
         and confidence is not None and confidence >= 75.0
         and security_status == "PASS" and exit_status == "PASS"
@@ -116,12 +149,24 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     )
     return {
         "schema_version": SCHEMA_VERSION,
+        "short_term_momentum_score": momentum,
+        # Compatibility alias for the existing dashboard. This is NOT a
+        # smart-money score; see the explicit evidence status below.
         "short_term_momentum_smart_money_score": momentum,
+        "momentum_score_components": components,
+        "momentum_evidence_coverage_pct": momentum_coverage_pct,
+        "wallet_breadth_evidence_status": "VERIFIED_FOR_RETURNED_SAMPLE" if wallet_sample_verified else "UNKNOWN",
+        "smart_money_evidence_status": "NOT_AVAILABLE",
+        "new_buyer_cohort_status": "NOT_AVAILABLE",
         "safety_exit_liquidity_score": safety,
         "data_confidence_score": confidence,
         "candidate_status": "QUALIFIED_GEM" if qualified else "RESEARCH_WATCH",
         "trade_authorization": "NO_TRADE",
-        "score_semantics": "Evidence-based research ranking, not a probability of profit or trade instruction.",
+        "score_semantics": (
+            "Observed Pool buy-volume share, returned-sample wallet breadth and technical filters; "
+            "not new-buyer cohort analysis, beneficial-owner attribution, smart-money tracking, "
+            "a probability of profit or trade instruction."
+        ),
     }
 
 
