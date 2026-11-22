@@ -59,12 +59,11 @@ class DexOnlyHttp:
             ]
         if "/latest/dex/search?" in url:
             return {"pairs": [row for (chain, _), row in self.rows.items() if chain in {"base", "ethereum"}]}
-        if "/tokens/v1/" in url:
-            _, tail = url.split("/tokens/v1/", 1)
-            chain, addresses = tail.split("/", 1)
+        if "/latest/dex/tokens/" in url:
+            _, addresses = url.split("/latest/dex/tokens/", 1)
             wanted = set(addresses.split(","))
-            return [row for (network, token), row in self.rows.items()
-                    if network == chain and token in wanted]
+            return {"pairs": [row for (network, token), row in self.rows.items()
+                    if token in wanted]}
         if "/token-pairs/v1/" in url:
             _, tail = url.split("/token-pairs/v1/", 1)
             chain, token = tail.split("/", 1)
@@ -99,7 +98,7 @@ class GemHunterDexDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
         self.assertEqual(set(result["candidate_counts_by_network"]), {"solana", "base", "ethereum"})
         self.assertEqual(result["candidate_count"], 12)
-        batch_calls = [url for url, _ in http.calls if "/tokens/v1/" in url]
+        batch_calls = [url for url, _ in http.calls if "/latest/dex/tokens/" in url]
         self.assertEqual(len(batch_calls), 3)
         self.assertTrue(all("GECKOTERMINAL" not in str(item) for item in result["sources"]))
         self.assertTrue(all(row["source"] == "DEXSCREENER_PRIMARY" for row in result["candidates"]))
@@ -124,7 +123,7 @@ class GemHunterDexDiscoveryTests(unittest.TestCase):
             for index, chain in enumerate(["solana"] * 35)
         }
         result = discover_gem_candidates(http, limit=50, now=NOW)
-        batch_calls = [url for url, _ in http.calls if "/tokens/v1/" in url]
+        batch_calls = [url for url, _ in http.calls if "/latest/dex/tokens/" in url]
         self.assertEqual(len(batch_calls), 2)
         self.assertTrue(all(len(url.rsplit("/", 1)[-1].split(",")) <= 30 for url in batch_calls))
         self.assertGreater(result["candidate_count"], 0)
