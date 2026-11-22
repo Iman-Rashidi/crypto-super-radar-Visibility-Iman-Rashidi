@@ -67,7 +67,7 @@ def _valid_wallet(chain: str, address: Any) -> bool:
 def _valid_tx_hash(chain: str, tx_hash: Any) -> bool:
     if not isinstance(tx_hash, str):
         return False
-    if chain == "base":
+    if chain in {"base", "ethereum"}:
         return bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash))
     if chain == "solana":
         return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,100}", tx_hash))
