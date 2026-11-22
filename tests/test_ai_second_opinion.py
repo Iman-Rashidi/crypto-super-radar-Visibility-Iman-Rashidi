@@ -268,8 +268,9 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(result["paper_entry_eligible"])
         self.assertFalse(result.get("orders_submitted", False))
 
-    def test_openrouter_reasoning_json_is_only_a_fallback_when_content_is_empty(self):
+    def test_openrouter_reasoning_json_with_prose_and_markdown_is_extracted_safely(self):
         document = valid_document()
+        captured = {}
 
         class ReasoningResponse:
             status_code = 200
@@ -279,21 +280,32 @@ class FreeAISecondOpinionTests(unittest.TestCase):
                     "model": DEFAULT_FREE_MODEL,
                     "choices": [{
                         "message": {
-                            "content": None,
-                            "reasoning": json.dumps(document, ensure_ascii=False),
+                            "content": "Analysis follows; the final decision is below.",
+                            "reasoning": (
+                                "Reasoning summary: the evidence is consistent.\\n"
+                                "```json\\n" + json.dumps(document, ensure_ascii=False)
+                                + "\\n```\\nEnd of explanation."
+                            ),
                         }
                     }],
                 }
 
+        def fake_post(url, headers, json: dict, timeout, allow_redirects=False):
+            captured.update({"payload": json, "headers": headers})
+            return ReasoningResponse()
+
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
             result = run_free_ai_second_opinion(
                 valid_result(), AssetSpec.parse("cex:BTCUSDT"),
-                http_post=lambda *args, **kwargs: ReasoningResponse(),
+                http_post=fake_post,
                 bypass_cache=True,
             )
         self.assertEqual(result["status"], "APPROVED")
         self.assertTrue(result["response_validated"])
         self.assertTrue(result["paper_entry_eligible"])
+        self.assertGreaterEqual(captured["payload"]["max_tokens"], 1200)
+        self.assertIn("complete, valid JSON object", captured["payload"]["messages"][0]["content"])
+        self.assertFalse(result.get("orders_submitted", False))
 
     def test_non_text_parts_and_plain_reasoning_never_approve(self):
         class InvalidStructuredResponse:
