@@ -240,6 +240,14 @@ class TursoGemHunterStore:
                 raise RuntimeError("Turso did not confirm rows_affected; refusing to assume event was stored")
             return int(affected) == 1
 
+    def release_event(self, event_key: str) -> None:
+        """Release a failed, unsent alert reservation so a later scan can retry."""
+        with self._db:
+            self.execute(
+                "DELETE FROM gem_hunter_lifecycle_events WHERE event_key=? AND event_type='TELEGRAM_ALERT_RESERVED'",
+                (event_key,),
+            )
+
     def close(self) -> None:
         self._db.close()
 
@@ -287,7 +295,7 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     if not inserted:
         return {"status": "DUPLICATE_SUPPRESSED", "candidate_id": candidate_id}
     # A missing chat id must not consume the one-time alert slot.
-    momentum = candidate.get("short_term_momentum_smart_money_score")
+    momentum = candidate.get("short_term_momentum_score", candidate.get("short_term_momentum_smart_money_score"))
     text = (
         "🔎 <b>QUALIFIED GEM · RESEARCH ONLY</b>\n"
         f"<b>Token:</b> {candidate.get('token_name') or 'Unknown'} ({candidate.get('token_symbol') or '?'})\n"
@@ -295,19 +303,25 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         f"<b>Price:</b> {candidate.get('price_usd') or 'UNKNOWN'} USD\n"
         f"<b>Liquidity:</b> {candidate.get('liquidity_usd') or 'UNKNOWN'} USD\n"
         f"<b>Momentum:</b> {momentum if momentum is not None else 'UNKNOWN'}/100\n"
+        f"<b>Wallet breadth:</b> {candidate.get('wallet_breadth_evidence_status', 'UNKNOWN')}\n"
+        f"<b>Smart-money attribution:</b> {candidate.get('smart_money_evidence_status', 'NOT_AVAILABLE')}\n"
         f"<b>Reason:</b> {candidate.get('qualification_reason') or 'Security, exit-liquidity and market evidence passed.'}\n"
         "<i>No order has been placed. Research alert only.</i>"
     )
     client = session or requests
-    response = client.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": destination, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if not payload.get("ok"):
-        raise RuntimeError("Telegram API did not confirm the message")
+    try:
+        response = client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": destination, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError("Telegram API did not confirm the message")
+    except Exception:
+        store.release_event(event_key)
+        raise
     return {"status": "SENT", "candidate_id": candidate_id, "message_id": (payload.get("result") or {}).get("message_id")}
 
 
