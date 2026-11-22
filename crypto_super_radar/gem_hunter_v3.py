@@ -340,7 +340,7 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
             "tier": "TIER_2_EARLY_ALPHA", "tier_label_fa": "فرصت اولیه: واچ‌لیست داغ",
             "tier_strengths_fa": ["گیت امنیت پایه PASS شده است.", f"نسبت حجم به نقدینگی {ratio:.2f} برابر است.", "حجم و فشار خرید اولیه از آستانهٔ واچ‌لیست عبور کرده‌اند."],
             "tier_cautions_fa": cautions or ["فرصت اولیه است و هنوز تأیید کامل Tier 1 را ندارد."],
-            "tier_data_confidence": "MEDIUM" if market.get("status") == "PASS" and security_status == "PASS" else "LIMITED",
+            "tier_data_confidence": "MEDIUM" if market.get("verification_level") == "INDEPENDENT_CROSS_SOURCE" and security_status == "PASS" else "LIMITED",
             "tier_base_security_status": base_security_status,
         }
 
