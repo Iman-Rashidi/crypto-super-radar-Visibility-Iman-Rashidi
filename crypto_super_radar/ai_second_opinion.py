@@ -1412,7 +1412,9 @@ def run_free_ai_second_opinion(
         "model": model,
         "messages": _prompt_messages(evidence),
         "temperature": 0.1,
-        "max_tokens": 2_400,
+        "max_tokens": 4_096,
+        "response_format": {"type": "json_object"},
+        "reasoning": {"effort": "low"},
     }
     headers = {
         "Authorization": f"Bearer {key}",
