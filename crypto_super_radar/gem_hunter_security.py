@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -166,10 +167,20 @@ def screen_discovery_candidates(candidates: Any, data_service, *, limit: int = 1
         if valid and bounded:
             _SCAN_OFFSET = (start + bounded) % len(valid)
     selected = {(start + offset) % len(valid) for offset in range(bounded)} if valid else set()
+    # Run the bounded security checks concurrently. PublicHttpClient still
+    # enforces per-host spacing, while concurrency prevents ten sequential
+    # Solana RPC/GoPlus/Sourcify checks from keeping the entire scan refreshing.
+    selected_indices = sorted(selected)
+    if selected_indices:
+        with ThreadPoolExecutor(max_workers=min(5, len(selected_indices))) as executor:
+            results = list(executor.map(
+                lambda index: screen_discovery_candidate(valid[index], data_service),
+                selected_indices,
+            ))
+        for index, evidence in zip(selected_indices, results):
+            valid[index]["security_evidence"] = evidence
     for index, row in enumerate(valid):
-        if index in selected:
-            row["security_evidence"] = screen_discovery_candidate(row, data_service)
-        else:
+        if index not in selected:
             row["security_evidence"] = {
                 "status": "NOT_CHECKED_BUDGET",
                 "provider": "NOT_CHECKED",
