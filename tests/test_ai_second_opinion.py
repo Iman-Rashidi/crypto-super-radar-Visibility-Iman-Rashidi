@@ -304,6 +304,8 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(result["response_validated"])
         self.assertTrue(result["paper_entry_eligible"])
         self.assertGreaterEqual(captured["payload"]["max_tokens"], 1200)
+        self.assertEqual(captured["payload"]["response_format"], {"type": "json_object"})
+        self.assertEqual(captured["payload"]["reasoning"], {"effort": "low"})
         self.assertIn("complete, valid JSON object", captured["payload"]["messages"][0]["content"])
         self.assertFalse(result.get("orders_submitted", False))
 
