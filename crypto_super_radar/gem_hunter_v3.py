@@ -141,7 +141,6 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
 
     qualified = (
         momentum is not None and momentum >= 70.0 and momentum_coverage_pct >= 75.0
-        and wallet_sample_verified
         and safety is not None and safety >= 70.0
         and confidence is not None and confidence >= 75.0
         and security_status == "PASS" and exit_status == "PASS"
@@ -167,6 +166,122 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
             "not new-buyer cohort analysis, beneficial-owner attribution, smart-money tracking, "
             "a probability of profit or trade instruction."
         ),
+    }
+
+
+def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep promising but incomplete discoveries visible without weakening hard safety gates."""
+    security = candidate.get("security_evidence") or {}
+    exit_gate = candidate.get("exit_slippage_evidence") or {}
+    market = candidate.get("market_reconciliation") or {}
+    flags = security.get("flags") or {}
+    liquidity = _finite(
+        market.get("verified_liquidity_usd") if market.get("status") == "PASS"
+        else candidate.get("liquidity_usd")
+    )
+    volume = _finite(
+        market.get("verified_volume_24h_usd") if market.get("status") == "PASS"
+        else candidate.get("volume_24h_usd")
+    )
+    ratio = _finite(candidate.get("volume_to_liquidity_24h"))
+    if ratio is None and liquidity and volume is not None:
+        ratio = volume / liquidity if liquidity > 0 else None
+
+    trades = candidate.get("pool_trade_evidence") or {}
+    components = scores.get("momentum_score_components") or {}
+    buy_share = _finite(components.get("pool_buy_volume_share"))
+    if buy_share is None:
+        buy_share = _finite(candidate.get("buy_volume_share_pct"))
+    buys = _finite(candidate.get("buys_24h"))
+    sells = _finite(candidate.get("sells_24h"))
+    tx_buy_share = (
+        100.0 * buys / (buys + sells)
+        if buys is not None and sells is not None and buys >= 0 and sells >= 0 and buys + sells > 0
+        else None
+    )
+    if buy_share is None:
+        buy_share = tx_buy_share
+    momentum = _finite(scores.get("short_term_momentum_score"))
+    if momentum is None and buy_share is not None:
+        momentum = round(buy_share, 2)
+
+    hard_sell_block = (
+        flags.get("is_honeypot") is True
+        or flags.get("cannot_sell_all") is True
+        or flags.get("is_blacklisted") is True
+        or security.get("honeypot_detected") is True
+        or security.get("transfer_simulation_status") == "FAIL"
+        or (_finite(security.get("sell_tax_pct")) is not None and _finite(security.get("sell_tax_pct")) > 5.0)
+    )
+    if hard_sell_block:
+        return {
+            "tier": "BLOCKED_SCAM", "tier_label_fa": "مسدود: خطر قطعی فروش/کلاهبرداری",
+            "tier_strengths_fa": [], "tier_cautions_fa": ["منبع امنیتی نشانهٔ صریح Honeypot، محدودیت فروش یا مالیات فروش مخرب گزارش کرده است."],
+            "tier_data_confidence": "SOURCE_CONFIRMED",
+        }
+    if liquidity is not None and liquidity < 5_000:
+        return {
+            "tier": "BLOCKED_LOW_LIQUIDITY", "tier_label_fa": "مسدود: نقدینگی بسیار کم",
+            "tier_strengths_fa": [], "tier_cautions_fa": ["نقدینگی کمتر از کف ۵٬۰۰۰ دلار است؛ این برچسب به‌معنی اثبات کلاهبرداری نیست."],
+            "tier_data_confidence": "OBSERVED",
+        }
+
+    security_status = security.get("status")
+    if security_status != "PASS":
+        return {
+            "tier": "REVIEW_REQUIRED", "tier_label_fa": "در انتظار بررسی امنیت",
+            "tier_strengths_fa": (["شتاب حجم و نقدینگی قابل توجه است."] if volume and liquidity and liquidity > 0 and volume / liquidity >= 3 else []),
+            "tier_cautions_fa": ["گیت امنیتی هنوز PASS نشده است؛ UNKNOWN یا بررسی‌نشده به معنی سالم بودن قرارداد نیست."],
+            "tier_data_confidence": "INCOMPLETE",
+        }
+
+    if (
+        market.get("status") == "PASS"
+        and exit_gate.get("status") == "PASS"
+        and liquidity is not None and liquidity >= 50_000
+        and volume is not None and volume >= 100_000
+        and momentum is not None and momentum >= 70
+        and _finite(scores.get("momentum_evidence_coverage_pct")) is not None
+        and _finite(scores.get("momentum_evidence_coverage_pct")) >= 75
+        and buy_share is not None and buy_share >= 55
+        and _finite(scores.get("safety_exit_liquidity_score")) is not None
+        and _finite(scores.get("safety_exit_liquidity_score")) >= 70
+    ):
+        return {
+            "tier": "TIER_1_VERIFIED_GEM", "tier_label_fa": "ستاره طلایی: شواهد قوی و تطبیق‌شده",
+            "tier_strengths_fa": ["امنیت پایه تأیید شده است.", "نقدینگی و حجم از دو منبع مستقل تطبیق شده‌اند.", "فشار خرید و امکان خروج تخمینی از آستانه عبور کرده‌اند."],
+            "tier_cautions_fa": ["امتیاز رشد تضمین سود نیست؛ لغزش خروج هنوز تخمینی است."],
+            "tier_data_confidence": "HIGH",
+        }
+
+    if (
+        liquidity is not None and liquidity >= 10_000
+        and volume is not None and volume >= 100_000
+        and ratio is not None and ratio >= 3.0
+        and buy_share is not None and buy_share >= 50
+        and (momentum is None or momentum >= 50)
+    ):
+        cautions = []
+        if market.get("status") != "PASS":
+            cautions.append("تطبیق مستقل دو منبع هنوز کامل نیست؛ قیمت/حجم ممکن است نیازمند تأیید باشد.")
+        if exit_gate.get("status") != "PASS":
+            cautions.append("لغزش خروج هنوز تأیید نشده؛ این طبقه مجوز معامله نیست.")
+        if momentum is None or _finite(scores.get("momentum_evidence_coverage_pct")) is None or _finite(scores.get("momentum_evidence_coverage_pct")) < 75:
+            cautions.append("سابقهٔ کندلی یا نمونهٔ معاملات هنوز کوتاه است؛ امتیاز مومنتوم پوشش کامل ندارد.")
+        if scores.get("smart_money_evidence_status") == "NOT_AVAILABLE":
+            cautions.append("انتساب پول هوشمند و شناسایی خریداران جدید هنوز در دسترس نیست.")
+        return {
+            "tier": "TIER_2_EARLY_ALPHA", "tier_label_fa": "فرصت اولیه: واچ‌لیست داغ",
+            "tier_strengths_fa": ["گیت امنیت پایه PASS شده است.", f"نسبت حجم به نقدینگی {ratio:.2f} برابر است.", "حجم و فشار خرید اولیه از آستانهٔ واچ‌لیست عبور کرده‌اند."],
+            "tier_cautions_fa": cautions or ["فرصت اولیه است و هنوز تأیید کامل Tier 1 را ندارد."],
+            "tier_data_confidence": "MEDIUM" if market.get("status") == "PASS" else "LIMITED",
+        }
+
+    return {
+        "tier": "RESEARCH_WATCH", "tier_label_fa": "پایش پژوهشی: شواهد هنوز کافی نیست",
+        "tier_strengths_fa": (["امنیت پایه PASS شده است."] if security_status == "PASS" else []),
+        "tier_cautions_fa": ["نامزد حذف نشده است؛ برای ارتقا به Tier 2 به نقدینگی، حجم و فشار خرید قابل‌اندازه‌گیری نیاز دارد."],
+        "tier_data_confidence": "LIMITED",
     }
 
 
@@ -356,7 +471,9 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
         original_trade_authorization = row.get("trade_authorization")
         scores = score_candidate_v3(row)
         row.update(scores)
-        row["gem_hunter_v3_status"] = scores.get("candidate_status")
+        tier = classify_gem_tier(row, scores)
+        row.update(tier)
+        row["gem_hunter_v3_status"] = tier.get("tier")
         row["candidate_status"] = original_status
         row["trade_authorization"] = original_trade_authorization
         row["gem_hunter_v3_trade_authorization"] = "NO_TRADE"
@@ -367,7 +484,7 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
                 row["gem_hunter_storage_status"] = "PERSISTED"
             except Exception as exc:
                 row["gem_hunter_storage_status"] = f"UNKNOWN:{type(exc).__name__}"
-        if notify and store is not None and row.get("gem_hunter_v3_status") == "QUALIFIED_GEM":
+        if notify and store is not None and row.get("gem_hunter_v3_status") in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA"}:
             try:
                 row["telegram_alert_status"] = notify_qualified_gem(row, store)
             except Exception as exc:
