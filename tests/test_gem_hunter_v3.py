@@ -45,7 +45,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "technical_evidence": {"coverage_status": "COMPLETE", "filters": {"trend": "PASS", "momentum": "PASS"}},
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 20},
-            "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000, "verified_volume_24h_usd": 500000},
+            "market_reconciliation": {"status": "PASS", "verification_level": "INDEPENDENT_CROSS_SOURCE", "verified_liquidity_usd": 100000, "verified_volume_24h_usd": 500000},
         })
         self.assertEqual(result["short_term_momentum_smart_money_score"], 83.75)
         self.assertEqual(result["short_term_momentum_score"], 83.75)
@@ -111,7 +111,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "liquidity_usd": 100000, "volume_24h_usd": 500000,
             "volume_to_liquidity_24h": 5, "buy_volume_share_pct": 70,
             "security_evidence": {"status": "PASS"},
-            "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000,
+            "market_reconciliation": {"status": "PASS", "verification_level": "INDEPENDENT_CROSS_SOURCE", "verified_liquidity_usd": 100000,
                                       "verified_volume_24h_usd": 500000},
             "exit_slippage_evidence": {"status": "PASS"},
         }
@@ -121,6 +121,40 @@ class GemHunterV3Tests(unittest.TestCase):
             "safety_exit_liquidity_score": 90,
         })
         self.assertEqual(tier["tier"], "TIER_1_VERIFIED_GEM")
+
+    def test_dex_single_source_is_not_mislabeled_as_independently_verified_gem(self):
+        result = score_candidate_v3({
+            "pool_trade_evidence": {"buy_volume_usd": 9000, "sell_volume_usd": 1000, "coverage_status": "COMPLETE"},
+            "technical_evidence": {"coverage_status": "COMPLETE", "filters": {"trend": "PASS", "momentum": "PASS"}},
+            "security_evidence": {"status": "PASS"},
+            "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 10},
+            "market_reconciliation": {
+                "status": "PASS", "verification_level": "DEXSCREENER_PRIMARY_SINGLE_SOURCE",
+                "verified_liquidity_usd": 150000, "verified_volume_24h_usd": 350000,
+            },
+        })
+        self.assertEqual(result["candidate_status"], "RESEARCH_WATCH")
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
+
+    def test_single_source_dex_market_cannot_enter_tier1_and_tier2_explains_limit(self):
+        candidate = {
+            "chain": "base", "liquidity_usd": 150000, "volume_24h_usd": 350000,
+            "volume_to_liquidity_24h": 4.0, "buy_volume_share_pct": 70,
+            "security_evidence": {"status": "PASS"},
+            "market_reconciliation": {
+                "status": "PASS", "verification_level": "DEXSCREENER_PRIMARY_SINGLE_SOURCE",
+                "verified_liquidity_usd": 150000, "verified_volume_24h_usd": 350000,
+            },
+            "exit_slippage_evidence": {"status": "PASS"},
+        }
+        tier = classify_gem_tier(candidate, {
+            "short_term_momentum_score": 80, "momentum_evidence_coverage_pct": 80,
+            "momentum_score_components": {"pool_buy_volume_share": 70},
+            "safety_exit_liquidity_score": 90,
+        })
+        self.assertNotEqual(tier["tier"], "TIER_1_VERIFIED_GEM")
+        self.assertEqual(tier["tier"], "TIER_2_EARLY_ALPHA")
+        self.assertTrue(any("منبع مستقل دوم" in item for item in tier["tier_cautions_fa"]))
 
     def test_three_scores_do_not_invent_missing_evidence(self):
         result = score_candidate_v3({})
