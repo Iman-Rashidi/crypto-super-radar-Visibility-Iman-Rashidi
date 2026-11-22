@@ -99,6 +99,21 @@ class HttpRetryTests(unittest.TestCase):
         sleep.assert_called_once_with(0.0)
 
     @patch("crypto_super_radar.providers.requests.request")
+    def test_request_specific_retry_budget_and_timeout_are_respected(self, request):
+        response = MagicMock(status_code=429, headers={"Retry-After": "0"}, text="rate limited")
+        request.return_value = response
+        client = PublicHttpClient(AppConfig(max_http_retries=3))
+        client.limiter.wait = MagicMock()
+        with self.assertRaisesRegex(DataProviderError, "HTTP 429"):
+            client.post(
+                "https://api.mainnet-beta.solana.com",
+                {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": []},
+                timeout=6, max_retries=1,
+            )
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_args.kwargs["timeout"], 6)
+
+    @patch("crypto_super_radar.providers.requests.request")
     def test_non_retryable_http_error_fails_immediately(self, request):
         response = MagicMock(status_code=400, headers={}, text="bad request")
         request.return_value = response
