@@ -68,3 +68,4 @@ jobs:
             -f ref=staging/challenge1-integration-2026-11-16
 
 # V2 guarded Demo verification after Groq config fix and Turso read-back validation.
+# one-time V2 Demo dispatch for Staging deploy 1ce26cce28484dabb92c2cf99253fa8687ee2b1b
