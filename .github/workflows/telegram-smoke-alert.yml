@@ -1,0 +1,41 @@
+name: Telegram smoke alert (isolated)
+
+on:
+  push:
+    branches:
+      - staging/challenge1-integration-2026-11-16
+    paths:
+      - crypto_super_radar/telegram_notifier.py
+      - tests/test_telegram_notifier.py
+      - .github/workflows/telegram-smoke-alert.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-smoke-alert
+  cancel-in-progress: false
+
+jobs:
+  telegram-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - name: Checkout Staging source
+        uses: actions/checkout@v4
+        with:
+          ref: staging/challenge1-integration-2026-11-16
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install notifier test dependencies
+        run: python -m pip install --disable-pip-version-check requests
+      - name: Run isolated Telegram unit tests
+        run: python -m unittest discover -s tests -p 'test_telegram_notifier.py' -v
+      - name: Lock @Germany004 in Turso and send smoke alert
+        run: python -m crypto_super_radar.telegram_notifier --smoke-test

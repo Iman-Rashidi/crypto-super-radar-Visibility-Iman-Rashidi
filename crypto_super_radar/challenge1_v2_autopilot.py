@@ -97,7 +97,7 @@ def _exit_id(prefix: str, position_id: str) -> str:
     return (prefix + hashlib.sha256(position_id.encode()).hexdigest()[:20])[:32]
 
 
-def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None) -> dict[str, Any]:
+def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None, notifier: Any | None = None) -> dict[str, Any]:
     """Manage exact Turso-journaled V2 positions; ambiguous state never triggers a write."""
     now_ms = int(now_ms if now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     states = store.list_v2_position_exit_states(active_only=True, limit=100)
@@ -113,6 +113,47 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None)
             and str(p.get("positionSide") or "").lower() == "net"
             and Decimal(str(p.get("positions") or "0")) != 0]
         if len(exact) != 1:
+            # A missing live position is not proof of closure. Reconcile exact
+            # positionId against Demo partial/closed history before recording.
+            if not exact:
+                try:
+                    partial_rows = _rows(client.get_positions_history(inst_id=inst, state="partially_closed", limit=100))
+                    closed_rows = _rows(client.get_positions_history(inst_id=inst, state="closed", limit=100))
+                    outcome = store.record_closed_position_outcome(
+                        instrument_id=inst, history_rows=closed_rows, partial_rows=partial_rows,
+                        client_order_id=str(state.get("client_order_id") or ""), position_id=pid,
+                    )
+                    if isinstance(outcome, Mapping) and outcome.get("status") == "RECORDED":
+                        history = [r for r in (partial_rows + closed_rows)
+                            if str(r.get("positionId") or "") == pid]
+                        raw_reason = " ".join(str(
+                            next((r.get(k) for r in reversed(history) if r.get(k)),
+                                 state.get("exit_reason") or "")
+                        ) for k in ("closeType", "closeReason", "reason", "exitType")).strip().upper()
+                        if str(state.get("status") or "").upper() == "TIME_EXIT_PENDING" or str(state.get("exit_order_id") or "").startswith("TIME"):
+                            exit_reason = "TIME_EXIT"
+                        elif any(term in raw_reason for term in ("STOP", "SL", "LOSS")):
+                            exit_reason = "SL"
+                        elif any(term in raw_reason for term in ("TAKE", "TP", "PROFIT")):
+                            exit_reason = "TP"
+                        else:
+                            exit_reason = raw_reason[:48] or "EXCHANGE_CLOSED"
+                        state.update(status="CLOSED", exit_reason=exit_reason,
+                            closed_history_ids=outcome.get("history_ids", []))
+                        store.save_v2_position_exit_state(state)
+                        if notifier is not None:
+                            notifier.notify_async(
+                                f"challenge1-v2:closed:{pid}",
+                                f"🏁 معامله {inst} پایان یافت\\nجهت: {state.get('side')}\\nدلیل خروج: {exit_reason}\\n"
+                                f"PnL پس از کارمزد معاملاتی (پیش از Funding): {outcome.get('realized_pnl_after_reported_trading_fees')} USDT",
+                            )
+                        results.append({"position_id":pid,"status":"CLOSED_RECONCILED","exit_reason":exit_reason})
+                        continue
+                    results.append({"position_id":pid,"status":str((outcome or {}).get("status") or "CLOSE_HISTORY_NOT_RECONCILED")})
+                    continue
+                except Exception as exc:
+                    results.append({"position_id":pid,"status":"CLOSE_HISTORY_CHECK_FAILED","error_type":type(exc).__name__})
+                    continue
             results.append({"position_id":pid,"status":"POSITION_NOT_EXACTLY_IDENTIFIED"})
             continue
         marks = _rows(client.get_mark_price(inst_id=inst))
@@ -151,6 +192,12 @@ def manage_open_positions(client: Any, store: Any, *, now_ms: int | None = None)
             state.update(tp1_executed=True,remaining_size=str(Decimal(str(state["original_size"]))-half),
                 status="TP1_EXECUTED",break_even_stop_loss=str(net_be),tp1_exit_order_id=cid)
             store.save_v2_position_exit_state(state)
+            if notifier is not None:
+                notifier.notify_async(
+                    f"challenge1-v2:tp1:{pid}",
+                    f"🎯 TP1 تأیید شد: {inst}\\nجهت: {side}\\nپرشدن: ۵۰٪ حجم\\n"
+                    f"حد ضرر به نقطه سربه‌سر منتقل و تأیید شد: {net_be}",
+                )
             results.append({"position_id":pid,"status":"TP1_EXECUTED_SL_VERIFIED"})
             continue
         candles = client.get_candles(inst,bar="15m",limit=30)
@@ -207,7 +254,8 @@ def _persist_entry_state(client: Any, store: Any, execution: Mapping[str, Any],
 
 
 def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str,...]=SYMBOLS,
-              executor: Any | None=None, environ: Mapping[str,str] | None=None) -> dict[str,Any]:
+              executor: Any | None=None, environ: Mapping[str,str] | None=None,
+              notifier: Any | None=None) -> dict[str,Any]:
     if analyzer is None:
         from .challenge1_v2_orchestration import analyze_challenge1_v2_market
         analyzer=analyze_challenge1_v2_market
@@ -216,7 +264,17 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
     if trading_active and executor is None:
         raise RuntimeError("Demo trading flags enabled without BloFinDemoExecutor.")
     cycle_id,started_at=uuid.uuid4().hex,_utc_now()
-    exit_summary=manage_open_positions(client,executor.store) if trading_active else {"positions_checked":0,"results":[]}
+    if notifier is None and str(env.get("TELEGRAM_BOT_TOKEN") or "").strip():
+        try:
+            from .telegram_notifier import TelegramNotifier
+            from .database import connect_database
+            notifier = TelegramNotifier(
+                token=os.getenv("TELEGRAM_BOT_TOKEN"),
+                connection_factory=connect_database,
+            )
+        except Exception:
+            notifier = None
+    exit_summary=manage_open_positions(client,executor.store,notifier=notifier) if trading_active else {"positions_checked":0,"results":[]}
     rows=[]
     for symbol in symbols:
         try:
@@ -231,8 +289,16 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
                 inst=str(result.get("instrument_id") or result.get("inst_id") or symbol).upper()
                 execution=executor.execute(result,inst_id=inst,allow_demo_orders=True,
                     leverage=int(env.get("CHALLENGE_1_V2_LEVERAGE","1")))
-                _persist_entry_state(client,executor.store,execution,result,
+                entry_state = _persist_entry_state(client,executor.store,execution,result,
                     now_ms=int(datetime.now(timezone.utc).timestamp()*1000))
+                if notifier is not None:
+                    notifier.notify_async(
+                        f"challenge1-v2:entry:{entry_state['position_id']}",
+                        f"🚀 معامله جدید تأیید شد: {inst}\\nجهت: {entry_state['side']}\\n"
+                        f"قیمت ورود: {entry_state['entry_price']}\\nحد ضرر SL: {entry_state['initial_stop_loss']}\\n"
+                        f"هدف اول TP1: {result.get('take_profit') or result.get('take_profit_1') or 'ثبت‌شده در برنامه خروج'}\\n"
+                        f"شناسه موقعیت: {entry_state['position_id']}\\nسفارش حفاظتی SL: فعال و تأییدشده",
+                    )
                 safe.update(execution_result=dict(execution),orders_submitted=True,mode="DEMO_AUTOPILOT")
             elif trading_active:
                 safe["entry_skipped_reason"]="TWO_REVIEWER_APPROVAL_NOT_PRESENT"
