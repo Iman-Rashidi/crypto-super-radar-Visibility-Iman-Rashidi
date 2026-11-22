@@ -96,8 +96,7 @@ class DexScreenerOnlyPipelineTests(unittest.TestCase):
         def process(rows, notify=True):
             for index, row in enumerate(rows):
                 row["gem_hunter_v3_status"] = (
-                    "TIER_1_VERIFIED_GEM" if index == 0 else
-                    "TIER_2_EARLY_ALPHA" if index == 1 else "RESEARCH_WATCH"
+                    "TIER_2_EARLY_ALPHA" if index == 0 else "RESEARCH_WATCH"
                 )
                 row["trade_authorization"] = "NO_TRADE"
                 row["gem_hunter_v3_trade_authorization"] = "NO_TRADE"
@@ -118,7 +117,7 @@ class DexScreenerOnlyPipelineTests(unittest.TestCase):
         self.assertEqual(report["evaluation_record_count"], 10)
         self.assertEqual(report["complete_evaluation_count"], 10)
         self.assertEqual(report["evaluation_target_count"], 10)
-        self.assertEqual(report["gem_hunter_v3_tier1_count"], 1)
+        self.assertEqual(report["gem_hunter_v3_tier1_count"], 0)
         self.assertEqual(report["gem_hunter_v3_tier2_count"], 1)
         self.assertEqual(report["primary_source"], "DEXSCREENER")
         self.assertEqual(report["market_reconciliation_counts"]["PASS"], 10)
