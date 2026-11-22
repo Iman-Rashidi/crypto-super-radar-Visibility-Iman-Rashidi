@@ -1403,6 +1403,7 @@ def _gem_hunter_pending_payload(*, refreshing: bool, error: str | None = None) -
         "status": "UNKNOWN" if failed else "LOADING",
         "generated_at_utc": None,
         "networks": ["base", "ethereum", "solana"],
+        "trade_authorization": "NO_TRADE",
         "source_count": 0,
         "sources": {},
         "candidate_count": 0,
