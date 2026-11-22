@@ -1,0 +1,77 @@
+name: Challenge 1 V2 Staging live acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staging-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
+    steps:
+      - name: Verify deployed health and public five-market snapshot
+        shell: python
+        run: |
+          import json
+          import os
+          import urllib.request
+
+          base = os.environ["STAGING_URL"].rstrip("/")
+          for path in ("/health", "/api/blofin/demo/v2-autopilot/latest-public"):
+              request = urllib.request.Request(base + path, headers={"Accept": "application/json"})
+              with urllib.request.urlopen(request, timeout=25) as response:
+                  body = json.loads(response.read().decode("utf-8"))
+                  print(json.dumps({"path": path, "http_status": response.status, "body": body}, ensure_ascii=False))
+                  assert response.status == 200
+                  if path == "/health":
+                      assert body.get("status") == "ok"
+                  else:
+                      assert body.get("status") == "OK"
+                      symbols = [row.get("symbol") for row in body.get("cycles", [])]
+                      assert symbols == ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT"], symbols
+                      assert body.get("latest_cycle_id")
+                      assert len(body.get("cycles", [])) == 5
+
+      - name: Run simultaneous independent live AI reviewer dry-run
+        shell: python
+        run: |
+          import json
+          import os
+          import urllib.request
+
+          base = os.environ["STAGING_URL"].rstrip("/")
+          request = urllib.request.Request(
+              base + "/api/ai/dry-run",
+              data=b"confirm=1",
+              headers={
+                  "Accept": "application/json",
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  "Origin": base,
+                  "Sec-Fetch-Site": "same-origin",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=180) as response:
+              payload = json.loads(response.read().decode("utf-8"))
+              print(json.dumps(payload, ensure_ascii=False))
+              assert response.status == 200
+          consensus = payload.get("ai_consensus") or {}
+          assert payload.get("test_passed") is True, payload.get("status")
+          assert consensus.get("status") == "APPROVED_BY_BOTH", consensus
+          assert consensus.get("primary_verified") is True
+          assert consensus.get("second_verified") is True
+          assert consensus.get("providers_independent") is True
+          assert consensus.get("models_independent") is True
+          reviewers = payload.get("ai_reviews") or []
+          assert len(reviewers) == 2, reviewers
+          for reviewer in reviewers:
+              review = reviewer.get("review") or {}
+              assert review.get("http_status") == 200, reviewer
+              assert review.get("response_validated") is True, reviewer
+              assert review.get("model_verified") is True, reviewer
+          assert payload.get("orders_submitted") is False
+          assert payload.get("trade_executed") is False
