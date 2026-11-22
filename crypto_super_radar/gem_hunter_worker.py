@@ -152,9 +152,10 @@ def run_scan(limit: int = 50) -> dict[str, Any]:
         raise RuntimeError("Gem Hunter V3 did not return a candidate list.")
     if payload.get("status") not in {"PASS", "PARTIAL"}:
         raise RuntimeError("Discovery source did not return a usable scan: " + str(payload.get("status")))
-    failed = [row for row in rows if row.get("gem_hunter_storage_status") not in {"PERSISTED"}]
+    evaluated_rows = [row for row in rows if isinstance(row.get("qualification"), dict)]
+    failed = [row for row in evaluated_rows if row.get("gem_hunter_storage_status") != "PERSISTED"]
     if failed:
-        raise RuntimeError(f"{len(failed)} V3 candidates were not confirmed persisted to Turso.")
+        raise RuntimeError(f"{len(failed)} evaluated V3 candidates were not confirmed persisted to Turso.")
     payload = dict(payload)
     payload["report_id"] = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     payload["generated_at_utc"] = payload.get("generated_at_utc") or _utc_now()
