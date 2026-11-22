@@ -36,3 +36,5 @@ No live/demo order writes. Main, staging, Render and active CHALLENGE_1_V2 were 
 - Independent SHA-256: f2dc555dad89a5e1a9cbf1470547fe25f95946f1947e097395b3899c671887ba.
 - Independent source spans 2025-10-31 09:00 UTC to 2026-03-09 00:00 UTC (~4.25 months); first month is warm-up. Scored holdout is 2025-11-30 to 2026-03-09 (~3.25 months), not a full 4.5-month scored sample.
 - Only 26 independent Range-only trades: insufficient to establish durable profitability.
+
+- Max Drawdown is measured on realized equity at trade exits, not full intratrade mark-to-market excursions; it may understate worst intratrade drawdown.
