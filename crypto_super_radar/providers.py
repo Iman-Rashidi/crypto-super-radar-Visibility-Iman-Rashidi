@@ -22,8 +22,8 @@ class DataProviderError(RuntimeError):
     pass
 
 
-NETWORKS = {"solana": "solana", "base": "base", "eth": "eth"}
-DEX_CHAINS = {"solana": "solana", "base": "base", "eth": "ethereum"}
+NETWORKS = {"solana": "solana", "base": "base", "eth": "eth", "ethereum": "eth"}
+DEX_CHAINS = {"solana": "solana", "base": "base", "eth": "ethereum", "ethereum": "ethereum"}
 
 
 class PublicHttpClient:
