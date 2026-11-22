@@ -1355,7 +1355,11 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result.pop("trade_authorization", None)
     result.pop("available_candidate_count", None)
     result["candidates"] = qualified
-    result["gem_hunter_v3_qualified_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "QUALIFIED_GEM")
+    result["gem_hunter_v3_tier1_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "TIER_1_VERIFIED_GEM")
+    result["gem_hunter_v3_tier2_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "TIER_2_EARLY_ALPHA")
+    result["gem_hunter_v3_review_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "REVIEW_REQUIRED")
+    result["gem_hunter_v3_blocked_count"] = sum(1 for item in raw_candidates if str(item.get("gem_hunter_v3_status") or "").startswith("BLOCKED_"))
+    result["gem_hunter_v3_qualified_count"] = result["gem_hunter_v3_tier1_count"] + result["gem_hunter_v3_tier2_count"]
     result["candidate_count"] = len(qualified)
     result["discovered_candidate_count"] = discovered_count
     result["evaluation_record_count"] = evaluation_record_count
