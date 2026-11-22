@@ -61,7 +61,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "technical_evidence": {"coverage_status": "COMPLETE", "filters": {"trend": "PASS", "momentum": "PASS"}},
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 10},
-            "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000, "verified_volume_24h_usd": 500000},
+            "market_reconciliation": {"status": "PASS", "verification_level": "INDEPENDENT_CROSS_SOURCE", "verified_liquidity_usd": 100000, "verified_volume_24h_usd": 500000},
         })
         self.assertEqual(result["candidate_status"], "QUALIFIED_GEM")
         self.assertEqual(result["wallet_breadth_evidence_status"], "UNKNOWN")
