@@ -1,0 +1,95 @@
+name: Gem Hunter V3 Staging live research scan
+
+on:
+  push:
+    branches:
+      - staging/challenge1-integration-2026-11-16
+    paths:
+      - .github/workflows/gem-hunter-v3-staging-live-scan.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-research-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
+    steps:
+      - name: Trigger and collect Gem Hunter V3 research-only scan
+        shell: python
+        run: |
+          import json
+          import os
+          import time
+          import urllib.request
+          from pathlib import Path
+
+          base = os.environ["STAGING_URL"].rstrip("/")
+
+          def get_json(path):
+              request = urllib.request.Request(
+                  base + path,
+                  headers={"Accept": "application/json", "Cache-Control": "no-cache"},
+              )
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  body = json.loads(response.read().decode("utf-8"))
+                  print(json.dumps({
+                      "path": path,
+                      "http_status": response.status,
+                      "status": body.get("status"),
+                      "refreshing": body.get("refreshing"),
+                      "generated_at_utc": body.get("generated_at_utc"),
+                  }, ensure_ascii=False))
+                  assert response.status == 200
+                  return body
+
+          health = get_json("/health")
+          assert health.get("status") == "ok", health
+
+          # refresh=1 starts the asynchronous V3 discovery; regular GETs only poll it.
+          report = get_json("/api/gem-hunter/report?limit=20&refresh=1")
+          for attempt in range(36):
+              if not report.get("refreshing"):
+                  break
+              time.sleep(10)
+              report = get_json("/api/gem-hunter/report?limit=20")
+          else:
+              raise TimeoutError("Gem Hunter V3 scan did not finish within 6 minutes")
+
+          candidates = report.get("diagnostic_candidates") or report.get("candidates") or []
+          summary = {
+              "status": report.get("status"),
+              "generated_at_utc": report.get("generated_at_utc"),
+              "networks": report.get("networks"),
+              "discovered_candidate_count": report.get("discovered_candidate_count", report.get("candidate_count", len(candidates))),
+              "tier1_count": report.get("gem_hunter_v3_tier1_count"),
+              "tier2_count": report.get("gem_hunter_v3_tier2_count"),
+              "review_count": report.get("gem_hunter_v3_review_count"),
+              "blocked_count": report.get("gem_hunter_v3_blocked_count"),
+              "refreshing": report.get("refreshing"),
+              "stale": report.get("stale"),
+              "trade_authorization": report.get("trade_authorization", "NO_TRADE"),
+              "candidates": candidates,
+              "sources": report.get("sources"),
+              "market_reconciliation_counts": report.get("market_reconciliation_counts"),
+              "diagnostic_fa": report.get("diagnostic_fa"),
+              "diagnostic_freshness": report.get("diagnostic_freshness"),
+          }
+          Path("gem-hunter-v3-live-scan.json").write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          print("GEM_HUNTER_V3_LIVE_SCAN_RESULT")
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          assert report.get("refreshing") is not True
+          assert report.get("trade_authorization", "NO_TRADE") == "NO_TRADE"
+          print("Research-only scan completed. No trade/order route was called.")
+
+      - name: Upload live scan evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gem-hunter-v3-staging-live-scan
+          path: gem-hunter-v3-live-scan.json
+          if-no-files-found: error
