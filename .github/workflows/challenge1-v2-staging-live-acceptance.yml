@@ -6,6 +6,8 @@ on:
       - staging/challenge1-integration-2026-11-16
     paths:
       - .github/workflows/challenge1-v2-staging-live-acceptance.yml
+      - crypto_super_radar/web_app.py
+      - tests/test_v2_public_dashboard.py
   workflow_dispatch:
 
 permissions:
