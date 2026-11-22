@@ -246,6 +246,7 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn('cdn.simpleicons.org/bybit', page)
         self.assertIn('cdn.simpleicons.org/okx', page)
         self.assertIn('/api/gem-hunter/report?limit=10&refresh=1', page)
+        self.assertNotIn("gem-hunter/v2/candidates", page)
         self.assertNotIn('/api/gem-hunter/v2/candidates?limit=10', page)
         self.assertIn('Tier 1', page)
         self.assertIn('Tier 2', page)
