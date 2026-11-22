@@ -1402,7 +1402,7 @@ def _gem_hunter_pending_payload(*, refreshing: bool, error: str | None = None) -
     return {
         "status": "UNKNOWN" if failed else "LOADING",
         "generated_at_utc": None,
-        "networks": ["base", "solana"],
+        "networks": ["base", "ethereum", "solana"],
         "source_count": 0,
         "sources": {},
         "candidate_count": 0,
@@ -7820,7 +7820,7 @@ async function loadBlofinInstruments(){
             <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن کشف اجرا نشده است.</span>
           </div>
           <div id="gem-hunter-results" style="overflow-x:auto">
-            <p class="muted">برای دریافت فهرست اولیهٔ کاندیداها دکمهٔ کشف را بزنید.</p>
+            <p class="muted">برای اجرای اسکن زندهٔ Gem Hunter V3 دکمهٔ کشف را بزنید؛ نامزدهای Tier 1 و Tier 2 با نقاط قوت و احتیاط نمایش داده می‌شوند.</p>
           </div>
         </section>
         <section class="card" id="gem-hunter-watchlist">
@@ -8166,7 +8166,7 @@ async function loadBlofinInstruments(){
             let lastError = null;
             for (let retry = 0; retry < 4; retry += 1) {
               try {
-                const response = await fetch('/api/gem-hunter/v2/candidates?limit=10', {
+                const response = await fetch('/api/gem-hunter/report?limit=10', {
                   cache: 'no-store',
                   credentials: 'same-origin',
                   headers: { 'Accept': 'application/json' }
@@ -8235,7 +8235,7 @@ async function loadBlofinInstruments(){
               'candidate-meta'));
           };
           button.addEventListener('click', async () => {
-            button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت ۱۰ نامزد برتر ذخیره‌شده در Turso و گزارش شش معیار Gem Hunter V2...'));
+            button.disabled = true; results.replaceChildren(el('p', 'در حال اجرای اسکن زندهٔ Gem Hunter V3 روی Solana، Base و Ethereum و بررسی طبقه‌های Tier 1 و Tier 2...'));
              window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana، Base و Ethereum...');
             status.textContent = 'در حال کشف و اعتبارسنجی Solana، Base و Ethereum...';
             try {
@@ -8259,11 +8259,12 @@ async function loadBlofinInstruments(){
                 Number(data.complete_evaluation_count || 0) + ' · BUY تأییدشده: ' + buys.length;
               const summary = document.createElement('div');
               summary.appendChild(el('p', data.diagnostic_fa || 'گزارش مرحلهٔ کشف آماده شد.', 'muted'));
-              summary.appendChild(el('p', 'کشف: ' + discovered + ' | دارای پروندهٔ ارزیابی: ' +
-                Number(data.evaluation_record_count || 0) + ' | ساختار کامل پرونده: ' +
-                Number(data.complete_evaluation_count || 0) + ' | ارزیابی ناقص: ' +
-                Number(data.incomplete_evaluation_count || 0) + ' | ارزیابی‌نشده: ' +
-                Number(data.unassessed_candidate_count || 0), 'muted'));
+              summary.appendChild(el('p', 'کشف: ' + discovered +
+                ' | ⭐ Tier 1: ' + Number(data.gem_hunter_v3_tier1_count || 0) +
+                ' | 🔥 Tier 2: ' + Number(data.gem_hunter_v3_tier2_count || 0) +
+                ' | بررسی امنیت: ' + Number(data.gem_hunter_v3_review_count || 0) +
+                ' | مسدود: ' + Number(data.gem_hunter_v3_blocked_count || 0) +
+                ' | BUY معاملاتی: صفر (NO_TRADE)', 'muted'));
               const reconciliationCounts = data.market_reconciliation_counts || {};
               summary.appendChild(el('p', 'تطبیق مستقل Pool: ' +
                 Number(reconciliationCounts.PASS || 0) + ' PASS · ' +
