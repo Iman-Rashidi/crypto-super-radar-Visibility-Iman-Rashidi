@@ -171,9 +171,13 @@ def _closed_frame(
     return frame.astype(float)
 
 
+STANDARD_CRYPTO_PERPETUALS = frozenset({"BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT"})
+
+
 def _regular_funding(
     client: Any, instrument_id: str, *, asof_ms: int,
 ) -> dict[str, Any]:
+    """Validate funding history; infer the standard class only for exact known crypto perps."""
     rows = client.get_funding_rate_history(inst_id=instrument_id, limit=100)
     if not isinstance(rows, list) or not rows:
         raise Challenge1V2DataBlocked("Funding history is unavailable")
@@ -182,21 +186,30 @@ def _regular_funding(
     for row in rows:
         if not isinstance(row, Mapping):
             raise Challenge1V2DataBlocked("Funding history contains a malformed event")
+        if str(row.get("instId") or "").strip().upper() != instrument_id:
+            raise Challenge1V2DataBlocked("Funding event instrument identity is missing or mismatched")
         try:
             timestamp = int(row["fundingTime"])
             rate = _finite(row["fundingRate"], "fundingRate")
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise Challenge1V2DataBlocked("Funding event timestamp or rate is missing") from exc
-        kind = row.get("fundingKind")
-        if kind is None or str(kind).strip() not in {"0", "1"}:
-            raise Challenge1V2DataBlocked("FundingKind is missing or unsupported; event class cannot be inferred")
-        kind = str(kind).strip()
+        raw_kind = row.get("fundingKind")
+        if raw_kind is None or not str(raw_kind).strip():
+            if instrument_id not in STANDARD_CRYPTO_PERPETUALS:
+                raise Challenge1V2DataBlocked("FundingKind is missing for a non-standard instrument")
+            kind = "0"
+            classification = "STANDARD_CRYPTO_FUNDING"
+        else:
+            kind = str(raw_kind).strip()
+            if kind not in {"0", "1"}:
+                raise Challenge1V2DataBlocked("FundingKind is unsupported")
+            classification = "STANDARD_CRYPTO_FUNDING" if kind == "0" else "NON_STANDARD_FUNDING_EVENT"
         if timestamp <= 0 or timestamp in seen:
             raise Challenge1V2DataBlocked("Funding history has an invalid or duplicate timestamp")
         seen.add(timestamp)
-        parsed.append((timestamp, rate, kind))
+        parsed.append((timestamp, rate, kind, classification))
     latest = max(parsed, key=lambda item: item[0])
-    timestamp, rate, kind = latest
+    timestamp, rate, kind, classification = latest
     age_ms = asof_ms - timestamp
     if age_ms < 0:
         raise Challenge1V2DataBlocked("Latest funding event is future-dated")
@@ -207,6 +220,7 @@ def _regular_funding(
     return {
         "funding_rate": rate,
         "funding_kind": kind,
+        "funding_classification": classification,
         "funding_event_time_ms": timestamp,
         "funding_max_age_ms": FUNDING_MAX_AGE_MS,
         "funding_age_ms": age_ms,
@@ -277,6 +291,7 @@ def analyze_challenge1_v2_market(
             "BTC_15m": {"rows": len(btc_15m), "latest_open_utc": btc_15m.index[-1].isoformat()},
         },
         "funding": funding,
+        "funding_classification": funding["funding_classification"],
         "contract_specs_verified": True,
         "common_asof": True,
     }
