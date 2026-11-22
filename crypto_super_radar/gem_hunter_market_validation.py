@@ -14,7 +14,10 @@ from typing import Any
 
 DEX_BASE = "https://api.dexscreener.com"
 GECKO_BASE = "https://api.geckoterminal.com/api/v2"
-MAX_SOURCE_RATIO = 2.0
+MAX_SOURCE_RATIO = 1.05  # Backward-compatible strict default for price comparisons.
+MAX_PRICE_DISAGREEMENT_RATIO = 1.05
+MAX_LIQUIDITY_DISAGREEMENT_RATIO = 1.25
+MAX_VOLUME_DISAGREEMENT_RATIO = 1.50
 CACHE_TTL_SECONDS = 45.0
 MAX_CANDIDATES_PER_SCAN = 10
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -40,7 +43,7 @@ def _same_address(left: Any, right: Any, chain: str) -> bool:
 
 
 def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
-    chain_id = {"base": "base", "solana": "solana"}.get(chain)
+    chain_id = {"base": "base", "solana": "solana", "ethereum": "ethereum"}.get(chain)
     if not chain_id:
         raise ValueError("Unsupported chain for exact-pool reconciliation")
     payload = http.get(f"{DEX_BASE}/token-pairs/v1/{chain_id}/{token}")
@@ -99,10 +102,10 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
 
 
 def _gecko_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
-    if chain not in {"base", "solana"}:
+    if chain not in {"base", "solana", "ethereum"}:
         raise ValueError("Unsupported chain for GeckoTerminal reconciliation")
     payload = http.get(
-        f"{GECKO_BASE}/networks/{chain}/pools/{pool}",
+        f"{GECKO_BASE}/networks/{'eth' if chain == 'ethereum' else chain}/pools/{pool}",
         params={"include": "base_token,quote_token"},
     )
     if not isinstance(payload, dict):
@@ -142,11 +145,11 @@ def _gecko_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
     }
 
 
-def _ratio_conflict(values: list[float]) -> bool:
+def _ratio_conflict(values: list[float], max_ratio: float = MAX_SOURCE_RATIO) -> bool:
     positive = [value for value in values if value > 0]
     if len(positive) != len(values):
         return len(set(values)) > 1
-    return max(positive) / min(positive) > MAX_SOURCE_RATIO
+    return max(positive) / min(positive) > max_ratio
 
 
 def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
@@ -221,23 +224,23 @@ def reconcile_candidate_market_data(candidate: dict, http) -> dict[str, Any]:
             base["reason_fa"].append("حجم ۲۴ساعتهٔ هر دو منبع برای مقایسه موجود نیست.")
             result = base
         else:
-            price_conflict = _ratio_conflict(prices)
+            price_conflict = _ratio_conflict(prices, MAX_PRICE_DISAGREEMENT_RATIO)
             reported_price_conflict = (
                 reported_price is not None
                 and reported_price > 0
-                and _ratio_conflict([reported_price, *prices])
+                and _ratio_conflict([reported_price, *prices], MAX_PRICE_DISAGREEMENT_RATIO)
             )
-            liquidity_conflict = _ratio_conflict(liquidities)
-            volume_conflict = _ratio_conflict(volumes)
+            liquidity_conflict = _ratio_conflict(liquidities, MAX_LIQUIDITY_DISAGREEMENT_RATIO)
+            volume_conflict = _ratio_conflict(volumes, MAX_VOLUME_DISAGREEMENT_RATIO)
             reported_volume_conflict = (
                 reported_volume is not None
                 and reported_volume >= 0
-                and _ratio_conflict([reported_volume, *volumes])
+                and _ratio_conflict([reported_volume, *volumes], MAX_VOLUME_DISAGREEMENT_RATIO)
             )
             reported_conflict = (
                 reported_liquidity is not None
                 and reported_liquidity >= 0
-                and _ratio_conflict([reported_liquidity, *liquidities])
+                and _ratio_conflict([reported_liquidity, *liquidities], MAX_LIQUIDITY_DISAGREEMENT_RATIO)
             )
             ratios = []
             for values in ([*liquidities, reported_liquidity] if reported_liquidity is not None else liquidities,):
