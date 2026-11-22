@@ -1355,6 +1355,8 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result.pop("trade_authorization", None)
     result.pop("available_candidate_count", None)
     result["candidates"] = qualified
+    result["gem_hunter_v3_candidates"] = copy.deepcopy(raw_candidates[:limit])
+    result["gem_hunter_v3_qualified_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "QUALIFIED_GEM")
     result["candidate_count"] = len(qualified)
     result["discovered_candidate_count"] = discovered_count
     result["evaluation_record_count"] = evaluation_record_count
@@ -7979,7 +7981,7 @@ async function loadBlofinInstruments(){
               card.appendChild(el('p', (item.chain || 'شبکه نامشخص').toUpperCase() + ' · ' + (item.token_address || item.reference_url || 'بدون آدرس'), 'candidate-meta'));
               const links = document.createElement('div'); links.className = 'gem-links';
               if (item.reference_url) addLink(links, 'لینک ذخیره‌شده ↗', item.reference_url);
-              if (item.token_address && ['solana','base'].includes(item.chain)) addLink(links, 'اکسپلورر ↗', explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address));
+              if (item.token_address && ['solana','base','ethereum'].includes(item.chain)) addLink(links, 'اکسپلورر ↗', explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address));
               if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'DEX Screener ↗', 'https://dexscreener.com/' + item.chain + '/' + encodeURIComponent(item.pool_address));
               card.appendChild(links);
               const timeLabel = el('label', 'زمان بررسی بعدی');
@@ -8009,7 +8011,10 @@ async function loadBlofinInstruments(){
             const card = document.createElement('article'); card.className = 'gem-candidate';
             card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
             card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · نامزد مرحلهٔ کشف · ' + (item.candidate_status || 'UNKNOWN') + ' · ' + (item.trade_authorization || 'NO_TRADE'), 'candidate-meta'));
-            card.appendChild(el('p', 'امتیاز Gem Hunter V2: ' + (item.discovery_priority_score ?? 'ناموجود') + '/100 · وضعیت: ' + (item.candidate_status || 'WATCH') + ' · امنیت: ' + ((item.security_evidence || {}).status || 'NOT_AVAILABLE') + ' · بازار: ' + ((item.cex || {}).status || 'NOT_VERIFIED') + ' (' + (((item.cex || {}).exchanges || []).join(', ') || 'DEX') + ')', 'candidate-meta'));
+            card.appendChild(el('p', 'امتیاز کشف V2: ' + (item.discovery_priority_score ?? 'ناموجود') + '/100 · Gem Hunter V3: ' + (item.gem_hunter_v3_status || 'RESEARCH_WATCH') + ' · امنیت: ' + ((item.security_evidence || {}).status || 'UNKNOWN') + ' · بازار: ' + ((item.market_reconciliation || {}).status || 'UNKNOWN'), 'candidate-meta'));
+            const exit = item.exit_slippage_evidence || {};
+            card.appendChild(el('p', 'مومنتوم کوتاه‌مدت: ' + (item.short_term_momentum_smart_money_score ?? 'ناموجود') + '/100 · ایمنی/خروج: ' + (item.safety_exit_liquidity_score ?? 'ناموجود') + '/100 · اعتماد داده: ' + (item.data_confidence_score ?? 'ناموجود') + '/100 · لغزش خروج: ' + (exit.estimated_slippage_bps ?? 'UNKNOWN') + ' bps (' + (exit.status || 'UNKNOWN') + ')', 'candidate-meta'));
+            card.appendChild(el('p', 'Turso: ' + (item.gem_hunter_storage_status || 'UNKNOWN') + ' · هشدار تلگرام: ' + ((item.telegram_alert_status || {}).status || 'NOT_SENT') + ' · مجوز معامله: NO_TRADE', 'candidate-meta'));
             card.appendChild(el('p', 'Read-Only · هیچ دسترسی سفارش‌گذاری وجود ندارد · ' + (item.eu_mica_warning || 'بررسی مجوز MiCA و دسترسی آلمان مستقل است.'), 'candidate-meta'));
             const facts = document.createElement('div'); facts.className = 'gem-facts';
             const reconciliation = item.market_reconciliation || q.market_reconciliation || {};
@@ -8221,7 +8226,7 @@ async function loadBlofinInstruments(){
           };
           button.addEventListener('click', async () => {
             button.disabled = true; results.replaceChildren(el('p', 'در حال دریافت ۱۰ نامزد برتر ذخیره‌شده در Turso و گزارش شش معیار Gem Hunter V2...'));
-             window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana و Base...');
+             window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana، Base و Ethereum...');
             status.textContent = 'در حال کشف و اعتبارسنجی Solana و Base...';
             try {
               let data = null;
