@@ -3,6 +3,7 @@ import sqlite3
 import unittest
 from unittest.mock import Mock, patch
 
+from crypto_super_radar.dashboard_data import gem_hunter_v3_dataframe
 from crypto_super_radar.gem_hunter_v3 import (
     estimate_exit_slippage, score_candidate_v3, persist_candidate_lifecycle,
     notify_qualified_gem, TursoGemHunterStore,
@@ -177,6 +178,22 @@ class GemHunterV3Tests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(count, 1)
         store.close()
+
+    def test_dashboard_exposes_momentum_evidence_gaps_and_telegram_status(self):
+        frame = gem_hunter_v3_dataframe([{
+            "chain": "ethereum", "token_address": "0x1",
+            "short_term_momentum_score": 72, "momentum_evidence_coverage_pct": 75,
+            "wallet_breadth_evidence_status": "VERIFIED_FOR_RETURNED_SAMPLE",
+            "smart_money_evidence_status": "NOT_AVAILABLE",
+            "new_buyer_cohort_status": "NOT_AVAILABLE",
+            "telegram_alert_status": {"status": "NOT_SENT"},
+            "trade_authorization": "BUY",
+        }])
+        self.assertEqual(frame.iloc[0]["امتیاز مومنتوم"], 72)
+        self.assertEqual(frame.iloc[0]["پوشش شواهد مومنتوم (%)"], 75)
+        self.assertEqual(frame.iloc[0]["انتساب پول هوشمند"], "NOT_AVAILABLE")
+        self.assertEqual(frame.iloc[0]["وضعیت هشدار تلگرام"], "NOT_SENT")
+        self.assertEqual(frame.iloc[0]["مجوز معامله"], "NO_TRADE")
 
     def test_dashboard_status_never_authorizes_trading(self):
         result = score_candidate_v3({"security_evidence": {"status": "PASS"},
