@@ -55,7 +55,7 @@ jobs:
           grep -q 'blofin-v2-run-once' <<< "$dashboard"
           echo "Staging dashboard page and V2 panel: PASS"
           ai_status="$(curl --fail --silent --show-error --connect-timeout 15 --max-time 45 "$BASE_URL/api/ai/challenge1-status")"
-          python -c 'import json,sys; p=json.load(sys.stdin); s=p.get("second_supervisor") or {}; assert s.get("configured") is True, s.get("configuration_issues"); assert s.get("provider") == "Groq", s; assert s.get("model") == "openai/gpt-oss-120b", s; print(json.dumps({"configured":s.get("configured"),"provider":s.get("provider"),"model":s.get("model"),"status":"PASS"}))' <<< "$ai_status"
+          python -c 'import json,sys; p=json.load(sys.stdin); a=p.get("primary_supervisor") or {}; s=p.get("second_supervisor") or {}; assert a.get("configured") is True, a; assert a.get("model") == "nvidia/nemotron-3-ultra-550b-a55b:free", a; assert s.get("configured") is True, s.get("configuration_issues"); assert s.get("provider") == "Groq", s; assert s.get("model") == "openai/gpt-oss-120b", s; print(json.dumps({"primary":{"configured":a.get("configured"),"model":a.get("model")},"secondary":{"configured":s.get("configured"),"provider":s.get("provider"),"model":s.get("model")},"status":"PASS"}))' <<< "$ai_status"
 
       - name: One-time guarded V2 Demo verification dispatch after refreshed Staging worker
         if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[run-v2-demo-verification]') }}
