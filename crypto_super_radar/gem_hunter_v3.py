@@ -139,8 +139,14 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
         confidence_parts.append(100.0)
     confidence = round(sum(confidence_parts) / len(confidence_parts), 2) if confidence_parts else None
 
+    verified_liquidity = _finite(reconciliation.get("verified_liquidity_usd"))
+    verified_volume = _finite(reconciliation.get("verified_volume_24h_usd"))
+    observed_pool_buy_share = _finite(components.get("pool_buy_volume_share"))
     qualified = (
         momentum is not None and momentum >= 70.0 and momentum_coverage_pct >= 75.0
+        and observed_pool_buy_share is not None and observed_pool_buy_share >= 55.0
+        and verified_liquidity is not None and verified_liquidity >= 50_000
+        and verified_volume is not None and verified_volume >= 100_000
         and safety is not None and safety >= 70.0
         and confidence is not None and confidence >= 75.0
         and security_status == "PASS" and exit_status == "PASS"
