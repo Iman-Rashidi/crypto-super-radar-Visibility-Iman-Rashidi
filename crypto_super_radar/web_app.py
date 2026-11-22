@@ -1204,7 +1204,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
             cached = discover_gem_candidates(getattr(ENGINE.data, "http", None), limit=50)
             GEM_HUNTER_CACHE["payload"] = copy.deepcopy(cached)
             # Do not hammer rate-limited feeds after PARTIAL results.
-            ttl = GEM_HUNTER_CACHE_TTL_SECONDS if cached.get("status") == "PASS" else 90
+            ttl = GEM_HUNTER_CACHE_TTL_SECONDS
             GEM_HUNTER_CACHE["expires_at"] = time.monotonic() + ttl
         result = copy.deepcopy(cached)
 
