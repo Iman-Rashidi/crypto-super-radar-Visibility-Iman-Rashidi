@@ -34,6 +34,7 @@ from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
+from .gem_hunter_v3 import process_gem_hunter_v3_candidates
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
@@ -1224,7 +1225,7 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         progress_payload.update({
             "status": result.get("status", "UNKNOWN"),
             "generated_at_utc": result.get("generated_at_utc"),
-            "networks": copy.deepcopy(result.get("networks") or ["base", "solana"]),
+            "networks": copy.deepcopy(result.get("networks") or ["base", "solana", "ethereum"]),
             "source_count": result.get("source_count", 0),
             "sources": copy.deepcopy(result.get("sources") or {}),
             "discovered_candidate_count": len(raw_candidates),
@@ -1263,6 +1264,9 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
         raw_candidates, ENGINE.data, limit=1,
     )
     raw_candidates = evaluate_discovery_candidates(raw_candidates)
+    # V3 adds research-only scores, persistent lifecycle snapshots and optional
+    # deduplicated Telegram alerts. It never creates a Futures/spot order.
+    raw_candidates = process_gem_hunter_v3_candidates(raw_candidates, notify=True)
     discovered_count = len(raw_candidates)
     evaluation_records = [
         item.get("qualification")
