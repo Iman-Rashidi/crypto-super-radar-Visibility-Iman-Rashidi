@@ -25,6 +25,11 @@ _CACHE_LOCK = threading.RLock()
 _SCAN_OFFSET = 0
 
 
+def _dexscreener_get(http, url: str) -> Any:
+    bounded = getattr(http, "get_with_timeout", None)
+    return bounded(url, timeout=8.0) if callable(bounded) else http.get(url)
+
+
 def _number(value: Any):
     if isinstance(value, bool) or value is None:
         return None
@@ -97,7 +102,7 @@ def _dex_snapshot(http, chain: str, token: str, pool: str) -> dict[str, Any]:
     chain_id = {"base": "base", "solana": "solana", "ethereum": "ethereum"}.get(chain)
     if not chain_id:
         raise ValueError("Unsupported chain for exact-pool reconciliation")
-    payload = http.get(f"{DEX_BASE}/latest/dex/tokens/{token}")
+    payload = _dexscreener_get(http, f"{DEX_BASE}/latest/dex/tokens/{token}")
     return _dex_snapshot_from_payload(payload, chain, token, pool)
 
 
@@ -279,8 +284,8 @@ def reconcile_discovery_candidates(candidates: Any, http, *, limit: int = MAX_CA
         if not addresses:
             continue
         try:
-            payload = http.get(
-                f"{DEX_BASE}/latest/dex/tokens/" + ",".join(addresses[:30])
+            payload = _dexscreener_get(
+                http, f"{DEX_BASE}/latest/dex/tokens/" + ",".join(addresses[:30])
             )
             for row in chain_rows:
                 token, pool = row.get("token_address"), row.get("pool_address")
