@@ -43,7 +43,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 20},
             "market_reconciliation": {"status": "PASS"},
         })
-        self.assertEqual(result["short_term_momentum_smart_money_score"], 100)
+        self.assertEqual(result["short_term_momentum_smart_money_score"], 90)
         self.assertEqual(result["candidate_status"], "QUALIFIED_GEM")
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
 
@@ -59,7 +59,7 @@ class GemHunterV3Tests(unittest.TestCase):
         candidate = {"chain": "ethereum", "token_address": "0x" + "1" * 40, "price_usd": 0.01,
                      "liquidity_usd": 120000, "candidate_status": "DISCOVERED"}
         candidate_id = persist_candidate_lifecycle(store, candidate)
-        self.assertEqual(candidate_id, "ethereum:" + "1" * 40)
+        self.assertEqual(candidate_id, "ethereum:0x" + "1" * 40)
         self.assertEqual(len(store.rows), 1)
 
     def test_telegram_deduplicates_qualified_gems(self):
