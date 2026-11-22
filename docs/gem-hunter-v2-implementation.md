@@ -28,3 +28,5 @@
 
 
 - CI trigger marker for the final Render-side Turso bridge review; this line has no runtime effect.
+
+- Verification branch for the final Render/Turso ingestion test run; no runtime effect.
