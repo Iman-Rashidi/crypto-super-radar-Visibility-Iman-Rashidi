@@ -1,11 +1,11 @@
 import sqlite3
 import unittest
 from datetime import datetime,timezone
-from crypto_super_radar.gem_hunter_v2 import _score,initialize_schema,save_top10,public_snapshot
+from crypto_super_radar.gem_hunter_v2 import _score,initialize_schema,save_top10,ingest_candidates,public_snapshot
 
 class GemHunterV2Tests(unittest.TestCase):
     def candidate(self,**overrides):
-        row={"candidate_id":"base:0xabc:pool","chain":"base","token_address":"0xabc","pool_address":"pool","token_symbol":"TST","liquidity_usd":50000,"volume_24h_usd":80000,"buys_1h":80,"sells_1h":20,"pool_age_hours":8,"gecko_match":True,"security":{"status":"PASS","provider":"TEST"},"holders":{"status":"NOT_AVAILABLE","top10_pct":None},"cex":{"status":"DEX_ONLY","exchanges":[]}}
+        row={"candidate_id":"base:0xabc:pool","chain":"base","token_address":"0xabc","pool_address":"pool","token_symbol":"TST","liquidity_usd":50000,"volume_24h_usd":80000,"buys_1h":80,"sells_1h":20,"pool_age_hours":8,"gecko_match":True,"security":{"status":"PASS","provider":"TEST"},"holders":{"status":"NOT_AVAILABLE","top10_pct":None},"cex":{"status":"DEX_ONLY","exchanges":[]},"read_only":True,"trade_authorization":"NO_TRADE"}
         row.update(overrides)
         return row
     def test_security_failure_is_hard_reject(self):
@@ -27,6 +27,26 @@ class GemHunterV2Tests(unittest.TestCase):
         self.assertEqual(_score(row)["status"],"STRONG GEM")
     def test_toxic_liquidity_is_reject(self):
         self.assertEqual(_score(self.candidate(liquidity_usd=100))["status"],"REJECT")
+    def test_ingest_preserves_scan_count_and_is_idempotent(self):
+        db=sqlite3.connect(":memory:")
+        db.row_factory=sqlite3.Row
+        initialize_schema(db)
+        row=self.candidate(score=90,status="STRONG GEM",consecutive_scans=2,first_seen_utc="2026-11-22T00:00:00Z",last_seen_utc="2026-11-22T02:00:00Z",expires_at_utc="2026-12-06T02:00:00Z")
+        first=ingest_candidates([row],connection=db,now=datetime(2026,11,22,2,1,tzinfo=timezone.utc))
+        second=ingest_candidates([row],connection=db,now=datetime(2026,11,22,2,2,tzinfo=timezone.utc))
+        self.assertEqual(first[0]["consecutive_scans"],2)
+        self.assertEqual(second[0]["consecutive_scans"],2)
+        stored=db.execute("SELECT payload_json FROM gem_hunter_v2_candidates WHERE candidate_id=?",(row["candidate_id"],)).fetchone()
+        self.assertEqual(__import__("json").loads(stored["payload_json"])["status"],"STRONG GEM")
+        db.close()
+    def test_ingest_rejects_non_read_only_payload(self):
+        db=sqlite3.connect(":memory:")
+        db.row_factory=sqlite3.Row
+        initialize_schema(db)
+        row=self.candidate(score=75,status="EARLY GEM",trade_authorization="ORDER")
+        with self.assertRaises(ValueError):
+            ingest_candidates([row],connection=db)
+        db.close()
     def test_top10_storage_and_public_read_only(self):
         db=sqlite3.connect(":memory:")
         db.row_factory=sqlite3.Row
