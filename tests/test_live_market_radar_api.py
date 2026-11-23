@@ -108,7 +108,7 @@ class LiveMarketRadarApiTests(unittest.TestCase):
                 "/api/live-market-radar?symbol=BTCUSDT&interval=5m&refresh=1"
             )
         payload = json.loads(raw_payload)
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 200, payload.get("error", payload))
         self.assertEqual(payload["cross_validation"]["status"], "PASS")
         self.assertEqual(payload["signal"]["signal"], "BUY")
         self.assertTrue(payload["candles"][-1]["is_closed"] is False)
@@ -162,7 +162,7 @@ class LiveMarketRadarApiTests(unittest.TestCase):
                 "/api/live-market-radar?symbol=BTCUSDT&interval=5m&refresh=1"
             )
         payload = json.loads(raw_payload)
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 200, payload.get("error", payload))
         self.assertEqual(payload["feed_diagnostics"]["primary_provider"], "OKX Spot")
         self.assertEqual(payload["feed_diagnostics"]["secondary_provider"], "Kraken Spot")
         self.assertTrue(payload["feed_diagnostics"]["fallback_used"])
