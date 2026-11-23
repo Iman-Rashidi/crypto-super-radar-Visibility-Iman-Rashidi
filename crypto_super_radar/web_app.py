@@ -10699,21 +10699,11 @@ async function loadBlofinInstruments(){
                         return self._send(409, json.dumps({
                             "status": "BLOCKED",
                             "blocker": "V2_SCHEDULER_PREREQUISITES_NOT_MET",
-                            "message_fa": "زمان‌بند V2 آماده نیست؛ نقش WEB، کلیدهای V2 و Demo، خاموش‌بودن Smoke Test و خاموش‌بودن اتوپایلوت قدیمی بررسی شوند.",
+                            "message_fa": "زمان‌بند V2 آماده نیست؛ نقش WEB، کلیدهای V2 و Demo و خاموش‌بودن Smoke Test بررسی شوند.",
                             "orders_submitted": False,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-                    now = datetime.now(timezone.utc)
-                    with LOCK:
-                        BLOFIN_AUTOPILOT_STATE.update({
-                            "enabled": True, "status": "SCHEDULED",
-                            "runtime_role": "WEB", "execution_profile": "CHALLENGE_1_V2",
-                            "interval_seconds": 600, "search_continues": True,
-                            "next_cycle_scheduled": True,
-                            "next_cycle_at_utc": (now + timedelta(seconds=600)).isoformat(),
-                            "next_cycle_in_seconds": 600,
-                            "last_message_fa": "زمان‌بند Challenge 1 V2 در نقش WEB فعال شد؛ نخستین چرخه پس از ۶۰۰ ثانیه اجرا می‌شود.",
-                        })
-                    _persist_blofin_autopilot_state()
+                    _set_blofin_demo_autopilot_runtime_override(True)
+                    _mark_challenge1_v2_autopilot_scheduled()
                     return self._send(202, json.dumps({
                         "status": "SCHEDULED", "enabled": True, "interval_seconds": 600,
                         "message_fa": "زمان‌بند اتوپایلوت V2 فعال شد؛ نخستین چرخه پس از ۶۰۰ ثانیه اجرا می‌شود.",
@@ -13689,6 +13679,14 @@ def _start_challenge1_v2_render_scheduler() -> bool:
         return CHALLENGE1_V2_RENDER_SCHEDULER_THREAD.is_alive()
 
 
+def _mark_challenge1_v2_autopilot_scheduled() -> None:
+    """Publish the WEB scheduler state only after its thread has started."""
+    from .challenge1_v2_render_scheduler import scheduled_status_fields
+    with LOCK:
+        BLOFIN_AUTOPILOT_STATE.update(scheduled_status_fields())
+    _persist_blofin_autopilot_state()
+
+
 def main():
     port = int(os.getenv("PORT", "10000"))
     host = os.getenv("HOST", "0.0.0.0")
@@ -13698,8 +13696,9 @@ def main():
         _start_notion_sync_worker()
         _start_blofin_demo_position_manager()
     _start_blofin_demo_autopilot()
-    if role == "WEB":
-        _start_challenge1_v2_render_scheduler()
+    if role == "WEB" and _blofin_demo_autopilot_enabled():
+        if _start_challenge1_v2_render_scheduler():
+            _mark_challenge1_v2_autopilot_scheduled()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
 
