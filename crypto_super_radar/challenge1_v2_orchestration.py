@@ -252,10 +252,20 @@ def analyze_challenge1_v2_market(
         client.get_candles(symbol, bar="4H", limit=300),
         bar="4H", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["4H"],
     )
-    frame_5m = _closed_frame(
-        client.get_candles(symbol, bar="5m", limit=300),
-        bar="5m", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["5m"],
-    )
+    fast_feed_error = None
+    try:
+        frame_5m = _closed_frame(
+            client.get_candles(symbol, bar="5m", limit=300),
+            bar="5m", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["5m"],
+        )
+    except Challenge1V2DataBlocked as exc:
+        # The fast lane is additive: missing 5m data must not disable the
+        # independently validated V2 1H/15m baseline path.
+        fast_feed_error = str(exc)
+        frame_5m = pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=pd.DatetimeIndex([], tz="UTC"),
+        )
     frame_15m = _closed_frame(
         client.get_candles(symbol, bar="15m", limit=300),
         bar="15m", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["15m"],
@@ -269,7 +279,7 @@ def analyze_challenge1_v2_market(
         raise Challenge1V2DataBlocked("1H frame exceeds the common as-of boundary")
     if not (frame_4h.index[-1] + pd.Timedelta(hours=4) <= asof):
         raise Challenge1V2DataBlocked("4H frame exceeds the common as-of boundary")
-    if not (frame_5m.index[-1] + pd.Timedelta(minutes=5) <= asof):
+    if not frame_5m.empty and not (frame_5m.index[-1] + pd.Timedelta(minutes=5) <= asof):
         raise Challenge1V2DataBlocked("5m frame exceeds the common as-of boundary")
     if not (frame_15m.index[-1] + pd.Timedelta(minutes=15) <= asof):
         raise Challenge1V2DataBlocked("15m frame exceeds the common as-of boundary")
@@ -290,17 +300,30 @@ def analyze_challenge1_v2_market(
     # Run the dashboard's existing non-repainting 5m candle/Elliott engine
     # against the same exchange-derived as-of boundary. 15m trend alignment
     # is checked by the V2 fast-path builder before any AI reviewer is called.
-    fast_trigger_record = analyze_blofin_challenge1(
-        client, symbol, now_ms=asof_ms,
-    )
-    early_w3_path = build_early_wave3_signal(
-        instrument_id=symbol, frame_5m=frame_5m, frame_15m=frame_15m,
-        asof=asof, entry_price=quote["last"],
-        funding_rate=funding["funding_rate"], funding_kind=funding["funding_kind"],
-        funding_event_time_ms=funding["funding_event_time_ms"],
-        funding_max_age_ms=funding["funding_max_age_ms"],
-        spread_fraction=quote["spread_fraction"],
-    )
+    if frame_5m.empty:
+        fast_trigger_record = {
+            "signal": "NO_TRADE", "reason_fa": fast_feed_error or "دادهٔ بسته‌شدهٔ ۵ دقیقه‌ای در دسترس نیست.",
+            "signal_id": None,
+        }
+        early_w3_path = {"signal": "NO_TRADE", "reason": fast_feed_error or "No completed 5m candles"}
+    else:
+        try:
+            fast_trigger_record = analyze_blofin_challenge1(
+                client, symbol, now_ms=asof_ms,
+            )
+        except (ValueError, TypeError, KeyError, IndexError) as exc:
+            fast_trigger_record = {
+                "signal": "NO_TRADE", "reason_fa": "Fast dashboard engine unavailable: " + str(exc),
+                "signal_id": None,
+            }
+        early_w3_path = build_early_wave3_signal(
+            instrument_id=symbol, frame_5m=frame_5m, frame_15m=frame_15m,
+            asof=asof, entry_price=quote["last"],
+            funding_rate=funding["funding_rate"], funding_kind=funding["funding_kind"],
+            funding_event_time_ms=funding["funding_event_time_ms"],
+            funding_max_age_ms=funding["funding_max_age_ms"],
+            spread_fraction=quote["spread_fraction"],
+        )
     if early_w3_path.get("signal") in {"LONG", "SHORT"}:
         record = early_w3_path
     fast_path = None
@@ -348,7 +371,7 @@ def analyze_challenge1_v2_market(
             "1H": {"rows": len(frame_1h), "latest_open_utc": frame_1h.index[-1].isoformat()},
             "4H": {"rows": len(frame_4h), "latest_open_utc": frame_4h.index[-1].isoformat()},
             "15m": {"rows": len(frame_15m), "latest_open_utc": frame_15m.index[-1].isoformat()},
-            "5m": {"rows": len(frame_5m), "latest_open_utc": frame_5m.index[-1].isoformat(), "source": "BLOFIN_DEMO_REST_AND_LOCAL_WAVE3", "signal_id": (fast_trigger_record.get("signal_id") if fast_trigger_record.get("signal") in {"LONG", "SHORT"} else None), "selected": bool(record.get("fast_trigger_active") or record.get("early_w3_active"))},
+            "5m": {"rows": len(frame_5m), "latest_open_utc": (frame_5m.index[-1].isoformat() if not frame_5m.empty else None), "source": ("BLOFIN_DEMO_REST_AND_LOCAL_WAVE3" if not frame_5m.empty else "UNAVAILABLE_OPTIONAL_FAST_FEED"), "feed_error": fast_feed_error, "signal_id": (fast_trigger_record.get("signal_id") if fast_trigger_record.get("signal") in {"LONG", "SHORT"} else None), "selected": bool(record.get("fast_trigger_active") or record.get("early_w3_active"))},
             "BTC_15m": {"rows": len(btc_15m), "latest_open_utc": btc_15m.index[-1].isoformat()},
         },
         "funding": funding,
