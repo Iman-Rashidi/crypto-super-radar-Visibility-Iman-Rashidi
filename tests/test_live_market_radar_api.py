@@ -116,14 +116,16 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertNotIn(payload["signal"]["signal"], {"BUY", "SELL"})
         self.assertEqual(payload["signal"]["status"], "BLOCKED")
 
-    def test_symbol_outside_curated_market_universe_is_rejected(self):
-        status, raw_payload = self.request(
-            "/api/live-market-radar?symbol=UNKNOWNUSDT&interval=5m"
-        )
+    def test_valid_custom_symbol_is_normalized_and_sent_to_spot_analyzer(self):
+        expected = {"symbol": "UNKNOWNUSDT", "status": "OK", "candles": [], "orders_submitted": False}
+        with patch.object(web_app, "_live_market_radar_payload", return_value=expected) as builder:
+            status, raw_payload = self.request(
+                "/api/live-market-radar?symbol=unknown&interval=5m"
+            )
         payload = json.loads(raw_payload)
-        self.assertEqual(status, 400)
-        self.assertEqual(payload["status"], "UNKNOWN")
-        self.assertFalse(payload["orders_submitted"])
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["symbol"], "UNKNOWNUSDT")
+        builder.assert_called_once_with("UNKNOWNUSDT", "5m", force_refresh=False)
 
     def test_home_page_includes_live_candle_controls_in_paper_bot(self):
         connection = HTTPConnection(self.host, self.port, timeout=5)
