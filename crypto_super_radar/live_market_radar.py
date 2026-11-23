@@ -15,7 +15,6 @@ import pandas as pd
 from .elliott_waves import monitor_elliott_waves
 from .market_patterns import analyze_market_patterns
 from .market_flow import analyze_market_flow
-from .future_forecast import build_future_forecast
 
 INTERVAL_MS = {
     "1s": 1_000,
@@ -39,8 +38,7 @@ BYBIT_INTERVAL = {
     "1M": "M",
 }
 PIVOT_RADIUS = 3
-MAX_CANDLES = 180
-ANALYSIS_CANDLES = 120
+MAX_CANDLES = 240
 MAX_CANDLE_DISCREPANCY_PCT = 0.40
 SIGNAL_MAX_PIVOT_AGE_BARS = 10
 
@@ -286,8 +284,6 @@ def build_live_market_radar_payload(
     aggregate_trades: list[dict[str, Any]] | None = None,
     order_book: dict[str, Any] | None = None,
     market_flow_error: str | None = None,
-    higher_timeframes: dict[str, list[dict[str, Any]]] | None = None,
-    news: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a chart payload and fail-closed signal from two public OHLCV sources."""
     normalized_symbol = str(symbol or "").strip().upper()
@@ -353,12 +349,9 @@ def build_live_market_radar_payload(
             cross_reason = f"{type(exc).__name__}: {str(exc)[:160]}"
     quality_status = cross_validation
 
-    # Keep the chart history at 180 candles, but bound all structural analysis
-    # to the latest 120 completed candles to avoid mobile request timeouts.
-    analysis_frame = closed.tail(ANALYSIS_CANDLES)
-    pivots = _pivots(analysis_frame)
+    pivots = _pivots(closed)
     wave = monitor_elliott_waves(
-        analysis_frame,
+        closed,
         min_reversal_pct=ELLIOTT_MIN_REVERSAL_PCT[normalized_interval],
         max_reversal_pct=0.15,
     )
@@ -388,9 +381,9 @@ def build_live_market_radar_payload(
                 "kind": point["kind"],
                 "label": "سقف ساختاری" if point["kind"] == "HIGH" else "کف ساختاری",
             })
-    market_analysis = analyze_market_patterns(analysis_frame, pivots, wave)
+    market_analysis = analyze_market_patterns(closed, pivots, wave)
     market_flow = analyze_market_flow(
-        analysis_frame, aggregate_trades=aggregate_trades, order_book=order_book, now=current.to_pydatetime()
+        closed, aggregate_trades=aggregate_trades, order_book=order_book, now=current.to_pydatetime()
     )
     if market_flow_error:
         market_flow["live_flow_error"] = str(market_flow_error)[:180]
@@ -404,7 +397,7 @@ def build_live_market_radar_payload(
         ),
     }
     signal = _signal(
-        analysis_frame, pivots, quality_status=quality_status, freshness_status=freshness_status,
+        closed, pivots, quality_status=quality_status, freshness_status=freshness_status,
         divergence=market_analysis.get("direction", {}).get("divergence"),
     )
     chart = []
@@ -420,16 +413,6 @@ def build_live_market_radar_payload(
             "volume": float(row["volume"]),
             "is_closed": bool(is_closed),
         })
-    future_forecast = build_future_forecast(
-        chart,
-        symbol=normalized_symbol,
-        interval=normalized_interval,
-        wave=wave,
-        divergence=market_analysis.get("direction", {}).get("divergence"),
-        market_flow=market_flow,
-        higher_timeframes=higher_timeframes,
-        news=news,
-    )
     return {
         "status": "PASS" if freshness_status == "FRESH" else "STALE",
         "symbol": normalized_symbol,
@@ -452,7 +435,6 @@ def build_live_market_radar_payload(
         "elliott_waves": wave,
         "market_analysis": market_analysis,
         "market_flow": market_flow,
-        "future_forecast": future_forecast,
         "signal": signal,
         "signal_only": True,
         "paper_bot_connected": False,
