@@ -3105,13 +3105,13 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
     ) as executor:
         binance_future = executor.submit(
             binance_provider.candles,
-            normalized_symbol, interval=normalized_interval, limit=300,
+            normalized_symbol, interval=normalized_interval, limit=500,
         )
         bybit_future = None
         if normalized_interval in BYBIT_INTERVAL:
             bybit_future = executor.submit(
                 bybit_provider.candles,
-                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=300,
+                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=500,
             )
         else:
             bybit_error = "Bybit Spot does not provide 1-second candles; independent candle validation is unavailable on this interval."
@@ -3130,7 +3130,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             timeframe: executor.submit(
                 binance_provider.candles, normalized_symbol, interval=timeframe, limit=180
             )
-            for timeframe in ("1h", "4h")
+            for timeframe in ("1h", "4h", "1d", "1w", "1M")
         }
         base_asset = normalized_symbol[:-4]
         news_future = executor.submit(
@@ -3167,7 +3167,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
                 higher_timeframes[timeframe] = [
                     {"open": float(row.open), "high": float(row.high), "low": float(row.low),
                      "close": float(row.close), "volume": float(row.volume)}
-                    for row in frame.tail(180).itertuples()
+                    for row in frame.tail(500).itertuples()
                 ]
             except Exception as exc:
                 higher_timeframe_errors[timeframe] = f"{type(exc).__name__}: {str(exc)[:100]}"
@@ -3212,6 +3212,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         news=news_items,
     )
     payload["future_forecast"]["higher_timeframe_errors"] = higher_timeframe_errors
+    payload["future_forecast"]["higher_timeframes"] = higher_timeframes
     payload["future_forecast"]["news_status"] = "PASS" if news_items else "UNAVAILABLE"
     # Publish W3 retracement levels only when the dashboard's non-repainting
     # Elliott monitor confirms a complete W4 pivot sequence.
@@ -9223,15 +9224,20 @@ async function loadBlofinInstruments(){
             .live-radar-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:12px 0}
             .live-radar-controls label{display:grid;gap:5px;color:var(--muted);font-size:.85rem}
             .live-candle-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:#07131f}
-            #live-candle-chart{display:block;width:100%;min-width:820px;height:480px}
+            #live-candle-chart{display:block;width:100%;min-width:0;height:500px;touch-action:pan-y;cursor:grab}
             .future-forecast-panel{margin:14px 0;padding:14px;border:1px solid #47647c;border-radius:14px;background:linear-gradient(145deg,#0b1b2b,#10283a)}
-            .future-forecast-controls{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
-            .future-forecast-controls button{padding:8px 12px;border:1px solid #45677e;border-radius:9px;background:#132f43;color:#e7f5ff;font:inherit;font-weight:800}
+            .future-forecast-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:10px 0}
+            .future-forecast-controls button{min-height:42px;padding:7px 6px;border:1px solid #45677e;border-radius:9px;background:#132f43;color:#e7f5ff;font:inherit;font-weight:800}
             .future-forecast-controls button[aria-pressed="true"]{border-color:#58c7a1;background:#124b3d}
-            #future-forecast-chart{display:block;width:100%;min-width:720px;height:360px}
+            #future-forecast-chart{display:block;width:100%;min-width:0;height:420px;touch-action:pan-y;cursor:grab}
             .future-forecast-wrap{width:100%;overflow-x:auto;border:1px solid #304b60;border-radius:10px;background:#07131f}
             .future-forecast-note{color:#c6d8e6;line-height:1.8;font-size:.88rem}
-            .live-candle-wrap{min-height:480px}
+            .live-candle-wrap{min-height:500px;touch-action:pan-y}
+            .chart-touch-tools{display:grid;grid-template-columns:auto auto auto minmax(100px,1fr) auto;gap:8px;align-items:center;margin:10px 0}
+            .chart-touch-tools button{min-height:48px;min-width:54px;padding:8px 12px;border:1px solid #45677e;border-radius:10px;background:#132f43;color:#e7f5ff;font-size:1.15rem;font-weight:900;touch-action:manipulation}
+            .chart-touch-tools input{width:100%;min-height:42px;accent-color:#58c7a1}
+            .forecast-touch-tools{display:flex;gap:8px;justify-content:flex-end;margin:8px 0}
+            .forecast-touch-tools button{min-height:44px;min-width:54px;border:1px solid #45677e;border-radius:10px;background:#132f43;color:#e7f5ff;font-size:1.1rem;font-weight:900;touch-action:manipulation}
             .live-volume-caption{display:flex;align-items:center;gap:8px;margin:8px 2px 0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-weight:800;line-height:1.6}
             .live-volume-caption.good{color:#7be4b3;border-color:#238d69;background:rgba(17,91,66,.18)}
             .live-volume-caption.weak{color:#ff9ba5;border-color:#a74754;background:rgba(112,35,48,.18)}
@@ -9279,8 +9285,16 @@ async function loadBlofinInstruments(){
               .live-radar-custom-search{grid-template-columns:1fr}
               .live-wave-grid{grid-template-columns:1fr}
               .live-wave-card{padding:10px}
-              #live-candle-chart{height:480px;min-width:720px}
-              .live-candle-wrap{min-height:480px}
+              #live-candle-chart{height:500px;min-width:0}
+              #future-forecast-chart{height:420px;min-width:0}
+              .live-candle-wrap{min-height:500px}
+              .future-forecast-controls{grid-template-columns:repeat(4,minmax(0,1fr))}
+              .future-forecast-controls button{min-height:48px;font-size:.82rem;padding:6px 3px}
+              .chart-touch-tools{grid-template-columns:repeat(3,minmax(0,1fr))}
+              .chart-touch-tools input{grid-column:1/-1;grid-row:2}
+              .chart-touch-tools button{min-height:52px}
+              .forecast-touch-tools{justify-content:stretch}
+              .forecast-touch-tools button{flex:1;min-height:50px}
             }
             .manual-wave-trade{margin:16px 0;border:1px solid var(--line);background:var(--surface-raised)}
             .manual-wave-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -9357,6 +9371,13 @@ async function loadBlofinInstruments(){
             <div class="live-candle-wrap">
               <canvas id="live-candle-chart" width="1440" height="560" role="img" aria-label="نمودار بزرگ کندل، موج قیمت، نشانه‌های ساده خرید و فروش و حجم بازار"></canvas>
             </div>
+            <div class="chart-touch-tools" role="group" aria-label="کنترل حرکت و بزرگ‌نمایی نمودار">
+              <button type="button" id="live-chart-zoom-in" aria-label="بزرگ‌نمایی">🔍+</button>
+              <button type="button" id="live-chart-zoom-out" aria-label="کوچک‌نمایی">🔍−</button>
+              <button type="button" id="live-chart-now" aria-label="بازگشت به لحظه حال">⏭ حال</button>
+              <input type="range" id="live-chart-time-slider" min="0" max="499" value="0" step="1" aria-label="حرکت در تاریخچه کندل‌ها">
+              <span id="live-chart-window-label" class="live-radar-note">آخرین کندل‌ها</span>
+            </div>
             <section class="future-forecast-panel" id="future-forecast-panel">
               <h4>🔮 چارت پیش‌بینی مسیر آینده امواج و الگوها (سناریوی احتمالی)</h4>
               <div class="future-forecast-controls" role="group" aria-label="افق پیش‌بینی">
@@ -9364,6 +9385,15 @@ async function loadBlofinInstruments(){
                 <button type="button" data-forecast-horizon="1h" aria-pressed="false">۱ ساعت آینده</button>
                 <button type="button" data-forecast-horizon="4h" aria-pressed="false">۴ ساعت آینده</button>
                 <button type="button" data-forecast-horizon="1d" aria-pressed="false">۱ روز آینده</button>
+                <button type="button" data-forecast-horizon="1w" aria-pressed="false">۱ هفته آینده</button>
+                <button type="button" data-forecast-horizon="1mo" aria-pressed="false">۱ ماه آینده</button>
+                <button type="button" data-forecast-horizon="6mo" aria-pressed="false">۶ ماه آینده</button>
+                <button type="button" data-forecast-horizon="1y" aria-pressed="false">۱ سال آینده</button>
+              </div>
+              <div class="forecast-touch-tools" role="group" aria-label="بزرگ‌نمایی و حرکت چارت پیش‌بینی">
+                <button type="button" id="forecast-chart-zoom-in" aria-label="بزرگ‌نمایی پیش‌بینی">🔍+</button>
+                <button type="button" id="forecast-chart-zoom-out" aria-label="کوچک‌نمایی پیش‌بینی">🔍−</button>
+                <button type="button" id="forecast-chart-reset" aria-label="بازنشانی پیش‌بینی">⏭</button>
               </div>
               <div class="future-forecast-wrap"><canvas id="future-forecast-chart" width="1440" height="360" role="img" aria-label="سناریوهای احتمالی مسیر آینده قیمت و موج الیوت"></canvas></div>
               <p id="future-forecast-explanation" class="future-forecast-note" aria-live="polite">در انتظار دادهٔ معتبر بازار برای ساخت سناریوهای احتمالی.</p>
@@ -9461,6 +9491,7 @@ async function loadBlofinInstruments(){
             const forecastExplanation=document.getElementById('future-forecast-explanation');
             const forecastEvidence=document.getElementById('future-forecast-evidence');
             let forecastHorizon='15m',latestChartData=null;
+            let chartZoom=1,chartOffset=0,forecastZoom=1,forecastPan=0;
             const fields={
               action:document.getElementById('live-radar-action'),
               currentPrice:document.getElementById('live-radar-current-price'),
@@ -9609,7 +9640,15 @@ async function loadBlofinInstruments(){
             }
             let busy=false,lastSignalKey=null,timer=null;
             function draw(data){
-              const bars=data.candles||[];
+              const allBars=data.candles||[];
+              const visibleCount=Math.max(24,Math.min(500,Math.round(500/chartZoom)));
+              const end=Math.max(1,allBars.length-Math.max(0,chartOffset));
+              const start=Math.max(0,end-visibleCount);
+              const bars=allBars.slice(start,end);
+              const slider=document.getElementById('live-chart-time-slider');
+              const windowLabel=document.getElementById('live-chart-window-label');
+              if(slider){slider.max=String(Math.max(0,allBars.length-1));slider.value=String(chartOffset);}
+              if(windowLabel)windowLabel.textContent=(start+1)+' تا '+end+' از '+allBars.length+' کندل';
               ctx.clearRect(0,0,canvas.width,canvas.height);
               ctx.fillStyle='#07131f';ctx.fillRect(0,0,canvas.width,canvas.height);
               if(!bars.length){ctx.fillStyle='#ffc66d';ctx.font='18px sans-serif';ctx.fillText('کندل معتبر برای نمایش در دسترس نیست',24,40);return;}
@@ -9917,7 +9956,10 @@ async function loadBlofinInstruments(){
             }
             function drawFutureForecast(data,horizon){
               if(!forecastCtx||!forecastCanvas)return;
-              const bars=(Array.isArray(data.candles)?data.candles:[]).filter(item=>Number.isFinite(Number(item.close))).slice(-20);
+              const allForecastBars=(Array.isArray(data.candles)?data.candles:[]).filter(item=>Number.isFinite(Number(item.close)));
+              const forecastCount=Math.max(8,Math.min(500,Math.round(40/forecastZoom)));
+              const forecastEnd=Math.max(1,allForecastBars.length-Math.max(0,forecastPan));
+              const bars=allForecastBars.slice(Math.max(0,forecastEnd-forecastCount),forecastEnd);
               const ctx=forecastCtx,w=forecastCanvas.width,h=forecastCanvas.height;
               ctx.clearRect(0,0,w,h);ctx.fillStyle='#07131f';ctx.fillRect(0,0,w,h);
               const fmt=value=>'$'+Number(value).toLocaleString('en-US',{maximumFractionDigits:8});
@@ -9965,12 +10007,27 @@ async function loadBlofinInstruments(){
               const color=bullish?'#32d99a':bearish?'#ff647b':'#ffc66d';
               const confidencePct=Number.isFinite(Number(forecast.confidence_pct))?Number(forecast.confidence_pct):null;
               const scenarioLabel=bullish?'سناریوی محتمل: صعودی':'سناریوی محتمل: اصلاحی / نزولی';
-              const horizonSteps={'15m':3,'1h':6,'4h':10,'1d':14}[horizon]||3;
-              const horizonLabel={'15m':'۱۵ دقیقه آینده','1h':'۱ ساعت آینده','4h':'۴ ساعت آینده','1d':'۱ روز آینده'}[horizon]||'افق کوتاه';
-              const stepMove=Math.max(Number(forecast.atr)||atr,atr*.18);
+              const horizonConfig={
+                '15m':{steps:3,label:'۱۵ دقیقه آینده',bars:3,macro:'1h'},
+                '1h':{steps:6,label:'۱ ساعت آینده',bars:12,macro:'1h'},
+                '4h':{steps:10,label:'۴ ساعت آینده',bars:48,macro:'4h'},
+                '1d':{steps:14,label:'۱ روز آینده',bars:24,macro:'1d'},
+                '1w':{steps:18,label:'۱ هفته آینده',bars:168,macro:'1d'},
+                '1mo':{steps:20,label:'۱ ماه آینده',bars:720,macro:'1d'},
+                '6mo':{steps:22,label:'۶ ماه آینده',bars:4320,macro:'1w'},
+                '1y':{steps:24,label:'۱ سال آینده',bars:8760,macro:'1w'}
+              };
+              const horizonSpec=horizonConfig[horizon]||horizonConfig['15m'];
+              const horizonSteps=horizonSpec.steps,horizonLabel=horizonSpec.label;
+              const macroBars=(forecast.higher_timeframes&&forecast.higher_timeframes[horizonSpec.macro])||[];
+              const macroRanges=macroBars.slice(-14).map(item=>Math.max(0,Number(item.high)-Number(item.low))).filter(Number.isFinite);
+              const macroAtr=macroRanges.length?macroRanges.reduce((sum,value)=>sum+value,0)/macroRanges.length:atr;
+              const intervalBars=({1s:86400,1m:1440,5m:288,15m:96,1h:24,4h:6,1d:1,1w:1/7,1M:1/30}[data.interval]||24);
+              const timeScaledAtr=Math.max(atr,macroAtr)*Math.sqrt(Math.max(1,horizonSpec.bars/Math.max(1,intervalBars)));
+              const stepMove=Math.max(Number(forecast.atr)||atr,timeScaledAtr/Math.sqrt(horizonSteps),atr*.18);
               const band=Array.isArray(forecast.confidence_band)?forecast.confidence_band:[];
               const future=[];let previous=last;
-              for(let i=0;i<Math.min(horizonSteps,band.length||horizonSteps);i++){
+              for(let i=0;i<horizonSteps;i++){
                 const point=band[i]||{};
                 const close=Number.isFinite(Number(point.center))?Number(point.center):previous+(bullish?1:bearish?-1:0)*stepMove*.12;
                 const high=Number.isFinite(Number(point.upper))?Number(point.upper):Math.max(previous,close)+stepMove*.65;
@@ -10040,7 +10097,7 @@ async function loadBlofinInstruments(){
                 ctx.fillStyle='#ffd27a';ctx.fillText('🟡 شروع رکود / چرخش',split+8,Math.max(top+14,Math.min(bottom-6,Math.min(sy1,sy2)-5)),w-right-split-16);
               }
               ctx.restore();
-              ctx.fillStyle='#d7e8f5';ctx.font='bold 14px sans-serif';ctx.fillText('۲۰ کندل واقعی اخیر',left,20);
+              ctx.fillStyle='#d7e8f5';ctx.font='bold 14px sans-serif';ctx.fillText(bars.length+' کندل تاریخی · ATR کلان '+fmt(macroAtr),left,20);
               ctx.fillStyle='#b9a1ff';ctx.fillText('مسیر واحد · '+horizonLabel,split+10,20);
               const evidence=scoreParts.length?scoreParts.map(item=>item.name+(item.score>0?' مثبت':' منفی')).join('، '):'شواهد جهت‌دار کافی ثبت نشده؛ مسیر بر اساس شیب قیمت انتخاب شد';
               const reason='شواهد مؤثر: '+evidence+' · امتیاز جهت: '+totalScore.toFixed(1);
@@ -10050,8 +10107,46 @@ async function loadBlofinInstruments(){
               ctx.fillStyle='#e5eff7';ctx.font='11px sans-serif';ctx.fillText('قدرت سناریو: '+(confidencePct===null?'نامشخص':confidencePct.toLocaleString('fa-IR')+'٪'),boxX+9,boxY+38,boxW-18);
               ctx.fillStyle='#bdcedb';ctx.fillText('هدف تقریبی: '+fmt(target)+' · پژوهشی / NO_TRADE',boxX+9,boxY+57,boxW-18);ctx.restore();
               if(forecastExplanation)forecastExplanation.textContent=horizonLabel+' · '+scenarioLabel+' · قدرت سناریو: '+(confidencePct===null?'نامشخص':confidencePct+'%')+' · هدف تقریبی '+fmt(target)+' · برآورد پژوهشی، نه سیگنال سفارش.';
-              if(forecastEvidence)forecastEvidence.textContent='وضعیت نهنگ‌ها: '+(forecast.whale_summary_fa||'داده تأییدشده موجود نیست')+' | خبر مرتبط '+(data.symbol||'')+': '+(forecast.news_summary_fa||'داده تأییدشده موجود نیست')+' | سطوح 1H/4H فقط در صورت دریافت داده معتبر محاسبه می‌شوند.';
+              if(forecastEvidence)forecastEvidence.textContent='ATR کلان '+horizonLabel+': '+fmt(macroAtr)+' · دامنه زمانی برآورد: '+horizonSpec.bars+' کندل معادل · وضعیت نهنگ‌ها: '+(forecast.whale_summary_fa||'داده تأییدشده موجود نیست')+' | خبر مرتبط '+(data.symbol||'')+': '+(forecast.news_summary_fa||'داده تأییدشده موجود نیست')+' | پژوهشی و NO_TRADE.'
             }
+            function setMainZoom(next){chartZoom=Math.max(1,Math.min(12,next));draw(latestChartData||{candles:[]});}
+            function attachChartGestures(target,kind){
+              if(!target)return;
+              let lastX=0,startY=0,lastDistance=0,dragging=false;
+              const distance=touches=>Math.hypot(touches[0].clientX-touches[1].clientX,touches[0].clientY-touches[1].clientY);
+              target.addEventListener('touchstart',event=>{
+                if(event.touches.length===1){lastX=event.touches[0].clientX;startY=event.touches[0].clientY;dragging=true;}
+                else if(event.touches.length===2){lastDistance=distance(event.touches);dragging=false;}
+              },{passive:true});
+              target.addEventListener('touchmove',event=>{
+                if(kind==='main'&&event.touches.length===1&&dragging){
+                  const dx=event.touches[0].clientX-lastX,dy=event.touches[0].clientY-startY;
+                  if(Math.abs(dx)>Math.abs(dy)){event.preventDefault();chartOffset=Math.max(0,Math.min(499,chartOffset+Math.round(dx/8)));lastX=event.touches[0].clientX;draw(latestChartData||{candles:[]});}
+                }else if(event.touches.length===2){
+                  event.preventDefault();const next=distance(event.touches);
+                  if(lastDistance>0){const ratio=next/lastDistance;if(kind==='main')setMainZoom(chartZoom*ratio);else{forecastZoom=Math.max(.5,Math.min(5,forecastZoom/ratio));if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);}}
+                  lastDistance=next;
+                }
+              },{passive:false});
+              target.addEventListener('touchend',()=>{dragging=false;lastDistance=0;});
+              target.addEventListener('mousedown',event=>{dragging=true;lastX=event.clientX;target.style.cursor='grabbing';});
+              window.addEventListener('mousemove',event=>{
+                if(!dragging)return;const dx=event.clientX-lastX;
+                if(kind==='main'){chartOffset=Math.max(0,Math.min(499,chartOffset+Math.round(dx/8)));draw(latestChartData||{candles:[]});}
+                else{forecastPan=Math.max(0,Math.min(480,forecastPan+Math.round(dx/12)));if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);}
+                lastX=event.clientX;
+              });
+              window.addEventListener('mouseup',()=>{dragging=false;target.style.cursor='grab';});
+              target.addEventListener('wheel',event=>{event.preventDefault();if(kind==='main')setMainZoom(chartZoom*(event.deltaY<0?1.15:.87));else{forecastZoom=Math.max(.5,Math.min(5,forecastZoom*(event.deltaY<0?1.15:.87)));if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);}},{passive:false});
+            }
+            attachChartGestures(canvas,'main');attachChartGestures(forecastCanvas,'forecast');
+            document.getElementById('live-chart-zoom-in')?.addEventListener('click',()=>setMainZoom(chartZoom*1.25));
+            document.getElementById('live-chart-zoom-out')?.addEventListener('click',()=>setMainZoom(chartZoom/1.25));
+            document.getElementById('live-chart-now')?.addEventListener('click',()=>{chartOffset=0;chartZoom=1;draw(latestChartData||{candles:[]});});
+            document.getElementById('live-chart-time-slider')?.addEventListener('input',event=>{chartOffset=Number(event.target.value)||0;draw(latestChartData||{candles:[]});});
+            document.getElementById('forecast-chart-zoom-in')?.addEventListener('click',()=>{forecastZoom=Math.min(5,forecastZoom*1.25);if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);});
+            document.getElementById('forecast-chart-zoom-out')?.addEventListener('click',()=>{forecastZoom=Math.max(.5,forecastZoom/1.25);if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);});
+            document.getElementById('forecast-chart-reset')?.addEventListener('click',()=>{forecastZoom=1;forecastPan=0;if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);});
             document.querySelectorAll('[data-forecast-horizon]').forEach(button=>{
               button.addEventListener('click',()=>{
                 forecastHorizon=button.dataset.forecastHorizon;
