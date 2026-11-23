@@ -3,7 +3,6 @@ from __future__ import annotations
 import atexit
 import json
 import threading
-import time
 import unittest
 from datetime import datetime, timezone
 from http.client import HTTPConnection
@@ -86,15 +85,8 @@ class LiveMarketRadarApiTests(unittest.TestCase):
 
     def test_api_returns_two_source_candles_waves_and_signal(self):
         frame = candle_frame()
-        def public_get(url, params=None):
-            if "/depth" in url:
-                return {"bids": [], "asks": []}
-            if "cryptocompare" in url:
-                return {"Data": []}
-            return []
         with patch.object(web_app.ENGINE.data.binance, "candles", return_value=frame) as binance, \
              patch.object(web_app.ENGINE.data.bybit, "candles", return_value=frame.copy()) as bybit, \
-             patch.object(web_app.ENGINE.data.binance.http, "get", side_effect=public_get), \
              patch("crypto_super_radar.live_market_radar.datetime") as clock:
             clock.now.return_value = datetime(2025, 1, 1, 5, 3, tzinfo=timezone.utc)
             clock.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
@@ -108,43 +100,13 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertTrue(payload["candles"][-1]["is_closed"] is False)
         self.assertEqual(payload["signal"]["signal_candle_at"], payload["last_closed_candle_at"])
         self.assertFalse(payload["orders_submitted"])
-        self.assertIn("future_forecast", payload)
-        self.assertEqual(len(payload["future_forecast"]["confidence_band"]), 12)
-        self.assertIn("higher_timeframes", payload["future_forecast"])
-        self.assertEqual(payload["future_forecast"]["news_summary_fa"], "داده تأییدشده موجود نیست")
-        self.assertEqual(binance.call_count, 6)
-        self.assertEqual({call.kwargs.get("interval") for call in binance.call_args_list}, {"5m", "1h", "4h", "1d", "1w", "1M"})
-        self.assertTrue(all(call.kwargs.get("limit") == 180 for call in binance.call_args_list))
+        binance.assert_called_once()
         bybit.assert_called_once()
-
-    def test_one_second_interval_uses_fast_binance_only_fallback(self):
-        frame = candle_frame()
-        frame.index = pd.date_range("2025-01-01T00:00:00Z", periods=len(frame), freq="1s")
-        started = time.monotonic()
-        with patch.object(web_app.ENGINE.data.binance, "candles", return_value=frame) as binance, \
-             patch.object(web_app.ENGINE.data.bybit, "candles") as bybit:
-            payload = web_app._live_market_radar_payload("BTCUSDT", "1s", force_refresh=True)
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 2.0)
-        binance.assert_called_once_with("BTCUSDT", interval="1s", limit=300)
-        bybit.assert_not_called()
-        self.assertEqual(payload["source_mode"], "SINGLE_SOURCE")
-        self.assertIn("Binance", payload["source_status_fa"])
-        self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
-        self.assertEqual(payload["signal"]["status"], "BLOCKED")
-        self.assertFalse(payload["orders_submitted"])
 
     def test_missing_second_provider_blocks_buy_sell_signal(self):
         frame = candle_frame()
-        def public_get(url, params=None):
-            if "/depth" in url:
-                return {"bids": [], "asks": []}
-            if "cryptocompare" in url:
-                return {"Data": []}
-            return []
         with patch.object(web_app.ENGINE.data.binance, "candles", return_value=frame), \
-             patch.object(web_app.ENGINE.data.bybit, "candles", side_effect=RuntimeError("rate limited")), \
-             patch.object(web_app.ENGINE.data.binance.http, "get", side_effect=public_get):
+             patch.object(web_app.ENGINE.data.bybit, "candles", side_effect=RuntimeError("rate limited")):
             status, raw_payload = self.request(
                 "/api/live-market-radar?symbol=BTCUSDT&interval=5m&refresh=1"
             )

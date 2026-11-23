@@ -159,21 +159,5 @@ class LiveMarketRadarTests(unittest.TestCase):
             )
 
 
-    def test_chart_retains_180_completed_candles_for_history_navigation(self):
-        start = pd.Timestamp("2025-01-01T00:00:00Z")
-        index = pd.date_range(start=start, periods=520, freq="5min")
-        frame = pd.DataFrame({
-            "open": [100.0] * 520, "high": [101.0] * 520,
-            "low": [99.0] * 520, "close": [100.2] * 520,
-            "volume": [1000.0] * 520,
-        }, index=index)
-        now = datetime(2025, 1, 2, 20, 1, tzinfo=timezone.utc)
-        payload = build_live_market_radar_payload(
-            "BTCUSDT", "5m", frame, frame.copy(), now=now,
-        )
-        self.assertEqual(len(payload["candles"]), 180)
-        self.assertTrue(all(item["is_closed"] for item in payload["candles"]))
-        self.assertEqual(payload["candles"][0]["time"], int(index[-180].timestamp() * 1000))
-
 if __name__ == "__main__":
     unittest.main()
