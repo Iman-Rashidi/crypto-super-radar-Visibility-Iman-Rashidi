@@ -7884,6 +7884,12 @@ async function loadBlofinInstruments(){
             <button id="gem-hunter-run" type="button">اجرای اسکن زنده Gem Hunter V3</button>
             <span id="gem-hunter-status" class="muted" aria-live="polite">هنوز اسکن Gem Hunter V3 اجرا نشده است.</span>
           </div>
+          <div id="gem-hunter-filter-bar" class="grid" role="group" aria-label="فیلتر سریع نامزدهای Gem Hunter" style="grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0">
+            <button type="button" class="gem-filter active" data-gem-filter="all" aria-pressed="true">همه</button>
+            <button type="button" class="gem-filter" data-gem-filter="meme" aria-pressed="false">🐸 میم‌کوین‌ها</button>
+            <button type="button" class="gem-filter" data-gem-filter="alt" aria-pressed="false">💎 آلت‌کوین‌های جدید</button>
+            <button type="button" class="gem-filter" data-gem-filter="whale" aria-pressed="false">🐋 دارای ورود نهنگ</button>
+          </div>
           <div id="gem-hunter-results" style="overflow-x:auto">
             <p class="muted">برای اجرای اسکن زندهٔ Gem Hunter V3 دکمهٔ کشف را بزنید؛ نامزدهای Tier 1 و Tier 2 با نقاط قوت و احتیاط نمایش داده می‌شوند.</p>
           </div>
@@ -7947,10 +7953,12 @@ async function loadBlofinInstruments(){
           const button = document.getElementById('gem-hunter-run');
           const status = document.getElementById('gem-hunter-status');
           const results = document.getElementById('gem-hunter-results');
+          const filterBar = document.getElementById('gem-hunter-filter-bar');
+          let activeGemFilter = 'all';
           const watchEntries = document.getElementById('watchlist-entries');
           const watchStatus = document.getElementById('watchlist-status');
           const watchForm = document.getElementById('watchlist-manual-form');
-          if (!button || !status || !results || !watchEntries || !watchForm) return;
+          if (!button || !status || !results || !watchEntries || !watchForm || !filterBar) return;
           const STORAGE_KEY = 'crypto-super-radar.gem-hunter-watchlist.v1';
           const filterLabels = {
             contract_security:'امنیت قرارداد و اختیارات',
@@ -8105,14 +8113,144 @@ async function loadBlofinInstruments(){
             const box = document.createElement('div'); box.className = 'gem-fact';
             box.appendChild(el('span', label)); box.appendChild(el('strong', value)); parent.appendChild(box);
           };
+          const candidateMatchesGemFilter = (item, filter) => {
+            if (filter === 'all') return true;
+            const category = String(item.category_fa || (item.pump_dump_analysis || {}).category_fa || '');
+            const poolTrades = item.pool_trade_evidence || item.pool_trades_evidence || {};
+            const wallets = Array.isArray(poolTrades.whale_wallets_1h) ? poolTrades.whale_wallets_1h :
+              (Array.isArray(item.whale_wallets) ? item.whale_wallets : []);
+            const buyUsd = Number(poolTrades.whale_buy_volume_1h_usd ?? item.whale_buy_volume_1h_usd ?? 0);
+            const sellUsd = Number(poolTrades.whale_sell_volume_1h_usd ?? item.whale_sell_volume_1h_usd ?? 0);
+            const hasWhale = wallets.length > 0 || buyUsd > 0 || sellUsd > 0;
+            if (filter === 'meme') return category.includes('میم‌کوین') || category.includes('میم کوین');
+            if (filter === 'alt') return category.includes('آلت‌کوین') || category.includes('آلت کوین');
+            if (filter === 'whale') return hasWhale;
+            return true;
+          };
+          const applyGemHunterFilterToCard = card => {
+            const visible = activeGemFilter === 'all' ||
+              (activeGemFilter === 'meme' && card.dataset.gemFilterKind === 'meme') ||
+              (activeGemFilter === 'alt' && card.dataset.gemFilterKind === 'alt') ||
+              (activeGemFilter === 'whale' && card.dataset.gemHasWhale === 'true');
+            card.hidden = !visible;
+          };
+          const applyGemHunterFilter = () => {
+            results.querySelectorAll('.gem-candidate[data-gem-filter-kind]').forEach(card => {
+              const kind = card.dataset.gemFilterKind || 'alt';
+              const hasWhale = card.dataset.gemHasWhale === 'true';
+              const visible = activeGemFilter === 'all' ||
+                (activeGemFilter === 'meme' && kind === 'meme') ||
+                (activeGemFilter === 'alt' && kind === 'alt') ||
+                (activeGemFilter === 'whale' && hasWhale);
+              card.hidden = !visible;
+            });
+            filterBar.querySelectorAll('[data-gem-filter]').forEach(button => {
+              const selected = button.dataset.gemFilter === activeGemFilter;
+              button.classList.toggle('active', selected);
+              button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+            });
+          };
+          filterBar.addEventListener('click', event => {
+            const button = event.target.closest('[data-gem-filter]');
+            if (!button) return;
+            activeGemFilter = button.dataset.gemFilter || 'all';
+            applyGemHunterFilter();
+          });
           const renderCandidate = item => {
             const q = item.qualification || {}; const m = q.market_metrics || {};
             const filters = q.filters || {}; const gates = q.critical_gates || {};
             const card = document.createElement('article'); card.className = 'gem-candidate';
+            const initialCategory = String(item.category_fa || (item.pump_dump_analysis || {}).category_fa || '');
+            const initialTrades = item.pool_trade_evidence || item.pool_trades_evidence || {};
+            const initialWallets = Array.isArray(initialTrades.whale_wallets_1h) ? initialTrades.whale_wallets_1h : (Array.isArray(item.whale_wallets) ? item.whale_wallets : []);
+            const initialWhaleBuy = Number(initialTrades.whale_buy_volume_1h_usd ?? item.whale_buy_volume_1h_usd ?? 0);
+            const initialWhaleSell = Number(initialTrades.whale_sell_volume_1h_usd ?? item.whale_sell_volume_1h_usd ?? 0);
+            card.dataset.gemFilterKind = initialCategory.includes('میم') ? 'meme' : 'alt';
+            card.dataset.gemHasWhale = String(initialWallets.length > 0 || initialWhaleBuy > 0 || initialWhaleSell > 0);
             card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
             const tier = item.gem_hunter_v3_status || item.tier || 'RESEARCH_WATCH';
             const tierLabel = item.tier_label_fa || ({TIER_1_VERIFIED_GEM:'⭐ ستاره طلایی · Tier 1',TIER_2_EARLY_ALPHA:'🔥 فرصت اولیه · Tier 2',BLOCKED_SCAM:'مسدود · خطر فروش/کلاهبرداری',BLOCKED_LOW_LIQUIDITY:'مسدود · نقدینگی بسیار کم',REVIEW_REQUIRED:'در انتظار بررسی امنیت',RESEARCH_WATCH:'پایش پژوهشی'}[tier] || tier);
             card.appendChild(el('p', (item.chain || 'unknown').toUpperCase() + ' · ' + tierLabel + ' · مجوز: NO_TRADE', 'candidate-meta'));
+            const pump = item.pump_dump_analysis || item;
+            const narrative = item.narrative_analysis || item;
+            card.appendChild(el('p', 'دسته: ' + (pump.category_fa || item.category_fa || 'نامشخص') +
+              ' · فاز پامپ/دامپ: ' + (pump.pump_phase_fa || item.pump_phase_fa || 'نامشخص'), 'candidate-meta'));
+            card.appendChild(el('p', 'قیمت تخمینی شروع موج: ' +
+              (pump.pump_start_price_usd ?? item.pump_start_price_usd ?? 'نامشخص') + ' USD · ' +
+              (pump.pump_window_summary_fa || item.pump_window_summary_fa || 'مدت فعالیت استخر نامشخص') +
+              ' · خط قرمز ریسک: ' + (pump.risk_invalidation_price_usd ?? item.risk_invalidation_price_usd ?? 'نامشخص') + ' USD', 'candidate-meta'));
+            card.appendChild(el('p', '🧠 روانشناسی روایت: ' +
+              (narrative.narrative_psychology_fa || item.narrative_psychology_fa ||
+               'تحلیل روایت در دادهٔ این نامزد موجود نیست؛ خبر و شبکه اجتماعی راستی‌آزمایی نشده است.'), 'candidate-meta'));
+
+            const whaleEvidence = item.pool_trade_evidence || item.pool_trades_evidence || {};
+            const whaleWallets = Array.isArray(whaleEvidence.whale_wallets_1h) ? whaleEvidence.whale_wallets_1h :
+              (Array.isArray(item.whale_wallets) ? item.whale_wallets : []);
+            const whaleBuy = whaleEvidence.whale_buy_volume_1h_usd ?? item.whale_buy_volume_1h_usd;
+            const whaleSell = whaleEvidence.whale_sell_volume_1h_usd ?? item.whale_sell_volume_1h_usd;
+            const whaleAction = whaleEvidence.whale_net_action_fa || item.whale_net_action_fa || 'دادهٔ کافی برای تشخیص رفتار نهنگ‌ها موجود نیست.';
+            const whaleSection = document.createElement('details');
+            whaleSection.appendChild(el('summary', '🐋 نهنگ‌های فعال این ارز · ' + whaleWallets.length + ' کیف‌پول مشاهده‌شده'));
+            whaleSection.appendChild(el('p', 'خرید نهنگ‌ها: ' + (whaleBuy ?? 'ناموجود') + ' USD · فروش نهنگ‌ها: ' +
+              (whaleSell ?? 'ناموجود') + ' USD', 'candidate-meta'));
+            whaleSection.appendChild(el('p', whaleAction, 'candidate-meta'));
+            if (whaleWallets.length) {
+              const walletList = document.createElement('ul');
+              whaleWallets.slice(0, 10).forEach(wallet => {
+                const address = String(wallet.wallet_address || wallet.address || '');
+                const shortAddress = address ? address.slice(0, 7) + '…' + address.slice(-5) : 'کیف‌پول نامشخص';
+                const li = document.createElement('li');
+                li.appendChild(el('span', shortAddress + ' · خرید: ' + (wallet.buy_volume_usd ?? '—') +
+                  ' USD · فروش: ' + (wallet.sell_volume_usd ?? '—') + ' USD '));
+                if (address && ['solana','base','ethereum'].includes(item.chain)) {
+                  const base = explorerBase(item.chain);
+                  addLink(li, 'مشاهده کیف‌پول ↗', base + (item.chain === 'solana' ? '/account/' : '/address/') + encodeURIComponent(address));
+                }
+                walletList.appendChild(li);
+              });
+              whaleSection.appendChild(walletList);
+            } else {
+              whaleSection.appendChild(el('p', 'در نمونهٔ معاملاتی موجود، کیف‌پول نهنگ قابل‌نمایشی ثبت نشده است.', 'candidate-meta'));
+            }
+            card.appendChild(whaleSection);
+
+            const technical = item.technical_evidence || {};
+            const waveButton = el('button', '📊 مشاهده کندل و ساختار موج الیوت');
+            waveButton.type = 'button';
+            const wavePanel = document.createElement('div');
+            wavePanel.hidden = true;
+            wavePanel.className = 'gem-wave-panel';
+            const renderWaveSummary = () => {
+              wavePanel.replaceChildren();
+              const timeframes = technical.timeframes || {};
+              wavePanel.appendChild(el('p', 'وضعیت دادهٔ تکنیکال: ' + (technical.status || 'UNKNOWN') +
+                ' · پوشش: ' + (technical.coverage_status || 'UNKNOWN') +
+                ' · زمان بررسی UTC: ' + (technical.checked_at_utc || 'نامشخص'), 'candidate-meta'));
+              ['15m','4h','1d'].forEach(tf => {
+                const frame = timeframes[tf];
+                if (!frame) {
+                  wavePanel.appendChild(el('p', tf + ': کندل بسته‌شدهٔ معتبر در دسترس نیست.', 'candidate-meta'));
+                  return;
+                }
+                wavePanel.appendChild(el('p', tf + ' · ساختار روند: ' + (frame.direction || 'UNKNOWN') +
+                  ' · EMA20: ' + (frame.ema20 ?? 'ناموجود') + ' · EMA50: ' + (frame.ema50 ?? 'ناموجود') +
+                  ' · RSI14: ' + (frame.rsi14 ?? 'ناموجود') +
+                  ' · آخرین کندل بسته‌شده UTC: ' + (frame.latest_candle_utc || 'نامشخص'), 'candidate-meta'));
+              });
+              const waveLabel = technical.status === 'COMPLETE'
+                ? 'موج الیوت: شمارش موج و پیوت‌های تأییدشده در خروجی موتور موجود نیست؛ از روی EMA/RSI نمی‌توان موج ۱ تا ۵ را معتبر نام‌گذاری کرد.'
+                : 'موج الیوت: نامشخص؛ پوشش OHLCV کامل و معتبر نیست و شمارش موج قابل اتکا ارائه نمی‌شود.';
+              wavePanel.appendChild(el('p', waveLabel, 'candidate-meta'));
+              (technical.reason_fa || []).forEach(reason => wavePanel.appendChild(el('p', reason, 'candidate-meta')));
+              wavePanel.appendChild(el('p', 'نمایش فعلی خلاصهٔ شاخص‌های کندل بسته‌شده است، نه نمودار OHLC یا سیگنال معاملاتی. وضعیت: NO_TRADE.', 'candidate-meta'));
+            };
+            waveButton.addEventListener('click', () => {
+              wavePanel.hidden = !wavePanel.hidden;
+              if (!wavePanel.hidden) renderWaveSummary();
+              waveButton.setAttribute('aria-expanded', wavePanel.hidden ? 'false' : 'true');
+            });
+            card.appendChild(waveButton);
+            card.appendChild(wavePanel);
             card.appendChild(el('p', 'اولویت کشف اولیه: ' + (item.discovery_priority_score ?? 'ناموجود') + '/100 · امنیت پایه: ' + (item.tier_base_security_status || 'UNKNOWN') + ' · بررسی کامل امنیت: ' + ((item.security_evidence || {}).status || 'UNKNOWN') + ' · بازار: ' + ((item.market_reconciliation || {}).status || 'UNKNOWN'), 'candidate-meta'));
             const exit = item.exit_slippage_evidence || {};
             card.appendChild(el('p', 'مومنتوم مشاهده‌شده: ' + (item.short_term_momentum_score ?? item.short_term_momentum_smart_money_score ?? 'ناموجود') + '/100 · ایمنی/خروج: ' + (item.safety_exit_liquidity_score ?? 'ناموجود') + '/100 · اعتماد داده: ' + (item.data_confidence_score ?? 'ناموجود') + '/100 · لغزش خروج: ' + (exit.estimated_slippage_bps ?? 'UNKNOWN') + ' bps (' + (exit.status || 'UNKNOWN') + ')', 'candidate-meta'));
@@ -8257,7 +8395,7 @@ async function loadBlofinInstruments(){
                 add.textContent = 'افزودن ناموفق؛ جزئیات را بررسی کنید';
               }
             });
-            card.appendChild(add); return card;
+            card.appendChild(add); applyGemHunterFilterToCard(card); return card;
           };
           watchForm.addEventListener('submit', event => {
             event.preventDefault();
@@ -8334,6 +8472,7 @@ async function loadBlofinInstruments(){
               const list = document.createElement('div'); list.className = 'gem-report-list';
               rows.forEach(item => list.appendChild(renderCandidate(item)));
               results.appendChild(list);
+              applyGemHunterFilter();
               status.textContent = 'آخرین اسکن ذخیره‌شده به‌صورت خودکار بارگذاری شد · ' + rows.length + ' نامزد';
               window.CryptoRadar.update('radar-gem-hunter', rows, {
                 state: 'complete', caption: 'آخرین اسکن Turso · ' + rows.length + ' نامزد · NO_TRADE'
@@ -8363,6 +8502,7 @@ async function loadBlofinInstruments(){
               const list = document.createElement('div'); list.className = 'gem-report-list';
               pendingCandidates.forEach(item => list.appendChild(renderCandidate(item)));
               results.appendChild(list);
+              applyGemHunterFilter();
             } else {
               results.appendChild(el('p', discovered
                 ? discovered + ' نامزد پیدا شده؛ جزئیات آن هنوز به پاسخ گزارش نرسیده است.'

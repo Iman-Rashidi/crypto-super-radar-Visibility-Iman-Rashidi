@@ -1,6 +1,7 @@
 """Offline tests for Gem Hunter V3 research-only primitives."""
 import sqlite3
 import unittest
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, patch
 
@@ -33,6 +34,20 @@ class FakeStore:
 
 
 class GemHunterV3Tests(unittest.TestCase):
+
+    def test_gem_hunter_web_ui_contains_filters_whales_pump_and_wave_controls(self):
+        source = Path(__file__).parents[1].joinpath(
+            "crypto_super_radar", "web_app.py"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "gem-hunter-filter-bar", "🐸 میم‌کوین‌ها", "💎 آلت‌کوین‌های جدید",
+            "🐋 دارای ورود نهنگ", "pump_phase_fa", "pump_start_price_usd",
+            "risk_invalidation_price_usd", "whale_wallets_1h",
+            "narrative_psychology_fa", "📊 مشاهده کندل و ساختار موج الیوت",
+            "technical_evidence", "EMA20", "RSI14",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
 
     def test_pump_dump_phase_early_mid_exhaustion_and_invalidation(self):
         now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
