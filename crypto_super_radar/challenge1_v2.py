@@ -368,9 +368,11 @@ RSI_DIVERGENCE_PIVOT_REVERSAL = 0.002
 BREAKOUT_VOLUME_MULTIPLE = 1.20
 
 
-def detect_confirmed_rsi_divergence(frame: pd.DataFrame, *, timeframe: str) -> dict[str, Any]:
+def detect_confirmed_rsi_divergence(
+    frame: pd.DataFrame, *, timeframe: str, wave: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Detect regular RSI divergence only at confirmed Elliott pivots."""
-    wave = monitor_elliott_waves(frame, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    wave = wave or monitor_elliott_waves(frame, min_reversal_pct=0.002, max_reversal_pct=0.03)
     pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
     rsi_values = rsi(frame["close"], 14)
     highs = [p for p in pivots if str(p.get("kind", "")).upper() == "HIGH"]
@@ -413,11 +415,15 @@ def detect_confirmed_rsi_divergence(frame: pd.DataFrame, *, timeframe: str) -> d
     return {"type": "NONE", "timeframe": timeframe, "details": [bearish, bullish]}
 
 
-def rsi_divergence_entry_guard(frame_5m: pd.DataFrame, frame_15m: pd.DataFrame, side: str) -> dict[str, Any]:
+def rsi_divergence_entry_guard(
+    frame_5m: pd.DataFrame, frame_15m: pd.DataFrame, side: str, *,
+    wave_5m: Mapping[str, Any] | None = None,
+    wave_15m: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Fail closed: bearish divergence blocks LONG; bullish divergence blocks SHORT."""
     checks = [
-        detect_confirmed_rsi_divergence(frame_5m, timeframe="5m"),
-        detect_confirmed_rsi_divergence(frame_15m, timeframe="15m"),
+        detect_confirmed_rsi_divergence(frame_5m, timeframe="5m", wave=wave_5m),
+        detect_confirmed_rsi_divergence(frame_15m, timeframe="15m", wave=wave_15m),
     ]
     direction = str(side or "").upper()
     blocked = any(
@@ -530,7 +536,7 @@ def detect_early_wave3_breakout(
     crossed = previous_close <= w1_level < close if side == "LONG" else previous_close >= w1_level > close
     if not crossed:
         return {"signal": "NO_TRADE", "reason": "Latest closed 5m candle did not initiate the W1 breakout"}
-    divergence_guard = rsi_divergence_entry_guard(five, fifteen, side)
+    divergence_guard = rsi_divergence_entry_guard(five, fifteen, side, wave_5m=wave5, wave_15m=wave15)
     if divergence_guard["blocked"]:
         return {"signal": "NO_TRADE", "reason": divergence_guard["reason"], "rsi_divergence_guard": divergence_guard}
     volume_confirmation = breakout_volume_confirmation(five)
@@ -646,6 +652,109 @@ def build_early_wave3_signal(
 
 
 
+
+def build_wave5_entry_signal(
+    *, instrument_id: str, frame_5m: pd.DataFrame, frame_15m: pd.DataFrame,
+    asof: pd.Timestamp, entry_price: float, funding_rate: float,
+    funding_kind: str, funding_event_time_ms: int, funding_max_age_ms: int,
+    spread_fraction: float,
+) -> dict[str, Any]:
+    """Confirm a W4 retracement and enter only on a closed-candle W5 reversal."""
+    if asof.tzinfo is None:
+        raise ValueError("asof must be timezone-aware")
+    asof = asof.tz_convert("UTC")
+    five = _closed(_validate(frame_5m, "5M", 60), asof, pd.Timedelta(minutes=5))
+    fifteen = _closed(_validate(frame_15m, "15M", 30), asof, pd.Timedelta(minutes=15))
+    if len(five) < 60 or len(fifteen) < 30:
+        return {"signal": "NO_TRADE", "reason": "W5 entry needs 60 closed 5m and 30 closed 15m candles"}
+    wave5 = monitor_elliott_waves(five, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    wave15 = monitor_elliott_waves(fifteen, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    fib = calculate_wave4_fibonacci(five)
+    if fib.get("status") != "CONFIRMED":
+        return {"signal": "NO_TRADE", "reason": "W4 structure and Fibonacci retracement are not confirmed", "wave4_fibonacci": fib}
+    side = "LONG" if fib.get("pattern") == "BULLISH" else "SHORT"
+    pivots = wave5.get("pivots") if isinstance(wave5.get("pivots"), list) else []
+    if len(pivots) < 5:
+        return {"signal": "NO_TRADE", "reason": "W1-W4 confirmed pivots are incomplete"}
+    p = pivots[-5:]
+    expected = ["LOW", "HIGH", "LOW", "HIGH", "LOW"] if side == "LONG" else ["HIGH", "LOW", "HIGH", "LOW", "HIGH"]
+    if [str(x.get("kind") or "").upper() for x in p] != expected:
+        return {"signal": "NO_TRADE", "reason": "W1-W4 pivot sequence is invalid"}
+    try:
+        w1_start, w1_end, w3_start, w3_end, w4_end = [float(x["price"]) for x in p]
+        confirmations = [_utc_timestamp(x.get("confirmed_at")) for x in p]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return {"signal": "NO_TRADE", "reason": "W1-W4 pivot values are invalid"}
+    if any(x is None or x > asof for x in confirmations):
+        return {"signal": "NO_TRADE", "reason": "W1-W4 pivots are not confirmed as of decision time"}
+    levels = fib.get("levels") or {}
+    level382, level50, level618 = (float(levels[k]) for k in ("0.382", "0.5", "0.618"))
+    zone_low, zone_high = sorted((level382, level618))
+    if not zone_low <= w4_end <= zone_high:
+        return {"signal": "NO_TRADE", "reason": "W4 pivot is outside the 38.2%-61.8% retracement zone", "wave4_fibonacci": fib}
+    if not math.isfinite(float(entry_price)) or float(entry_price) <= 0:
+        return {"signal": "NO_TRADE", "reason": "Executable quote is invalid"}
+    last, prev = five.iloc[-1], five.iloc[-2]
+    trigger = float(last["close"]) > float(prev["high"]) and float(last["close"]) > float(last["open"]) if side == "LONG" else (
+        float(last["close"]) < float(prev["low"]) and float(last["close"]) < float(last["open"])
+    )
+    if not trigger:
+        return {"signal": "NO_TRADE", "reason": "Closed 5m candle has not confirmed W5 reversal"}
+    divergence = rsi_divergence_entry_guard(five, fifteen, side, wave_5m=wave5, wave_15m=wave15)
+    if divergence["blocked"]:
+        return {"signal": "NO_TRADE", "reason": divergence["reason"], "rsi_divergence_guard": divergence}
+    volume = breakout_volume_confirmation(five)
+    if not volume["confirmed"]:
+        return {"signal": "NO_TRADE", "reason": "W5 breakout volume rejected", "breakout_volume_confirmation": volume}
+    ema15 = ema(fifteen["close"], 21)
+    if pd.isna(ema15.iloc[-1]) or pd.isna(ema15.iloc[-4]):
+        return {"signal": "NO_TRADE", "reason": "15m trend confirmation unavailable"}
+    aligned = float(fifteen["close"].iloc[-1]) > float(ema15.iloc[-1]) and ema15.iloc[-1] > ema15.iloc[-4] if side == "LONG" else (
+        float(fifteen["close"].iloc[-1]) < float(ema15.iloc[-1]) and ema15.iloc[-1] < ema15.iloc[-4]
+    )
+    if not aligned:
+        return {"signal": "NO_TRADE", "reason": "15m trend does not confirm W5 direction"}
+    atr5 = float(atr(five, 14).iloc[-1])
+    buffer = 0.10 * atr5
+    stop = min(level618, w1_start) - buffer if side == "LONG" else max(level618, w1_start) + buffer
+    risk = float(entry_price) - stop if side == "LONG" else stop - float(entry_price)
+    if not math.isfinite(risk) or risk <= 0 or risk / float(entry_price) > MAX_STOP_DISTANCE_PCT:
+        return {"signal": "NO_TRADE", "reason": "W5 structural stop is invalid or exceeds 3.5%"}
+    target = float(entry_price) + 1.8 * risk if side == "LONG" else float(entry_price) - 1.8 * risk
+    if target <= 0:
+        return {"signal": "NO_TRADE", "reason": "W5 target is invalid"}
+    stamp = five.index[-1].isoformat()
+    signal_id = f"challenge1-v2-wave5:{str(instrument_id).upper()}:{stamp}:{side}"
+    evidence = {
+        "decision_engine_version": "CHALLENGE_1_V2_W4_PULLBACK_W5_ENTRY",
+        "signal_id": signal_id, "instrument_id": str(instrument_id).upper(),
+        "setup_timeframe": "5m", "entry_execution_timeframe": "15m",
+        "context_timeframes": ["5m", "15m"], "higher_timeframes_used": False,
+        "completed_candles_only": True, "signal_candle_open_utc": stamp,
+        "context_15m_candle_open_utc": fifteen.index[-1].isoformat(),
+        "data_asof_utc": asof.isoformat(), "elliott_wave": wave5,
+        "wave4_fibonacci": fib, "rsi_divergence_guard": divergence,
+        "breakout_volume_confirmation": volume, "funding_kind": "0",
+        "funding_rate": float(funding_rate), "funding_event_time_ms": int(funding_event_time_ms),
+        "funding_max_age_ms": int(funding_max_age_ms),
+    }
+    return {
+        "signal": side, "signal_id": signal_id, "instrument_id": str(instrument_id).upper(),
+        "execution_profile": "CHALLENGE_1_V2", "entry": float(entry_price),
+        "stop_loss": float(stop), "take_profit": float(target),
+        "gross_rr": 1.8, "confidence_score": 100.0,
+        "score_parts": {"confirmed_w4_fibonacci": 35, "closed_candle_w5_trigger": 25,
+                        "rsi_divergence_clear": 20, "breakout_volume_confirmed": 10,
+                        "completed_15m_alignment": 10},
+        "regime": {"status": "FAST_TREND", "direction": side},
+        "atr_15m": atr5, "elliott_wave_5m": wave5,
+        "challenge1_v2_evidence": evidence, "funding_rate": float(funding_rate),
+        "funding_kind": "0", "funding_event_time_ms": int(funding_event_time_ms),
+        "funding_max_age_ms": int(funding_max_age_ms), "spread_fraction": float(spread_fraction),
+        "signal_candle_open_utc": stamp, "orders_submitted": False,
+        "wave5_entry_active": True, "wave4_fibonacci": fib,
+        "rsi_divergence_guard": divergence, "breakout_volume_confirmation": volume,
+    }
 
 
 def _utc_timestamp(value: Any) -> pd.Timestamp | None:
