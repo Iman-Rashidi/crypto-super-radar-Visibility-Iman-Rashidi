@@ -6913,6 +6913,14 @@ def _run_blofin_demo_smoke_test_job(job_id: str) -> None:
 
 
 
+def _deep_num(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _deep_analysis_json(url: str):
     from urllib.request import Request, urlopen
     try:
@@ -6942,7 +6950,7 @@ def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = 
     pairs.sort(key=lambda p: float(((p.get("liquidity") or {}).get("usd") or 0) or 0), reverse=True)
     pair = pairs[0] if pairs else {}
     token = pair.get("baseToken") or {}
-    price = _safe_float(pair.get("priceUsd")) if pair else None
+    price = _deep_num(pair.get("priceUsd")) if pair else None
     txns, changes, volume = pair.get("txns") or {}, pair.get("priceChange") or {}, pair.get("volume") or {}
     pressure = {}
     for key in ("m5","h1","h6","h24"):
