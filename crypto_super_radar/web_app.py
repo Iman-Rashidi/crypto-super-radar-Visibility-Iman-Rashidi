@@ -8230,7 +8230,7 @@ async function loadBlofinInstruments(){
                 if (event.wallet_address) addLink(li, event.wallet_address, explorer + (item.chain === 'solana' ? '/account/' : '/address/') + encodeURIComponent(event.wallet_address));
                 if (event.tx_hash) {
                   li.appendChild(el('span', ' · تراکنش: '));
-                  addLink(li, event.tx_hash, explorer + '/tx/' + encodeURIComponent(event.tx_hash));
+                  addLink(li, event.tx_hash, event.explorer_tx_url || explorer + '/tx/' + encodeURIComponent(event.tx_hash));
                 }
                 if (event.source) li.appendChild(el('span', ' · منبع: ' + event.source));
                 eventList.appendChild(li);
