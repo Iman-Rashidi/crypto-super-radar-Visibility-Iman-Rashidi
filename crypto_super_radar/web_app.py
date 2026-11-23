@@ -2042,7 +2042,43 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
     <tbody id="gem-watchlist-rows"><tr><td colspan="6">در حال دریافت واچ‌لیست دائمی…</td></tr></tbody>
   </table></div>
   <p id="gem-watchlist-status" class="muted" aria-live="polite">داده‌ها فقط خواندنی هستند.</p>
-</section><script>
+</section><div id="gem-deep-modal" hidden role="dialog" aria-modal="true" aria-labelledby="gem-deep-title" style="position:fixed;inset:0;z-index:10050;background:#020914dd;overflow:auto;padding:18px">
+ <section style="max-width:850px;margin:5vh auto;background:var(--surface,#102235);border:1px solid #39718a;border-radius:18px;padding:18px;color:var(--text,#eef8ff)">
+  <div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><h2 id="gem-deep-title">🔍 تحلیل عمیق توکن</h2><button id="gem-deep-close" type="button">بستن ✕</button></div>
+  <div id="gem-deep-content" aria-live="polite">در حال دریافت داده‌های زنده…</div>
+ </section>
+</div>
+<script>
+(function(){
+ const modal=document.getElementById('gem-deep-modal'),out=document.getElementById('gem-deep-content');
+ const esc=v=>String(v==null?'NOT_AVAILABLE':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const show=(label,value)=>'<div class="card" style="padding:10px"><b>'+esc(label)+'</b><div>'+esc(value)+'</div></div>';
+ function render(d){
+  const m=d.market||{},sec=d.security||{},p=d.buy_sell_pressure||{},w=d.whales||{},lev=d.price_levels||{};
+  let html='<h3>'+esc((d.token||{}).symbol)+' · '+esc((d.token||{}).chain)+'</h3><h2>'+esc(d.research_status_fa||d.status)+'</h2>';
+  html+='<div class="grid">'+show('قیمت USD',m.price_usd)+show('حجم ۲۴ساعته USD',m.volume_24h_usd)+show('نقدینگی USD',m.liquidity_usd)+show('FDV USD',m.fdv_usd)+show('امتیاز فرصت / ۱۰۰',d.opportunity_score)+show('امتیاز ریسک / ۱۰۰',d.risk_score)+show('روند',d.trend_fa)+'</div>';
+  html+='<h3>فشار خرید و فروش</h3><div class="grid">';
+  [['۵ دقیقه','m5'],['۱ ساعت','h1'],['۶ ساعت','h6'],['۲۴ ساعت','h24']].forEach(x=>{const q=p[x[1]]||{};html+=show(x[0],String(q.buys)+' خرید / '+String(q.sells)+' فروش · نسبت '+String(q.buy_sell_ratio)+' · تغییر '+String(q.price_change_pct)+'%')});
+  html+='</div><h3>امنیت قرارداد</h3><div class="grid">'+show('Mint Authority',sec.mint_authority)+show('Freeze Authority',sec.freeze_authority)+show('قفل LP (%)',sec.lp_locked_pct)+show('امتیاز خام RugCheck',sec.raw_risk_score)+'</div>';
+  html+='<p>هشدارها: '+esc((sec.warnings_fa||[]).join('؛ '))+'</p><h3>شواهد نهنگ‌ها</h3>'+show('هولدرها',w.holder_count)+show('تمرکز ۱۰ دارنده گزارش‌شده (%)',w.top10_reported_concentration_pct)+show('انتقال بزرگ تأییدشده',w.large_transfers)+'<p>'+esc(w.note_fa)+'</p>';
+  html+='<h3>سطوح سناریویی USD</h3>'+show('محدوده ورود',Array.isArray(lev.entry_range_usd)?lev.entry_range_usd.join(' تا '):lev.entry_range_usd)+show('حد ابطال',lev.invalidation_usd)+show('اهداف',Array.isArray(lev.targets_usd)?lev.targets_usd.join(' / '):lev.targets_usd)+'<p>'+esc(lev.method_fa)+'</p>';
+  html+='<h3>سناریوی سرمایه یورویی</h3><div class="grid">';
+  [10,50,100].forEach(c=>{const q=(d.eur_scenarios||{})[String(c)]||{};html+=show('سرمایه €'+c,'افت ۲۰٪: €'+q.minus_20_pct+' · افت ۱۰٪: €'+q.minus_10_pct+' · رشد ۱۰٪: €'+q.plus_10_pct+' · رشد ۲۰٪: €'+q.plus_20_pct)});
+  html+='</div><p><b>دلایل مثبت:</b> '+esc(((d.reasons_fa||{}).positive||[]).join('؛ '))+'</p><p><b>احتیاط:</b> '+esc(((d.reasons_fa||{}).cautions||[]).join('؛ '))+'</p><small>به‌روزرسانی: '+esc(d.updated_at_utc)+' · فقط پژوهشی، NO_TRADE؛ بدون توصیه قطعی یا دستور سفارش.</small>';
+  out.innerHTML=html;
+ }
+ async function open(button){
+  const chain=button.dataset.deepChain||'',address=button.dataset.deepAddress||'',symbol=button.dataset.deepSymbol||'';
+  modal.hidden=false;out.textContent='در حال دریافت داده‌های زنده از DexScreener و RugCheck…';
+  try{const q=new URLSearchParams({chain,address,symbol});const r=await fetch('/api/gem-hunter/deep-analysis?'+q.toString(),{cache:'no-store'});const d=await r.json();if(!r.ok&&d.status!=='MARKET_DATA_UNAVAILABLE')throw new Error(d.message_fa||d.status||r.status);render(d)}
+  catch(e){out.textContent='تحلیل در دسترس نیست: '+e.message}
+ }
+ document.addEventListener('click',e=>{const b=e.target.closest('[data-deep-analysis]');if(b){e.preventDefault();open(b)}});
+ document.getElementById('gem-deep-close').addEventListener('click',()=>modal.hidden=true);
+ modal.addEventListener('click',e=>{if(e.target===modal)modal.hidden=true});
+ document.addEventListener('keydown',e=>{if(e.key==='Escape')modal.hidden=true});
+})();
+</script><script>
 (function(){{
  const btn=document.getElementById('gem-watchlist-refresh');
  if(!btn)return;
@@ -2063,7 +2099,7 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
    document.getElementById('gem-watchlist-rows').innerHTML=rows.map(r=>{{
     const profit=Number(r.eur_100_net_profit_eur||0);
     const color=profit>=0?'#20c997':'#ff647c';
-    return '<tr><td>'+esc(r.token_name)+' ('+esc(r.token_symbol)+')<br>'+esc(r.chain)+' · '+esc(r.detection_count)+' بار شکار</td>'+
+    return '<tr><td>'+esc(r.token_name)+' ('+esc(r.token_symbol)+')<br>'+esc(r.chain)+' · '+esc(r.detection_count)+' بار شکار<br><button type="button" data-deep-analysis data-deep-chain="'+esc(r.chain)+'" data-deep-address="'+esc(r.token_address)+'" data-deep-symbol="'+esc(r.token_symbol)+'">🔍 مشاهده تحلیل کامل</button></td>'+
      '<td>'+esc(r.first_detected_utc)+'</td>'+
      '<td>'+esc(r.initial_price_usd)+' ← '+esc(r.latest_price_usd)+' ('+esc(r.peak_price_usd)+')</td>'+
      '<td style="color:'+color+'">'+(r.current_change_pct==null?'—':Number(r.current_change_pct).toFixed(2)+'%')+'</td>'+
@@ -8727,6 +8763,12 @@ async function loadBlofinInstruments(){
             addresses.appendChild(el('span', 'Mint / Contract: ')); addresses.appendChild(el('code', item.token_address || '—'));
             addresses.appendChild(el('span', ' · Pool: ')); addresses.appendChild(el('code', item.pool_address || '—'));
             card.appendChild(addresses);
+            if (item.token_address) {
+              const deepButton = el('button', '🔍 مشاهده تحلیل کامل'); deepButton.type = 'button';
+              deepButton.dataset.deepAnalysis = '1'; deepButton.dataset.deepChain = String(item.chain || '');
+              deepButton.dataset.deepAddress = String(item.token_address || ''); deepButton.dataset.deepSymbol = String(item.token_symbol || item.symbol || '');
+              card.appendChild(deepButton);
+            }
             if (item.token_address) {
               const copyAddress = el('button', 'کپی آدرس قرارداد'); copyAddress.type = 'button';
               copyAddress.addEventListener('click', async () => {
