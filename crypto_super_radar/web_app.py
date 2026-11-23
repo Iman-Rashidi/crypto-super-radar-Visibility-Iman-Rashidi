@@ -8474,7 +8474,7 @@ async function loadBlofinInstruments(){
             const initialWhaleSell = Number(initialTrades.whale_sell_volume_1h_usd ?? item.whale_sell_volume_1h_usd ?? 0);
             card.dataset.gemFilterKind = initialCategory.includes('میم') ? 'meme' : 'alt';
             card.dataset.gemHasWhale = String(initialWallets.length > 0 || initialWhaleBuy > 0 || initialWhaleSell > 0);
-            card.dataset.pumpPhase = String(item.pump_phase_fa || (item.pump_dump_analysis || {{}}).pump_phase_fa || item.pump_phase || '');
+            card.dataset.pumpPhase = String(item.pump_phase_fa || (item.pump_dump_analysis || {}).pump_phase_fa || item.pump_phase || '');
             card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
             const opportunityRaw = item.opportunity_score ?? item.short_term_momentum_score ?? item.short_term_momentum_smart_money_score;
             const riskRaw = item.risk_score ?? q.risk_score;
