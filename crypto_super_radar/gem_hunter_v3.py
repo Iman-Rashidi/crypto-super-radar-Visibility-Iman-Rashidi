@@ -277,8 +277,6 @@ def analyze_pump_dump_phase(candidate: Mapping[str, Any], *, now: Optional[datet
     buys = max(0.0, buys) if buys is not None else None
     sells = max(0.0, sells) if sells is not None else None
     market_cap = _finite(candidate.get("market_cap_usd", candidate.get("fdv_usd")))
-    pump = candidate.get("pump_dump_analysis") or analyze_pump_dump_phase(candidate)
-    narrative = candidate.get("narrative_analysis") or analyze_narrative_psychology(candidate)
     created = _parse_utc_datetime(candidate.get("pool_created_at_utc"))
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -731,6 +729,12 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     whale_flow = candidate.get("pool_trade_evidence") or {}
     whale_ratio = whale_flow.get("whale_buy_sell_ratio_1h")
     whale_events = whale_flow.get("whale_events") if isinstance(whale_flow.get("whale_events"), list) else []
+    pump = candidate.get("pump_dump_analysis") if isinstance(candidate.get("pump_dump_analysis"), Mapping) else {}
+    narrative = candidate.get("narrative_analysis") if isinstance(candidate.get("narrative_analysis"), Mapping) else {}
+    pump_start = _finite(pump.get("pump_start_price_usd", candidate.get("pump_start_price_usd")))
+    invalidation = _finite(pump.get("risk_invalidation_price_usd", candidate.get("risk_invalidation_price_usd")))
+    pump_start_text = f"${pump_start:.10g}" if pump_start is not None else "ناموجود"
+    invalidation_text = f"${invalidation:.10g}" if invalidation is not None else "ناموجود"
     price = _finite(candidate.get("price_usd"))
     liquidity = _finite(market.get("verified_liquidity_usd")
                         if market.get("status") == "PASS" else candidate.get("liquidity_usd"))
@@ -852,7 +856,12 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         "🚀 <b>بخش پامپ/دامپ و خط قرمز ریسک</b>\n"
         f"<b>دسته‌بندی:</b> {html_escape(str(pump.get('category_fa') or 'نامشخص'))}\n"
         f"<b>فاز موج:</b> {html_escape(str(pump.get('pump_phase_fa') or 'نامشخص'))}\n"
-        f"<b>قیمت تخمینی شروع موج:</b> {('
+        f"<b>قیمت تخمینی شروع موج:</b> {pump_start_text}\n"
+        f"<b>مدت فعالیت استخر:</b> {html_escape(str(pump.get('pump_window_summary_fa') or 'نامشخص'))}\n"
+        f"<b>سطح ابطال ریسک:</b> {invalidation_text} · {html_escape(str(pump.get('risk_invalidation_basis') or 'مبنای محاسبه نامشخص'))}\n"
+        "🧠 <b>روانشناسی روایت و جریان بازار</b>\n"
+        f"{html_escape(str(narrative.get('narrative_psychology_fa') or 'تحلیل روایت در دسترس نیست'))}\n"
+        "<i>خبر یا شبکه اجتماعی مستقلاً راستی‌آزمایی نشده است.</i>\n"
         f"<b>شتاب مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'} از ۱۰۰\n"
         "<b>نقاط قوت:</b>\n"
         + "\n".join(strength_lines) + "\n"
