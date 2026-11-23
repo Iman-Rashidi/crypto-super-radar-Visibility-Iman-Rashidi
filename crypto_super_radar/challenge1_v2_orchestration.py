@@ -387,12 +387,9 @@ def analyze_challenge1_v2_market(
     if record.get("fast_trigger_active") and fast_ohlcv_ready:
         side = str(record["signal"]).upper()
         divergence_guard = rsi_divergence_entry_guard(frame_5m, frame_15m, side)
-        volume_confirmation = breakout_volume_confirmation(frame_5m)
         record["rsi_divergence_guard"] = divergence_guard
-        record["breakout_volume_confirmation"] = volume_confirmation
-        if divergence_guard.get("blocked") or not volume_confirmation.get("confirmed"):
-            reason = divergence_guard.get("reason") if divergence_guard.get("blocked") else volume_confirmation.get("reason")
-            record.update({"signal": "NO_TRADE", "status": "NO_TRADE", "reason": str(reason), "orders_submitted": False})
+        if divergence_guard.get("blocked"):
+            record.update({"signal": "NO_TRADE", "status": "NO_TRADE", "reason": str(divergence_guard.get("reason")), "orders_submitted": False})
     record["early_w3_diagnostic"] = {"signal": early_w3_path.get("signal"), "reason": early_w3_path.get("reason"), "selected": bool(early_w3_path.get("early_w3_active"))}
     record["fast_trigger_diagnostic"] = {
         "engine": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
