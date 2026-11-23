@@ -38,7 +38,7 @@ class LiveChartUiTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
-        scripts = re.findall(r"<script\\b[^>]*>([\\s\\S]*?)</script\\s*>", html, flags=re.IGNORECASE)
+        scripts = re.findall(r"<script\b[^>]*>([\s\S]*?)</script\s*>", html, flags=re.IGNORECASE)
         self.assertTrue(scripts, "The rendered homepage did not contain any script blocks")
         inline_scripts = [script for script in scripts if script.strip()]
         self.assertTrue(inline_scripts, "The rendered homepage contained no inline JavaScript")
@@ -57,7 +57,7 @@ class LiveChartUiTests(unittest.TestCase):
                 self.assertEqual(
                     checked.returncode,
                     0,
-                    f"SyntaxError in rendered homepage inline <script> #{index}:\\n"
+                    f"SyntaxError in rendered homepage inline <script> #{index}:\n"
                     f"{checked.stderr or checked.stdout}",
                 )
 
