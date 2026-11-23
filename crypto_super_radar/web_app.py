@@ -9249,7 +9249,7 @@ async function loadBlofinInstruments(){
           </style>
           <div id="live-market-radar">
             <h3>نمودار زندهٔ کندل و رادار موج‌ها</h3>
-            <p class="muted">کندل‌های Spot از Binance و Bybit دریافت می‌شوند. نمودار هر ۱۵ ثانیه تازه‌سازی می‌شود؛ فقط کندل‌های بسته‌شده در تشخیص سقف/کف و سیگنال استفاده می‌شوند.</p>
+            <p class="muted">کندل‌های Spot از چند منبع مستقل (Binance، Bybit، OKX و Kraken) دریافت و تطبیق می‌شوند. نمودار هر ۱۵ ثانیه تازه‌سازی می‌شود؛ فقط کندل‌های بسته‌شده در تشخیص سقف/کف و سیگنال استفاده می‌شوند.</p>
             <div class="live-radar-custom-search">
               <label for="live-radar-custom-symbol">نماد دلخواه برای تحلیل زنده (مثلاً PEPE، DOGE، SUI یا SHIBUSDT)
                 <input id="live-radar-custom-symbol" type="text" inputmode="text" autocomplete="off" maxlength="20" placeholder="مثلاً PEPE یا SHIBUSDT">
@@ -9383,7 +9383,7 @@ async function loadBlofinInstruments(){
             </section>
             <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
             <p id="live-radar-provider" class="live-radar-note">اعتبارسنجی چندمنبعی: در انتظار داده</p>
-            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance/Bybit و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و از موتور Challenge 1 فیوچرز BloFin جداست. Challenge 1 به‌طور مستقل فقط کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای BloFin را همراه با ساختار قیمت، موج الیوت و دو ناظر مستقل بررسی می‌کند؛ تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
+            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance، Bybit، OKX و Kraken و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و از موتور Challenge 1 فیوچرز BloFin جداست. Challenge 1 به‌طور مستقل فقط کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای BloFin را همراه با ساختار قیمت، موج الیوت و دو ناظر مستقل بررسی می‌کند؛ تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
           </div>
           <script>
           (function(){
@@ -9805,7 +9805,7 @@ async function loadBlofinInstruments(){
                 const response=await fetch(url,{cache:'no-store'});const raw=await response.text();let data;try{data=JSON.parse(raw);}catch(parseError){throw new Error('HTTP '+response.status+' · پاسخ JSON نامعتبر: '+String(parseError.message||parseError)+' · '+raw.slice(0,180));}
                 if(!response.ok)throw new Error((data&&data.error)||('HTTP '+response.status));
                 if(!data||!Array.isArray(data.candles)||!data.candles.length)throw new Error((data&&data.error)||'پاسخ سرور فاقد آرایهٔ کندل معتبر است.');
-                latestChartData=data;draw(data);
+                data=normalizeChartPayload(data);latestChartData=data;draw(data);
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 renderFlow(data.market_flow||{});
