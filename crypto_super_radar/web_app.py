@@ -9281,8 +9281,12 @@ async function loadBlofinInstruments(){
             .live-flow-event{padding:8px;border-radius:8px;border:1px solid var(--line);font-size:.78rem}
             .live-flow-event.buy{border-inline-start:3px solid #19a974}.live-flow-event.sell{border-inline-start:3px solid #e05260}
 
-            .live-radar-custom-search{display:grid;grid-template-columns:minmax(180px,1fr) auto;gap:9px;align-items:end;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
-            .live-radar-custom-search label{display:grid;gap:6px;font-weight:700;font-size:.86rem}
+            .live-radar-custom-search{display:flex;flex-wrap:wrap;gap:9px;align-items:end;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--surface);width:100%;max-width:100%;min-width:0;overflow:hidden}
+            .live-radar-custom-search label{display:grid;gap:6px;font-weight:700;font-size:.86rem;flex:1 1 180px;min-width:0;max-width:100%}
+            .live-radar-custom-search button{flex:0 1 auto;width:auto;max-width:100%;min-width:0;white-space:normal;overflow-wrap:anywhere}
+            .live-radar-controls{width:100%;max-width:100%;min-width:0}
+            .live-radar-controls label{min-width:0}
+            #live-radar-retry{width:auto;max-width:100%;min-height:44px;padding:8px 16px;border:1px solid #b77b36;border-radius:10px;background:#4b3219;color:#ffe0ad;font-weight:800}
             .live-radar-custom-search input{width:100%;min-height:42px;padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface-raised);color:var(--text);font:inherit}
             .live-radar-custom-search button,.live-wave-card button{min-height:40px;padding:8px 12px;border:1px solid #39718c;border-radius:9px;background:#10344a;color:#e6f7ff;font:inherit;font-weight:800;cursor:pointer}
             .live-wave-watch{margin:14px 0;padding:14px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
@@ -9293,7 +9297,9 @@ async function loadBlofinInstruments(){
             .live-wave-meta{font-size:.78rem;line-height:1.65;color:var(--muted);overflow-wrap:anywhere}
             .live-wave-card button{width:100%;font-size:.78rem}
             @media(max-width:600px){
-              .live-radar-custom-search{grid-template-columns:1fr}
+              .live-radar-custom-search{flex-direction:column;align-items:stretch;width:100%;max-width:100%;min-width:0}
+              .live-radar-custom-search label,.live-radar-custom-search button{width:100%;max-width:100%;min-width:0;flex:1 1 auto}
+              .live-radar-controls{grid-template-columns:minmax(0,1fr);width:100%;min-width:0}
               .live-wave-grid{grid-template-columns:1fr}
               .live-wave-card{padding:10px}
               #live-candle-chart{height:500px;min-width:0}
@@ -9379,6 +9385,7 @@ async function loadBlofinInstruments(){
               <p class="easy-robot-caption"><strong id="easy-robot-market">بازار: در انتظار داده</strong> · ربات فقط تحلیل را نمایش می‌دهد و مستقلاً سفارش نمی‌فرستد.</p>
             </section>
             <p id="live-radar-status" class="muted" aria-live="polite">در حال دریافت کندل‌های زنده...</p>
+            <button type="button" id="live-radar-retry" hidden>↻ تلاش مجدد</button>
             <div class="live-candle-wrap">
               <canvas id="live-candle-chart" width="1440" height="560" role="img" aria-label="نمودار بزرگ کندل، موج قیمت، نشانه‌های ساده خرید و فروش و حجم بازار"></canvas>
             </div>
@@ -9495,6 +9502,7 @@ async function loadBlofinInstruments(){
             const interval=document.getElementById('live-radar-interval');
             const button=document.getElementById('live-radar-refresh');
             const status=document.getElementById('live-radar-status');
+            const retryButton=document.getElementById('live-radar-retry');
             const canvas=document.getElementById('live-candle-chart');
             const ctx=canvas.getContext('2d');
             const forecastCanvas=document.getElementById('future-forecast-chart');
@@ -9874,10 +9882,12 @@ async function loadBlofinInstruments(){
               ctx.fillText(data.symbol+' · '+data.interval+' · محور افقی: زمان | محور عمودی: قیمت',pad.left,19);
             }
             async function refresh(force){
-              if(busy)return;busy=true;button.disabled=true;status.textContent='در حال دریافت و تطبیق کندل‌ها...';
+              if(busy)return;busy=true;button.disabled=true;retryButton.hidden=true;status.textContent='در حال دریافت کندل‌های زنده...';
+              const controller=new AbortController();
+              const requestTimeout=setTimeout(()=>controller.abort(),8000);
               try{
                 const url='/api/live-market-radar?symbol='+encodeURIComponent(symbol.value)+'&interval='+encodeURIComponent(interval.value)+(force?'&refresh=1':'');
-                const response=await fetch(url,{cache:'no-store'});const data=await response.json();
+                const response=await fetch(url,{cache:'no-store',signal:controller.signal});const data=await response.json();
                 if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
                 latestChartData=data;draw(data);
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
@@ -9938,7 +9948,9 @@ async function loadBlofinInstruments(){
                   lastSignalKey=s.signal_key;status.textContent+=' · هشدار جدید '+(labels[s.signal]||s.signal);
                 }
               }catch(error){
-                status.textContent='دادهٔ تازه در دسترس نیست؛ سیگنال تازه صادر نمی‌شود: '+String(error.message||error);
+                const timedOut=error&&error.name==='AbortError';
+                status.textContent=timedOut?'مهلت دریافت ۸ ثانیه‌ای تمام شد. اتصال یا منبع داده پاسخ نداد؛ سیگنال تازه صادر نمی‌شود.':'دریافت کندل ناموفق بود: '+String(error.message||error)+' · سیگنال تازه صادر نمی‌شود.';
+                retryButton.hidden=false;
                 draw({candles:[]});
                 fields.action.textContent='نامشخص';
                 updateEasyTraderRobot({candlestick_patterns:[]},{signal:'UNKNOWN'},symbol.value,interval.value);
@@ -9948,8 +9960,9 @@ async function loadBlofinInstruments(){
                 renderPatternList(fields.geometricPatterns,[],'دادهٔ تازه برای تحلیل الگوها در دسترس نیست.');
                 renderPatternList(fields.waveAnalysis,[],'دادهٔ تازه برای تحلیل موج در دسترس نیست.');
                 fields.reason.textContent='آخرین داده تأیید نشد. از سیگنال قبلی برای تصمیم تازه استفاده نکنید.';
-              }finally{busy=false;button.disabled=false;}
+              }finally{clearTimeout(requestTimeout);busy=false;button.disabled=false;}
             }
+            retryButton.addEventListener('click',()=>refresh(true));
             function normalizeCustomSymbol(value){
               let raw=String(value||'').trim().toUpperCase().replaceAll(' ','').replaceAll('/','').replaceAll('-','').replaceAll('_','');
               if(!raw.endsWith('USDT'))raw+='USDT';
