@@ -9167,6 +9167,13 @@ async function loadBlofinInstruments(){
             .live-radar-controls label{display:grid;gap:5px;color:var(--muted);font-size:.85rem}
             .live-candle-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:#07131f}
             #live-candle-chart{display:block;width:100%;min-width:820px;height:480px}
+            .future-forecast-panel{margin:14px 0;padding:14px;border:1px solid #47647c;border-radius:14px;background:linear-gradient(145deg,#0b1b2b,#10283a)}
+            .future-forecast-controls{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+            .future-forecast-controls button{padding:8px 12px;border:1px solid #45677e;border-radius:9px;background:#132f43;color:#e7f5ff;font:inherit;font-weight:800}
+            .future-forecast-controls button[aria-pressed="true"]{border-color:#58c7a1;background:#124b3d}
+            #future-forecast-chart{display:block;width:100%;min-width:720px;height:360px}
+            .future-forecast-wrap{width:100%;overflow-x:auto;border:1px solid #304b60;border-radius:10px;background:#07131f}
+            .future-forecast-note{color:#c6d8e6;line-height:1.8;font-size:.88rem}
             .live-candle-wrap{min-height:480px}
             .live-volume-caption{display:flex;align-items:center;gap:8px;margin:8px 2px 0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-weight:800;line-height:1.6}
             .live-volume-caption.good{color:#7be4b3;border-color:#238d69;background:rgba(17,91,66,.18)}
@@ -9293,6 +9300,17 @@ async function loadBlofinInstruments(){
             <div class="live-candle-wrap">
               <canvas id="live-candle-chart" width="1440" height="560" role="img" aria-label="نمودار بزرگ کندل، موج قیمت، نشانه‌های ساده خرید و فروش و حجم بازار"></canvas>
             </div>
+            <section class="future-forecast-panel" id="future-forecast-panel">
+              <h4>🔮 چارت پیش‌بینی مسیر آینده امواج و الگوها (سناریوی احتمالی)</h4>
+              <div class="future-forecast-controls" role="group" aria-label="افق پیش‌بینی">
+                <button type="button" data-forecast-horizon="15m" aria-pressed="true">۱۵ دقیقه آینده</button>
+                <button type="button" data-forecast-horizon="1h" aria-pressed="false">۱ ساعت آینده</button>
+                <button type="button" data-forecast-horizon="4h" aria-pressed="false">۴ ساعت آینده</button>
+                <button type="button" data-forecast-horizon="1d" aria-pressed="false">۱ روز آینده</button>
+              </div>
+              <div class="future-forecast-wrap"><canvas id="future-forecast-chart" width="1440" height="360" role="img" aria-label="سناریوهای احتمالی مسیر آینده قیمت و موج الیوت"></canvas></div>
+              <p id="future-forecast-explanation" class="future-forecast-note" aria-live="polite">در انتظار دادهٔ معتبر بازار برای ساخت سناریوهای احتمالی.</p>
+            </section>
             <div id="live-volume-status" class="live-volume-caption" role="status" aria-live="polite">حجم بازار پس از دریافت کندل‌ها نمایش داده می‌شود.</div>
             <section class="card manual-wave-trade" id="manual-wave-trade">
               <h4>⚡ معامله دستی هوشمند با یک کلیک در BloFin Demo</h4>
@@ -9380,6 +9398,10 @@ async function loadBlofinInstruments(){
             const status=document.getElementById('live-radar-status');
             const canvas=document.getElementById('live-candle-chart');
             const ctx=canvas.getContext('2d');
+            const forecastCanvas=document.getElementById('future-forecast-chart');
+            const forecastCtx=forecastCanvas?forecastCanvas.getContext('2d'):null;
+            const forecastExplanation=document.getElementById('future-forecast-explanation');
+            let forecastHorizon='15m',latestChartData=null;
             const fields={
               action:document.getElementById('live-radar-action'),
               currentPrice:document.getElementById('live-radar-current-price'),
@@ -9419,10 +9441,24 @@ async function loadBlofinInstruments(){
             function updateManualTradeDefaults(data,signal){
               const raw=String(symbol.value||'BTCUSDT').toUpperCase().replace(/USDT$/,'');
               manualLastInstrument=raw+'-USDT';manualTrade.symbol.value=manualLastInstrument;
-              manualEntryPrice=Number((data.candles||[]).slice(-1)[0]?.close||signal.entry_reference_price||0);
-              manualDirection=signal.action==='SELL'||signal.direction==='BEARISH'?'SHORT':'LONG';
-              const sl=Number(signal.stop_loss||signal.sl||0),tp=Number(signal.take_profit||signal.tp||0);
-              if(sl>0)manualTrade.sl.value=String(sl);if(tp>0)manualTrade.tp.value=String(tp);updateManualProfit();
+              const candles=Array.isArray(data.candles)?data.candles:[];
+              const last=candles[candles.length-1]||{};
+              manualEntryPrice=Number(last.close||signal.entry_reference_price||0);
+              const direction=data.market_analysis&&data.market_analysis.direction||{};
+              const bias=String(signal.direction||direction.bias||direction.trend||'').toUpperCase();
+              manualDirection=(signal.action==='SELL'||signal.signal==='SELL'||bias==='BEARISH')?'SHORT':'LONG';
+              const ranges=candles.slice(-14).map(bar=>Math.max(0,Number(bar.high)-Number(bar.low))).filter(Number.isFinite);
+              const atr=ranges.length?ranges.reduce((sum,value)=>sum+value,0)/ranges.length:manualEntryPrice*.01;
+              const risk=Math.max(atr,manualEntryPrice*.002);
+              const suggestedSl=manualDirection==='LONG'?manualEntryPrice-risk:manualEntryPrice+risk;
+              const suggestedTp=manualDirection==='LONG'?manualEntryPrice+risk*1.5:manualEntryPrice-risk*1.5;
+              const sl=Number(signal.stop_loss||signal.sl||suggestedSl);
+              const tp=Number(signal.take_profit||signal.tp||suggestedTp);
+              if(manualEntryPrice>0){
+                manualTrade.sl.value=String(sl>0?sl:suggestedSl);
+                manualTrade.tp.value=String(tp>0?tp:suggestedTp);
+              }
+              updateManualProfit();
             }
             function updateManualProfit(){
               const target=Number(manualTrade.tp.value),margin=Number(manualTrade.margin.value||100),lev=Number(manualTrade.leverage.value||1);
@@ -9546,9 +9582,6 @@ async function loadBlofinInstruments(){
                 const yy=y(level.value);
                 ctx.save();ctx.strokeStyle=level.color;ctx.lineWidth=1.8;ctx.setLineDash(level.dash);
                 ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right+8,yy);ctx.stroke();ctx.restore();
-                ctx.fillStyle=level.color;ctx.font='bold 13px sans-serif';
-                ctx.fillText(level.name,canvas.width-pad.right+16,yy-5);
-                ctx.font='12px sans-serif';ctx.fillText(number(level.value),canvas.width-pad.right+16,yy+13);
               });
               ctx.strokeStyle='#274156';ctx.lineWidth=1;
               for(let k=0;k<=4;k++){
@@ -9582,7 +9615,6 @@ async function loadBlofinInstruments(){
                   ctx.strokeRect(xx-bodyW/2-2,top-2,bodyW+4,Math.max(5,bottom-top+4));ctx.restore();
                 }
               });
-              const waveLabels=new Map((data.wave_pivots||[]).map(p=>[Date.parse(p.timestamp),p]));
               let prev=null;
               (data.pivots||[]).forEach(p=>{
                 const i=indexByTime.get(Date.parse(p.timestamp));
@@ -9593,13 +9625,10 @@ async function loadBlofinInstruments(){
                   ctx.beginPath();ctx.moveTo(prev.x,prev.y);ctx.lineTo(xx,yy);ctx.stroke();ctx.restore();
                 }
                 ctx.fillStyle=p.kind==='LOW'?'#53d6a0':'#ffc66d';
-                ctx.beginPath();ctx.arc(xx,yy,5,0,Math.PI*2);ctx.fill();
-                const wavePoint=waveLabels.get(Date.parse(p.timestamp));
-                ctx.fillStyle='#edf4fb';ctx.font='11px sans-serif';
-                ctx.fillText(wavePoint?wavePoint.label:(p.kind==='LOW'?'کف':'سقف'),xx+5,yy+(p.kind==='LOW'?16:-8));
+                ctx.beginPath();ctx.arc(xx,yy,4,0,Math.PI*2);ctx.fill();
                 prev={x:xx,y:yy};
               });
-              let wavePrev=null;
+              let wavePrev=null,lastWaveLabelX=-Infinity;
               (data.wave_pivots||[]).forEach(p=>{
                 const i=indexByTime.get(Date.parse(p.timestamp));
                 if(i===undefined)return;
@@ -9609,7 +9638,11 @@ async function loadBlofinInstruments(){
                   ctx.beginPath();ctx.moveTo(wavePrev.x,wavePrev.y);ctx.lineTo(point.x,point.y);ctx.stroke();ctx.restore();
                 }
                 ctx.fillStyle='#d7a9ff';ctx.beginPath();ctx.arc(point.x,point.y,7,0,Math.PI*2);ctx.fill();
-                ctx.fillStyle='#f5eaff';ctx.font='bold 12px sans-serif';ctx.fillText(p.label,point.x+7,point.y-9);
+                const waveText=String(p.label||'');
+                if(waveText&&point.x-lastWaveLabelX>=95){
+                  ctx.fillStyle='#f5eaff';ctx.font='bold 12px sans-serif';
+                  ctx.fillText(waveText,point.x+7,point.y-9);lastWaveLabelX=point.x;
+                }
                 wavePrev=point;
               });
               const signal=data.signal||{};
@@ -9619,9 +9652,25 @@ async function loadBlofinInstruments(){
                 const yy=y(currentPrice);
                 ctx.save();ctx.strokeStyle='#55d7ff';ctx.lineWidth=2.7;ctx.setLineDash([]);
                 ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right+8,yy);ctx.stroke();ctx.restore();
-                ctx.fillStyle='#55d7ff';ctx.font='bold 13px sans-serif';
-                ctx.fillText('قیمت آخرین کندل '+number(currentPrice),canvas.width-pad.right+16,yy-9);
               }
+              const rightLabels=[
+                ...levels.map(level=>({name:level.name,value:level.value,color:level.color})),
+                ...(currentPrice!==null&&currentPrice!==undefined?[{name:'قیمت آخرین کندل',value:currentPrice,color:'#55d7ff'}]:[])
+              ].map(item=>({...item,desired:y(item.value)})).sort((a,b)=>a.desired-b.desired);
+              const labelTop=pad.top+12,labelBottom=canvas.height-pad.bottom-12,minGap=26;
+              rightLabels.forEach((item,index)=>{
+                item.labelY=Math.max(labelTop,item.desired);
+                if(index)item.labelY=Math.max(item.labelY,rightLabels[index-1].labelY+minGap);
+              });
+              if(rightLabels.length&&rightLabels[rightLabels.length-1].labelY>labelBottom){
+                rightLabels[rightLabels.length-1].labelY=labelBottom;
+                for(let i=rightLabels.length-2;i>=0;i--)rightLabels[i].labelY=Math.min(rightLabels[i].labelY,rightLabels[i+1].labelY-minGap);
+              }
+              rightLabels.forEach(item=>{
+                ctx.save();ctx.fillStyle=item.color;ctx.font='bold 12px sans-serif';
+                ctx.fillText(item.name+' · '+number(item.value),canvas.width-pad.right+12,item.labelY);
+                ctx.restore();
+              });
               if(signal.entry_reference_price){
                 const yy=y(signal.entry_reference_price);
                 ctx.save();ctx.strokeStyle=signal.signal==='BUY'?'#53d6a0':signal.signal==='SELL'?'#ff7b85':'#ffc66d';
@@ -9646,15 +9695,32 @@ async function loadBlofinInstruments(){
                 ...(Array.isArray(analysis.candlestick_patterns)?analysis.candlestick_patterns:[]),
                 ...(Array.isArray(analysis.geometric_patterns)?analysis.geometric_patterns:[])
               ].filter(item=>item&&item.state==='CONFIRMED').slice(0,2);
-              patternItems.forEach((item,index)=>{
-                const name=String(item.name_fa||item.name_en||'الگوی قیمت');
-                const detail=String(item.description||'الگو در کندل‌های اخیر شناسایی شد.').replace(/\s+/g,' ').slice(0,82);
-                const text=name+' ('+detail+')';
-                const yy=pad.top+72+index*30;
-                ctx.save();ctx.font='bold 14px sans-serif';
-                ctx.fillStyle='rgba(18,36,52,.94)';ctx.fillRect(pad.left+12,yy,Math.min(700,ctx.measureText(text).width+20),25);
-                ctx.fillStyle='#e7f2fb';ctx.fillText(text,pad.left+22,yy+17,680);ctx.restore();
-              });
+              if(patternItems.length){
+                patternItems.forEach((item,index)=>{
+                  const points=Array.isArray(item.points)?item.points:(Array.isArray(item.geometry_points)?item.geometry_points:[]);
+                  const mapped=points.map(point=>{
+                    const idx=Number.isInteger(point.index)?point.index:indexByTime.get(Date.parse(point.timestamp||point.time));
+                    const price=Number(point.price);
+                    return Number.isInteger(idx)&&idx>=0&&idx<bars.length&&Number.isFinite(price)?{x:x(idx),y:y(price)}:null;
+                  }).filter(Boolean);
+                  if(mapped.length>=2){
+                    ctx.save();ctx.strokeStyle=index===0?'#ffc66d':'#74b7ff';ctx.lineWidth=2.5;ctx.setLineDash([6,4]);
+                    ctx.beginPath();mapped.forEach((point,i)=>i?ctx.lineTo(point.x,point.y):ctx.moveTo(point.x,point.y));ctx.stroke();ctx.restore();
+                  }
+                  const name=String(item.name_fa||item.name_en||'الگوی قیمت');
+                  const detail=String(item.description||'الگو در کندل‌های اخیر شناسایی شد.').replace(/\s+/g,' ').slice(0,82);
+                  const text=name+' ('+detail+')';
+                  const yy=pad.top+72+index*30;
+                  ctx.save();ctx.font='bold 14px sans-serif';
+                  ctx.fillStyle='rgba(18,36,52,.94)';ctx.fillRect(pad.left+12,yy,Math.min(700,ctx.measureText(text).width+20),25);
+                  ctx.fillStyle='#e7f2fb';ctx.fillText(text,pad.left+22,yy+17,680);ctx.restore();
+                });
+              }else{
+                const guide='راهنما: سقف و کف فقط سطح بازه‌اند؛ برچسب موج فقط با پیوت معتبر نمایش داده می‌شود.';
+                ctx.save();ctx.font='bold 13px sans-serif';ctx.fillStyle='rgba(18,36,52,.94)';
+                ctx.fillRect(pad.left+12,pad.top+72,650,28);ctx.fillStyle='#dceaf5';
+                ctx.fillText(guide,pad.left+22,pad.top+91,630);ctx.restore();
+              }
               // Volume histogram uses candle direction: green for rising, red for falling.
               const volumeTop=canvas.height-pad.bottom+14;
               const volumeBase=canvas.height-43;
@@ -9701,7 +9767,7 @@ async function loadBlofinInstruments(){
                 const url='/api/live-market-radar?symbol='+encodeURIComponent(symbol.value)+'&interval='+encodeURIComponent(interval.value)+(force?'&refresh=1':'');
                 const response=await fetch(url,{cache:'no-store'});const data=await response.json();
                 if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
-                draw(data);
+                latestChartData=data;draw(data);
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
                 renderFlow(data.market_flow||{});
@@ -9718,6 +9784,7 @@ async function loadBlofinInstruments(){
                 fields.stop.textContent=number(s.stop_loss);
                 fields.target.textContent=number(s.take_profit);
                 updateManualTradeDefaults(data,s);
+                drawFutureForecast(data,forecastHorizon);
                 fields.rr.textContent=s.reward_risk===null||s.reward_risk===undefined?'—':s.reward_risk+'R';
                 fields.wave.textContent=(w.pattern||'نامشخص')+' · '+(w.phase||'داده ناکافی');
                 fields.bias.textContent=d.label_fa||faDirection(d.bias);
@@ -9786,6 +9853,78 @@ async function loadBlofinInstruments(){
                 await refresh(true);
               }catch(error){status.textContent=String(error.message||error);}
             }
+            function drawFutureForecast(data,horizon){
+              if(!forecastCtx||!forecastCanvas)return;
+              const bars=(Array.isArray(data.candles)?data.candles:[]).filter(item=>Number.isFinite(Number(item.close))).slice(-20);
+              const ctx=forecastCtx,w=forecastCanvas.width,h=forecastCanvas.height;
+              ctx.clearRect(0,0,w,h);ctx.fillStyle='#07131f';ctx.fillRect(0,0,w,h);
+              if(!bars.length){ctx.fillStyle='#ffc66d';ctx.font='18px sans-serif';ctx.fillText('داده معتبر برای سناریو در دسترس نیست',24,38);return;}
+              const closes=bars.map(item=>Number(item.close)),last=closes[closes.length-1];
+              const analysis=data.market_analysis||{},direction=analysis.direction||{},wave=analysis.wave_structure||{};
+              const divergence=direction.divergence||{};
+              const ranges=bars.map(item=>Math.max(0,Number(item.high)-Number(item.low)));
+              const atr=ranges.reduce((sum,value)=>sum+value,0)/Math.max(1,ranges.length);
+              const avgMove=closes.length>1?(closes[closes.length-1]-closes[0])/(closes.length-1):0;
+              const bias=String(direction.bias||direction.trend||'').toUpperCase();
+              const bearish=bias==='BEARISH'||divergence.type==='BEARISH';
+              const bullish=bias==='BULLISH'||divergence.type==='BULLISH';
+              const drift=bullish?Math.max(Math.abs(avgMove),atr*.08):bearish?-Math.max(Math.abs(avgMove),atr*.08):avgMove*.25;
+              const horizonSteps={'15m':3,'1h':6,'4h':10,'1d':14}[horizon]||3;
+              const horizonLabel={'15m':'۱۵ دقیقه آینده','1h':'۱ ساعت آینده','4h':'۴ ساعت آینده','1d':'۱ روز آینده'}[horizon]||'افق کوتاه';
+              const stepMove=Math.max(atr*.18,Math.abs(last)*.00015);
+              const bull=[],bear=[],future=[];let up=last,down=last;
+              for(let i=1;i<=horizonSteps;i++){
+                up+=Math.max(drift,stepMove*.35)+Math.sin(i*1.25)*stepMove*.12;
+                down+=Math.min(drift,-stepMove*.35)-Math.cos(i*1.1)*stepMove*.10;
+                bull.push(up);bear.push(down);
+                const open=future.length?future[future.length-1].close:last+(up-last)*.12;
+                const close=open+(up-open)*.42,wick=stepMove*.38;
+                future.push({open,close,high:Math.max(open,close)+wick,low:Math.min(open,close)-wick});
+              }
+              const allValues=[...bars.flatMap(item=>[Number(item.high),Number(item.low)]),...bull,...bear,...future.flatMap(item=>[item.high,item.low])].filter(Number.isFinite);
+              const lo=Math.min(...allValues),hi=Math.max(...allValues),pad=(hi-lo)*.12||Math.abs(last)*.002;
+              const min=lo-pad,max=hi+pad,top=34,bottom=h-42,y=value=>bottom-(value-min)/(max-min)*(bottom-top);
+              const left=54,right=48,plotW=w-left-right,split=left+plotW*.62;
+              const histW=(split-left)/bars.length,body=Math.max(4,Math.min(15,histW*.62));
+              ctx.fillStyle='rgba(63,105,132,.18)';ctx.fillRect(split,top,w-right-split,bottom-top);
+              ctx.strokeStyle='#2c465a';ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(split,top);ctx.lineTo(split,bottom);ctx.stroke();ctx.setLineDash([]);
+              bars.forEach((bar,i)=>{
+                const xx=left+(i+.5)*histW,color=Number(bar.close)>=Number(bar.open)?'#53d6a0':'#ff7b85';
+                ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
+                const y1=y(Math.max(Number(bar.open),Number(bar.close))),y2=y(Math.min(Number(bar.open),Number(bar.close)));
+                ctx.fillRect(xx-body/2,y1,body,Math.max(2,y2-y1));
+              });
+              const futureX=i=>split+14+(i/(horizonSteps+1))*(w-right-split-28);
+              function scenario(values,color,dash){
+                ctx.save();ctx.strokeStyle=color;ctx.lineWidth=3;ctx.setLineDash(dash);ctx.beginPath();
+                values.forEach((value,i)=>i?ctx.lineTo(futureX(i+1),y(value)):ctx.moveTo(futureX(i+1),y(last)));
+                ctx.stroke();ctx.setLineDash([]);values.forEach((value,i)=>{ctx.fillStyle=color;ctx.beginPath();ctx.arc(futureX(i+1),y(value),3.5,0,Math.PI*2);ctx.fill();});ctx.restore();
+              }
+              scenario(bull,'#32d99a',[7,6]);scenario(bear,'#ff647b',[7,6]);
+              future.forEach((bar,i)=>{
+                const xx=futureX(i+1),color='#b9a1ff';ctx.save();ctx.strokeStyle=color;ctx.fillStyle='rgba(185,161,255,.25)';ctx.lineWidth=2;
+                ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
+                const y1=y(Math.max(bar.open,bar.close)),y2=y(Math.min(bar.open,bar.close));
+                ctx.fillRect(xx-4,y1,8,Math.max(3,y2-y1));ctx.restore();
+              });
+              ctx.fillStyle='#d7e8f5';ctx.font='bold 15px sans-serif';ctx.fillText('۲۰ کندل واقعی اخیر',left,20);
+              ctx.fillStyle='#b9a1ff';ctx.fillText('بخش آینده · '+horizonLabel,split+12,20);
+              ctx.fillStyle='#32d99a';ctx.fillText('صعودی احتمالی',split+12,h-13);
+              ctx.fillStyle='#ff647b';ctx.fillText('اصلاحی / نزولی',split+170,h-13);
+              const pattern=(analysis.candlestick_patterns||[]).find(item=>item&&item.state==='CONFIRMED');
+              const waveText=wave.phase||wave.pattern||'ساختار موج نامشخص';
+              const baseText=bullish?'حفظ حمایت و تمایل ساختاری صعودی':bearish?'فشار اصلاحی یا واگرایی منفی':'جهت خنثی؛ دو سناریو با وزن محتاطانه نمایش داده شده‌اند';
+              if(forecastExplanation)forecastExplanation.textContent='افق '+horizonLabel+' · '+baseText+' · موج: '+waveText+
+                (pattern?' · الگوی تأییدشده: '+(pattern.name_fa||pattern.name_en):' · الگوی کلاسیک تأییدشده‌ای ثبت نشده')+
+                '؛ خطوط و کندل‌های آینده سناریوی محاسباتی پژوهشی بر پایه نوسان اخیر و جهت/واگرایی‌اند، نه پیش‌بینی قطعی یا سیگنال سفارش.';
+            }
+            document.querySelectorAll('[data-forecast-horizon]').forEach(button=>{
+              button.addEventListener('click',()=>{
+                forecastHorizon=button.dataset.forecastHorizon;
+                document.querySelectorAll('[data-forecast-horizon]').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
+                if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);
+              });
+            });
             function drawMiniChart(canvasElement,data){
               const bars=(data&&Array.isArray(data.candles)?data.candles:[]).slice(-48);
               const context=canvasElement.getContext('2d');
