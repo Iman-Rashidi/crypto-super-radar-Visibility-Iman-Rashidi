@@ -539,9 +539,6 @@ def detect_early_wave3_breakout(
     divergence_guard = rsi_divergence_entry_guard(five, fifteen, side, wave_5m=wave5, wave_15m=wave15)
     if divergence_guard["blocked"]:
         return {"signal": "NO_TRADE", "reason": divergence_guard["reason"], "rsi_divergence_guard": divergence_guard}
-    volume_confirmation = breakout_volume_confirmation(five)
-    if not volume_confirmation["confirmed"]:
-        return {"signal": "NO_TRADE", "reason": "W3 breakout rejected: " + volume_confirmation["reason"], "volume_confirmation": volume_confirmation}
     atr_value = float(atr(five, 14).iloc[-1])
     rsi_value = float(rsi(five["close"], 14).iloc[-1])
     if not math.isfinite(atr_value) or atr_value <= 0 or not math.isfinite(rsi_value):
@@ -552,6 +549,9 @@ def detect_early_wave3_breakout(
         return {"signal": "NO_TRADE", "reason": "Anti-top-chase guard: W3 breakout is already extended"}
     if (side == "LONG" and rsi_value > 78.0) or (side == "SHORT" and rsi_value < 22.0):
         return {"signal": "NO_TRADE", "reason": "Anti-top-chase guard: RSI is in extreme territory"}
+    volume_confirmation = breakout_volume_confirmation(five)
+    if not volume_confirmation["confirmed"]:
+        return {"signal": "NO_TRADE", "reason": "W3 breakout rejected: " + volume_confirmation["reason"], "volume_confirmation": volume_confirmation}
 
     # 15m must independently agree by completed EMA21 direction/slope.
     ema21_15 = ema(fifteen["close"], 21)
