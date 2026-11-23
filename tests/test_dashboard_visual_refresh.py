@@ -30,8 +30,8 @@ class DashboardVisualRefreshTests(unittest.TestCase):
 
     def test_gem_candidate_visual_scores_badges_and_copy_feedback(self):
         source = self.source
-        for marker in ("gem-score-panel", "gem-score-fill opportunity",
-                       "gem-score-fill risk", "gem-visual-badges",
+        for marker in ("gem-score-panel", "gem-score-fill ' + kind",
+                       "scoreLine('امتیاز فرصت'", "scoreLine('امتیاز ریسک'", "gem-visual-badges",
                        "net-solana", "net-base", "net-ethereum",
                        "gem-copy-success", "کپی آدرس قرارداد"):
             with self.subTest(marker=marker):
