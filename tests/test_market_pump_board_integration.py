@@ -6,6 +6,7 @@ class MarketPumpBoardIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = Path("crypto_super_radar/web_app.py").read_text(encoding="utf-8")
+        cls.data_source = Path("crypto_super_radar/dashboard_data.py").read_text(encoding="utf-8")
 
     def test_spot_universe_includes_requested_assets(self):
         for symbol in ("PEPEUSDT", "SHIBUSDT", "DOGEUSDT", "BONKUSDT", "WIFUSDT",
