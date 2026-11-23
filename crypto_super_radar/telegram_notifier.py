@@ -173,12 +173,14 @@ class TelegramNotifier:
                 db.close()
 
         try:
-            self._api("sendMessage", {"chat_id": recipient["chat_id"], "text": text, "disable_web_page_preview": True})
+                response = self._api("sendMessage", {"chat_id": recipient["chat_id"], "text": text, "disable_web_page_preview": True})
         except Exception as exc:
             self._finish_event(key, "FAILED", type(exc).__name__)
             raise
         self._finish_event(key, "SENT", None)
-        return {"status": "SENT", "event_key": key, "chat_id": recipient["chat_id"]}
+        message_id = (response.get("result") or {}).get("message_id")
+        return {"status": "SENT", "event_key": key, "chat_id": recipient["chat_id"],
+                "message_id": message_id}
 
     def _finish_event(self, event_key: str, status: str, error_type: str | None) -> None:
         db = self._connection()
