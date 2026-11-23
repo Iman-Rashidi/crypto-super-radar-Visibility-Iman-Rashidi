@@ -3147,6 +3147,27 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         order_book=order_book,
         market_flow_error="; ".join(flow_errors) if flow_errors else None,
     )
+    # Publish W3 retracement levels only when the dashboard's non-repainting
+    # Elliott monitor confirms a complete W4 pivot sequence.
+    wave = payload.get("elliott_waves") if isinstance(payload.get("elliott_waves"), dict) else {}
+    pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
+    fib = {"status": "UNCONFIRMED", "timeframe": normalized_interval, "levels": {}}
+    if normalized_interval == "5m" and str(wave.get("phase") or "").upper() == "WAVE_4_CONFIRMED" and len(pivots) >= 5:
+        points = pivots[-5:]
+        pattern = str(wave.get("pattern") or "").upper()
+        expected = ["LOW", "HIGH", "LOW", "HIGH", "LOW"] if pattern == "BULLISH" else ["HIGH", "LOW", "HIGH", "LOW", "HIGH"]
+        if pattern in {"BULLISH", "BEARISH"} and [str(item.get("kind") or "").upper() for item in points] == expected:
+            start, end = float(points[2]["price"]), float(points[3]["price"])
+            sign = -1.0 if pattern == "BULLISH" else 1.0
+            length = abs(end - start)
+            if length > 0:
+                fib = {
+                    "status": "CONFIRMED", "timeframe": "5m", "pattern": pattern,
+                    "w3_start": start, "w3_end": end, "w4_pivot": float(points[4]["price"]),
+                    "levels": {str(level): end + sign * level * length for level in (0.382, 0.5, 0.618)},
+                    "pivot_confirmed_at": points[4].get("confirmed_at"),
+                }
+    payload["wave4_fibonacci"] = fib
     cached_payload = {**copy.deepcopy(payload), "_cached_at": time.monotonic()}
     with LIVE_MARKET_RADAR_CACHE_LOCK:
         LIVE_MARKET_RADAR_CACHE[key] = cached_payload
@@ -9531,7 +9552,9 @@ async function loadBlofinInstruments(){
                   ' · ADX(14): '+number(d.adx14)+' · RSI(14): '+number(d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[d.rsi_state]||'')+')'+
                   ' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
                   ' · RVOL کندلی: '+number(d.volume_ratio)+'x · واگرایی: '+(divergence.type||'NONE')+
-                  ' · فیبوناچی: '+(fib.status||'نامشخص')+' '+number(fib.retracement)+' · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
+                  ' · فیبوناچی: '+(fib.status||'نامشخص')+' '+number(fib.retracement)+
+                  ' · اصلاح W4: '+(data.wave4_fibonacci&&data.wave4_fibonacci.status==='CONFIRMED'?'38.2% '+number(data.wave4_fibonacci.levels['0.382'])+' / 50% '+number(data.wave4_fibonacci.levels['0.5'])+' / 61.8% '+number(data.wave4_fibonacci.levels['0.618']):'ساختار W4 هنوز تأیید نشده')+
+                  ' · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
                 const qualityLabel=({PASS:'تطبیق دو منبع موفق',FAIL:'اختلاف دو منبع؛ سیگنال مسدود',UNKNOWN:'تطبیق دو منبع نامشخص'}[quality.cross_validation_status]||'تطبیق نامشخص');
                 const freshnessLabel=quality.freshness_status==='FRESH'?'داده تازه':quality.freshness_status==='STALE'?'داده کهنه':'تازگی نامشخص';
                 fields.analysisNote.textContent='منبع تحلیل: '+(quality.pattern_data_source||'نامشخص')+' · '+qualityLabel+' · '+freshnessLabel+
