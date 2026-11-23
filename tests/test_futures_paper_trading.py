@@ -273,3 +273,54 @@ class FuturesPaperBotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_http_418_uses_okx_and_bybit_fallback_and_reaches_ai(self):
+        from crypto_super_radar.providers import PerpetualMarketProvider
+
+        class FakeHttp:
+            class Config:
+                class Thresholds:
+                    provider_discrepancy_pct = 1.0
+                thresholds = Thresholds()
+            config = Config()
+            def get(self, url, params=None):
+                if "fapi.binance.com" in url:
+                    raise DataProviderError("HTTP 418 from fapi.binance.com: IP banned")
+                if url.endswith("/market/ticker"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP", "last": "100", "bidPx": "99.9", "askPx": "100.1", "ts": str(int(time.time()*1000))}]}
+                if url.endswith("/public/mark-price"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP", "markPx": "100", "ts": str(int(time.time()*1000))}]}
+                if url.endswith("/market/index-tickers"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT", "idxPx": "100", "ts": str(int(time.time()*1000))}]}
+                if url.endswith("/public/funding-rate"):
+                    return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP", "fundingRate": "0.0001"}]}
+                if url.endswith("/v5/market/tickers"):
+                    return {"retCode": 0, "time": int(time.time()*1000), "result": {"list": [{"symbol": "BTCUSDT", "markPrice": "100", "indexPrice": "100", "bid1Price": "99.9", "ask1Price": "100.1", "fundingRate": "0.0001", "openInterest": "1000"}]}}
+                if url.endswith("/public/funding-rate-history"):
+                    now = int(time.time()*1000)
+                    return {"code": "0", "data": [{"fundingTime": str(now-8*3600000)}, {"fundingTime": str(now)}]}
+                if "futures/usdt/contracts" in url:
+                    return {"funding_interval": 28800}
+                raise AssertionError(url)
+
+        provider = PerpetualMarketProvider(FakeHttp())
+        snapshot = provider.execution_snapshot("BTCUSDT")
+        self.assertEqual(snapshot["status"], "PASS")
+        self.assertEqual(snapshot["sources"], ["OKX USDT Swap", "Bybit Linear"])
+
+        engine = FakeFuturesEngine("LONG")
+        engine.data.perpetual = provider
+        ai_calls = []
+        bot = FuturesPaperTradingBot(
+            engine, ledger=self.ledger,
+            ai_reviewer=lambda result, asset: (
+                ai_calls.append(asset.symbol) or {
+                    "status": "APPROVED", "paper_entry_eligible": True,
+                    "expected_side": result.signal, "market_type": "perpetual",
+                }
+            ),
+        )
+        result = bot.run_once("perp:BTCUSDT")
+        self.assertTrue(ai_calls, "AI reviewer must be reached after validated fallback data")
+        self.assertIn(result["status"], {"OPENED", "AI_BLOCKED", "NO_TRADE"})
+        self.assertFalse(result.get("orders_submitted", False) and result.get("mode") != "FUTURES_PAPER_ONLY")
