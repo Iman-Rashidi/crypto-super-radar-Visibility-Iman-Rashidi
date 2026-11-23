@@ -216,14 +216,14 @@ def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=No
             chain = html_escape(str(item.get("chain") or "نامشخص"))
             address = html_escape(str(item.get("token_address") or ""))
             text = (
-                "💰 <b>گزارش سود واچ‌لیست رادار</b>\\n"
-                f"🎯 <b>سطح سود ثبت‌شده:</b> +{milestone}%  (معادل +€{milestone} روی مبنای €100)\\n"
-                f"🪙 <b>دارایی:</b> {name} ({symbol}) · {chain}\\n"
-                f"📈 <b>تغییر از اولین کشف:</b> +{change_pct:.2f}%\\n"
-                f"💶 <b>ارزش فرضی €100:</b> €{current_value:.2f} · <b>سود:</b> +€{profit_eur:.2f}\\n"
-                f"💵 <b>قیمت اولیه:</b> ${initial:.12g} · <b>قیمت فعلی:</b> ${latest:.12g}\\n"
-                f"🕒 <b>اولین کشف UTC:</b> {html_escape(str(item.get('first_detected_utc') or 'نامشخص'))}\\n"
-                f"<code>{address}</code>\\n"
+                "💰 <b>گزارش سود واچ‌لیست رادار</b>\n"
+                f"🎯 <b>سطح سود ثبت‌شده:</b> +{milestone}%  (معادل +€{milestone} روی مبنای €100)\n"
+                f"🪙 <b>دارایی:</b> {name} ({symbol}) · {chain}\n"
+                f"📈 <b>تغییر از اولین کشف:</b> +{change_pct:.2f}%\n"
+                f"💶 <b>ارزش فرضی €100:</b> €{current_value:.2f} · <b>سود:</b> +€{profit_eur:.2f}\n"
+                f"💵 <b>قیمت اولیه:</b> ${initial:.12g} · <b>قیمت فعلی:</b> ${latest:.12g}\n"
+                f"🕒 <b>اولین کشف UTC:</b> {html_escape(str(item.get('first_detected_utc') or 'نامشخص'))}\n"
+                f"<code>{address}</code>\n"
                 "⚠️ این گزارش تغییر قیمت از زمان کشف است؛ سود تحقق‌یافته نیست و کارمزد، مالیات و لغزش را لحاظ نمی‌کند. ربات هیچ معامله‌ای انجام نداده است."
             )
             try:
