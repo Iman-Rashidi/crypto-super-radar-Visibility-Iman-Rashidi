@@ -263,8 +263,11 @@ def _regime(
     # HH/HL or LL/LH remains measurable confluence, never a standalone hard gate.
     ema21_slope = float(e21.iloc[-1] - e21.iloc[-4])
     ema55_slope = float(e55.iloc[-1] - e55.iloc[-4])
-    long_ok = float(row["close"]) > float(e21.iloc[-1]) and float(row["close"]) > float(e55.iloc[-1])
-    short_ok = float(row["close"]) < float(e21.iloc[-1]) and float(row["close"]) < float(e55.iloc[-1])
+    # Direction is decided on the completed 1H candle only: ADX(14) >= 22
+    # plus close vs EMA21. EMA55 and swing structure remain descriptive context,
+    # not entry gates; 15m is reserved for entry price and protective-stop sizing.
+    long_ok = float(row["close"]) > float(e21.iloc[-1])
+    short_ok = float(row["close"]) < float(e21.iloc[-1])
     direction = "LONG" if long_ok else "SHORT" if short_ok else "NONE"
     structure_aligned = bool(swing_long if direction == "LONG" else swing_short if direction == "SHORT" else False)
     aligned_4h = False
@@ -297,7 +300,7 @@ def _regime(
         "structure_aligned_1h": structure_aligned,
         "candle_open_utc": h1.index[-1].isoformat(),
         "candle_open_utc_4h": h4.index[-1].isoformat() if not h4.empty else None,
-        "reason": "ADX>=22 and 1H close aligned above/below EMA21+EMA55; swing structure is auxiliary",
+        "reason": "ADX(14)>=22 and completed 1H close above/below EMA21; EMA55 and swing structure are informational",
     }
 
 def _elliott_wave_1h_evidence(
@@ -386,10 +389,14 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     signal_id = str(record.get("signal_id") or "").strip()
     expected_time = str(record.get("signal_candle_open_utc") or "").strip()
     if (
-        evidence.get("decision_engine_version") != "CHALLENGE_1_V2_1H_4H_15M"
+        evidence.get("decision_engine_version") not in {
+            "CHALLENGE_1_V2_1H_4H_15M",
+            "CHALLENGE_1_V2_1H_ADX_EMA21_15M_EXECUTION",
+        }
         or evidence.get("signal_id") != signal_id
         or evidence.get("instrument_id") != symbol
-        or evidence.get("setup_timeframe") != "15m"
+        or evidence.get("setup_timeframe") not in {"15m", "1H"}
+        or evidence.get("entry_execution_timeframe", "15m") != "15m"
         or evidence.get("context_timeframes") != ["1H", "4H"]
         or evidence.get("higher_timeframes_used") is not True
         or evidence.get("completed_candles_only") is not True
@@ -635,10 +642,9 @@ def analyze_signal(
     else:
         trigger = float(last["close"]) < float(previous["low"]) and float(last["close"]) < float(last["open"])
     rsi_low, rsi_high = (35, 68) if direction == "LONG" else (32, 65)
-    if not value_zone or not rsi_low <= rsi_value <= rsi_high or not trigger or volume_ratio < 1.0:
-        return {"signal": "NO_TRADE", "reason": "15M value zone, directional RSI, close-break or 1.0x volume gate failed", "regime": regime,
-                "setup": {"value_zone": value_zone, "rsi_15m": rsi_value, "rsi_range": [rsi_low, rsi_high], "volume_ratio": volume_ratio, "trigger": trigger}}
-
+    # No 15m candle-pattern, RSI, value-zone, breakout or volume confirmation
+    # is required. Keep those readings as diagnostics only; 15m remains the
+    # execution-price / ATR protective-stop timeframe.
     if precomputed_context is None:
         atr_series = atr14.dropna()
     else:
@@ -687,11 +693,9 @@ def analyze_signal(
         return {"signal": "NO_TRADE", "reason": "stop distance breaches 1.5% volatility cap", "regime": regime}
 
     score_parts = {
-        "h1_ema21_ema55_direction": 25,
-        "h1_swing_structure_bonus": 5 if regime.get("structure_aligned_1h") else 0,
-        "adx_gte_22": 20 if float(regime["adx_1h"]) >= 22 else 0,
-        "value_zone_rejection": 20,
-        "volume_gte_1_0x": 15 if volume_ratio >= 1.0 else 0,
+        "h1_close_vs_ema21": 35,
+        "h1_adx_gte_22": 35 if float(regime["adx_1h"]) >= 22 else 0,
+        "h4_alignment_bonus": 20 if regime.get("aligned_4h") else 0,
         "btc_alignment": 10 if btc_ok else 0,
     }
     confidence_score = sum(score_parts.values())
@@ -723,10 +727,11 @@ def analyze_signal(
         precomputed_context=precomputed_context,
     )
     v2_evidence = {
-        "decision_engine_version": "CHALLENGE_1_V2_1H_4H_15M",
+        "decision_engine_version": "CHALLENGE_1_V2_1H_ADX_EMA21_15M_EXECUTION",
         "signal_id": signal_id,
         "instrument_id": symbol,
-        "setup_timeframe": "15m",
+        "setup_timeframe": "1H",
+        "entry_execution_timeframe": "15m",
         "context_timeframes": ["1H", "4H"],
         "higher_timeframes_used": True,
         "completed_candles_only": True,
