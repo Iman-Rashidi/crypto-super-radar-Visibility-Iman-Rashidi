@@ -99,19 +99,25 @@ def build_future_forecast(
     news_items = [item for item in (news or []) if isinstance(item, dict) and str(item.get("title") or "").strip()]
     if news_items:
         news_score = 0.0
+        positive_terms = {"surge", "rally", "approval", "approved", "adoption", "inflow", "bullish", "breakout", "record high", "partnership", "upgrade"}
+        negative_terms = {"crash", "hack", "exploit", "lawsuit", "ban", "outflow", "bearish", "liquidation", "probe", "insolvency", "delist"}
         for item in news_items[:8]:
             sentiment = str(item.get("sentiment") or "").upper()
             if sentiment in {"POSITIVE", "BULLISH"}:
                 news_score += 0.25
             elif sentiment in {"NEGATIVE", "BEARISH"}:
                 news_score -= 0.25
+            elif not sentiment:
+                headline_text = str(item.get("title") or "").lower()
+                news_score += 0.15 * sum(term in headline_text for term in positive_terms)
+                news_score -= 0.15 * sum(term in headline_text for term in negative_terms)
         news_score = max(-1.5, min(1.5, news_score))
         if news_score:
             score += news_score; coverage += 1.5
         headline = str(news_items[0].get("title") or "")[:220]
         source = str(news_items[0].get("source") or "منبع عمومی خبر")
         news_summary = f"{headline} · {source}"
-        evidence.append({"source": "asset_news", "direction": "BULLISH" if news_score > 0 else "BEARISH" if news_score < 0 else "NEUTRAL", "weight": round(news_score, 3)})
+        evidence.append({"source": "asset_news", "sentiment_method": "provider_label_or_transparent_headline_keyword_heuristic", "direction": "BULLISH" if news_score > 0 else "BEARISH" if news_score < 0 else "NEUTRAL", "weight": round(news_score, 3)})
     else:
         news_summary = "داده تأییدشده موجود نیست"
         evidence.append({"source": "asset_news", "direction": "UNKNOWN", "weight": 0.0})
