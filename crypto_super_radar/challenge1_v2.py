@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from .elliott_waves import monitor_elliott_waves
 
+MAX_STOP_DISTANCE_PCT = 0.035
+
 
 def _validate(frame: pd.DataFrame, label: str, minimum: int) -> pd.DataFrame:
     required = {"open", "high", "low", "close", "volume"}
@@ -425,8 +427,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
         not isinstance(regime, Mapping)
         or str(regime.get("direction") or "").upper() != side
         or str(regime.get("status") or "").upper() != "TREND"
-        or regime.get("opposed_4h") is True
-        or regime.get("candle_open_utc") != evidence.get("context_1h_candle_open_utc")
+                or regime.get("candle_open_utc") != evidence.get("context_1h_candle_open_utc")
         or regime.get("candle_open_utc_4h") != evidence.get("context_4h_candle_open_utc")
     ):
         return False, "V2 1H regime or directly opposing 4H evidence is invalid."
@@ -689,8 +690,8 @@ def analyze_signal(
         stop = max(float(m15["high"].tail(5).max()), entry + atr_mult * current_atr)
         target = entry - tp_r * (stop - entry)
     stop_pct = abs(entry - stop) / entry
-    if stop_pct <= 0 or stop_pct > 0.015:
-        return {"signal": "NO_TRADE", "reason": "stop distance breaches 1.5% volatility cap", "regime": regime}
+    if stop_pct <= 0 or stop_pct > MAX_STOP_DISTANCE_PCT:
+        return {"signal": "NO_TRADE", "reason": "stop distance breaches 3.5% volatility cap", "regime": regime}
 
     score_parts = {
         "h1_close_vs_ema21": 35,
@@ -699,9 +700,6 @@ def analyze_signal(
         "btc_alignment": 10 if btc_ok else 0,
     }
     confidence_score = sum(score_parts.values())
-    if regime.get("opposed_4h") is True:
-        return {"signal": "NO_TRADE", "reason": "4H trend is directly opposed to the 1H signal", "regime": regime,
-                "confidence_score": confidence_score, "score_parts": score_parts}
     if confidence_score < 70:
         return {"signal": "NO_TRADE", "reason": "confluence score below 70", "regime": regime,
                 "confidence_score": confidence_score, "score_parts": score_parts}
