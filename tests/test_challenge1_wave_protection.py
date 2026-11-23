@@ -67,7 +67,7 @@ class TestChallenge1WaveProtection(unittest.TestCase):
         frame5.iloc[-2, frame5.columns.get_loc("high")] = 115.5
         frame5.iloc[-1, frame5.columns.get_loc("close")] = 116.0
         frame5.iloc[-1, frame5.columns.get_loc("high")] = 116.2
-        idx15 = pd.date_range("2026-01-01", periods=30, freq="15min", tz="UTC")
+        idx15 = pd.date_range("2025-12-31T20:00:00Z", periods=30, freq="15min")
         close15 = [100 + i * 0.5 for i in range(30)]
         frame15 = pd.DataFrame({
             "open":[x-0.1 for x in close15], "high":[x+0.2 for x in close15],
@@ -91,7 +91,7 @@ class TestChallenge1WaveProtection(unittest.TestCase):
                 funding_kind="0", funding_event_time_ms=funding_time,
                 funding_max_age_ms=3_600_000, spread_fraction=0.0001,
             )
-        self.assertEqual(result["signal"], "LONG")
+        self.assertEqual(result["signal"], "LONG", result)
         self.assertTrue(result["wave5_entry_active"])
         self.assertLess(result["stop_loss"], 112.64)
         self.assertGreater(result["take_profit"], result["entry"])
