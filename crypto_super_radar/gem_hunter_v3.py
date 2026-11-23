@@ -903,7 +903,9 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
 
 
 
-def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) -> list[dict[str, Any]]:
+def process_gem_hunter_v3_candidates(
+    candidates: Any, *, notify: bool = True, persist: bool = True,
+) -> list[dict[str, Any]]:
     """Enrich a discovery batch, persist its lifecycle when Turso is configured,
     and send deduplicated research alerts. This path never authorizes a trade.
     """
@@ -911,7 +913,7 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
     store = None
     storage_status = "NOT_CONFIGURED"
     try:
-        if storage_backend() == "TURSO_CLOUD_SQLITE":
+        if persist and storage_backend() == "TURSO_CLOUD_SQLITE":
             store = TursoGemHunterStore()
             store.initialize()
             storage_status = "READY"
