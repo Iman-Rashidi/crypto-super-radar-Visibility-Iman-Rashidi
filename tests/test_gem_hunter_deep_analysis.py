@@ -1,0 +1,70 @@
+"""Unit tests for read-only Gem Hunter deep analysis."""
+import unittest
+from unittest.mock import patch
+
+from crypto_super_radar.web_app import build_gem_hunter_deep_analysis
+
+
+class GemHunterDeepAnalysisTests(unittest.TestCase):
+    def dex_payload(self):
+        return {"pairs": [{
+            "chainId": "solana",
+            "baseToken": {"address": "MintExample", "symbol": "EX", "name": "Example"},
+            "priceUsd": "0.001",
+            "volume": {"h24": 250000},
+            "liquidity": {"usd": 80000},
+            "fdv": 900000,
+            "marketCap": 850000,
+            "txns": {
+                "m5": {"buys": 12, "sells": 8},
+                "h1": {"buys": 90, "sells": 70},
+                "h6": {"buys": 500, "sells": 450},
+                "h24": {"buys": 2000, "sells": 1800},
+            },
+            "priceChange": {"m5": 1.2, "h1": 2.5, "h6": 8.0, "h24": 24.0},
+            "dexId": "pumpswap",
+        }]}
+
+    @patch("crypto_super_radar.web_app._deep_analysis_json")
+    def test_missing_rugcheck_is_explicit_not_fabricated(self, fetch):
+        fetch.side_effect = [self.dex_payload(), None]
+        report = build_gem_hunter_deep_analysis("solana", "MintExample", "EX")
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(report["security"]["provider"], "NOT_AVAILABLE")
+        self.assertEqual(report["security"]["mint_authority"], "NOT_AVAILABLE")
+        self.assertEqual(report["security"]["freeze_authority"], "NOT_AVAILABLE")
+        self.assertEqual(report["security"]["lp_locked_pct"], "NOT_AVAILABLE")
+        self.assertEqual(report["whales"]["large_transfers"], "NOT_AVAILABLE")
+        self.assertEqual(report["trade_authorization"], "NO_TRADE")
+
+    @patch("crypto_super_radar.web_app._deep_analysis_json")
+    def test_euro_scenarios_and_market_pressure(self, fetch):
+        fetch.side_effect = [self.dex_payload(), None]
+        report = build_gem_hunter_deep_analysis("solana", "MintExample", "EX")
+        self.assertEqual(report["eur_scenarios"]["10"]["minus_20_pct"], 8.0)
+        self.assertEqual(report["eur_scenarios"]["50"]["plus_10_pct"], 55.0)
+        self.assertEqual(report["eur_scenarios"]["100"]["plus_20_pct"], 120.0)
+        self.assertEqual(report["buy_sell_pressure"]["h24"]["buys"], 2000)
+        self.assertEqual(report["buy_sell_pressure"]["h24"]["sells"], 1800)
+        self.assertEqual(report["market"]["price_usd"], 0.001)
+        self.assertGreaterEqual(report["opportunity_score"], 0)
+        self.assertLessEqual(report["opportunity_score"], 100)
+        self.assertGreaterEqual(report["risk_score"], 0)
+        self.assertLessEqual(report["risk_score"], 100)
+
+    @patch("crypto_super_radar.web_app._deep_analysis_json")
+    def test_no_market_pair_returns_unavailable_without_fake_price(self, fetch):
+        fetch.side_effect = [None, None]
+        report = build_gem_hunter_deep_analysis("solana", "MintExample")
+        self.assertEqual(report["status"], "MARKET_DATA_UNAVAILABLE")
+        self.assertEqual(report["market"]["price_usd"], "NOT_AVAILABLE")
+        self.assertEqual(report["price_levels"], "NOT_AVAILABLE")
+
+    def test_invalid_request_is_rejected_and_no_trade(self):
+        report = build_gem_hunter_deep_analysis("unknown", "", "")
+        self.assertEqual(report["status"], "INVALID_INPUT")
+        self.assertEqual(report["trade_authorization"], "NO_TRADE")
+
+
+if __name__ == "__main__":
+    unittest.main()
