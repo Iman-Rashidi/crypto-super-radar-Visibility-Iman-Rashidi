@@ -15,6 +15,7 @@ import pandas as pd
 from .elliott_waves import monitor_elliott_waves
 from .market_patterns import analyze_market_patterns
 from .market_flow import analyze_market_flow
+from .future_forecast import build_future_forecast
 
 INTERVAL_MS = {
     "1s": 1_000,
@@ -284,6 +285,8 @@ def build_live_market_radar_payload(
     aggregate_trades: list[dict[str, Any]] | None = None,
     order_book: dict[str, Any] | None = None,
     market_flow_error: str | None = None,
+    higher_timeframes: dict[str, list[dict[str, Any]]] | None = None,
+    news: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a chart payload and fail-closed signal from two public OHLCV sources."""
     normalized_symbol = str(symbol or "").strip().upper()
@@ -413,6 +416,16 @@ def build_live_market_radar_payload(
             "volume": float(row["volume"]),
             "is_closed": bool(is_closed),
         })
+    future_forecast = build_future_forecast(
+        chart,
+        symbol=normalized_symbol,
+        interval=normalized_interval,
+        wave=wave,
+        divergence=market_analysis.get("direction", {}).get("divergence"),
+        market_flow=market_flow,
+        higher_timeframes=higher_timeframes,
+        news=news,
+    )
     return {
         "status": "PASS" if freshness_status == "FRESH" else "STALE",
         "symbol": normalized_symbol,
@@ -435,6 +448,7 @@ def build_live_market_radar_payload(
         "elliott_waves": wave,
         "market_analysis": market_analysis,
         "market_flow": market_flow,
+        "future_forecast": future_forecast,
         "signal": signal,
         "signal_only": True,
         "paper_bot_connected": False,
