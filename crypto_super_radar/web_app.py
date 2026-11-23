@@ -1972,6 +1972,7 @@ body{{background:radial-gradient(ellipse at 78% -12%,#193e5a 0,transparent 38%),
 .gem-candidate details>summary:after{{content:"＋";float:left;color:#63e6d2;transition:transform .2s}}
 .gem-candidate details[open]>summary:after{{content:"−";transform:rotate(180deg)}}
 .gem-wave-panel{{overflow:hidden;transition:opacity .24s ease,transform .24s ease}}
+.gem-wave-panel:not([hidden]){{animation:gem-wave-open .28s ease both}}@keyframes gem-wave-open{{from{{opacity:0;transform:translateY(-5px)}}to{{opacity:1;transform:translateY(0)}}}}
 .gem-candidate button:focus-visible{{outline:2px solid #5eead4;outline-offset:3px}}
 .gem-visual-badges{{display:flex;flex-wrap:wrap;gap:7px;margin:9px 0}}
 .gem-visual-badge{{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid #3a607c;border-radius:999px;background:#112c42;color:#d8f5ff;font-size:.76rem;font-weight:750;box-shadow:0 0 14px #38bdf81a}}
@@ -2108,6 +2109,8 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
      const categoryBadge=document.createElement('span');categoryBadge.className='gem-visual-badge';categoryBadge.textContent=category;badges.appendChild(categoryBadge);
      const chain=text.toLowerCase().includes('solana')?'solana':text.toLowerCase().includes('base')?'base':text.toLowerCase().includes('ethereum')?'ethereum':'';
      if(chain){{const b=document.createElement('span');b.className='gem-visual-badge net-'+chain;b.textContent=chain==='solana'?'Solana':chain==='base'?'Base':'Ethereum';badges.appendChild(b)}}
+     const phase=String(card.dataset.pumpPhase||'').trim();
+     if(phase){{const p=document.createElement('span');p.className='gem-visual-badge '+(phase.includes('شروع')?'phase-start':phase.includes('میانه')?'phase-mid':phase.includes('خطر')||phase.includes('دامپ')?'phase-risk':'');p.textContent=phase;badges.appendChild(p)}}
      if(card.dataset.gemHasWhale==='true'){{const b=document.createElement('span');b.className='gem-visual-badge';b.textContent='🐋 شواهد نهنگ';badges.appendChild(b)}}
      const heading=card.querySelector('h3');if(heading)heading.insertAdjacentElement('afterend',badges);
    }});
@@ -8309,16 +8312,21 @@ async function loadBlofinInstruments(){
             const initialWhaleSell = Number(initialTrades.whale_sell_volume_1h_usd ?? item.whale_sell_volume_1h_usd ?? 0);
             card.dataset.gemFilterKind = initialCategory.includes('میم') ? 'meme' : 'alt';
             card.dataset.gemHasWhale = String(initialWallets.length > 0 || initialWhaleBuy > 0 || initialWhaleSell > 0);
+            card.dataset.pumpPhase = String(item.pump_phase_fa || (item.pump_dump_analysis || {{}}).pump_phase_fa || item.pump_phase || '');
             card.appendChild(el('h3', (item.token_name || 'توکن بدون نام') + ' (' + (item.token_symbol || '—') + ')'));
-            const opportunityScore = Math.max(0, Math.min(100, Number(item.opportunity_score ?? item.short_term_momentum_score ?? item.short_term_momentum_smart_money_score ?? 0)));
-            const riskScore = Math.max(0, Math.min(100, Number(item.risk_score ?? q.risk_score ?? 0)));
+            const opportunityRaw = item.opportunity_score ?? item.short_term_momentum_score ?? item.short_term_momentum_smart_money_score;
+            const riskRaw = item.risk_score ?? q.risk_score;
+            const scoreValue = value => Number.isFinite(Number(value)) && value !== null && value !== undefined && value !== '' ? Math.max(0, Math.min(100, Number(value))) : null;
+            const opportunityScore = scoreValue(opportunityRaw), riskScore = scoreValue(riskRaw);
             const scorePanel = document.createElement('div'); scorePanel.className = 'gem-score-panel';
             const scoreLine = (label, value, kind) => {{
               const line = document.createElement('div'); line.className = 'gem-score-row';
               const caption = document.createElement('span'); caption.textContent = label;
               const track = document.createElement('div'); track.className = 'gem-score-track';
-              const fill = document.createElement('div'); fill.className = 'gem-score-fill ' + kind; fill.style.width = value + '%'; track.appendChild(fill);
-              const number = document.createElement('strong'); number.textContent = String(value);
+              if (value !== null) {{
+                const fill = document.createElement('div'); fill.className = 'gem-score-fill ' + kind; fill.style.width = value + '%'; track.appendChild(fill);
+              }}
+              const number = document.createElement('strong'); number.textContent = value === null ? 'ناموجود' : String(value);
               line.append(caption, track, number); scorePanel.appendChild(line);
             }};
             scoreLine('امتیاز فرصت', opportunityScore, 'opportunity'); scoreLine('امتیاز ریسک', riskScore, 'risk');
