@@ -35,6 +35,7 @@ def scheduled_status_fields(now=None) -> dict[str, Any]:
         "status": "SCHEDULED",
         "runtime_role": "WEB",
         "execution_profile": "CHALLENGE_1_V2",
+        "max_concurrent_positions": 4,
         "interval_seconds": 600,
         "search_continues": True,
         "next_cycle_scheduled": True,

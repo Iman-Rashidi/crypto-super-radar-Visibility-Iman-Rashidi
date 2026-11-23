@@ -409,7 +409,7 @@ def analyze_challenge1_v2_market(
     record["market_data_proof"] = {
         "source": "BLOFIN_DEMO_REST",
         "asof_utc": asof.isoformat(),
-        "signal_rule": ("CLOSED_5M_15M_EARLY_W3_BREAKOUT" if record.get("early_w3_active") else ("DASHBOARD_CONFIRMED_5M_ELLIOTT_PLUS_COMPLETED_15M_EMA21_ALIGNMENT" if record.get("fast_trigger_active") else "COMPLETED_1H_ADX14_GTE_22_AND_CLOSE_VS_EMA21")),
+        "signal_rule": ("CLOSED_5M_15M_EARLY_W3_BREAKOUT" if record.get("early_w3_active") else ("DASHBOARD_CONFIRMED_5M_ELLIOTT_PLUS_COMPLETED_15M_EMA21_ALIGNMENT" if record.get("fast_trigger_active") else "COMPLETED_1H_ADX14_GTE_18_AND_CLOSE_VS_EMA21")),
         "signal_timeframe": "5m" if (record.get("fast_trigger_active") or record.get("early_w3_active")) else "1H",
         "entry_execution_timeframe": "15m",
         "timeframes": {

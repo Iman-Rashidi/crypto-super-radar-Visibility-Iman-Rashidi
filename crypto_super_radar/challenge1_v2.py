@@ -13,6 +13,26 @@ from .elliott_waves import monitor_elliott_waves
 from .challenge1_strategy import challenge1_entry_evidence_ready
 
 MAX_STOP_DISTANCE_PCT = 0.035
+MIN_ADX_1H = 18.0
+MIN_ENTRY_SCORE = 62.0
+
+
+def adx_meets_entry_threshold(value: float) -> bool:
+    """Return whether the completed 1H ADX meets the V2 trend floor."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(numeric) and numeric >= MIN_ADX_1H
+
+
+def entry_score_meets_threshold(value: float) -> bool:
+    """Return whether a V2 trade plan meets the shared entry-score floor."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(numeric) and numeric >= MIN_ENTRY_SCORE
 
 
 def _validate(frame: pd.DataFrame, label: str, minimum: int) -> pd.DataFrame:
@@ -260,13 +280,13 @@ def _regime(
     if any(pd.isna(x) or not math.isfinite(float(x)) for x in vals):
         return {"status": "UNKNOWN", "direction": "NONE", "reason": "1H indicator warm-up incomplete"}
     strength = float(adx14.iloc[-1])
-    if strength < 22:
-        return {"status": "RANGE", "direction": "NONE", "adx": strength, "reason": "ADX(14) below 22"}
+    if not adx_meets_entry_threshold(strength):
+        return {"status": "RANGE", "direction": "NONE", "adx": strength, "reason": "ADX(14) below 18"}
     # ADX confirms trend strength; close location versus both fast EMAs sets direction.
     # HH/HL or LL/LH remains measurable confluence, never a standalone hard gate.
     ema21_slope = float(e21.iloc[-1] - e21.iloc[-4])
     ema55_slope = float(e55.iloc[-1] - e55.iloc[-4])
-    # Direction is decided on the completed 1H candle only: ADX(14) >= 22
+    # Direction is decided on the completed 1H candle only: ADX(14) >= 18
     # plus close vs EMA21. EMA55 and swing structure remain descriptive context,
     # not entry gates; 15m is reserved for entry price and protective-stop sizing.
     long_ok = float(row["close"]) > float(e21.iloc[-1])
@@ -303,7 +323,7 @@ def _regime(
         "structure_aligned_1h": structure_aligned,
         "candle_open_utc": h1.index[-1].isoformat(),
         "candle_open_utc_4h": h4.index[-1].isoformat() if not h4.empty else None,
-        "reason": "ADX(14)>=22 and completed 1H close above/below EMA21; EMA55 and swing structure are informational",
+        "reason": "ADX(14)>=18 and completed 1H close above/below EMA21; EMA55 and swing structure are informational",
     }
 
 def _elliott_wave_1h_evidence(
@@ -1010,7 +1030,7 @@ def _fast_trigger_execution_evidence_ready(record: Mapping[str, Any]) -> tuple[b
         return False, "Fast V2 trade-plan or funding fields are invalid."
     if (
         not all(math.isfinite(x) for x in (entry, stop, target, score, rr, funding, spread, total))
-        or entry <= 0 or stop <= 0 or target <= 0 or score < 70
+        or entry <= 0 or stop <= 0 or target <= 0 or not entry_score_meets_threshold(score)
         or abs(rr - 1.5) > 1e-6 or abs(total - score) > 1e-9
         or abs(entry - stop) / entry > MAX_STOP_DISTANCE_PCT
         or abs((abs(target - entry) / abs(entry - stop)) - 1.5) > 1e-6
@@ -1071,7 +1091,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
             or _utc_timestamp(early.get("signal_candle_open_utc")) != signal_open_early
             or _utc_timestamp(early.get("context_15m_candle_open_utc")) != m15_open_early
             or not all(math.isfinite(x) for x in (entry, stop, target, score, rr))
-            or entry <= 0 or stop <= 0 or target <= 0 or score < 70
+            or entry <= 0 or stop <= 0 or target <= 0 or not entry_score_meets_threshold(score)
             or abs(entry-stop)/entry > MAX_STOP_DISTANCE_PCT
             or rr < 1.5 - 1e-6
             or abs(abs(target-entry)/abs(entry-stop)-rr) > 1e-5
@@ -1227,7 +1247,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     numeric = (entry, stop, target, score, gross_rr, funding, spread)
     if not all(math.isfinite(value) for value in numeric):
         return False, "V2 trade plan contains non-finite values."
-    if entry <= 0 or stop <= 0 or target <= 0 or score < 70 or gross_rr < 1.8:
+    if entry <= 0 or stop <= 0 or target <= 0 or not entry_score_meets_threshold(score) or gross_rr < 1.8:
         return False, "V2 trade plan fails its positive-price, score or gross reward/risk floor."
     if spread < 0 or spread > 0.0004:
         return False, "V2 spread is outside its supported range."
@@ -1394,13 +1414,13 @@ def analyze_signal(
 
     score_parts = {
         "h1_close_vs_ema21": 35,
-        "h1_adx_gte_22": 35 if float(regime["adx_1h"]) >= 22 else 0,
+        "h1_adx_gte_18": 35 if adx_meets_entry_threshold(regime["adx_1h"]) else 0,
         "h4_alignment_bonus": 20 if regime.get("aligned_4h") else 0,
         "btc_alignment": 10 if btc_ok else 0,
     }
     confidence_score = sum(score_parts.values())
-    if confidence_score < 70:
-        return {"signal": "NO_TRADE", "reason": "confluence score below 70", "regime": regime,
+    if not entry_score_meets_threshold(confidence_score):
+        return {"signal": "NO_TRADE", "reason": "confluence score below 62", "regime": regime,
                 "confidence_score": confidence_score, "score_parts": score_parts}
     hour = m15.index[-1].hour
     ema200_1h = float(regime["ema200_1h"])

@@ -4,9 +4,34 @@ import threading
 import unittest
 
 from crypto_super_radar.challenge1_v2_render_scheduler import run_cycle_guarded
+from crypto_super_radar.challenge1_v2 import (
+    MIN_ADX_1H, MIN_ENTRY_SCORE, adx_meets_entry_threshold,
+    entry_score_meets_threshold, MAX_STOP_DISTANCE_PCT,
+)
 
 
 class Challenge1V2RenderSchedulerTests(unittest.TestCase):
+    def test_v2_entry_thresholds_are_adx_18_and_score_62(self):
+        self.assertEqual(MIN_ADX_1H, 18.0)
+        self.assertEqual(MIN_ENTRY_SCORE, 62.0)
+        self.assertTrue(adx_meets_entry_threshold(18.0))
+        self.assertTrue(adx_meets_entry_threshold(22.0))
+        self.assertFalse(adx_meets_entry_threshold(17.999))
+        self.assertFalse(adx_meets_entry_threshold(float("nan")))
+        self.assertTrue(entry_score_meets_threshold(62.0))
+        self.assertTrue(entry_score_meets_threshold(70.0))
+        self.assertFalse(entry_score_meets_threshold(61.999))
+        self.assertFalse(entry_score_meets_threshold(float("inf")))
+        self.assertEqual(MAX_STOP_DISTANCE_PCT, 0.035)
+
+    def test_v2_status_snapshot_reports_profile_and_four_position_policy(self):
+        from datetime import datetime, timezone
+        from crypto_super_radar.challenge1_v2_render_scheduler import scheduled_status_fields
+
+        state = scheduled_status_fields(datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(state["execution_profile"], "CHALLENGE_1_V2")
+        self.assertEqual(state["max_concurrent_positions"], 4)
+
     def test_v2_scheduler_accepts_master_switch_and_smoke_test_off_in_web_role(self):
         from crypto_super_radar.challenge1_v2_render_scheduler import scheduler_is_configured
 

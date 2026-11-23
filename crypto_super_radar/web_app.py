@@ -3834,7 +3834,7 @@ def _blofin_demo_execution_readiness() -> dict:
         "daily_loss_limit_pct": 1.0,
         "max_drawdown_pct": 5.0,
         "max_margin_usage_pct": 10.0,
-        "max_concurrent_positions": 1,
+        "max_concurrent_positions": (4 if os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true" else 1),
         "signal_deduplication": "ONE_ORDER_PER_COMPLETED_5M_CANDLE",
         "message_fa": message_fa,
     }
@@ -7038,12 +7038,16 @@ class Handler(BaseHTTPRequestHandler):
                 })
             payload["instrument_ids"] = [s.strip().upper() for s in os.getenv("BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS", ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS)).split(",") if s.strip()]
             payload["instrument_id"] = payload["instrument_ids"][0] if payload["instrument_ids"] else "BTC-USDT"
+            v2_autopilot_enabled = (
+                os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true"
+            )
             configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
             payload["execution_profile"] = (
-                configured_profile
-                if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
-                else "CHALLENGE_1"
+                "CHALLENGE_1_V2" if v2_autopilot_enabled else
+                configured_profile if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"} else
+                "CHALLENGE_1"
             )
+            payload["max_concurrent_positions"] = 4 if v2_autopilot_enabled else 1
             payload["v2_orchestration_enabled"] = (
                 os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() == "true"
             )
