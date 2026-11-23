@@ -318,7 +318,7 @@ def analyze_challenge1_v2_market(
             }
         early_w3_path = build_early_wave3_signal(
             instrument_id=symbol, frame_5m=frame_5m, frame_15m=frame_15m,
-            asof=asof, entry_price=quote["last"],
+            asof=asof, entry_price=float(quote.get("last") or quote.get("markPrice") or frame_5m["close"].iloc[-1]),
             funding_rate=funding["funding_rate"], funding_kind=funding["funding_kind"],
             funding_event_time_ms=funding["funding_event_time_ms"],
             funding_max_age_ms=funding["funding_max_age_ms"],
