@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import pandas as pd
+
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
 from .dashboard_data import market_movement_label
