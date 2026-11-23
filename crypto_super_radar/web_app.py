@@ -10011,12 +10011,12 @@ async function loadBlofinInstruments(){
                 if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);
               });
             });
-            function drawMiniChart(canvasElement,data,symbolValue){
+            function drawMiniChart(canvasElement,data){
               try{
                 const bars=(data&&Array.isArray(data.candles)?data.candles:[]).slice(-48);
-                if(!canvasElement||typeof canvasElement.getContext!=='function')throw new Error('عنصر Canvas مینی‌چارت '+symbolValue+' در دسترس نیست.');
+                if(!canvasElement||typeof canvasElement.getContext!=='function')throw new Error('عنصر Canvas مینی‌چارت در دسترس نیست.');
                 const context=canvasElement.getContext('2d');
-                if(!context)throw new Error('Canvas 2D context مینی‌چارت '+symbolValue+' ساخته نشد.');
+                if(!context)throw new Error('Canvas 2D context مینی‌چارت ساخته نشد.');
                 const width=canvasElement.width,height=canvasElement.height;
                 context.clearRect(0,0,width,height);context.fillStyle='#07131f';context.fillRect(0,0,width,height);
                 if(!bars.length){context.fillStyle='#ffc66d';context.font='20px sans-serif';context.fillText('داده موجود نیست',18,34);return;}
@@ -10044,7 +10044,7 @@ async function loadBlofinInstruments(){
                   pivots.forEach(point=>{context.fillStyle='#e8cfff';context.beginPath();context.arc((point.index+.5)*slot,y(point.price),4,0,Math.PI*2);context.fill();});
                 }
                 context.fillStyle='#b9cad8';context.font='bold 16px sans-serif';context.fillText('کندل و مسیر موج',10,18);
-              }catch(error){showChartError(error,'mini chart '+symbolValue);throw error;}
+              }catch(error){showChartError(error,'mini chart');throw error;}
             }
             function renderWaveWatchCard(symbolValue,data){
               const card=document.createElement('article');card.className='live-wave-card';
@@ -10057,7 +10057,7 @@ async function loadBlofinInstruments(){
               const lastCandle=candles[candles.length-1]||{};
               const price=document.createElement('div');price.className='live-wave-meta';
               price.textContent='آخرین قیمت: '+number(lastCandle.close);
-              try{drawMiniChart(mini,data,symbolValue);}catch(miniError){mini.setAttribute('aria-label',symbolValue+' مینی‌چارت با خطا: '+String(miniError.message||miniError));}
+              try{drawMiniChart(mini,data);}catch(miniError){mini.setAttribute('aria-label',symbolValue+' مینی‌چارت با خطا: '+String(miniError.message||miniError));}
               const waveMatch=phase.match(/WAVE[_ ]?([1-5])/i);
               const wave=document.createElement('div');wave.className='live-wave-meta';
               wave.textContent='موج فعلی: '+(waveMatch?'W'+waveMatch[1]:(waves.phase||waves.pattern||waveStructure.pattern||'نامشخص'));
