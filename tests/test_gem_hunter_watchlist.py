@@ -20,7 +20,9 @@ class WatchlistLedgerTests(unittest.TestCase):
     def candidate(self, **overrides):
         row = {"chain":"solana","token_address":"MintABC","token_name":"Alpha",
                "token_symbol":"ALP","price_usd":0.01,"category_fa":"میم‌کوین",
-               "gem_hunter_v3_status":"TIER_2_EARLY_ALPHA"}
+               "gem_hunter_v3_status":"TIER_2_EARLY_ALPHA",
+               "pump_phase_fa":"🟢 فاز ۱: شروع پامپ (Early Ignition)",
+               "risk_score":55,"security_evidence":{"status":"PASS"}}
         row.update(overrides)
         return row
 

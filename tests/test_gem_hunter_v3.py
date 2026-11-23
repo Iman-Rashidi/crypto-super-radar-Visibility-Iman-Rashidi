@@ -119,7 +119,7 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertTrue(result["pump_phase_fa"])
         self.assertTrue(result["pump_window_summary_fa"])
         self.assertTrue(result["narrative_psychology_fa"])
-        self.assertEqual(result["trade_authorization"], candidate.get("trade_authorization"))
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
         self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
 
 
@@ -381,6 +381,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS"},
             "market_reconciliation": {"status": "PASS"},
+            "pump_phase_fa": "🟢 فاز ۱: انباشت / شروع موج", "risk_score": 55,
         }
         client = Mock()
         client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 7}}
@@ -404,6 +405,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "market_reconciliation": {"status": "UNKNOWN"},
             "tier_strengths_fa": ["حجم و فشار خرید اولیه"],
             "tier_cautions_fa": ["تطبیق بازار و لغزش خروج در انتظار است."],
+            "pump_phase_fa": "🟡 فاز ۲: ادامه صعود سالم", "risk_score": 55,
         }
         client = Mock()
         client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 9}}
@@ -421,6 +423,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "security_evidence": {"status": "PASS"},
             "exit_slippage_evidence": {"status": "PASS"},
             "market_reconciliation": {"status": "PASS"},
+            "pump_phase_fa": "🟢 فاز ۱: انباشت / شروع موج", "risk_score": 55,
         }
         failed_client = Mock()
         failed_client.post.side_effect = RuntimeError("temporary Telegram failure")
@@ -441,10 +444,11 @@ class GemHunterV3Tests(unittest.TestCase):
             "candidate_status": "BUY", "trade_authorization": "BUY",
             "market_reconciliation": {"status": "PASS", "verified_liquidity_usd": 100000},
             "security_evidence": {"status": "UNKNOWN"},
+            "pump_phase_fa": "🟢 فاز ۱: انباشت / شروع موج", "risk_score": 55,
         }
         with patch.dict("os.environ", {}, clear=True):
             result = process_gem_hunter_v3_candidates([candidate], notify=False)[0]
-        self.assertEqual(result["trade_authorization"], "BUY")
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
         self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
 
     def test_telegram_requires_all_critical_gates(self):
@@ -453,6 +457,7 @@ class GemHunterV3Tests(unittest.TestCase):
                      "gem_hunter_v3_status": "TIER_1_VERIFIED_GEM",
                      "gem_hunter_v3_trade_authorization": "NO_TRADE",
                      "security_evidence": {"status": "PASS"},
+                     "pump_phase_fa": "🟢 فاز ۱: انباشت / شروع موج", "risk_score": 55,
                      "exit_slippage_evidence": {"status": "UNKNOWN"},
                      "market_reconciliation": {"status": "PASS"}}
         result = notify_qualified_gem(candidate, store, session=Mock(), bot_token="t", chat_id="c")
@@ -631,10 +636,12 @@ class GemHunterV3Tests(unittest.TestCase):
             "gem_hunter_v3_status": "EARLY_ALPHA_REVIEW",
             "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "tier_base_security_status": "UNKNOWN",
+            "risk_score": 55,
             "pump_phase_fa": "🟢 فاز ۱: شروع پامپ (Early Ignition)",
             "buy_volume_share_pct": 60,
             "security_evidence": {"status": "UNKNOWN", "provider": "SOLANA_RPC"},
             "short_term_momentum_score": 75,
+            "risk_score": 55,
             "tier_data_confidence": "INCOMPLETE",
             "pump_phase_fa": "🟢 فاز ۱: شروع پامپ (Early Ignition)",
             "buy_volume_share_pct": 60,
@@ -687,6 +694,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "gem_hunter_v3_status": "EARLY_ALPHA_REVIEW",
             "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "price_usd": 0.01, "liquidity_usd": 75000, "volume_24h_usd": 650000,
+            "risk_score": 55,
             "pump_phase_fa": "🔴 فاز ۳: سقف فرسودگی / خطر دامپ",
             "buy_volume_share_pct": 80,
         }
