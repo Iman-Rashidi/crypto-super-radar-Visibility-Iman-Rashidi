@@ -43,7 +43,7 @@ from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
-from .live_market_radar import (BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload, fetch_bybit_candles, fetch_okx_candles, fetch_kraken_candles)
+from .live_market_radar import (BYBIT_INTERVAL, INTERVAL_MS, LIVE_MARKET_RADAR_CACHE_TTL_SECONDS, build_live_market_radar_payload, fetch_bybit_candles, fetch_okx_candles, fetch_kraken_candles, fetch_coinbase_candles, get_live_market_radar_cache, set_live_market_radar_cache, live_market_radar_key_lock)
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_TRADE_CREDENTIAL_ENV, DEMO_REST_URL, _resolve_env_credential
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
@@ -1192,9 +1192,6 @@ CRYPTO_MARKET_CACHE_TTL_SECONDS = 60
 CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None, "refreshing": False, "last_error": None}
 CRYPTO_MARKET_CACHE_LOCK = threading.Lock()
 
-LIVE_MARKET_RADAR_CACHE: dict[tuple[str, str], dict] = {}
-LIVE_MARKET_RADAR_CACHE_TTL_SECONDS = 8
-LIVE_MARKET_RADAR_CACHE_LOCK = threading.RLock()
 GEM_HUNTER_CACHE_TTL_SECONDS = 120
 GEM_HUNTER_CACHE = {"expires_at": 0.0, "payload": None}
 GEM_HUNTER_CACHE_LOCK = threading.Lock()
@@ -3119,16 +3116,18 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
     if normalized_interval not in INTERVAL_MS:
         raise ValueError("بازهٔ کندل پشتیبانی نمی‌شود.")
     key = (normalized_symbol, normalized_interval)
-    now = time.monotonic()
-    with LIVE_MARKET_RADAR_CACHE_LOCK:
-        cached = LIVE_MARKET_RADAR_CACHE.get(key)
-        if (
-            not force_refresh and cached is not None
-            and now - float(cached.get("_cached_at", 0.0)) < (2 if normalized_interval == "1s" else LIVE_MARKET_RADAR_CACHE_TTL_SECONDS)
-        ):
-            return copy.deepcopy({k: v for k, v in cached.items() if k != "_cached_at"})
+    request_lock = live_market_radar_key_lock(key)
+    request_lock.acquire()
+    try:
+        cached = get_live_market_radar_cache(key)
+        if not force_refresh and cached is not None:
+            cached_payload, cache_age = cached
+            cached_payload["cache_status"] = "FRESH_CACHE"
+            cached_payload["cache_age_seconds"] = round(cache_age, 3)
+            cached_payload["cache_ttl_seconds"] = LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
+            return cached_payload
 
-    http = ENGINE.data.http
+        http = ENGINE.data.http
     provider_jobs = {
         "Binance Spot": lambda: _ohlcv_frame(http.get_with_timeout(
             f"{ENGINE.data.binance.BASE}/api/v3/klines",
@@ -3138,6 +3137,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         "Bybit Spot": lambda: fetch_bybit_candles(http, normalized_symbol, normalized_interval, 240),
         "OKX Spot": lambda: fetch_okx_candles(http, normalized_symbol, normalized_interval, 240),
         "Kraken Spot": lambda: fetch_kraken_candles(http, normalized_symbol, normalized_interval, 240),
+        "Coinbase Exchange": lambda: fetch_coinbase_candles(http, normalized_symbol, normalized_interval, 240),
     }
     frames = {}
     errors = {}
@@ -3154,12 +3154,33 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             except Exception as exc:
                 errors[name] = f"{type(exc).__name__}: {str(exc)[:180]}"
 
-    priority = ("Binance Spot", "OKX Spot", "Kraken Spot", "Bybit Spot")
+    priority = ("Binance Spot", "OKX Spot", "Kraken Spot", "Bybit Spot", "Coinbase Exchange")
     primary_provider = next((name for name in priority if name in frames), None)
     if primary_provider is None:
         detail = "; ".join(f"{name}: {message}" for name, message in errors.items())
+        stale = get_live_market_radar_cache(key, allow_expired=True)
+        if stale is not None:
+            stale_payload, stale_age = stale
+            stale_payload["cache_status"] = "STALE_CACHE"
+            stale_payload["cache_age_seconds"] = round(stale_age, 3)
+            stale_payload["cache_ttl_seconds"] = LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
+            stale_payload["status"] = "STALE"
+            stale_payload["freshness_status"] = "STALE"
+            stale_payload["signal"] = {
+                "signal": "UNKNOWN", "status": "BLOCKED",
+                "reason": "آخرین داده معتبر به‌دلیل خطای موقت منابع عمومی نمایش داده شده؛ برای تصمیم تازه معتبر نیست.",
+            }
+            quality = stale_payload.get("market_analysis", {}).get("data_quality", {})
+            quality["freshness_status"] = "STALE"
+            quality["signal_eligible"] = False
+            quality["reason"] = "STALE_CACHE: upstream feeds failed; cached values are display-only."
+            stale_payload["feed_diagnostics"] = {
+                "primary_provider": None, "secondary_provider": None,
+                "provider_errors": errors, "stale_cache_fallback": True,
+            }
+            return stale_payload
         raise RuntimeError("All public OHLCV feeds failed: " + detail[:700])
-    secondary_priority = ("Bybit Spot", "OKX Spot", "Kraken Spot", "Binance Spot")
+    secondary_priority = ("Bybit Spot", "OKX Spot", "Kraken Spot", "Binance Spot", "Coinbase Exchange")
     secondary_provider = next(
         (name for name in secondary_priority if name in frames and name != primary_provider),
         None,
@@ -3211,13 +3232,13 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
                     "pivot_confirmed_at": points[4].get("confirmed_at"),
                 }
     payload["wave4_fibonacci"] = fib
-    cached_payload = {**copy.deepcopy(payload), "_cached_at": time.monotonic()}
-    with LIVE_MARKET_RADAR_CACHE_LOCK:
-        LIVE_MARKET_RADAR_CACHE[key] = cached_payload
-        while len(LIVE_MARKET_RADAR_CACHE) > 60:
-            oldest = next(iter(LIVE_MARKET_RADAR_CACHE))
-            LIVE_MARKET_RADAR_CACHE.pop(oldest, None)
+    payload["cache_status"] = "LIVE"
+    payload["cache_age_seconds"] = 0.0
+    payload["cache_ttl_seconds"] = LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
+    set_live_market_radar_cache(key, payload)
     return payload
+    finally:
+        request_lock.release()
 
 
 def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
@@ -10248,21 +10269,32 @@ async function loadBlofinInstruments(){
               action.addEventListener('click',()=>{let opt=Array.from(symbol.options).find(item=>item.value===symbolValue);if(!opt){opt=document.createElement('option');opt.value=symbolValue;opt.textContent=symbolValue.replace(/USDT$/,'');symbol.appendChild(opt);}symbol.value=symbolValue;refresh(true);});
               card.append(title,mini,price,wave,fibonacci,div,action);return card;
             }
+            const waitForWaveSlot=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+            async function fetchWaveCard(symbolValue){
+              const controller=new AbortController();
+              const timeout=setTimeout(()=>controller.abort(),8000);
+              try{
+                const response=await fetch('/api/live-market-radar?symbol='+encodeURIComponent(symbolValue)+'&interval=5m',{cache:'no-store',signal:controller.signal});
+                const raw=await response.json();if(!response.ok)throw new Error(raw.error||('HTTP '+response.status));
+                return {symbol:symbolValue,data:normalizeChartPayload(raw)};
+              }finally{clearTimeout(timeout);}
+            }
             async function refreshWaveWatchlist(){
               const symbols=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','LINKUSDT'];
-              const results=await Promise.all(symbols.map(async item=>{
-                try{
-                  const response=await fetch('/api/live-market-radar?symbol='+encodeURIComponent(item)+'&interval=5m',{cache:'no-store'});
-                  const raw=await response.json();if(!response.ok)throw new Error(raw.error||('HTTP '+response.status));
-                  const data=normalizeChartPayload(raw);
-                  return {symbol:item,data};
-                }catch(error){return {symbol:item,error:String(error.message||error)};}
-              }));
+              const results=[];
               waveWatchGrid.replaceChildren();
-              results.forEach(item=>{
-                if(item.data){waveWatchGrid.appendChild(renderWaveWatchCard(item.symbol,item.data));}
-                else{const card=document.createElement('article');card.className='live-wave-card';const title=document.createElement('h5');title.textContent=item.symbol;const note=document.createElement('p');note.className='live-wave-meta';note.textContent='داده در دسترس نیست: '+item.error;card.append(title,note);waveWatchGrid.appendChild(card);}
-              });
+              for(let index=0;index<symbols.length;index++){
+                const item=symbols[index];
+                if(index>0)await waitForWaveSlot(400);
+                try{
+                  const result=await fetchWaveCard(item);results.push(result);
+                  waveWatchGrid.appendChild(renderWaveWatchCard(item,result.data));
+                }catch(error){
+                  const result={symbol:item,error:String(error.name==='AbortError'?'Timeout after 8 seconds':(error.message||error))};results.push(result);
+                  const card=document.createElement('article');card.className='live-wave-card';const title=document.createElement('h5');title.textContent=item;const note=document.createElement('p');note.className='live-wave-meta';note.textContent='داده در دسترس نیست: '+result.error;card.append(title,note);waveWatchGrid.appendChild(card);
+                }
+              }
+              return results;
             }
             button.addEventListener('click',()=>refresh(true));
             customSearch.addEventListener('click',searchCustomSymbol);
@@ -10270,8 +10302,7 @@ async function loadBlofinInstruments(){
             symbol.addEventListener('change',()=>refresh(true));
             function scheduleRefresh(){if(timer!==null)clearInterval(timer);timer=setInterval(()=>refresh(false),interval.value==='1s'?5000:15000);}
             interval.addEventListener('change',()=>{scheduleRefresh();refresh(true);});
-            refresh(true);
-            refreshWaveWatchlist();
+            refresh(true).then(()=>refreshWaveWatchlist());
             scheduleRefresh();
             const waveWatchTimer=setInterval(refreshWaveWatchlist,30000);
             window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);clearInterval(waveWatchTimer);});
