@@ -853,8 +853,8 @@ class WebAppHttpTests(unittest.TestCase):
             return {"price": 100.0, "volume_24h": 1_000_000.0,
                     "raw": {"price24hPcnt": "0.02"}}
 
-        with patch.object(web_app.ENGINE.data.binance, "ticker", side_effect=binance_ticker) as binance_fetch, \\
-             patch.object(web_app.ENGINE.data.bybit, "ticker", side_effect=bybit_ticker) as bybit_fetch, \\
+        with patch.object(web_app.ENGINE.data.binance, "ticker", side_effect=binance_ticker) as binance_fetch, \
+             patch.object(web_app.ENGINE.data.bybit, "ticker", side_effect=bybit_ticker) as bybit_fetch, \
              patch.object(web_app, "_market_volume_spike", return_value=1.5):
             status, _, payload = self.request("GET", "/api/crypto-markets")
             first = json.loads(payload)
@@ -900,8 +900,8 @@ class WebAppHttpTests(unittest.TestCase):
             return {"price": 100.0, "volume_24h": 1_000_000.0,
                     "raw": {"price24hPcnt": "0.02"}}
 
-        with patch.object(web_app.ENGINE.data.binance, "ticker", side_effect=binance_ticker), \\
-             patch.object(web_app.ENGINE.data.bybit, "ticker", side_effect=bybit_ticker), \\
+        with patch.object(web_app.ENGINE.data.binance, "ticker", side_effect=binance_ticker), \
+             patch.object(web_app.ENGINE.data.bybit, "ticker", side_effect=bybit_ticker), \
              patch.object(web_app, "_market_volume_spike", return_value=None):
             status, _, payload = self.request("GET", "/api/crypto-markets")
             result = json.loads(payload)
