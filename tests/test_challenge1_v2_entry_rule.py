@@ -65,6 +65,7 @@ class Challenge1V2OneHourEntryRuleTests(unittest.TestCase):
         # Deliberately bearish/weak 15m close: no breakout, no bullish candle,
         # no EMA value-zone overlap, and only 0.1x average volume.
         m15 = candles(m15_index, close=100.0, high=100.2, low=99.8, opened=100.1, volume=10.0)
+        m15.iloc[-1, m15.columns.get_loc("volume")] = 1.0
         btc = candles(btc_index)
         regime = {
             "status": "TREND", "direction": "LONG", "adx_1h": 25.0,
@@ -87,6 +88,7 @@ class Challenge1V2OneHourEntryRuleTests(unittest.TestCase):
         with (
             patch.object(challenge1_v2, "_regime", return_value=regime),
             patch.object(challenge1_v2, "atr", return_value=atr_values),
+            patch.object(challenge1_v2, "ema", side_effect=lambda series, period: pd.Series(102.0 if period == 21 else 103.0, index=series.index)),
             patch.object(challenge1_v2, "rsi", return_value=pd.Series(50.0, index=m15.index)),
             patch.object(challenge1_v2, "_elliott_wave_1h_evidence", return_value=wave),
         ):
