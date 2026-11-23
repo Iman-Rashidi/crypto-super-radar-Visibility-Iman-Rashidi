@@ -19,11 +19,19 @@ class LiveChartUiTests(unittest.TestCase):
     def test_five_minute_default_and_bounded_chart_request(self):
         self.assertIn('<option value="5m" selected>۵ دقیقه</option>', self.source)
         self.assertIn("new AbortController()", self.source)
-        self.assertIn("setTimeout(()=>controller.abort(),8000)", self.source)
+        self.assertIn("setTimeout(()=>controller.abort(),7000)", self.source)
         self.assertIn("signal:controller.signal", self.source)
         self.assertIn('id="live-radar-retry"', self.source)
         self.assertIn("retryButton.hidden=false", self.source)
-        self.assertIn("مهلت دریافت ۸ ثانیه‌ای تمام شد", self.source)
+        self.assertIn("مهلت دریافت ۷ ثانیه‌ای تمام شد", self.source)
+
+    def test_live_chart_uses_180_candles_and_120_candle_analysis_window(self):
+        radar_source = (SOURCE.parent / "live_market_radar.py").read_text(encoding="utf-8")
+        self.assertIn("MAX_CANDLES = 180", radar_source)
+        self.assertIn("ANALYSIS_CANDLES = 120", radar_source)
+        self.assertIn("analysis_frame = closed.tail(ANALYSIS_CANDLES)", radar_source)
+        self.assertIn("limit=180", self.source)
+        self.assertIn('query.get("interval", ["5m"])[0]', self.source)
 
     def test_custom_symbol_search_fits_mobile_width(self):
         self.assertIn(".live-radar-custom-search{display:flex;flex-wrap:wrap", self.source)
