@@ -175,11 +175,17 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
             # The 5m input must satisfy the Elliott engine's full OHLCV contract.
             pd.DataFrame(
                 {
-                    "open": [100.0], "high": [101.0], "low": [99.0],
-                    "close": [100.0], "volume": [1000.0],
+                    "timestamp": pd.date_range(
+                        end=asof - pd.Timedelta(minutes=5), periods=30,
+                        freq="5min", tz="UTC",
+                    ),
+                    "open": [100.0] * 30,
+                    "high": [101.0] * 30,
+                    "low": [99.0] * 30,
+                    "close": [100.0] * 30,
+                    "volume": [1000.0] * 30,
                 },
-                index=pd.DatetimeIndex([asof - pd.Timedelta(minutes=5)], tz="UTC"),
-            ),
+            ).set_index("timestamp"),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
         ]
