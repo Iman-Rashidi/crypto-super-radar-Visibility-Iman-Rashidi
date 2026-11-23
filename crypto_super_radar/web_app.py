@@ -37,7 +37,7 @@ from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION
 from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
 from .gem_hunter_v3 import process_gem_hunter_v3_candidates
 from .fast_asset_scan import build_fast_asset_scan_report, run_with_hard_timeout
-from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials_from_github_actions
+from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials_from_github_actions, watchlist_from_turso
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
@@ -2038,7 +2038,23 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
 <div id="radar-scan-overlay" role="status" aria-live="polite">
 <svg class="radar-svg" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="45" fill="#061522" stroke="#3b718c" stroke-width="1.5"/><circle cx="50" cy="50" r="32" fill="none" stroke="#28556d"/><circle cx="50" cy="50" r="18" fill="none" stroke="#28556d"/><path d="M5 50H95M50 5V95" stroke="#28556d" stroke-width="1"/><circle class="radar-wave" cx="50" cy="50" r="24" fill="none" stroke="#4eead0" stroke-width="2"/><circle class="radar-wave delay" cx="50" cy="50" r="24" fill="none" stroke="#60cfff" stroke-width="2"/><path class="radar-sweep" d="M50 50L50 5A45 45 0 0 1 89 28Z" fill="#36d9c055" stroke="#71f4e0" stroke-width="1"/><circle cx="50" cy="50" r="3" fill="#8fffe8"/><text x="50" y="57" text-anchor="middle" font-size="13">🐸</text></svg>
 <div style="flex:1;min-width:0"><strong id="radar-scan-title">رادار در حال اسکن بلاک‌چین...</strong><div class="muted" style="font-size:.8rem">دریافت و ارزیابی داده‌ها · وضعیت پژوهشی، بدون مجوز معامله</div><div class="radar-progress"></div></div>
-</div>{body}<nav id="radar-quick-jump" aria-label="دسترسی سریع"><a href="#gem-hunter-panel">🐸<span>شکار توکن</span></a><a href="#free-airdrop-radar">🎁<span>ایردراپ</span></a><a href="#futures-paper-bot">🤖<span>فیوچرز دمو</span></a><a href="#live-market-radar">📊<span>بازار و کندل</span></a></nav><script>
+</div>{body}<nav id="radar-quick-jump" aria-label="دسترسی سریع"><a href="#gem-hunter-panel">🐸<span>شکار توکن</span></a><a href="#free-airdrop-radar">🎁<span>ایردراپ</span></a><a href="#futures-paper-bot">🤖<span>فیوچرز دمو</span></a><a href="#live-market-radar">📊<span>بازار و کندل</span></a><a href="#gem-hunter-watchlist">📈<span>واچ‌لیست سود</span></a></nav>
+<section id="gem-hunter-watchlist" class="panel" style="margin:18px 0;padding:16px;border:1px solid #28506a;border-radius:18px;background:var(--surface)">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+    <div><h2 style="margin:0">📈 واچ‌لیست دائمی و راستی‌آزمایی سود (مبنای ۱۰۰ یورو)</h2><p class="muted">قیمت اولیه و زمان اولین کشف ثابت می‌مانند؛ ارزش‌ها بر پایه تغییر نسبی قیمت و بدون احتساب کارمزد/مالیات هستند.</p></div>
+    <button type="button" id="gem-watchlist-refresh">↻ به‌روزرسانی واچ‌لیست</button>
+  </div>
+  <div id="gem-watchlist-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0">
+    <div class="card"><b>تعداد کل ارزها</b><strong id="gem-watchlist-total">—</strong></div>
+    <div class="card"><b>ارزهای وارد سود</b><strong id="gem-watchlist-profitable">—</strong></div>
+    <div class="card"><b>بهترین شکار</b><strong id="gem-watchlist-best">—</strong></div>
+  </div>
+  <div style="overflow-x:auto"><table style="width:100%;min-width:850px;border-collapse:collapse;font-size:.82rem">
+    <thead><tr><th>نام / نماد · شبکه · تکرار</th><th>اولین کشف UTC</th><th>اولیه ← فعلی (سقف) USD</th><th>سود / زیان</th><th>ارزش €100 · سود خالص</th><th>قرارداد</th></tr></thead>
+    <tbody id="gem-watchlist-rows"><tr><td colspan="6">در حال دریافت واچ‌لیست دائمی…</td></tr></tbody>
+  </table></div>
+  <p id="gem-watchlist-status" class="muted" aria-live="polite">داده‌ها فقط خواندنی هستند.</p>
+</section><script>
 (function(){{
   const source=document.getElementById('crypto-market-search-activity');
   if(!source)return;
@@ -7089,6 +7105,18 @@ class Handler(BaseHTTPRequestHandler):
             payload = GLOBAL_MARKET_BOARD.get_board(force_refresh=refresh)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/gem-hunter/v3/watchlist":
+            try:
+                payload = watchlist_from_turso()
+                payload["read_only"] = True
+                payload["capital_basis_eur"] = 100
+                return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status":"UNAVAILABLE","error_type":type(exc).__name__,"items":[],
+                           "read_only":True,"capital_basis_eur":100}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
         if parsed.path == "/api/gem-hunter/v3/latest":
             try:
                 payload = latest_report_from_turso()
