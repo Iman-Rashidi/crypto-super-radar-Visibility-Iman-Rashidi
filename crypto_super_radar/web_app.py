@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .integrated_engine import WhaleAwareConfirmationEngine
 from .indicators import observed_price_ranges
+from .dashboard_data import market_movement_label
 from .models import AssetSpec, AnalysisResult, GateResult, GateStatus, SafetyStatus, Signal
 from .paper_trading import PAPER_ASSETS, PaperTradingBot
 from .futures_paper_trading import FUTURES_PAPER_ASSETS, FuturesPaperTradingBot
@@ -1177,6 +1178,11 @@ CRYPTO_MARKET_UNIVERSE = (
     ("HBARUSDT", "Hedera", "هدرا"),
     ("NEARUSDT", "NEAR Protocol", "نیر"),
     ("UNIUSDT", "Uniswap", "یونی‌سواپ"),
+    ("BONKUSDT", "Bonk", "بانک"),
+    ("WIFUSDT", "dogwifhat", "دوج‌ویف‌هت"),
+    ("FLOKIUSDT", "FLOKI", "فلوکی"),
+    ("RENDERUSDT", "Render", "رندر"),
+    ("FETUSDT", "Artificial Superintelligence Alliance", "فچ"),
 )
 CRYPTO_MARKET_CACHE_TTL_SECONDS = 60
 CRYPTO_MARKET_CACHE = {"expires_at": 0.0, "payload": None, "refreshing": False, "last_error": None}
@@ -3072,13 +3078,10 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
 def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
     total = len(CRYPTO_MARKET_UNIVERSE)
     complete = len(items) >= total
-    passed_items = [
-        item for item in items[:total]
-        if isinstance(item, dict) and item.get("status") == "PASS"
-    ]
-    passed_count = len(passed_items)
+    usable_items = [item for item in items[:total] if isinstance(item, dict) and item.get("status") in {"PASS", "PARTIAL"}]
+    usable_count = len(usable_items)
     observed_times = []
-    for item in passed_items:
+    for item in usable_items:
         raw = item.get("received_at_utc")
         if isinstance(raw, str) and raw.strip():
             try:
@@ -3088,74 +3091,194 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
                 observed_times.append(stamp.astimezone(timezone.utc))
             except ValueError:
                 continue
-    # The board's age reflects its oldest successful quote, not the last fetch attempt.
     oldest_observation = min(observed_times) if observed_times else None
     if complete:
-        status = (
-            "PASS" if passed_count == total and len(observed_times) == total
-            else "PARTIAL" if passed_count else "UNKNOWN"
-        )
+        status = "PASS" if all(item.get("status") == "PASS" for item in items[:total]) else "PARTIAL" if usable_count else "UNKNOWN"
     else:
-        status = "PARTIAL" if passed_count else "LOADING"
-    # Report only venues that actually contributed to validated rows. This
-    # keeps a successful OKX fallback from being mislabeled as Bybit data.
+        status = "PARTIAL" if usable_count else "LOADING"
     sources = list(dict.fromkeys(
-        provider
-        for item in items
-        if isinstance(item, dict) and item.get("status") == "PASS"
+        provider for item in usable_items
         for provider in (item.get("providers") or [])
         if isinstance(provider, str) and provider.strip()
     ))
-    if not sources:
-        sources = ["Binance Spot", "Bybit Spot"]
+    ranked = sorted(
+        copy.deepcopy(items),
+        key=lambda item: (
+            float(item.get("price_change_24h_pct")) if isinstance(item, dict) and isinstance(item.get("price_change_24h_pct"), (int, float)) and math.isfinite(float(item.get("price_change_24h_pct"))) else -1e12,
+            float(item.get("volume_24h_usd")) if isinstance(item, dict) and isinstance(item.get("volume_24h_usd"), (int, float)) and math.isfinite(float(item.get("volume_24h_usd"))) else -1.0,
+        ),
+        reverse=True,
+    )
     return {
         "status": status,
-        "freshness": (
-            "FRESH" if status == "PASS"
-            else "PARTIAL" if passed_count else "UNKNOWN"
-        ),
+        "freshness": "FRESH" if status == "PASS" else "PARTIAL" if usable_count else "UNKNOWN",
         "updated_at_utc": oldest_observation.isoformat() if oldest_observation else None,
         "completed_at_utc": datetime.now(timezone.utc).isoformat() if complete else None,
         "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
         "sources": sources,
-        "items": copy.deepcopy(items),
+        "items": ranked,
         "completed_items": min(len(items), total),
         "total_items": total,
         "refreshing": refreshing,
+        "trade_authorization": "NO_TRADE",
+        "board_type": "SPOT_PUMP_VOLATILITY_RESEARCH",
     }
 
 
+def _safe_market_float(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _market_ticker_metrics(symbol: str, binance_ticker: dict | None, bybit_ticker: dict | None) -> dict:
+    """Merge real 24h spot ticker fields without disguising a missing venue."""
+    observations = []
+    errors = []
+    if isinstance(binance_ticker, dict):
+        raw = binance_ticker.get("raw") or {}
+        change = _safe_market_float(raw.get("priceChangePercent"))
+        if change is not None:
+            observations.append(("Binance Spot", binance_ticker, change))
+        else:
+            errors.append("Binance Spot omitted priceChangePercent")
+    if isinstance(bybit_ticker, dict):
+        raw = bybit_ticker.get("raw") or {}
+        change = _safe_market_float(raw.get("price24hPcnt"))
+        provider = str(bybit_ticker.get("provider") or "Bybit Spot")
+        if change is None and provider == "Gate.io Spot":
+            change = _safe_market_float(raw.get("change_percentage"))
+        if change is not None:
+            if provider != "Gate.io Spot":
+                change *= 100.0
+            observations.append((provider, bybit_ticker, change))
+        else:
+            errors.append("Bybit Spot omitted price24hPcnt")
+    if not observations:
+        raise ValueError("; ".join(errors) or "No valid 24h ticker observations")
+    changes = [entry[2] for entry in observations]
+    prices = [_safe_market_float(entry[1].get("price")) for entry in observations]
+    prices = [value for value in prices if value is not None and value > 0]
+    volumes = [_safe_market_float(entry[1].get("volume_24h")) for entry in observations]
+    volumes = [value for value in volumes if value is not None and value >= 0]
+    if not prices or not volumes:
+        raise ValueError("Ticker observations omitted a valid price or quote volume")
+    discrepancy = (
+        abs(prices[0] - prices[1]) / ((prices[0] + prices[1]) / 2.0) * 100.0
+        if len(prices) > 1 else None
+    )
+    providers = [name for name, _, _ in observations]
+    has_binance = "Binance Spot" in providers
+    has_bybit = "Bybit Spot" in providers
+    return {
+        "price_usd": sum(prices) / len(prices),
+        "volume_24h_usd": sum(volumes) / len(volumes),
+        "price_change_24h_pct": sum(changes) / len(changes),
+        "price_change_sources": {name: change for name, _, change in observations},
+        "price_discrepancy_pct": discrepancy,
+        "providers": providers,
+        "status": "PASS" if has_binance and has_bybit else "PARTIAL",
+        "source_errors": errors,
+    }
+
+
+def _market_volume_spike(symbol: str, current_volume_usd: float) -> float | None:
+    """Compare rolling 24h quote turnover with the mean of seven closed daily candles."""
+    binance = ENGINE.data.binance
+    bybit = ENGINE.data.bybit
+    daily_quote_volumes = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="market-volume-baseline") as executor:
+        binance_future = executor.submit(
+            binance.http.get, f"{binance.BASE}/api/v3/klines",
+            {"symbol": symbol, "interval": "1d", "limit": 9},
+        )
+        bybit_future = executor.submit(
+            bybit.http.get, f"{bybit.BASE}/v5/market/kline",
+            {"category": "spot", "symbol": symbol, "interval": "D", "limit": 9},
+        )
+        try:
+            rows = binance_future.result()
+            if isinstance(rows, list):
+                now_ms = int(time.time() * 1000)
+                daily_quote_volumes.extend(
+                    value for row in rows
+                    if isinstance(row, (list, tuple)) and len(row) > 7
+                    and _safe_market_float(row[0]) is not None
+                    and _safe_market_float(row[0]) + 86_400_000 <= now_ms
+                    for value in [_safe_market_float(row[7])]
+                    if value is not None and value > 0
+                )
+        except Exception:
+            pass
+        try:
+            payload = bybit_future.result()
+            rows = ((payload.get("result") or {}).get("list") or []) if isinstance(payload, dict) else []
+            now_ms = int(time.time() * 1000)
+            daily_quote_volumes.extend(
+                value for row in rows
+                if isinstance(row, (list, tuple)) and len(row) > 6
+                and _safe_market_float(row[0]) is not None
+                and _safe_market_float(row[0]) + 86_400_000 <= now_ms
+                for value in [_safe_market_float(row[6])]
+                if value is not None and value > 0
+            )
+        except Exception:
+            pass
+    if len(daily_quote_volumes) < 3:
+        return None
+    baseline = sum(daily_quote_volumes) / len(daily_quote_volumes)
+    return current_volume_usd / baseline if baseline > 0 else None
+
+
 def _refresh_crypto_market_board() -> None:
-    """Refresh public prices away from the request thread, publishing bounded progress."""
+    """Refresh 24h momentum and turnover from Binance and Bybit public Spot APIs."""
     items: list[dict] = []
     try:
-        for symbol, name_en, name_fa in CRYPTO_MARKET_UNIVERSE:
+        def fetch_symbol(entry):
+            symbol, name_en, name_fa = entry
+            binance_ticker = None
+            bybit_ticker = None
+            errors = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="market-ticker") as executor:
+                binance_future = executor.submit(ENGINE.data.binance.ticker, symbol)
+                bybit_future = executor.submit(ENGINE.data.bybit.ticker, symbol)
+                try:
+                    binance_ticker = binance_future.result()
+                except Exception as exc:
+                    errors.append("Binance Spot: " + type(exc).__name__ + ": " + str(exc)[:120])
+                try:
+                    bybit_ticker = bybit_future.result()
+                except Exception as exc:
+                    errors.append("Bybit Spot: " + type(exc).__name__ + ": " + str(exc)[:120])
             try:
-                asset = AssetSpec.parse("cex:" + symbol)
-                snapshot = ENGINE.data.snapshot(asset)
-                item = {
-                    "symbol": symbol,
-                    "name_en": name_en,
-                    "name_fa": name_fa,
-                    "status": "PASS",
-                    "price_usd": snapshot.price_usd,
-                    "volume_24h_usd": snapshot.volume_24h_usd,
-                    "price_discrepancy_pct": snapshot.price_discrepancy_pct,
-                    "providers": [snapshot.provider_a, snapshot.provider_b],
+                metrics = _market_ticker_metrics(symbol, binance_ticker, bybit_ticker)
+                metrics.update({
+                    "symbol": symbol, "name_en": name_en, "name_fa": name_fa,
+                    "volume_spike_ratio": _market_volume_spike(symbol, metrics["volume_24h_usd"]),
+                    "market_movement_fa": market_movement_label(metrics["price_change_24h_pct"]),
                     "received_at_utc": datetime.now(timezone.utc).isoformat(),
-                }
+                    "trade_authorization": "NO_TRADE",
+                })
+                if errors:
+                    metrics["source_errors"] = (metrics.get("source_errors") or []) + errors
+                return metrics
             except Exception as exc:
-                item = {
-                    "symbol": symbol,
-                    "name_en": name_en,
-                    "name_fa": name_fa,
+                return {
+                    "symbol": symbol, "name_en": name_en, "name_fa": name_fa,
                     "status": "UNKNOWN",
-                    "reason": type(exc).__name__ + ": " + str(exc)[:180],
+                    "reason": "; ".join(errors + [type(exc).__name__ + ": " + str(exc)[:180]]),
+                    "trade_authorization": "NO_TRADE",
                 }
-            items.append(item)
-            with CRYPTO_MARKET_CACHE_LOCK:
-                CRYPTO_MARKET_CACHE["payload"] = _market_board_payload(items, refreshing=True)
-                CRYPTO_MARKET_CACHE["expires_at"] = 0.0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="market-board") as executor:
+            futures = [executor.submit(fetch_symbol, entry) for entry in CRYPTO_MARKET_UNIVERSE]
+            for future in concurrent.futures.as_completed(futures):
+                items.append(future.result())
+                with CRYPTO_MARKET_CACHE_LOCK:
+                    CRYPTO_MARKET_CACHE["payload"] = _market_board_payload(items, refreshing=True)
+                    CRYPTO_MARKET_CACHE["expires_at"] = 0.0
 
         with CRYPTO_MARKET_CACHE_LOCK:
             CRYPTO_MARKET_CACHE["payload"] = _market_board_payload(items, refreshing=False)
@@ -3168,9 +3291,9 @@ def _refresh_crypto_market_board() -> None:
                 CRYPTO_MARKET_CACHE["payload"] = {
                     "status": "UNKNOWN", "freshness": "UNKNOWN", "updated_at_utc": None,
                     "cache_ttl_seconds": CRYPTO_MARKET_CACHE_TTL_SECONDS,
-                    "sources": ["Binance Spot", "Bybit Spot"], "items": [],
-                    "completed_items": 0, "total_items": len(CRYPTO_MARKET_UNIVERSE),
-                    "refreshing": False, "error": CRYPTO_MARKET_CACHE["last_error"],
+                    "sources": [], "items": [], "completed_items": 0,
+                    "total_items": len(CRYPTO_MARKET_UNIVERSE), "refreshing": False,
+                    "error": CRYPTO_MARKET_CACHE["last_error"], "trade_authorization": "NO_TRADE",
                 }
     finally:
         with CRYPTO_MARKET_CACHE_LOCK:
@@ -8906,7 +9029,7 @@ async function loadBlofinInstruments(){
             </label>
             <label>مرتب‌سازی
               <select id="crypto-market-sort">
-                <option value="volume">بیشترین حجم ۲۴ساعته</option>
+                <option value="change">بیشترین رشد ۲۴ساعته</option><option value="volume">بیشترین حجم ۲۴ساعته</option>
                 <option value="name">نام رمزارز</option>
                 <option value="symbol">نماد</option>
               </select>
@@ -8914,8 +9037,8 @@ async function loadBlofinInstruments(){
           </div>
           <p id="crypto-market-count" class="muted">۰ رمزارز</p>
           <div style="overflow-x:auto"><table>
-            <thead><tr><th>رمزارز</th><th>نماد</th><th>قیمت مرجع (USD)</th><th>حجم ۲۴ساعته (USD)</th><th>اختلاف منابع</th><th>وضعیت</th><th>اقدام</th></tr></thead>
-            <tbody id="crypto-market-rows"><tr><td colspan="7"><div class="market-loading-mascot" role="status" aria-live="polite">
+            <thead><tr><th>رمزارز</th><th>نماد</th><th>قیمت مرجع (USD)</th><th>تغییر ۲۴ساعته</th><th>حجم ۲۴ساعته (USD)</th><th>شتاب حجم</th><th>اختلاف منابع</th><th>جهت بازار</th><th>اقدام پژوهشی</th></tr></thead>
+            <tbody id="crypto-market-rows"><tr><td colspan="9"><div class="market-loading-mascot" role="status" aria-live="polite">
             <svg class="market-loading-rabbit" viewBox="0 0 120 92" role="img" aria-label="خرگوش در حال کندن زمین و پیدا کردن هویج">
               <g class="rabbit-body">
                 <ellipse cx="55" cy="59" rx="31" ry="22" fill="#eee0c9" stroke="#9e8061" stroke-width="2"/>
@@ -8959,21 +9082,25 @@ async function loadBlofinInstruments(){
             visible.sort((a,b)=>{
               if(sort.value==='name')return (a.name_en||'').localeCompare(b.name_en||'');
               if(sort.value==='symbol')return (a.symbol||'').localeCompare(b.symbol||'');
-              return (Number(b.volume_24h_usd)||-1)-(Number(a.volume_24h_usd)||-1);
+              if(sort.value==='volume')return (Number(b.volume_24h_usd)||-1)-(Number(a.volume_24h_usd)||-1);
+              return (Number(b.price_change_24h_pct)||-1e12)-(Number(a.price_change_24h_pct)||-1e12);
             });
             const tableRows=visible.map(item=>{
               const tr=document.createElement('tr');
+              const usable=item.status==='PASS'||item.status==='PARTIAL';
               const values=[item.name_fa+' · '+item.name_en,item.symbol,
-                item.status==='PASS'?fmt(item.price_usd):'—',
-                item.status==='PASS'?fmt(item.volume_24h_usd,2):'—',
-                item.status==='PASS'?fmt(item.price_discrepancy_pct,4)+'%':'—',
-                item.status==='PASS'?'تأیید دو منبع':'نامشخص · UNKNOWN'];
+                usable?fmt(item.price_usd):'—',
+                usable&&item.price_change_24h_pct!==null?fmt(item.price_change_24h_pct,2)+'%':'—',
+                usable?fmt(item.volume_24h_usd,2):'—',
+                usable&&item.volume_spike_ratio!==null&&item.volume_spike_ratio!==undefined?fmt(item.volume_spike_ratio,2)+'×':'دادهٔ مبنا ناموجود',
+                usable&&item.price_discrepancy_pct!==null?fmt(item.price_discrepancy_pct,4)+'%':'—',
+                usable?(item.market_movement_fa||'⚪ دادهٔ تغییر قیمت ناموجود'):'نامشخص · UNKNOWN'];
               values.forEach((value,index)=>{const itemCell=cell('td',value);if(index>=2&&index<=4)itemCell.className='numeric';tr.appendChild(itemCell);});
               const actionCell=document.createElement('td');
               const scanButton=document.createElement('button');
               scanButton.type='button';scanButton.className='market-scan-button';
               scanButton.textContent='انتخاب برای اسکن';
-              scanButton.disabled=item.status!=='PASS';
+              scanButton.disabled=item.status!=='PASS'&&item.status!=='PARTIAL';
               scanButton.addEventListener('click',()=>{
                 const input=document.getElementById('scan-asset');
                 input.value='cex:'+item.symbol;
@@ -8981,28 +9108,28 @@ async function loadBlofinInstruments(){
                 input.focus();
               });
               actionCell.appendChild(scanButton);tr.appendChild(actionCell);
-              if(item.status!=='PASS')tr.className='status-unknown';
+              if(!usable)tr.className='status-unknown';
               return tr;
             });
             rows.replaceChildren(...tableRows);
             count.textContent='نمایش '+visible.length+' از '+marketItems.length+' رمزارز';
             searchActivity.classList.toggle('is-found',query.length>0&&visible.length>0);
-            if(!visible.length){const empty=cell('td','موردی با این جست‌وجو پیدا نشد');empty.colSpan=7;const tr=document.createElement('tr');tr.appendChild(empty);rows.replaceChildren(tr);}
+            if(!visible.length){const empty=cell('td','موردی با این جست‌وجو پیدا نشد');empty.colSpan=9;const tr=document.createElement('tr');tr.appendChild(empty);rows.replaceChildren(tr);}
           }
           function showMarketLoading(){{
             const tr=document.createElement('tr'),td=document.createElement('td');
-            td.colSpan=7;
+            td.colSpan=9;
             td.innerHTML='<div class="market-loading-mascot" role="status" aria-live="polite"><svg class="market-loading-rabbit" viewBox="0 0 120 92" role="img" aria-label="خرگوش در حال کندن زمین و پیدا کردن هویج"><g class="rabbit-body"><ellipse cx="55" cy="59" rx="31" ry="22" fill="#eee0c9" stroke="#9e8061" stroke-width="2"/><circle cx="31" cy="57" r="9" fill="#fff7e9" stroke="#9e8061" stroke-width="1.5"/><g class="rabbit-ear"><ellipse cx="39" cy="23" rx="8" ry="23" transform="rotate(-15 39 23)" fill="#f4e7d4" stroke="#9e8061" stroke-width="2"/><ellipse cx="40" cy="24" rx="3.5" ry="15" transform="rotate(-15 40 24)" fill="#e9a9a5"/></g><ellipse cx="67" cy="46" rx="22" ry="19" fill="#f4e7d4" stroke="#9e8061" stroke-width="2"/><ellipse cx="81" cy="52" rx="13" ry="10" fill="#fff7e9"/><circle cx="72" cy="43" r="2.5" fill="#34271e"/><circle cx="91" cy="53" r="3" fill="#d98791"/><path d="M79 59q5 4 9 0" fill="none" stroke="#795c4a" stroke-width="1.5" stroke-linecap="round"/><g class="rabbit-paw"><ellipse cx="83" cy="72" rx="13" ry="6" fill="#f4e7d4" stroke="#9e8061" stroke-width="1.5"/><path d="M88 70l8 5" stroke="#9e8061" stroke-width="2" stroke-linecap="round"/></g></g><g class="rabbit-dirt" fill="#a66a3f"><circle cx="100" cy="73" r="3"/><circle cx="109" cy="65" r="2"/><circle cx="96" cy="61" r="2.5"/></g><path d="M17 79q24-13 47 0q20-10 42 0" fill="none" stroke="#a66a3f" stroke-width="5" stroke-linecap="round"/><g class="rabbit-carrot"><path d="M105 72q-7 11-4 17q8-4 11-15z" fill="#f28b28" stroke="#b85a1b" stroke-width="1.2"/><path d="M106 72q-6-8-12-6q4 7 10 9q1-9 8-11q1 7-6 12" fill="#59b66b" stroke="#347c49" stroke-width="1"/></g></svg><span>خرگوش دوباره مشغول کندن زمینه... 🥕</span><span class="market-loading-carrot" aria-hidden="true">🥕</span></div>';
             tr.appendChild(td);rows.replaceChildren(tr);
           }}
           async function refresh(){
-            button.disabled=true;status.textContent='در حال دریافت قیمت‌های عمومی...';showMarketLoading();window.CryptoRadar.scanning('radar-market', 'در حال دریافت قیمت و تطبیق منابع عمومی بازار...');
+            button.disabled=true;status.textContent='در حال دریافت قیمت‌های عمومی...';showMarketLoading();window.CryptoRadar.scanning('radar-market', 'در حال اسکن مومنتوم ۲۴ساعته و شتاب حجم Binance و Bybit Spot...');
             try{
               const response=await fetch('/api/crypto-markets');
               const data=await response.json();
               if(!response.ok)throw new Error('HTTP '+response.status);
               marketItems=data.items||[];
-              window.CryptoRadar.update('radar-market', marketItems, {state:data.refreshing?'scanning':'complete', caption:'آبی: قیمت تأییدشده از دو منبع مستقل · زرد: دادهٔ نامشخص. این رادار جهت خرید/فروش تولید نمی‌کند.'});
+              window.CryptoRadar.update('radar-market', marketItems, {state:data.refreshing?'scanning':'complete', caption:'تغییر ۲۴ساعته و شتاب حجم از Binance و Bybit Spot؛ رتبه‌بندی رشد/حجم فقط پژوهشی است و مجوز معامله NO_TRADE باقی می‌ماند.'});
               renderRows();
               const receivedDate=data.updated_at_utc?new Date(data.updated_at_utc):null;
               const received=receivedDate&&!Number.isNaN(receivedDate.getTime())
