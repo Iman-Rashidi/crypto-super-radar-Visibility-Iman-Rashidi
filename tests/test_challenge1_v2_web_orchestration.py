@@ -141,7 +141,7 @@ class FakeBloFinReadOnly:
         self.requested_bars.append((inst_id, bar))
         if bar == self.missing_bar:
             return []
-        interval = v2_orchestration.BAR_INTERVAL_MS[bar]
+        interval = 5 * 60_000 if bar == "5m" else v2_orchestration.BAR_INTERVAL_MS[bar]
         count = 300 if bar in {"1H", "4H"} else 120
         last_open = self.now_ms - interval
         rows = []
