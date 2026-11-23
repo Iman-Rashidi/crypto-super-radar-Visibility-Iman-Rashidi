@@ -186,7 +186,10 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
         ), patch.object(flow, "analyze_signal", return_value=record), patch.object(
             flow, "challenge1_v2_execution_evidence_ready", return_value=(True, "ok")
         ), patch.object(flow, "run_challenge1_v2_supervisor_reviews", return_value=reviewer_result) as review:
-            out = flow.analyze_challenge1_v2_market(object(), "BTC-USDT", local_now_ms=asof_ms)
+            class DummyClient:
+                def get_candles(self, instrument_id, *, bar, limit):
+                    return []
+            out = flow.analyze_challenge1_v2_market(DummyClient(), "BTC-USDT", local_now_ms=asof_ms)
         self.assertEqual(out["signal"], "LONG")
         self.assertEqual(out["status"], "AI_REVIEW_BLOCKED")
         self.assertFalse(out["orders_submitted"])
