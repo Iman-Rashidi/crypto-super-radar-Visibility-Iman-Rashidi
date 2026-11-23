@@ -611,8 +611,8 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     market_cap_label = "ارزش بازار" if _finite(candidate.get("market_cap_usd")) is not None else "FDV"
     if market_cap is not None and market_cap > 0:
         scenario_text = (
-            f"ارزش فعلی {market_cap_label}: \${market_cap:,.0f}. سناریوی فرضی ۲x یعنی "
-            f"\${market_cap * 2:,.0f} و ۵x یعنی \${market_cap * 5:,.0f}؛ این‌ها محاسبات سناریویی‌اند، نه هدف قیمت یا پیش‌بینی."
+            f"ارزش فعلی {market_cap_label}: ${market_cap:,.0f}. سناریوی فرضی ۲x یعنی "
+            f"${market_cap * 2:,.0f} و ۵x یعنی ${market_cap * 5:,.0f}؛ این‌ها محاسبات سناریویی‌اند، نه هدف قیمت یا پیش‌بینی."
         )
     else:
         scenario_text = "ارزش بازار/FDV معتبر در Snapshot موجود نیست؛ بنابراین سناریوی ۲x تا ۵x محاسبه نمی‌شود و عددی حدس زده نخواهد شد."
@@ -634,7 +634,7 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         trade_label = "بازکردن توکن در Jupiter"
     elif chain in {"base", "ethereum"}:
         dex_url = f"https://dexscreener.com/{chain}/{address}"
-        trade_url = f"https://app.uniswap.org/swap?chain={chain}&outputCurrency={address}"
+        trade_url = f"https://app.uniswap.org/#/swap?chain={chain}&inputCurrency=ETH&outputCurrency={address}"
         wallet_guide = (
             f"در Trust Wallet یا MetaMask شبکه {network_label} را دستی انتخاب کن، "
             "آدرس قرارداد را با منبع مستقل تطبیق بده و سپس در Swap آن را به‌عنوان توکن مقصد وارد کن. "
@@ -662,9 +662,9 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         "🧾 <b>بخش ۱ | شناسنامه و اعداد کلیدی</b>\n"
         f"<b>نام و نماد ارز:</b> {token_name} ({token_symbol})\n"
         f"<b>بلاک‌چین / شبکه:</b> {network_label}\n"
-        f"<b>قیمت فعلی:</b> \${price_text}\n"
+        f"<b>قیمت فعلی:</b> ${price_text}\n"
         f"<b>مقدار قابل خرید با ۱۰۰ دلار:</b> حدود {tokens_text} توکن (تخمینی؛ بدون کارمزد و لغزش)\n"
-        f"<b>نقدینگی استخر:</b> \${liquidity_text} | <b>حجم ۲۴ ساعته:</b> \${volume_text}\n"
+        f"<b>نقدینگی استخر:</b> ${liquidity_text} | <b>حجم ۲۴ ساعته:</b> ${volume_text}\n"
         f"<b>آدرس قرارداد (برای کپی):</b> <code>{safe_address}</code>\n"
         "\n"
         "🧠 <b>بخش ۲ | تحلیل هوشمند، نقاط قوت، ضعف و رفرنس</b>\n"

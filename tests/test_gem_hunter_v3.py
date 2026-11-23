@@ -433,7 +433,8 @@ class GemHunterV3Tests(unittest.TestCase):
             "gem_hunter_v3_status": "EARLY_ALPHA_REVIEW",
             "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "tier_base_security_status": "UNKNOWN",
-            "security_evidence": {"status": "UNKNOWN"},
+            "security_evidence": {"status": "UNKNOWN", "provider": "SOLANA_RPC"},
+            "short_term_momentum_score": 75,
             "tier_data_confidence": "INCOMPLETE",
         }
         client = Mock()
@@ -472,7 +473,7 @@ class GemHunterV3Tests(unittest.TestCase):
         ):
             self.assertIn(expected, sent_text)
         self.assertIn("\n", sent_text)
-        self.assertNotIn("\\\\n", sent_text)
+        self.assertNotIn("\\n", sent_text)
         self.assertIn("🛡️ <b>بخش ۳", sent_text)
         self.assertIn("Seed Phrase", sent_text)
         self.assertIn("📡 <b>بخش ۴", sent_text)
