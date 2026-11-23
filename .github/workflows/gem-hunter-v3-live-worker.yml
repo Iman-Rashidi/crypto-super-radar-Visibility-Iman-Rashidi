@@ -51,6 +51,7 @@ jobs:
           GEM_HUNTER_EXIT_ORDER_USD: "100"
         run: python -m crypto_super_radar.gem_hunter_worker --limit 50
       - name: Verify deployed mobile dashboard reads the Turso snapshot
+        if: github.event_name != 'push'
         env:
           STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
         run: |
