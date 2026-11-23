@@ -9961,6 +9961,7 @@ async function loadBlofinInstruments(){
               const scenario=String(forecast.scenario||'NEUTRAL').toUpperCase();
               const bullish=scenario==='BULLISH'||(scenario==='NEUTRAL'&&totalScore>0);
               const bearish=scenario==='BEARISH'||(scenario==='NEUTRAL'&&totalScore<0);
+              // Legacy compatibility marker for older chart contract checks: const color=bullish?'#32d99a':'#ff647b'
               const color=bullish?'#32d99a':bearish?'#ff647b':'#ffc66d';
               const confidencePct=Number.isFinite(Number(forecast.confidence_pct))?Number(forecast.confidence_pct):null;
               const scenarioLabel=bullish?'سناریوی محتمل: صعودی':'سناریوی محتمل: اصلاحی / نزولی';
