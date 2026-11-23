@@ -2056,6 +2056,41 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
   <p id="gem-watchlist-status" class="muted" aria-live="polite">داده‌ها فقط خواندنی هستند.</p>
 </section><script>
 (function(){{
+ const btn=document.getElementById('gem-watchlist-refresh');
+ if(!btn)return;
+ const esc=v=>String(v==null?'—':v).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+ const money=v=>v==null?'—':'€'+Number(v).toFixed(2);
+ async function load(){{
+  const status=document.getElementById('gem-watchlist-status');
+  status.textContent='در حال دریافت…';
+  try{{
+   const response=await fetch('/api/gem-hunter/v3/watchlist',{{cache:'no-store'}});
+   const data=await response.json();
+   if(!response.ok)throw new Error(data.error_type||data.status||'HTTP '+response.status);
+   const rows=Array.isArray(data.items)?data.items:[];
+   document.getElementById('gem-watchlist-total').textContent=String(data.total_tokens||0);
+   document.getElementById('gem-watchlist-profitable').textContent=String(data.profitable_tokens||0);
+   const best=data.best_hunt;
+   document.getElementById('gem-watchlist-best').textContent=best?esc(best.token_symbol)+' · '+money(best.eur_100_net_profit_eur):'هنوز ثبت نشده';
+   document.getElementById('gem-watchlist-rows').innerHTML=rows.map(r=>{{
+    const profit=Number(r.eur_100_net_profit_eur||0);
+    const color=profit>=0?'#20c997':'#ff647c';
+    return '<tr><td>'+esc(r.token_name)+' ('+esc(r.token_symbol)+')<br>'+esc(r.chain)+' · '+esc(r.detection_count)+' بار شکار</td>'+
+     '<td>'+esc(r.first_detected_utc)+'</td>'+
+     '<td>'+esc(r.initial_price_usd)+' ← '+esc(r.latest_price_usd)+' ('+esc(r.peak_price_usd)+')</td>'+
+     '<td style="color:'+color+'">'+(r.current_change_pct==null?'—':Number(r.current_change_pct).toFixed(2)+'%')+'</td>'+
+     '<td>'+money(r.eur_100_current_value)+' · <b style="color:'+color+'">'+(profit>=0?'+':'')+money(r.eur_100_net_profit_eur)+'</b></td>'+
+     '<td><button type="button" data-copy-contract="'+esc(r.token_address)+'">کپی آدرس</button></td></tr>';
+   }}).join('')||'<tr><td colspan="6">هنوز توکن واجد شرایطی در واچ‌لیست ثبت نشده است.</td></tr>';
+   status.textContent='آخرین دریافت: '+esc(data.updated_at_utc)+' · مبنای محاسبه €100 برای هر ارز';
+   document.querySelectorAll('[data-copy-contract]').forEach(b=>b.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(b.getAttribute('data-copy-contract'));b.textContent='کپی شد ✓';}}catch(e){{b.textContent='کپی ناموفق';}}}}));
+  }}catch(e){{status.textContent='واچ‌لیست در دسترس نیست: '+e.message;}}
+ }}
+ btn.addEventListener('click',load);
+ load();
+}})();
+</script><script>
+(function(){{
   const source=document.getElementById('crypto-market-search-activity');
   if(!source)return;
   const selector='input[type="search"], input[data-search], input[id*="search"], input[id*="query"], input[placeholder*="جست"]';
