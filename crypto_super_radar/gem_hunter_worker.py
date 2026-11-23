@@ -265,6 +265,9 @@ def run_scan(limit: int = 50) -> dict[str, Any]:
     payload["trade_authorization"] = "NO_TRADE"
     payload["read_only"] = True
     payload["report_source"] = "GITHUB_ACTIONS_WORKER"
+    from .gem_hunter_watchlist import sync_watchlist_scan
+    watchlist_sync = sync_watchlist_scan(rows)
+    payload["watchlist_ledger_sync"] = watchlist_sync
     _save_report(payload)
     render_dashboard_sync = _publish_turso_credentials_to_render()
     alert_counts: dict[str, int] = {}
@@ -280,9 +283,29 @@ def run_scan(limit: int = 50) -> dict[str, Any]:
         "evaluated_persisted_candidates": len(evaluated_rows) - len(failed),
         "persisted_candidate_rows": sum(1 for row in rows if row.get("gem_hunter_storage_status") == "PERSISTED"),
         "telegram_alert_status_counts": alert_counts,
+        "watchlist_ledger_sync": watchlist_sync,
         "render_dashboard_sync": render_dashboard_sync,
         "trade_authorization": "NO_TRADE",
     }
+
+
+
+def watchlist_from_turso() -> dict[str, Any]:
+    """Read the durable €100 watchlist using the verified worker-provided Turso credentials."""
+    with _TURSO_READ_CREDENTIALS_LOCK:
+        cached_url = _TURSO_READ_CREDENTIALS.get("url")
+        cached_token = _TURSO_READ_CREDENTIALS.get("token")
+    if cached_url and cached_token:
+        db = connect_database(url=cached_url, token=cached_token)
+    else:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            return {"status":"UNAVAILABLE","message_fa":"اتصال امن Turso در دسترس نیست.","items":[]}
+        db = connect_database()
+    try:
+        from .gem_hunter_watchlist import watchlist_snapshot
+        return watchlist_snapshot(db)
+    finally:
+        db.close()
 
 
 def main() -> None:
