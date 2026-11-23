@@ -9628,8 +9628,10 @@ async function loadBlofinInstruments(){
                 ctx.beginPath();ctx.arc(xx,yy,4,0,Math.PI*2);ctx.fill();
                 prev={x:xx,y:yy};
               });
-              let wavePrev=null,lastWaveLabelX=-Infinity;
-              (data.wave_pivots||[]).forEach(p=>{
+              let wavePrev=null;
+              const waveLabels=['مبدأ موج','سقف موج ۱','کف اصلاح ۲','سقف موج ۳','کف اصلاح ۴','سقف موج ۵'];
+              const wavePoints=(data.wave_pivots||[]).slice(-6);
+              wavePoints.forEach((p,index)=>{
                 const i=indexByTime.get(Date.parse(p.timestamp));
                 if(i===undefined)return;
                 const point={x:x(i),y:y(p.price)};
@@ -9638,11 +9640,12 @@ async function loadBlofinInstruments(){
                   ctx.beginPath();ctx.moveTo(wavePrev.x,wavePrev.y);ctx.lineTo(point.x,point.y);ctx.stroke();ctx.restore();
                 }
                 ctx.fillStyle='#d7a9ff';ctx.beginPath();ctx.arc(point.x,point.y,7,0,Math.PI*2);ctx.fill();
-                const waveText=String(p.label||'');
-                if(waveText&&point.x-lastWaveLabelX>=95){
-                  ctx.fillStyle='#f5eaff';ctx.font='bold 12px sans-serif';
-                  ctx.fillText(waveText,point.x+7,point.y-9);lastWaveLabelX=point.x;
-                }
+                const waveText=(waveLabels[index]||('پیوت موج '+(index+1)))+' · '+number(p.price);
+                const labelY=Math.max(pad.top+16,Math.min(canvas.height-pad.bottom-8,point.y+(index%2?20:-12)));
+                ctx.save();ctx.font='bold 12px sans-serif';ctx.textAlign='left';
+                const labelWidth=Math.min(190,ctx.measureText(waveText).width+10);
+                ctx.fillStyle='rgba(22,18,35,.92)';ctx.fillRect(Math.min(canvas.width-pad.right-labelWidth,point.x+7),labelY-13,labelWidth,18);
+                ctx.fillStyle='#f5eaff';ctx.fillText(waveText,Math.min(canvas.width-pad.right-labelWidth+5,point.x+12),labelY, labelWidth-8);ctx.restore();
                 wavePrev=point;
               });
               const signal=data.signal||{};
@@ -9858,65 +9861,112 @@ async function loadBlofinInstruments(){
               const bars=(Array.isArray(data.candles)?data.candles:[]).filter(item=>Number.isFinite(Number(item.close))).slice(-20);
               const ctx=forecastCtx,w=forecastCanvas.width,h=forecastCanvas.height;
               ctx.clearRect(0,0,w,h);ctx.fillStyle='#07131f';ctx.fillRect(0,0,w,h);
+              const fmt=value=>'$'+Number(value).toLocaleString('en-US',{maximumFractionDigits:8});
               if(!bars.length){ctx.fillStyle='#ffc66d';ctx.font='18px sans-serif';ctx.fillText('داده معتبر برای سناریو در دسترس نیست',24,38);return;}
               const closes=bars.map(item=>Number(item.close)),last=closes[closes.length-1];
               const analysis=data.market_analysis||{},direction=analysis.direction||{},wave=analysis.wave_structure||{};
-              const divergence=direction.divergence||{};
-              const ranges=bars.map(item=>Math.max(0,Number(item.high)-Number(item.low)));
-              const atr=ranges.reduce((sum,value)=>sum+value,0)/Math.max(1,ranges.length);
+              const divergence=direction.divergence||analysis.rsi_divergence||{};
+              const patterns=Array.isArray(analysis.candlestick_patterns)?analysis.candlestick_patterns:[];
+              const confirmedPattern=patterns.find(item=>item&&item.state==='CONFIRMED');
+              const ranges=bars.map(item=>Math.max(0,Number(item.high)-Number(item.low))).filter(Number.isFinite);
+              const atr=ranges.length?ranges.reduce((sum,value)=>sum+value,0)/ranges.length:Math.abs(last)*.002;
               const avgMove=closes.length>1?(closes[closes.length-1]-closes[0])/(closes.length-1):0;
               const bias=String(direction.bias||direction.trend||'').toUpperCase();
-              const bearish=bias==='BEARISH'||divergence.type==='BEARISH';
-              const bullish=bias==='BULLISH'||divergence.type==='BULLISH';
-              const drift=bullish?Math.max(Math.abs(avgMove),atr*.08):bearish?-Math.max(Math.abs(avgMove),atr*.08):avgMove*.25;
+              const waveBias=String(wave.pattern||wave.direction||wave.bias||'').toUpperCase();
+              const divergenceType=String(divergence.type||divergence.direction||'').toUpperCase();
+              const scoreParts=[];
+              if(bias==='BULLISH'||bias==='BULL'||bias==='LONG')scoreParts.push({name:'روند بازار',score:1.5});
+              if(bias==='BEARISH'||bias==='BEAR'||bias==='SHORT')scoreParts.push({name:'روند بازار',score:-1.5});
+              if(waveBias.includes('BULL'))scoreParts.push({name:'ساختار امواج',score:2});
+              if(waveBias.includes('BEAR'))scoreParts.push({name:'ساختار امواج',score:-2});
+              if(divergenceType.includes('BULL'))scoreParts.push({name:'واگرایی RSI',score:2.2});
+              if(divergenceType.includes('BEAR'))scoreParts.push({name:'واگرایی RSI',score:-2.2});
+              if(confirmedPattern){
+                const patternDirection=String(confirmedPattern.direction||confirmedPattern.potential_direction||'').toUpperCase();
+                if(patternDirection.includes('BULL'))scoreParts.push({name:'الگوی کندلی',score:1.5});
+                if(patternDirection.includes('BEAR'))scoreParts.push({name:'الگوی کندلی',score:-1.5});
+              }
+              const recent=bars.slice(-8);
+              const buyVolume=recent.reduce((sum,bar)=>sum+(Number(bar.close)>=Number(bar.open)?Math.max(0,Number(bar.volume)||0):0),0);
+              const sellVolume=recent.reduce((sum,bar)=>sum+(Number(bar.close)<Number(bar.open)?Math.max(0,Number(bar.volume)||0):0),0);
+              const totalVolume=buyVolume+sellVolume;
+              const buyShare=totalVolume>0?buyVolume/totalVolume:.5;
+              if(totalVolume>0)scoreParts.push({name:'حجم خرید و فروش',score:(buyShare-.5)*4});
+              const sma=(values,count)=>values.slice(-count).reduce((sum,value)=>sum+value,0)/Math.max(1,values.slice(-count).length);
+              const maFast=sma(closes,Math.min(5,closes.length)),maSlow=sma(closes,Math.min(12,closes.length));
+              const maSlope=maSlow?(maFast-maSlow)/maSlow:0;
+              if(Math.abs(maSlope)>.00005)scoreParts.push({name:'شیب میانگین متحرک',score:maSlope>0?1.4:-1.4});
+              if(Math.abs(avgMove)>Math.abs(last)*.00001)scoreParts.push({name:'شتاب قیمت',score:avgMove>0?.6:-.6});
+              const totalScore=scoreParts.reduce((sum,item)=>sum+item.score,0);
+              const bullish=totalScore>0;
+              const color=bullish?'#32d99a':'#ff647b';
+              const scenarioLabel=bullish?'سناریوی محتمل: صعودی':'سناریوی محتمل: اصلاحی / نزولی';
               const horizonSteps={'15m':3,'1h':6,'4h':10,'1d':14}[horizon]||3;
               const horizonLabel={'15m':'۱۵ دقیقه آینده','1h':'۱ ساعت آینده','4h':'۴ ساعت آینده','1d':'۱ روز آینده'}[horizon]||'افق کوتاه';
               const stepMove=Math.max(atr*.18,Math.abs(last)*.00015);
-              const bull=[],bear=[],future=[];let up=last,down=last;
+              const confidence=Math.max(.2,Math.min(.8,Math.abs(totalScore)/8));
+              const signedDrift=(bullish?1:-1)*Math.max(stepMove*.22,Math.abs(avgMove)*.45)*(.65+confidence);
+              const future=[];let previous=last;
               for(let i=1;i<=horizonSteps;i++){
-                up+=Math.max(drift,stepMove*.35)+Math.sin(i*1.25)*stepMove*.12;
-                down+=Math.min(drift,-stepMove*.35)-Math.cos(i*1.1)*stepMove*.10;
-                bull.push(up);bear.push(down);
-                const open=future.length?future[future.length-1].close:last+(up-last)*.12;
-                const close=open+(up-open)*.42,wick=stepMove*.38;
+                const waveNoise=Math.sin(i*.92)*stepMove*.10;
+                const close=previous+signedDrift+waveNoise;
+                const open=previous;
+                const wick=stepMove*(.22+(i%3)*.035);
                 future.push({open,close,high:Math.max(open,close)+wick,low:Math.min(open,close)-wick});
+                previous=close;
               }
-              const allValues=[...bars.flatMap(item=>[Number(item.high),Number(item.low)]),...bull,...bear,...future.flatMap(item=>[item.high,item.low])].filter(Number.isFinite);
-              const lo=Math.min(...allValues),hi=Math.max(...allValues),pad=(hi-lo)*.12||Math.abs(last)*.002;
+              const target=future[future.length-1].close;
+              const turnIndex=Math.max(0,Math.min(future.length-1,Math.floor(future.length*.55)-1));
+              const turnPrice=future[turnIndex].close;
+              const allValues=[...bars.flatMap(item=>[Number(item.high),Number(item.low)]),...future.flatMap(item=>[item.high,item.low])].filter(Number.isFinite);
+              const lo=Math.min(...allValues),hi=Math.max(...allValues),pad=(hi-lo)*.16||Math.abs(last)*.002;
               const min=lo-pad,max=hi+pad,top=34,bottom=h-42,y=value=>bottom-(value-min)/(max-min)*(bottom-top);
-              const left=54,right=48,plotW=w-left-right,split=left+plotW*.62;
+              const left=62,right=126,plotW=w-left-right,split=left+plotW*.61;
               const histW=(split-left)/bars.length,body=Math.max(4,Math.min(15,histW*.62));
+              for(let tick=0;tick<=5;tick++){
+                const value=max-tick*(max-min)/5,yy=y(value);
+                ctx.strokeStyle='#294256';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(w-right+2,yy);ctx.stroke();
+                ctx.fillStyle='#c5d7e5';ctx.font='12px sans-serif';ctx.textAlign='left';ctx.fillText(fmt(value),w-right+9,yy+4);
+              }
               ctx.fillStyle='rgba(63,105,132,.18)';ctx.fillRect(split,top,w-right-split,bottom-top);
               ctx.strokeStyle='#2c465a';ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(split,top);ctx.lineTo(split,bottom);ctx.stroke();ctx.setLineDash([]);
               bars.forEach((bar,i)=>{
-                const xx=left+(i+.5)*histW,color=Number(bar.close)>=Number(bar.open)?'#53d6a0':'#ff7b85';
-                ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
+                const xx=left+(i+.5)*histW,colorBar=Number(bar.close)>=Number(bar.open)?'#53d6a0':'#ff7b85';
+                ctx.strokeStyle=colorBar;ctx.fillStyle=colorBar;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
                 const y1=y(Math.max(Number(bar.open),Number(bar.close))),y2=y(Math.min(Number(bar.open),Number(bar.close)));
                 ctx.fillRect(xx-body/2,y1,body,Math.max(2,y2-y1));
               });
-              const futureX=i=>split+14+(i/(horizonSteps+1))*(w-right-split-28);
-              function scenario(values,color,dash){
-                ctx.save();ctx.strokeStyle=color;ctx.lineWidth=3;ctx.setLineDash(dash);ctx.beginPath();
-                values.forEach((value,i)=>i?ctx.lineTo(futureX(i+1),y(value)):ctx.moveTo(futureX(i+1),y(last)));
-                ctx.stroke();ctx.setLineDash([]);values.forEach((value,i)=>{ctx.fillStyle=color;ctx.beginPath();ctx.arc(futureX(i+1),y(value),3.5,0,Math.PI*2);ctx.fill();});ctx.restore();
-              }
-              scenario(bull,'#32d99a',[7,6]);scenario(bear,'#ff647b',[7,6]);
+              const futureX=i=>split+12+(i/(horizonSteps+1))*(w-right-split-24);
+              ctx.save();ctx.strokeStyle=color;ctx.lineWidth=3;ctx.setLineDash([7,5]);ctx.beginPath();
+              future.forEach((bar,i)=>i?ctx.lineTo(futureX(i+1),y(bar.close)):ctx.moveTo(futureX(0),y(last)));
+              ctx.stroke();ctx.setLineDash([]);
               future.forEach((bar,i)=>{
-                const xx=futureX(i+1),color='#b9a1ff';ctx.save();ctx.strokeStyle=color;ctx.fillStyle='rgba(185,161,255,.25)';ctx.lineWidth=2;
+                const xx=futureX(i+1),yy=y(bar.close);
+                ctx.shadowColor=color;ctx.shadowBlur=10;ctx.strokeStyle=color;ctx.fillStyle=bullish?'rgba(50,217,154,.24)':'rgba(255,100,123,.24)';ctx.lineWidth=2;
                 ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
                 const y1=y(Math.max(bar.open,bar.close)),y2=y(Math.min(bar.open,bar.close));
-                ctx.fillRect(xx-4,y1,8,Math.max(3,y2-y1));ctx.restore();
+                ctx.fillRect(xx-4,y1,8,Math.max(3,y2-y1));
+                ctx.shadowBlur=0;ctx.fillStyle=color;ctx.beginPath();ctx.arc(xx,yy,3,0,Math.PI*2);ctx.fill();
               });
-              ctx.fillStyle='#d7e8f5';ctx.font='bold 15px sans-serif';ctx.fillText('۲۰ کندل واقعی اخیر',left,20);
-              ctx.fillStyle='#b9a1ff';ctx.fillText('بخش آینده · '+horizonLabel,split+12,20);
-              ctx.fillStyle='#32d99a';ctx.fillText('صعودی احتمالی',split+12,h-13);
-              ctx.fillStyle='#ff647b';ctx.fillText('اصلاحی / نزولی',split+170,h-13);
-              const pattern=(analysis.candlestick_patterns||[]).find(item=>item&&item.state==='CONFIRMED');
-              const waveText=wave.phase||wave.pattern||'ساختار موج نامشخص';
-              const baseText=bullish?'حفظ حمایت و تمایل ساختاری صعودی':bearish?'فشار اصلاحی یا واگرایی منفی':'جهت خنثی؛ دو سناریو با وزن محتاطانه نمایش داده شده‌اند';
-              if(forecastExplanation)forecastExplanation.textContent='افق '+horizonLabel+' · '+baseText+' · موج: '+waveText+
-                (pattern?' · الگوی تأییدشده: '+(pattern.name_fa||pattern.name_en):' · الگوی کلاسیک تأییدشده‌ای ثبت نشده')+
-                '؛ خطوط و کندل‌های آینده سناریوی محاسباتی پژوهشی بر پایه نوسان اخیر و جهت/واگرایی‌اند، نه پیش‌بینی قطعی یا سیگنال سفارش.';
+              ctx.restore();
+              const targetX=futureX(horizonSteps),targetY=y(target),turnX=futureX(turnIndex+1),turnY=y(turnPrice);
+              ctx.save();ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.setLineDash([3,4]);
+              ctx.beginPath();ctx.moveTo(targetX,targetY);ctx.lineTo(w-right+4,targetY);ctx.stroke();
+              ctx.fillStyle=color;ctx.beginPath();ctx.arc(targetX,targetY,5,0,Math.PI*2);ctx.fill();
+              ctx.font='bold 13px sans-serif';ctx.fillText('هدف '+fmt(target),Math.max(split+4,targetX-105),Math.max(top+14,targetY-10));
+              ctx.fillStyle='#ffd27a';ctx.beginPath();ctx.arc(turnX,turnY,4,0,Math.PI*2);ctx.fill();
+              ctx.fillStyle='#ffd27a';ctx.fillText('چرخش '+fmt(turnPrice),Math.max(split+4,turnX-110),Math.min(bottom-4,turnY+18));
+              ctx.restore();
+              ctx.fillStyle='#d7e8f5';ctx.font='bold 14px sans-serif';ctx.fillText('۲۰ کندل واقعی اخیر',left,20);
+              ctx.fillStyle='#b9a1ff';ctx.fillText('مسیر واحد · '+horizonLabel,split+10,20);
+              const evidence=scoreParts.length?scoreParts.map(item=>item.name+(item.score>0?' مثبت':' منفی')).join('، '):'شواهد جهت‌دار کافی ثبت نشده؛ مسیر بر اساس شیب قیمت انتخاب شد';
+              const reason='شواهد مؤثر: '+evidence+' · امتیاز جهت: '+totalScore.toFixed(1);
+              const boxX=split+8,boxY=top+8,boxW=Math.max(170,w-right-boxX-8),boxH=72;
+              ctx.save();ctx.fillStyle='rgba(5,17,28,.91)';ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.fillRect(boxX,boxY,boxW,boxH);ctx.strokeRect(boxX,boxY,boxW,boxH);
+              ctx.fillStyle=color;ctx.font='bold 13px sans-serif';ctx.fillText(scenarioLabel,boxX+9,boxY+18,boxW-18);
+              ctx.fillStyle='#e5eff7';ctx.font='11px sans-serif';ctx.fillText('هدف تخمینی: '+fmt(target),boxX+9,boxY+38,boxW-18);
+              ctx.fillStyle='#bdcedb';ctx.fillText('برآورد پژوهشی · نه سیگنال سفارش',boxX+9,boxY+57,boxW-18);ctx.restore();
+              if(forecastExplanation)forecastExplanation.textContent=horizonLabel+' · '+scenarioLabel+' · '+reason+' · هدف تخمینی '+fmt(target)+' · برآورد پژوهشی، نه پیش‌بینی قطعی و نه سیگنال سفارش.';
             }
             document.querySelectorAll('[data-forecast-horizon]').forEach(button=>{
               button.addEventListener('click',()=>{
