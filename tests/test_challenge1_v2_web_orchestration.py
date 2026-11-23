@@ -654,5 +654,56 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         self.assertFalse(result["orders_submitted"])
 
 
+class Challenge1EarlyWave3Tests(unittest.TestCase):
+    def _frames(self):
+        idx5 = pd.date_range("2026-01-01T00:00:00Z", periods=80, freq="5min")
+        idx15 = pd.date_range("2026-01-01T00:00:00Z", periods=80, freq="15min")
+        values5 = [100.0 + (i % 5) * 0.08 for i in range(80)]
+        values15 = [100.0 + (i % 5) * 0.12 for i in range(80)]
+        values5[-3:] = [108.8, 109.2, 110.1]
+        values15[-4:] = [108.0, 108.4, 108.7, 109.0]
+        def frame(index, values):
+            close = pd.Series(values, index=index, dtype=float)
+            return pd.DataFrame({
+                "open": close - 0.03, "high": close + 0.12,
+                "low": close - 0.12, "close": close, "volume": 1000.0,
+            }, index=index)
+        return frame(idx5, values5), frame(idx15, values15)
+
+    def _wave(self):
+        points = [
+            {"kind":"LOW","price":100.0,"timestamp":"2026-01-01T04:00:00+00:00","confirmed_at":"2026-01-01T04:05:00+00:00"},
+            {"kind":"HIGH","price":109.0,"timestamp":"2026-01-01T05:00:00+00:00","confirmed_at":"2026-01-01T05:05:00+00:00"},
+            {"kind":"LOW","price":104.0,"timestamp":"2026-01-01T05:30:00+00:00","confirmed_at":"2026-01-01T05:35:00+00:00"},
+        ]
+        return {"pattern":"BULLISH","phase":"WAVES_1_AND_2_CONFIRMED","pivots":points,"confirmed_pivot_count":3}
+
+    def test_early_w3_breakout_is_detected_before_any_1h_close(self):
+        from crypto_super_radar.challenge1_v2 import detect_early_wave3_breakout
+        five, fifteen = self._frames()
+        asof = five.index[-1] + pd.Timedelta(minutes=5)
+        with (
+            patch("crypto_super_radar.challenge1_v2.monitor_elliott_waves", side_effect=[self._wave(), self._wave()]),
+            patch("crypto_super_radar.challenge1_v2.rsi", return_value=pd.Series([55.0] * len(five), index=five.index)),
+        ):
+            result = detect_early_wave3_breakout(five, fifteen, asof=asof, entry_price=110.1)
+        self.assertEqual(result["signal"], "LONG")
+        self.assertLessEqual(result["breakout_distance_pct"], 0.012)
+        self.assertLessEqual((result["entry"] - result["stop_loss"]) / result["entry"], 0.035)
+        self.assertGreaterEqual(result["risk_reward"], 1.5)
+
+    def test_extended_w3_breakout_is_blocked_by_anti_top_chase_guard(self):
+        from crypto_super_radar.challenge1_v2 import detect_early_wave3_breakout
+        five, fifteen = self._frames()
+        asof = five.index[-1] + pd.Timedelta(minutes=5)
+        with (
+            patch("crypto_super_radar.challenge1_v2.monitor_elliott_waves", side_effect=[self._wave(), self._wave()]),
+            patch("crypto_super_radar.challenge1_v2.rsi", return_value=pd.Series([55.0] * len(five), index=five.index)),
+        ):
+            result = detect_early_wave3_breakout(five, fifteen, asof=asof, entry_price=112.0)
+        self.assertEqual(result["signal"], "NO_TRADE")
+        self.assertIn("Anti-top-chase", result["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
