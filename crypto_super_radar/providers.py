@@ -853,6 +853,34 @@ class PerpetualMarketProvider:
         try:
             return self._binance_ticker(symbol)
         except DataProviderError as exc:
+            if self._binance_unavailable(exc):
+                def load():
+                    instrument = f"{symbol[:-4]}-USDT-SWAP"
+                    okx = self.http.get(f"{self.OKX}/market/ticker", {"instId": instrument})
+                    bybit = self.http.get(f"{self.BYBIT}/v5/market/tickers", {"category": "linear", "symbol": symbol})
+                    if not isinstance(okx, dict) or okx.get("code") != "0":
+                        raise DataProviderError("OKX ticker fallback returned an API error") from exc
+                    rows = okx.get("data")
+                    bybit_rows = ((bybit or {}).get("result") or {}).get("list") if isinstance(bybit, dict) and bybit.get("retCode") in (0, "0") else None
+                    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(bybit_rows, list) or len(bybit_rows) != 1:
+                        raise DataProviderError("OKX/Bybit ticker fallback has no unique instrument") from exc
+                    o, y = rows[0], bybit_rows[0]
+                    op, yp = _positive_float(o.get("last")), _positive_float(y.get("lastPrice"))
+                    of, yf = _finite_float(o.get("fundingRate")), _finite_float(y.get("fundingRate"))
+                    if op is None or yp is None or of is None or yf is None:
+                        # OKX ticker may omit fundingRate; the dedicated endpoint is authoritative.
+                        funding = self.http.get(f"{self.OKX}/public/funding-rate", {"instId": instrument})
+                        fr = funding.get("data") if isinstance(funding, dict) and funding.get("code") == "0" else None
+                        of = _finite_float(fr[0].get("fundingRate")) if isinstance(fr, list) and len(fr) == 1 else None
+                    if op is None or yp is None or of is None or yf is None:
+                        raise DataProviderError("OKX/Bybit ticker fallback has invalid price or funding") from exc
+                    discrepancy = relative_difference_pct(op, yp)
+                    if discrepancy > self.http.config.thresholds.provider_discrepancy_pct or abs(of-yf) > 0.0002:
+                        raise DataProviderError("OKX/Bybit ticker discrepancy exceeds validation limits") from exc
+                    return {"price": (op+yp)/2, "volume_24h": _safe_float(o.get("volCcy24h")) or _safe_float(y.get("turnover24h")) or 0.0,
+                            "funding_rate": (of+yf)/2, "open_interest": _positive_float(y.get("openInterest")) or 1.0,
+                            "provider": "OKX USDT Swap + Bybit Linear", "raw": {"okx": o, "bybit": y}}
+                return self._cached_fallback(("ticker", symbol), load)
             if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
                 raise
             contract = f"{symbol[:-4]}_USDT"
