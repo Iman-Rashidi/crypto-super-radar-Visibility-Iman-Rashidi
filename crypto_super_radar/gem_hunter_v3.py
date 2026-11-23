@@ -946,6 +946,14 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
         row.update(row["pump_dump_analysis"])
         row["narrative_analysis"] = analyze_narrative_psychology(row)
         row.update(row["narrative_analysis"])
+        # Explicit top-level mobile-card contract; numeric estimates remain evidence-derived.
+        for field in (
+            "category_fa", "pump_phase_fa", "pump_start_price_usd",
+            "pump_window_summary_fa", "risk_invalidation_price_usd",
+            "narrative_psychology_fa",
+        ):
+            source = row["narrative_analysis"] if field == "narrative_psychology_fa" else row["pump_dump_analysis"]
+            row[field] = source.get(field)
         row.update(scores)
         tier = classify_gem_tier(row, scores)
         row.update(tier)

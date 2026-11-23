@@ -8156,6 +8156,30 @@ async function loadBlofinInstruments(){
             activeGemFilter = button.dataset.gemFilter || 'all';
             applyGemHunterFilter();
           });
+          const isCompleteEvaluatedGemCandidate = item => {
+            if (!item || typeof item !== 'object') return false;
+            const price = Number(item.price_usd);
+            if (!Number.isFinite(price) || price <= 0) return false;
+            const qualification = item.qualification && typeof item.qualification === 'object' ? item.qualification : {};
+            const metrics = qualification.market_metrics && typeof qualification.market_metrics === 'object' ? qualification.market_metrics : {};
+            const reconciliation = item.market_reconciliation || {};
+            const hasRealMarketData = Number(item.liquidity_usd ?? metrics.liquidity_usd ?? reconciliation.verified_liquidity_usd) > 0 ||
+              Number(item.volume_24h_usd ?? metrics.volume_24h_usd ?? reconciliation.verified_volume_24h_usd) > 0;
+            if (!hasRealMarketData) return false;
+            const evaluatedTiers = new Set([
+              'TIER_1_VERIFIED_GEM', 'TIER_2_EARLY_ALPHA', 'EARLY_ALPHA_REVIEW',
+              'REVIEW_REQUIRED', 'RESEARCH_WATCH', 'BLOCKED_SCAM', 'BLOCKED_LOW_LIQUIDITY'
+            ]);
+            const tier = String(item.gem_hunter_v3_status || item.tier || '').toUpperCase();
+            const evaluationStatus = String(qualification.evaluation_status || '').toUpperCase();
+            return evaluatedTiers.has(tier) || evaluationStatus === 'COMPLETE' || evaluationStatus === 'PASS';
+          };
+          const sortCompleteGemCandidates = rows => rows
+            .filter(isCompleteEvaluatedGemCandidate)
+            .sort((a, b) => {
+              const score = item => Number(item.opportunity_score ?? item.short_term_momentum_score ?? item.short_term_momentum_smart_money_score ?? -1);
+              return score(b) - score(a);
+            });
           const renderCandidate = item => {
             const q = item.qualification || {}; const m = q.market_metrics || {};
             const filters = q.filters || {}; const gates = q.critical_gates || {};
@@ -8243,6 +8267,20 @@ async function loadBlofinInstruments(){
               wavePanel.appendChild(el('p', waveLabel, 'candidate-meta'));
               (technical.reason_fa || []).forEach(reason => wavePanel.appendChild(el('p', reason, 'candidate-meta')));
               wavePanel.appendChild(el('p', 'نمایش فعلی خلاصهٔ شاخص‌های کندل بسته‌شده است، نه نمودار OHLC یا سیگنال معاملاتی. وضعیت: NO_TRADE.', 'candidate-meta'));
+              const liveChartLinks = document.createElement('div'); liveChartLinks.className = 'gem-links';
+              const chartChain = String(item.chain || '').toLowerCase();
+              const chartAddress = String(item.pool_address || item.token_address || '').trim();
+              const geckoNetwork = ({solana:'solana',base:'base',ethereum:'eth'})[chartChain];
+              if (chartAddress && geckoNetwork) {
+                addLink(liveChartLinks, 'کندل زنده · DEX Screener ↗',
+                  'https://dexscreener.com/' + chartChain + '/' + encodeURIComponent(chartAddress));
+                const geckoKind = item.pool_address ? 'pools' : 'tokens';
+                addLink(liveChartLinks, 'کندل زنده · GeckoTerminal ↗',
+                  'https://www.geckoterminal.com/' + geckoNetwork + '/' + geckoKind + '/' + encodeURIComponent(chartAddress));
+              } else {
+                liveChartLinks.appendChild(el('span', 'لینک نمودار زنده در دسترس نیست؛ شبکه یا آدرس قرارداد معتبر ثبت نشده است.', 'candidate-meta'));
+              }
+              wavePanel.appendChild(liveChartLinks);
             };
             waveButton.addEventListener('click', () => {
               wavePanel.hidden = !wavePanel.hidden;
@@ -8456,9 +8494,10 @@ async function loadBlofinInstruments(){
           const loadLatestStoredGemHunterReport = async () => {
             try {
               const data = await fetchGemHunterReport();
-              const rows = [...(data.candidates || []), ...(data.gem_hunter_v3_candidates || []), ...(data.diagnostic_candidates || [])]
+              const discoveredRows = [...(data.candidates || []), ...(data.gem_hunter_v3_candidates || []), ...(data.diagnostic_candidates || [])]
                 .filter((item, index, all) => item && all.findIndex(other =>
                   (other.token_address || other.candidate_id) === (item.token_address || item.candidate_id)) === index);
+              const rows = sortCompleteGemCandidates(discoveredRows);
               if (!rows.length) {
                 status.textContent = data.status === 'UNAVAILABLE'
                   ? 'گزارش ذخیره‌شدهٔ Turso فعلاً در دسترس نیست.'
@@ -8473,17 +8512,18 @@ async function loadBlofinInstruments(){
               rows.forEach(item => list.appendChild(renderCandidate(item)));
               results.appendChild(list);
               applyGemHunterFilter();
-              status.textContent = 'آخرین اسکن ذخیره‌شده به‌صورت خودکار بارگذاری شد · ' + rows.length + ' نامزد';
+              status.textContent = 'آخرین اسکن ذخیره‌شده · ' + rows.length + ' نامزد ارزیابی‌شده از ' + discoveredRows.length + ' مورد کشف‌شده';
               window.CryptoRadar.update('radar-gem-hunter', rows, {
-                state: 'complete', caption: 'آخرین اسکن Turso · ' + rows.length + ' نامزد · NO_TRADE'
+                state: 'complete', caption: 'آخرین اسکن Turso · ' + rows.length + ' نامزد ارزیابی‌شده · NO_TRADE'
               });
             } catch (error) {
               status.textContent = 'خواندن آخرین اسکن ذخیره‌شده ممکن نشد: ' + String(error.message || error);
             }
           };
           const renderPendingReport = data => {
-            const pendingCandidates = (data.diagnostic_candidates || [])
+            const discoveredPendingCandidates = (data.diagnostic_candidates || [])
               .filter(item => item && item.trade_authorization !== 'BUY');
+            const pendingCandidates = sortCompleteGemCandidates(discoveredPendingCandidates);
             const discovered = Number(data.discovered_candidate_count || pendingCandidates.length || 0);
              window.CryptoRadar.update('radar-gem-hunter', [...(data.candidates || []), ...pendingCandidates], {state:data.refreshing ? 'scanning' : 'complete', caption:'کشف‌شده: ' + discovered + ' · BUY تأییدشده: ' + Number(data.qualified_buy_count || 0) + ' · نامزدهای فاقد تأیید کامل به‌عنوان BUY نمایش داده نمی‌شوند.'});
             const isStale = data.diagnostic_freshness === 'STALE_LAST_COMPLETED_SCAN';
@@ -8533,7 +8573,8 @@ async function loadBlofinInstruments(){
                 renderPendingReport(data);
                 return;
               }
-              const buys = data.candidates || []; const candidates = (data.diagnostic_candidates || []).filter(item => item.trade_authorization !== 'BUY');
+              const buys = data.candidates || []; const discoveredCandidates = (data.diagnostic_candidates || []).filter(item => item.trade_authorization !== 'BUY');
+              const candidates = sortCompleteGemCandidates(discoveredCandidates);
               const discovered = Number(data.discovered_candidate_count || candidates.length || 0);
               status.textContent = 'کشف‌شده: ' + discovered + ' · پرونده‌های ارزیابی: ' +
                 Number(data.evaluation_record_count || 0) + ' · ساختار کامل پرونده: ' +
@@ -8569,8 +8610,8 @@ async function loadBlofinInstruments(){
                 results.appendChild(el('h3', 'فرصت‌های BUY تأییدشده'));
                 buys.forEach(item => results.appendChild(renderCandidate(item)));
               } else results.appendChild(el('p', 'در این اسکن هیچ فرصت خریدی تمام استانداردها را نگذرانده است.', 'muted'));
-              results.appendChild(el('h3', 'گزارش نامزدهای کشف‌شده · فقط برای بررسی و زیر نظر گرفتن'));
-              results.appendChild(el('p', 'نامزدهای زیر BUY نیستند. وضعیت UNKNOWN یا پروندهٔ ناقص به معنی رد قطعی یا تأیید خرید نیست.', 'muted'));
+              results.appendChild(el('h3', 'نامزدهای ارزیابی‌شده · مرتب‌شده بر اساس امتیاز'));
+              results.appendChild(el('p', 'فقط پرونده‌های دارای ارزیابی و دادهٔ واقعی بازار نمایش داده می‌شوند؛ توکن‌های خام کشف‌شده از فهرست اصلی حذف شده‌اند.', 'muted'));
               const list = document.createElement('div'); list.className = 'gem-report-list';
               const tierGroups = [
                 ['TIER_1_VERIFIED_GEM', '⭐ Tier 1 · ستاره‌های طلایی'],
@@ -8591,7 +8632,7 @@ async function loadBlofinInstruments(){
               if (!candidates.length) list.appendChild(el('p', 'در این اسکن نامزدی برای گزارش دریافت نشد.', 'muted'));
               results.appendChild(list);
               results.appendChild(el('p', 'زمان گزارش UTC: ' + (data.generated_at_utc || data.updated_at_utc || 'در دسترس نیست') +
-                ' · این گزارش برای تحقیق است و سفارش یا تراکنش ارسال نمی‌کند.', 'candidate-meta'));
+                ' · ' + discoveredCandidates.length + ' مورد کشف‌شده، ' + candidates.length + ' مورد ارزیابی‌شده · فقط پژوهشی و NO_TRADE', 'candidate-meta'));
             } catch (error) {
               status.textContent = 'خطا در دریافت داده: ' + error.message;
                window.CryptoRadar.error('radar-gem-hunter', 'دریافت گزارش Gem Hunter ناموفق بود؛ هیچ سیگنالی از دادهٔ ناقص تولید نشده است.');

@@ -46,6 +46,9 @@ class GemHunterV3Tests(unittest.TestCase):
             "risk_invalidation_price_usd", "whale_wallets_1h",
             "narrative_psychology_fa", "📊 مشاهده کندل و ساختار موج الیوت",
             "technical_evidence", "EMA20", "RSI14",
+            "isCompleteEvaluatedGemCandidate", "sortCompleteGemCandidates",
+            "نامزدهای ارزیابی‌شده", "کندل زنده · DEX Screener",
+            "کندل زنده · GeckoTerminal",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
@@ -104,6 +107,18 @@ class GemHunterV3Tests(unittest.TestCase):
             result = process_gem_hunter_v3_candidates([candidate], notify=False)[0]
         self.assertIn("pump_dump_analysis", result)
         self.assertIn("narrative_analysis", result)
+        for field in (
+            "category_fa", "pump_phase_fa", "pump_start_price_usd",
+            "pump_window_summary_fa", "risk_invalidation_price_usd",
+            "narrative_psychology_fa",
+        ):
+            self.assertIn(field, result)
+            nested = result["narrative_analysis"] if field == "narrative_psychology_fa" else result["pump_dump_analysis"]
+            self.assertEqual(result[field], nested.get(field))
+        self.assertTrue(result["category_fa"])
+        self.assertTrue(result["pump_phase_fa"])
+        self.assertTrue(result["pump_window_summary_fa"])
+        self.assertTrue(result["narrative_psychology_fa"])
         self.assertEqual(result["trade_authorization"], candidate.get("trade_authorization"))
         self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
 
