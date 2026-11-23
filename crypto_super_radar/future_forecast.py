@@ -164,6 +164,7 @@ def build_future_forecast(
     invalidation = (nearest_support if nearest_support is not None else local_low) - 0.35 * atr if scenario == "BULLISH" else (nearest_resistance if nearest_resistance is not None else local_high) + 0.35 * atr if scenario == "BEARISH" else None
     return {
         "status": "PASS" if scenario != "NEUTRAL" else "MIXED_EVIDENCE",
+        "trade_permission": "NO_TRADE", "orders_submitted": False,
         "symbol": symbol, "interval": interval, "scenario": scenario,
         "confidence_pct": confidence, "score": round(score, 3), "atr": round(atr, 12),
         "confidence_band": band, "bullish_start": bullish_start,
