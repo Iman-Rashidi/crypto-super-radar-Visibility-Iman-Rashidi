@@ -17,6 +17,9 @@ def candles(index, *, close=100.0, high=101.0, low=99.0, opened=100.0, volume=10
 
 
 class Challenge1V2OneHourEntryRuleTests(unittest.TestCase):
+    def test_stop_distance_cap_is_3_5_percent(self):
+        self.assertEqual(challenge1_v2.MAX_STOP_DISTANCE_PCT, 0.035)
+
     def _regime_frames(self, side):
         h1_index = pd.date_range("2026-01-01", periods=210, freq="1h", tz="UTC")
         h4_index = pd.date_range("2025-11-20", periods=210, freq="4h", tz="UTC")
@@ -70,7 +73,7 @@ class Challenge1V2OneHourEntryRuleTests(unittest.TestCase):
         regime = {
             "status": "TREND", "direction": "LONG", "adx_1h": 25.0,
             "close_1h": 105.0, "ema21_1h": 100.0, "ema55_1h": 110.0,
-            "ema200_1h": 90.0, "aligned_4h": False, "opposed_4h": False,
+            "ema200_1h": 90.0, "aligned_4h": False, "opposed_4h": True,
             "neutral_4h": True, "structure_aligned_1h": False,
             "candle_open_utc": h1_index[-1].isoformat(),
             "candle_open_utc_4h": h4_index[-1].isoformat(),
