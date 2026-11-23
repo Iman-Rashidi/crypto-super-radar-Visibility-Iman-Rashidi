@@ -203,10 +203,12 @@ def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=No
             with db:
                 reservation = db.execute(
                     f"INSERT OR IGNORE INTO {PROFIT_ALERT_TABLE} "
-                    "(token_id, threshold_pct, reserved_at_utc) VALUES (?, ?, ?)",
+                    "(token_id, threshold_pct, reserved_at_utc) VALUES (?, ?, ?) "
+                    "RETURNING token_id",
                     (str(item["token_id"]), milestone, now),
                 )
-            if getattr(reservation, "rowcount", 0) == 0:
+                reserved_row = reservation.fetchone()
+            if reserved_row is None:
                 duplicates += 1
                 continue
             profit_eur = 100.0 * (latest / initial - 1.0)
