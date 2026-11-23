@@ -45,7 +45,7 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn("function drawFutureForecast(data,horizon)", self.source)
         self.assertIn("const totalScore=scoreParts.reduce", self.source)
         self.assertIn("const color=bullish?'#32d99a':bearish?'#ff647b':'#ffc66d'", self.source)
-        self.assertIn("future.confidence_band", self.source)
+        self.assertIn("forecast.confidence_band", self.source)
         self.assertIn("خط ابطال پیش‌بینی", self.source)
         self.assertIn("نقطه شروع صعود", self.source)
         self.assertIn("شروع رکود / چرخش", self.source)
