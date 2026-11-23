@@ -26,7 +26,7 @@ def _number(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _fetch_json(url: str, timeout: float = 4.5) -> Any:
+def _fetch_json(url: str, timeout: float = 3.8) -> Any:
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "CryptoSuperRadar/1.0"})
     with urlopen(request, timeout=max(0.5, min(float(timeout), 5.0))) as response:
         return json.loads(response.read(1_000_000).decode("utf-8"))
@@ -123,7 +123,7 @@ def build_fast_asset_scan_report(
     }
     processor = v3_processor or process_gem_hunter_v3_candidates
     try:
-        processed = processor([candidate], notify=False)
+        processed = processor([candidate], notify=False, persist=False)
         scored = processed[0] if processed and isinstance(processed[0], dict) else candidate
     except Exception as exc:
         scored = candidate
