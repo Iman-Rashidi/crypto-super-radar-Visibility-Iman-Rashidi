@@ -2600,3 +2600,27 @@ class BloFinRiskOverrideCloseTests(unittest.TestCase):
             fake_store.record_manual_action.call_args_list[-1].args[1],
             "RISK_OVERRIDE_POSITION_CLOSE_ACCEPTED",
         )
+
+
+class LiveRadarMultiMarketDashboardTests(unittest.TestCase):
+    def test_custom_symbol_normalization_adds_usdt_and_preserves_pair(self):
+        self.assertEqual(web_app._normalize_live_radar_symbol(" pepe "), "PEPEUSDT")
+        self.assertEqual(web_app._normalize_live_radar_symbol("SHIBUSDT"), "SHIBUSDT")
+        self.assertEqual(web_app._normalize_live_radar_symbol("sui/usdt"), "SUIUSDT")
+
+    def test_custom_symbol_normalization_rejects_invalid_input(self):
+        for value in ("", "BTC?USDT", "BTCUSDT;DROP", "THISISWAYTOOLONGSYMBOLUSDT"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    web_app._normalize_live_radar_symbol(value)
+
+    def test_dashboard_renders_custom_search_and_five_market_watchlist(self):
+        with patch.object(web_app, "_dashboard_html", wraps=web_app._dashboard_html) as _:
+            page = web_app._dashboard_html()
+        self.assertIn('id="live-radar-custom-symbol"', page)
+        self.assertIn('id="live-radar-custom-search"', page)
+        self.assertIn('id="live-wave-watch-grid"', page)
+        for symbol in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "LINKUSDT"):
+            self.assertIn(symbol, page)
+        self.assertIn("refreshWaveWatchlist", page)
+        self.assertIn("نمایش روی نمودار بزرگ", page)
