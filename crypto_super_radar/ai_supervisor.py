@@ -194,14 +194,52 @@ def run_challenge1_v2_supervisor_reviews(
 
     primary_status = str(primary.get("status") or "UNKNOWN").upper()
     second_status = str(second.get("status") or "UNKNOWN").upper()
+
+    def transient_provider_failure(review: dict[str, Any]) -> bool:
+        # Failover is deliberately limited to transport/server faults. A bad,
+        # incomplete, unverified, rate-limited, or unconfigured review is not
+        # converted into approval.
+        http_status = review.get("http_status")
+        if isinstance(http_status, int) and 500 <= http_status <= 599:
+            return True
+        error_type = str(review.get("error_type") or "").casefold()
+        return any(token in error_type for token in (
+            "timeout", "connectionerror", "connecttimeout", "readtimeout",
+            "requestexception", "networkerror",
+        ))
+
+    demo_failover_enabled = (
+        str(os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED") or "").strip().lower() == "true"
+        and str(os.getenv("BLOFIN_DEMO_TRADING_ENABLED") or "").strip().lower() == "true"
+    )
+    explicit_veto = primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"}
+    one_verified_approval = (
+        expected_side in {"LONG", "SHORT"}
+        and expected_wave_phase in {
+            "WAVES_1_AND_2_CONFIRMED", "WAVE_3_CONFIRMED",
+            "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
+        }
+        and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+        and (
+            (primary_approved and transient_provider_failure(second))
+            or (second_approved and transient_provider_failure(primary))
+        )
+    )
+    demo_single_reviewer_failover = (
+        demo_failover_enabled and not explicit_veto and one_verified_approval
+    )
     if two_approvals:
         consensus_status = "APPROVED_BY_BOTH"
         decision = "AUTHORIZE_DEMO_EXECUTION"
         status_fa = "هر دو ناظر مستقل، الگو و موج الیوت یکسان را تأیید کردند؛ کنترل‌های Executor همچنان اجباری است."
-    elif primary_status in {"VETO", "REJECT"} or second_status in {"VETO", "REJECT"}:
+    elif explicit_veto:
         consensus_status = "VETO"
         decision = "BLOCK_DEMO_ENTRY"
         status_fa = "حداقل یک ناظر مستقل ورود را رد کرد؛ هیچ سفارش Demo ارسال نمی‌شود."
+    elif demo_single_reviewer_failover:
+        consensus_status = "APPROVED_WITH_TRANSIENT_PROVIDER_FAILURE"
+        decision = "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_VERIFIED_REVIEWER"
+        status_fa = "یک ناظر معتبر ورود را تأیید کرد و ناظر دوم خطای موقت شبکه/سرور داشت؛ فقط در BloFin Demo و با عبور از تمام کنترل‌های Executor مجاز است."
     elif primary_verified and second_verified and (
         primary_status != second_status
         or primary.get("trader_proposal") != second.get("trader_proposal")
@@ -240,6 +278,10 @@ def run_challenge1_v2_supervisor_reviews(
         "elliott_wave_phase": expected_wave_phase,
         "elliott_wave_direction": expected_wave_direction,
         "two_reviewer_approval": two_approvals,
+        "single_reviewer_demo_failover": demo_single_reviewer_failover,
+        "verified_approval_count": int(primary_approved) + int(second_approved),
+        "transient_provider_failure_count": int(transient_provider_failure(primary)) + int(transient_provider_failure(second)),
+        "veto_provider_count": int(primary_status in {"VETO", "REJECT"}) + int(second_status in {"VETO", "REJECT"}),
         "decision": decision,
         "entry_gate_enforced": True,
         "reviewed_signal_id": reviewed_signal_id,
@@ -249,7 +291,9 @@ def run_challenge1_v2_supervisor_reviews(
     }
     ai_status = "APPROVED_BY_BOTH" if two_approvals else consensus_status
     return {
-        "approved": two_approvals, "status": ai_status, "ai_status": ai_status,
+        "approved": two_approvals or demo_single_reviewer_failover,
+        "status": ("APPROVED_WITH_TRANSIENT_PROVIDER_FAILURE" if demo_single_reviewer_failover else ai_status),
+        "ai_status": ("APPROVED_WITH_TRANSIENT_PROVIDER_FAILURE" if demo_single_reviewer_failover else ai_status),
         "ai_review": primary, "second_ai_review": second,
         "ai_reviews": reviews, "ai_consensus": consensus, "reason_fa": status_fa,
     }
