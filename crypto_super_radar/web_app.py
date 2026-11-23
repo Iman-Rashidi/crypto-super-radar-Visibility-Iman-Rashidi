@@ -10011,49 +10011,60 @@ async function loadBlofinInstruments(){
                 if(latestChartData)drawFutureForecast(latestChartData,forecastHorizon);
               });
             });
-            function drawMiniChart(canvasElement,data){
-              const bars=(data&&Array.isArray(data.candles)?data.candles:[]).slice(-48);
-              const context=canvasElement.getContext('2d');
-              const width=canvasElement.width,height=canvasElement.height;
-              context.clearRect(0,0,width,height);context.fillStyle='#07131f';context.fillRect(0,0,width,height);
-              if(!bars.length){context.fillStyle='#ffc66d';context.font='20px sans-serif';context.fillText('داده موجود نیست',18,34);return;}
-              const low=Math.min(...bars.map(item=>Number(item.low))),high=Math.max(...bars.map(item=>Number(item.high)));
-              const spread=Math.max(high-low,Math.abs(high)*0.0001,1e-9),top=12,bottom=height-16;
-              const y=value=>bottom-((Number(value)-low)/spread)*(bottom-top);
-              const slot=width/bars.length,bodyWidth=Math.max(3,Math.min(9,slot*.62));
-              bars.forEach((bar,index)=>{
-                const x=(index+.5)*slot,up=Number(bar.close)>=Number(bar.open),color=up?'#53d6a0':'#ff7b85';
-                context.strokeStyle=color;context.fillStyle=color;context.lineWidth=2;
-                context.beginPath();context.moveTo(x,y(bar.high));context.lineTo(x,y(bar.low));context.stroke();
-                const candleTop=y(Math.max(Number(bar.open),Number(bar.close)));
-                const candleBottom=y(Math.min(Number(bar.open),Number(bar.close)));
-                context.fillRect(x-bodyWidth/2,candleTop,bodyWidth,Math.max(2,candleBottom-candleTop));
-              });
-              const indexByTime=new Map(bars.map((bar,index)=>[Date.parse(bar.time),index]));
-              const pivots=(data.pivots||[]).map(point=>({index:indexByTime.get(Date.parse(point.timestamp)),price:Number(point.price)}))
-                .filter(point=>Number.isInteger(point.index)&&Number.isFinite(point.price));
-              if(pivots.length>1){
-                context.save();context.strokeStyle='#d7a9ff';context.lineWidth=3;context.beginPath();
-                pivots.forEach((point,index)=>{const x=(point.index+.5)*slot,py=y(point.price);if(index===0)context.moveTo(x,py);else context.lineTo(x,py);});
-                context.stroke();context.restore();
-                pivots.forEach(point=>{context.fillStyle='#e8cfff';context.beginPath();context.arc((point.index+.5)*slot,y(point.price),4,0,Math.PI*2);context.fill();});
-              }
-              context.fillStyle='#b9cad8';context.font='bold 16px sans-serif';context.fillText('کندل و مسیر موج',10,18);
+            function drawMiniChart(canvasElement,data,symbolValue){
+              try{
+                const bars=(data&&Array.isArray(data.candles)?data.candles:[]).slice(-48);
+                if(!canvasElement||typeof canvasElement.getContext!=='function')throw new Error('عنصر Canvas مینی‌چارت '+symbolValue+' در دسترس نیست.');
+                const context=canvasElement.getContext('2d');
+                if(!context)throw new Error('Canvas 2D context مینی‌چارت '+symbolValue+' ساخته نشد.');
+                const width=canvasElement.width,height=canvasElement.height;
+                context.clearRect(0,0,width,height);context.fillStyle='#07131f';context.fillRect(0,0,width,height);
+                if(!bars.length){context.fillStyle='#ffc66d';context.font='20px sans-serif';context.fillText('داده موجود نیست',18,34);return;}
+                const low=Math.min(...bars.map(item=>Number(item.low))),high=Math.max(...bars.map(item=>Number(item.high)));
+                const spread=Math.max(high-low,Math.abs(high)*0.0001,1e-9),top=12,bottom=height-16;
+                const y=value=>bottom-((Number(value)-low)/spread)*(bottom-top);
+                const slot=width/bars.length,bodyWidth=Math.max(3,Math.min(9,slot*.62));
+                bars.forEach((bar,index)=>{
+                  const x=(index+.5)*slot,up=Number(bar.close)>=Number(bar.open),color=up?'#53d6a0':'#ff7b85';
+                  context.strokeStyle=color;context.fillStyle=color;context.lineWidth=2;
+                  context.beginPath();context.moveTo(x,y(bar.high));context.lineTo(x,y(bar.low));context.stroke();
+                  const candleTop=y(Math.max(Number(bar.open),Number(bar.close)));
+                  const candleBottom=y(Math.min(Number(bar.open),Number(bar.close)));
+                  context.fillRect(x-bodyWidth/2,candleTop,bodyWidth,Math.max(2,candleBottom-candleTop));
+                });
+                const indexByTime=new Map(bars.map((bar,index)=>[Number(bar.time),index]));
+                const pivots=(data.pivots||[]).map(point=>{
+                  const stamp=typeof point.timestamp==='number'?point.timestamp:Date.parse(point.timestamp);
+                  return {index:indexByTime.get(stamp),price:Number(point.price)};
+                }).filter(point=>Number.isInteger(point.index)&&Number.isFinite(point.price));
+                if(pivots.length>1){
+                  context.save();context.strokeStyle='#d7a9ff';context.lineWidth=3;context.beginPath();
+                  pivots.forEach((point,index)=>{const x=(point.index+.5)*slot,py=y(point.price);if(index===0)context.moveTo(x,py);else context.lineTo(x,py);});
+                  context.stroke();context.restore();
+                  pivots.forEach(point=>{context.fillStyle='#e8cfff';context.beginPath();context.arc((point.index+.5)*slot,y(point.price),4,0,Math.PI*2);context.fill();});
+                }
+                context.fillStyle='#b9cad8';context.font='bold 16px sans-serif';context.fillText('کندل و مسیر موج',10,18);
+              }catch(error){showChartError(error,'mini chart '+symbolValue);throw error;}
             }
             function renderWaveWatchCard(symbolValue,data){
               const card=document.createElement('article');card.className='live-wave-card';
               const title=document.createElement('h5');title.textContent=symbolValue;
               const mini=document.createElement('canvas');mini.className='live-wave-mini';mini.width=640;mini.height=180;
               mini.setAttribute('role','img');mini.setAttribute('aria-label',symbolValue+' نمودار کوچک کندل و موج');
-              drawMiniChart(mini,data);
               const candles=Array.isArray(data.candles)?data.candles:[];
-              const waveMatch=phase.match(/WAVE[_ ]?([1-5])/);
+              const analysis=data.market_analysis||{},waveStructure=analysis.wave_structure||{},waves=data.elliott_waves||{};
+              const phase=String(waveStructure.phase||waves.phase||waves.pattern||'');
+              const lastCandle=candles[candles.length-1]||{};
+              const price=document.createElement('div');price.className='live-wave-meta';
+              price.textContent='آخرین قیمت: '+number(lastCandle.close);
+              try{drawMiniChart(mini,data,symbolValue);}catch(miniError){mini.setAttribute('aria-label',symbolValue+' مینی‌چارت با خطا: '+String(miniError.message||miniError));}
+              const waveMatch=phase.match(/WAVE[_ ]?([1-5])/i);
               const wave=document.createElement('div');wave.className='live-wave-meta';
-              wave.textContent='موج فعلی: '+(waveMatch?'W'+waveMatch[1]:(waves.phase||waves.pattern||'نامشخص'));
+              wave.textContent='موج فعلی: '+(waveMatch?'W'+waveMatch[1]:(waves.phase||waves.pattern||waveStructure.pattern||'نامشخص'));
               const fib=data.wave4_fibonacci||{},levels=fib.levels||{};
               const fibonacci=document.createElement('div');fibonacci.className='live-wave-meta';
               fibonacci.textContent=fib.status==='CONFIRMED'?'فیبوناچی W4 · 38.2% '+number(levels['0.382'])+' · 50% '+number(levels['0.5'])+' · 61.8% '+number(levels['0.618']):'فیبوناچی W4: تأیید نشده';
-              const divergence=((data.market_analysis||{}).direction||{}).divergence||{};
+              const divergence=(analysis.direction||{}).divergence||{};
               const div=document.createElement('div');div.className='live-wave-meta';
               div.textContent='واگرایی RSI: '+({BULLISH:'مثبت',BEARISH:'منفی',NONE:'شناسایی نشد'}[divergence.type]||'نامشخص');
               const action=document.createElement('button');action.type='button';action.textContent='نمایش روی نمودار بزرگ ↗';
@@ -10065,7 +10076,8 @@ async function loadBlofinInstruments(){
               const results=await Promise.all(symbols.map(async item=>{
                 try{
                   const response=await fetch('/api/live-market-radar?symbol='+encodeURIComponent(item)+'&interval=5m',{cache:'no-store'});
-                  const data=await response.json();if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+                  const raw=await response.json();if(!response.ok)throw new Error(raw.error||('HTTP '+response.status));
+                  const data=normalizeChartPayload(raw);
                   return {symbol:item,data};
                 }catch(error){return {symbol:item,error:String(error.message||error)};}
               }));
