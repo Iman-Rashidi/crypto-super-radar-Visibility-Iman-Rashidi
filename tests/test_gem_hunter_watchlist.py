@@ -125,7 +125,7 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertEqual(result["sent"], 0)
         client.post.assert_not_called()
 
-    def test_failed_profit_alert_delivery_releases_reservation(self):
+    def test_failed_profit_alert_delivery_is_not_retried_or_marked_sent(self):
         record_watchlist_candidates(self.db, [self.candidate()])
         with self.db:
             self.db.execute(
@@ -146,16 +146,16 @@ class WatchlistLedgerTests(unittest.TestCase):
         )
         self.assertEqual(result["errors"], 1)
 
-        success = Mock()
-        class SuccessResponse:
-            def raise_for_status(self): return None
-            def json(self): return {"ok": True, "result": {"message_id": 9}}
-        success.post.return_value = SuccessResponse()
+        self.assertIsNone(self.db.execute(
+            "SELECT sent_at_utc FROM gem_hunter_watchlist_profit_alerts WHERE token_id='solana:MintABC' AND threshold_pct=25"
+        ).fetchone()[0])
+        retry_client = Mock()
         retry = send_watchlist_profit_alerts(
-            self.db, session=success, bot_token="bot-token", chat_id="12345"
+            self.db, session=retry_client, bot_token="bot-token", chat_id="12345"
         )
-        self.assertEqual(retry["sent"], 1)
-        self.assertEqual(success.post.call_count, 1)
+        self.assertEqual(retry["sent"], 0)
+        self.assertEqual(retry["duplicates"], 1)
+        retry_client.post.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
