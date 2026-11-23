@@ -358,6 +358,170 @@ def _elliott_wave_1h_evidence(
     }
 
 
+EARLY_W3_MAX_BREAKOUT_PCT = 0.012
+EARLY_W3_ATR_MULTIPLE = 1.5
+EARLY_W3_STOP_BUFFER_ATR = 0.10
+
+
+def detect_early_wave3_breakout(
+    frame_5m: pd.DataFrame, frame_15m: pd.DataFrame, *,
+    asof: pd.Timestamp, entry_price: float,
+) -> dict[str, Any]:
+    """Detect a just-confirmed W1 breakout after W2 on closed 5m/15m candles.
+
+    The pivot monitor reports pivots only after reversal confirmation. The
+    breakout must occur on the latest fully closed candle; no intrabar lookahead.
+    """
+    if asof.tzinfo is None:
+        raise ValueError("asof must be timezone-aware")
+    asof = asof.tz_convert("UTC")
+    five = _closed(_validate(frame_5m, "5M", 30), asof, pd.Timedelta(minutes=5))
+    fifteen = _closed(_validate(frame_15m, "15M", 30), asof, pd.Timedelta(minutes=15))
+    if len(five) < 30 or len(fifteen) < 30:
+        return {"signal": "NO_TRADE", "reason": "Insufficient closed 5m/15m candles"}
+    if not math.isfinite(float(entry_price)) or float(entry_price) <= 0:
+        return {"signal": "NO_TRADE", "reason": "Invalid executable quote"}
+
+    # Evaluate the same rule-based dashboard wave engine at both fast intervals.
+    wave5 = monitor_elliott_waves(five, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    wave15 = monitor_elliott_waves(fifteen, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    side = "LONG" if str(wave5.get("pattern", "")).upper() == "BULLISH" else (
+        "SHORT" if str(wave5.get("pattern", "")).upper() == "BEARISH" else "NONE"
+    )
+    if side == "NONE" or str(wave5.get("phase", "")).upper() != "WAVES_1_AND_2_CONFIRMED":
+        return {"signal": "NO_TRADE", "reason": "5m wave 1 and wave 2 are not structurally confirmed"}
+    expected_kinds = ["LOW", "HIGH", "LOW"] if side == "LONG" else ["HIGH", "LOW", "HIGH"]
+    pivots = wave5.get("pivots")
+    if not isinstance(pivots, list) or len(pivots) < 3:
+        return {"signal": "NO_TRADE", "reason": "Confirmed W1/W2 pivots are missing"}
+    points = pivots[-3:]
+    if [str(p.get("kind", "")).upper() for p in points] != expected_kinds:
+        return {"signal": "NO_TRADE", "reason": "W1/W2 pivot order is invalid"}
+    try:
+        w1_start, w1_end, w2_end = (float(p["price"]) for p in points)
+        pivot_confirmed = [_utc_timestamp(p.get("confirmed_at")) for p in points]
+        pivot_times = [_utc_timestamp(p.get("timestamp")) for p in points]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return {"signal": "NO_TRADE", "reason": "W1/W2 pivot values are invalid"}
+    if any(x is None for x in pivot_confirmed + pivot_times):
+        return {"signal": "NO_TRADE", "reason": "W1/W2 pivot timestamps are invalid"}
+    if any(t > asof for t in pivot_confirmed) or any(t > c for t, c in zip(pivot_times, pivot_confirmed)):
+        return {"signal": "NO_TRADE", "reason": "Wave pivots are not confirmed as of the decision time"}
+
+    close = float(five["close"].iloc[-1])
+    previous_close = float(five["close"].iloc[-2])
+    w1_level = w1_end
+    crossed = previous_close <= w1_level < close if side == "LONG" else previous_close >= w1_level > close
+    if not crossed:
+        return {"signal": "NO_TRADE", "reason": "Latest closed 5m candle did not initiate the W1 breakout"}
+    atr_value = float(atr(five, 14).iloc[-1])
+    rsi_value = float(rsi(five["close"], 14).iloc[-1])
+    if not math.isfinite(atr_value) or atr_value <= 0 or not math.isfinite(rsi_value):
+        return {"signal": "NO_TRADE", "reason": "5m ATR/RSI is unavailable"}
+    distance = (float(entry_price) - w1_level) / w1_level if side == "LONG" else (w1_level - float(entry_price)) / w1_level
+    max_extension = min(EARLY_W3_MAX_BREAKOUT_PCT, EARLY_W3_ATR_MULTIPLE * atr_value / w1_level)
+    if distance < 0 or distance > max_extension:
+        return {"signal": "NO_TRADE", "reason": "Anti-top-chase guard: W3 breakout is already extended"}
+    if (side == "LONG" and rsi_value > 78.0) or (side == "SHORT" and rsi_value < 22.0):
+        return {"signal": "NO_TRADE", "reason": "Anti-top-chase guard: RSI is in extreme territory"}
+
+    # 15m must independently agree by completed EMA21 direction/slope.
+    ema21_15 = ema(fifteen["close"], 21)
+    if pd.isna(ema21_15.iloc[-1]) or pd.isna(ema21_15.iloc[-4]):
+        return {"signal": "NO_TRADE", "reason": "15m EMA21 alignment is unavailable"}
+    m15_close = float(fifteen["close"].iloc[-1])
+    m15_slope = float(ema21_15.iloc[-1] - ema21_15.iloc[-4])
+    aligned = m15_close > float(ema21_15.iloc[-1]) and m15_slope > 0 if side == "LONG" else (
+        m15_close < float(ema21_15.iloc[-1]) and m15_slope < 0
+    )
+    if not aligned:
+        return {"signal": "NO_TRADE", "reason": "15m completed-candle trend conflicts with W3 direction"}
+    wave15_pattern = str(wave15.get("pattern") or "AMBIGUOUS").upper()
+    if wave15_pattern in {"BULLISH", "BEARISH"} and wave15_pattern != ("BULLISH" if side == "LONG" else "BEARISH"):
+        return {"signal": "NO_TRADE", "reason": "15m Elliott structure opposes the 5m W3 breakout"}
+
+    buffer = EARLY_W3_STOP_BUFFER_ATR * atr_value
+    stop = w2_end - buffer if side == "LONG" else w2_end + buffer
+    risk = float(entry_price) - stop if side == "LONG" else stop - float(entry_price)
+    if risk <= 0 or risk / float(entry_price) > MAX_STOP_DISTANCE_PCT:
+        return {"signal": "NO_TRADE", "reason": "W2 structural stop is invalid or exceeds 3.5%"}
+    w1_length = abs(w1_end - w1_start)
+    fib_target = w2_end + 1.618 * w1_length if side == "LONG" else w2_end - 1.618 * w1_length
+    rr_target = float(entry_price) + 1.5 * risk if side == "LONG" else float(entry_price) - 1.5 * risk
+    target = max(fib_target, rr_target) if side == "LONG" else min(fib_target, rr_target)
+    if target <= 0 or (side == "LONG" and not stop < float(entry_price) < target) or (
+        side == "SHORT" and not target < float(entry_price) < stop
+    ):
+        return {"signal": "NO_TRADE", "reason": "W3 Fibonacci/1.5R target is invalid"}
+
+    return {
+        "signal": side, "reason": "EARLY_W3_BREAKOUT_CONFIRMED",
+        "timeframe": "5m", "entry": float(entry_price), "stop_loss": float(stop),
+        "take_profit": float(target), "risk_reward": abs(target - float(entry_price)) / risk,
+        "w1_start": w1_start, "w1_end": w1_end, "w2_end": w2_end,
+        "atr_5m": atr_value, "rsi_5m": rsi_value,
+        "breakout_distance_pct": distance, "max_extension_pct": max_extension,
+        "wave_5m": wave5, "wave_15m": wave15,
+        "signal_candle_open_utc": five.index[-1].isoformat(),
+        "context_15m_candle_open_utc": fifteen.index[-1].isoformat(),
+        "asof_utc": asof.isoformat(),
+        "completed_candles_only": True,
+    }
+
+
+def build_early_wave3_signal(
+    *, instrument_id: str, frame_5m: pd.DataFrame, frame_15m: pd.DataFrame,
+    asof: pd.Timestamp, entry_price: float, funding_rate: float,
+    funding_kind: str, funding_event_time_ms: int, funding_max_age_ms: int,
+    spread_fraction: float,
+) -> dict[str, Any]:
+    """Build a signal packet from an early W3 breakout; still analysis-only."""
+    setup = detect_early_wave3_breakout(frame_5m, frame_15m, asof=asof, entry_price=entry_price)
+    if setup.get("signal") not in {"LONG", "SHORT"}:
+        return {"signal": "NO_TRADE", "reason": setup.get("reason", "No early W3 setup")}
+    side = setup["signal"]
+    symbol = str(instrument_id).upper()
+    if funding_kind != "0" or not math.isfinite(float(funding_rate)):
+        return {"signal": "NO_TRADE", "reason": "Regular funding proof is required"}
+    if not math.isfinite(float(spread_fraction)) or not 0 <= float(spread_fraction) <= 0.0004:
+        return {"signal": "NO_TRADE", "reason": "Spread guard failed"}
+    age = int(asof.timestamp() * 1000) - int(funding_event_time_ms)
+    if age < 0 or age > int(funding_max_age_ms):
+        return {"signal": "NO_TRADE", "reason": "Funding event is stale or future-dated"}
+    signal_id = f"challenge1-v2-early-w3:{symbol}:{setup['signal_candle_open_utc']}:{side}"
+    evidence = {
+        "decision_engine_version": "CHALLENGE_1_V2_EARLY_W3_5M_15M",
+        "signal_id": signal_id, "instrument_id": symbol,
+        "setup_timeframe": "5m", "entry_execution_timeframe": "15m",
+        "context_timeframes": ["5m", "15m"], "higher_timeframes_used": False,
+        "completed_candles_only": True, "signal_candle_open_utc": setup["signal_candle_open_utc"],
+        "context_15m_candle_open_utc": setup["context_15m_candle_open_utc"],
+        "data_asof_utc": setup["asof_utc"], "elliott_wave": setup["wave_5m"],
+        "early_w3": setup, "funding_kind": "0", "funding_rate": float(funding_rate),
+        "funding_event_time_ms": int(funding_event_time_ms),
+        "funding_max_age_ms": int(funding_max_age_ms),
+    }
+    risk = abs(setup["entry"] - setup["stop_loss"])
+    return {
+        "signal": side, "signal_id": signal_id, "instrument_id": symbol,
+        "execution_profile": "CHALLENGE_1_V2", "entry": setup["entry"],
+        "stop_loss": setup["stop_loss"], "take_profit": setup["take_profit"],
+        "gross_rr": round(abs(setup["take_profit"] - setup["entry"]) / risk, 6),
+        "confidence_score": 100.0,
+        "score_parts": {"early_w3_breakout": 45, "w2_structural_stop": 25,
+                        "fib_1_618_or_1_5r": 20, "completed_15m_alignment": 10},
+        "regime": {"status": "FAST_TREND", "direction": side},
+        "atr_15m": setup["atr_5m"], "elliott_wave_5m": setup["wave_5m"],
+        "challenge1_v2_evidence": evidence, "funding_rate": float(funding_rate),
+        "funding_kind": "0", "funding_event_time_ms": int(funding_event_time_ms),
+        "funding_max_age_ms": int(funding_max_age_ms), "spread_fraction": float(spread_fraction),
+        "signal_candle_open_utc": setup["signal_candle_open_utc"],
+        "orders_submitted": False, "fast_trigger_active": True, "early_w3_active": True,
+    }
+
+
+
+
 
 def _utc_timestamp(value: Any) -> pd.Timestamp | None:
     if not isinstance(value, str) or not value.strip():
@@ -628,6 +792,47 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     evidence = record.get("challenge1_v2_evidence")
     if not isinstance(evidence, Mapping):
         return False, "V2-specific execution evidence is missing."
+
+    if evidence.get("decision_engine_version") == "CHALLENGE_1_V2_EARLY_W3_5M_15M":
+        early = evidence.get("early_w3")
+        try:
+            entry, stop, target = (float(record.get(k)) for k in ("entry", "stop_loss", "take_profit"))
+            score = float(record.get("confidence_score"))
+            rr = float(record.get("gross_rr"))
+            funding_time = int(record.get("funding_event_time_ms"))
+            funding_max_age = int(record.get("funding_max_age_ms"))
+            asof_early = _utc_timestamp(evidence.get("data_asof_utc"))
+            signal_open_early = _utc_timestamp(evidence.get("signal_candle_open_utc"))
+            m15_open_early = _utc_timestamp(evidence.get("context_15m_candle_open_utc"))
+        except (TypeError, ValueError, OverflowError):
+            return False, "Early W3 trade-plan evidence is invalid."
+        if not isinstance(early, Mapping) or any(x is None for x in (asof_early, signal_open_early, m15_open_early)):
+            return False, "Early W3 timestamps or structure evidence are missing."
+        if (
+            evidence.get("signal_id") != record.get("signal_id")
+            or evidence.get("instrument_id") != symbol
+            or evidence.get("completed_candles_only") is not True
+            or evidence.get("higher_timeframes_used") is not False
+            or evidence.get("context_timeframes") != ["5m", "15m"]
+            or evidence.get("signal_candle_open_utc") != record.get("signal_candle_open_utc")
+            or _utc_timestamp(early.get("asof_utc")) != asof_early
+            or _utc_timestamp(early.get("signal_candle_open_utc")) != signal_open_early
+            or _utc_timestamp(early.get("context_15m_candle_open_utc")) != m15_open_early
+            or not all(math.isfinite(x) for x in (entry, stop, target, score, rr))
+            or entry <= 0 or stop <= 0 or target <= 0 or score < 70
+            or abs(entry-stop)/entry > MAX_STOP_DISTANCE_PCT
+            or rr < 1.5 - 1e-6
+            or abs(abs(target-entry)/abs(entry-stop)-rr) > 1e-5
+            or record.get("orders_submitted") is not False
+            or record.get("funding_kind") != "0" or evidence.get("funding_kind") != "0"
+            or int(asof_early.timestamp()*1000)-funding_time < 0
+            or int(asof_early.timestamp()*1000)-funding_time > funding_max_age
+            or (side == "LONG" and not stop < entry < target)
+            or (side == "SHORT" and not target < entry < stop)
+        ):
+            return False, "Early W3 identity, chronology, funding or risk contract failed."
+        return True, "Closed-candle early W3 breakout with anti-chase and structural W2 protection."
+
     if evidence.get("decision_engine_version") == "CHALLENGE_1_V2_FAST_5M_15M_ELLIOTT":
         return _fast_trigger_execution_evidence_ready(record)
     signal_id = str(record.get("signal_id") or "").strip()
