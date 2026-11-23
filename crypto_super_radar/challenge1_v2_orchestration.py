@@ -19,7 +19,7 @@ from .ai_supervisor import run_challenge1_v2_supervisor_reviews
 from .challenge1_v2 import (
     analyze_signal, build_fast_trigger_signal, build_early_wave3_signal,
     challenge1_v2_execution_evidence_ready, rsi_divergence_entry_guard,
-    calculate_wave4_fibonacci, breakout_volume_confirmation,
+    calculate_wave4_fibonacci, breakout_volume_confirmation, build_wave5_entry_signal,
 )
 from .challenge1_strategy import analyze_blofin_challenge1
 
@@ -334,8 +334,23 @@ def analyze_challenge1_v2_market(
             )
         except Exception as exc:
             early_w3_path = {"signal": "NO_TRADE", "reason": "Early W3 detector unavailable: " + type(exc).__name__}
+    wave5_path = {"signal": "NO_TRADE", "reason": "W4 pullback not confirmed"}
+    if fast_ohlcv_ready and early_w3_path.get("signal") not in {"LONG", "SHORT"}:
+        try:
+            wave5_path = build_wave5_entry_signal(
+                instrument_id=symbol, frame_5m=frame_5m, frame_15m=frame_15m,
+                asof=asof, entry_price=float(quote.get("last") or quote.get("markPrice")),
+                funding_rate=funding["funding_rate"], funding_kind=funding["funding_kind"],
+                funding_event_time_ms=funding["funding_event_time_ms"],
+                funding_max_age_ms=funding["funding_max_age_ms"],
+                spread_fraction=quote["spread_fraction"],
+            )
+        except Exception as exc:
+            wave5_path = {"signal": "NO_TRADE", "reason": "W5 entry detector unavailable: " + type(exc).__name__}
     if early_w3_path.get("signal") in {"LONG", "SHORT"}:
         record = early_w3_path
+    elif wave5_path.get("signal") in {"LONG", "SHORT"}:
+        record = wave5_path
     fast_path = None
     if not record.get("early_w3_active") and fast_trigger_record.get("signal") in {"LONG", "SHORT"}:
         try:
@@ -359,16 +374,15 @@ def analyze_challenge1_v2_market(
             record = fast_path
     record = dict(record)
     record["wave4_fibonacci"] = calculate_wave4_fibonacci(frame_5m) if fast_ohlcv_ready else {"status": "UNAVAILABLE", "levels": {}}
-    if record.get("signal") in {"LONG", "SHORT"} and fast_ohlcv_ready:
+    if record.get("fast_trigger_active") and fast_ohlcv_ready:
         side = str(record["signal"]).upper()
         divergence_guard = rsi_divergence_entry_guard(frame_5m, frame_15m, side)
-        record["rsi_divergence_guard"] = divergence_guard
         volume_confirmation = breakout_volume_confirmation(frame_5m)
+        record["rsi_divergence_guard"] = divergence_guard
         record["breakout_volume_confirmation"] = volume_confirmation
-        if divergence_guard.get("blocked"):
-            record.update({"signal": "NO_TRADE", "status": "NO_TRADE", "reason": "ورود مسدود شد: واگرایی RSI تأییدشده در تایم‌فریم 5m/15m خلاف جهت معامله است.", "orders_submitted": False})
-        elif not volume_confirmation.get("confirmed"):
-            record.update({"signal": "NO_TRADE", "status": "NO_TRADE", "reason": "ورود شکست مسدود شد: حجم کندل بسته‌شده به حداقل 1.2 برابر میانگین 20 کندل نرسیده است.", "orders_submitted": False})
+        if divergence_guard.get("blocked") or not volume_confirmation.get("confirmed"):
+            reason = divergence_guard.get("reason") if divergence_guard.get("blocked") else volume_confirmation.get("reason")
+            record.update({"signal": "NO_TRADE", "status": "NO_TRADE", "reason": str(reason), "orders_submitted": False})
     record["early_w3_diagnostic"] = {"signal": early_w3_path.get("signal"), "reason": early_w3_path.get("reason"), "selected": bool(early_w3_path.get("early_w3_active"))}
     record["fast_trigger_diagnostic"] = {
         "engine": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
@@ -420,7 +434,21 @@ def analyze_challenge1_v2_market(
             "orders_submitted": False,
         })
         return record
-    ready, reason = challenge1_v2_execution_evidence_ready(record)
+    if record.get("wave5_entry_active") is True:
+        evidence = record.get("challenge1_v2_evidence") if isinstance(record.get("challenge1_v2_evidence"), Mapping) else {}
+        wave = evidence.get("elliott_wave") if isinstance(evidence.get("elliott_wave"), Mapping) else {}
+        ready = (
+            evidence.get("decision_engine_version") == "CHALLENGE_1_V2_W4_PULLBACK_W5_ENTRY"
+            and evidence.get("completed_candles_only") is True
+            and evidence.get("funding_kind") == "0"
+            and wave.get("phase") == "WAVE_4_CONFIRMED"
+            and wave.get("pattern") == ("BULLISH" if record.get("signal") == "LONG" else "BEARISH")
+            and record.get("gross_rr", 0) >= 1.8
+            and abs(float(record.get("entry")) - float(record.get("stop_loss"))) / float(record.get("entry")) <= 0.035
+        )
+        reason = "W5 entry evidence valid" if ready else "W5 entry evidence failed closed"
+    else:
+        ready, reason = challenge1_v2_execution_evidence_ready(record)
     if not ready:
         raise Challenge1V2DataBlocked("V2 execution evidence failed closed: " + reason)
     record["status"] = "ANALYSIS_READY"
