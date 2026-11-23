@@ -537,6 +537,10 @@ class FuturesPaperTradingBot:
         market = getter(asset.symbol)
         if not isinstance(market, dict) or market.get("status") != "PASS":
             raise RuntimeError("Perpetual market microstructure did not pass independent validation.")
+        if market.get("quote_quality") == "OBSERVED_CROSS_VENUE_FALLBACK":
+            sources = set(market.get("sources") or [])
+            if not {"OKX USDT Swap", "Bybit Linear"}.issubset(sources):
+                raise RuntimeError("Fallback market data did not pass the required OKX/Bybit two-venue provenance check.")
         for key in ("mark_price", "index_price", "best_bid", "best_ask", "funding_rate", "funding_interval_hours", "timestamp_ms"):
             if _number(market.get(key)) is None:
                 raise RuntimeError(f"Perpetual {key} is unavailable or invalid.")
