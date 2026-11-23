@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import json
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from http.client import HTTPConnection
@@ -115,6 +116,23 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertEqual({call.kwargs.get("interval") for call in binance.call_args_list}, {"5m", "1h", "4h", "1d", "1w", "1M"})
         self.assertTrue(all(call.kwargs.get("limit") == 500 for call in binance.call_args_list))
         bybit.assert_called_once()
+
+    def test_one_second_interval_uses_fast_binance_only_fallback(self):
+        frame = candle_frame()
+        frame.index = pd.date_range("2025-01-01T00:00:00Z", periods=len(frame), freq="1s")
+        started = time.monotonic()
+        with patch.object(web_app.ENGINE.data.binance, "candles", return_value=frame) as binance, \
+             patch.object(web_app.ENGINE.data.bybit, "candles") as bybit:
+            payload = web_app._live_market_radar_payload("BTCUSDT", "1s", force_refresh=True)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0)
+        binance.assert_called_once_with("BTCUSDT", interval="1s", limit=500)
+        bybit.assert_not_called()
+        self.assertEqual(payload["source_mode"], "SINGLE_SOURCE")
+        self.assertIn("Binance", payload["source_status_fa"])
+        self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
+        self.assertEqual(payload["signal"]["status"], "BLOCKED")
+        self.assertFalse(payload["orders_submitted"])
 
     def test_missing_second_provider_blocks_buy_sell_signal(self):
         frame = candle_frame()
