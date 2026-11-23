@@ -1147,6 +1147,8 @@ class WebAppHttpTests(unittest.TestCase):
             "candidates": [good, bad], "trade_authorization": "NO_TRADE",
         }), patch.object(web_app, "reconcile_discovery_candidates", side_effect=lambda rows, http: rows), \
              patch.object(web_app, "screen_discovery_candidates", side_effect=lambda rows, data: rows), \
+             patch.object(web_app, "evaluate_discovery_candidates", side_effect=lambda rows: rows), \
+             patch.object(web_app, "process_gem_hunter_v3_candidates", side_effect=lambda rows, notify: rows), \
              patch.object(web_app, "_start_gem_hunter_refresh", side_effect=web_app._refresh_gem_hunter_result):
             status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
         result = json.loads(payload)
