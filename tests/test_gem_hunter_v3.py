@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.dashboard_data import gem_hunter_v3_dataframe, airdrop_radar_projects, airdrop_radar_dataframe
+from crypto_super_radar.gem_hunter_v3 import process_gem_hunter_v3_candidates
 from crypto_super_radar.web_app import _rank_gem_hunter_candidates
 from crypto_super_radar.providers import SolanaRpcProvider, DataProviderError
 from crypto_super_radar.gem_hunter_v3 import (
@@ -158,6 +159,68 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertNotEqual(tier["tier"], "TIER_1_VERIFIED_GEM")
         self.assertEqual(tier["tier"], "TIER_2_EARLY_ALPHA")
         self.assertTrue(any("منبع مستقل دوم" in item for item in tier["tier_cautions_fa"]))
+
+    def test_mobile_six_metrics_are_enriched_and_kept_research_only(self):
+        candidate = {
+            "chain": "solana", "token_address": "Mint111", "price_usd": 0.01,
+            "liquidity_usd": 100000, "volume_24h_usd": 600000,
+            "buys_24h": 70, "sells_24h": 30,
+            "security_evidence": {"status": "UNKNOWN", "largest_accounts_count": 20},
+            "pool_trade_evidence": {
+                "buy_volume_usd": 7000, "sell_volume_usd": 3000,
+                "coverage_status": "COMPLETE", "unique_trader_count": 41,
+            },
+            "exit_slippage_evidence": {"status": "PASS", "estimated_slippage_bps": 39.62},
+        }
+        with patch("crypto_super_radar.gem_hunter_v3.storage_backend", return_value="DISABLED"):
+            result = process_gem_hunter_v3_candidates([candidate], notify=False)[0]
+        self.assertEqual(result["buy_volume_share_pct"], 70.0)
+        self.assertEqual(result["unique_traders_24h"], 41)
+        self.assertEqual(result["unique_traders_24h_basis"], "POOL_PROVIDER_UNIQUE_TRADERS")
+        self.assertEqual(result["holder_count"], 20)
+        self.assertEqual(result["estimated_slippage_bps"], 39.62)
+        self.assertEqual(result["opportunity_score"], result["short_term_momentum_score"])
+        self.assertGreaterEqual(result["risk_score"], 0)
+        self.assertLessEqual(result["risk_score"], 100)
+        self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
+
+    def test_mobile_metrics_fallback_labels_transaction_proxy(self):
+        candidate = {
+            "chain": "base", "token_address": "0x" + "2" * 40,
+            "buys_24h": 8, "sells_24h": 2,
+            "security_evidence": {"status": "UNKNOWN"},
+            "exit_slippage_evidence": {"status": "UNKNOWN"},
+        }
+        with patch("crypto_super_radar.gem_hunter_v3.storage_backend", return_value="DISABLED"):
+            result = process_gem_hunter_v3_candidates([candidate], notify=False)[0]
+        self.assertEqual(result["buy_volume_share_pct"], 80.0)
+        self.assertEqual(result["unique_traders_24h"], 10)
+        self.assertEqual(result["unique_traders_24h_basis"], "TRANSACTION_COUNT_PROXY_NOT_UNIQUE_WALLETS")
+        self.assertIsNone(result["holder_count"])
+        self.assertEqual(result["opportunity_score"], 80.0)
+        self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
+
+    def test_gem_hunter_dataframe_maps_six_metrics(self):
+        frame = gem_hunter_v3_dataframe([{
+            "token_name": "Test", "holder_count": 20, "unique_traders_24h": 41,
+            "unique_traders_24h_basis": "POOL_PROVIDER_UNIQUE_TRADERS",
+            "buy_volume_share_pct": 70, "estimated_slippage_bps": 39.62,
+            "opportunity_score": 79.5, "risk_score": 32.0,
+            "exit_slippage_evidence": {"estimated_slippage_bps": 39.62},
+        }])
+        row = frame.iloc[0]
+        self.assertEqual(row["تعداد هولدرها / حساب‌های بزرگ مشاهده‌شده"], 20)
+        self.assertEqual(row["معامله‌گران یکتا / برآورد تراکنش"], 41)
+        self.assertEqual(row["سهم حجمی خرید (%)"], 70)
+        self.assertEqual(row["لغزش خروج (bps)"], 39.62)
+        self.assertEqual(row["امتیاز فرصت (از ۱۰۰)"], 79.5)
+        self.assertEqual(row["امتیاز ریسک (از ۱۰۰)"], 32.0)
+
+    def test_dashboard_auto_loads_latest_turso_report_on_page_entry(self):
+        source = open("crypto_super_radar/web_app.py", encoding="utf-8").read()
+        self.assertIn("loadLatestStoredGemHunterReport();", source)
+        self.assertIn("fetchGemHunterReport()", source)
+        self.assertIn("/api/gem-hunter/v3/latest", source)
 
     def test_three_scores_do_not_invent_missing_evidence(self):
         result = score_candidate_v3({})

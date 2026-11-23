@@ -8132,12 +8132,13 @@ async function loadBlofinInstruments(){
             fact(facts, 'تغییر قیمت ۱ساعته (%)', item.price_change_1h_pct);
             fact(facts, 'عمر استخر (ساعت)', item.pool_age_hours);
             fact(facts, 'خرید / فروش ۲۴ساعته (تعداد)', String(item.buys_24h ?? '—') + ' / ' + String(item.sells_24h ?? '—'));
-            fact(facts, 'تعداد هولدرها', m.holder_count);
-            fact(facts, 'معامله‌گران یکتای ۲۴ساعته', m.unique_traders_24h);
-            fact(facts, 'سهم حجمی خرید (%)', m.buy_volume_share_pct);
-            fact(facts, 'لغزش تخمینی (bps)', m.estimated_slippage_bps);
-            fact(facts, 'امتیاز فرصت مستقل', q.opportunity_score);
-            fact(facts, 'امتیاز ریسک مستقل', q.risk_score);
+            fact(facts, 'تعداد هولدرها / حساب‌های بزرگ مشاهده‌شده', m.holder_count ?? item.holder_count ?? ((item.security_evidence || {}).largest_accounts_count) ?? 'ناموجود');
+            fact(facts, 'معامله‌گران یکتا / برآورد تعداد معاملات', m.unique_traders_24h ?? item.unique_traders_24h ?? 'ناموجود');
+            fact(facts, 'مبنای شمارش معامله‌گران', m.unique_traders_24h_basis ?? item.unique_traders_24h_basis ?? 'ناموجود');
+            fact(facts, 'سهم حجمی خرید (%)', m.buy_volume_share_pct ?? item.buy_volume_share_pct ?? 'ناموجود');
+            fact(facts, 'لغزش تخمینی (bps)', m.estimated_slippage_bps ?? item.estimated_slippage_bps ?? (item.exit_slippage_evidence || {}).estimated_slippage_bps ?? 'ناموجود');
+            fact(facts, 'امتیاز فرصت (مومنتوم از ۱۰۰)', q.opportunity_score ?? item.opportunity_score ?? item.short_term_momentum_score ?? 'ناموجود');
+            fact(facts, 'امتیاز ریسک (از ۱۰۰، عدد بالاتر یعنی ریسک بیشتر)', q.risk_score ?? item.risk_score ?? 'ناموجود');
             card.appendChild(facts);
             const addresses = document.createElement('p'); addresses.className = 'candidate-meta';
             addresses.appendChild(el('span', 'Mint / Contract: ')); addresses.appendChild(el('code', item.token_address || '—'));
@@ -8314,6 +8315,33 @@ async function loadBlofinInstruments(){
             throw new Error('API پس از ۴ تلاش پاسخ نداد: ' +
               String(lastError && lastError.message || lastError || 'network error'));
           };
+          const loadLatestStoredGemHunterReport = async () => {
+            try {
+              const data = await fetchGemHunterReport();
+              const rows = [...(data.candidates || []), ...(data.gem_hunter_v3_candidates || []), ...(data.diagnostic_candidates || [])]
+                .filter((item, index, all) => item && all.findIndex(other =>
+                  (other.token_address || other.candidate_id) === (item.token_address || item.candidate_id)) === index);
+              if (!rows.length) {
+                status.textContent = data.status === 'UNAVAILABLE'
+                  ? 'گزارش ذخیره‌شدهٔ Turso فعلاً در دسترس نیست.'
+                  : 'هنوز اسکن تکمیل‌شده‌ای در Turso ذخیره نشده است.';
+                return;
+              }
+              results.replaceChildren(el('p',
+                'آخرین گزارش ذخیره‌شده از Turso · زمان UTC: ' +
+                (data.generated_at_utc || data.updated_at_utc || 'نامشخص') +
+                ' · فقط خواندنی / NO_TRADE', 'muted'));
+              const list = document.createElement('div'); list.className = 'gem-report-list';
+              rows.forEach(item => list.appendChild(renderCandidate(item)));
+              results.appendChild(list);
+              status.textContent = 'آخرین اسکن ذخیره‌شده به‌صورت خودکار بارگذاری شد · ' + rows.length + ' نامزد';
+              window.CryptoRadar.update('radar-gem-hunter', rows, {
+                state: 'complete', caption: 'آخرین اسکن Turso · ' + rows.length + ' نامزد · NO_TRADE'
+              });
+            } catch (error) {
+              status.textContent = 'خواندن آخرین اسکن ذخیره‌شده ممکن نشد: ' + String(error.message || error);
+            }
+          };
           const renderPendingReport = data => {
             const pendingCandidates = (data.diagnostic_candidates || [])
               .filter(item => item && item.trade_authorization !== 'BUY');
@@ -8345,6 +8373,8 @@ async function loadBlofinInstruments(){
               'هیچ سیگنال BUY از دادهٔ ناقص یا منقضی صادر نمی‌شود.',
               'candidate-meta'));
           };
+          // Load the latest persisted Turso snapshot on page entry; do not launch a new scan.
+          loadLatestStoredGemHunterReport();
           button.addEventListener('click', async () => {
             button.disabled = true; results.replaceChildren(el('p', 'در حال اجرای اسکن زندهٔ Gem Hunter V3 روی Solana، Base و Ethereum و بررسی طبقه‌های Tier 1 و Tier 2...'));
              window.CryptoRadar.scanning('radar-gem-hunter', 'در حال کشف و ارزیابی نامزدهای Solana، Base و Ethereum...');

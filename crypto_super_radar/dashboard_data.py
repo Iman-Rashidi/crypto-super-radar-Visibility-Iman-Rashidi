@@ -310,6 +310,12 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
             "امتیاز ایمنی": item.get("safety_exit_liquidity_score"),
             "اعتماد داده": item.get("data_confidence_score"),
             "لغزش خروج (bps)": exit_gate.get("estimated_slippage_bps"),
+            "تعداد هولدرها / حساب‌های بزرگ مشاهده‌شده": item.get("holder_count", (item.get("security_evidence") or {}).get("largest_accounts_count")),
+            "معامله‌گران یکتا / برآورد تراکنش": item.get("unique_traders_24h"),
+            "مبنای شمارش معامله‌گران": item.get("unique_traders_24h_basis", "NOT_AVAILABLE"),
+            "سهم حجمی خرید (%)": item.get("buy_volume_share_pct"),
+            "امتیاز فرصت (از ۱۰۰)": item.get("opportunity_score", item.get("short_term_momentum_score")),
+            "امتیاز ریسک (از ۱۰۰)": item.get("risk_score"),
             "وضعیت خروج": exit_gate.get("status", "UNKNOWN"),
             "وضعیت Gem Hunter V3": item.get("gem_hunter_v3_status", "RESEARCH_WATCH"),
             "وضعیت ذخیره‌سازی": item.get("gem_hunter_storage_status", "UNKNOWN"),
@@ -321,6 +327,8 @@ def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
         "امتیاز مومنتوم", "پوشش شواهد مومنتوم (%)", "پهنای خریداران مشاهده‌شده",
         "انتساب پول هوشمند", "شناسایی خریداران جدید", "وضعیت هشدار تلگرام",
         "امتیاز ایمنی", "اعتماد داده", "لغزش خروج (bps)",
+        "تعداد هولدرها / حساب‌های بزرگ مشاهده‌شده", "معامله‌گران یکتا / برآورد تراکنش", "مبنای شمارش معامله‌گران",
+        "سهم حجمی خرید (%)", "امتیاز فرصت (از ۱۰۰)", "امتیاز ریسک (از ۱۰۰)",
         "وضعیت خروج", "وضعیت Gem Hunter V3", "وضعیت ذخیره‌سازی", "مجوز معامله",
     ])
 

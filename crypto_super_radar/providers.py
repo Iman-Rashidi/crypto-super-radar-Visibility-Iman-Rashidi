@@ -515,6 +515,7 @@ class SolanaRpcProvider:
             "mint_authority_active": mint_authority is not None,
             "freeze_authority_active": freeze_authority is not None,
             "top10_token_account_concentration_pct": top10_pct,
+            "largest_accounts_count": len(largest),
             "mint_authority": mint_authority,
             "freeze_authority": freeze_authority,
             "supply": total_supply,

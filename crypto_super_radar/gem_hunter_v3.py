@@ -118,6 +118,60 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     )
     momentum_coverage_pct = round(available_weight * 100.0, 2)
 
+    # DEX transaction counts are an explicitly labelled proxy, not unique wallets.
+    buys_24h = _finite(candidate.get("buys_24h"))
+    sells_24h = _finite(candidate.get("sells_24h"))
+    dex_buy_share = None
+    if buys_24h is not None and sells_24h is not None and buys_24h >= 0 and sells_24h >= 0 and buys_24h + sells_24h > 0:
+        dex_buy_share = round(100.0 * buys_24h / (buys_24h + sells_24h), 2)
+    if momentum is None and dex_buy_share is not None:
+        momentum = dex_buy_share
+        momentum_coverage_pct = 25.0
+        components["dex_transaction_buy_share_estimate"] = dex_buy_share
+
+    unique_trader_count = _finite(trades.get("unique_trader_count"))
+    unique_trader_basis = "POOL_PROVIDER_UNIQUE_TRADERS"
+    if unique_trader_count is None:
+        unique_buyers = _finite(trades.get("unique_buyers_count"))
+        unique_sellers = _finite(trades.get("unique_sellers_count"))
+        if trades.get("wallet_attribution_status") == "COMPLETE_FOR_RETURNED_SAMPLE" and unique_buyers is not None and unique_sellers is not None:
+            unique_trader_count = unique_buyers + unique_sellers
+            unique_trader_basis = "UNIQUE_WALLETS_IN_RETURNED_SAMPLE"
+        elif buys_24h is not None and sells_24h is not None:
+            unique_trader_count = buys_24h + sells_24h
+            unique_trader_basis = "TRANSACTION_COUNT_PROXY_NOT_UNIQUE_WALLETS"
+
+    buy_volume_share_pct = _finite(trades.get("buy_volume_share_pct"))
+    if buy_volume_share_pct is None:
+        buy_volume_share_pct = _finite(components.get("pool_buy_volume_share"))
+    if buy_volume_share_pct is None:
+        buy_volume_share_pct = dex_buy_share
+
+    holder_evidence = candidate.get("holder_evidence") or candidate.get("holders") or {}
+    holder_count = _finite(candidate.get("holder_count", security.get("holder_count", holder_evidence.get("holder_count", security.get("largest_accounts_count")))))
+    if holder_count is not None:
+        holder_count = int(holder_count)
+
+    # Independent risk score: missing evidence raises risk, never implies PASS.
+    risk_score = 55.0 if safety is None else round(100.0 - safety, 2)
+    if security_status != "PASS":
+        risk_score += 20.0
+    if exit_status == "UNKNOWN":
+        risk_score += 10.0
+    elif exit_status == "FAIL":
+        risk_score += 20.0
+    volume_liquidity = _finite(candidate.get("volume_to_liquidity_24h"))
+    if volume_liquidity is None:
+        liq = _finite(reconciliation.get("verified_liquidity_usd")) or _finite(candidate.get("liquidity_usd"))
+        vol = _finite(reconciliation.get("verified_volume_24h_usd")) or _finite(candidate.get("volume_24h_usd"))
+        if liq is not None and liq > 0 and vol is not None:
+            volume_liquidity = vol / liq
+    if volume_liquidity is not None and volume_liquidity > 5:
+        risk_score += min(15.0, (volume_liquidity - 5.0) * 2.0)
+    if holder_count is None:
+        risk_score += 5.0
+    risk_score = round(min(100.0, max(0.0, risk_score)), 2)
+
     security_status = security.get("status")
     exit_status = exit_gate.get("status")
     safety = None
@@ -162,6 +216,14 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "short_term_momentum_score": momentum,
+        "opportunity_score": momentum,
+        "risk_score": risk_score,
+        "buy_volume_share_pct": buy_volume_share_pct,
+        "unique_traders_24h": int(unique_trader_count) if unique_trader_count is not None else None,
+        "unique_traders_24h_basis": unique_trader_basis if unique_trader_count is not None else "NOT_AVAILABLE",
+        "holder_count": holder_count,
+        "holder_count_basis": ("SOLANA_LARGEST_TOKEN_ACCOUNTS_SAMPLE" if str(candidate.get("chain") or "").lower() == "solana" and holder_count is not None else "PROVIDER_HOLDER_COUNT" if holder_count is not None else "NOT_AVAILABLE"),
+        "estimated_slippage_bps": _finite(exit_gate.get("estimated_slippage_bps")),
         # Compatibility alias for the existing dashboard. This is NOT a
         # smart-money score; see the explicit evidence status below.
         "short_term_momentum_smart_money_score": momentum,
@@ -728,9 +790,15 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
             reconciliation.get("verified_liquidity_usd")
             if reconciliation.get("status") == "PASS" else None
         )
-        row["exit_slippage_evidence"] = estimate_exit_slippage(
+        existing_exit = row.get("exit_slippage_evidence") or {}
+        calculated_exit = estimate_exit_slippage(
             liquidity_usd=verified_liquidity,
             order_usd=_finite(os.getenv("GEM_HUNTER_EXIT_ORDER_USD")) or DEFAULT_EXIT_ORDER_USD,
+        )
+        # Retain a previously computed, numeric estimate rather than replacing it with UNKNOWN.
+        row["exit_slippage_evidence"] = (
+            existing_exit if _finite(existing_exit.get("estimated_slippage_bps")) is not None
+            else calculated_exit
         )
         original_status = row.get("candidate_status")
         original_trade_authorization = row.get("trade_authorization")
@@ -742,6 +810,23 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
         row["candidate_status"] = original_status
         row["trade_authorization"] = original_trade_authorization
         row["gem_hunter_v3_trade_authorization"] = "NO_TRADE"
+        metrics = {
+            "holder_count": row.get("holder_count"),
+            "unique_traders_24h": row.get("unique_traders_24h"),
+            "unique_traders_24h_basis": row.get("unique_traders_24h_basis"),
+            "buy_volume_share_pct": row.get("buy_volume_share_pct"),
+            "estimated_slippage_bps": row.get("estimated_slippage_bps"),
+        }
+        row["opportunity_score"] = row.get("opportunity_score", row.get("short_term_momentum_score"))
+        qualification = row.get("qualification")
+        if isinstance(qualification, dict):
+            qualification = dict(qualification)
+            market_metrics = dict(qualification.get("market_metrics") or {})
+            market_metrics.update(metrics)
+            qualification["market_metrics"] = market_metrics
+            qualification["opportunity_score"] = row["opportunity_score"]
+            qualification["risk_score"] = row.get("risk_score")
+            row["qualification"] = qualification
         row["gem_hunter_storage_status"] = storage_status
         if store is not None:
             try:
