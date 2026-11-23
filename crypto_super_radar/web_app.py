@@ -8286,29 +8286,10 @@ async function loadBlofinInstruments(){
           <p class="candidate-meta"><strong>هشدار امنیتی:</strong> برای دریافت ایردراپ یا توکن تست، Seed Phrase / عبارت بازیابی یا کلید خصوصی را در هیچ وب‌سایت یا فرمی وارد نکنید. این رادار هیچ کیف‌پولی متصل نمی‌کند و هیچ تراکنشی امضا نمی‌کند.</p>
           <p class="candidate-meta">حالت سامانه: پژوهشی و نمایشی · NO_TRADE · بدون اتصال کیف‌پول</p>
         </section>
-        <section class="card" id="gem-hunter-watchlist">
-          <h2>فهرست محلی زیر نظر · پیگیری ساعت‌ها و روزهای آینده</h2>
-          <p class="muted">این فهرست فقط در همین مرورگر و دستگاه ذخیره می‌شود. نامزدهای اضافه‌شده سیگنال BUY نیستند. آدرس قرارداد یا لینک بازار را پیست کنید تا همراه با زمان بررسی بعدی و یادداشت ذخیره شود.</p>
-          <form id="watchlist-manual-form" class="watchlist-form">
-            <label>نام توکن / نماد
-              <input id="watch-manual-name" placeholder="مثلاً TOKEN (TKN)" autocomplete="off">
-            </label>
-            <label>شبکه
-              <select id="watch-manual-chain"><option value="solana">Solana</option><option value="base">Base</option><option value="unknown">نامشخص</option></select>
-            </label>
-            <label class="wide">آدرس قرارداد یا لینک توکن / بازار
-              <input id="watch-manual-reference" required placeholder="آدرس Mint / Contract یا لینک DEX Screener">
-            </label>
-            <label>زمان بررسی بعدی
-              <input id="watch-manual-next-check" type="datetime-local">
-            </label>
-            <label class="wide">یادداشت پیگیری
-              <textarea id="watch-manual-notes" placeholder="چه چیزی را در بررسی بعدی کنترل کنم؟ مثلاً حجم، نقدینگی، هولدرها یا تراکنش نهنگ‌ها"></textarea>
-            </label>
-            <div class="wide"><button type="submit" class="gem-add-watch">افزودن به فهرست زیر نظر</button></div>
-          </form>
-          <p id="watchlist-status" class="muted" aria-live="polite">هنوز موردی برای پیگیری ذخیره نشده است.</p>
-          <div id="watchlist-entries" class="watchlist-entries"></div>
+        <section class="card" aria-label="واچ‌لیست خودکار">
+          <h2>📈 پیگیری خودکار دارایی‌ها</h2>
+          <p class="muted">ثبت، پایش قیمت و محاسبه سود به‌صورت خودکار انجام می‌شود. جدول دائمی واچ‌لیست در بالای داشبورد نمایش داده می‌شود.</p>
+          <a href="#gem-hunter-watchlist">رفتن به جدول زنده واچ‌لیست (€100) ↑</a>
         </section>
         <script>
         (() => {
@@ -8317,10 +8298,7 @@ async function loadBlofinInstruments(){
           const results = document.getElementById('gem-hunter-results');
           const filterBar = document.getElementById('gem-hunter-filter-bar');
           let activeGemFilter = 'all';
-          const watchEntries = document.getElementById('watchlist-entries');
-          const watchStatus = document.getElementById('watchlist-status');
-          const watchForm = document.getElementById('watchlist-manual-form');
-          if (!button || !status || !results || !watchEntries || !watchForm || !filterBar) return;
+          if (!button || !status || !results || !filterBar) return;
           const STORAGE_KEY = 'crypto-super-radar.gem-hunter-watchlist.v1';
           const filterLabels = {
             contract_security:'امنیت قرارداد و اختیارات',
@@ -8395,82 +8373,6 @@ async function loadBlofinInstruments(){
           const explorerBase = chain => chain === 'solana' ? 'https://solscan.io' : 'https://basescan.org';
           const tokenExplorer = item => explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address || '');
           const poolUrl = item => 'https://dexscreener.com/' + encodeURIComponent(item.chain || '') + '/' + encodeURIComponent(item.pool_address || '');
-          const readWatchlist = () => {
-            try {
-              const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-              return Array.isArray(value) ? value.filter(x => x && typeof x === 'object') : [];
-            } catch (_) { return []; }
-          };
-          const writeWatchlist = list => {
-            try {
-              localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-              watchStatus.textContent = list.length + ' مورد در حافظهٔ محلی همین مرورگر ذخیره شده است.';
-              return true;
-            } catch (_) {
-              watchStatus.textContent = 'ذخیره‌سازی محلی در این مرورگر در دسترس نیست؛ فضای ذخیره‌سازی مرورگر را بررسی کنید.';
-              return false;
-            }
-          };
-          const watchlistIdentity = item => [
-            String(item.chain || 'unknown').trim().toLowerCase(),
-            String(item.token_address || item.pool_address || item.reference_url || '').trim().toLowerCase()
-          ].join(':');
-          const addToWatchlist = item => {
-            const list = readWatchlist();
-            const key = watchlistIdentity(item);
-            if (!key.split(':')[1]) {
-              watchStatus.textContent = 'افزودن انجام نشد: آدرس قرارداد، Pool یا لینک معتبر موجود نیست.';
-              return 'invalid';
-            }
-            const exists = list.some(x => watchlistIdentity(x) === key);
-            if (exists) {
-              watchStatus.textContent = 'این توکن از قبل در فهرست زیر نظر وجود دارد.';
-              return 'exists';
-            }
-            list.unshift(Object.assign({
-              id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8),
-              added_at: new Date().toISOString(), next_check_at: '', notes: '', status: 'WATCH'
-            }, item));
-            if (!writeWatchlist(list)) return 'error';
-            renderWatchlist();
-            watchStatus.textContent = '✓ مورد با موفقیت در فهرست زیر نظر همین مرورگر ذخیره شد.';
-            return 'added';
-          };
-          const renderWatchlist = () => {
-            const list = readWatchlist();
-            watchEntries.replaceChildren();
-            if (!list.length) {
-              watchEntries.appendChild(el('p', 'هنوز موردی برای پیگیری ذخیره نشده است.', 'muted'));
-              watchStatus.textContent = 'فهرست محلی خالی است؛ از گزارش کشف یا فرم افزودن دستی استفاده کنید.';
-              return;
-            }
-            watchStatus.textContent = list.length + ' مورد در حافظهٔ محلی همین مرورگر ذخیره شده است.';
-            list.forEach(item => {
-              const card = document.createElement('article'); card.className = 'watch-entry';
-              card.appendChild(el('h3', (item.token_name || item.name || 'توکن بدون نام') + ' · ' + (item.token_symbol || item.symbol || '—')));
-              card.appendChild(el('p', (item.chain || 'شبکه نامشخص').toUpperCase() + ' · ' + (item.token_address || item.reference_url || 'بدون آدرس'), 'candidate-meta'));
-              const links = document.createElement('div'); links.className = 'gem-links';
-              if (item.reference_url) addLink(links, 'لینک ذخیره‌شده ↗', item.reference_url);
-              if (item.token_address && ['solana','base','ethereum'].includes(item.chain)) addLink(links, 'اکسپلورر ↗', explorerBase(item.chain) + '/token/' + encodeURIComponent(item.token_address));
-              if (item.pool_address && ['solana','base'].includes(item.chain)) addLink(links, 'DEX Screener ↗', 'https://dexscreener.com/' + item.chain + '/' + encodeURIComponent(item.pool_address));
-              card.appendChild(links);
-              const timeLabel = el('label', 'زمان بررسی بعدی');
-              const timeInput = document.createElement('input'); timeInput.type = 'datetime-local'; timeInput.value = item.next_check_at || '';
-              timeLabel.appendChild(timeInput); card.appendChild(timeLabel);
-              const notesLabel = el('label', 'یادداشت پیگیری');
-              const notes = document.createElement('textarea'); notes.value = item.notes || '';
-              notesLabel.appendChild(notes); card.appendChild(notesLabel);
-              const actions = document.createElement('div'); actions.className = 'watch-entry-actions';
-              const save = el('button', 'ذخیره تغییرات'); save.type = 'button';
-              save.addEventListener('click', () => {
-                const current = readWatchlist(); const index = current.findIndex(x => x.id === item.id);
-                if (index >= 0) { current[index].next_check_at = timeInput.value; current[index].notes = notes.value; if (writeWatchlist(current)) renderWatchlist(); }
-              });
-              const remove = el('button', 'حذف', 'watch-delete'); remove.type = 'button';
-              remove.addEventListener('click', () => { const current = readWatchlist().filter(x => x.id !== item.id); if (writeWatchlist(current)) renderWatchlist(); });
-              actions.append(save, remove); card.appendChild(actions); watchEntries.appendChild(card);
-            });
-          };
           const fact = (parent, label, value) => {
             const box = document.createElement('div'); box.className = 'gem-fact';
             box.appendChild(el('span', label)); box.appendChild(el('strong', value)); parent.appendChild(box);
@@ -8792,44 +8694,8 @@ async function loadBlofinInstruments(){
               details.appendChild(eventList);
             } else details.appendChild(el('p', 'هیچ رویداد Swap نهنگ قابل‌ردیابی در پرونده ثبت نشده است.'));
             card.appendChild(details);
-            const add = el('button', '＋ افزودن به فهرست زیر نظر'); add.type = 'button'; add.className = 'gem-add-watch';
-            add.addEventListener('click', event => {
-              event.preventDefault();
-              event.stopPropagation();
-              const outcome = addToWatchlist({
-                chain: item.chain, token_name: item.token_name, token_symbol: item.token_symbol,
-                token_address: item.token_address, pool_address: item.pool_address, dex: item.dex,
-                discovery_priority_score: item.discovery_priority_score, price_usd: item.price_usd,
-                liquidity_usd: item.liquidity_usd, volume_24h_usd: item.volume_24h_usd,
-                reference_url: item.pool_address ? poolUrl(item) : (item.token_address ? tokenExplorer(item) : '')
-              });
-              if (outcome === 'added') {
-                add.textContent = '✓ اضافه شد';
-                add.disabled = true;
-              } else if (outcome === 'exists') {
-                add.textContent = 'قبلاً اضافه شده';
-                add.disabled = true;
-              } else {
-                add.textContent = 'افزودن ناموفق؛ جزئیات را بررسی کنید';
-              }
-            });
-            card.appendChild(add); applyGemHunterFilterToCard(card); return card;
+            applyGemHunterFilterToCard(card); return card;
           };
-          watchForm.addEventListener('submit', event => {
-            event.preventDefault();
-            const reference = document.getElementById('watch-manual-reference').value.trim();
-            const chain = document.getElementById('watch-manual-chain').value;
-            const url = safeUrl(reference);
-            if (!reference) { watchStatus.textContent = 'ابتدا آدرس قرارداد یا لینک معتبر را وارد کنید.'; return; }
-            const outcome = addToWatchlist({
-              chain, token_name: document.getElementById('watch-manual-name').value.trim() || 'توکن پیگیری دستی',
-              token_symbol: '', token_address: url ? '' : reference, reference_url: url || '',
-              next_check_at: document.getElementById('watch-manual-next-check').value,
-              notes: document.getElementById('watch-manual-notes').value.trim()
-            });
-            if (outcome === 'added') watchForm.reset();
-          });
-          renderWatchlist();
           const fetchGemHunterReport = async () => {
             let lastError = null;
             for (let retry = 0; retry < 4; retry += 1) {
