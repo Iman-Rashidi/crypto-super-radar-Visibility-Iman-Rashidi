@@ -9166,7 +9166,12 @@ async function loadBlofinInstruments(){
             .live-radar-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:12px 0}
             .live-radar-controls label{display:grid;gap:5px;color:var(--muted);font-size:.85rem}
             .live-candle-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:#07131f}
-            #live-candle-chart{display:block;width:100%;min-width:820px;height:390px}
+            #live-candle-chart{display:block;width:100%;min-width:820px;height:480px}
+            .live-candle-wrap{min-height:480px}
+            .live-volume-caption{display:flex;align-items:center;gap:8px;margin:8px 2px 0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-weight:800;line-height:1.6}
+            .live-volume-caption.good{color:#7be4b3;border-color:#238d69;background:rgba(17,91,66,.18)}
+            .live-volume-caption.weak{color:#ff9ba5;border-color:#a74754;background:rgba(112,35,48,.18)}
+            .live-wave-mini{display:block;width:100%;height:150px;border:1px solid var(--line);border-radius:9px;background:#07131f}
             .live-radar-divergence{margin:10px 0;padding:12px 14px;border:1px solid #52677b;border-inline-start:5px solid #ffc66d;border-radius:10px;background:#101e2b;color:#dce9f5;font-weight:700;line-height:1.8}
             .live-radar-divergence.bullish{border-color:#19d18b;background:#092a25;color:#a9f5d5}
             .live-radar-divergence.bearish{border-color:#ff4d83;background:#351523;color:#ffc0d4}
@@ -9201,13 +9206,18 @@ async function loadBlofinInstruments(){
             .live-radar-custom-search button,.live-wave-card button{min-height:40px;padding:8px 12px;border:1px solid #39718c;border-radius:9px;background:#10344a;color:#e6f7ff;font:inherit;font-weight:800;cursor:pointer}
             .live-wave-watch{margin:14px 0;padding:14px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
             .live-wave-watch h4{margin:0 0 5px}.live-wave-watch-note{margin:0 0 12px;color:var(--muted);font-size:.8rem}
-            .live-wave-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px}
+            .live-wave-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
             .live-wave-card{min-width:0;padding:11px;border:1px solid var(--line);border-radius:12px;background:var(--surface-raised);display:grid;gap:7px}
             .live-wave-card h5{margin:0;font-size:1rem}.live-wave-price{font-size:1.08rem;font-weight:900;overflow-wrap:anywhere}
             .live-wave-meta{font-size:.78rem;line-height:1.65;color:var(--muted);overflow-wrap:anywhere}
             .live-wave-card button{width:100%;font-size:.78rem}
-            @media(max-width:900px){.live-wave-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-            @media(max-width:600px){.live-radar-custom-search{grid-template-columns:1fr}.live-wave-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.live-wave-card{padding:9px}}
+            @media(max-width:600px){
+              .live-radar-custom-search{grid-template-columns:1fr}
+              .live-wave-grid{grid-template-columns:1fr}
+              .live-wave-card{padding:10px}
+              #live-candle-chart{height:480px;min-width:720px}
+              .live-candle-wrap{min-height:480px}
+            }
             .easy-trader-robot{margin:14px 0;border:1px solid var(--line);border-radius:18px;padding:12px;background:linear-gradient(135deg,#0b1d2c,#102b3b 60%,#142338);overflow:hidden}
             .easy-robot-stage{position:relative;min-height:240px;display:flex;align-items:flex-end;justify-content:center}
             .easy-robot-bubble{position:relative;z-index:2;width:min(560px,94%);margin:0 auto 96px;padding:12px;border:1px solid #3a7189;border-radius:15px;background:#081825;color:#e7f5ff;text-align:center}
@@ -9274,8 +9284,9 @@ async function loadBlofinInstruments(){
             </section>
             <p id="live-radar-status" class="muted" aria-live="polite">در حال دریافت کندل‌های زنده...</p>
             <div class="live-candle-wrap">
-              <canvas id="live-candle-chart" width="1440" height="460" role="img" aria-label="نمودار کندل و امواج الیوت با سه سطح کف، تعادل و سقف، قیمت لحظه‌ای و کندل‌های واگرایی"></canvas>
+              <canvas id="live-candle-chart" width="1440" height="560" role="img" aria-label="نمودار بزرگ کندل، موج قیمت، نشانه‌های ساده خرید و فروش و حجم بازار"></canvas>
             </div>
+            <div id="live-volume-status" class="live-volume-caption" role="status" aria-live="polite">حجم بازار پس از دریافت کندل‌ها نمایش داده می‌شود.</div>
             <section class="live-wave-watch" aria-label="دیده‌بان هم‌زمان پنج بازار اصلی">
               <h4>🌊 دیده‌بان امواج ۵ بازار اصلی (BTC · ETH · SOL · XRP · LINK)</h4>
               <p class="live-wave-watch-note">تحلیل مستقل ۵ بازار با کندل‌های ۵ دقیقه‌ای؛ دادهٔ ناقص یا تأییدنشده به‌عنوان موج قطعی نمایش داده نمی‌شود.</p>
@@ -9446,7 +9457,7 @@ async function loadBlofinInstruments(){
               ctx.clearRect(0,0,canvas.width,canvas.height);
               ctx.fillStyle='#07131f';ctx.fillRect(0,0,canvas.width,canvas.height);
               if(!bars.length){ctx.fillStyle='#ffc66d';ctx.font='18px sans-serif';ctx.fillText('کندل معتبر برای نمایش در دسترس نیست',24,40);return;}
-              const pad={left:82,right:190,top:34,bottom:58};
+              const pad={left:82,right:190,top:42,bottom:142};
               const rawMin=Math.min.apply(null,bars.map(x=>x.low));
               const rawMax=Math.max.apply(null,bars.map(x=>x.high));
               const rawSpread=Math.max(rawMax-rawMin,Math.abs(rawMax)*0.0001,1e-9);
@@ -9556,6 +9567,62 @@ async function loadBlofinInstruments(){
                 ctx.setLineDash([8,5]);ctx.beginPath();ctx.moveTo(pad.left,yy);
                 ctx.lineTo(canvas.width-pad.right,yy);ctx.stroke();ctx.restore();
               }
+              // Simple Persian signal tags are drawn only for confirmed BUY/SELL signals.
+              const confirmedSignal=String(signal.signal||'').toUpperCase();
+              if(confirmedSignal==='BUY'||confirmedSignal==='SELL'){
+                const text=confirmedSignal==='BUY'
+                  ?'🟢 زمان خوب برای خرید (شروع موج صعودی / الگوی برگشت خریداران)'
+                  :'🔴 زمان فروش یا خروج (سقف موج / احتمال افت قیمت)';
+                const tagX=pad.left+12,tagY=pad.top+24;
+                ctx.save();ctx.font='bold 18px sans-serif';
+                const tagWidth=Math.min(790,ctx.measureText(text).width+24);
+                ctx.fillStyle=confirmedSignal==='BUY'?'rgba(8,76,55,.94)':'rgba(104,29,43,.94)';
+                ctx.fillRect(tagX,tagY,tagWidth,34);
+                ctx.fillStyle='#ffffff';ctx.fillText(text,tagX+12,tagY+23,tagWidth-20);ctx.restore();
+              }
+              // Show up to two confirmed candle/classic patterns in plain Persian.
+              const patternItems=[
+                ...(Array.isArray(analysis.candlestick_patterns)?analysis.candlestick_patterns:[]),
+                ...(Array.isArray(analysis.geometric_patterns)?analysis.geometric_patterns:[])
+              ].filter(item=>item&&item.state==='CONFIRMED').slice(0,2);
+              patternItems.forEach((item,index)=>{
+                const name=String(item.name_fa||item.name_en||'الگوی قیمت');
+                const detail=String(item.description||'الگو در کندل‌های اخیر شناسایی شد.').replace(/\s+/g,' ').slice(0,82);
+                const text=name+' ('+detail+')';
+                const yy=pad.top+72+index*30;
+                ctx.save();ctx.font='bold 14px sans-serif';
+                ctx.fillStyle='rgba(18,36,52,.94)';ctx.fillRect(pad.left+12,yy,Math.min(700,ctx.measureText(text).width+20),25);
+                ctx.fillStyle='#e7f2fb';ctx.fillText(text,pad.left+22,yy+17,680);ctx.restore();
+              });
+              // Volume histogram uses candle direction: green for rising, red for falling.
+              const volumeTop=canvas.height-pad.bottom+14;
+              const volumeBase=canvas.height-43;
+              const volumeHeight=volumeBase-volumeTop;
+              const volumes=bars.map(bar=>Math.max(0,Number(bar.volume)||0));
+              const maxVolume=Math.max(...volumes,1);
+              const volumeSlot=(canvas.width-pad.left-pad.right)/bars.length;
+              ctx.save();ctx.fillStyle='rgba(12,29,43,.92)';ctx.fillRect(pad.left,volumeTop-8,canvas.width-pad.left-pad.right,volumeHeight+16);
+              ctx.strokeStyle='#345066';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(pad.left,volumeBase);ctx.lineTo(canvas.width-pad.right,volumeBase);ctx.stroke();ctx.setLineDash([]);
+              bars.forEach((bar,index)=>{
+                const value=volumes[index],height=Math.max(1,(value/maxVolume)*volumeHeight);
+                ctx.fillStyle=bar.close>=bar.open?'#27b982':'#e45e70';
+                const width=Math.max(2,Math.min(13,volumeSlot*.68));
+                ctx.fillRect(x(index)-width/2,volumeBase-height,width,height);
+              });
+              ctx.fillStyle='#b9cad8';ctx.font='bold 13px sans-serif';ctx.fillText('حجم معاملات هر کندل',pad.left+8,volumeTop+14);
+              ctx.restore();
+              const latest=bars[bars.length-1]||{};
+              const latestVolume=Number(latest.volume)||0;
+              const avgVolume=volumes.slice(-21,-1);
+              const average=avgVolume.length?avgVolume.reduce((sum,value)=>sum+value,0)/avgVolume.length:0;
+              const healthyVolume=average>0&&latestVolume>=average&&Number(latest.close)>=Number(latest.open);
+              const volumeStatus=document.getElementById('live-volume-status');
+              if(volumeStatus){
+                volumeStatus.className='live-volume-caption '+(healthyVolume?'good':'weak');
+                volumeStatus.textContent=healthyVolume
+                  ?'🟢 حجم بازار خوب است (مناسب خرید): فعالیت خریداران در آخرین کندل از میانگین بیشتر است.'
+                  :'🔴 حجم بازار ضعیف است (مناسب خرید نیست): قدرت خرید در آخرین کندل تأیید نشده است.';
+              }
               const tickIndexes=[0,Math.floor((bars.length-1)/3),Math.floor(2*(bars.length-1)/3),bars.length-1];
               ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';ctx.textAlign='center';
               tickIndexes.forEach(i=>{
@@ -9657,13 +9724,42 @@ async function loadBlofinInstruments(){
                 await refresh(true);
               }catch(error){status.textContent=String(error.message||error);}
             }
+            function drawMiniChart(canvasElement,data){
+              const bars=(data&&Array.isArray(data.candles)?data.candles:[]).slice(-48);
+              const context=canvasElement.getContext('2d');
+              const width=canvasElement.width,height=canvasElement.height;
+              context.clearRect(0,0,width,height);context.fillStyle='#07131f';context.fillRect(0,0,width,height);
+              if(!bars.length){context.fillStyle='#ffc66d';context.font='20px sans-serif';context.fillText('داده موجود نیست',18,34);return;}
+              const low=Math.min(...bars.map(item=>Number(item.low))),high=Math.max(...bars.map(item=>Number(item.high)));
+              const spread=Math.max(high-low,Math.abs(high)*0.0001,1e-9),top=12,bottom=height-16;
+              const y=value=>bottom-((Number(value)-low)/spread)*(bottom-top);
+              const slot=width/bars.length,bodyWidth=Math.max(3,Math.min(9,slot*.62));
+              bars.forEach((bar,index)=>{
+                const x=(index+.5)*slot,up=Number(bar.close)>=Number(bar.open),color=up?'#53d6a0':'#ff7b85';
+                context.strokeStyle=color;context.fillStyle=color;context.lineWidth=2;
+                context.beginPath();context.moveTo(x,y(bar.high));context.lineTo(x,y(bar.low));context.stroke();
+                const candleTop=y(Math.max(Number(bar.open),Number(bar.close)));
+                const candleBottom=y(Math.min(Number(bar.open),Number(bar.close)));
+                context.fillRect(x-bodyWidth/2,candleTop,bodyWidth,Math.max(2,candleBottom-candleTop));
+              });
+              const indexByTime=new Map(bars.map((bar,index)=>[Date.parse(bar.time),index]));
+              const pivots=(data.pivots||[]).map(point=>({index:indexByTime.get(Date.parse(point.timestamp)),price:Number(point.price)}))
+                .filter(point=>Number.isInteger(point.index)&&Number.isFinite(point.price));
+              if(pivots.length>1){
+                context.save();context.strokeStyle='#d7a9ff';context.lineWidth=3;context.beginPath();
+                pivots.forEach((point,index)=>{const x=(point.index+.5)*slot,py=y(point.price);if(index===0)context.moveTo(x,py);else context.lineTo(x,py);});
+                context.stroke();context.restore();
+                pivots.forEach(point=>{context.fillStyle='#e8cfff';context.beginPath();context.arc((point.index+.5)*slot,y(point.price),4,0,Math.PI*2);context.fill();});
+              }
+              context.fillStyle='#b9cad8';context.font='bold 16px sans-serif';context.fillText('کندل و مسیر موج',10,18);
+            }
             function renderWaveWatchCard(symbolValue,data){
               const card=document.createElement('article');card.className='live-wave-card';
               const title=document.createElement('h5');title.textContent=symbolValue;
+              const mini=document.createElement('canvas');mini.className='live-wave-mini';mini.width=640;mini.height=180;
+              mini.setAttribute('role','img');mini.setAttribute('aria-label',symbolValue+' نمودار کوچک کندل و موج');
+              drawMiniChart(mini,data);
               const candles=Array.isArray(data.candles)?data.candles:[];
-              const latest=candles.length?candles[candles.length-1]:null;
-              const price=document.createElement('div');price.className='live-wave-price';price.textContent=latest?'قیمت: '+number(latest.close):'قیمت: ناموجود';
-              const waves=data.elliott_waves||{},phase=String(waves.phase||'').toUpperCase();
               const waveMatch=phase.match(/WAVE[_ ]?([1-5])/);
               const wave=document.createElement('div');wave.className='live-wave-meta';
               wave.textContent='موج فعلی: '+(waveMatch?'W'+waveMatch[1]:(waves.phase||waves.pattern||'نامشخص'));
@@ -9675,7 +9771,7 @@ async function loadBlofinInstruments(){
               div.textContent='واگرایی RSI: '+({BULLISH:'مثبت',BEARISH:'منفی',NONE:'شناسایی نشد'}[divergence.type]||'نامشخص');
               const action=document.createElement('button');action.type='button';action.textContent='نمایش روی نمودار بزرگ ↗';
               action.addEventListener('click',()=>{let opt=Array.from(symbol.options).find(item=>item.value===symbolValue);if(!opt){opt=document.createElement('option');opt.value=symbolValue;opt.textContent=symbolValue.replace(/USDT$/,'');symbol.appendChild(opt);}symbol.value=symbolValue;refresh(true);});
-              card.append(title,price,wave,fibonacci,div,action);return card;
+              card.append(title,mini,price,wave,fibonacci,div,action);return card;
             }
             async function refreshWaveWatchlist(){
               const symbols=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','LINKUSDT'];
