@@ -30,7 +30,7 @@ class LiveChartFrontendContractTests(unittest.TestCase):
         self.assertIn("const phase=String(", card_renderer)
         self.assertIn("waves=data.elliott_waves||{}", card_renderer)
         self.assertIn("const price=document.createElement('div')", card_renderer)
-        self.assertIn("drawMiniChart(mini,data,symbolValue)", card_renderer)
+        self.assertIn("drawMiniChart(mini,data)", card_renderer)
         self.assertIn("Number(bar.time)", card_renderer)
         self.assertNotIn("Date.parse(bar.time)", card_renderer)
 
