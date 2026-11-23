@@ -67,8 +67,9 @@ class LiveChartUiTests(unittest.TestCase):
 
     def test_chart_labels_use_collision_spacing_and_hide_minor_pivot_text(self):
         self.assertIn("minGap=26", self.source)
-        self.assertIn("point.x-lastWaveLabelX>=95", self.source)
         self.assertIn("rightLabels.forEach", self.source)
+        self.assertIn("const wavePoints=(data.wave_pivots||[]).slice(-6)", self.source)
+        self.assertIn("const labelY=Math.max(pad.top+16", self.source)
         self.assertNotIn("wavePoint?wavePoint.label:(p.kind==='LOW'?'کف':'سقف')", self.source)
 
     def test_manual_demo_tp_sl_are_populated_even_without_signal_levels(self):
