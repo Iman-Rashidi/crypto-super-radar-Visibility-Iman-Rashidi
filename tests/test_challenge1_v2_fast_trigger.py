@@ -54,6 +54,8 @@ class Challenge1V2FastTriggerTests(unittest.TestCase):
                 spread_fraction=0.0002,
                 fast_trigger_record=fast,
             )
+            ready, ready_reason = challenge1_v2.challenge1_v2_execution_evidence_ready(result)
+        self.assertTrue(ready, ready_reason)
         self.assertEqual(result["signal"], "LONG", result.get("reason"))
         self.assertTrue(result["fast_trigger_active"])
         self.assertEqual(result["challenge1_v2_evidence"]["setup_timeframe"], "5m")
