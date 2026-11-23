@@ -3128,7 +3128,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         )
         htf_futures = {
             timeframe: executor.submit(
-                binance_provider.candles, normalized_symbol, interval=timeframe, limit=180
+                binance_provider.candles, normalized_symbol, interval=timeframe, limit=500
             )
             for timeframe in ("1h", "4h", "1d", "1w", "1M")
         }
