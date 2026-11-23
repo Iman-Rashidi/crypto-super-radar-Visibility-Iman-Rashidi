@@ -5,6 +5,7 @@ import json
 import math
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -72,8 +73,16 @@ def build_fast_asset_scan_report(
     volume = _number((pair.get("volume") or {}).get("h24"))
     txns = pair.get("txns") if isinstance(pair.get("txns"), dict) else {}
     tx24 = txns.get("h24") if isinstance(txns.get("h24"), dict) else {}
+    tx1 = txns.get("h1") if isinstance(txns.get("h1"), dict) else {}
     buys = _number(tx24.get("buys"))
     sells = _number(tx24.get("sells"))
+    buys_1h = _number(tx1.get("buys"))
+    sells_1h = _number(tx1.get("sells"))
+    pair_created_ms = _number(pair.get("pairCreatedAt"))
+    pool_created_at_utc = (
+        datetime.fromtimestamp(pair_created_ms / 1000.0, tz=timezone.utc).isoformat()
+        if pair_created_ms is not None and pair_created_ms > 0 else None
+    )
     price = _number(pair.get("priceUsd"))
     changes = pair.get("priceChange") if isinstance(pair.get("priceChange"), dict) else {}
 
@@ -88,6 +97,9 @@ def build_fast_asset_scan_report(
         "volume_24h_usd": volume,
         "buys_24h": buys,
         "sells_24h": sells,
+        "buys_1h": buys_1h,
+        "sells_1h": sells_1h,
+        "pool_created_at_utc": pool_created_at_utc,
         "price_change_5m_pct": _number(changes.get("m5")),
         "price_change_1h_pct": _number(changes.get("h1")),
         "price_change_6h_pct": _number(changes.get("h6")),
