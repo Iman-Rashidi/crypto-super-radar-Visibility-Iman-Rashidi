@@ -8137,8 +8137,8 @@ async function loadBlofinInstruments(){
             fact(facts, 'مبنای شمارش معامله‌گران', m.unique_traders_24h_basis ?? item.unique_traders_24h_basis ?? 'ناموجود');
             fact(facts, 'سهم حجمی خرید (%)', m.buy_volume_share_pct ?? item.buy_volume_share_pct ?? 'ناموجود');
             fact(facts, 'لغزش تخمینی (bps)', m.estimated_slippage_bps ?? item.estimated_slippage_bps ?? (item.exit_slippage_evidence || {}).estimated_slippage_bps ?? 'ناموجود');
-            fact(facts, 'امتیاز فرصت (مومنتوم از ۱۰۰)', q.opportunity_score ?? item.opportunity_score ?? item.short_term_momentum_score ?? 'ناموجود');
-            fact(facts, 'امتیاز ریسک (از ۱۰۰، عدد بالاتر یعنی ریسک بیشتر)', q.risk_score ?? item.risk_score ?? 'ناموجود');
+            fact(facts, 'امتیاز فرصت (مومنتوم از ۱۰۰)', item.opportunity_score ?? item.short_term_momentum_score ?? q.opportunity_score ?? 'ناموجود');
+            fact(facts, 'امتیاز ریسک (از ۱۰۰، عدد بالاتر یعنی ریسک بیشتر)', item.risk_score ?? q.risk_score ?? 'ناموجود');
             card.appendChild(facts);
             const addresses = document.createElement('p'); addresses.className = 'candidate-meta';
             addresses.appendChild(el('span', 'Mint / Contract: ')); addresses.appendChild(el('code', item.token_address || '—'));
