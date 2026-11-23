@@ -33,6 +33,14 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn("limit=180", self.source)
         self.assertIn('query.get("interval", ["5m"])[0]', self.source)
 
+    def test_chart_has_independent_bootstrap_when_advanced_script_fails(self):
+        self.assertIn("window.__csrLiveChartPrimaryStarted=true", self.source)
+        self.assertIn("Independent chart bootstrap", self.source)
+        self.assertIn("if(window.__csrLiveChartPrimaryStarted)return", self.source)
+        self.assertIn("دریافت کندل بیش از ۷ ثانیه طول کشید", self.source)
+        self.assertIn("drawFallback(data)", self.source)
+        self.assertNotIn("refreshWaveWatchlist();\n            scheduleRefresh();\n            const waveWatchTimer=setInterval", self.source)
+
     def test_custom_symbol_search_fits_mobile_width(self):
         self.assertIn(".live-radar-custom-search{display:flex;flex-wrap:wrap", self.source)
         self.assertIn("max-width:100%;min-width:0;overflow:hidden", self.source)
