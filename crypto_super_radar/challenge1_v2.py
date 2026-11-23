@@ -430,7 +430,7 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
                 or regime.get("candle_open_utc") != evidence.get("context_1h_candle_open_utc")
         or regime.get("candle_open_utc_4h") != evidence.get("context_4h_candle_open_utc")
     ):
-        return False, "V2 1H regime or directly opposing 4H evidence is invalid."
+        return False, "V2 1H regime or timeframe identity evidence is invalid."
 
     wave = evidence.get("elliott_wave")
     if not isinstance(wave, Mapping):
