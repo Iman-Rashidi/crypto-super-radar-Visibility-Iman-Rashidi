@@ -1937,22 +1937,8 @@ pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#08101d;padding:12px
 .gem-detail{{padding:8px 10px;border:1px solid #20364d;border-radius:9px;font-size:.82rem;min-width:0}}
 .gem-detail strong{{display:block}}
 .gem-links{{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0}}
-.gem-links a,.watch-entry a{{color:#9feee4;overflow-wrap:anywhere}}
-.gem-add-watch{{width:auto;margin:8px 0 0;padding:9px 12px;background:linear-gradient(135deg,#167b70,#155e65)}}
-.watchlist-form{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0}}
-.watchlist-form label{{margin:0}}
-.watchlist-form .wide{{grid-column:1/-1}}
-.watchlist-form textarea{{width:100%;min-height:76px;padding:11px 13px;border:1px solid #334a63;border-radius:11px;background:#091522;color:var(--text);font:inherit}}
-.watchlist-entries{{display:grid;gap:11px;margin-top:14px}}
-.watch-entry{{padding:13px;border:1px solid #2b4660;border-radius:13px;background:#0a1725;min-width:0}}
-.watch-entry h3{{margin:0 0 4px;font-size:1rem}}
-.watch-entry label{{font-size:.82rem;margin-top:8px}}
-.watch-entry input,.watch-entry textarea{{margin-top:4px}}
-.watch-entry textarea{{width:100%;min-height:58px;padding:9px;border:1px solid #334a63;border-radius:9px;background:#091522;color:var(--text);font:inherit}}
-.watch-entry-actions{{display:flex;gap:8px;flex-wrap:wrap}}
-.watch-entry-actions button{{width:auto;padding:7px 11px;font-size:.82rem}}
-.watch-delete{{background:#6c2934}}
-@media(max-width:680px){{.exchange-links-grid{{grid-template-columns:1fr}}.watchlist-form{{grid-template-columns:1fr}}.watchlist-form .wide{{grid-column:auto}}.gem-facts,.gem-detail-grid{{grid-template-columns:1fr}}}}
+.gem-links a{{color:#9feee4;overflow-wrap:anywhere}}
+@media(max-width:680px){{.exchange-links-grid{{grid-template-columns:1fr}}.gem-facts,.gem-detail-grid{{grid-template-columns:1fr}}}}
 
 @media(max-width:680px){{.analysis-links-grid{{grid-template-columns:1fr}}}}
 .metric{{background:#0a1725;border:1px solid #263a53;border-radius:13px;padding:14px}}
@@ -2038,8 +2024,7 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
 <div id="radar-scan-overlay" role="status" aria-live="polite">
 <svg class="radar-svg" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="45" fill="#061522" stroke="#3b718c" stroke-width="1.5"/><circle cx="50" cy="50" r="32" fill="none" stroke="#28556d"/><circle cx="50" cy="50" r="18" fill="none" stroke="#28556d"/><path d="M5 50H95M50 5V95" stroke="#28556d" stroke-width="1"/><circle class="radar-wave" cx="50" cy="50" r="24" fill="none" stroke="#4eead0" stroke-width="2"/><circle class="radar-wave delay" cx="50" cy="50" r="24" fill="none" stroke="#60cfff" stroke-width="2"/><path class="radar-sweep" d="M50 50L50 5A45 45 0 0 1 89 28Z" fill="#36d9c055" stroke="#71f4e0" stroke-width="1"/><circle cx="50" cy="50" r="3" fill="#8fffe8"/><text x="50" y="57" text-anchor="middle" font-size="13">🐸</text></svg>
 <div style="flex:1;min-width:0"><strong id="radar-scan-title">رادار در حال اسکن بلاک‌چین...</strong><div class="muted" style="font-size:.8rem">دریافت و ارزیابی داده‌ها · وضعیت پژوهشی، بدون مجوز معامله</div><div class="radar-progress"></div></div>
-</div>{body}<nav id="radar-quick-jump" aria-label="دسترسی سریع"><a href="#gem-hunter-panel">🐸<span>شکار توکن</span></a><a href="#free-airdrop-radar">🎁<span>ایردراپ</span></a><a href="#futures-paper-bot">🤖<span>فیوچرز دمو</span></a><a href="#live-market-radar">📊<span>بازار و کندل</span></a><a href="#gem-hunter-watchlist">📈<span>واچ‌لیست سود</span></a></nav>
-<section id="gem-hunter-watchlist" class="panel" style="margin:18px 0;padding:16px;border:1px solid #28506a;border-radius:18px;background:var(--surface)">
+</div><section id="gem-hunter-watchlist" class="panel" style="margin:18px 0;padding:16px;border:1px solid #28506a;border-radius:18px;background:var(--surface)">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
     <div><h2 style="margin:0">📈 واچ‌لیست دائمی و راستی‌آزمایی سود (مبنای ۱۰۰ یورو)</h2><p class="muted">قیمت اولیه و زمان اولین کشف ثابت می‌مانند؛ ارزش‌ها بر پایه تغییر نسبی قیمت و بدون احتساب کارمزد/مالیات هستند.</p></div>
     <button type="button" id="gem-watchlist-refresh">↻ به‌روزرسانی واچ‌لیست</button>
@@ -2089,7 +2074,8 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
  btn.addEventListener('click',load);
  load();
 }})();
-</script><script>
+</script>{body}<nav id="radar-quick-jump" aria-label="دسترسی سریع"><a href="#gem-hunter-panel">🐸<span>شکار توکن</span></a><a href="#free-airdrop-radar">🎁<span>ایردراپ</span></a><a href="#futures-paper-bot">🤖<span>فیوچرز دمو</span></a><a href="#live-market-radar">📊<span>بازار و کندل</span></a><a href="#gem-hunter-watchlist">📈<span>واچ‌لیست سود</span></a></nav>
+<script>
 (function(){{
   const source=document.getElementById('crypto-market-search-activity');
   if(!source)return;
