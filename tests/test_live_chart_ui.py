@@ -12,7 +12,7 @@ class LiveChartUiTests(unittest.TestCase):
         cls.source = SOURCE.read_text(encoding="utf-8")
 
     def test_main_chart_is_mobile_readable(self):
-        self.assertIn("#live-candle-chart{display:block;width:100%;min-width:820px;height:480px}", self.source)
+        self.assertIn("#live-candle-chart{display:block;width:100%;min-width:0;height:500px;touch-action:pan-y;cursor:grab}", self.source)
         self.assertIn('width="1440" height="560"', self.source)
         self.assertIn("@media(max-width:600px)", self.source)
 
@@ -39,7 +39,7 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn(".live-wave-grid{grid-template-columns:1fr}", self.source)
 
     def test_future_projection_chart_has_one_scored_scenario_and_exact_price_axis(self):
-        for horizon in ("15m", "1h", "4h", "1d"):
+        for horizon in ("15m", "1h", "4h", "1d", "1w", "1mo", "6mo", "1y"):
             self.assertIn('data-forecast-horizon="'+horizon+'"', self.source)
         self.assertIn('id="future-forecast-chart"', self.source)
         self.assertIn("function drawFutureForecast(data,horizon)", self.source)
@@ -56,8 +56,18 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn("مسیر واحد", self.source)
         self.assertNotIn("scenario(bull", self.source)
         self.assertNotIn("scenario(bear", self.source)
-        self.assertIn("۲۰ کندل واقعی اخیر", self.source)
+        self.assertIn("const horizonConfig={", self.source)
+        self.assertIn("ATR کلان", self.source)
         self.assertIn("نه پیش‌بینی قطعی", self.source)
+
+    def test_touch_pan_zoom_and_return_to_live_controls_are_present(self):
+        for control in ("live-chart-zoom-in", "live-chart-zoom-out", "live-chart-now", "live-chart-time-slider", "forecast-chart-zoom-in", "forecast-chart-zoom-out"):
+            self.assertIn('id="' + control + '"', self.source)
+        for event in ("touchstart", "touchmove", "touchend", "mousedown", "mousemove", "wheel"):
+            self.assertIn("addEventListener(\'" + event + "\'", self.source)
+        self.assertIn("pinch", self.source.lower()) if "pinch" in self.source.lower() else self.assertIn("lastDistance", self.source)
+        self.assertIn("height:500px", self.source)
+        self.assertIn("height:420px", self.source)
 
     def test_future_scenario_uses_wave_volume_candles_rsi_and_moving_average_evidence(self):
         for evidence in ("ساختار امواج", "حجم خرید و فروش", "الگوی کندلی", "واگرایی RSI", "شیب میانگین متحرک"):
