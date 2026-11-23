@@ -60,6 +60,66 @@ class GemHunterDeepAnalysisTests(unittest.TestCase):
         self.assertEqual(report["market"]["price_usd"], "NOT_AVAILABLE")
         self.assertEqual(report["price_levels"], "NOT_AVAILABLE")
 
+    @patch("crypto_super_radar.web_app._deep_analysis_json")
+    def test_symbol_lookup_resolves_highest_liquidity_mint_for_rugcheck(self, fetch):
+        dex = {
+            "pairs": [
+                {
+                    "chainId": "solana",
+                    "baseToken": {"address": "BONK_LOW_MINT", "symbol": "BONK"},
+                    "priceUsd": "0.00001",
+                    "liquidity": {"usd": 12000},
+                    "volume": {"h24": 100000},
+                    "txns": {"h24": {"buys": 100, "sells": 80}},
+                },
+                {
+                    "chainId": "solana",
+                    "baseToken": {"address": "BONK_HIGH_MINT", "symbol": "BONK"},
+                    "priceUsd": "0.00002",
+                    "liquidity": {"usd": 95000},
+                    "volume": {"h24": 900000},
+                    "txns": {"h24": {"buys": 900, "sells": 700}},
+                },
+            ]
+        }
+        rugcheck = {
+            "mintAuthority": None,
+            "freezeAuthority": None,
+            "score_normalised": 120,
+            "totalHolders": 25000,
+            "topHolders": [{"pct": 4.2}, {"pct": 3.1}],
+            "markets": [{"lp": {"lpLockedPct": 98.5}}],
+            "risks": [],
+        }
+        fetch.side_effect = [dex, rugcheck]
+        report = build_gem_hunter_deep_analysis("solana", "", "BONK")
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(report["market"]["price_usd"], 0.00002)
+        self.assertEqual(report["market"]["liquidity_usd"], 95000)
+        self.assertEqual(report["market"]["volume_24h_usd"], 900000)
+        self.assertEqual(report["security"]["provider"], "RUGCHECK")
+        self.assertEqual(report["security"]["lp_locked_pct"], 98.5)
+        self.assertEqual(report["holders"]["total"], 25000)
+        self.assertIn("BONK_HIGH_MINT", fetch.call_args_list[1].args[0])
+        self.assertTrue(fetch.call_args_list[0].args[0].endswith("/latest/dex/search?q=BONK"))
+        self.assertTrue(fetch.call_args_list[1].args[0].endswith(
+            "/v1/tokens/BONK_HIGH_MINT/report/summary"
+        ))
+
+    @patch("urllib.request.urlopen")
+    def test_provider_http_requests_send_json_and_browser_user_agent(self, urlopen):
+        from unittest.mock import MagicMock
+        from crypto_super_radar.web_app import _deep_analysis_json
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"ok": true}'
+        response.__enter__.return_value = response
+        urlopen.return_value = response
+        self.assertEqual(_deep_analysis_json("https://api.dexscreener.com/test"), {"ok": True})
+        request = urlopen.call_args.args[0]
+        self.assertIn("Mozilla/5.0", request.get_header("User-agent"))
+        self.assertEqual(request.get_header("Accept"), "application/json")
+
     def test_invalid_request_is_rejected_and_no_trade(self):
         report = build_gem_hunter_deep_analysis("unknown", "", "")
         self.assertEqual(report["status"], "INVALID_INPUT")
