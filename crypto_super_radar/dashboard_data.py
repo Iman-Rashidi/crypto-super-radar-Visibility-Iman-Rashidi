@@ -398,3 +398,27 @@ def market_board_dataframe(items: Any) -> pd.DataFrame:
         "نماد", "تغییر ۲۴ساعته (%)", "حجم ۲۴ساعته (USD)",
         "جهت بازار", "شتاب حجم (برابر)", "وضعیت داده",
     ])
+
+def gem_hunter_watchlist_dataframe(payload: Any) -> pd.DataFrame:
+    """Build the permanent €100 performance ledger view for the mobile dashboard."""
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    rows = []
+    for item in items if isinstance(items, list) else []:
+        rows.append({
+            "نام و نماد": f"{item.get('token_name') or 'نامشخص'} ({item.get('token_symbol') or '?'})",
+            "شبکه": item.get("chain"),
+            "تعداد شکار": item.get("detection_count"),
+            "اولین کشف UTC": item.get("first_detected_utc"),
+            "قیمت اولیه USD": item.get("initial_price_usd"),
+            "قیمت فعلی USD": item.get("latest_price_usd"),
+            "سقف USD": item.get("peak_price_usd"),
+            "سود/زیان درصد": item.get("current_change_pct"),
+            "ارزش فعلی €100": item.get("eur_100_current_value"),
+            "سود خالص یورو": item.get("eur_100_net_profit_eur"),
+            "سود سقف یورو": item.get("eur_100_peak_profit_eur"),
+            "آدرس قرارداد": item.get("token_address"),
+        })
+    return pd.DataFrame(rows, columns=["نام و نماد", "شبکه", "تعداد شکار", "اولین کشف UTC",
+        "قیمت اولیه USD", "قیمت فعلی USD", "سقف USD", "سود/زیان درصد",
+        "ارزش فعلی €100", "سود خالص یورو", "سود سقف یورو", "آدرس قرارداد"])
+
