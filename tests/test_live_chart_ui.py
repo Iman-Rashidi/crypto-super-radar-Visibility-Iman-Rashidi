@@ -38,15 +38,32 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn(".live-wave-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}", self.source)
         self.assertIn(".live-wave-grid{grid-template-columns:1fr}", self.source)
 
-    def test_future_projection_chart_has_four_selectable_horizons_and_two_scenarios(self):
+    def test_future_projection_chart_has_one_scored_scenario_and_exact_price_axis(self):
         for horizon in ("15m", "1h", "4h", "1d"):
             self.assertIn('data-forecast-horizon="'+horizon+'"', self.source)
         self.assertIn('id="future-forecast-chart"', self.source)
         self.assertIn("function drawFutureForecast(data,horizon)", self.source)
-        self.assertIn("scenario(bull,'#32d99a',[7,6])", self.source)
-        self.assertIn("scenario(bear,'#ff647b',[7,6])", self.source)
+        self.assertIn("const totalScore=scoreParts.reduce", self.source)
+        self.assertIn("const color=bullish?'#32d99a':'#ff647b'", self.source)
+        self.assertIn("ctx.fillText(fmt(value),w-right+9,yy+4)", self.source)
+        self.assertIn("'هدف '+fmt(target)", self.source)
+        self.assertIn("مسیر واحد", self.source)
+        self.assertNotIn("scenario(bull", self.source)
+        self.assertNotIn("scenario(bear", self.source)
         self.assertIn("۲۰ کندل واقعی اخیر", self.source)
         self.assertIn("نه پیش‌بینی قطعی", self.source)
+
+    def test_future_scenario_uses_wave_volume_candles_rsi_and_moving_average_evidence(self):
+        for evidence in ("ساختار امواج", "حجم خرید و فروش", "الگوی کندلی", "واگرایی RSI", "شیب میانگین متحرک"):
+            self.assertIn(evidence, self.source)
+        self.assertIn("const buyVolume=", self.source)
+        self.assertIn("const sellVolume=", self.source)
+        self.assertIn("const maSlope=", self.source)
+
+    def test_wave_pivots_have_full_persian_labels_and_prices(self):
+        for label in ("مبدأ موج", "سقف موج ۱", "کف اصلاح ۲", "سقف موج ۳", "کف اصلاح ۴", "سقف موج ۵"):
+            self.assertIn(label, self.source)
+        self.assertIn("+' · '+number(p.price)", self.source)
 
     def test_chart_labels_use_collision_spacing_and_hide_minor_pivot_text(self):
         self.assertIn("minGap=26", self.source)
