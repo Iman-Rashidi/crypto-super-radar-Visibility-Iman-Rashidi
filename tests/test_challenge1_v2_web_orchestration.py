@@ -599,5 +599,60 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         v2_worker.assert_not_called()
 
 
+    def test_confirmed_dashboard_fast_trigger_is_sent_to_v2_ai_reviewers(self):
+        now_ms = int(time.time() * 1000)
+        signal_time = pd.Timestamp(now_ms, unit="ms", tz="UTC").floor("5min") - pd.Timedelta(minutes=5)
+        fast_id = f"challenge1-v4:BTC-USDT:5m:{signal_time.isoformat()}"
+        fast = {
+            "signal": "LONG", "instrument_id": "BTC-USDT",
+            "signal_id": fast_id, "signal_bar_open_utc": signal_time.isoformat(),
+            "reason_fa": "موج صعودی ۵ دقیقه‌ای تأیید شد.",
+        }
+        fast_path = {
+            "signal": "LONG", "signal_id": f"challenge1-v2-fast:BTC-USDT:5m:{signal_time.isoformat()}:LONG",
+            "instrument_id": "BTC-USDT", "execution_profile": "CHALLENGE_1_V2",
+            "entry": 100.0, "stop_loss": 98.5, "take_profit": 102.25,
+            "gross_rr": 1.5, "confidence_score": 100.0,
+            "score_parts": {
+                "confirmed_5m_pattern": 35, "confirmed_5m_elliott_wave": 35,
+                "completed_15m_ema21_alignment": 20, "btc_master_alignment": 10,
+            },
+            "regime": {"status": "RANGE", "direction": "NONE"},
+            "signal_candle_open_utc": signal_time.isoformat(),
+            "challenge1_v2_evidence": {
+                "decision_engine_version": "CHALLENGE_1_V2_FAST_5M_15M_ELLIOTT",
+                "signal_id": f"challenge1-v2-fast:BTC-USDT:5m:{signal_time.isoformat()}:LONG",
+                "instrument_id": "BTC-USDT", "setup_timeframe": "5m",
+                "entry_execution_timeframe": "15m",
+                "context_timeframes": ["15m", "1H", "4H"],
+                "higher_timeframes_used": True, "completed_candles_only": True,
+                "signal_candle_open_utc": signal_time.isoformat(),
+            },
+            "orders_submitted": False, "fast_trigger_active": True,
+        }
+        approved = {
+            "approved": True, "status": "APPROVED",
+            "ai_review": {"status": "APPROVED"},
+            "second_ai_review": {"status": "APPROVED"},
+            "ai_reviews": [{"reviewer_id": "nemotron"}, {"reviewer_id": "groq"}],
+            "ai_consensus": {"status": "APPROVED_BY_BOTH"},
+        }
+        client = FakeBloFinReadOnly(now_ms=now_ms)
+        with (
+            patch.object(v2_orchestration, "analyze_signal", return_value={"signal": "NO_TRADE", "orders_submitted": False}),
+            patch.object(v2_orchestration, "analyze_blofin_challenge1", return_value=fast),
+            patch.object(v2_orchestration, "build_fast_trigger_signal", return_value=fast_path),
+            patch.object(v2_orchestration, "challenge1_v2_execution_evidence_ready", return_value=(True, "ok")),
+            patch.object(v2_orchestration, "run_challenge1_v2_supervisor_reviews", return_value=approved) as reviewers,
+        ):
+            result = v2_orchestration.analyze_challenge1_v2_market(client, "BTC-USDT", local_now_ms=now_ms)
+        reviewers.assert_called_once()
+        self.assertEqual(result["signal"], "LONG")
+        self.assertTrue(result["fast_trigger_active"])
+        self.assertEqual(result["market_data_proof"]["signal_timeframe"], "5m")
+        self.assertTrue(result["fast_trigger_diagnostic"]["fast_path_selected"])
+        self.assertFalse(result["orders_submitted"])
+
+
 if __name__ == "__main__":
     unittest.main()
