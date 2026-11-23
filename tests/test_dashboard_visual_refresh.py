@@ -33,7 +33,8 @@ class DashboardVisualRefreshTests(unittest.TestCase):
         for marker in ("gem-score-panel", "gem-score-fill ' + kind",
                        "scoreLine('امتیاز فرصت'", "scoreLine('امتیاز ریسک'", "gem-visual-badges",
                        "net-solana", "net-base", "net-ethereum",
-                       "gem-copy-success", "کپی آدرس قرارداد"):
+                       "gem-copy-success", "کپی آدرس قرارداد", "pumpPhase", "phase-start",
+                       "gem-wave-panel:not([hidden])", "scoreValue(value)"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, source)
 
