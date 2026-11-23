@@ -3105,13 +3105,13 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
     try:
         binance_future = executor.submit(
             binance_provider.candles,
-            normalized_symbol, interval=normalized_interval, limit=500,
+            normalized_symbol, interval=normalized_interval, limit=180,
         )
         bybit_future = None
         if normalized_interval in BYBIT_INTERVAL and normalized_interval != "1s":
             bybit_future = executor.submit(
                 bybit_provider.candles,
-                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=500,
+                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=180,
             )
         else:
             bybit_error = "Bybit Spot does not provide 1-second candles; independent candle validation is unavailable on this interval."
@@ -3132,7 +3132,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             )
             htf_futures = {
                 timeframe: executor.submit(
-                    binance_provider.candles, normalized_symbol, interval=timeframe, limit=500
+                    binance_provider.candles, normalized_symbol, interval=timeframe, limit=180
                 )
                 for timeframe in ("1h", "4h", "1d", "1w", "1M")
             }
@@ -3144,10 +3144,10 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             )
 
         # Binance candles are mandatory for the chart. Other feeds fail independently.
-        binance_frame = binance_future.result(timeout=1.5 if normalized_interval == "1s" else 5.0)
+        binance_frame = binance_future.result(timeout=1.5 if normalized_interval == "1s" else 2.7)
         if bybit_future is not None:
             try:
-                bybit_frame = bybit_future.result(timeout=max(0.05, 5.0 - (time.monotonic() - exchange_started)))
+                bybit_frame = bybit_future.result(timeout=max(0.05, 2.9 - (time.monotonic() - exchange_started)))
             except Exception as exc:
                 bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
 
@@ -3171,7 +3171,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
                 higher_timeframes[timeframe] = [
                     {"open": float(row.open), "high": float(row.high), "low": float(row.low),
                      "close": float(row.close), "volume": float(row.volume)}
-                    for row in frame.tail(500).itertuples()
+                    for row in frame.tail(180).itertuples()
                 ]
             except Exception as exc:
                 higher_timeframe_errors[timeframe] = f"{type(exc).__name__}: {str(exc)[:100]}"
@@ -9885,7 +9885,7 @@ async function loadBlofinInstruments(){
             async function refresh(force){
               if(busy)return;busy=true;button.disabled=true;retryButton.hidden=true;status.textContent='در حال دریافت کندل‌های زنده...';
               const controller=new AbortController();
-              const requestTimeout=setTimeout(()=>controller.abort(),8000);
+              const requestTimeout=setTimeout(()=>controller.abort(),7000);
               try{
                 const url='/api/live-market-radar?symbol='+encodeURIComponent(symbol.value)+'&interval='+encodeURIComponent(interval.value)+(force?'&refresh=1':'');
                 const response=await fetch(url,{cache:'no-store',signal:controller.signal});const data=await response.json();
@@ -9950,7 +9950,7 @@ async function loadBlofinInstruments(){
                 }
               }catch(error){
                 const timedOut=error&&error.name==='AbortError';
-                status.textContent=timedOut?'مهلت دریافت ۸ ثانیه‌ای تمام شد. اتصال یا منبع داده پاسخ نداد؛ سیگنال تازه صادر نمی‌شود.':'دریافت کندل ناموفق بود: '+String(error.message||error)+' · سیگنال تازه صادر نمی‌شود.';
+                status.textContent=timedOut?'مهلت دریافت ۷ ثانیه‌ای تمام شد. اتصال یا منبع داده پاسخ نداد؛ سیگنال تازه صادر نمی‌شود.':'دریافت کندل ناموفق بود: '+String(error.message||error)+' · سیگنال تازه صادر نمی‌شود.';
                 retryButton.hidden=false;
                 draw({candles:[]});
                 fields.action.textContent='نامشخص';
