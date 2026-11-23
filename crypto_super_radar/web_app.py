@@ -3600,7 +3600,18 @@ def _scan_queue_worker():
                 elif task["route"] == "/futures-paper-bot/tick":
                     _run_futures_paper_tick(job_id, task["asset"])
                 else:
-                    _run_scan(job_id, task["asset"], task["headline"], task["social_post"])
+                    finished, _ = run_with_hard_timeout(
+                        lambda: _run_scan(job_id, task["asset"], task["headline"], task["social_post"]),
+                        timeout_seconds=14.5,
+                    )
+                    if not finished:
+                        with LOCK:
+                            current = JOBS.get(job_id) or {}
+                            if current.get("status") == "running":
+                                JOBS[job_id] = {**current, "status": "failed",
+                                                "error": "SCAN_TIMEOUT_15S",
+                                                "message_fa": "اسکن در مهلت سخت ۱۵ ثانیه‌ای متوقف شد؛ به داشبورد بازگرد.",
+                                                "finished_at_utc": datetime.now(timezone.utc).isoformat()}
         except Exception as exc:
             with LOCK:
                 JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
