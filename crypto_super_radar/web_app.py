@@ -10084,7 +10084,14 @@ async function loadBlofinInstruments(){
         if length <= 0 or length > 16_384:
             return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
         try:
-            form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
+            raw_body = self.rfile.read(length).decode("utf-8", errors="replace")
+            if api_jobs_request and "application/json" in self.headers.get("Content-Type", "").lower():
+                api_payload = json.loads(raw_body)
+                if not isinstance(api_payload, dict):
+                    raise ValueError("JSON request body must be an object")
+                form = {str(key): [str(value)] for key, value in api_payload.items() if value is not None}
+            else:
+                form = parse_qs(raw_body)
             if route == "/api/blofin/demo/v2-autopilot/run-once":
                 if (
                     not origin
