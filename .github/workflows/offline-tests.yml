@@ -80,6 +80,7 @@ jobs:
               test_challenge1_strategy.py \
               test_ai_second_opinion.py \
               test_web_app.py \
+              test_dashboard_visual_refresh.py \
               test_blofin_demo_executor.py \
               test_challenge1_executor.py \
               test_notion_event_sync.py \
