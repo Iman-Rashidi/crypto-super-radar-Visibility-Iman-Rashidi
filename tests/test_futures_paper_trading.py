@@ -270,10 +270,6 @@ class FuturesPaperBotTests(unittest.TestCase):
         self.assertEqual(review["status"], "VETO")
         self.assertFalse(review["paper_entry_eligible"])
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_http_418_uses_okx_and_bybit_fallback_and_reaches_ai(self):
         from crypto_super_radar.providers import PerpetualMarketProvider
 
@@ -324,3 +320,7 @@ if __name__ == "__main__":
         self.assertTrue(ai_calls, "AI reviewer must be reached after validated fallback data")
         self.assertIn(result["status"], {"OPENED", "AI_BLOCKED", "NO_TRADE"})
         self.assertFalse(result.get("orders_submitted", False) and result.get("mode") != "FUTURES_PAPER_ONLY")
+
+
+if __name__ == "__main__":
+    unittest.main()
