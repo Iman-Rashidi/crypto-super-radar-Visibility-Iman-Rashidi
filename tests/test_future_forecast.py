@@ -26,7 +26,9 @@ class FutureForecastTests(unittest.TestCase):
             higher_timeframes={"1h": candles(100), "4h": candles(99)},
             news=[{"title": "BTC asset headline", "source": "CryptoCompare", "sentiment": "POSITIVE"}],
         )
-        self.assertEqual(result["scenario"], "BULLISH")\n        self.assertEqual(result["trade_permission"], "NO_TRADE")\n        self.assertFalse(result["orders_submitted"])
+        self.assertEqual(result["scenario"], "BULLISH")
+        self.assertEqual(result["trade_permission"], "NO_TRADE")
+        self.assertFalse(result["orders_submitted"])
         self.assertGreater(result["confidence_pct"], 50)
         self.assertEqual(len(result["confidence_band"]), 12)
         self.assertIsNotNone(result["invalidation_price"])
@@ -40,7 +42,9 @@ class FutureForecastTests(unittest.TestCase):
 
     def test_missing_candles_fail_closed(self):
         result = build_future_forecast([], symbol="BTCUSDT", interval="5m")
-        self.assertEqual(result["status"], "INSUFFICIENT_DATA")\n        self.assertEqual(result["trade_permission"], "NO_TRADE")\n        self.assertFalse(result["orders_submitted"])
+        self.assertEqual(result["status"], "INSUFFICIENT_DATA")
+        self.assertEqual(result["trade_permission"], "NO_TRADE")
+        self.assertFalse(result["orders_submitted"])
         self.assertIsNone(result["confidence_pct"])
         self.assertEqual(result["confidence_band"], [])
 

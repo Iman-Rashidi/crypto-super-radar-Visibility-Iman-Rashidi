@@ -45,7 +45,8 @@ def build_future_forecast(
     bars = [row for row in candles if isinstance(row, dict) and _finite(row.get("close")) is not None]
     if len(bars) < 15:
         return {
-            "status": "INSUFFICIENT_DATA", "scenario": "NEUTRAL", "confidence_pct": None,\n            "trade_permission": "NO_TRADE", "orders_submitted": False,
+            "status": "INSUFFICIENT_DATA", "scenario": "NEUTRAL", "confidence_pct": None,
+            "trade_permission": "NO_TRADE", "orders_submitted": False,
             "symbol": symbol, "whale_summary_fa": "داده تأییدشده موجود نیست",
             "news_summary_fa": "داده تأییدشده موجود نیست", "confidence_band": [],
             "bullish_start": None, "stagnation_start": None, "invalidation_price": None,
