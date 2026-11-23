@@ -6947,9 +6947,17 @@ def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = 
     pairs = dex.get("pairs", []) if isinstance(dex, dict) else []
     pairs = [p for p in pairs if isinstance(p, dict) and str(p.get("chainId","")).lower() == chain]
     if symbol and not address:
-        # Symbol lookup resolves only exact base-token matches; priceUsd then
-        # belongs to the requested token rather than its quote asset.
+        # Exact base-symbol matching avoids interpreting a quote token's USD price
+        # as the requested token. For well-known Solana assets, pin the mint to
+        # the canonical address so a copycat with inflated liquidity cannot win.
         pairs = [p for p in pairs if symbol == str((p.get("baseToken") or {}).get("symbol","")).upper()]
+        canonical_solana_mints = {
+            "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+            "WIF": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+        }
+        canonical_mint = canonical_solana_mints.get(symbol) if chain == "solana" else None
+        if canonical_mint:
+            pairs = [p for p in pairs if str((p.get("baseToken") or {}).get("address","")).lower() == canonical_mint.lower()]
     if address:
         matched = [p for p in pairs if address.lower() in {
             str((p.get("baseToken") or {}).get("address","")).lower(),
