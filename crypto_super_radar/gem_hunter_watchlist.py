@@ -244,11 +244,9 @@ def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=No
                 else:
                     sent += 1
             except Exception:
-                with db:
-                    db.execute(
-                        f"DELETE FROM {PROFIT_ALERT_TABLE} WHERE token_id=? AND threshold_pct=? AND sent_at_utc IS NULL",
-                        (str(item["token_id"]), milestone),
-                    )
+                # Keep the unique reservation after an ambiguous network failure.
+                # The shared Telegram outbox intentionally does not retry FAILED
+                # events, avoiding duplicate DMs if Telegram accepted a timed-out send.
                 errors += 1
     return {"status": "OK" if errors == 0 else "PARTIAL",
             "sent": sent, "duplicates": duplicates, "errors": errors}
