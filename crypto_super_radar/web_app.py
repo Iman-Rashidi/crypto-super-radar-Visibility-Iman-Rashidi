@@ -35,7 +35,7 @@ from .gem_hunter_technical import enrich_discovery_candidates_with_technicals
 from .gem_hunter_pool_trades import enrich_discovery_candidates_with_pool_trades
 from .gem_hunter_market_validation import reconcile_discovery_candidates
 from .gem_hunter_security import screen_discovery_candidates
-from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
+from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates, qualified_early_wave_candidates
 from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
 from .gem_hunter_v3 import process_gem_hunter_v3_candidates
 from .fast_asset_scan import build_fast_asset_scan_report, run_with_hard_timeout
@@ -1366,7 +1366,10 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     evaluation_record_count = len(evaluation_records)
     unassessed_count = max(0, discovered_count - evaluation_record_count)
     incomplete_evaluation_count = max(0, evaluation_record_count - complete_evaluation_count)
-    qualified = public_buy_candidates(raw_candidates, limit=limit)
+    qualified = qualified_early_wave_candidates(raw_candidates, limit=limit)
+    warning_only = [dict(item, qualification_status="WATCH_ONLY_HIGH_RISK", trade_authorization="NO_TRADE")
+                    for item in raw_candidates if isinstance(item, dict)
+                    and item.get("qualification_status") == "WATCH_ONLY_HIGH_RISK"]
 
     if qualified:
         signal_status = "BUY_FOUND"
@@ -1405,6 +1408,8 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result.pop("trade_authorization", None)
     result.pop("available_candidate_count", None)
     result["candidates"] = qualified
+    result["warning_only_candidates"] = warning_only
+    result["trade_authorization"] = "NO_TRADE"
     result["gem_hunter_v3_tier1_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "TIER_1_VERIFIED_GEM")
     result["gem_hunter_v3_tier2_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "TIER_2_EARLY_ALPHA")
     result["gem_hunter_v3_review_count"] = sum(1 for item in raw_candidates if item.get("gem_hunter_v3_status") == "REVIEW_REQUIRED")
@@ -1422,7 +1427,9 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     result["complete_evaluation_count"] = complete_evaluation_count
     result["incomplete_evaluation_count"] = incomplete_evaluation_count
     result["unassessed_candidate_count"] = unassessed_count
-    result["qualified_buy_count"] = len(qualified)
+    result["qualified_buy_count"] = 0
+    result["qualified_early_wave_count"] = len(qualified)
+    result["warning_only_count"] = len(warning_only)
     result["qualification_engine_status"] = engine_status
     result["signal_status"] = signal_status
     result["diagnostic_fa"] = diagnostic_fa

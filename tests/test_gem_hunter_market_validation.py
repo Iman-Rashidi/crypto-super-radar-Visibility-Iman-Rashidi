@@ -133,5 +133,16 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         self.assertNotEqual(second[1]["market_reconciliation"]["status"], "NOT_CHECKED_BUDGET")
 
 
+
+    def test_highest_liquidity_pool_is_selected_as_reference(self):
+        payload = {"pairs": [
+            {"chainId":"base","pairAddress":"0x"+"2"*40,"baseToken":{"address":TOKEN},"quoteToken":{"address":WETH},"liquidity":{"usd":10000},"volume":{"h24":20000},"priceUsd":"0.01"},
+            {"chainId":"base","pairAddress":"0x"+"3"*40,"baseToken":{"address":TOKEN},"quoteToken":{"address":WETH},"liquidity":{"usd":90000},"volume":{"h24":200000},"priceUsd":"0.012"},
+        ]}
+        result = validation._dex_snapshot_from_payload(payload, "base", TOKEN, POOL)
+        self.assertEqual(result["pool_address"], "0x"+"3"*40)
+        self.assertEqual(result["liquidity_usd"], 90000)
+        self.assertEqual(result["price_usd"], 0.012)
+
 if __name__ == "__main__":
     unittest.main()

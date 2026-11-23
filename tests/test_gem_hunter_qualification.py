@@ -6,6 +6,8 @@ from crypto_super_radar.gem_hunter_qualification import (
     FILTER_IDS,
     is_public_buy_candidate,
     public_buy_candidates,
+    research_qualification_status,
+    qualified_early_wave_candidates,
 )
 
 
@@ -181,6 +183,27 @@ class GemHunterQualificationTests(unittest.TestCase):
         item["qualification"]["market_data_sources"] = ["single_provider"]
         self.assertFalse(is_public_buy_candidate(item, now=NOW))
 
+
+
+    def test_fiona_phase_three_risk_95_is_warning_only_and_excluded_from_shortlist(self):
+        fiona = {"pump_phase_fa": "🔴 فاز ۳: سقف فرسودگی / خطر دامپ", "risk_score": 95,
+                 "security_evidence": {"status": "PASS"}, "trade_authorization": "NO_TRADE",
+                 "opportunity_score": 99}
+        self.assertEqual(research_qualification_status(fiona), "WATCH_ONLY_HIGH_RISK")
+        self.assertEqual(qualified_early_wave_candidates([fiona]), [])
+
+    def test_phase_one_and_two_risk_55_are_research_qualified_without_trade_permission(self):
+        for phase in ("🟢 فاز ۱: انباشت / شروع موج", "🟡 فاز ۲: ادامه صعود سالم"):
+            item = {"pump_phase_fa": phase, "risk_score": 55,
+                    "security_evidence": {"status": "PASS"}, "trade_authorization": "NO_TRADE"}
+            self.assertEqual(research_qualification_status(item), "QUALIFIED_EARLY_WAVE")
+            result = qualified_early_wave_candidates([item])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["trade_authorization"], "NO_TRADE")
+
+    def test_risk_over_75_and_security_fail_are_watch_only(self):
+        self.assertEqual(research_qualification_status({"pump_phase_fa":"فاز ۱","risk_score":76,"security_evidence":{"status":"PASS"}}), "WATCH_ONLY_HIGH_RISK")
+        self.assertEqual(research_qualification_status({"pump_phase_fa":"فاز ۲","risk_score":55,"security_evidence":{"status":"FAIL"}}), "WATCH_ONLY_HIGH_RISK")
 
 if __name__ == "__main__":
     unittest.main()

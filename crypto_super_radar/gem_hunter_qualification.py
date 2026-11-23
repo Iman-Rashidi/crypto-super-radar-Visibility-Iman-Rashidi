@@ -285,3 +285,39 @@ def public_buy_candidates(candidates: Any, *, limit: int = 20,
         reverse=True,
     )
     return qualified[:limit]
+
+
+EARLY_WAVE_PHASE_MARKERS = ("فاز ۱", "فاز ۲", "فاز 1", "فاز 2", "phase 1", "phase 2", "انباشت", "شروع موج", "ادامه صعود سالم", "میانه موج صعودی", "early ignition")
+
+def research_qualification_status(candidate: Any) -> str:
+    """Research-only eligibility; this never grants trade authorization."""
+    if not isinstance(candidate, Mapping):
+        return "WATCH_ONLY_HIGH_RISK"
+    pump = candidate.get("pump_dump_analysis") or {}
+    phase = str(candidate.get("pump_phase_fa") or pump.get("pump_phase_fa") or candidate.get("pump_phase") or "").lower()
+    risk_value = candidate.get("risk_score")
+    if risk_value is None:
+        risk_value = (candidate.get("qualification") or {}).get("risk_score")
+    risk = _finite_number(risk_value)
+    security = candidate.get("security_evidence") or {}
+    security_status = str(security.get("status") or candidate.get("security_status") or "").upper()
+    phase3 = any(x in phase for x in ("فاز ۳", "فاز 3", "phase 3", "خطر دامپ", "سقف فرسودگی"))
+    early = any(x in phase for x in EARLY_WAVE_PHASE_MARKERS)
+    if phase3 or (risk is not None and risk > 75) or security_status == "FAIL":
+        return "WATCH_ONLY_HIGH_RISK"
+    if early and risk is not None and risk <= 70 and security_status in {"PASS", "UNKNOWN", ""}:
+        return "QUALIFIED_EARLY_WAVE"
+    return "WATCH_ONLY_HIGH_RISK"
+
+def qualified_early_wave_candidates(candidates: Any, *, limit: int = 20) -> list[dict[str, Any]]:
+    if not isinstance(candidates, list):
+        return []
+    rows = []
+    for row in candidates:
+        if isinstance(row, Mapping) and research_qualification_status(row) == "QUALIFIED_EARLY_WAVE":
+            item = dict(row)
+            item["qualification_status"] = "QUALIFIED_EARLY_WAVE"
+            item["trade_authorization"] = "NO_TRADE"
+            rows.append(item)
+    rows.sort(key=lambda x: (_finite_number(x.get("opportunity_score")) or 0.0, -(_finite_number(x.get("risk_score")) or 100.0)), reverse=True)
+    return rows[:max(1, min(int(limit), 50))]

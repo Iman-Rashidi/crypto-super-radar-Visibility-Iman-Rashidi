@@ -157,5 +157,12 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertEqual(retry["duplicates"], 1)
         retry_client.post.assert_not_called()
 
+
+    def test_phase_three_risk_95_never_enters_eur_100_watchlist(self):
+        item=self.candidate(pump_phase_fa="🔴 فاز ۳: سقف فرسودگی / خطر دامپ",risk_score=95,
+                            qualification_status="WATCH_ONLY_HIGH_RISK")
+        self.assertFalse(is_watchlist_eligible(item))
+        self.assertEqual(record_watchlist_candidates(self.db,[item]),0)
+
 if __name__ == "__main__":
     unittest.main()

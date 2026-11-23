@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional
 import requests
 
 from .database import connect_database, storage_backend
+from .gem_hunter_qualification import research_qualification_status
 
 
 SCHEMA_VERSION = "gem-hunter-v3"
@@ -672,7 +673,8 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     """Send a structured Persian VIP research card; never a trade instruction."""
     status = candidate.get("gem_hunter_v3_status", candidate.get("candidate_status"))
     allowed = {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}
-    if status not in allowed or candidate.get("gem_hunter_v3_trade_authorization", "NO_TRADE") != "NO_TRADE":
+    if (status not in allowed or candidate.get("gem_hunter_v3_trade_authorization", "NO_TRADE") != "NO_TRADE"
+            or research_qualification_status(candidate) != "QUALIFIED_EARLY_WAVE"):
         return {"status": "SKIPPED", "reason": "Candidate is not in an eligible Telegram research tier."}
     if status == "EARLY_ALPHA_REVIEW":
         phase = candidate.get("pump_phase_fa") or (candidate.get("pump_dump_analysis") or {}).get("pump_phase_fa")
@@ -952,7 +954,6 @@ def process_gem_hunter_v3_candidates(
             else calculated_exit
         )
         original_status = row.get("candidate_status")
-        original_trade_authorization = row.get("trade_authorization")
         scores = score_candidate_v3(row)
         row["pump_dump_analysis"] = analyze_pump_dump_phase(row)
         row.update(row["pump_dump_analysis"])
@@ -967,11 +968,19 @@ def process_gem_hunter_v3_candidates(
             source = row["narrative_analysis"] if field == "narrative_psychology_fa" else row["pump_dump_analysis"]
             row[field] = source.get(field)
         row.update(scores)
+        if reconciliation.get("status") == "PASS":
+            if reconciliation.get("pool_address"):
+                row["pool_address"] = reconciliation["pool_address"]
+            for field in ("verified_price_usd", "verified_liquidity_usd"):
+                value = _finite(reconciliation.get(field))
+                if value is not None:
+                    row["price_usd" if field == "verified_price_usd" else "liquidity_usd"] = value
         tier = classify_gem_tier(row, scores)
         row.update(tier)
         row["gem_hunter_v3_status"] = tier.get("tier")
         row["candidate_status"] = original_status
-        row["trade_authorization"] = original_trade_authorization
+        row["qualification_status"] = research_qualification_status(row)
+        row["trade_authorization"] = "NO_TRADE"
         row["gem_hunter_v3_trade_authorization"] = "NO_TRADE"
         metrics = {
             "holder_count": row.get("holder_count"),
@@ -997,7 +1006,7 @@ def process_gem_hunter_v3_candidates(
                 row["gem_hunter_storage_status"] = "PERSISTED"
             except Exception as exc:
                 row["gem_hunter_storage_status"] = f"UNKNOWN:{type(exc).__name__}"
-        if notify and store is not None and row.get("gem_hunter_v3_status") in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}:
+        if notify and store is not None and row.get("qualification_status") == "QUALIFIED_EARLY_WAVE" and row.get("gem_hunter_v3_status") in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}:
             try:
                 row["telegram_alert_status"] = notify_qualified_gem(row, store)
             except Exception as exc:

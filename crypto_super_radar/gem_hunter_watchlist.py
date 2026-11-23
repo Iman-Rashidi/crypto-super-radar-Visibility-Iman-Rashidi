@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from html import escape as html_escape
 from typing import Any, Mapping
+
+from .gem_hunter_qualification import research_qualification_status
 import os
 import requests
 
@@ -31,6 +33,8 @@ def _nonnegative(value: Any):
     return result if result >= 0 and result < float("inf") else None
 
 def is_watchlist_eligible(candidate: Mapping[str, Any]) -> bool:
+    if research_qualification_status(candidate) != "QUALIFIED_EARLY_WAVE":
+        return False
     tier = candidate.get("gem_hunter_v3_status", candidate.get("tier"))
     if tier in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA"}:
         return True

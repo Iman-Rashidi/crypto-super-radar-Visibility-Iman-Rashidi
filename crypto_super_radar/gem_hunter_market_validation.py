@@ -57,7 +57,7 @@ def _dex_snapshot_from_payload(payload: Any, chain: str, token: str, pool: str) 
         raise ValueError("DexScreener pair response schema is invalid")
     matches = []
     for pair in payload:
-        if not isinstance(pair, dict) or not _same_address(pair.get("pairAddress"), pool, chain):
+        if not isinstance(pair, dict):
             continue
         if str(pair.get("chainId") or "").lower() != chain_id:
             continue
@@ -94,7 +94,8 @@ def _dex_snapshot_from_payload(payload: Any, chain: str, token: str, pool: str) 
             "dex_id": pair.get("dexId"), "url": pair.get("url"),
         })
     if not matches:
-        raise LookupError("DexScreener did not return the exact pool with matching token identity")
+        raise LookupError("DexScreener did not return a pool with matching token identity")
+    matches.sort(key=lambda row: _number(row.get("liquidity_usd")) if _number(row.get("liquidity_usd")) is not None else -1.0, reverse=True)
     return matches[0]
 
 
@@ -206,6 +207,8 @@ def reconcile_candidate_market_data(candidate: dict, http, *, dex_snapshot: Opti
         base["reason_fa"].append("منبع اصلی DEX Screener برای همین توکن/استخر پاسخ معتبر نداد.")
         result = base
     else:
+        base["pool_address"] = snapshot.get("pool_address") or pool
+        base["reference_pool_selection"] = "HIGHEST_LIQUIDITY_USD"
         base["sources"] = [snapshot]
         base["source_count"] = 1
         base["verification_level"] = "DEXSCREENER_PRIMARY_SINGLE_SOURCE"
