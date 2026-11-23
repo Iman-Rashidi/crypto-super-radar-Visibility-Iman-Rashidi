@@ -540,7 +540,7 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         return {"status": "BLOCKED", "reason": "Token contract address is missing."}
     candidate_id = f"{chain}:{address if chain == 'solana' else address.lower()}"
     six_hour_bucket = int(datetime.now(timezone.utc).timestamp() // (6 * 60 * 60))
-    event_key = f"TELEGRAM_{status}:{candidate_id}:{six_hour_bucket}"
+    event_key = f"TELEGRAM_VIP_CARD_V1:{status}:{candidate_id}:{six_hour_bucket}"
     token = bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
     destination = chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
     if not token or not destination:
