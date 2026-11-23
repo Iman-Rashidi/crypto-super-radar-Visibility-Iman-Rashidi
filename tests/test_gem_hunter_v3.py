@@ -705,6 +705,8 @@ class GemHunterV3Tests(unittest.TestCase):
             "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "security_evidence": {"status": "UNKNOWN"},
             "tier_base_security_status": "UNKNOWN",
+            "pump_phase_fa": "🟢 فاز ۱: شروع پامپ (Early Ignition)",
+            "buy_volume_share_pct": 60,
         }
         result = notify_qualified_gem(candidate, FakeStore(), session=Mock(), bot_token="t", chat_id="c")
         self.assertEqual(result["status"], "BLOCKED")
