@@ -276,7 +276,7 @@ def analyze_pump_dump_phase(candidate: Mapping[str, Any], *, now: Optional[datet
     buys, sells = _finite(candidate.get("buys_1h")), _finite(candidate.get("sells_1h"))
     buys = max(0.0, buys) if buys is not None else None
     sells = max(0.0, sells) if sells is not None else None
-    market_cap = _finite(candidate.get("market_cap_usd", candidate.get("fdv_usd")))
+    market_cap = _finite(candidate.get("market_cap_usd") or candidate.get("fdv") or candidate.get("fdv_usd"))
     created = _parse_utc_datetime(candidate.get("pool_created_at_utc"))
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -674,6 +674,16 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     allowed = {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}
     if status not in allowed or candidate.get("gem_hunter_v3_trade_authorization", "NO_TRADE") != "NO_TRADE":
         return {"status": "SKIPPED", "reason": "Candidate is not in an eligible Telegram research tier."}
+    if status == "EARLY_ALPHA_REVIEW":
+        phase = candidate.get("pump_phase_fa") or (candidate.get("pump_dump_analysis") or {}).get("pump_phase_fa")
+        buy_share = _finite(candidate.get("buy_volume_share_pct"))
+        if buy_share is None:
+            trades = candidate.get("pool_trade_evidence") or {}
+            buy, sell = _finite(trades.get("buy_volume_usd")), _finite(trades.get("sell_volume_usd"))
+            if buy is not None and sell is not None and buy + sell > 0:
+                buy_share = 100.0 * buy / (buy + sell)
+        if phase not in {"🟢 فاز ۱: شروع پامپ (Early Ignition)", "🟡 فاز ۲: میانه موج صعودی"} or buy_share is None or buy_share < 52.0:
+            return {"status": "SKIPPED", "reason": "EARLY_ALPHA_REVIEW alert requires bullish phase 1/2 and buy-volume share >=52%."}
 
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
@@ -881,7 +891,7 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         "📡 <b>بخش ۴ | داشبورد زنده</b>\n"
         f"{dashboard_link}\n"
         "\n"
-        "<i>وضعیت سیستم: پژوهشی · NO_TRADE (بدون معامله خودکار)</i>"
+        "<i>وضعیت سیستم: پژوهشی · 🔍 وضعیت: سیگنال پژوهشی تاییدشده (خرید دستی در کیف پول با کاربر)</i>"
     )
     client = session or requests
     try:
