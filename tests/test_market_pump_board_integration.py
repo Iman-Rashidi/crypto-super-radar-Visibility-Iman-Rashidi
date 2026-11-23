@@ -15,11 +15,13 @@ class MarketPumpBoardIntegrationTests(unittest.TestCase):
 
     def test_board_uses_exchange_24h_changes_and_volume_spike(self):
         for marker in ("priceChangePercent", "price24hPcnt", "price_change_24h_pct",
-                       "volume_spike_ratio", "_market_volume_spike",
-                       "🚀 در حال پامپ / صعود قوی", "🟢 متمایل به صعود",
-                       "🔴 فشار فروش / نزولی", "⚪ در حال تثبیت"):
+                       "volume_spike_ratio", "_market_volume_spike"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.source)
+        for marker in ("🚀 در حال پامپ / صعود قوی", "🟢 متمایل به صعود",
+                       "🔴 فشار فروش / نزولی", "⚪ در حال تثبیت"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.data_source)
 
     def test_board_remains_research_only(self):
         self.assertIn('"trade_authorization": "NO_TRADE"', self.source)
