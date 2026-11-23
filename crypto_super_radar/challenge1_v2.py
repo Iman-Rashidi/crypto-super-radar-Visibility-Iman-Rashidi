@@ -716,7 +716,16 @@ def build_wave5_entry_signal(
         return {"signal": "NO_TRADE", "reason": "15m trend does not confirm W5 direction"}
     atr5 = float(atr(five, 14).iloc[-1])
     buffer = 0.10 * atr5
-    stop = min(level618, w1_start) - buffer if side == "LONG" else max(level618, w1_start) + buffer
+    # The 0.618 retracement is the primary W4 invalidation; W1 extreme is
+    # an alternative only when it is closer to entry and remains within risk cap.
+    structural = level618
+    alternative = w1_start
+    if side == "LONG":
+        candidates = [x for x in (structural, alternative) if x < float(entry_price)]
+        stop = max(candidates) - buffer if candidates else float("nan")
+    else:
+        candidates = [x for x in (structural, alternative) if x > float(entry_price)]
+        stop = min(candidates) + buffer if candidates else float("nan")
     risk = float(entry_price) - stop if side == "LONG" else stop - float(entry_price)
     if not math.isfinite(risk) or risk <= 0 or risk / float(entry_price) > MAX_STOP_DISTANCE_PCT:
         return {"signal": "NO_TRADE", "reason": "W5 structural stop is invalid or exceeds 3.5%"}
