@@ -170,20 +170,21 @@ def ensure_profit_alert_schema(db) -> None:
 
 
 def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=None) -> dict[str, Any]:
-    """Send one Persian Telegram alert per token/milestone, based on current price vs first discovery."""
+    """Send one Persian Telegram alert per token/milestone to the Turso-locked @Germany004 recipient."""
     token = (bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN")
              or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-    destination = (chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID")
-                   or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-    if not token or not destination:
+    if not token:
         return {"status": "NOT_CONFIGURED", "sent": 0, "duplicates": 0, "errors": 0}
+    # Reuse the shared notifier's verified username-to-chat-ID lock. Telegram's
+    # sendMessage cannot DM a personal account by @username directly.
+    from .telegram_notifier import TelegramNotifier
+    notifier = TelegramNotifier(token=token, connection=db, http_post=(session or requests).post)
     ensure_watchlist_schema(db)
     ensure_profit_alert_schema(db)
     rows = db.execute(
         f"SELECT token_id, first_detected_utc, token_name, token_symbol, chain, token_address, "
         f"initial_price_usd, latest_price_usd FROM {TABLE} ORDER BY first_detected_utc"
     ).fetchall()
-    client = session or requests
     sent = duplicates = errors = 0
     for row in rows:
         item = dict(row) if isinstance(row, Mapping) else {
@@ -213,41 +214,35 @@ def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=No
                 continue
             profit_eur = 100.0 * (latest / initial - 1.0)
             current_value = 100.0 + profit_eur
-            name = html_escape(str(item.get("token_name") or "نامشخص"))
-            symbol = html_escape(str(item.get("token_symbol") or "?"))
-            chain = html_escape(str(item.get("chain") or "نامشخص"))
-            address = html_escape(str(item.get("token_address") or ""))
-            text = (
-                "💰 <b>گزارش سود واچ‌لیست رادار</b>\n"
-                f"🎯 <b>سطح سود ثبت‌شده:</b> +{milestone}%  (معادل +€{milestone} روی مبنای €100)\n"
-                f"🪙 <b>دارایی:</b> {name} ({symbol}) · {chain}\n"
-                f"📈 <b>تغییر از اولین کشف:</b> +{change_pct:.2f}%\n"
-                f"💶 <b>ارزش فرضی €100:</b> €{current_value:.2f} · <b>سود:</b> +€{profit_eur:.2f}\n"
-                f"💵 <b>قیمت اولیه:</b> ${initial:.12g} · <b>قیمت فعلی:</b> ${latest:.12g}\n"
-                f"🕒 <b>اولین کشف UTC:</b> {html_escape(str(item.get('first_detected_utc') or 'نامشخص'))}\n"
-                f"<code>{address}</code>\n"
+            name = str(item.get("token_name") or "نامشخص")
+            symbol = str(item.get("token_symbol") or "?")
+            chain = str(item.get("chain") or "نامشخص")
+            address = str(item.get("token_address") or "")
+            message = (
+                "💰 گزارش سود واچ‌لیست رادار\n"
+                f"🎯 سطح سود ثبت‌شده: +{milestone}% (معادل +€{milestone} روی مبنای €100)\n"
+                f"🪙 دارایی: {name} ({symbol}) · {chain}\n"
+                f"📈 تغییر از اولین کشف: +{change_pct:.2f}%\n"
+                f"💶 ارزش فرضی €100: €{current_value:.2f} · سود: +€{profit_eur:.2f}\n"
+                f"💵 قیمت اولیه: ${initial:.12g} · قیمت فعلی: ${latest:.12g}\n"
+                f"🕒 اولین کشف UTC: {item.get('first_detected_utc') or 'نامشخص'}\n"
+                f"آدرس: {address}\n"
                 "⚠️ این گزارش تغییر قیمت از زمان کشف است؛ سود تحقق‌یافته نیست و کارمزد، مالیات و لغزش را لحاظ نمی‌کند. ربات هیچ معامله‌ای انجام نداده است."
             )
+            event_key = f"gem-hunter-watchlist-profit:{item['token_id']}:{milestone}:v1"
             try:
-                response = client.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": destination, "text": text, "parse_mode": "HTML",
-                          "disable_web_page_preview": True},
-                    timeout=15,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                if not payload.get("ok"):
-                    raise RuntimeError("Telegram API did not confirm the watchlist profit alert")
-                message_id = str((payload.get("result") or {}).get("message_id") or "")
+                result = notifier.send_once(event_key, message)
                 with db:
                     db.execute(
                         f"UPDATE {PROFIT_ALERT_TABLE} SET sent_at_utc=?, telegram_message_id=? "
                         "WHERE token_id=? AND threshold_pct=?",
                         (datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                         message_id, str(item["token_id"]), milestone),
+                         str(result.get("chat_id") or ""), str(item["token_id"]), milestone),
                     )
-                sent += 1
+                if result.get("status") == "DUPLICATE_SKIPPED":
+                    duplicates += 1
+                else:
+                    sent += 1
             except Exception:
                 with db:
                     db.execute(
