@@ -6,6 +6,7 @@ unit-tested in the base, zero-cost installation.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 import pandas as pd
@@ -341,3 +342,59 @@ def gem_hunter_v3_report_dataframe(report: Any) -> pd.DataFrame:
     if not isinstance(candidates, list):
         candidates = report.get("gem_hunter_v3_candidates") or report.get("diagnostic_candidates") or []
     return gem_hunter_v3_dataframe(candidates)
+
+
+def market_movement_label(price_change_24h_pct: Any) -> str:
+    """Map a finite 24h percentage move to a concise Persian market state."""
+    try:
+        change = float(price_change_24h_pct)
+    except (TypeError, ValueError, OverflowError):
+        return "⚪ دادهٔ تغییر قیمت ناموجود"
+    if not math.isfinite(change):
+        return "⚪ دادهٔ تغییر قیمت ناموجود"
+    if change > 5.0:
+        return "🚀 در حال پامپ / صعود قوی"
+    if change >= 1.0:
+        return "🟢 متمایل به صعود"
+    if change < -3.0:
+        return "🔴 فشار فروش / نزولی"
+    return "⚪ در حال تثبیت"
+
+
+def market_board_dataframe(items: Any) -> pd.DataFrame:
+    """Return a research-only market board ranked by 24h momentum, then turnover."""
+    rows = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        change = item.get("price_change_24h_pct")
+        try:
+            change_sort = float(change)
+            if not math.isfinite(change_sort):
+                change_sort = float("-inf")
+        except (TypeError, ValueError, OverflowError):
+            change_sort = float("-inf")
+        try:
+            volume_sort = float(item.get("volume_24h_usd"))
+            if not math.isfinite(volume_sort):
+                volume_sort = -1.0
+        except (TypeError, ValueError, OverflowError):
+            volume_sort = -1.0
+        rows.append({
+            "نماد": item.get("symbol"),
+            "تغییر ۲۴ساعته (%)": change,
+            "حجم ۲۴ساعته (USD)": item.get("volume_24h_usd"),
+            "جهت بازار": market_movement_label(change),
+            "شتاب حجم (برابر)": item.get("volume_spike_ratio"),
+            "وضعیت داده": item.get("status", "UNKNOWN"),
+            "_change_sort": change_sort,
+            "_volume_sort": volume_sort,
+        })
+    rows.sort(key=lambda row: (row["_change_sort"], row["_volume_sort"]), reverse=True)
+    for row in rows:
+        row.pop("_change_sort", None)
+        row.pop("_volume_sort", None)
+    return pd.DataFrame(rows, columns=[
+        "نماد", "تغییر ۲۴ساعته (%)", "حجم ۲۴ساعته (USD)",
+        "جهت بازار", "شتاب حجم (برابر)", "وضعیت داده",
+    ])
