@@ -19,6 +19,15 @@ def _number(value: Any):
         return None
     return result if result > 0 and result < float("inf") else None
 
+def _nonnegative(value: Any):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if result >= 0 and result < float("inf") else None
+
 def is_watchlist_eligible(candidate: Mapping[str, Any]) -> bool:
     tier = candidate.get("gem_hunter_v3_status", candidate.get("tier"))
     if tier in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA"}:
@@ -29,7 +38,7 @@ def is_watchlist_eligible(candidate: Mapping[str, Any]) -> bool:
     share = _number(candidate.get("buy_volume_share_pct"))
     if share is None:
         trades = candidate.get("pool_trade_evidence") or {}
-        buy, sell = _number(trades.get("buy_volume_usd")), _number(trades.get("sell_volume_usd"))
+        buy, sell = _nonnegative(trades.get("buy_volume_usd")), _nonnegative(trades.get("sell_volume_usd"))
         if buy is not None and sell is not None:
             share = 100.0 * buy / (buy + sell) if buy + sell else None
     if share is None:
