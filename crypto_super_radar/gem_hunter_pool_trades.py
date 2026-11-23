@@ -91,6 +91,11 @@ def analyze_pool_trade_evidence(
         "whale_buy_count": 0,
         "whale_sell_count": 0,
         "whale_events": [],
+        "whale_buy_volume_1h_usd": 0.0,
+        "whale_sell_volume_1h_usd": 0.0,
+        "whale_buy_sell_ratio_1h": None,
+        "whale_net_action_fa": "⚪ دادهٔ کافی برای تشخیص رفتار نهنگ‌ها در یک ساعت اخیر وجود ندارد.",
+        "whale_wallets_1h": [],
         "wash_trading_signal": "UNKNOWN",
         "reason_codes": [],
         "reason_fa": [],
@@ -148,6 +153,7 @@ def analyze_pool_trade_evidence(
             "timestamp": stamp,
             "tx_hash": tx_hash.strip(),
             "wallet": wallet,
+            "token_amount": _finite(row.get("to_token_amount") if kind == "buy" else row.get("from_token_amount")),
         })
 
     if invalid_rows:
@@ -214,7 +220,35 @@ def analyze_pool_trade_evidence(
                 "timestamp_utc": row["timestamp"].isoformat().replace("+00:00", "Z"),
                 "tx_hash": row["tx_hash"],
                 "wallet_address": row["wallet"],
+                "token_amount": round(row["token_amount"], 12) if row.get("token_amount") is not None else None,
+                "explorer_tx_url": ({"solana": "https://solscan.io/tx/", "base": "https://basescan.org/tx/", "ethereum": "https://etherscan.io/tx/"}.get(chain, "") + row["tx_hash"]),
+                "explorer_wallet_url": ({"solana": "https://solscan.io/account/", "base": "https://basescan.org/address/", "ethereum": "https://etherscan.io/address/"}.get(chain, "") + (row["wallet"] or "")),
             })
+
+    # Whale flow is restricted to the last hour inside the bounded 24h sample.
+    one_hour_cutoff = now - timedelta(hours=1)
+    whale_1h = [row for row in parsed if row["amount_usd"] >= whale_threshold and row["timestamp"] >= one_hour_cutoff]
+    whale_buy_1h = sum(row["amount_usd"] for row in whale_1h if row["kind"] == "buy")
+    whale_sell_1h = sum(row["amount_usd"] for row in whale_1h if row["kind"] == "sell")
+    result["whale_buy_volume_1h_usd"] = round(whale_buy_1h, 8)
+    result["whale_sell_volume_1h_usd"] = round(whale_sell_1h, 8)
+    result["whale_buy_sell_ratio_1h"] = round(whale_buy_1h / whale_sell_1h, 4) if whale_sell_1h > 0 else (None if whale_buy_1h <= 0 else "INF")
+    if whale_buy_1h + whale_sell_1h > 0:
+        if whale_buy_1h >= whale_sell_1h * 1.2:
+            result["whale_net_action_fa"] = "🟢 نهنگ‌های مشاهده‌شده در این نمونه، در یک ساعت اخیر خالص خرید سنگین داشته‌اند."
+        elif whale_sell_1h >= whale_buy_1h * 1.2:
+            result["whale_net_action_fa"] = "🔴 نهنگ‌های مشاهده‌شده در این نمونه، در یک ساعت اخیر خالص فروش سنگین داشته‌اند؛ خطر فشار دامپ."
+        else:
+            result["whale_net_action_fa"] = "🟡 جریان خرید و فروش نهنگ‌ها نزدیک به هم است؛ جهت غالب تأیید نشده."
+    by_wallet: dict[str, dict[str, Any]] = {}
+    for row in whale_1h:
+        if not row.get("wallet"):
+            continue
+        entry = by_wallet.setdefault(row["wallet"], {"wallet_address": row["wallet"], "buy_volume_usd": 0.0, "sell_volume_usd": 0.0, "buy_count": 0, "sell_count": 0})
+        side = "buy" if row["kind"] == "buy" else "sell"
+        entry[side + "_volume_usd"] += row["amount_usd"]
+        entry[side + "_count"] += 1
+    result["whale_wallets_1h"] = sorted(by_wallet.values(), key=lambda item: item["buy_volume_usd"] + item["sell_volume_usd"], reverse=True)[:10]
 
     if capped:
         result["reason_codes"].append("PROVIDER_SAMPLE_CAPPED")
