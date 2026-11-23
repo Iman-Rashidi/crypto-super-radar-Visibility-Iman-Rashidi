@@ -43,7 +43,7 @@ from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
-from .live_market_radar import (BYBIT_INTERVAL, INTERVAL_MS, LIVE_MARKET_RADAR_CACHE_TTL_SECONDS, build_live_market_radar_payload, fetch_bybit_candles, fetch_okx_candles, fetch_kraken_candles, fetch_coinbase_candles, get_live_market_radar_cache, set_live_market_radar_cache, live_market_radar_key_lock)
+from .live_market_radar import (BYBIT_INTERVAL, INTERVAL_MS, LIVE_MARKET_RADAR_CACHE_TTL_SECONDS, build_live_market_radar_payload, fetch_bybit_candles, fetch_okx_candles, fetch_kraken_candles, fetch_coinbase_candles, get_live_market_radar_cache, set_live_market_radar_cache, live_market_radar_key_lock, LIVE_MARKET_RADAR_CACHE, LIVE_MARKET_RADAR_CACHE_LOCK)
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_TRADE_CREDENTIAL_ENV, DEMO_REST_URL, _resolve_env_credential
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
@@ -10276,7 +10276,7 @@ async function loadBlofinInstruments(){
               try{
                 const response=await fetch('/api/live-market-radar?symbol='+encodeURIComponent(symbolValue)+'&interval=5m',{cache:'no-store',signal:controller.signal});
                 const raw=await response.json();if(!response.ok)throw new Error(raw.error||('HTTP '+response.status));
-                return {symbol:symbolValue,data:normalizeChartPayload(raw)};
+                return raw;
               }finally{clearTimeout(timeout);}
             }
             async function refreshWaveWatchlist(){
@@ -10287,8 +10287,10 @@ async function loadBlofinInstruments(){
                 const item=symbols[index];
                 if(index>0)await waitForWaveSlot(400);
                 try{
-                  const result=await fetchWaveCard(item);results.push(result);
-                  waveWatchGrid.appendChild(renderWaveWatchCard(item,result.data));
+                  const raw=await fetchWaveCard(item);
+                  const data=normalizeChartPayload(raw);
+                  const result={symbol:item,data};results.push(result);
+                  waveWatchGrid.appendChild(renderWaveWatchCard(item,data));
                 }catch(error){
                   const result={symbol:item,error:String(error.name==='AbortError'?'Timeout after 8 seconds':(error.message||error))};results.push(result);
                   const card=document.createElement('article');card.className='live-wave-card';const title=document.createElement('h5');title.textContent=item;const note=document.createElement('p');note.className='live-wave-meta';note.textContent='داده در دسترس نیست: '+result.error;card.append(title,note);waveWatchGrid.appendChild(card);
