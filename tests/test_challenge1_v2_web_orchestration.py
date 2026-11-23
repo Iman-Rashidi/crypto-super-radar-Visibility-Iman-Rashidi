@@ -682,9 +682,12 @@ class Challenge1EarlyWave3Tests(unittest.TestCase):
         values15[-4:] = [108.0, 108.4, 108.7, 109.0]
         def frame(index, values):
             close = pd.Series(values, index=index, dtype=float)
+            volume = pd.Series([1000.0] * len(index), index=index)
+            if index.freq == pd.Timedelta(minutes=5):
+                volume.iloc[-1] = 1500.0
             return pd.DataFrame({
                 "open": close - 0.03, "high": close + 0.12,
-                "low": close - 0.12, "close": close, "volume": 1000.0,
+                "low": close - 0.12, "close": close, "volume": volume,
             }, index=index)
         return frame(idx5, values5), frame(idx15, values15)
 
