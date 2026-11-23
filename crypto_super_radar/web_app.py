@@ -3059,14 +3059,23 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
             SCAN_RUNNING = False
 
 
+def _normalize_live_radar_symbol(symbol: str) -> str:
+    """Normalize a user-entered spot asset to a strictly validated USDT symbol."""
+    raw = re.sub(r"[\\s/_-]+", "", str(symbol or "").strip().upper())
+    if raw.endswith("USDT"):
+        normalized = raw
+    else:
+        normalized = raw + "USDT"
+    if not re.fullmatch(r"[A-Z0-9]{2,16}USDT", normalized):
+        raise ValueError("نماد نامعتبر است؛ فقط نماد معتبر دارایی مانند PEPE یا PEPEUSDT وارد کنید.")
+    return normalized
+
+
 def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: bool = False) -> dict:
     """Fetch live spot candles from two independent venues and cache briefly."""
-    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_symbol = _normalize_live_radar_symbol(symbol)
     raw_interval = str(interval or "").strip()
     normalized_interval = raw_interval if raw_interval == "1M" else raw_interval.lower()
-    allowed_symbols = {item[0] for item in CRYPTO_MARKET_UNIVERSE}
-    if normalized_symbol not in allowed_symbols:
-        raise ValueError("نماد برای رادار زنده در فهرست بازار منتخب نیست.")
     if normalized_interval not in INTERVAL_MS:
         raise ValueError("بازهٔ کندل پشتیبانی نمی‌شود.")
     key = (normalized_symbol, normalized_interval)
@@ -7250,7 +7259,13 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json; charset=utf-8")
         if parsed.path == "/api/live-market-radar":
             query = parse_qs(parsed.query)
-            symbol = query.get("symbol", ["BTCUSDT"])[0]
+            try:
+                symbol = _normalize_live_radar_symbol(query.get("symbol", ["BTCUSDT"])[0])
+            except ValueError as exc:
+                payload = {"status": "UNKNOWN", "error": str(exc), "signal": {"signal": "UNKNOWN", "status": "BLOCKED"},
+                           "candles": [], "orders_submitted": False}
+                return self._send(400, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
             interval = query.get("interval", ["5m"])[0]
             force_refresh = query.get("refresh", ["0"])[0] == "1"
             try:
@@ -9180,6 +9195,19 @@ async function loadBlofinInstruments(){
             .live-flow-event{padding:8px;border-radius:8px;border:1px solid var(--line);font-size:.78rem}
             .live-flow-event.buy{border-inline-start:3px solid #19a974}.live-flow-event.sell{border-inline-start:3px solid #e05260}
 
+            .live-radar-custom-search{display:grid;grid-template-columns:minmax(180px,1fr) auto;gap:9px;align-items:end;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+            .live-radar-custom-search label{display:grid;gap:6px;font-weight:700;font-size:.86rem}
+            .live-radar-custom-search input{width:100%;min-height:42px;padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface-raised);color:var(--text);font:inherit}
+            .live-radar-custom-search button,.live-wave-card button{min-height:40px;padding:8px 12px;border:1px solid #39718c;border-radius:9px;background:#10344a;color:#e6f7ff;font:inherit;font-weight:800;cursor:pointer}
+            .live-wave-watch{margin:14px 0;padding:14px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
+            .live-wave-watch h4{margin:0 0 5px}.live-wave-watch-note{margin:0 0 12px;color:var(--muted);font-size:.8rem}
+            .live-wave-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px}
+            .live-wave-card{min-width:0;padding:11px;border:1px solid var(--line);border-radius:12px;background:var(--surface-raised);display:grid;gap:7px}
+            .live-wave-card h5{margin:0;font-size:1rem}.live-wave-price{font-size:1.08rem;font-weight:900;overflow-wrap:anywhere}
+            .live-wave-meta{font-size:.78rem;line-height:1.65;color:var(--muted);overflow-wrap:anywhere}
+            .live-wave-card button{width:100%;font-size:.78rem}
+            @media(max-width:900px){.live-wave-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+            @media(max-width:600px){.live-radar-custom-search{grid-template-columns:1fr}.live-wave-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.live-wave-card{padding:9px}}
             .easy-trader-robot{margin:14px 0;border:1px solid var(--line);border-radius:18px;padding:12px;background:linear-gradient(135deg,#0b1d2c,#102b3b 60%,#142338);overflow:hidden}
             .easy-robot-stage{position:relative;min-height:240px;display:flex;align-items:flex-end;justify-content:center}
             .easy-robot-bubble{position:relative;z-index:2;width:min(560px,94%);margin:0 auto 96px;padding:12px;border:1px solid #3a7189;border-radius:15px;background:#081825;color:#e7f5ff;text-align:center}
@@ -9201,6 +9229,12 @@ async function loadBlofinInstruments(){
           <div id="live-market-radar">
             <h3>نمودار زندهٔ کندل و رادار موج‌ها</h3>
             <p class="muted">کندل‌های Spot از Binance و Bybit دریافت می‌شوند. نمودار هر ۱۵ ثانیه تازه‌سازی می‌شود؛ فقط کندل‌های بسته‌شده در تشخیص سقف/کف و سیگنال استفاده می‌شوند.</p>
+            <div class="live-radar-custom-search">
+              <label for="live-radar-custom-symbol">نماد دلخواه برای تحلیل زنده (مثلاً PEPE، DOGE، SUI یا SHIBUSDT)
+                <input id="live-radar-custom-symbol" type="text" inputmode="text" autocomplete="off" maxlength="20" placeholder="مثلاً PEPE یا SHIBUSDT">
+              </label>
+              <button type="button" id="live-radar-custom-search">🔍 تحلیل کندل و امواج این ارز</button>
+            </div>
             <div class="live-radar-controls">
               <label>رمزارز<select id="live-radar-symbol"><option value="BTCUSDT">BTC</option><option value="ETHUSDT">ETH</option><option value="SOLUSDT">SOL</option><option value="BNBUSDT">BNB</option><option value="XRPUSDT">XRP</option><option value="DOGEUSDT">DOGE</option><option value="ADAUSDT">ADA</option><option value="AVAXUSDT">AVAX</option><option value="LINKUSDT">LINK</option><option value="DOTUSDT">DOT</option><option value="LTCUSDT">LTC</option><option value="TRXUSDT">TRX</option><option value="GRAMUSDT">GRAM</option><option value="PEPEUSDT">PEPE</option><option value="SHIBUSDT">SHIB</option><option value="BCHUSDT">BCH</option><option value="SUIUSDT">SUI</option><option value="HBARUSDT">HBAR</option><option value="NEARUSDT">NEAR</option><option value="UNIUSDT">UNI</option></select></label>
               <label>تایم‌فریم
@@ -9242,6 +9276,17 @@ async function loadBlofinInstruments(){
             <div class="live-candle-wrap">
               <canvas id="live-candle-chart" width="1440" height="460" role="img" aria-label="نمودار کندل و امواج الیوت با سه سطح کف، تعادل و سقف، قیمت لحظه‌ای و کندل‌های واگرایی"></canvas>
             </div>
+            <section class="live-wave-watch" aria-label="دیده‌بان هم‌زمان پنج بازار اصلی">
+              <h4>🌊 دیده‌بان امواج ۵ بازار اصلی (BTC · ETH · SOL · XRP · LINK)</h4>
+              <p class="live-wave-watch-note">تحلیل مستقل ۵ بازار با کندل‌های ۵ دقیقه‌ای؛ دادهٔ ناقص یا تأییدنشده به‌عنوان موج قطعی نمایش داده نمی‌شود.</p>
+              <div id="live-wave-watch-grid" class="live-wave-grid" aria-live="polite">
+                <article class="live-wave-card"><h5>BTCUSDT</h5><p class="live-wave-meta">در حال دریافت کندل و ساختار موج...</p></article>
+                <article class="live-wave-card"><h5>ETHUSDT</h5><p class="live-wave-meta">در حال دریافت کندل و ساختار موج...</p></article>
+                <article class="live-wave-card"><h5>SOLUSDT</h5><p class="live-wave-meta">در حال دریافت کندل و ساختار موج...</p></article>
+                <article class="live-wave-card"><h5>XRPUSDT</h5><p class="live-wave-meta">در حال دریافت کندل و ساختار موج...</p></article>
+                <article class="live-wave-card"><h5>LINKUSDT</h5><p class="live-wave-meta">در حال دریافت کندل و ساختار موج...</p></article>
+              </div>
+            </section>
             <div id="live-radar-divergence" class="live-radar-divergence neutral" role="status" aria-live="polite">واگرایی RSI: در انتظار تحلیل پیوت‌های تأییدشده...</div>
             <div class="live-radar-signal">
               <div class="metric"><span>سیگنال فعلی</span><strong id="live-radar-action">در انتظار داده</strong></div>
@@ -9287,6 +9332,9 @@ async function loadBlofinInstruments(){
           <script>
           (function(){
             const symbol=document.getElementById('live-radar-symbol');
+            const customSymbol=document.getElementById('live-radar-custom-symbol');
+            const customSearch=document.getElementById('live-radar-custom-search');
+            const waveWatchGrid=document.getElementById('live-wave-watch-grid');
             const interval=document.getElementById('live-radar-interval');
             const button=document.getElementById('live-radar-refresh');
             const status=document.getElementById('live-radar-status');
@@ -9594,13 +9642,67 @@ async function loadBlofinInstruments(){
                 fields.reason.textContent='آخرین داده تأیید نشد. از سیگنال قبلی برای تصمیم تازه استفاده نکنید.';
               }finally{busy=false;button.disabled=false;}
             }
+            function normalizeCustomSymbol(value){
+              let raw=String(value||'').trim().toUpperCase().replace(/[\\s/_-]+/g,'');
+              if(!raw.endsWith('USDT'))raw+='USDT';
+              if(!/^[A-Z0-9]{2,16}USDT$/.test(raw))throw new Error('نماد نامعتبر است؛ مانند PEPE یا PEPEUSDT وارد کنید.');
+              return raw;
+            }
+            async function searchCustomSymbol(){
+              try{
+                const normalized=normalizeCustomSymbol(customSymbol.value);
+                let option=Array.from(symbol.options).find(item=>item.value===normalized);
+                if(!option){option=document.createElement('option');option.value=normalized;option.textContent=normalized.replace(/USDT$/,'');symbol.appendChild(option);}
+                symbol.value=normalized;
+                await refresh(true);
+              }catch(error){status.textContent=String(error.message||error);}
+            }
+            function renderWaveWatchCard(symbolValue,data){
+              const card=document.createElement('article');card.className='live-wave-card';
+              const title=document.createElement('h5');title.textContent=symbolValue;
+              const candles=Array.isArray(data.candles)?data.candles:[];
+              const latest=candles.length?candles[candles.length-1]:null;
+              const price=document.createElement('div');price.className='live-wave-price';price.textContent=latest?'قیمت: '+number(latest.close):'قیمت: ناموجود';
+              const waves=data.elliott_waves||{},phase=String(waves.phase||'').toUpperCase();
+              const waveMatch=phase.match(/WAVE[_ ]?([1-5])/);
+              const wave=document.createElement('div');wave.className='live-wave-meta';
+              wave.textContent='موج فعلی: '+(waveMatch?'W'+waveMatch[1]:(waves.phase||waves.pattern||'نامشخص'));
+              const fib=data.wave4_fibonacci||{},levels=fib.levels||{};
+              const fibonacci=document.createElement('div');fibonacci.className='live-wave-meta';
+              fibonacci.textContent=fib.status==='CONFIRMED'?'فیبوناچی W4 · 38.2% '+number(levels['0.382'])+' · 50% '+number(levels['0.5'])+' · 61.8% '+number(levels['0.618']):'فیبوناچی W4: تأیید نشده';
+              const divergence=((data.market_analysis||{}).direction||{}).divergence||{};
+              const div=document.createElement('div');div.className='live-wave-meta';
+              div.textContent='واگرایی RSI: '+({BULLISH:'مثبت',BEARISH:'منفی',NONE:'شناسایی نشد'}[divergence.type]||'نامشخص');
+              const action=document.createElement('button');action.type='button';action.textContent='نمایش روی نمودار بزرگ ↗';
+              action.addEventListener('click',()=>{let opt=Array.from(symbol.options).find(item=>item.value===symbolValue);if(!opt){opt=document.createElement('option');opt.value=symbolValue;opt.textContent=symbolValue.replace(/USDT$/,'');symbol.appendChild(opt);}symbol.value=symbolValue;refresh(true);});
+              card.append(title,price,wave,fibonacci,div,action);return card;
+            }
+            async function refreshWaveWatchlist(){
+              const symbols=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','LINKUSDT'];
+              const results=await Promise.all(symbols.map(async item=>{
+                try{
+                  const response=await fetch('/api/live-market-radar?symbol='+encodeURIComponent(item)+'&interval=5m',{cache:'no-store'});
+                  const data=await response.json();if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+                  return {symbol:item,data};
+                }catch(error){return {symbol:item,error:String(error.message||error)};}
+              }));
+              waveWatchGrid.replaceChildren();
+              results.forEach(item=>{
+                if(item.data){waveWatchGrid.appendChild(renderWaveWatchCard(item.symbol,item.data));}
+                else{const card=document.createElement('article');card.className='live-wave-card';const title=document.createElement('h5');title.textContent=item.symbol;const note=document.createElement('p');note.className='live-wave-meta';note.textContent='داده در دسترس نیست: '+item.error;card.append(title,note);waveWatchGrid.appendChild(card);}
+              });
+            }
             button.addEventListener('click',()=>refresh(true));
+            customSearch.addEventListener('click',searchCustomSymbol);
+            customSymbol.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();searchCustomSymbol();}});
             symbol.addEventListener('change',()=>refresh(true));
             function scheduleRefresh(){if(timer!==null)clearInterval(timer);timer=setInterval(()=>refresh(false),interval.value==='1s'?5000:15000);}
             interval.addEventListener('change',()=>{scheduleRefresh();refresh(true);});
             refresh(true);
+            refreshWaveWatchlist();
             scheduleRefresh();
-            window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);});
+            const waveWatchTimer=setInterval(refreshWaveWatchlist,30000);
+            window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);clearInterval(waveWatchTimer);});
           })();
           </script>
           <p class="muted">موتور مستقل Spot Paper فقط LONG را با ۱۲ فیلتر ارزیابی می‌کند؛ این موتور با معاملهٔ BloFin Demo Challenge 1 یکی نیست. هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
