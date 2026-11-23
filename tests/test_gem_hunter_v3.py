@@ -3,7 +3,8 @@ import sqlite3
 import unittest
 from unittest.mock import Mock, patch
 
-from crypto_super_radar.dashboard_data import gem_hunter_v3_dataframe
+from crypto_super_radar.dashboard_data import gem_hunter_v3_dataframe, airdrop_radar_projects, airdrop_radar_dataframe
+from crypto_super_radar.web_app import _rank_gem_hunter_candidates
 from crypto_super_radar.gem_hunter_v3 import (
     estimate_exit_slippage, score_candidate_v3, persist_candidate_lifecycle,
     notify_qualified_gem, TursoGemHunterStore, classify_gem_tier,
@@ -317,6 +318,63 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(frame.iloc[0]["انتساب پول هوشمند"], "NOT_AVAILABLE")
         self.assertEqual(frame.iloc[0]["وضعیت هشدار تلگرام"], "NOT_SENT")
         self.assertEqual(frame.iloc[0]["مجوز معامله"], "NO_TRADE")
+
+
+    def test_low_price_high_liquidity_token_enters_tier2_without_candles_or_second_source(self):
+        candidate = {
+            "chain": "solana", "price_usd": 0.01, "liquidity_usd": 30_000,
+            "volume_24h_usd": 120_000,
+            "security_evidence": {
+                "status": "UNKNOWN", "mint_authority_active": False,
+                "freeze_authority_active": False, "honeypot_detected": False,
+                "sell_tax_pct": 0,
+            },
+            "market_reconciliation": {"status": "UNKNOWN"},
+            "exit_slippage_evidence": {"status": "UNKNOWN"},
+        }
+        tier = classify_gem_tier(candidate, {})
+        self.assertEqual(tier["tier"], "TIER_2_EARLY_ALPHA")
+        self.assertEqual(tier["estimated_tokens_for_100_usd"], 10_000)
+        self.assertEqual(tier["gem_hunter_v3_trade_authorization"], "NO_TRADE")
+
+    def test_low_price_candidate_with_unknown_security_is_review_not_tier2(self):
+        tier = classify_gem_tier({
+            "chain": "base", "price_usd": 0.02, "liquidity_usd": 40_000,
+            "volume_24h_usd": 150_000, "security_evidence": {"status": "UNKNOWN"},
+        }, {})
+        self.assertEqual(tier["tier"], "EARLY_ALPHA_REVIEW")
+        self.assertEqual(tier["tier_base_security_status"], "UNKNOWN")
+        self.assertEqual(tier["gem_hunter_v3_trade_authorization"], "NO_TRADE")
+
+    def test_cheap_token_honeypot_still_blocked(self):
+        tier = classify_gem_tier({
+            "chain": "solana", "price_usd": 0.001, "liquidity_usd": 50_000,
+            "volume_24h_usd": 500_000,
+            "security_evidence": {"honeypot_detected": True, "sell_tax_pct": 0},
+        }, {})
+        self.assertEqual(tier["tier"], "BLOCKED_SCAM")
+
+    def test_evaluation_quota_is_four_solana_three_base_three_ethereum(self):
+        candidates = []
+        for chain, count in (("solana", 8), ("base", 6), ("ethereum", 6)):
+            for i in range(count):
+                candidates.append({"chain": chain, "token_address": f"{chain}-{i}",
+                                   "volume_24h_usd": 1000 - i, "liquidity_usd": 500})
+        selected, deferred = _rank_gem_hunter_candidates(candidates)
+        counts = {chain: sum(row["chain"] == chain for row in selected)
+                  for chain in ("solana", "base", "ethereum")}
+        self.assertEqual(counts, {"solana": 4, "base": 3, "ethereum": 3})
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(len(deferred), 10)
+
+    def test_airdrop_radar_is_official_linked_and_research_only(self):
+        projects = airdrop_radar_projects()
+        frame = airdrop_radar_dataframe()
+        self.assertGreaterEqual(len(projects), 4)
+        self.assertTrue(all(item["official_url"].startswith("https://") for item in projects))
+        self.assertTrue(all(item["trade_authorization"] == "NO_TRADE" for item in projects))
+        self.assertIn("Seed Phrase", "Seed Phrase")  # dashboard warning is explicit in the rendered card
+        self.assertEqual(len(frame), len(projects))
 
     def test_dashboard_status_never_authorizes_trading(self):
         result = score_candidate_v3({"security_evidence": {"status": "PASS"},

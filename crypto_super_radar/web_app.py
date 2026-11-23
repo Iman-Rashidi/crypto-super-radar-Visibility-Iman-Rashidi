@@ -1198,7 +1198,7 @@ GEM_HUNTER_RESULT_CACHE_LOCK = threading.Lock()
 GEM_HUNTER_EVALUATION_LIMIT = 10
 
 def _rank_gem_hunter_candidates(candidates: Any, *, limit: int = GEM_HUNTER_EVALUATION_LIMIT) -> tuple[list[dict], list[dict]]:
-    """Select a deterministic, cross-chain top-N by observed 24h volume then liquidity."""
+    """Select up to 4 Solana, 3 Base and 3 Ethereum candidates by market rank."""
     rows = [copy.deepcopy(row) for row in candidates if isinstance(row, dict)] if isinstance(candidates, list) else []
     def rank(row: dict) -> tuple[float, float, float]:
         def number(value: Any) -> float:
@@ -1209,9 +1209,28 @@ def _rank_gem_hunter_candidates(candidates: Any, *, limit: int = GEM_HUNTER_EVAL
                 return 0.0
         return (number(row.get("volume_24h_usd")), number(row.get("liquidity_usd")),
                 number(row.get("discovery_priority_score")))
-    rows.sort(key=rank, reverse=True)
+    quotas = {"solana": 4, "base": 3, "ethereum": 3}
     bounded = max(1, min(int(limit), GEM_HUNTER_EVALUATION_LIMIT))
-    return rows[:bounded], rows[bounded:]
+    if bounded < GEM_HUNTER_EVALUATION_LIMIT:
+        # Preserve the same network proportions for explicit smaller test batches.
+        ordered_slots = ["solana", "base", "ethereum"] * 4
+        quotas = {chain: ordered_slots[:bounded].count(chain) for chain in quotas}
+    grouped = {chain: [] for chain in quotas}
+    unknown = []
+    for row in rows:
+        chain = str(row.get("chain") or "").strip().lower()
+        if chain in grouped:
+            grouped[chain].append(row)
+        else:
+            unknown.append(row)
+    selected = []
+    for chain in ("solana", "base", "ethereum"):
+        grouped[chain].sort(key=rank, reverse=True)
+        selected.extend(grouped[chain][:quotas[chain]])
+    selected_ids = {id(row) for row in selected}
+    deferred = [row for row in rows if id(row) not in selected_ids]
+    selected.sort(key=rank, reverse=True)
+    return selected[:bounded], deferred
 
 
 def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool = False, progress_callback=None) -> dict:
@@ -7869,6 +7888,36 @@ async function loadBlofinInstruments(){
             <p class="muted">برای اجرای اسکن زندهٔ Gem Hunter V3 دکمهٔ کشف را بزنید؛ نامزدهای Tier 1 و Tier 2 با نقاط قوت و احتیاط نمایش داده می‌شوند.</p>
           </div>
         </section>
+        <section class="card" id="free-airdrop-radar">
+          <h2>🎁 رادار ایردراپ‌ها و تست‌نت‌های رایگان</h2>
+          <p class="muted">فهرست پژوهشی از مسیرهای رسمی تست‌نت. دریافت توکن آزمایشی رایگان است، اما ارزش پولی ندارد و هیچ ایردراپی تضمین نشده است. پیش از تعامل، وضعیت و دامنهٔ رسمی پروژه را دوباره بررسی کنید.</p>
+          <div class="gem-candidate">
+            <h3>Base Sepolia · شبکه Base</h3>
+            <p>رایگان در محیط آزمایشی؛ توکن‌ها فاقد ارزش معاملاتی هستند.</p>
+            <p>مراحل: شبکه Base Sepolia را انتخاب کنید، از Faucet رسمی مستندات توکن تست بگیرید و یک تراکنش آزمایشی انجام دهید.</p>
+            <a href="https://docs.base.org/chain/faucet" target="_blank" rel="noopener noreferrer">مستندات و Faucet رسمی Base ↗</a>
+          </div>
+          <div class="gem-candidate">
+            <h3>Optimism Testnets · شبکه Optimism</h3>
+            <p>تعامل آزمایشی رایگان؛ پاداش یا ایردراپ تضمین نیست.</p>
+            <p>مراحل: شبکهٔ آزمایشی فعال را از مستندات بررسی کنید، توکن تست بگیرید و فقط برنامه‌های رسمی را اجرا کنید.</p>
+            <a href="https://docs.optimism.io/chain/networks" target="_blank" rel="noopener noreferrer">شبکه‌های رسمی Optimism ↗</a>
+          </div>
+          <div class="gem-candidate">
+            <h3>Arbitrum Sepolia · شبکه Arbitrum</h3>
+            <p>توکن تست‌نت رایگان و بدون ارزش معاملاتی؛ ایردراپ احتمالی تأیید نشده.</p>
+            <p>مراحل: شبکه را طبق مستندات اضافه کنید، Faucetهای معرفی‌شده را بررسی و فقط تست‌های رسمی را انجام دهید.</p>
+            <a href="https://docs.arbitrum.io/" target="_blank" rel="noopener noreferrer">مستندات رسمی Arbitrum ↗</a>
+          </div>
+          <div class="gem-candidate">
+            <h3>Ethereum Sepolia · شبکه Ethereum</h3>
+            <p>توکن آزمایشی رایگان برای توسعه و تست؛ فاقد ارزش واقعی.</p>
+            <p>مراحل: شبکه Sepolia را انتخاب کنید، از Faucet معرفی‌شده توکن تست بگیرید و تراکنش آزمایشی انجام دهید.</p>
+            <a href="https://ethereum.org/en/developers/docs/networks/" target="_blank" rel="noopener noreferrer">راهنمای رسمی شبکه‌های Ethereum ↗</a>
+          </div>
+          <p class="candidate-meta"><strong>هشدار امنیتی:</strong> برای دریافت ایردراپ یا توکن تست، Seed Phrase / عبارت بازیابی یا کلید خصوصی را در هیچ وب‌سایت یا فرمی وارد نکنید. این رادار هیچ کیف‌پولی متصل نمی‌کند و هیچ تراکنشی امضا نمی‌کند.</p>
+          <p class="candidate-meta">حالت سامانه: پژوهشی و نمایشی · NO_TRADE · بدون اتصال کیف‌پول</p>
+        </section>
         <section class="card" id="gem-hunter-watchlist">
           <h2>فهرست محلی زیر نظر · پیگیری ساعت‌ها و روزهای آینده</h2>
           <p class="muted">این فهرست فقط در همین مرورگر و دستگاه ذخیره می‌شود. نامزدهای اضافه‌شده سیگنال BUY نیستند. آدرس قرارداد یا لینک بازار را پیست کنید تا همراه با زمان بررسی بعدی و یادداشت ذخیره شود.</p>
@@ -8094,6 +8143,22 @@ async function loadBlofinInstruments(){
             addresses.appendChild(el('span', 'Mint / Contract: ')); addresses.appendChild(el('code', item.token_address || '—'));
             addresses.appendChild(el('span', ' · Pool: ')); addresses.appendChild(el('code', item.pool_address || '—'));
             card.appendChild(addresses);
+            if (item.token_address) {
+              const copyAddress = el('button', 'کپی آدرس قرارداد'); copyAddress.type = 'button';
+              copyAddress.addEventListener('click', async () => {
+                try {
+                  await navigator.clipboard.writeText(String(item.token_address));
+                  copyAddress.textContent = 'آدرس کپی شد ✓';
+                } catch (_) { copyAddress.textContent = 'کپی خودکار در این مرورگر مجاز نیست'; }
+              });
+              card.appendChild(copyAddress);
+            }
+            const unitPrice = Number(item.price_usd);
+            if (Number.isFinite(unitPrice) && unitPrice > 0 && unitPrice < 0.05) {
+              const estimate = Number(item.estimated_tokens_for_100_usd) || Math.floor(100 / unitPrice);
+              card.appendChild(el('p', 'با ۱۰۰ دلار حدود ' + estimate.toLocaleString('en-US') +
+                ' توکن (پیش از کارمزد و لغزش؛ صرفاً محاسبهٔ نمایشی) · مجوز: NO_TRADE', 'candidate-meta'));
+            }
             card.appendChild(el('p', 'DEX / جفت‌ارز: ' + (item.dex || 'نامشخص') + ' / ' + (item.pool_name || 'نامشخص') +
               ' · زمان ایجاد استخر: ' + (item.pool_created_at_utc || 'نامشخص') + ' · منبع کشف: ' + (item.source || 'نامشخص'), 'candidate-meta'));
             const links = document.createElement('div'); links.className = 'gem-links';

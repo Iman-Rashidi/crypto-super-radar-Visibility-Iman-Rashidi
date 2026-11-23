@@ -286,6 +286,22 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
         }
 
     security_status = security.get("status")
+    price = _finite(candidate.get("price_usd"))
+    cheap_meme_candidate = (
+        price is not None and 0 < price < 0.05
+        and liquidity is not None and liquidity >= 25_000
+        and volume is not None and volume > 100_000
+    )
+    if cheap_meme_candidate and base_security_status != "PASS":
+        return {
+            "tier": "EARLY_ALPHA_REVIEW",
+            "tier_label_fa": "بررسی فرصت زودهنگام: امنیت هنوز تأیید نشده",
+            "tier_strengths_fa": ["قیمت زیر ۰٫۰۵ دلار است.", "نقدینگی حداقل ۲۵٬۰۰۰ دلار و حجم ۲۴ساعته بیش از ۱۰۰٬۰۰۰ دلار گزارش شده است."],
+            "tier_cautions_fa": ["وضعیت Honeypot، امکان فروش یا مالیات فروش هنوز با شواهد کافی تأیید نشده؛ این توکن Tier 2 نیست و نباید سالم فرض شود."],
+            "tier_data_confidence": "INCOMPLETE",
+            "tier_base_security_status": base_security_status,
+            "gem_hunter_v3_trade_authorization": "NO_TRADE",
+        }
     if base_security_status != "PASS" or security_status == "FAIL":
         return {
             "tier": "REVIEW_REQUIRED", "tier_label_fa": "در انتظار بررسی امنیت",
@@ -293,6 +309,28 @@ def classify_gem_tier(candidate: Mapping[str, Any], scores: Mapping[str, Any]) -
             "tier_cautions_fa": ["شواهد پایهٔ ضد Honeypot/فروش هنوز کامل و قابل تأیید نیست؛ UNKNOWN به معنی سالم بودن قرارداد نیست."],
             "tier_data_confidence": "INCOMPLETE",
             "tier_base_security_status": base_security_status,
+        }
+
+    if cheap_meme_candidate:
+        estimated_tokens = int(100.0 / price)
+        return {
+            "tier": "TIER_2_EARLY_ALPHA",
+            "tier_label_fa": "میم‌کوین ارزان: فرصت اولیه پژوهشی · Tier 2",
+            "tier_strengths_fa": [
+                "قیمت زیر ۰٫۰۵ دلار است.",
+                "نقدینگی حداقل ۲۵٬۰۰۰ دلار و حجم ۲۴ساعته بیش از ۱۰۰٬۰۰۰ دلار است.",
+                "کنترل‌های پایه ضد Honeypot و مالیات فروش با شواهد موجود عبور کرده‌اند.",
+            ],
+            "tier_cautions_fa": [
+                "این مسیر برای کشف زودهنگام است؛ نبود کندل تاریخی یا منبع دوم به معنی تأیید روند یا عمق واقعی خروج نیست.",
+                "تعداد توکن با ۱۰۰ دلار تخمینی است و کارمزد، لغزش، مالیات احتمالی و تغییر قیمت را لحاظ نمی‌کند.",
+                "Tier 2 توصیه خرید نیست و مجوز معامله ندارد.",
+            ],
+            "tier_data_confidence": "LIMITED",
+            "tier_base_security_status": base_security_status,
+            "estimated_tokens_for_100_usd": estimated_tokens,
+            "estimated_budget_usd": 100,
+            "gem_hunter_v3_trade_authorization": "NO_TRADE",
         }
 
     if (

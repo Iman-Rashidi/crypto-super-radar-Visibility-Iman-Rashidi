@@ -237,6 +237,50 @@ def build_dashboard_frames(
     }
 
 
+
+
+_AIRDROP_RADAR_PROJECTS = [
+    {
+        "project": "Base Sepolia", "network": "Base", "free_level_fa": "کاملاً رایگان در محیط آزمایشی؛ توکن‌ها ارزش پولی ندارند.",
+        "steps_fa": ["کیف‌پول سازگار با شبکه آزمایشی بسازید.", "شبکه Base Sepolia را انتخاب کنید.", "از Faucet رسمی مستندات Base توکن آزمایشی بگیرید.", "یک تراکنش آزمایشی انجام دهید؛ هیچ پاداشی تضمین نشده است."],
+        "official_url": "https://docs.base.org/chain/faucet", "category": "TESTNET", "trade_authorization": "NO_TRADE",
+    },
+    {
+        "project": "Optimism Testnets", "network": "Optimism", "free_level_fa": "تعامل آزمایشی رایگان؛ پاداش یا ایردراپ تضمین نیست.",
+        "steps_fa": ["شبکه آزمایشی فعال را از مستندات رسمی بررسی کنید.", "توکن آزمایشی را فقط از Faucet معرفی‌شده در مستندات بگیرید.", "برنامه‌های آزمایشی رسمی را بررسی و تراکنش‌ها را ثبت کنید."],
+        "official_url": "https://docs.optimism.io/chain/networks", "category": "TESTNET", "trade_authorization": "NO_TRADE",
+    },
+    {
+        "project": "Arbitrum Sepolia", "network": "Arbitrum", "free_level_fa": "توکن تست‌نت رایگان و بدون ارزش معاملاتی؛ ایردراپ احتمالی تأیید نشده.",
+        "steps_fa": ["شبکه Arbitrum Sepolia را طبق مستندات رسمی اضافه کنید.", "Faucetهای معتبر معرفی‌شده در مستندات را بررسی کنید.", "فقط برنامه‌های آزمایشی رسمی را اجرا کنید."],
+        "official_url": "https://docs.arbitrum.io/", "category": "TESTNET", "trade_authorization": "NO_TRADE",
+    },
+    {
+        "project": "Ethereum Sepolia", "network": "Ethereum", "free_level_fa": "توکن آزمایشی رایگان برای تست؛ فاقد ارزش واقعی.",
+        "steps_fa": ["شبکه Sepolia را در کیف‌پول انتخاب کنید.", "از Faucet معرفی‌شده در مستندات Ethereum توکن آزمایشی بگیرید.", "قراردادها و تراکنش‌های آزمایشی را فقط در محیط تست اجرا کنید."],
+        "official_url": "https://ethereum.org/en/developers/docs/networks/", "category": "TESTNET", "trade_authorization": "NO_TRADE",
+    },
+]
+
+
+def airdrop_radar_projects() -> list[dict[str, Any]]:
+    """Return curated official testnet entry points; never imply an airdrop is guaranteed."""
+    return [dict(item, steps_fa=list(item["steps_fa"])) for item in _AIRDROP_RADAR_PROJECTS]
+
+
+def airdrop_radar_dataframe() -> pd.DataFrame:
+    """Build the Persian, research-only free-airdrop/testnet directory."""
+    rows = []
+    for item in airdrop_radar_projects():
+        rows.append({
+            "پروژه": item["project"], "شبکه": item["network"],
+            "میزان رایگان بودن": item["free_level_fa"],
+            "مراحل": "؛ ".join(item["steps_fa"]), "لینک رسمی": item["official_url"],
+            "نوع": item["category"], "مجوز معامله": "NO_TRADE",
+        })
+    return pd.DataFrame(rows, columns=["پروژه", "شبکه", "میزان رایگان بودن", "مراحل", "لینک رسمی", "نوع", "مجوز معامله"])
+
+
 def gem_hunter_v3_dataframe(candidates: Any) -> pd.DataFrame:
     """Build a mobile-friendly Gem Hunter V3 view without trade authorization."""
     rows = []
