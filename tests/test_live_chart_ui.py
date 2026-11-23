@@ -38,6 +38,28 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn(".live-wave-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}", self.source)
         self.assertIn(".live-wave-grid{grid-template-columns:1fr}", self.source)
 
+    def test_future_projection_chart_has_four_selectable_horizons_and_two_scenarios(self):
+        for horizon in ("15m", "1h", "4h", "1d"):
+            self.assertIn('data-forecast-horizon="'+horizon+'"', self.source)
+        self.assertIn('id="future-forecast-chart"', self.source)
+        self.assertIn("function drawFutureForecast(data,horizon)", self.source)
+        self.assertIn("scenario(bull,'#32d99a',[7,6])", self.source)
+        self.assertIn("scenario(bear,'#ff647b',[7,6])", self.source)
+        self.assertIn("۲۰ کندل واقعی اخیر", self.source)
+        self.assertIn("نه پیش‌بینی قطعی", self.source)
+
+    def test_chart_labels_use_collision_spacing_and_hide_minor_pivot_text(self):
+        self.assertIn("minGap=26", self.source)
+        self.assertIn("point.x-lastWaveLabelX>=95", self.source)
+        self.assertIn("rightLabels.forEach", self.source)
+        self.assertNotIn("wavePoint?wavePoint.label:(p.kind==='LOW'?'کف':'سقف')", self.source)
+
+    def test_manual_demo_tp_sl_are_populated_even_without_signal_levels(self):
+        self.assertIn("const suggestedSl=manualDirection==='LONG'?manualEntryPrice-risk:manualEntryPrice+risk", self.source)
+        self.assertIn("const suggestedTp=manualDirection==='LONG'?manualEntryPrice+risk*1.5:manualEntryPrice-risk*1.5", self.source)
+        self.assertIn("manualTrade.sl.value=String(sl>0?sl:suggestedSl)", self.source)
+        self.assertIn("manualTrade.tp.value=String(tp>0?tp:suggestedTp)", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
