@@ -18,7 +18,8 @@ from .models import AssetSpec, Signal
 from .ai_supervisor import run_challenge1_v2_supervisor_reviews
 from .challenge1_v2 import (
     analyze_signal, build_fast_trigger_signal, build_early_wave3_signal,
-    challenge1_v2_execution_evidence_ready,
+    challenge1_v2_execution_evidence_ready, rsi_divergence_entry_guard,
+    calculate_wave4_fibonacci, breakout_volume_confirmation,
 )
 from .challenge1_strategy import analyze_blofin_challenge1
 
@@ -357,6 +358,17 @@ def analyze_challenge1_v2_market(
         if fast_path.get("signal") in {"LONG", "SHORT"}:
             record = fast_path
     record = dict(record)
+    record["wave4_fibonacci"] = calculate_wave4_fibonacci(frame_5m) if fast_ohlcv_ready else {"status": "UNAVAILABLE", "levels": {}}
+    if record.get("signal") in {"LONG", "SHORT"} and fast_ohlcv_ready:
+        side = str(record["signal"]).upper()
+        divergence_guard = rsi_divergence_entry_guard(frame_5m, frame_15m, side)
+        record["rsi_divergence_guard"] = divergence_guard
+        volume_confirmation = breakout_volume_confirmation(frame_5m)
+        record["breakout_volume_confirmation"] = volume_confirmation
+        if divergence_guard.get("blocked"):
+            record.update({"signal": "NO_TRADE", "status": "NO_TRADE", "reason": "ورود مسدود شد: واگرایی RSI تأییدشده در تایم‌فریم 5m/15m خلاف جهت معامله است.", "orders_submitted": False})
+        elif not volume_confirmation.get("confirmed"):
+            record.update({"signal": "NO_TRADE", "status": "NO_TRADE", "reason": "ورود شکست مسدود شد: حجم کندل بسته‌شده به حداقل 1.2 برابر میانگین 20 کندل نرسیده است.", "orders_submitted": False})
     record["early_w3_diagnostic"] = {"signal": early_w3_path.get("signal"), "reason": early_w3_path.get("reason"), "selected": bool(early_w3_path.get("early_w3_active"))}
     record["fast_trigger_diagnostic"] = {
         "engine": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
