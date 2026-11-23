@@ -631,9 +631,13 @@ class GemHunterV3Tests(unittest.TestCase):
             "gem_hunter_v3_status": "EARLY_ALPHA_REVIEW",
             "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "tier_base_security_status": "UNKNOWN",
+            "pump_phase_fa": "🟢 فاز ۱: شروع پامپ (Early Ignition)",
+            "buy_volume_share_pct": 60,
             "security_evidence": {"status": "UNKNOWN", "provider": "SOLANA_RPC"},
             "short_term_momentum_score": 75,
             "tier_data_confidence": "INCOMPLETE",
+            "pump_phase_fa": "🟢 فاز ۱: شروع پامپ (Early Ignition)",
+            "buy_volume_share_pct": 60,
         }
         client = Mock()
         client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 21}}
@@ -667,7 +671,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "https://jup.ag/swap/SOL-MintAddress123",
             "https://dexscreener.com/solana/MintAddress123",
             "https://crypto-super-radar-unlimited-demo-staging.onrender.com",
-            "NO_TRADE (بدون معامله خودکار)",
+            "🔍 وضعیت: سیگنال پژوهشی تاییدشده (خرید دستی در کیف پول با کاربر)",
         ):
             self.assertIn(expected, sent_text)
         self.assertIn("\n", sent_text)
