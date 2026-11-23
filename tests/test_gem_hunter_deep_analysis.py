@@ -68,7 +68,7 @@ class GemHunterDeepAnalysisTests(unittest.TestCase):
                     "chainId": "solana",
                     "baseToken": {"address": "BONK_COPYCAT_MINT", "symbol": "BONK"},
                     "priceUsd": "0.00001",
-                    "liquidity": {"usd": 12000},
+                    "liquidity": {"usd": 1200000},
                     "volume": {"h24": 100000},
                     "txns": {"h24": {"buys": 100, "sells": 80}},
                 },
