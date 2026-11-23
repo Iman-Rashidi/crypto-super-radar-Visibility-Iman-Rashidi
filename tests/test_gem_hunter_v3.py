@@ -681,6 +681,22 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertIn("📡 <b>بخش ۴", sent_text)
         self.assertEqual(client.post.call_args_list[0].kwargs["json"]["parse_mode"], "HTML")
 
+    def test_early_alpha_review_telegram_skips_non_bullish_or_low_buy_share(self):
+        base = {
+            "chain": "solana", "token_address": "MintAddress123",
+            "gem_hunter_v3_status": "EARLY_ALPHA_REVIEW",
+            "gem_hunter_v3_trade_authorization": "NO_TRADE",
+            "price_usd": 0.01, "liquidity_usd": 75000, "volume_24h_usd": 650000,
+            "pump_phase_fa": "🔴 فاز ۳: سقف فرسودگی / خطر دامپ",
+            "buy_volume_share_pct": 80,
+        }
+        result = notify_qualified_gem(base, FakeStore(), session=Mock(), bot_token="t", chat_id="c")
+        self.assertEqual(result["status"], "SKIPPED")
+        base["pump_phase_fa"] = "🟡 فاز ۲: میانه موج صعودی"
+        base["buy_volume_share_pct"] = 51.9
+        result = notify_qualified_gem(base, FakeStore(), session=Mock(), bot_token="t", chat_id="c")
+        self.assertEqual(result["status"], "SKIPPED")
+
     def test_early_alpha_review_telegram_rejects_values_below_requested_thresholds(self):
         candidate = {
             "chain": "base", "token_address": "0xabc", "price_usd": 0.01,
