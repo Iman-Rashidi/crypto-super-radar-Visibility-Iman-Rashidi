@@ -10,6 +10,7 @@ import math
 import numpy as np
 import pandas as pd
 from .elliott_waves import monitor_elliott_waves
+from .challenge1_strategy import challenge1_entry_evidence_ready
 
 MAX_STOP_DISTANCE_PCT = 0.035
 
@@ -370,6 +371,243 @@ def _utc_timestamp(value: Any) -> pd.Timestamp | None:
     return stamp.tz_convert("UTC")
 
 
+
+def build_fast_trigger_signal(
+    *, instrument_id: str, frame_1h: pd.DataFrame, frame_4h: pd.DataFrame,
+    frame_15m: pd.DataFrame, btc_15m: pd.DataFrame, asof: pd.Timestamp,
+    funding_rate: float | None, funding_kind: str | int | None,
+    funding_event_time_ms: int | None, funding_max_age_ms: int | None,
+    spread_fraction: float | None, fast_trigger_record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Promote the dashboard's confirmed 5m Elliott/candle trigger through V2 risk gates."""
+    side = str(fast_trigger_record.get("signal") or "").upper()
+    symbol = str(instrument_id or "").upper()
+    if side not in {"LONG", "SHORT"} or fast_trigger_record.get("instrument_id") != symbol:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger identity or direction is invalid"}
+    fast_ready, fast_reason = challenge1_entry_evidence_ready(fast_trigger_record)
+    if not fast_ready:
+        return {"signal": "NO_TRADE", "reason": "Fast candle evidence rejected: " + fast_reason}
+    if asof.tzinfo is None:
+        raise ValueError("asof must be timezone-aware")
+    asof = asof.tz_convert("UTC")
+    m15 = _closed(_validate(frame_15m, "15M", 70), asof, pd.Timedelta(minutes=15))
+    if len(m15) < 60:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger 15m alignment history is insufficient"}
+    e21 = ema(m15["close"], 21)
+    if len(e21) < 4 or pd.isna(e21.iloc[-1]) or pd.isna(e21.iloc[-4]):
+        return {"signal": "NO_TRADE", "reason": "Fast trigger 15m EMA21 alignment is unavailable"}
+    m15_close = float(m15["close"].iloc[-1])
+    ema21_value = float(e21.iloc[-1])
+    ema21_slope = float(e21.iloc[-1] - e21.iloc[-4])
+    aligned = (
+        m15_close > ema21_value and ema21_slope > 0
+        if side == "LONG" else
+        m15_close < ema21_value and ema21_slope < 0
+    )
+    if not aligned:
+        return {"signal": "NO_TRADE", "reason": "Confirmed 5m trigger conflicts with completed 15m EMA21 trend"}
+    if funding_rate is None or spread_fraction is None or str(funding_kind or "").strip() != "0":
+        return {"signal": "NO_TRADE", "reason": "Fast trigger funding classification or spread evidence is missing"}
+    if (
+        isinstance(funding_event_time_ms, bool) or not isinstance(funding_event_time_ms, int)
+        or isinstance(funding_max_age_ms, bool) or not isinstance(funding_max_age_ms, int)
+        or funding_event_time_ms <= 0 or funding_max_age_ms <= 0
+    ):
+        return {"signal": "NO_TRADE", "reason": "Fast trigger funding freshness evidence is invalid"}
+    asof_ms = int(asof.timestamp() * 1000)
+    funding_age = asof_ms - funding_event_time_ms
+    if funding_age < 0 or funding_age > funding_max_age_ms:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger funding event is stale or future-dated"}
+    funding = float(funding_rate)
+    spread = float(spread_fraction)
+    if not math.isfinite(funding) or not math.isfinite(spread) or spread < 0 or spread > 0.0004:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger funding or spread guard failed"}
+    if (side == "LONG" and funding > 0.0005) or (side == "SHORT" and funding < -0.0005):
+        return {"signal": "NO_TRADE", "reason": "Fast trigger funding crowding guard blocked entry"}
+
+    btc = _closed(_validate(btc_15m, "BTC 15M", 40), asof, pd.Timedelta(minutes=15))
+    if len(btc) < 25:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger BTC master feed is unavailable"}
+    btc_ema21 = ema(btc["close"], 21)
+    btc_change = float(btc["close"].iloc[-1] / btc["close"].iloc[-2] - 1.0)
+    btc_ok = True if symbol == "BTC-USDT" else (
+        float(btc["close"].iloc[-1]) > float(btc_ema21.iloc[-1]) and btc_change > -0.008
+        if side == "LONG" else
+        float(btc["close"].iloc[-1]) < float(btc_ema21.iloc[-1]) and btc_change < 0.008
+    )
+    if not btc_ok:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger BTC master guard blocked the setup"}
+
+    entry = float(fast_trigger_record.get("entry_price_usd") or 0)
+    stop = float(fast_trigger_record.get("stop_loss_usd") or 0)
+    if not all(math.isfinite(x) and x > 0 for x in (entry, stop)):
+        return {"signal": "NO_TRADE", "reason": "Fast trigger entry or structural stop is invalid"}
+    risk = entry - stop if side == "LONG" else stop - entry
+    stop_pct = risk / entry if entry > 0 else math.inf
+    if risk <= 0 or stop_pct > MAX_STOP_DISTANCE_PCT:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger structural stop exceeds the 3.5% risk cap"}
+    target = entry + 1.5 * risk if side == "LONG" else entry - 1.5 * risk
+    if target <= 0:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger TP1 calculation is invalid"}
+
+    h1 = _closed(_validate(frame_1h, "1H", 205), asof, pd.Timedelta(hours=1))
+    h4 = _closed(_validate(frame_4h, "4H", 205), asof, pd.Timedelta(hours=4))
+    if h1.empty or h4.empty:
+        return {"signal": "NO_TRADE", "reason": "Fast trigger higher-timeframe context is unavailable"}
+    regime = _regime(frame_1h, frame_4h, asof)
+    fast_evidence = fast_trigger_record["challenge1_evidence"]
+    wave = dict(fast_evidence["elliott_wave"])
+    wave.update({
+        "timeframe": "5m",
+        "evidence_source": "DASHBOARD_CHALLENGE1_COMPLETED_5M_CANDLES",
+        "expected_signal_direction": side,
+        "latest_closed_candle_open_utc": fast_trigger_record["signal_bar_open_utc"],
+        "data_asof_utc": asof.isoformat(),
+        "wave_alignment": "ALIGNED",
+    })
+    signal_time = str(fast_trigger_record["signal_bar_open_utc"])
+    signal_id = f"challenge1-v2-fast:{symbol}:5m:{signal_time}:{side}"
+    score_parts = {
+        "confirmed_5m_pattern": 35,
+        "confirmed_5m_elliott_wave": 35,
+        "completed_15m_ema21_alignment": 20,
+        "btc_master_alignment": 10 if btc_ok else 0,
+    }
+    confidence = sum(score_parts.values())
+    evidence = {
+        "decision_engine_version": "CHALLENGE_1_V2_FAST_5M_15M_ELLIOTT",
+        "signal_id": signal_id,
+        "instrument_id": symbol,
+        "setup_timeframe": "5m",
+        "entry_execution_timeframe": "15m",
+        "context_timeframes": ["15m", "1H", "4H"],
+        "higher_timeframes_used": True,
+        "completed_candles_only": True,
+        "signal_candle_open_utc": signal_time,
+        "context_15m_candle_open_utc": m15.index[-1].isoformat(),
+        "context_1h_candle_open_utc": h1.index[-1].isoformat(),
+        "context_4h_candle_open_utc": h4.index[-1].isoformat(),
+        "data_asof_utc": asof.isoformat(),
+        "funding_rate": funding,
+        "funding_kind": "0",
+        "funding_event_time_ms": funding_event_time_ms,
+        "funding_max_age_ms": funding_max_age_ms,
+        "elliott_wave": wave,
+        "wave_alignment": "ALIGNED",
+        "fast_trigger": dict(fast_trigger_record),
+        "m15_alignment": {
+            "timeframe": "15m",
+            "evidence_source": "BLOFIN_DEMO_COMPLETED_15M_CANDLES",
+            "completed_candles_only": True,
+            "latest_closed_candle_open_utc": m15.index[-1].isoformat(),
+            "close": m15_close,
+            "ema21": ema21_value,
+            "ema21_slope_3_bars": ema21_slope,
+            "direction": side,
+            "aligned": True,
+        },
+    }
+    return {
+        "signal": side, "signal_id": signal_id, "instrument_id": symbol,
+        "execution_profile": "CHALLENGE_1_V2",
+        "entry": entry, "stop_loss": stop, "take_profit": target,
+        "atr_15m": float(atr(m15, 14).iloc[-1]),
+        "gross_rr": 1.5, "confidence_score": confidence,
+        "score_parts": score_parts, "regime": regime,
+        "volume_ratio": fast_evidence.get("volume_confirmation", {}).get("volume_ratio"),
+        "elliott_wave_5m": wave, "challenge1_v2_evidence": evidence,
+        "funding_rate": funding, "funding_kind": "0",
+        "funding_event_time_ms": funding_event_time_ms,
+        "funding_max_age_ms": funding_max_age_ms,
+        "spread_fraction": spread, "signal_candle_open_utc": signal_time,
+        "orders_submitted": False,
+        "fast_trigger_active": True,
+    }
+
+
+def _fast_trigger_execution_evidence_ready(record: Mapping[str, Any]) -> tuple[bool, str]:
+    evidence = record.get("challenge1_v2_evidence")
+    if not isinstance(evidence, Mapping):
+        return False, "Fast V2 evidence is missing."
+    side = str(record.get("signal") or "").upper()
+    symbol = str(record.get("instrument_id") or "").upper()
+    signal_id = str(record.get("signal_id") or "")
+    signal_open = _utc_timestamp(evidence.get("signal_candle_open_utc"))
+    asof = _utc_timestamp(evidence.get("data_asof_utc"))
+    h1_open = _utc_timestamp(evidence.get("context_1h_candle_open_utc"))
+    h4_open = _utc_timestamp(evidence.get("context_4h_candle_open_utc"))
+    m15_open = _utc_timestamp(evidence.get("context_15m_candle_open_utc"))
+    fast = evidence.get("fast_trigger")
+    m15 = evidence.get("m15_alignment")
+    if (
+        evidence.get("decision_engine_version") != "CHALLENGE_1_V2_FAST_5M_15M_ELLIOTT"
+        or evidence.get("signal_id") != signal_id
+        or evidence.get("instrument_id") != symbol
+        or evidence.get("setup_timeframe") != "5m"
+        or evidence.get("entry_execution_timeframe") != "15m"
+        or evidence.get("context_timeframes") != ["15m", "1H", "4H"]
+        or evidence.get("completed_candles_only") is not True
+        or evidence.get("higher_timeframes_used") is not True
+        or evidence.get("signal_candle_open_utc") != record.get("signal_candle_open_utc")
+        or any(x is None for x in (signal_open, asof, h1_open, h4_open, m15_open))
+        or signal_id != f"challenge1-v2-fast:{symbol}:5m:{signal_open.isoformat()}:{side}"
+        or not isinstance(fast, Mapping)
+        or not isinstance(m15, Mapping)
+    ):
+        return False, "Fast V2 identity, timeframe or timestamp evidence is invalid."
+    raw_ready, raw_reason = challenge1_entry_evidence_ready(fast)
+    if not raw_ready or fast.get("signal") != side or fast.get("instrument_id") != symbol:
+        return False, "Dashboard fast-trigger evidence failed: " + raw_reason
+    if (
+        m15.get("timeframe") != "15m"
+        or m15.get("evidence_source") != "BLOFIN_DEMO_COMPLETED_15M_CANDLES"
+        or m15.get("completed_candles_only") is not True
+        or m15.get("aligned") is not True
+        or str(m15.get("direction") or "").upper() != side
+        or _utc_timestamp(m15.get("latest_closed_candle_open_utc")) != m15_open
+        or float(m15.get("close") or 0) <= 0
+        or float(m15.get("ema21") or 0) <= 0
+        or (float(m15.get("ema21_slope_3_bars") or 0) <= 0 if side == "LONG" else float(m15.get("ema21_slope_3_bars") or 0) >= 0)
+    ):
+        return False, "Completed 15m trend alignment evidence is invalid."
+    for open_time, duration, label in (
+        (signal_open, pd.Timedelta(minutes=5), "5M"),
+        (m15_open, pd.Timedelta(minutes=15), "15M"),
+        (h1_open, pd.Timedelta(hours=1), "1H"),
+        (h4_open, pd.Timedelta(hours=4), "4H"),
+    ):
+        age = asof - (open_time + duration)
+        if age < pd.Timedelta(0) or age > duration:
+            return False, f"Fast {label} candle is future-dated or stale."
+    try:
+        entry, stop, target = (float(record.get(k)) for k in ("entry", "stop_loss", "take_profit"))
+        score = float(record.get("confidence_score"))
+        rr = float(record.get("gross_rr"))
+        funding = float(record.get("funding_rate"))
+        spread = float(record.get("spread_fraction"))
+        parts = record.get("score_parts")
+        total = sum(float(v) for v in parts.values())
+        funding_time = int(record.get("funding_event_time_ms"))
+        funding_max_age = int(record.get("funding_max_age_ms"))
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return False, "Fast V2 trade-plan or funding fields are invalid."
+    if (
+        not all(math.isfinite(x) for x in (entry, stop, target, score, rr, funding, spread, total))
+        or entry <= 0 or stop <= 0 or target <= 0 or score < 70
+        or rr < 1.5 or abs(total - score) > 1e-9
+        or abs(entry - stop) / entry > MAX_STOP_DISTANCE_PCT
+        or spread < 0 or spread > 0.0004
+        or evidence.get("funding_kind") != "0"
+        or record.get("funding_kind") != "0"
+        or int(asof.timestamp() * 1000) - funding_time < 0
+        or int(asof.timestamp() * 1000) - funding_time > funding_max_age
+        or (side == "LONG" and not stop < entry < target)
+        or (side == "SHORT" and not target < entry < stop)
+    ):
+        return False, "Fast V2 risk, funding, score or reward/risk contract failed."
+    return True, "Confirmed 5m dashboard trigger aligned with completed 15m trend; Demo risk and AI gates remain mandatory."
+
+
 def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     """Preflight V2 analysis evidence; this function never authorizes an order.
 
@@ -388,6 +626,8 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     evidence = record.get("challenge1_v2_evidence")
     if not isinstance(evidence, Mapping):
         return False, "V2-specific execution evidence is missing."
+    if evidence.get("decision_engine_version") == "CHALLENGE_1_V2_FAST_5M_15M_ELLIOTT":
+        return _fast_trigger_execution_evidence_ready(record)
     signal_id = str(record.get("signal_id") or "").strip()
     expected_time = str(record.get("signal_candle_open_utc") or "").strip()
     if (
