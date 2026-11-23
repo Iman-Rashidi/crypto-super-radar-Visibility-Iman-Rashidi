@@ -47,6 +47,7 @@ class FastAssetScanTests(unittest.TestCase):
         self.assertEqual(submitted["sells_1h"], 7)
         self.assertTrue(submitted["pool_created_at_utc"])
         self.assertFalse(processor.call_args.kwargs["notify"])
+        self.assertFalse(processor.call_args.kwargs["persist"])
 
     def test_missing_pair_returns_limited_card(self):
         asset = AssetSpec.parse("base:0x1111111111111111111111111111111111111111")
