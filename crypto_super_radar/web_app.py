@@ -9294,6 +9294,7 @@ async function loadBlofinInstruments(){
               <p class="easy-robot-caption"><strong id="easy-robot-market">بازار: در انتظار داده</strong> · ربات فقط تحلیل را نمایش می‌دهد و مستقلاً سفارش نمی‌فرستد.</p>
             </section>
             <p id="live-radar-status" class="muted" aria-live="polite">در حال دریافت کندل‌های زنده...</p>
+            <p id="live-radar-chart-error" role="alert" aria-live="assertive" hidden style="color:#ff8f9a;background:#321b25;border:1px solid #a94d60;border-radius:10px;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere"></p>
             <div class="live-candle-wrap">
               <canvas id="live-candle-chart" width="1440" height="560" role="img" aria-label="نمودار بزرگ کندل، موج قیمت، نشانه‌های ساده خرید و فروش و حجم بازار"></canvas>
             </div>
@@ -9394,7 +9395,17 @@ async function loadBlofinInstruments(){
             const button=document.getElementById('live-radar-refresh');
             const status=document.getElementById('live-radar-status');
             const canvas=document.getElementById('live-candle-chart');
-            const ctx=canvas.getContext('2d');
+            const ctx=canvas&&typeof canvas.getContext==='function'?canvas.getContext('2d'):null;
+            const chartErrorBox=document.getElementById('live-radar-chart-error');
+            function showChartError(error,source){
+              const detail=String(error&&error.stack||error&&error.message||error||'خطای نامشخص');
+              const message=(source?source+' · ':'')+detail;
+              if(chartErrorBox){chartErrorBox.hidden=false;chartErrorBox.textContent='خطای رسم نمودار: '+message;}
+              if(status)status.textContent='رسم چارت متوقف شد: '+message.slice(0,900);
+              return message;
+            }
+            window.addEventListener('error',event=>{if(event&&event.error)showChartError(event.error,'JavaScript global error');});
+            window.addEventListener('unhandledrejection',event=>{showChartError(event&&event.reason,'Unhandled promise rejection');});
             const forecastCanvas=document.getElementById('future-forecast-chart');
             const forecastCtx=forecastCanvas?forecastCanvas.getContext('2d'):null;
             const forecastExplanation=document.getElementById('future-forecast-explanation');
@@ -9546,7 +9557,33 @@ async function loadBlofinInstruments(){
               });
             }
             let busy=false,lastSignalKey=null,timer=null;
+            function normalizeChartPayload(input){
+              if(!input||typeof input!=='object')throw new TypeError('پاسخ API شیء JSON معتبر نیست.');
+              if(!Array.isArray(input.candles))throw new TypeError('فیلد candles در پاسخ API آرایه نیست.');
+              const candles=input.candles.map((bar,index)=>{
+                if(!bar||typeof bar!=='object')throw new TypeError('کندل شماره '+(index+1)+' شیء معتبر نیست.');
+                let stamp=bar.time;
+                if(typeof stamp==='string'&&!/^\d+(?:\.\d+)?$/.test(stamp))stamp=Date.parse(stamp);
+                else stamp=Number(stamp);
+                if(Number.isFinite(stamp)&&stamp>0&&stamp<100000000000)stamp*=1000;
+                const normalized={time:stamp,open:Number(bar.open),high:Number(bar.high),low:Number(bar.low),close:Number(bar.close),volume:Number(bar.volume||0),is_closed:bar.is_closed!==false};
+                if(!Number.isFinite(normalized.time)||!Number.isFinite(normalized.open)||!Number.isFinite(normalized.high)||!Number.isFinite(normalized.low)||!Number.isFinite(normalized.close))throw new TypeError('زمان یا OHLC کندل شماره '+(index+1)+' نامعتبر است: '+JSON.stringify(bar));
+                if(normalized.high<Math.max(normalized.open,normalized.close)||normalized.low>Math.min(normalized.open,normalized.close))throw new RangeError('محدوده high/low کندل شماره '+(index+1)+' ناسازگار است.');
+                return normalized;
+              }).sort((a,b)=>a.time-b.time);
+              const unique=[];candles.forEach(bar=>{if(!unique.length||unique[unique.length-1].time!==bar.time)unique.push(bar);else unique[unique.length-1]=bar;});
+              return {...input,candles:unique};
+            }
             function draw(data){
+              try{
+                if(!ctx)throw new Error('Canvas 2D context برای نمودار اصلی در این مرورگر در دسترس نیست.');
+                const normalized=normalizeChartPayload(data);
+                if(!normalized.candles.length)throw new Error('API هیچ کندل قابل رسم ارسال نکرد.');
+                if(chartErrorBox)chartErrorBox.hidden=true;
+                drawUnsafe(normalized);
+              }catch(error){showChartError(error,'main chart');throw error;}
+            }
+            function drawUnsafe(data){
               const bars=data.candles||[];
               ctx.clearRect(0,0,canvas.width,canvas.height);
               ctx.fillStyle='#07131f';ctx.fillRect(0,0,canvas.width,canvas.height);
@@ -9785,7 +9822,7 @@ async function loadBlofinInstruments(){
                 fields.stop.textContent=number(s.stop_loss);
                 fields.target.textContent=number(s.take_profit);
                 updateManualTradeDefaults(data,s);
-                drawFutureForecast(data,forecastHorizon);
+                try{drawFutureForecast(data,forecastHorizon);}catch(forecastError){showChartError(forecastError,'future forecast chart');}
                 fields.rr.textContent=s.reward_risk===null||s.reward_risk===undefined?'—':s.reward_risk+'R';
                 fields.wave.textContent=(w.pattern||'نامشخص')+' · '+(w.phase||'داده ناکافی');
                 fields.bias.textContent=d.label_fa||faDirection(d.bias);
@@ -9827,7 +9864,7 @@ async function loadBlofinInstruments(){
                   lastSignalKey=s.signal_key;status.textContent+=' · هشدار جدید '+(labels[s.signal]||s.signal);
                 }
               }catch(error){
-                const detail=String(error&&error.message||error||'خطای نامشخص');status.textContent='خطای دریافت چارت: '+detail+' · سیگنال تازه صادر نمی‌شود.';
+                const detail=String(error&&error.stack||error&&error.message||error||'خطای نامشخص');showChartError(error,'refresh / chart pipeline');status.textContent='خطای دریافت چارت: '+detail+' · سیگنال تازه صادر نمی‌شود.';
                 fields.reason.textContent='خطای دقیق سرور/مرورگر: '+detail;
                 draw({candles:[]});
                 fields.action.textContent='نامشخص';
