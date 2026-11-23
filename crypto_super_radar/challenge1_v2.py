@@ -427,7 +427,7 @@ def rsi_divergence_entry_guard(frame_5m: pd.DataFrame, frame_15m: pd.DataFrame, 
     )
     unknown = any(item.get("type") == "UNKNOWN" for item in checks)
     return {
-        "blocked": bool(blocked or unknown),
+        "blocked": bool(blocked),
         "reason": (
             "RSI_DIVERGENCE_OPPOSES_ENTRY" if blocked else
             "RSI_DIVERGENCE_EVIDENCE_UNKNOWN" if unknown else
@@ -530,6 +530,12 @@ def detect_early_wave3_breakout(
     crossed = previous_close <= w1_level < close if side == "LONG" else previous_close >= w1_level > close
     if not crossed:
         return {"signal": "NO_TRADE", "reason": "Latest closed 5m candle did not initiate the W1 breakout"}
+    divergence_guard = rsi_divergence_entry_guard(five, fifteen, side)
+    if divergence_guard["blocked"]:
+        return {"signal": "NO_TRADE", "reason": divergence_guard["reason"], "rsi_divergence_guard": divergence_guard}
+    volume_confirmation = breakout_volume_confirmation(five)
+    if not volume_confirmation["confirmed"]:
+        return {"signal": "NO_TRADE", "reason": "W3 breakout rejected: " + volume_confirmation["reason"], "volume_confirmation": volume_confirmation}
     atr_value = float(atr(five, 14).iloc[-1])
     rsi_value = float(rsi(five["close"], 14).iloc[-1])
     if not math.isfinite(atr_value) or atr_value <= 0 or not math.isfinite(rsi_value):
@@ -578,6 +584,9 @@ def detect_early_wave3_breakout(
         "atr_5m": atr_value, "rsi_5m": rsi_value,
         "breakout_distance_pct": distance, "max_extension_pct": max_extension,
         "wave_5m": wave5, "wave_15m": wave15,
+        "rsi_divergence_guard": divergence_guard,
+        "volume_confirmation": volume_confirmation,
+        "wave4_fibonacci": calculate_wave4_fibonacci(five),
         "signal_candle_open_utc": five.index[-1].isoformat(),
         "context_15m_candle_open_utc": fifteen.index[-1].isoformat(),
         "asof_utc": asof.isoformat(),
