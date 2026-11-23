@@ -36,6 +36,7 @@ from .gem_hunter_security import screen_discovery_candidates
 from .gem_hunter_qualification import CRITICAL_GATES, FILTER_IDS, SCHEMA_VERSION, public_buy_candidates
 from .gem_hunter_v2 import ingest_candidates as gem_hunter_v2_ingest_candidates, public_snapshot as gem_hunter_v2_public_snapshot
 from .gem_hunter_v3 import process_gem_hunter_v3_candidates
+from .fast_asset_scan import build_fast_asset_scan_report, run_with_hard_timeout
 from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials_from_github_actions
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
@@ -7144,7 +7145,7 @@ class Handler(BaseHTTPRequestHandler):
                            "candles": [], "orders_submitted": False}
                 return self._send(502, json.dumps(payload, ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
-        if parsed.path.startswith("/jobs/"):
+        if parsed.path.startswith("/jobs/") or parsed.path.startswith("/api/jobs/"):
             job_id = parsed.path.rsplit("/", 1)[-1]
             with LOCK:
                 job = JOBS.get(job_id)
@@ -9923,6 +9924,9 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
+        api_jobs_request = route == "/api/jobs"
+        if api_jobs_request:
+            route = "/scan"
         if route == "/api/gem-hunter/v3/refresh":
             supplied = self.headers.get("Authorization", "")
             if not supplied.startswith("Bearer ") or len(supplied) <= 7:
