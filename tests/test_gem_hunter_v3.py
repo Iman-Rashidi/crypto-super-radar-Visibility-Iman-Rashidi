@@ -42,7 +42,7 @@ class GemHunterV3Tests(unittest.TestCase):
         ]
         result = analyze_pool_trade_evidence(
             trades, chain="base", token_address="0x" + "1" * 40,
-            pool_address="0x" + "2" * 40, liquidity_usd=100000, now=now,
+            pool_address="0x" + "2" * 40, liquidity_usd=50000, now=now,
         )
         self.assertEqual(result["whale_buy_volume_1h_usd"], 5000)
         self.assertEqual(result["whale_sell_volume_1h_usd"], 1000)
