@@ -1369,11 +1369,12 @@ def _gem_hunter_discovery_payload(limit: int = 20, *, include_diagnostics: bool 
     qualified = qualified_early_wave_candidates(raw_candidates, limit=limit)
     warning_only = [dict(item, qualification_status="WATCH_ONLY_HIGH_RISK", trade_authorization="NO_TRADE")
                     for item in raw_candidates if isinstance(item, dict)
+                    and isinstance(item.get("qualification"), dict)
                     and item.get("qualification_status") == "WATCH_ONLY_HIGH_RISK"]
 
     if qualified:
-        signal_status = "BUY_FOUND"
-        diagnostic_fa = f"{len(qualified)} فرصت BUY با شواهد کامل تأیید شد."
+        signal_status = "EARLY_WAVE_CANDIDATES_FOUND"
+        diagnostic_fa = f"{len(qualified)} نامزد پژوهشی موج زودهنگام واجد شرایط شد؛ مجوز معامله همچنان NO_TRADE است."
         engine_status = "COMPLETE"
     elif discovered_count == 0:
         if result.get("status") == "PASS":

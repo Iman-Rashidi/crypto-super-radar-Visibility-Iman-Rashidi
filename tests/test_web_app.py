@@ -1128,9 +1128,20 @@ class WebAppHttpTests(unittest.TestCase):
             expires_at=0.0, payload=None, refreshing=False, last_error=None,
         )
         good = valid_candidate(now=datetime.now(timezone.utc))
+        good.update({
+            "pump_phase_fa": "🟢 فاز ۱: انباشت / شروع موج",
+            "risk_score": 30,
+            "qualification_status": "QUALIFIED_EARLY_WAVE",
+            "trade_authorization": "NO_TRADE",
+        })
         bad = dict(good)
-        bad["candidate_status"] = "UNSCREENED"
-        bad["trade_authorization"] = "NO_TRADE"
+        bad.update({
+            "candidate_status": "UNSCREENED",
+            "pump_phase_fa": "🔴 فاز ۳: سقف فرسودگی / خطر دامپ",
+            "risk_score": 95,
+            "qualification_status": "WATCH_ONLY_HIGH_RISK",
+            "trade_authorization": "NO_TRADE",
+        })
         with patch.object(web_app, "discover_gem_candidates", return_value={
             "status": "PASS", "candidate_count": 2,
             "candidates": [good, bad], "trade_authorization": "NO_TRADE",
@@ -1140,18 +1151,20 @@ class WebAppHttpTests(unittest.TestCase):
             status, _, payload = self.request("GET", "/api/gem-hunter/discover?limit=20")
         result = json.loads(payload)
         self.assertEqual(status, 200)
-        self.assertEqual(result["signal_status"], "BUY_FOUND")
-        self.assertEqual(result["qualified_buy_count"], 1)
+        self.assertEqual(result["signal_status"], "EARLY_WAVE_CANDIDATES_FOUND")
+        self.assertEqual(result["qualified_buy_count"], 0)
+        self.assertEqual(result["qualified_early_wave_count"], 1)
         self.assertEqual(result["candidate_count"], 1)
         self.assertEqual(result["discovered_candidate_count"], 2)
         self.assertEqual(result["evaluation_record_count"], 2)
         self.assertEqual(result["complete_evaluation_count"], 2)
         self.assertEqual(result["unassessed_candidate_count"], 0)
         self.assertEqual(len(result["candidates"]), 1)
-        self.assertEqual(result["candidates"][0]["trade_authorization"], "BUY")
+        self.assertEqual(result["candidates"][0]["trade_authorization"], "NO_TRADE")
+        self.assertEqual(result["trade_authorization"], "NO_TRADE")
+        self.assertEqual(result["candidates"][0]["qualification_status"], "QUALIFIED_EARLY_WAVE")
         self.assertNotIn("available_candidate_count", result)
-        self.assertNotIn("trade_authorization", result)
-        # The only returned token is the qualified BUY; the UNSCREENED twin is hidden.
+        # The phase-3 twin is isolated in the warning-only bucket.
 
     def test_gem_hunter_endpoint_hides_all_unqualified_candidates(self):
         web_app.GEM_HUNTER_CACHE.update(expires_at=0.0, payload=None)
@@ -1185,7 +1198,11 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertFalse(result["public_policy"]["discovery_candidates_exposed"])
         self.assertNotIn("available_candidate_count", result)
-        self.assertNotIn("61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP", json.dumps(result))
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["warning_only_count"], 1)
+        self.assertEqual(result["warning_only_candidates"][0]["qualification_status"], "WATCH_ONLY_HIGH_RISK")
+        self.assertEqual(result["warning_only_candidates"][0]["trade_authorization"], "NO_TRADE")
+        self.assertIn("61iusjsjCqfCW6SViHytSyYqvALUMcv3k2xMsUtM1UwP", json.dumps(result["warning_only_candidates"]))
 
     def test_gem_hunter_report_route_requests_v3_research_diagnostics_and_refresh(self):
         expected = {
