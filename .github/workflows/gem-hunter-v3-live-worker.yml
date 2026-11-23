@@ -8,6 +8,7 @@ on:
       - staging/challenge1-integration-2026-11-16
     paths:
       - "crypto_super_radar/gem_hunter_v3.py"
+      - "crypto_super_radar/providers.py"
       - "crypto_super_radar/gem_hunter_worker.py"
       - "crypto_super_radar/gem_hunter_discovery.py"
       - ".github/workflows/gem-hunter-v3-live-worker.yml"

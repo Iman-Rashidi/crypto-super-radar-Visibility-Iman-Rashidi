@@ -1,10 +1,12 @@
 """Offline tests for Gem Hunter V3 research-only primitives."""
 import sqlite3
 import unittest
+from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, patch
 
 from crypto_super_radar.dashboard_data import gem_hunter_v3_dataframe, airdrop_radar_projects, airdrop_radar_dataframe
 from crypto_super_radar.web_app import _rank_gem_hunter_candidates
+from crypto_super_radar.providers import SolanaRpcProvider, DataProviderError
 from crypto_super_radar.gem_hunter_v3 import (
     estimate_exit_slippage, score_candidate_v3, persist_candidate_lifecycle,
     notify_qualified_gem, TursoGemHunterStore, classify_gem_tier,
@@ -383,6 +385,94 @@ class GemHunterV3Tests(unittest.TestCase):
                                      "pool_trade_evidence": {"buy_volume_usd": 90, "sell_volume_usd": 10},
                                      "technical_evidence": {"filters": {"trend": "PASS", "momentum": "PASS"}}})
         self.assertEqual(result["trade_authorization"], "NO_TRADE")
+
+
+    def test_solana_rpc_fallback_retries_full_snapshot_after_each_primary_method_failure(self):
+        primary = SolanaRpcProvider.URL
+        fallback = "https://solana-rpc.publicnode.com"
+
+        class FakeHttp:
+            def __init__(self, fail_method):
+                self.fail_method = fail_method
+                self.calls = []
+
+            def post(self, url, payload, timeout=None, max_retries=None):
+                method = payload["method"]
+                self.calls.append((url, method))
+                if url == primary and method == self.fail_method:
+                    raise DataProviderError("simulated primary RPC timeout")
+                if method == "getAccountInfo":
+                    value = {"data": {"parsed": {"info": {"mintAuthority": None, "freezeAuthority": None}}}}
+                elif method == "getTokenSupply":
+                    value = {"uiAmountString": "1000"}
+                elif method == "getTokenLargestAccounts":
+                    value = [{"uiAmountString": "100"}]
+                else:
+                    raise AssertionError(method)
+                return {"jsonrpc": "2.0", "id": 1, "result": {"value": value}}
+
+        for failed_method in ("getAccountInfo", "getTokenSupply", "getTokenLargestAccounts"):
+            with self.subTest(failed_method=failed_method):
+                http = FakeHttp(failed_method)
+                result = SolanaRpcProvider(http).token_security("mint-address")
+                self.assertEqual(result["rpc_endpoint"], fallback)
+                self.assertFalse(result["mint_authority_active"])
+                self.assertFalse(result["freeze_authority_active"])
+                fallback_methods = [method for url, method in http.calls if url == fallback]
+                self.assertEqual(fallback_methods, [
+                    "getAccountInfo", "getTokenSupply", "getTokenLargestAccounts"
+                ])
+
+    def test_early_alpha_review_telegram_alert_has_full_persian_fields_and_six_hour_dedupe(self):
+        store = FakeStore()
+        candidate = {
+            "chain": "solana", "token_address": "MintAddress123",
+            "token_name": "Minelius", "token_symbol": "MNL",
+            "price_usd": 0.01, "liquidity_usd": 75000, "volume_24h_usd": 650000,
+            "candidate_status": "UNSCREENED", "trade_authorization": "NO_TRADE",
+            "gem_hunter_v3_status": "EARLY_ALPHA_REVIEW",
+            "gem_hunter_v3_trade_authorization": "NO_TRADE",
+            "tier_base_security_status": "UNKNOWN",
+            "security_evidence": {"status": "UNKNOWN"},
+            "tier_data_confidence": "INCOMPLETE",
+        }
+        client = Mock()
+        client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 21}}
+        client.post.return_value.raise_for_status.return_value = None
+        fixed_now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+
+        class FrozenDateTime(datetime):
+            current = fixed_now
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current if tz else cls.current.replace(tzinfo=None)
+
+        with patch("crypto_super_radar.gem_hunter_v3.datetime", FrozenDateTime):
+            first = notify_qualified_gem(candidate, store, session=client, bot_token="t", chat_id="private-chat")
+            second = notify_qualified_gem(candidate, store, session=client, bot_token="t", chat_id="private-chat")
+            FrozenDateTime.current = fixed_now + timedelta(hours=6)
+            third = notify_qualified_gem(candidate, store, session=client, bot_token="t", chat_id="private-chat")
+
+        self.assertEqual(first["status"], "SENT")
+        self.assertEqual(second["status"], "DUPLICATE_SUPPRESSED")
+        self.assertEqual(third["status"], "SENT")
+        self.assertEqual(client.post.call_count, 2)
+        sent_text = client.post.call_args_list[0].kwargs["json"]["text"]
+        for expected in ("Minelius", "solana", "$0.01", "$75,000.00", "$650,000.00",
+                         "10,000", "MintAddress123", "بررسی", "NO_TRADE"):
+            self.assertIn(expected, sent_text)
+
+    def test_early_alpha_review_telegram_rejects_values_below_requested_thresholds(self):
+        candidate = {
+            "chain": "base", "token_address": "0xabc", "price_usd": 0.01,
+            "liquidity_usd": 50000, "volume_24h_usd": 499999,
+            "gem_hunter_v3_status": "EARLY_ALPHA_REVIEW",
+            "gem_hunter_v3_trade_authorization": "NO_TRADE",
+            "security_evidence": {"status": "UNKNOWN"},
+            "tier_base_security_status": "UNKNOWN",
+        }
+        result = notify_qualified_gem(candidate, FakeStore(), session=Mock(), bot_token="t", chat_id="c")
+        self.assertEqual(result["status"], "BLOCKED")
 
 
 if __name__ == "__main__":

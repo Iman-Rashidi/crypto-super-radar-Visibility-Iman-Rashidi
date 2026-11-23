@@ -455,13 +455,14 @@ class BybitProvider:
 
 class SolanaRpcProvider:
     URL = "https://api.mainnet-beta.solana.com"
+    FALLBACK_URLS = ("https://solana-rpc.publicnode.com",)
 
     def __init__(self, http: PublicHttpClient):
         self.http = http
 
-    def _rpc(self, method: str, params: list) -> Any:
+    def _rpc(self, endpoint: str, method: str, params: list) -> Any:
         payload = self.http.post(
-            self.URL, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            endpoint, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
             timeout=6, max_retries=1,
         )
         if not isinstance(payload, dict):
@@ -473,8 +474,11 @@ class SolanaRpcProvider:
             raise DataProviderError(f"Solana RPC {method} omitted the required result value")
         return result["value"]
 
-    def token_security(self, mint: str) -> Dict[str, Any]:
-        account = self._rpc("getAccountInfo", [mint, {"encoding": "jsonParsed", "commitment": "confirmed"}])
+    def _token_security_from_endpoint(self, endpoint: str, mint: str) -> Dict[str, Any]:
+        account = self._rpc(
+            endpoint, "getAccountInfo",
+            [mint, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        )
         if not account:
             raise DataProviderError("Solana mint account not found")
         info = (((account.get("data") or {}).get("parsed") or {}).get("info") or {})
@@ -482,19 +486,18 @@ class SolanaRpcProvider:
             raise DataProviderError("Solana RPC did not return a parsed mint account")
         mint_authority = info.get("mintAuthority")
         freeze_authority = info.get("freezeAuthority")
-        supply_payload = self.http.post(
-            self.URL, {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]},
-            timeout=6, max_retries=1,
-        )
-        if not isinstance(supply_payload, dict) or supply_payload.get("error"):
-            raise DataProviderError("Solana RPC getTokenSupply returned an API error or unreadable response")
-        supply_value = ((supply_payload.get("result") or {}).get("value") or {})
+
+        supply_value = self._rpc(endpoint, "getTokenSupply", [mint])
         if not isinstance(supply_value, dict):
             raise DataProviderError("Solana RPC getTokenSupply returned an invalid value schema")
         total_supply = _positive_float(supply_value.get("uiAmountString"))
         if total_supply is None:
             raise DataProviderError("Solana token supply is missing, non-finite or non-positive")
-        largest = self._rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}]) or []
+
+        largest = self._rpc(
+            endpoint, "getTokenLargestAccounts",
+            [mint, {"commitment": "confirmed"}],
+        ) or []
         if not isinstance(largest, list):
             raise DataProviderError("Solana largest-token-account response has an invalid schema")
         top_amounts = []
@@ -506,7 +509,7 @@ class SolanaRpcProvider:
                 raise DataProviderError("Solana largest-token-account amount is missing or invalid")
             top_amounts.append(amount)
         top10_pct = None
-        if total_supply and total_supply > 0 and top_amounts:
+        if total_supply > 0 and top_amounts:
             top10_pct = min(100.0, sum(top_amounts[:10]) / total_supply * 100.0)
         return {
             "mint_authority_active": mint_authority is not None,
@@ -515,9 +518,23 @@ class SolanaRpcProvider:
             "mint_authority": mint_authority,
             "freeze_authority": freeze_authority,
             "supply": total_supply,
+            "rpc_endpoint": endpoint,
             "scope_note": "Top-10 token-account concentration is not wallet-owner concentration; LP and exchange accounts may distort it.",
         }
 
+    def token_security(self, mint: str) -> Dict[str, Any]:
+        errors = []
+        # Keep all three Mint/Freeze/supply queries on one endpoint per attempt.
+        # If any method fails or times out, retry the complete snapshot on fallback.
+        for endpoint in (self.URL, *self.FALLBACK_URLS):
+            try:
+                return self._token_security_from_endpoint(endpoint, mint)
+            except (DataProviderError, requests.RequestException, TimeoutError) as exc:
+                errors.append(f"{endpoint}: {type(exc).__name__}: {exc}")
+        raise DataProviderError(
+            "Solana RPC security snapshot failed on all configured endpoints: "
+            + " | ".join(errors)
+        )
 
 def _finite_float(value: Any) -> Optional[float]:
     """Parse finite numeric values, including signed funding; reject boolean schema values."""

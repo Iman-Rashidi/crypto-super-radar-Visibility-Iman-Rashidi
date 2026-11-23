@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from html import escape as html_escape
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
@@ -493,10 +494,12 @@ def persist_candidate_lifecycle(store: Any, candidate: Mapping[str, Any],
 def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
                          session: Any = None, bot_token: Optional[str] = None,
                          chat_id: Optional[str] = None, timeout: float = 10.0) -> dict[str, Any]:
-    """Send one Telegram research alert per token, only after all required gates pass."""
+    """Send deduplicated research alerts; EARLY_ALPHA_REVIEW is explicitly not a buy signal."""
     status = candidate.get("gem_hunter_v3_status", candidate.get("candidate_status"))
-    if status not in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA"} or candidate.get("gem_hunter_v3_trade_authorization", "NO_TRADE") != "NO_TRADE":
-        return {"status": "SKIPPED", "reason": "Candidate is not in a Telegram research tier."}
+    allowed = {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}
+    if status not in allowed or candidate.get("gem_hunter_v3_trade_authorization", "NO_TRADE") != "NO_TRADE":
+        return {"status": "SKIPPED", "reason": "Candidate is not in an eligible Telegram research tier."}
+
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     market = candidate.get("market_reconciliation") or {}
@@ -506,32 +509,89 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         return {"status": "BLOCKED", "reason": "Tier 2 requires explicit base anti-honeypot/sellability PASS."}
     if status == "TIER_1_VERIFIED_GEM" and (exit_gate.get("status") != "PASS" or market.get("status") != "PASS"):
         return {"status": "BLOCKED", "reason": "Tier 1 requires confirmed market reconciliation and exit gate."}
+    if status == "EARLY_ALPHA_REVIEW":
+        price_check = _finite(candidate.get("price_usd"))
+        liquidity_check = _finite(
+            market.get("verified_liquidity_usd")
+            if market.get("status") == "PASS" else candidate.get("liquidity_usd")
+        )
+        volume_check = _finite(
+            market.get("verified_volume_24h_usd")
+            if market.get("status") == "PASS" else candidate.get("volume_24h_usd")
+        )
+        hard_block = (
+            security.get("status") == "FAIL"
+            or candidate.get("tier_base_security_status") == "FAIL"
+            or security.get("honeypot_detected") is True
+            or security.get("transfer_simulation_status") == "FAIL"
+            or _finite(security.get("sell_tax_pct")) is not None
+               and _finite(security.get("sell_tax_pct")) > 5.0
+        )
+        if hard_block:
+            return {"status": "BLOCKED", "reason": "Explicit security/sellability failure blocks EARLY_ALPHA_REVIEW alerts."}
+        if not (price_check is not None and 0 < price_check < 0.05
+                and liquidity_check is not None and liquidity_check >= 50_000
+                and volume_check is not None and volume_check >= 500_000):
+            return {"status": "BLOCKED", "reason": "EARLY_ALPHA_REVIEW alert requires price < $0.05, liquidity >= $50,000 and 24h volume >= $500,000."}
+
     chain = str(candidate.get("chain") or "").lower()
     address = str(candidate.get("token_address") or "")
     candidate_id = f"{chain}:{address if chain == 'solana' else address.lower()}"
-    event_key = f"TELEGRAM_{status}:{candidate_id}"
+    # A deterministic UTC bucket permits one alert per token/status in each six-hour window.
+    six_hour_bucket = int(datetime.now(timezone.utc).timestamp() // (6 * 60 * 60))
+    event_key = f"TELEGRAM_{status}:{candidate_id}:{six_hour_bucket}"
     token = bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
     destination = chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
     if not token or not destination:
         return {"status": "NOT_CONFIGURED", "reason": "Telegram bot token or chat id is missing."}
     inserted = store.append_event(candidate_id, "TELEGRAM_ALERT_RESERVED", {
-        "candidate_status": status, "trade_authorization": "NO_TRADE"
+        "candidate_status": status, "trade_authorization": "NO_TRADE",
+        "dedupe_window_hours": 6, "dedupe_bucket_utc": six_hour_bucket,
     }, event_key=event_key)
     if not inserted:
         return {"status": "DUPLICATE_SUPPRESSED", "candidate_id": candidate_id}
-    # A missing chat id must not consume the one-time alert slot.
+
     momentum = candidate.get("short_term_momentum_score", candidate.get("short_term_momentum_smart_money_score"))
+    price = _finite(candidate.get("price_usd"))
+    liquidity = _finite(
+        market.get("verified_liquidity_usd")
+        if market.get("status") == "PASS" else candidate.get("liquidity_usd")
+    )
+    volume_24h = _finite(
+        market.get("verified_volume_24h_usd")
+        if market.get("status") == "PASS" else candidate.get("volume_24h_usd")
+    )
+    estimated_tokens = candidate.get("estimated_tokens_for_100_usd")
+    if estimated_tokens is None and price is not None and price > 0:
+        estimated_tokens = int(100.0 / price)
+    token_name = html_escape(str(candidate.get("token_name") or "Unknown"))
+    token_symbol = html_escape(str(candidate.get("token_symbol") or "?"))
+    safe_chain = html_escape(chain or "نامشخص")
+    safe_address = html_escape(address or "ناموجود")
+    tier_title = {
+        "TIER_1_VERIFIED_GEM": "⭐ TIER 1 · ستاره طلایی",
+        "TIER_2_EARLY_ALPHA": "🔥 TIER 2 · فرصت اولیه",
+        "EARLY_ALPHA_REVIEW": "🟠 EARLY ALPHA REVIEW · بررسی امنیتی لازم",
+    }[status]
+    price_text = f"{price:.10g}" if price is not None else "نامشخص"
+    liquidity_text = f"{liquidity:,.2f}" if liquidity is not None else "نامشخص"
+    volume_text = f"{volume_24h:,.2f}" if volume_24h is not None else "نامشخص"
+    tokens_text = f"{int(estimated_tokens):,}" if _finite(estimated_tokens) is not None else "نامشخص"
     text = (
-        f"🔎 <b>{'⭐ TIER 1 · ستاره طلایی' if status == 'TIER_1_VERIFIED_GEM' else '🔥 TIER 2 · فرصت اولیه / واچ‌لیست داغ'} · فقط پژوهشی</b>\\n"
-        f"<b>توکن:</b> {candidate.get('token_name') or 'Unknown'} ({candidate.get('token_symbol') or '?'})\\n"
-        f"<b>شبکه:</b> {chain}\\n<b>قرارداد:</b> <code>{address}</code>\\n"
-        f"<b>قیمت:</b> {candidate.get('price_usd') or 'UNKNOWN'} USD\\n"
-        f"<b>نقدینگی:</b> {candidate.get('liquidity_usd') or 'UNKNOWN'} USD\\n"
-        f"<b>مومنتوم مشاهده‌شده:</b> {momentum if momentum is not None else 'UNKNOWN'}/100\\n"
-        f"<b>نقاط قوت:</b> {' | '.join(candidate.get('tier_strengths_fa') or []) or 'شواهد اولیه موجود است.'}\\n"
-        f"<b>احتیاط:</b> {' | '.join(candidate.get('tier_cautions_fa') or []) or 'بررسی تکمیلی لازم است.'}\\n"
-        f"<b>اعتماد داده:</b> {candidate.get('tier_data_confidence', 'LIMITED')}\\n"
-        "<i>هیچ سفارشی ارسال نشده است. هشدار پژوهشی، NO_TRADE.</i>"
+        f"🔎 <b>{tier_title} · گزارش پژوهشی</b>\\n"
+        f"<b>توکن:</b> {token_name} ({token_symbol})\\n"
+        f"<b>شبکه:</b> {safe_chain}\\n"
+        f"<b>قیمت دلاری:</b> ${price_text}\\n"
+        f"<b>نقدینگی:</b> ${liquidity_text}\\n"
+        f"<b>حجم ۲۴ ساعته:</b> ${volume_text}\\n"
+        f"<b>تعداد تخمینی با ۱۰۰ دلار:</b> {tokens_text} توکن\\n"
+        f"<b>آدرس قرارداد (آماده کپی):</b> <code>{safe_address}</code>\\n"
+        f"<b>مومنتوم مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'}/100\\n"
+        f"<b>نقاط قوت:</b> {html_escape(' | '.join(candidate.get('tier_strengths_fa') or []) or 'شواهد اولیه موجود است.')}\\n"
+        f"<b>احتیاط:</b> {html_escape(' | '.join(candidate.get('tier_cautions_fa') or []) or 'بررسی تکمیلی لازم است.')}\\n"
+        f"<b>اعتماد داده:</b> {html_escape(str(candidate.get('tier_data_confidence', 'LIMITED')))}\\n"
+        "<i>قبل از هرگونه خرید، قرارداد و امکان فروش را مستقل بررسی کن. وضعیت امنیتی نامعلوم به معنی سالم بودن نیست.\\n"
+        "این پیام توصیه خرید نیست؛ هیچ سفارشی ارسال نشده است. NO_TRADE.</i>"
     )
     client = session or requests
     try:
@@ -594,7 +654,7 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
                 row["gem_hunter_storage_status"] = "PERSISTED"
             except Exception as exc:
                 row["gem_hunter_storage_status"] = f"UNKNOWN:{type(exc).__name__}"
-        if notify and store is not None and row.get("gem_hunter_v3_status") in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA"}:
+        if notify and store is not None and row.get("gem_hunter_v3_status") in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}:
             try:
                 row["telegram_alert_status"] = notify_qualified_gem(row, store)
             except Exception as exc:
