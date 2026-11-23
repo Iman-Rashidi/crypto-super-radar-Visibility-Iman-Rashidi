@@ -627,6 +627,9 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
 
     momentum = _finite(candidate.get("short_term_momentum_score",
                                      candidate.get("short_term_momentum_smart_money_score")))
+    whale_flow = candidate.get("pool_trade_evidence") or {}
+    whale_ratio = whale_flow.get("whale_buy_sell_ratio_1h")
+    whale_events = whale_flow.get("whale_events") if isinstance(whale_flow.get("whale_events"), list) else []
     price = _finite(candidate.get("price_usd"))
     liquidity = _finite(market.get("verified_liquidity_usd")
                         if market.get("status") == "PASS" else candidate.get("liquidity_usd"))
@@ -739,6 +742,11 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         f"<b>مقدار قابل خرید با ۱۰۰ دلار:</b> حدود {tokens_text} توکن (تخمینی؛ بدون کارمزد و لغزش)\n"
         f"<b>نقدینگی استخر:</b> ${liquidity_text} | <b>حجم ۲۴ ساعته:</b> ${volume_text}\n"
         f"<b>آدرس قرارداد (برای کپی):</b> <code>{safe_address}</code>\n"
+        "\n"
+        "🐋 <b>جریان نهنگ‌ها در یک ساعت اخیر</b>\n"
+        f"{html_escape(str(whale_flow.get('whale_net_action_fa') or 'دادهٔ معتبر نهنگ در دسترس نیست'))}\n"
+        f"<b>حجم خرید / فروش نهنگ‌ها:</b> ${_finite(whale_flow.get('whale_buy_volume_1h_usd')) or 0:,.2f} / ${_finite(whale_flow.get('whale_sell_volume_1h_usd')) or 0:,.2f} · نسبت خرید به فروش: {whale_ratio if whale_ratio is not None else 'نامشخص'}\n"
+        + "\n".join([f"• {html_escape(str(e.get('wallet_address') or 'کیف‌پول نامشخص'))} · {html_escape(str(e.get('event_type') or 'SWAP'))} · ${_finite(e.get('amount_usd')) or 0:,.2f} · تعداد توکن: {e.get('token_amount') if e.get('token_amount') is not None else 'ناموجود'} · {html_escape(str(e.get('timestamp_utc') or 'زمان نامشخص'))} · <a href=\"{html_escape(str(e.get('explorer_tx_url') or ''), quote=True)}\">تراکنش</a>" for e in whale_events[:8]]) + "\n"
         "\n"
         "🧠 <b>بخش ۲ | تحلیل هوشمند، نقاط قوت، ضعف و رفرنس</b>\n"
         f"<b>شتاب مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'} از ۱۰۰\n"
