@@ -31,8 +31,11 @@ class LiveChartFrontendContractTests(unittest.TestCase):
         self.assertIn("waves=data.elliott_waves||{}", card_renderer)
         self.assertIn("const price=document.createElement('div')", card_renderer)
         self.assertIn("drawMiniChart(mini,data)", card_renderer)
-        self.assertIn("Number(bar.time)", card_renderer)
-        self.assertNotIn("Date.parse(bar.time)", card_renderer)
+        mini_start = self.source.index("function drawMiniChart(canvasElement,data)")
+        mini_end = self.source.index("function renderWaveWatchCard(symbolValue,data)", mini_start)
+        mini_renderer = self.source[mini_start:mini_end]
+        self.assertIn("Number(bar.time)", mini_renderer)
+        self.assertNotIn("Date.parse(bar.time)", mini_renderer)
 
     def test_five_symbol_watchlist_normalizes_each_api_payload(self):
         start = self.source.index("async function refreshWaveWatchlist()")
