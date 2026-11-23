@@ -716,19 +716,9 @@ class MarketDataService:
             try:
                 return self.perpetual.binance_candles(asset.symbol, limit=365)
             except DataProviderError as exc:
-                if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                if not self.perpetual._binance_unavailable(exc):
                     raise
-                instrument = f"{asset.symbol[:-4]}-{asset.symbol[-4:]}-SWAP"
-                payload = self.perpetual.http.get(
-                    f"{self.perpetual.OKX}/market/history-candles",
-                    {"instId": instrument, "bar": "1Dutc", "limit": 365},
-                )
-                if not isinstance(payload, dict) or payload.get("code") != "0":
-                    raise DataProviderError("OKX perpetual candle fallback returned an API error") from exc
-                rows = payload.get("data")
-                if not isinstance(rows, list):
-                    raise DataProviderError("OKX perpetual candle fallback returned an invalid schema") from exc
-                return _ohlcv_frame(rows)
+                return self.perpetual.binance_candles(asset.symbol, limit=365)
         return self.binance.candles(asset.symbol, interval="1d", limit=365)
 
     def benchmark_candles(self) -> pd.DataFrame:
@@ -764,6 +754,100 @@ class PerpetualMarketProvider:
 
     def __init__(self, http: PublicHttpClient):
         self.http = http
+        self._fallback_cache: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+        import threading
+        self._fallback_cache_lock = threading.RLock()
+
+    @staticmethod
+    def _binance_unavailable(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(token in message for token in ("http 418", "http 451", "http 403", "timeout", "timed out"))
+
+    def _cached_fallback(self, key: Tuple[str, str], loader):
+        now = time.monotonic()
+        with self._fallback_cache_lock:
+            cached = self._fallback_cache.get(key)
+            if cached and now - cached[0] < 30.0:
+                return cached[1].copy() if hasattr(cached[1], "copy") else cached[1]
+        value = loader()
+        with self._fallback_cache_lock:
+            self._fallback_cache[key] = (time.monotonic(), value.copy() if hasattr(value, "copy") else value)
+        return value.copy() if hasattr(value, "copy") else value
+
+    def _okx_bybit_snapshot(self, symbol: str, reason: str) -> Dict[str, Any]:
+        base = symbol[:-4]
+        instrument = f"{base}-USDT-SWAP"
+        okx_ticker = self.http.get(f"{self.OKX}/market/ticker", {"instId": instrument})
+        okx_mark = self.http.get(f"{self.OKX}/public/mark-price", {"instType": "SWAP", "instId": instrument})
+        okx_index = self.http.get(f"{self.OKX}/market/index-tickers", {"instId": f"{base}-USDT"})
+        okx_funding = self.http.get(f"{self.OKX}/public/funding-rate", {"instId": instrument})
+        bybit_payload = self.http.get(f"{self.BYBIT}/v5/market/tickers", {"category": "linear", "symbol": symbol})
+        def one(payload, label):
+            if not isinstance(payload, dict) or payload.get("code") != "0":
+                raise DataProviderError(f"OKX {label} fallback response is invalid")
+            rows = payload.get("data")
+            if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+                raise DataProviderError(f"OKX {label} fallback has no unique row")
+            return rows[0]
+        ticker, mark, index, funding = (one(x, n) for x, n in (
+            (okx_ticker, "ticker"), (okx_mark, "mark price"),
+            (okx_index, "index price"), (okx_funding, "funding rate")))
+        if ticker.get("instId") != instrument or mark.get("instId") != instrument or funding.get("instId") != instrument:
+            raise DataProviderError("OKX fallback instrument mismatch")
+        if index.get("instId") != f"{base}-USDT":
+            raise DataProviderError("OKX index instrument mismatch")
+        if not isinstance(bybit_payload, dict) or bybit_payload.get("retCode") not in (0, "0"):
+            raise DataProviderError("Bybit Linear ticker fallback returned an API error")
+        bybit_rows = ((bybit_payload.get("result") or {}).get("list") or [])
+        if len(bybit_rows) != 1 or not isinstance(bybit_rows[0], dict):
+            raise DataProviderError("Bybit Linear ticker fallback has no unique row")
+        bybit = bybit_rows[0]
+        vals = {
+            "okx_mark": _positive_float(mark.get("markPx")),
+            "okx_index": _positive_float(index.get("idxPx")),
+            "okx_funding": _finite_float(funding.get("fundingRate")),
+            "okx_bid": _positive_float(ticker.get("bidPx")),
+            "okx_ask": _positive_float(ticker.get("askPx")),
+            "bybit_mark": _positive_float(bybit.get("markPrice")),
+            "bybit_index": _positive_float(bybit.get("indexPrice")),
+            "bybit_funding": _finite_float(bybit.get("fundingRate")),
+            "bybit_bid": _positive_float(bybit.get("bid1Price")),
+            "bybit_ask": _positive_float(bybit.get("ask1Price")),
+        }
+        if any(v is None for v in vals.values()):
+            raise DataProviderError("OKX/Bybit fallback contains missing or invalid market values")
+        if vals["okx_ask"] < vals["okx_bid"] or vals["bybit_ask"] < vals["bybit_bid"]:
+            raise DataProviderError("OKX/Bybit fallback order book is crossed")
+        mark_diff = relative_difference_pct(vals["okx_mark"], vals["bybit_mark"])
+        index_diff = relative_difference_pct(vals["okx_index"], vals["bybit_index"])
+        funding_diff = abs(vals["okx_funding"] - vals["bybit_funding"])
+        threshold = self.http.config.thresholds.provider_discrepancy_pct
+        if mark_diff > threshold or index_diff > threshold or funding_diff > 0.0002:
+            raise DataProviderError("OKX/Bybit fallback discrepancy exceeds validation limits")
+        ts_values = [_positive_float(ticker.get("ts")), _positive_float(mark.get("ts")),
+                     _positive_float(index.get("ts")), _positive_float(bybit_payload.get("time"))]
+        now_ms = int(time.time() * 1000)
+        if any(ts is None or ts > now_ms + 5000 or now_ms - ts > 120000 for ts in ts_values):
+            raise DataProviderError("OKX/Bybit fallback market data is stale")
+        interval = self.funding_interval_hours(symbol)
+        return {
+            "status": "PASS", "symbol": symbol,
+            "mark_price": (vals["okx_mark"] + vals["bybit_mark"]) / 2,
+            "index_price": (vals["okx_index"] + vals["bybit_index"]) / 2,
+            "best_bid": max(vals["okx_bid"], vals["bybit_bid"]),
+            "best_ask": min(vals["okx_ask"], vals["bybit_ask"]),
+            "funding_rate": (vals["okx_funding"] + vals["bybit_funding"]) / 2,
+            "funding_interval_hours": interval,
+            "open_interest_binance": _positive_float(bybit.get("openInterest")),
+            "open_interest_bybit": _positive_float(bybit.get("openInterest")),
+            "mark_price_discrepancy_pct": mark_diff,
+            "index_price_discrepancy_pct": index_diff,
+            "funding_rate_discrepancy": funding_diff,
+            "timestamp_ms": min(int(x) for x in ts_values),
+            "sources": ["OKX USDT Swap", "Bybit Linear"],
+            "provider_fallback_reason": str(reason)[:240],
+            "quote_quality": "OBSERVED_CROSS_VENUE_FALLBACK",
+        }
 
     def binance_ticker(self, symbol: str) -> Dict[str, Any]:
         try:
@@ -1007,8 +1091,6 @@ class PerpetualMarketProvider:
 
     def execution_snapshot(self, symbol: str) -> Dict[str, Any]:
         """Return independently checked perpetual data, with a strict regional fallback."""
-        from concurrent.futures import ThreadPoolExecutor
-
         try:
             with ThreadPoolExecutor(max_workers=4) as executor:
                 binance_book_future = executor.submit(
@@ -1029,9 +1111,9 @@ class PerpetualMarketProvider:
                 binance_oi = binance_oi_future.result()
                 bybit_payload = bybit_future.result()
         except DataProviderError as exc:
-            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+            if not self._binance_unavailable(exc):
                 raise
-            return self._gate_okx_execution_snapshot(symbol, fallback_reason=str(exc))
+            return self._okx_bybit_snapshot(symbol, reason=str(exc))
 
         if not isinstance(book, dict) or not isinstance(premium, dict) or not isinstance(binance_oi, dict):
             raise DataProviderError("Binance perpetual order-book/mark response has an invalid schema")
@@ -1107,8 +1189,35 @@ class PerpetualMarketProvider:
         }
 
     def binance_candles(self, symbol: str, limit: int = 365) -> pd.DataFrame:
-        rows = self.http.get(f"{self.BINANCE}/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": min(limit, 1000)})
-        return _ohlcv_frame(rows)
+        try:
+            rows = self.http.get(f"{self.BINANCE}/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": min(limit, 1000)})
+            return _ohlcv_frame(rows)
+        except DataProviderError as exc:
+            if not self._binance_unavailable(exc):
+                raise
+            def load():
+                base = symbol[:-4]
+                instrument = f"{base}-USDT-SWAP"
+                okx = self.http.get(f"{self.OKX}/market/candles", {"instId": instrument, "bar": "1Dutc", "limit": min(limit, 300)})
+                bybit = self.http.get(f"{self.BYBIT}/v5/market/kline", {"category": "linear", "symbol": symbol, "interval": "D", "limit": min(limit, 1000)})
+                if not isinstance(okx, dict) or okx.get("code") != "0":
+                    raise DataProviderError("OKX perpetual candles returned an API error") from exc
+                okx_rows = okx.get("data")
+                bybit_rows = ((bybit or {}).get("result") or {}).get("list") if isinstance(bybit, dict) and bybit.get("retCode") in (0, "0") else None
+                if not isinstance(okx_rows, list) or not okx_rows or not isinstance(bybit_rows, list) or not bybit_rows:
+                    raise DataProviderError("OKX/Bybit perpetual candles are incomplete") from exc
+                okx_frame, bybit_frame = _ohlcv_frame(okx_rows), _ohlcv_frame(bybit_rows)
+                if okx_frame.empty or bybit_frame.empty:
+                    raise DataProviderError("OKX/Bybit perpetual candles are empty") from exc
+                common = okx_frame.index.intersection(bybit_frame.index)
+                if len(common) < 2:
+                    raise DataProviderError("OKX/Bybit candles have insufficient overlapping timestamps") from exc
+                a, b = okx_frame.loc[common], bybit_frame.loc[common]
+                diffs = (a["close"] - b["close"]).abs() / ((a["close"] + b["close"]) / 2) * 100
+                if (diffs > self.http.config.thresholds.provider_discrepancy_pct).any():
+                    raise DataProviderError("OKX/Bybit candle close discrepancy exceeds configured limit") from exc
+                return a.copy()
+            return self._cached_fallback(("candles", symbol), load)
 
     def funding_interval_hours(self, symbol: str) -> float:
         try:
