@@ -17,13 +17,13 @@ from types import SimpleNamespace
 from .models import AssetSpec, Signal
 from .ai_supervisor import run_challenge1_v2_supervisor_reviews
 from .challenge1_v2 import (
-    analyze_signal, build_fast_trigger_signal,
+    analyze_signal, build_fast_trigger_signal, build_early_wave3_signal,
     challenge1_v2_execution_evidence_ready,
 )
 from .challenge1_strategy import analyze_blofin_challenge1
 
-BAR_INTERVAL_MS = {"15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
-MINIMUM_ROWS = {"15m": 70, "1H": 205, "4H": 205, "BTC_15m": 40}
+BAR_INTERVAL_MS = {"5m": 5 * 60_000, "15m": 15 * 60_000, "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
+MINIMUM_ROWS = {"5m": 60, "15m": 70, "1H": 205, "4H": 205, "BTC_15m": 40}
 FUNDING_MAX_AGE_MS = 9 * 60 * 60_000
 MAX_QUOTE_AGE_MS = 60_000
 
@@ -252,6 +252,10 @@ def analyze_challenge1_v2_market(
         client.get_candles(symbol, bar="4H", limit=300),
         bar="4H", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["4H"],
     )
+    frame_5m = _closed_frame(
+        client.get_candles(symbol, bar="5m", limit=300),
+        bar="5m", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["5m"],
+    )
     frame_15m = _closed_frame(
         client.get_candles(symbol, bar="15m", limit=300),
         bar="15m", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["15m"],
@@ -265,6 +269,8 @@ def analyze_challenge1_v2_market(
         raise Challenge1V2DataBlocked("1H frame exceeds the common as-of boundary")
     if not (frame_4h.index[-1] + pd.Timedelta(hours=4) <= asof):
         raise Challenge1V2DataBlocked("4H frame exceeds the common as-of boundary")
+    if not (frame_5m.index[-1] + pd.Timedelta(minutes=5) <= asof):
+        raise Challenge1V2DataBlocked("5m frame exceeds the common as-of boundary")
     if not (frame_15m.index[-1] + pd.Timedelta(minutes=15) <= asof):
         raise Challenge1V2DataBlocked("15m frame exceeds the common as-of boundary")
     record = analyze_signal(
@@ -287,8 +293,18 @@ def analyze_challenge1_v2_market(
     fast_trigger_record = analyze_blofin_challenge1(
         client, symbol, now_ms=asof_ms,
     )
+    early_w3_path = build_early_wave3_signal(
+        instrument_id=symbol, frame_5m=frame_5m, frame_15m=frame_15m,
+        asof=asof, entry_price=quote["last"],
+        funding_rate=funding["funding_rate"], funding_kind=funding["funding_kind"],
+        funding_event_time_ms=funding["funding_event_time_ms"],
+        funding_max_age_ms=funding["funding_max_age_ms"],
+        spread_fraction=quote["spread_fraction"],
+    )
+    if early_w3_path.get("signal") in {"LONG", "SHORT"}:
+        record = early_w3_path
     fast_path = None
-    if fast_trigger_record.get("signal") in {"LONG", "SHORT"}:
+    if not record.get("early_w3_active") and fast_trigger_record.get("signal") in {"LONG", "SHORT"}:
         fast_path = build_fast_trigger_signal(
             instrument_id=symbol,
             frame_1h=frame_1h,
@@ -306,6 +322,7 @@ def analyze_challenge1_v2_market(
         if fast_path.get("signal") in {"LONG", "SHORT"}:
             record = fast_path
     record = dict(record)
+    record["early_w3_diagnostic"] = {"signal": early_w3_path.get("signal"), "reason": early_w3_path.get("reason"), "selected": bool(early_w3_path.get("early_w3_active"))}
     record["fast_trigger_diagnostic"] = {
         "engine": "CHALLENGE_1_LOCAL_RULES_V5_5M_ELLIOTT_AWARE",
         "signal": fast_trigger_record.get("signal"),
@@ -324,14 +341,14 @@ def analyze_challenge1_v2_market(
     record["market_data_proof"] = {
         "source": "BLOFIN_DEMO_REST",
         "asof_utc": asof.isoformat(),
-        "signal_rule": ("DASHBOARD_CONFIRMED_5M_ELLIOTT_PLUS_COMPLETED_15M_EMA21_ALIGNMENT" if record.get("fast_trigger_active") else "COMPLETED_1H_ADX14_GTE_22_AND_CLOSE_VS_EMA21"),
-        "signal_timeframe": "5m" if record.get("fast_trigger_active") else "1H",
+        "signal_rule": ("CLOSED_5M_15M_EARLY_W3_BREAKOUT" if record.get("early_w3_active") else ("DASHBOARD_CONFIRMED_5M_ELLIOTT_PLUS_COMPLETED_15M_EMA21_ALIGNMENT" if record.get("fast_trigger_active") else "COMPLETED_1H_ADX14_GTE_22_AND_CLOSE_VS_EMA21")),
+        "signal_timeframe": "5m" if (record.get("fast_trigger_active") or record.get("early_w3_active")) else "1H",
         "entry_execution_timeframe": "15m",
         "timeframes": {
             "1H": {"rows": len(frame_1h), "latest_open_utc": frame_1h.index[-1].isoformat()},
             "4H": {"rows": len(frame_4h), "latest_open_utc": frame_4h.index[-1].isoformat()},
             "15m": {"rows": len(frame_15m), "latest_open_utc": frame_15m.index[-1].isoformat()},
-            "5m": {"source": "CHALLENGE_1_LOCAL_RULES_V5", "signal_id": (fast_trigger_record.get("signal_id") if fast_trigger_record.get("signal") in {"LONG", "SHORT"} else None), "selected": bool(record.get("fast_trigger_active"))},
+            "5m": {"rows": len(frame_5m), "latest_open_utc": frame_5m.index[-1].isoformat(), "source": "BLOFIN_DEMO_REST_AND_LOCAL_WAVE3", "signal_id": (fast_trigger_record.get("signal_id") if fast_trigger_record.get("signal") in {"LONG", "SHORT"} else None), "selected": bool(record.get("fast_trigger_active") or record.get("early_w3_active"))},
             "BTC_15m": {"rows": len(btc_15m), "latest_open_utc": btc_15m.index[-1].isoformat()},
         },
         "funding": funding,
