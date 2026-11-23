@@ -66,7 +66,7 @@ class GemHunterDeepAnalysisTests(unittest.TestCase):
             "pairs": [
                 {
                     "chainId": "solana",
-                    "baseToken": {"address": "BONK_LOW_MINT", "symbol": "BONK"},
+                    "baseToken": {"address": "BONK_COPYCAT_MINT", "symbol": "BONK"},
                     "priceUsd": "0.00001",
                     "liquidity": {"usd": 12000},
                     "volume": {"h24": 100000},
@@ -74,7 +74,7 @@ class GemHunterDeepAnalysisTests(unittest.TestCase):
                 },
                 {
                     "chainId": "solana",
-                    "baseToken": {"address": "BONK_HIGH_MINT", "symbol": "BONK"},
+                    "baseToken": {"address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "symbol": "BONK"},
                     "priceUsd": "0.00002",
                     "liquidity": {"usd": 95000},
                     "volume": {"h24": 900000},
@@ -100,10 +100,10 @@ class GemHunterDeepAnalysisTests(unittest.TestCase):
         self.assertEqual(report["security"]["provider"], "RUGCHECK")
         self.assertEqual(report["security"]["lp_locked_pct"], 98.5)
         self.assertEqual(report["whales"]["holder_count"], 25000)
-        self.assertIn("BONK_HIGH_MINT", fetch.call_args_list[1].args[0])
+        self.assertIn("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", fetch.call_args_list[1].args[0])
         self.assertTrue(fetch.call_args_list[0].args[0].endswith("/latest/dex/search?q=BONK"))
         self.assertTrue(fetch.call_args_list[1].args[0].endswith(
-            "/v1/tokens/BONK_HIGH_MINT/report/summary"
+            "/v1/tokens/DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263/report/summary"
         ))
 
     @patch("urllib.request.urlopen")
