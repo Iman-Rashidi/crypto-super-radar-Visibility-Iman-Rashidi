@@ -200,6 +200,28 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(result["opportunity_score"], 80.0)
         self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
 
+    def test_mobile_metrics_fall_back_to_existing_qualification_market_metrics(self):
+        candidate = {
+            "chain": "base", "token_address": "0x" + "3" * 40,
+            "qualification": {
+                "schema_version": "gem-hunter-v2",
+                "market_metrics": {
+                    "holder_count": 1420, "unique_traders_24h": 480,
+                    "buy_volume_share_pct": 64, "estimated_slippage_bps": 42,
+                },
+            },
+            "security_evidence": {"status": "PASS"},
+        }
+        with patch("crypto_super_radar.gem_hunter_v3.storage_backend", return_value="DISABLED"):
+            result = process_gem_hunter_v3_candidates([candidate], notify=False)[0]
+        self.assertEqual(result["holder_count"], 1420)
+        self.assertEqual(result["unique_traders_24h"], 480)
+        self.assertEqual(result["unique_traders_24h_basis"], "QUALIFICATION_MARKET_METRICS_REPORTED")
+        self.assertEqual(result["buy_volume_share_pct"], 64)
+        self.assertEqual(result["estimated_slippage_bps"], 42)
+        self.assertEqual(result["qualification"]["schema_version"], "gem-hunter-v2")
+        self.assertEqual(result["qualification"]["market_metrics"]["holder_count"], 1420)
+
     def test_gem_hunter_dataframe_maps_six_metrics(self):
         frame = gem_hunter_v3_dataframe([{
             "token_name": "Test", "holder_count": 20, "unique_traders_24h": 41,

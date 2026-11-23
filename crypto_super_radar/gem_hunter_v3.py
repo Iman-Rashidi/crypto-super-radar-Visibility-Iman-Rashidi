@@ -74,6 +74,8 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     security = candidate.get("security_evidence") or {}
     exit_gate = candidate.get("exit_slippage_evidence") or {}
     reconciliation = candidate.get("market_reconciliation") or {}
+    qualification = candidate.get("qualification") or {}
+    qualification_metrics = qualification.get("market_metrics") or {}
 
     components: dict[str, float] = {}
     buy = _finite(trades.get("buy_volume_usd"))
@@ -132,6 +134,10 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     unique_trader_count = _finite(trades.get("unique_trader_count"))
     unique_trader_basis = "POOL_PROVIDER_UNIQUE_TRADERS"
     if unique_trader_count is None:
+        unique_trader_count = _finite(qualification_metrics.get("unique_traders_24h"))
+        if unique_trader_count is not None:
+            unique_trader_basis = "QUALIFICATION_MARKET_METRICS_REPORTED"
+    if unique_trader_count is None:
         unique_buyers = _finite(trades.get("unique_buyers_count"))
         unique_sellers = _finite(trades.get("unique_sellers_count"))
         if trades.get("wallet_attribution_status") == "COMPLETE_FOR_RETURNED_SAMPLE" and unique_buyers is not None and unique_sellers is not None:
@@ -143,12 +149,16 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
 
     buy_volume_share_pct = _finite(trades.get("buy_volume_share_pct"))
     if buy_volume_share_pct is None:
+        buy_volume_share_pct = _finite(qualification_metrics.get("buy_volume_share_pct"))
+    if buy_volume_share_pct is None:
         buy_volume_share_pct = _finite(components.get("pool_buy_volume_share"))
     if buy_volume_share_pct is None:
         buy_volume_share_pct = dex_buy_share
 
     holder_evidence = candidate.get("holder_evidence") or candidate.get("holders") or {}
-    holder_count = _finite(candidate.get("holder_count", security.get("holder_count", holder_evidence.get("holder_count", security.get("largest_accounts_count")))))
+    holder_count = _finite(candidate.get("holder_count", security.get("holder_count", holder_evidence.get("holder_count", security.get("largest_accounts_count", qualification_metrics.get("holder_count"))))))
+    if holder_count is None:
+        holder_count = _finite(qualification_metrics.get("holder_count"))
     if holder_count is not None:
         holder_count = int(holder_count)
 
@@ -224,7 +234,7 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
         "unique_traders_24h_basis": unique_trader_basis if unique_trader_count is not None else "NOT_AVAILABLE",
         "holder_count": holder_count,
         "holder_count_basis": ("SOLANA_LARGEST_TOKEN_ACCOUNTS_SAMPLE" if str(candidate.get("chain") or "").lower() == "solana" and holder_count is not None else "PROVIDER_HOLDER_COUNT" if holder_count is not None else "NOT_AVAILABLE"),
-        "estimated_slippage_bps": _finite(exit_gate.get("estimated_slippage_bps")),
+        "estimated_slippage_bps": _finite(exit_gate.get("estimated_slippage_bps")) if _finite(exit_gate.get("estimated_slippage_bps")) is not None else _finite(qualification_metrics.get("estimated_slippage_bps")),
         # Compatibility alias for the existing dashboard. This is NOT a
         # smart-money score; see the explicit evidence status below.
         "short_term_momentum_smart_money_score": momentum,
@@ -792,6 +802,10 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
             if reconciliation.get("status") == "PASS" else None
         )
         existing_exit = row.get("exit_slippage_evidence") or {}
+        existing_qualification = row.get("qualification") or {}
+        existing_metrics = existing_qualification.get("market_metrics") or {}
+        if _finite(existing_exit.get("estimated_slippage_bps")) is None and _finite(existing_metrics.get("estimated_slippage_bps")) is not None:
+            existing_exit = {"status": "REPORTED", "estimated_slippage_bps": _finite(existing_metrics.get("estimated_slippage_bps")), "model": "QUALIFICATION_METRIC_PASSTHROUGH"}
         calculated_exit = estimate_exit_slippage(
             liquidity_usd=verified_liquidity,
             order_usd=_finite(os.getenv("GEM_HUNTER_EXIT_ORDER_USD")) or DEFAULT_EXIT_ORDER_USD,
