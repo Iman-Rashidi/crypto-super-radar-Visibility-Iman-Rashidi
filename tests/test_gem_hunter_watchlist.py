@@ -24,6 +24,29 @@ class WatchlistLedgerTests(unittest.TestCase):
         row.update(overrides)
         return row
 
+    def telegram_client(self, *, send_responses=3):
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+            def raise_for_status(self):
+                return None
+            def json(self):
+                return self.payload
+
+        client = Mock()
+        updates = {"ok": True, "result": [{
+            "update_id": 1,
+            "message": {
+                "from": {"id": 77, "username": "Germany004"},
+                "chat": {"id": 77, "type": "private"}
+            }
+        }]}
+        client.post.side_effect = [Response(updates)] + [
+            Response({"ok": True, "result": {"message_id": index}})
+            for index in range(send_responses)
+        ]
+        return client
+
     def test_first_detection_name_timestamp_and_initial_price_are_immutable(self):
         record_watchlist_candidates(self.db, [self.candidate()])
         first = dict(self.db.execute("SELECT * FROM gem_hunter_watchlist_ledger").fetchone())
@@ -68,9 +91,7 @@ class WatchlistLedgerTests(unittest.TestCase):
             self.db.execute(
                 "UPDATE gem_hunter_watchlist_ledger SET latest_price_usd=0.02 WHERE token_id='solana:MintABC'"
             )
-        client = Mock()
-        client.post.return_value.raise_for_status.return_value = None
-        client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 42}}
+        client = self.telegram_client(send_responses=3)
 
         first = send_watchlist_profit_alerts(
             self.db, session=client, bot_token="bot-token", chat_id="12345"
@@ -81,11 +102,13 @@ class WatchlistLedgerTests(unittest.TestCase):
 
         self.assertEqual(first, {"status": "OK", "sent": 3, "duplicates": 0, "errors": 0})
         self.assertEqual(second, {"status": "OK", "sent": 0, "duplicates": 3, "errors": 0})
-        self.assertEqual(client.post.call_count, 3)
-        messages = [call.kwargs["json"]["text"] for call in client.post.call_args_list]
+        self.assertEqual(client.post.call_count, 4)  # one getUpdates resolution + three sends
+        messages = [call.kwargs["json"]["text"] for call in client.post.call_args_list[1:]]
         self.assertIn("+25%", messages[0])
         self.assertIn("+50%", messages[1])
         self.assertIn("+100%", messages[2])
+        self.assertEqual(client.post.call_args_list[0].kwargs["json"], {"limit": 100, "timeout": 0})
+        self.assertEqual(client.post.call_args_list[1].kwargs["json"]["chat_id"], 77)
         self.assertTrue(all("€200.00" in message and "+€100.00" in message for message in messages))
         self.assertTrue(all("گزارش سود واچ‌لیست رادار" in message for message in messages))
 
@@ -109,15 +132,25 @@ class WatchlistLedgerTests(unittest.TestCase):
                 "UPDATE gem_hunter_watchlist_ledger SET latest_price_usd=0.013 WHERE token_id='solana:MintABC'"
             )
         failed = Mock()
-        failed.post.side_effect = RuntimeError("temporary Telegram failure")
+        class Response:
+            def raise_for_status(self): return None
+            def json(self):
+                return {"ok": True, "result": [{
+                    "update_id": 1,
+                    "message": {"from": {"id": 77, "username": "Germany004"},
+                                "chat": {"id": 77, "type": "private"}}
+                }]}
+        failed.post.side_effect = [Response(), RuntimeError("temporary Telegram failure")]
         result = send_watchlist_profit_alerts(
             self.db, session=failed, bot_token="bot-token", chat_id="12345"
         )
         self.assertEqual(result["errors"], 1)
 
         success = Mock()
-        success.post.return_value.raise_for_status.return_value = None
-        success.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 9}}
+        class SuccessResponse:
+            def raise_for_status(self): return None
+            def json(self): return {"ok": True, "result": {"message_id": 9}}
+        success.post.return_value = SuccessResponse()
         retry = send_watchlist_profit_alerts(
             self.db, session=success, bot_token="bot-token", chat_id="12345"
         )
