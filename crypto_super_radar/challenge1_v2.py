@@ -567,6 +567,7 @@ def _fast_trigger_execution_evidence_ready(record: Mapping[str, Any]) -> tuple[b
         or _utc_timestamp(m15.get("latest_closed_candle_open_utc")) != m15_open
         or float(m15.get("close") or 0) <= 0
         or float(m15.get("ema21") or 0) <= 0
+        or (float(m15.get("close") or 0) <= float(m15.get("ema21") or 0) if side == "LONG" else float(m15.get("close") or 0) >= float(m15.get("ema21") or 0))
         or (float(m15.get("ema21_slope_3_bars") or 0) <= 0 if side == "LONG" else float(m15.get("ema21_slope_3_bars") or 0) >= 0)
     ):
         return False, "Completed 15m trend alignment evidence is invalid."
@@ -594,8 +595,9 @@ def _fast_trigger_execution_evidence_ready(record: Mapping[str, Any]) -> tuple[b
     if (
         not all(math.isfinite(x) for x in (entry, stop, target, score, rr, funding, spread, total))
         or entry <= 0 or stop <= 0 or target <= 0 or score < 70
-        or rr < 1.5 or abs(total - score) > 1e-9
+        or abs(rr - 1.5) > 1e-6 or abs(total - score) > 1e-9
         or abs(entry - stop) / entry > MAX_STOP_DISTANCE_PCT
+        or abs((abs(target - entry) / abs(entry - stop)) - 1.5) > 1e-6
         or spread < 0 or spread > 0.0004
         or evidence.get("funding_kind") != "0"
         or record.get("funding_kind") != "0"
