@@ -126,7 +126,7 @@ class LiveMarketRadarApiTests(unittest.TestCase):
             payload = web_app._live_market_radar_payload("BTCUSDT", "1s", force_refresh=True)
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 2.0)
-        binance.assert_called_once_with("BTCUSDT", interval="1s", limit=180)
+        binance.assert_called_once_with("BTCUSDT", interval="1s", limit=300)
         bybit.assert_not_called()
         self.assertEqual(payload["source_mode"], "SINGLE_SOURCE")
         self.assertIn("Binance", payload["source_status_fa"])
