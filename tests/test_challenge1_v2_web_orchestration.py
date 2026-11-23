@@ -418,6 +418,24 @@ class Challenge1V2MarketIngestionTests(unittest.TestCase):
                 analyze.assert_not_called()
 
 
+    def test_missing_5m_fast_feed_falls_back_to_validated_baseline(self):
+        client = FakeBloFinReadOnly(now_ms=self.client.now_ms, missing_bar="5m")
+        baseline = {"signal": "NO_TRADE", "status": "NO_TRADE",
+                    "reason": "fixture has no directional setup", "orders_submitted": False}
+        with patch.object(v2_orchestration, "analyze_signal", return_value=baseline) as analyze:
+            result = v2_orchestration.analyze_challenge1_v2_market(
+                client, "BTC-USDT", local_now_ms=client.now_ms,
+            )
+        analyze.assert_called_once()
+        self.assertEqual(result["signal"], "NO_TRADE")
+        self.assertEqual(result["market_data_proof"]["timeframes"]["5m"]["rows"], 0)
+        self.assertEqual(
+            result["market_data_proof"]["timeframes"]["5m"]["source"],
+            "UNAVAILABLE_OPTIONAL_FAST_FEED",
+        )
+        self.assertIn("5m needs", result["market_data_proof"]["timeframes"]["5m"]["feed_error"])
+
+
 class Challenge1V2WebOrchestrationTests(unittest.TestCase):
     def setUp(self):
         self.job_id = "v2-web-orchestration-test"
