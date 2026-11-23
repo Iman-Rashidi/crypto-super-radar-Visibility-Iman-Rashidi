@@ -9467,20 +9467,20 @@ async function loadBlofinInstruments(){
               const net=gross-margin*lev*0.0012;manualTrade.profit.textContent='💰 سود خالص تخمینی در هدف: '+(net>=0?'+':'')+'$'+net.toFixed(2)+' (کارمزد تخمینی، بدون لغزش)';
             }
             async function manualTradeRequest(path,payload){
-              const token=manualTrade.token.value.trim();if(!token)throw new Error('ابتدا توکن پنل را وارد کن.');
+              const token=String((manualTrade.token&&manualTrade.token.value)||'').trim()||String((document.getElementById('blofin-dashboard-token')||{}).value||'').trim();if(!token)throw new Error('توکن پنل را در کادر معامله یا کادر توکن بالای پنل وارد کن.');
               const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload),cache:'no-store'});
-              const result=await response.json();if(!response.ok)throw new Error(result.message_fa||result.status||('HTTP '+response.status));return result;
+              let result={};try{result=await response.json();}catch(parseError){result={status:'INVALID_RESPONSE',message_fa:'پاسخ سرور JSON معتبر نبود.'};}if(!response.ok){const detail=result.message_fa||result.error_message||result.error_type||result.status||('HTTP '+response.status);const error=new Error(String(detail));error.payload=result;error.httpStatus=response.status;throw error;}return result;
             }
             async function submitManualWave(side){
               manualTrade.long.disabled=true;manualTrade.short.disabled=true;manualTrade.status.textContent='در حال بررسی حساب BloFin Demo...';manualTrade.result.textContent='';
               try{const result=await manualTradeRequest('/api/blofin-demo/manual-wave-order',{instrument_id:manualLastInstrument,side:side,margin_usdt:Number(manualTrade.margin.value),leverage:Number(manualTrade.leverage.value),tpTriggerPrice:Number(manualTrade.tp.value),slTriggerPrice:Number(manualTrade.sl.value)});
                 manualTrade.result.textContent=JSON.stringify(result,null,2);manualTrade.status.textContent='پاسخ صرافی: '+result.status+' · سفارش: '+(result.exchange_order_id||result.client_order_id||'نامشخص')+' · TP/SL را در حساب صرافی بررسی کن.';manualTrade.close.disabled=false;
-              }catch(error){manualTrade.status.textContent='سفارش ارسال نشد یا نتیجه نامشخص است: '+String(error.message||error);}finally{manualTrade.long.disabled=false;manualTrade.short.disabled=false;}
+              }catch(error){const detail=error&&error.payload?error.payload:{status:'CLIENT_ERROR',message_fa:String(error&&error.message||error||'خطای نامشخص')};manualTrade.status.textContent='سفارش انجام نشد / نتیجه نیازمند بررسی است: '+String(detail.message_fa||detail.error_message||detail.error_type||detail.status||'خطای نامشخص');manualTrade.result.textContent='جزئیات خطا (بدون نمایش توکن):\n'+JSON.stringify({http_status:error&&error.httpStatus||null,...detail},null,2);}finally{manualTrade.long.disabled=false;manualTrade.short.disabled=false;}
             }
             manualTrade.long.addEventListener('click',()=>submitManualWave('LONG'));manualTrade.short.addEventListener('click',()=>submitManualWave('SHORT'));
             manualTrade.close.addEventListener('click',async()=>{if(!window.confirm('پوزیشن همین نماد در BloFin Demo با قیمت بازار بسته شود؟'))return;manualTrade.close.disabled=true;
               try{const result=await manualTradeRequest('/api/blofin-demo/manual-wave-close',{instrument_id:manualLastInstrument,position_side:'net'});manualTrade.result.textContent=JSON.stringify(result,null,2);manualTrade.status.textContent=result.message_fa||'درخواست بستن ارسال شد.';}
-              catch(error){manualTrade.status.textContent='بستن پوزیشن ناموفق بود: '+String(error.message||error);manualTrade.close.disabled=false;}});
+              catch(error){const detail=error&&error.payload?error.payload:{status:'CLIENT_ERROR',message_fa:String(error&&error.message||error||'خطای نامشخص')};manualTrade.status.textContent='بستن پوزیشن ناموفق بود: '+String(detail.message_fa||detail.error_message||detail.error_type||detail.status);manualTrade.result.textContent='جزئیات خطا (بدون نمایش توکن):\n'+JSON.stringify({http_status:error&&error.httpStatus||null,...detail},null,2);manualTrade.close.disabled=false;}});
             [manualTrade.margin,manualTrade.leverage,manualTrade.tp].forEach(el=>el.addEventListener('input',updateManualProfit));
             function updateEasyTraderRobot(analysis,signal,symbolValue,intervalValue){
               if(!easyRobot.root)return;
@@ -10393,7 +10393,15 @@ async function loadBlofinInstruments(){
             except BloFinDemoExecutionUnknown as exc:
                 return self._send(503,json.dumps({"status":"UNKNOWN","message_fa":str(exc),"retry_allowed":False},ensure_ascii=False).encode(),"application/json; charset=utf-8")
             except Exception as exc:
-                return self._send(502,json.dumps({"status":"ERROR","error_type":type(exc).__name__},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+                # Preserve actionable exchange/client diagnostics; never expose credentials.
+                raw_message = str(exc).strip()
+                message_fa = raw_message[:1200] if raw_message else "خطای پیش‌بینی‌نشده در ارتباط با BloFin Demo؛ جزئیات فنی در error_type ثبت شد."
+                return self._send(502,json.dumps({
+                    "status":"ERROR", "message_fa":message_fa,
+                    "error_type":type(exc).__name__, "error_message":message_fa,
+                    "environment":"BLOFIN_DEMO", "orders_submitted":"UNKNOWN",
+                    "retry_allowed":False,
+                },ensure_ascii=False).encode(),"application/json; charset=utf-8")
         api_jobs_request = route == "/api/jobs"
         if api_jobs_request:
             route = "/scan"
