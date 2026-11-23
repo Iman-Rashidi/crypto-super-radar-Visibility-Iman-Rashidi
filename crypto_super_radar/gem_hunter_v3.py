@@ -256,6 +256,107 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
 
 
 
+
+def _parse_utc_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def analyze_pump_dump_phase(candidate: Mapping[str, Any], *, now: Optional[datetime] = None) -> dict[str, Any]:
+    """Estimate pump phase from snapshot fields; it does not claim candle-history precision."""
+    price = _finite(candidate.get("price_usd"))
+    change = _finite(candidate.get("price_change_1h_pct"))
+    buys, sells = _finite(candidate.get("buys_1h")), _finite(candidate.get("sells_1h"))
+    buys = max(0.0, buys) if buys is not None else None
+    sells = max(0.0, sells) if sells is not None else None
+    market_cap = _finite(candidate.get("market_cap_usd", candidate.get("fdv_usd")))
+    pump = candidate.get("pump_dump_analysis") or analyze_pump_dump_phase(candidate)
+    narrative = candidate.get("narrative_analysis") or analyze_narrative_psychology(candidate)
+    created = _parse_utc_datetime(candidate.get("pool_created_at_utc"))
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age_hours = max(0.0, (current.astimezone(timezone.utc) - created).total_seconds() / 3600.0) if created else None
+    if age_hours is None:
+        window = "زمان ایجاد استخر موجود نیست؛ مدت فعالیت نامشخص است."
+    elif age_hours < 1:
+        window = f"از ایجاد استخر تا بررسی: حدود {age_hours * 60:.0f} دقیقه."
+    else:
+        window = f"از ایجاد استخر تا بررسی: حدود {age_hours:.1f} ساعت."
+    buy_dominance = buys is not None and sells is not None and buys + sells > 0 and buys > sells
+    sell_dominance = buys is not None and sells is not None and buys + sells > 0 and sells > buys
+    if sell_dominance or (change is not None and change > 120):
+        phase = "🔴 فاز ۳: سقف فرسودگی / خطر دامپ"
+    elif change is not None and 45 <= change <= 120:
+        phase = "🟡 فاز ۲: میانه موج صعودی"
+    elif change is not None and 8 <= change < 45 and buy_dominance:
+        phase = "🟢 فاز ۱: شروع پامپ (Early Ignition)"
+    else:
+        phase = "⚪ فاز ۰: پیش از حرکت / تثبیت"
+    start_price = None
+    if price is not None and price > 0 and change is not None and change > -100:
+        denominator = 1 + change / 100
+        if denominator > 0:
+            start_price = round(price / denominator, 12)
+    invalidation = round(price * 0.82, 12) if price is not None and price > 0 else None
+    if invalidation is not None and start_price is not None and start_price < invalidation:
+        invalidation = round(start_price * 0.98, 12)
+    identity = " ".join(str(candidate.get(k) or "") for k in ("token_name", "token_symbol", "dex_id", "dex")).lower()
+    meme_terms = ("meme", "pepe", "doge", "shib", "inu", "frog", "cat", "moon", "pump")
+    meme = any(term in identity for term in meme_terms)
+    if not meme and market_cap is not None and 0 < market_cap <= 25_000_000:
+        meme = age_hours is not None and age_hours <= 720
+    return {
+        "category_fa": "🐸 میم‌کوین پامپی (نوسان کوتاه‌مدت)" if meme else "💎 آلت‌کوین / پروژه جدید (نگهداری میان‌مدت)",
+        "pump_phase_fa": phase,
+        "pump_start_price_usd": start_price,
+        "pump_start_price_basis": "ESTIMATED_FROM_PRICE_CHANGE_1H_NOT_VERIFIED_LOW" if start_price is not None else "NOT_AVAILABLE",
+        "pump_window_summary_fa": window,
+        "pool_age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "risk_invalidation_price_usd": invalidation,
+        "risk_invalidation_basis": "18_PERCENT_BELOW_CURRENT_OR_BELOW_ESTIMATED_ONE_HOUR_START; NO_CANDLE_SWING_LOW_AVAILABLE" if invalidation is not None else "NOT_AVAILABLE",
+        "trade_authorization": "NO_TRADE",
+    }
+
+
+def analyze_narrative_psychology(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Infer narrative hints from metadata and hourly transaction counts, not real news feeds."""
+    name = str(candidate.get("token_name") or "توکن")
+    symbol = str(candidate.get("token_symbol") or "")
+    dex = str(candidate.get("dex_id") or candidate.get("dex") or "DEX نامشخص")
+    identity = f"{name} {symbol} {dex}".lower()
+    buys, sells = _finite(candidate.get("buys_1h")), _finite(candidate.get("sells_1h"))
+    share = None
+    if buys is not None and sells is not None and buys >= 0 and sells >= 0 and buys + sells > 0:
+        share = round(100 * buys / (buys + sells), 1)
+    if any(x in identity for x in ("ai", "artificial intelligence", "agent", "gpt")):
+        story = "نشانه‌های روایی مرتبط با AI در نام/نماد یا DEX دیده می‌شود"
+    elif any(x in identity for x in ("meme", "pepe", "doge", "shib", "inu", "frog", "cat", "moon")):
+        story = "نام/نماد حال‌وهوای میم ویروسی دارد؛ وایرال‌شدن اجتماعی اثبات نشده است"
+    else:
+        story = "از نام، نماد و DEX به‌تنهایی موج خبری مشخصی قابل تأیید نیست"
+    if share is not None and share >= 65:
+        flow = f"غلبهٔ معاملات خرید ({share:.1f}٪) با احتمال هجوم خریداران خرد سازگار است"
+    elif share is not None and share <= 35:
+        flow = f"سهم خرید پایین ({share:.1f}٪) و فشار فروش/سفته‌بازی پرریسک مشاهده می‌شود"
+    elif share is not None:
+        flow = f"نسبت خرید و فروش نسبتاً متعادل است (سهم خرید {share:.1f}٪)"
+    else:
+        flow = "دادهٔ معتبر خرید و فروش ساعتی برای سنجش رفتار معامله‌گران موجود نیست"
+    return {
+        "narrative_psychology_fa": f"{story}؛ {flow}. این برداشت فقط از فراداده و شمار معاملات است و خبر یا احساسات شبکه‌های اجتماعی را مستقلاً تأیید نمی‌کند.",
+        "narrative_buyer_share_1h_pct": share,
+        "narrative_evidence_basis": "TOKEN_METADATA_AND_HOURLY_BUY_SELL_COUNTS_NOT_VERIFIED_NEWS_OR_SOCIAL_FEED",
+    }
+
+
 def _base_security_status(chain: str, security: Mapping[str, Any]) -> str:
     """Assess only explicit anti-honeypot/sellability basics; do not require secondary analytics."""
     if security.get("status") == "PASS":
@@ -748,6 +849,258 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
         f"<b>حجم خرید / فروش نهنگ‌ها:</b> ${_finite(whale_flow.get('whale_buy_volume_1h_usd')) or 0:,.2f} / ${_finite(whale_flow.get('whale_sell_volume_1h_usd')) or 0:,.2f} · نسبت خرید به فروش: {whale_ratio if whale_ratio is not None else 'نامشخص'}\n"
         + "\n".join([f"• {html_escape(str(e.get('wallet_address') or 'کیف‌پول نامشخص'))} · {html_escape(str(e.get('event_type') or 'SWAP'))} · ${_finite(e.get('amount_usd')) or 0:,.2f} · تعداد توکن: {e.get('token_amount') if e.get('token_amount') is not None else 'ناموجود'} · {html_escape(str(e.get('timestamp_utc') or 'زمان نامشخص'))} · <a href=\"{html_escape(str(e.get('explorer_tx_url') or ''), quote=True)}\">تراکنش</a>" for e in whale_events[:8]]) + "\n"
         "\n"
+        "🚀 <b>بخش پامپ/دامپ و خط قرمز ریسک</b>\n"
+        f"<b>دسته‌بندی:</b> {html_escape(str(pump.get('category_fa') or 'نامشخص'))}\n"
+        f"<b>فاز موج:</b> {html_escape(str(pump.get('pump_phase_fa') or 'نامشخص'))}\n"
+        f"<b>قیمت تخمینی شروع موج:</b> {('
+        f"<b>شتاب مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'} از ۱۰۰\n"
+        "<b>نقاط قوت:</b>\n"
+        + "\n".join(strength_lines) + "\n"
+        "<b>نقاط ضعف و هشدارها:</b>\n"
+        + "\n".join(caution_lines) + "\n"
+        f"<b>سناریوی رشد و افق پیگیری (پژوهشی):</b> {html_escape(scenario_text)}\n"
+        "\n"
+        "🛡️ <b>بخش ۳ | راهنمای امن استفاده از کیف پول</b>\n"
+        f"{trade_link}\n"
+        f"{dex_link}\n"
+        f"{html_escape(wallet_guide)}\n"
+        "⚠️ قبل از Swap، آدرس قرارداد و شبکه را دوباره بررسی کن؛ از لینک تبلیغاتی، توکن هم‌نام و پیام خصوصی افراد ناشناس استفاده نکن. Seed Phrase یا کلید خصوصی را هرگز وارد نکن.\n"
+        "\n"
+        "📡 <b>بخش ۴ | داشبورد زنده</b>\n"
+        f"{dashboard_link}\n"
+        "\n"
+        "<i>وضعیت سیستم: پژوهشی · NO_TRADE (بدون معامله خودکار)</i>"
+    )
+    client = session or requests
+    try:
+        response = client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": destination, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError("Telegram API did not confirm the message")
+    except Exception:
+        store.release_event(event_key)
+        raise
+    return {"status": "SENT", "candidate_id": candidate_id,
+            "message_id": (payload.get("result") or {}).get("message_id")}
+
+
+
+
+def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) -> list[dict[str, Any]]:
+    """Enrich a discovery batch, persist its lifecycle when Turso is configured,
+    and send deduplicated research alerts. This path never authorizes a trade.
+    """
+    rows = [dict(row) for row in candidates if isinstance(row, Mapping)] if isinstance(candidates, list) else []
+    store = None
+    storage_status = "NOT_CONFIGURED"
+    try:
+        if storage_backend() == "TURSO_CLOUD_SQLITE":
+            store = TursoGemHunterStore()
+            store.initialize()
+            storage_status = "READY"
+    except Exception as exc:
+        store = None
+        storage_status = f"UNKNOWN:{type(exc).__name__}"
+
+    for row in rows:
+        reconciliation = row.get("market_reconciliation") or {}
+        verified_liquidity = (
+            reconciliation.get("verified_liquidity_usd")
+            if reconciliation.get("status") == "PASS" else None
+        )
+        existing_exit = row.get("exit_slippage_evidence") or {}
+        existing_qualification = row.get("qualification") or {}
+        existing_metrics = existing_qualification.get("market_metrics") or {}
+        if _finite(existing_exit.get("estimated_slippage_bps")) is None and _finite(existing_metrics.get("estimated_slippage_bps")) is not None:
+            existing_exit = {"status": "REPORTED", "estimated_slippage_bps": _finite(existing_metrics.get("estimated_slippage_bps")), "model": "QUALIFICATION_METRIC_PASSTHROUGH"}
+        calculated_exit = estimate_exit_slippage(
+            liquidity_usd=verified_liquidity,
+            order_usd=_finite(os.getenv("GEM_HUNTER_EXIT_ORDER_USD")) or DEFAULT_EXIT_ORDER_USD,
+        )
+        # Retain a previously computed, numeric estimate rather than replacing it with UNKNOWN.
+        row["exit_slippage_evidence"] = (
+            existing_exit if _finite(existing_exit.get("estimated_slippage_bps")) is not None
+            else calculated_exit
+        )
+        original_status = row.get("candidate_status")
+        original_trade_authorization = row.get("trade_authorization")
+        scores = score_candidate_v3(row)
+        row["pump_dump_analysis"] = analyze_pump_dump_phase(row)
+        row.update(row["pump_dump_analysis"])
+        row["narrative_analysis"] = analyze_narrative_psychology(row)
+        row.update(row["narrative_analysis"])
+        row.update(scores)
+        tier = classify_gem_tier(row, scores)
+        row.update(tier)
+        row["gem_hunter_v3_status"] = tier.get("tier")
+        row["candidate_status"] = original_status
+        row["trade_authorization"] = original_trade_authorization
+        row["gem_hunter_v3_trade_authorization"] = "NO_TRADE"
+        metrics = {
+            "holder_count": row.get("holder_count"),
+            "unique_traders_24h": row.get("unique_traders_24h"),
+            "unique_traders_24h_basis": row.get("unique_traders_24h_basis"),
+            "buy_volume_share_pct": row.get("buy_volume_share_pct"),
+            "estimated_slippage_bps": row.get("estimated_slippage_bps"),
+        }
+        row["opportunity_score"] = row.get("opportunity_score", row.get("short_term_momentum_score"))
+        qualification = row.get("qualification")
+        if isinstance(qualification, dict) and qualification.get("schema_version") == SCHEMA_VERSION:
+            qualification = dict(qualification)
+            market_metrics = dict(qualification.get("market_metrics") or {})
+            market_metrics.update(metrics)
+            qualification["market_metrics"] = market_metrics
+            qualification["opportunity_score"] = row["opportunity_score"]
+            qualification["risk_score"] = row.get("risk_score")
+            row["qualification"] = qualification
+        row["gem_hunter_storage_status"] = storage_status
+        if store is not None:
+            try:
+                persist_candidate_lifecycle(store, row)
+                row["gem_hunter_storage_status"] = "PERSISTED"
+            except Exception as exc:
+                row["gem_hunter_storage_status"] = f"UNKNOWN:{type(exc).__name__}"
+        if notify and store is not None and row.get("gem_hunter_v3_status") in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}:
+            try:
+                row["telegram_alert_status"] = notify_qualified_gem(row, store)
+            except Exception as exc:
+                row["telegram_alert_status"] = {"status": "ERROR", "reason": type(exc).__name__}
+        else:
+            row["telegram_alert_status"] = {"status": "NOT_SENT"}
+    if store is not None:
+        store.close()
+    return rows
+ + format(_finite(pump.get('pump_start_price_usd')), '.10g')) if _finite(pump.get('pump_start_price_usd')) is not None else 'نامشخص'}\n"
+        f"<b>بازه فعالیت استخر:</b> {html_escape(str(pump.get('pump_window_summary_fa') or 'نامشخص'))}\n"
+        f"<b>خط قرمز ابطال ریسک:</b> {('
+        f"<b>شتاب مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'} از ۱۰۰\n"
+        "<b>نقاط قوت:</b>\n"
+        + "\n".join(strength_lines) + "\n"
+        "<b>نقاط ضعف و هشدارها:</b>\n"
+        + "\n".join(caution_lines) + "\n"
+        f"<b>سناریوی رشد و افق پیگیری (پژوهشی):</b> {html_escape(scenario_text)}\n"
+        "\n"
+        "🛡️ <b>بخش ۳ | راهنمای امن استفاده از کیف پول</b>\n"
+        f"{trade_link}\n"
+        f"{dex_link}\n"
+        f"{html_escape(wallet_guide)}\n"
+        "⚠️ قبل از Swap، آدرس قرارداد و شبکه را دوباره بررسی کن؛ از لینک تبلیغاتی، توکن هم‌نام و پیام خصوصی افراد ناشناس استفاده نکن. Seed Phrase یا کلید خصوصی را هرگز وارد نکن.\n"
+        "\n"
+        "📡 <b>بخش ۴ | داشبورد زنده</b>\n"
+        f"{dashboard_link}\n"
+        "\n"
+        "<i>وضعیت سیستم: پژوهشی · NO_TRADE (بدون معامله خودکار)</i>"
+    )
+    client = session or requests
+    try:
+        response = client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": destination, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError("Telegram API did not confirm the message")
+    except Exception:
+        store.release_event(event_key)
+        raise
+    return {"status": "SENT", "candidate_id": candidate_id,
+            "message_id": (payload.get("result") or {}).get("message_id")}
+
+
+
+
+def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) -> list[dict[str, Any]]:
+    """Enrich a discovery batch, persist its lifecycle when Turso is configured,
+    and send deduplicated research alerts. This path never authorizes a trade.
+    """
+    rows = [dict(row) for row in candidates if isinstance(row, Mapping)] if isinstance(candidates, list) else []
+    store = None
+    storage_status = "NOT_CONFIGURED"
+    try:
+        if storage_backend() == "TURSO_CLOUD_SQLITE":
+            store = TursoGemHunterStore()
+            store.initialize()
+            storage_status = "READY"
+    except Exception as exc:
+        store = None
+        storage_status = f"UNKNOWN:{type(exc).__name__}"
+
+    for row in rows:
+        reconciliation = row.get("market_reconciliation") or {}
+        verified_liquidity = (
+            reconciliation.get("verified_liquidity_usd")
+            if reconciliation.get("status") == "PASS" else None
+        )
+        existing_exit = row.get("exit_slippage_evidence") or {}
+        existing_qualification = row.get("qualification") or {}
+        existing_metrics = existing_qualification.get("market_metrics") or {}
+        if _finite(existing_exit.get("estimated_slippage_bps")) is None and _finite(existing_metrics.get("estimated_slippage_bps")) is not None:
+            existing_exit = {"status": "REPORTED", "estimated_slippage_bps": _finite(existing_metrics.get("estimated_slippage_bps")), "model": "QUALIFICATION_METRIC_PASSTHROUGH"}
+        calculated_exit = estimate_exit_slippage(
+            liquidity_usd=verified_liquidity,
+            order_usd=_finite(os.getenv("GEM_HUNTER_EXIT_ORDER_USD")) or DEFAULT_EXIT_ORDER_USD,
+        )
+        # Retain a previously computed, numeric estimate rather than replacing it with UNKNOWN.
+        row["exit_slippage_evidence"] = (
+            existing_exit if _finite(existing_exit.get("estimated_slippage_bps")) is not None
+            else calculated_exit
+        )
+        original_status = row.get("candidate_status")
+        original_trade_authorization = row.get("trade_authorization")
+        scores = score_candidate_v3(row)
+        row.update(scores)
+        tier = classify_gem_tier(row, scores)
+        row.update(tier)
+        row["gem_hunter_v3_status"] = tier.get("tier")
+        row["candidate_status"] = original_status
+        row["trade_authorization"] = original_trade_authorization
+        row["gem_hunter_v3_trade_authorization"] = "NO_TRADE"
+        metrics = {
+            "holder_count": row.get("holder_count"),
+            "unique_traders_24h": row.get("unique_traders_24h"),
+            "unique_traders_24h_basis": row.get("unique_traders_24h_basis"),
+            "buy_volume_share_pct": row.get("buy_volume_share_pct"),
+            "estimated_slippage_bps": row.get("estimated_slippage_bps"),
+        }
+        row["opportunity_score"] = row.get("opportunity_score", row.get("short_term_momentum_score"))
+        qualification = row.get("qualification")
+        if isinstance(qualification, dict) and qualification.get("schema_version") == SCHEMA_VERSION:
+            qualification = dict(qualification)
+            market_metrics = dict(qualification.get("market_metrics") or {})
+            market_metrics.update(metrics)
+            qualification["market_metrics"] = market_metrics
+            qualification["opportunity_score"] = row["opportunity_score"]
+            qualification["risk_score"] = row.get("risk_score")
+            row["qualification"] = qualification
+        row["gem_hunter_storage_status"] = storage_status
+        if store is not None:
+            try:
+                persist_candidate_lifecycle(store, row)
+                row["gem_hunter_storage_status"] = "PERSISTED"
+            except Exception as exc:
+                row["gem_hunter_storage_status"] = f"UNKNOWN:{type(exc).__name__}"
+        if notify and store is not None and row.get("gem_hunter_v3_status") in {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}:
+            try:
+                row["telegram_alert_status"] = notify_qualified_gem(row, store)
+            except Exception as exc:
+                row["telegram_alert_status"] = {"status": "ERROR", "reason": type(exc).__name__}
+        else:
+            row["telegram_alert_status"] = {"status": "NOT_SENT"}
+    if store is not None:
+        store.close()
+    return rows
+ + format(_finite(pump.get('risk_invalidation_price_usd')), '.10g')) if _finite(pump.get('risk_invalidation_price_usd')) is not None else 'نامشخص'}\n"
+        f"<i>مبنای خط قرمز:</i> {html_escape(str(pump.get('risk_invalidation_basis') or 'نامشخص'))}\n"
+        "🧠 <b>روانشناسی روایت و جریان بازار</b>\n"
+        f"{html_escape(str(narrative.get('narrative_psychology_fa') or 'تحلیل روایت در دسترس نیست'))}\n"
+        "<i>خبر یا شبکه اجتماعی مستقلاً راستی‌آزمایی نشده است.</i>\n"
         "🧠 <b>بخش ۲ | تحلیل هوشمند، نقاط قوت، ضعف و رفرنس</b>\n"
         f"<b>شتاب مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'} از ۱۰۰\n"
         "<b>نقاط قوت:</b>\n"

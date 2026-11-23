@@ -11,6 +11,7 @@ from crypto_super_radar.providers import SolanaRpcProvider, DataProviderError
 from crypto_super_radar.gem_hunter_v3 import (
     estimate_exit_slippage, score_candidate_v3, persist_candidate_lifecycle,
     notify_qualified_gem, TursoGemHunterStore, classify_gem_tier,
+    analyze_pump_dump_phase, analyze_narrative_psychology,
 )
 
 
@@ -30,7 +31,66 @@ class FakeStore:
         self.events.discard(event_key)
 
 
+
 class GemHunterV3Tests(unittest.TestCase):
+
+    def test_pump_dump_phase_early_mid_exhaustion_and_invalidation(self):
+        now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+        base = {
+            "token_name": "Pepe AI", "token_symbol": "PEPE", "dex_id": "raydium",
+            "price_usd": 0.018, "price_change_1h_pct": 20,
+            "buys_1h": 80, "sells_1h": 20,
+            "pool_created_at_utc": "2026-11-23T10:00:00Z",
+            "market_cap_usd": 8_000_000,
+        }
+        early = analyze_pump_dump_phase(base, now=now)
+        self.assertEqual(early["category_fa"], "🐸 میم‌کوین پامپی (نوسان کوتاه‌مدت)")
+        self.assertEqual(early["pump_phase_fa"], "🟢 فاز ۱: شروع پامپ (Early Ignition)")
+        self.assertAlmostEqual(early["pump_start_price_usd"], 0.015)
+        self.assertAlmostEqual(early["risk_invalidation_price_usd"], 0.0123)
+        self.assertEqual(early["pool_age_hours"], 2.0)
+        self.assertEqual(early["trade_authorization"], "NO_TRADE")
+
+        middle = analyze_pump_dump_phase({**base, "price_change_1h_pct": 80}, now=now)
+        self.assertEqual(middle["pump_phase_fa"], "🟡 فاز ۲: میانه موج صعودی")
+        exhausted = analyze_pump_dump_phase({**base, "price_change_1h_pct": 5, "buys_1h": 10, "sells_1h": 30}, now=now)
+        self.assertEqual(exhausted["pump_phase_fa"], "🔴 فاز ۳: سقف فرسودگی / خطر دامپ")
+        stable = analyze_pump_dump_phase({"price_usd": 2, "price_change_1h_pct": 3}, now=now)
+        self.assertEqual(stable["pump_phase_fa"], "⚪ فاز ۰: پیش از حرکت / تثبیت")
+        self.assertIsNone(stable["risk_invalidation_price_usd"])
+
+    def test_narrative_psychology_uses_metadata_and_hourly_buy_sell_share(self):
+        ai = analyze_narrative_psychology({
+            "token_name": "Open AI Agent", "token_symbol": "OAI",
+            "dex_id": "raydium", "buys_1h": 90, "sells_1h": 10,
+        })
+        self.assertIn("AI", ai["narrative_psychology_fa"])
+        self.assertIn("هجوم خریداران خرد", ai["narrative_psychology_fa"])
+        self.assertEqual(ai["narrative_buyer_share_1h_pct"], 90.0)
+        self.assertIn("NOT_VERIFIED_NEWS", ai["narrative_evidence_basis"])
+        selling = analyze_narrative_psychology({
+            "token_name": "Unknown", "token_symbol": "UNK",
+            "buys_1h": 10, "sells_1h": 90,
+        })
+        self.assertIn("فشار فروش", selling["narrative_psychology_fa"])
+        self.assertIsNone(analyze_narrative_psychology({})["narrative_buyer_share_1h_pct"])
+
+    def test_candidate_processing_attaches_pump_and_narrative_fields(self):
+        candidate = {
+            "chain": "solana", "token_address": "MintAddress",
+            "token_name": "Pepe", "token_symbol": "PEPE",
+            "price_usd": 0.01, "price_change_1h_pct": 30,
+            "buys_1h": 70, "sells_1h": 30,
+            "pool_created_at_utc": "2026-11-23T10:00:00Z",
+            "market_cap_usd": 5_000_000,
+        }
+        with patch("crypto_super_radar.gem_hunter_v3.storage_backend", return_value="LOCAL"):
+            result = process_gem_hunter_v3_candidates([candidate], notify=False)[0]
+        self.assertIn("pump_dump_analysis", result)
+        self.assertIn("narrative_analysis", result)
+        self.assertEqual(result["trade_authorization"], candidate.get("trade_authorization"))
+        self.assertEqual(result["gem_hunter_v3_trade_authorization"], "NO_TRADE")
+
 
     def test_whale_tracker_exposes_wallet_flow_token_amount_and_explorer_links(self):
         now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
