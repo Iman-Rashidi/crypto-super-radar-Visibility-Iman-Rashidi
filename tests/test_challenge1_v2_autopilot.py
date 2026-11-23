@@ -180,7 +180,7 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
         reviewer_result = {"approved": False, "status": "PENDING", "ai_reviews": [],
                            "ai_consensus": {"status": "PENDING"}}
         with patch.object(flow, "_contract_specs", return_value={"instId": "BTC-USDT"}), patch.object(
-            flow, "_market_quote", return_value={"asof_ts_ms": asof_ms, "spread_fraction": .0001}
+            flow, "_market_quote", return_value={"asof_ts_ms": asof_ms, "last": 100.0, "spread_fraction": .0001}
         ), patch.object(flow, "_closed_frame", side_effect=frames), patch.object(
             flow, "_regular_funding", return_value={"funding_rate": 0.0, "funding_kind": "0",
                 "funding_classification": "STANDARD_CRYPTO_FUNDING", "funding_event_time_ms": asof_ms - 60000,
