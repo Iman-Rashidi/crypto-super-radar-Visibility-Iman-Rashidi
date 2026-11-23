@@ -8995,7 +8995,7 @@ async function loadBlofinInstruments(){
         <section class="card" id="crypto-markets">
           <!--RADAR_MARKET-->
           <h2>بازار رمزارزها · اسکنر پامپ و پرنوسان Spot</h2>
-          <p class="muted">تغییر قیمت ۲۴ساعته، حجم و شتاب حجم از Binance و Bybit Spot؛ مرتب‌سازی بر اساس رشد یا حجم. برچسب‌ها وضعیت حرکت‌اند، نه سیگنال خرید/فروش. مجوز معامله: NO_TRADE.</p>
+          <p class="muted">قیمت‌های Spot منتخب از APIهای عمومی و رایگان Binance و Bybit؛ اسکن تغییر قیمت ۲۴ساعته، حجم و شتاب حجم با مرتب‌سازی رشد یا حجم. برچسب‌ها وضعیت حرکت‌اند، نه سیگنال خرید/فروش. مجوز معامله: NO_TRADE.</p>
           <p id="crypto-market-status" class="muted" aria-live="polite">در حال دریافت دادهٔ عمومی بازار...</p>
           <div class="grid" style="margin:12px 0">
             <label>جست‌وجوی نام یا نماد
