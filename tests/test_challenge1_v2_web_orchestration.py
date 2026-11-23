@@ -657,10 +657,10 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
 class Challenge1EarlyWave3Tests(unittest.TestCase):
     def _frames(self):
         idx5 = pd.date_range("2026-01-01T00:00:00Z", periods=80, freq="5min")
-        idx15 = pd.date_range("2026-01-01T00:00:00Z", periods=80, freq="15min")
+        idx15 = pd.date_range(end=idx5[-1].floor("15min"), periods=80, freq="15min")
         values5 = [100.0 + (i % 5) * 0.08 for i in range(80)]
         values15 = [100.0 + (i % 5) * 0.12 for i in range(80)]
-        values5[-3:] = [108.8, 109.2, 110.1]
+        values5[-3:] = [108.8, 108.9, 109.1]
         values15[-4:] = [108.0, 108.4, 108.7, 109.0]
         def frame(index, values):
             close = pd.Series(values, index=index, dtype=float)
@@ -674,7 +674,7 @@ class Challenge1EarlyWave3Tests(unittest.TestCase):
         points = [
             {"kind":"LOW","price":100.0,"timestamp":"2026-01-01T04:00:00+00:00","confirmed_at":"2026-01-01T04:05:00+00:00"},
             {"kind":"HIGH","price":109.0,"timestamp":"2026-01-01T05:00:00+00:00","confirmed_at":"2026-01-01T05:05:00+00:00"},
-            {"kind":"LOW","price":104.0,"timestamp":"2026-01-01T05:30:00+00:00","confirmed_at":"2026-01-01T05:35:00+00:00"},
+            {"kind":"LOW","price":106.0,"timestamp":"2026-01-01T05:30:00+00:00","confirmed_at":"2026-01-01T05:35:00+00:00"},
         ]
         return {"pattern":"BULLISH","phase":"WAVES_1_AND_2_CONFIRMED","pivots":points,"confirmed_pivot_count":3}
 
@@ -686,7 +686,7 @@ class Challenge1EarlyWave3Tests(unittest.TestCase):
             patch("crypto_super_radar.challenge1_v2.monitor_elliott_waves", side_effect=[self._wave(), self._wave()]),
             patch("crypto_super_radar.challenge1_v2.rsi", return_value=pd.Series([55.0] * len(five), index=five.index)),
         ):
-            result = detect_early_wave3_breakout(five, fifteen, asof=asof, entry_price=110.1)
+            result = detect_early_wave3_breakout(five, fifteen, asof=asof, entry_price=109.1)
         self.assertEqual(result["signal"], "LONG")
         self.assertLessEqual(result["breakout_distance_pct"], 0.012)
         self.assertLessEqual((result["entry"] - result["stop_loss"]) / result["entry"], 0.035)
