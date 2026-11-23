@@ -137,6 +137,13 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('id="live-market-radar"', page)
         self.assertIn('id="live-candle-chart"', page)
+        self.assertIn('id="live-radar-custom-symbol"', page)
+        self.assertIn('id="live-radar-custom-search"', page)
+        self.assertIn('id="live-wave-watch-grid"', page)
+        for symbol in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "LINKUSDT"):
+            self.assertIn(symbol, page)
+        self.assertIn("refreshWaveWatchlist", page)
+        self.assertIn("نمایش روی نمودار بزرگ", page)
         self.assertIn('/api/live-market-radar', page)
 
 
