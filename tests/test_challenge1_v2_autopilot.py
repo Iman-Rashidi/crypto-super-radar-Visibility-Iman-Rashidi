@@ -172,6 +172,8 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
         frames = [
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(hours=1)]),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(hours=4)]),
+            # The 5m input is now a required, independently closed market-data frame.
+            pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=5)]),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
         ]
@@ -188,7 +190,18 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
         ), patch.object(flow, "run_challenge1_v2_supervisor_reviews", return_value=reviewer_result) as review:
             class DummyClient:
                 def get_candles(self, instrument_id, *, bar, limit):
-                    return []
+                    # Supply realistic, closed synthetic candles for every requested
+                    # interval, including the newly mandatory 5m feed. The primary
+                    # orchestration frames remain isolated by the _closed_frame stub.
+                    intervals = {"5m": 5 * 60_000, "15m": 15 * 60_000,
+                                 "1H": 60 * 60_000, "4H": 4 * 60 * 60_000}
+                    interval = intervals[bar]
+                    count = min(limit, 300 if bar in {"1H", "4H"} else 120)
+                    return [
+                        [str(asof_ms - interval * (count - i)), "100", "101",
+                         "99", "100", "1000", "100000", "0", "1"]
+                        for i in range(count)
+                    ]
             out = flow.analyze_challenge1_v2_market(DummyClient(), "BTC-USDT", local_now_ms=asof_ms)
         self.assertEqual(out["signal"], "LONG")
         self.assertEqual(out["status"], "AI_REVIEW_BLOCKED")
