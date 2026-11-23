@@ -294,7 +294,12 @@ class FuturesPaperBotTests(unittest.TestCase):
                     return {"retCode": 0, "time": int(time.time()*1000), "result": {"list": [{"symbol": "BTCUSDT", "markPrice": "100", "indexPrice": "100", "bid1Price": "99.9", "ask1Price": "100.1", "fundingRate": "0.0001", "openInterest": "1000"}]}}
                 if url.endswith("/public/funding-rate-history"):
                     now = int(time.time()*1000)
-                    return {"code": "0", "data": [{"fundingTime": str(now-8*3600000)}, {"fundingTime": str(now)}]}
+                    return {"code": "0", "data": [{"fundingTime": str(now-8*3600000), "fundingRate": "0.0001"}, {"fundingTime": str(now), "fundingRate": "0.0001"}]}
+                if url.endswith("/v5/market/instruments-info"):
+                    return {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "fundingInterval": "480"}]}}
+                if url.endswith("/v5/market/funding/history"):
+                    now = int(time.time()*1000)
+                    return {"retCode": 0, "result": {"list": [{"fundingRateTimestamp": str(now-8*3600000), "fundingRate": "0.0001"}, {"fundingRateTimestamp": str(now), "fundingRate": "0.0001"}]}}
                 if "futures/usdt/contracts" in url:
                     return {"funding_interval": 28800}
                 raise AssertionError(url)
