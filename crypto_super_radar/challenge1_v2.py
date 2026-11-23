@@ -694,6 +694,13 @@ def build_wave5_entry_signal(
         return {"signal": "NO_TRADE", "reason": "W4 pivot is outside the 38.2%-61.8% retracement zone", "wave4_fibonacci": fib}
     if not math.isfinite(float(entry_price)) or float(entry_price) <= 0:
         return {"signal": "NO_TRADE", "reason": "Executable quote is invalid"}
+    if funding_kind != "0" or not math.isfinite(float(funding_rate)):
+        return {"signal": "NO_TRADE", "reason": "Regular funding proof is required"}
+    if not math.isfinite(float(spread_fraction)) or not 0 <= float(spread_fraction) <= 0.0004:
+        return {"signal": "NO_TRADE", "reason": "Spread guard failed"}
+    funding_age = int(asof.timestamp() * 1000) - int(funding_event_time_ms)
+    if funding_age < 0 or funding_age > int(funding_max_age_ms):
+        return {"signal": "NO_TRADE", "reason": "Funding event is stale or future-dated"}
     last, prev = five.iloc[-1], five.iloc[-2]
     trigger = float(last["close"]) > float(prev["high"]) and float(last["close"]) > float(last["open"]) if side == "LONG" else (
         float(last["close"]) < float(prev["low"]) and float(last["close"]) < float(last["open"])
