@@ -459,9 +459,11 @@ def breakout_volume_confirmation(frame: pd.DataFrame, *, multiple: float = BREAK
     }
 
 
-def calculate_wave4_fibonacci(frame_5m: pd.DataFrame) -> dict[str, Any]:
+def calculate_wave4_fibonacci(
+    frame_5m: pd.DataFrame, *, wave: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Calculate W3 retracement levels only from a confirmed five-pivot W4 structure."""
-    wave = monitor_elliott_waves(frame_5m, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    wave = wave or monitor_elliott_waves(frame_5m, min_reversal_pct=0.002, max_reversal_pct=0.03)
     pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
     if str(wave.get("phase", "")).upper() != "WAVE_4_CONFIRMED" or len(pivots) < 5:
         return {"status": "UNCONFIRMED", "timeframe": "5m", "levels": {}}
@@ -592,7 +594,7 @@ def detect_early_wave3_breakout(
         "wave_5m": wave5, "wave_15m": wave15,
         "rsi_divergence_guard": divergence_guard,
         "volume_confirmation": volume_confirmation,
-        "wave4_fibonacci": calculate_wave4_fibonacci(five),
+        "wave4_fibonacci": calculate_wave4_fibonacci(five, wave=wave5),
         "signal_candle_open_utc": five.index[-1].isoformat(),
         "context_15m_candle_open_utc": fifteen.index[-1].isoformat(),
         "asof_utc": asof.isoformat(),
@@ -669,7 +671,7 @@ def build_wave5_entry_signal(
         return {"signal": "NO_TRADE", "reason": "W5 entry needs 60 closed 5m and 30 closed 15m candles"}
     wave5 = monitor_elliott_waves(five, min_reversal_pct=0.002, max_reversal_pct=0.03)
     wave15 = monitor_elliott_waves(fifteen, min_reversal_pct=0.002, max_reversal_pct=0.03)
-    fib = calculate_wave4_fibonacci(five)
+    fib = calculate_wave4_fibonacci(five, wave=wave5)
     if fib.get("status") != "CONFIRMED":
         return {"signal": "NO_TRADE", "reason": "W4 structure and Fibonacci retracement are not confirmed", "wave4_fibonacci": fib}
     side = "LONG" if fib.get("pattern") == "BULLISH" else "SHORT"
