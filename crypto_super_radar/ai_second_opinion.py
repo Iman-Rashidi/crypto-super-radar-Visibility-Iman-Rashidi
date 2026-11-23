@@ -246,9 +246,45 @@ def _challenge1_v2_native_review(result: Any) -> dict[str, Any]:
     from .challenge1_v2 import challenge1_v2_execution_evidence_ready
 
     record = _challenge1_result_record(result)
-    ready, reason = challenge1_v2_execution_evidence_ready(record)
     regime = record.get("regime")
     aligned = isinstance(regime, Mapping) and regime.get("aligned_4h") is True
+    if record.get("wave5_entry_active") is True:
+        evidence = record.get("challenge1_v2_evidence") if isinstance(record.get("challenge1_v2_evidence"), Mapping) else {}
+        wave = evidence.get("elliott_wave") if isinstance(evidence.get("elliott_wave"), Mapping) else {}
+        asof = _safe_timestamp(evidence.get("data_asof_utc"))
+        try:
+            funding_time = int(evidence.get("funding_event_time_ms"))
+            funding_max_age = int(evidence.get("funding_max_age_ms"))
+            entry = float(record.get("entry"))
+            stop = float(record.get("stop_loss"))
+            target = float(record.get("take_profit"))
+            rr = float(record.get("gross_rr"))
+            spread = float(record.get("spread_fraction"))
+            funding = float(evidence.get("funding_rate"))
+            age = int(asof.timestamp() * 1000) - funding_time if asof is not None else -1
+            side = str(record.get("signal") or "").upper()
+            geometry = (stop < entry < target) if side == "LONG" else (target < entry < stop)
+            risk_pct = abs(entry - stop) / entry
+            ready = bool(
+                evidence.get("decision_engine_version") == "CHALLENGE_1_V2_W4_PULLBACK_W5_ENTRY"
+                and evidence.get("completed_candles_only") is True
+                and evidence.get("funding_kind") == "0"
+                and wave.get("phase") == "WAVE_4_CONFIRMED"
+                and wave.get("pattern") == ("BULLISH" if side == "LONG" else "BEARISH")
+                and evidence.get("setup_timeframe") == "5m"
+                and evidence.get("entry_execution_timeframe") == "15m"
+                and asof is not None and funding_time > 0 and funding_max_age > 0
+                and 0 <= age <= funding_max_age
+                and math.isfinite(entry) and math.isfinite(stop) and math.isfinite(target)
+                and math.isfinite(rr) and math.isfinite(spread) and math.isfinite(funding)
+                and geometry and rr >= 1.8 and 0 < risk_pct <= 0.035
+                and 0 <= spread <= 0.0004
+            )
+            reason = "Confirmed W4-to-W5 evidence and risk geometry are valid" if ready else "W5 evidence, funding, spread or protective geometry failed"
+        except (TypeError, ValueError, OverflowError):
+            ready, reason = False, "W5 evidence contains invalid numeric fields"
+    else:
+        ready, reason = challenge1_v2_execution_evidence_ready(record)
     if not aligned:
         ready, reason = False, "V2 1H/4H directional alignment is not confirmed"
     side = str(record.get("signal") or "").strip().upper()
