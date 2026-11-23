@@ -300,12 +300,18 @@ def analyze_challenge1_v2_market(
     # Run the dashboard's existing non-repainting 5m candle/Elliott engine
     # against the same exchange-derived as-of boundary. 15m trend alignment
     # is checked by the V2 fast-path builder before any AI reviewer is called.
-    if frame_5m.empty:
+    fast_ohlcv_ready = (
+        not frame_5m.empty
+        and {"open", "high", "low", "close", "volume"}.issubset(frame_5m.columns)
+    )
+    if not fast_ohlcv_ready:
+        if fast_feed_error is None:
+            fast_feed_error = "Optional 5m fast-feed OHLCV evidence is unavailable or incomplete"
         fast_trigger_record = {
-            "signal": "NO_TRADE", "reason_fa": fast_feed_error or "دادهٔ بسته‌شدهٔ ۵ دقیقه‌ای در دسترس نیست.",
+            "signal": "NO_TRADE", "reason_fa": fast_feed_error,
             "signal_id": None,
         }
-        early_w3_path = {"signal": "NO_TRADE", "reason": fast_feed_error or "No completed 5m candles"}
+        early_w3_path = {"signal": "NO_TRADE", "reason": fast_feed_error}
     else:
         try:
             fast_trigger_record = analyze_blofin_challenge1(
