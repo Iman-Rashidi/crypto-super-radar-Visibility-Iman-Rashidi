@@ -3061,7 +3061,7 @@ def _run_paper_tick(job_id: str, asset: AssetSpec) -> None:
 
 def _normalize_live_radar_symbol(symbol: str) -> str:
     """Normalize a user-entered spot asset to a strictly validated USDT symbol."""
-    raw = re.sub(r"[\\s/_-]+", "", str(symbol or "").strip().upper())
+    raw = re.sub(r"[\s/_-]+", "", str(symbol or "").strip().upper())
     if raw.endswith("USDT"):
         normalized = raw
     else:
@@ -9643,7 +9643,7 @@ async function loadBlofinInstruments(){
               }finally{busy=false;button.disabled=false;}
             }
             function normalizeCustomSymbol(value){
-              let raw=String(value||'').trim().toUpperCase().replace(/[\\s/_-]+/g,'');
+              let raw=String(value||'').trim().toUpperCase().replace(/[\s/_-]+/g,'');
               if(!raw.endsWith('USDT'))raw+='USDT';
               if(!/^[A-Z0-9]{2,16}USDT$/.test(raw))throw new Error('نماد نامعتبر است؛ مانند PEPE یا PEPEUSDT وارد کنید.');
               return raw;
