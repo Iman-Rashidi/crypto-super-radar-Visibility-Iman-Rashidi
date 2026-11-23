@@ -76,6 +76,9 @@ KRAKEN_INTERVAL = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440,
 LIVE_MARKET_RADAR_CACHE_TTL_SECONDS = 45
 _LIVE_MARKET_RADAR_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _LIVE_MARKET_RADAR_CACHE_LOCK = threading.RLock()
+# Compatibility aliases retained for existing offline API tests and diagnostics.
+LIVE_MARKET_RADAR_CACHE = _LIVE_MARKET_RADAR_CACHE
+LIVE_MARKET_RADAR_CACHE_LOCK = _LIVE_MARKET_RADAR_CACHE_LOCK
 _LIVE_MARKET_RADAR_KEY_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _LIVE_MARKET_RADAR_KEY_LOCKS_GUARD = threading.Lock()
 
