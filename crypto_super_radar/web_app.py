@@ -3097,8 +3097,11 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
     order_book = None
     flow_errors = []
 
+    higher_timeframes = {}
+    higher_timeframe_errors = {}
+    news_items = []
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=4, thread_name_prefix="live-radar-feed"
+        max_workers=7, thread_name_prefix="live-radar-feed"
     ) as executor:
         binance_future = executor.submit(
             binance_provider.candles,
@@ -3123,6 +3126,18 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             f"{binance_provider.BASE}/api/v3/depth",
             {"symbol": normalized_symbol, "limit": 20},
         )
+        htf_futures = {
+            timeframe: executor.submit(
+                binance_provider.candles, normalized_symbol, interval=timeframe, limit=180
+            )
+            for timeframe in ("1h", "4h")
+        }
+        base_asset = normalized_symbol[:-4]
+        news_future = executor.submit(
+            binance_provider.http.get,
+            "https://min-api.cryptocompare.com/data/v2/news/",
+            {"categories": base_asset, "lang": "EN"},
+        )
 
         # Binance candles are mandatory for the chart. Other feeds fail independently.
         binance_frame = binance_future.result()
@@ -3146,6 +3161,44 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         except Exception as exc:
             flow_errors.append(f"depth: {type(exc).__name__}: {str(exc)[:100]}")
 
+        for timeframe, future in htf_futures.items():
+            try:
+                frame = future.result()
+                higher_timeframes[timeframe] = [
+                    {"open": float(row.open), "high": float(row.high), "low": float(row.low),
+                     "close": float(row.close), "volume": float(row.volume)}
+                    for row in frame.tail(180).itertuples()
+                ]
+            except Exception as exc:
+                higher_timeframe_errors[timeframe] = f"{type(exc).__name__}: {str(exc)[:100]}"
+
+        try:
+            raw_news = news_future.result()
+            records = raw_news.get("Data", []) if isinstance(raw_news, dict) else []
+            for item in records if isinstance(records, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                categories = {
+                    part.strip().upper()
+                    for part in str(item.get("categories") or "").replace("|", ",").split(",")
+                    if part.strip()
+                }
+                title = str(item.get("title") or "").strip()
+                if base_asset.upper() not in categories and base_asset.upper() not in title.upper():
+                    continue
+                source_info = item.get("source_info") if isinstance(item.get("source_info"), dict) else {}
+                news_items.append({
+                    "title": title[:220],
+                    "source": str(source_info.get("name") or item.get("source") or "CryptoCompare"),
+                    "published_at": item.get("published_on"),
+                    "url": item.get("url"),
+                })
+                if len(news_items) >= 8:
+                    break
+        except Exception:
+            # Missing or unavailable news is explicitly reported as unknown downstream.
+            news_items = []
+
     payload = build_live_market_radar_payload(
         normalized_symbol,
         normalized_interval,
@@ -3155,7 +3208,11 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         aggregate_trades=aggregate_trades,
         order_book=order_book,
         market_flow_error="; ".join(flow_errors) if flow_errors else None,
+        higher_timeframes=higher_timeframes,
+        news=news_items,
     )
+    payload["future_forecast"]["higher_timeframe_errors"] = higher_timeframe_errors
+    payload["future_forecast"]["news_status"] = "PASS" if news_items else "UNAVAILABLE"
     # Publish W3 retracement levels only when the dashboard's non-repainting
     # Elliott monitor confirms a complete W4 pivot sequence.
     wave = payload.get("elliott_waves") if isinstance(payload.get("elliott_waves"), dict) else {}
@@ -9310,6 +9367,7 @@ async function loadBlofinInstruments(){
               </div>
               <div class="future-forecast-wrap"><canvas id="future-forecast-chart" width="1440" height="360" role="img" aria-label="سناریوهای احتمالی مسیر آینده قیمت و موج الیوت"></canvas></div>
               <p id="future-forecast-explanation" class="future-forecast-note" aria-live="polite">در انتظار دادهٔ معتبر بازار برای ساخت سناریوهای احتمالی.</p>
+              <p id="future-forecast-evidence" class="future-forecast-note" aria-live="polite">وضعیت نهنگ‌ها و اخبار مرتبط پس از دریافت داده نمایش داده می‌شود.</p>
             </section>
             <div id="live-volume-status" class="live-volume-caption" role="status" aria-live="polite">حجم بازار پس از دریافت کندل‌ها نمایش داده می‌شود.</div>
             <section class="card manual-wave-trade" id="manual-wave-trade">
@@ -9401,6 +9459,7 @@ async function loadBlofinInstruments(){
             const forecastCanvas=document.getElementById('future-forecast-chart');
             const forecastCtx=forecastCanvas?forecastCanvas.getContext('2d'):null;
             const forecastExplanation=document.getElementById('future-forecast-explanation');
+            const forecastEvidence=document.getElementById('future-forecast-evidence');
             let forecastHorizon='15m',latestChartData=null;
             const fields={
               action:document.getElementById('live-radar-action'),
@@ -9871,6 +9930,7 @@ async function loadBlofinInstruments(){
               const ranges=bars.map(item=>Math.max(0,Number(item.high)-Number(item.low))).filter(Number.isFinite);
               const atr=ranges.length?ranges.reduce((sum,value)=>sum+value,0)/ranges.length:Math.abs(last)*.002;
               const avgMove=closes.length>1?(closes[closes.length-1]-closes[0])/(closes.length-1):0;
+              const forecast=data.future_forecast||{};
               const bias=String(direction.bias||direction.trend||'').toUpperCase();
               const waveBias=String(wave.pattern||wave.direction||wave.bias||'').toUpperCase();
               const divergenceType=String(divergence.type||divergence.direction||'').toUpperCase();
@@ -9898,27 +9958,30 @@ async function loadBlofinInstruments(){
               if(Math.abs(maSlope)>.00005)scoreParts.push({name:'شیب میانگین متحرک',score:maSlope>0?1.4:-1.4});
               if(Math.abs(avgMove)>Math.abs(last)*.00001)scoreParts.push({name:'شتاب قیمت',score:avgMove>0?.6:-.6});
               const totalScore=scoreParts.reduce((sum,item)=>sum+item.score,0);
-              const bullish=totalScore>0;
-              const color=bullish?'#32d99a':'#ff647b';
+              const scenario=String(forecast.scenario||'NEUTRAL').toUpperCase();
+              const bullish=scenario==='BULLISH'||(scenario==='NEUTRAL'&&totalScore>0);
+              const bearish=scenario==='BEARISH'||(scenario==='NEUTRAL'&&totalScore<0);
+              const color=bullish?'#32d99a':bearish?'#ff647b':'#ffc66d';
+              const confidencePct=Number.isFinite(Number(forecast.confidence_pct))?Number(forecast.confidence_pct):null;
               const scenarioLabel=bullish?'سناریوی محتمل: صعودی':'سناریوی محتمل: اصلاحی / نزولی';
               const horizonSteps={'15m':3,'1h':6,'4h':10,'1d':14}[horizon]||3;
               const horizonLabel={'15m':'۱۵ دقیقه آینده','1h':'۱ ساعت آینده','4h':'۴ ساعت آینده','1d':'۱ روز آینده'}[horizon]||'افق کوتاه';
-              const stepMove=Math.max(atr*.18,Math.abs(last)*.00015);
-              const confidence=Math.max(.2,Math.min(.8,Math.abs(totalScore)/8));
-              const signedDrift=(bullish?1:-1)*Math.max(stepMove*.22,Math.abs(avgMove)*.45)*(.65+confidence);
+              const stepMove=Math.max(Number(forecast.atr)||atr,atr*.18);
+              const band=Array.isArray(forecast.confidence_band)?forecast.confidence_band:[];
               const future=[];let previous=last;
-              for(let i=1;i<=horizonSteps;i++){
-                const waveNoise=Math.sin(i*.92)*stepMove*.10;
-                const close=previous+signedDrift+waveNoise;
-                const open=previous;
-                const wick=stepMove*(.22+(i%3)*.035);
-                future.push({open,close,high:Math.max(open,close)+wick,low:Math.min(open,close)-wick});
+              for(let i=0;i<Math.min(horizonSteps,band.length||horizonSteps);i++){
+                const point=band[i]||{};
+                const close=Number.isFinite(Number(point.center))?Number(point.center):previous+(bullish?1:bearish?-1:0)*stepMove*.12;
+                const high=Number.isFinite(Number(point.upper))?Number(point.upper):Math.max(previous,close)+stepMove*.65;
+                const low=Number.isFinite(Number(point.lower))?Number(point.lower):Math.min(previous,close)-stepMove*.65;
+                future.push({open:previous,close,high,low,upper:high,lower:low});
                 previous=close;
               }
+              if(!future.length)future.push({open:last,close:last,high:last+stepMove,low:last-stepMove,upper:last+stepMove,lower:last-stepMove});
               const target=future[future.length-1].close;
               const turnIndex=Math.max(0,Math.min(future.length-1,Math.floor(future.length*.55)-1));
               const turnPrice=future[turnIndex].close;
-              const allValues=[...bars.flatMap(item=>[Number(item.high),Number(item.low)]),...future.flatMap(item=>[item.high,item.low])].filter(Number.isFinite);
+              const allValues=[...bars.flatMap(item=>[Number(item.high),Number(item.low)]),...future.flatMap(item=>[item.high,item.low]),Number(forecast.invalidation_price),Number(forecast.bullish_start),Number(forecast.stagnation_start&&forecast.stagnation_start.lower),Number(forecast.stagnation_start&&forecast.stagnation_start.upper)].filter(Number.isFinite);
               const lo=Math.min(...allValues),hi=Math.max(...allValues),pad=(hi-lo)*.16||Math.abs(last)*.002;
               const min=lo-pad,max=hi+pad,top=34,bottom=h-42,y=value=>bottom-(value-min)/(max-min)*(bottom-top);
               const left=62,right=126,plotW=w-left-right,split=left+plotW*.61;
@@ -9937,7 +10000,14 @@ async function loadBlofinInstruments(){
                 ctx.fillRect(xx-body/2,y1,body,Math.max(2,y2-y1));
               });
               const futureX=i=>split+12+(i/(horizonSteps+1))*(w-right-split-24);
-              ctx.save();ctx.strokeStyle=color;ctx.lineWidth=3;ctx.setLineDash([7,5]);ctx.beginPath();
+              ctx.save();
+              if(band.length){
+                ctx.beginPath();
+                future.forEach((bar,i)=>i?ctx.lineTo(futureX(i+1),y(bar.upper)):ctx.moveTo(futureX(i+1),y(bar.upper)));
+                for(let i=future.length-1;i>=0;i--)ctx.lineTo(futureX(i+1),y(future[i].lower));
+                ctx.closePath();ctx.fillStyle='rgba(119,165,255,.16)';ctx.fill();
+              }
+              ctx.strokeStyle=color;ctx.lineWidth=3;ctx.setLineDash([7,5]);ctx.beginPath();
               future.forEach((bar,i)=>i?ctx.lineTo(futureX(i+1),y(bar.close)):ctx.moveTo(futureX(0),y(last)));
               ctx.stroke();ctx.setLineDash([]);
               future.forEach((bar,i)=>{
@@ -9956,6 +10026,18 @@ async function loadBlofinInstruments(){
               ctx.font='bold 13px sans-serif';ctx.fillText('هدف '+fmt(target),Math.max(split+4,targetX-105),Math.max(top+14,targetY-10));
               ctx.fillStyle='#ffd27a';ctx.beginPath();ctx.arc(turnX,turnY,4,0,Math.PI*2);ctx.fill();
               ctx.fillStyle='#ffd27a';ctx.fillText('چرخش '+fmt(turnPrice),Math.max(split+4,turnX-110),Math.min(bottom-4,turnY+18));
+              if(Number.isFinite(Number(forecast.invalidation_price))){
+                const iy=y(Number(forecast.invalidation_price));ctx.strokeStyle='#ff5364';ctx.lineWidth=2;ctx.setLineDash([8,4]);ctx.beginPath();ctx.moveTo(split,iy);ctx.lineTo(w-right+2,iy);ctx.stroke();ctx.setLineDash([]);
+                ctx.fillStyle='#ff7b85';ctx.font='bold 12px sans-serif';ctx.fillText('⛔ خط ابطال پیش‌بینی: '+fmt(forecast.invalidation_price),split+8,Math.max(top+14,Math.min(bottom-6,iy-7)),w-right-split-16);
+              }
+              if(Number.isFinite(Number(forecast.bullish_start))){
+                const by=y(Number(forecast.bullish_start));ctx.strokeStyle='#32d99a';ctx.setLineDash([3,4]);ctx.beginPath();ctx.moveTo(split,by);ctx.lineTo(w-right+2,by);ctx.stroke();ctx.setLineDash([]);
+                ctx.fillStyle='#58e3aa';ctx.fillText('🟢 نقطه شروع صعود '+fmt(forecast.bullish_start),split+8,Math.max(top+14,Math.min(bottom-6,by-7)),w-right-split-16);
+              }
+              if(forecast.stagnation_start&&Number.isFinite(Number(forecast.stagnation_start.lower))&&Number.isFinite(Number(forecast.stagnation_start.upper))){
+                const sy1=y(Number(forecast.stagnation_start.upper)),sy2=y(Number(forecast.stagnation_start.lower));ctx.fillStyle='rgba(255,210,122,.15)';ctx.fillRect(split,Math.min(sy1,sy2),w-right-split,Math.abs(sy2-sy1));
+                ctx.fillStyle='#ffd27a';ctx.fillText('🟡 شروع رکود / چرخش',split+8,Math.max(top+14,Math.min(bottom-6,Math.min(sy1,sy2)-5)),w-right-split-16);
+              }
               ctx.restore();
               ctx.fillStyle='#d7e8f5';ctx.font='bold 14px sans-serif';ctx.fillText('۲۰ کندل واقعی اخیر',left,20);
               ctx.fillStyle='#b9a1ff';ctx.fillText('مسیر واحد · '+horizonLabel,split+10,20);
@@ -9964,9 +10046,10 @@ async function loadBlofinInstruments(){
               const boxX=split+8,boxY=top+8,boxW=Math.max(170,w-right-boxX-8),boxH=72;
               ctx.save();ctx.fillStyle='rgba(5,17,28,.91)';ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.fillRect(boxX,boxY,boxW,boxH);ctx.strokeRect(boxX,boxY,boxW,boxH);
               ctx.fillStyle=color;ctx.font='bold 13px sans-serif';ctx.fillText(scenarioLabel,boxX+9,boxY+18,boxW-18);
-              ctx.fillStyle='#e5eff7';ctx.font='11px sans-serif';ctx.fillText('هدف تخمینی: '+fmt(target),boxX+9,boxY+38,boxW-18);
-              ctx.fillStyle='#bdcedb';ctx.fillText('برآورد پژوهشی · نه سیگنال سفارش',boxX+9,boxY+57,boxW-18);ctx.restore();
-              if(forecastExplanation)forecastExplanation.textContent=horizonLabel+' · '+scenarioLabel+' · '+reason+' · هدف تخمینی '+fmt(target)+' · برآورد پژوهشی، نه پیش‌بینی قطعی و نه سیگنال سفارش.';
+              ctx.fillStyle='#e5eff7';ctx.font='11px sans-serif';ctx.fillText('قدرت سناریو: '+(confidencePct===null?'نامشخص':confidencePct.toLocaleString('fa-IR')+'٪'),boxX+9,boxY+38,boxW-18);
+              ctx.fillStyle='#bdcedb';ctx.fillText('هدف تقریبی: '+fmt(target)+' · پژوهشی / NO_TRADE',boxX+9,boxY+57,boxW-18);ctx.restore();
+              if(forecastExplanation)forecastExplanation.textContent=horizonLabel+' · '+scenarioLabel+' · قدرت سناریو: '+(confidencePct===null?'نامشخص':confidencePct+'%')+' · هدف تقریبی '+fmt(target)+' · برآورد پژوهشی، نه سیگنال سفارش.';
+              if(forecastEvidence)forecastEvidence.textContent='وضعیت نهنگ‌ها: '+(forecast.whale_summary_fa||'داده تأییدشده موجود نیست')+' | خبر مرتبط '+(data.symbol||'')+': '+(forecast.news_summary_fa||'داده تأییدشده موجود نیست')+' | سطوح 1H/4H فقط در صورت دریافت داده معتبر محاسبه می‌شوند.';
             }
             document.querySelectorAll('[data-forecast-horizon]').forEach(button=>{
               button.addEventListener('click',()=>{
