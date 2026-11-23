@@ -41,7 +41,7 @@ from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
-from .live_market_radar import (BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload, fetch_okx_candles, fetch_kraken_candles)
+from .live_market_radar import (BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload, fetch_bybit_candles, fetch_okx_candles, fetch_kraken_candles)
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_TRADE_CREDENTIAL_ENV, DEMO_REST_URL, _resolve_env_credential
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
@@ -3096,14 +3096,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             {"symbol": normalized_symbol, "interval": normalized_interval, "limit": 240},
             timeout=1.35,
         )),
-        "Bybit Spot": lambda: _ohlcv_frame(
-            (((http.get_with_timeout(
-                f"{ENGINE.data.bybit.BASE}/v5/market/kline",
-                {"category": "spot", "symbol": normalized_symbol,
-                 "interval": BYBIT_INTERVAL.get(normalized_interval, ""), "limit": 240},
-                timeout=1.35,
-            ).get("result") or {}).get("list") or [])
-        ),
+        "Bybit Spot": lambda: fetch_bybit_candles(http, normalized_symbol, normalized_interval, 240),
         "OKX Spot": lambda: fetch_okx_candles(http, normalized_symbol, normalized_interval, 240),
         "Kraken Spot": lambda: fetch_kraken_candles(http, normalized_symbol, normalized_interval, 240),
     }

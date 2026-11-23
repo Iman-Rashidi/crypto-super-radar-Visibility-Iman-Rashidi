@@ -75,6 +75,27 @@ def _usdt_instrument(symbol: str) -> str:
     return normalized[:-4] + "-USDT"
 
 
+
+def fetch_bybit_candles(http: Any, symbol: str, interval: str, limit: int = 240) -> pd.DataFrame:
+    """Fetch Bybit Spot OHLCV with one bounded request and normalize its rows."""
+    if interval not in BYBIT_INTERVAL:
+        raise ValueError(f"Bybit does not support interval {interval!r}")
+    payload = http.get_with_timeout(
+        "https://api.bybit.com/v5/market/kline",
+        {"category": "spot", "symbol": str(symbol).upper(),
+         "interval": BYBIT_INTERVAL[interval], "limit": max(35, min(int(limit), 300))},
+        timeout=1.35,
+    )
+    if not isinstance(payload, dict) or str(payload.get("retCode")) != "0":
+        detail = payload.get("retMsg") if isinstance(payload, dict) else "invalid JSON"
+        raise ValueError(f"Bybit candle API error: {str(detail)[:160]}")
+    rows = ((payload.get("result") or {}).get("list") or [])
+    frame = _ohlcv_frame(rows)
+    if frame.empty:
+        raise ValueError("Bybit returned no valid OHLCV candles")
+    return frame.tail(max(35, min(int(limit), 300)))
+
+
 def fetch_okx_candles(http: Any, symbol: str, interval: str, limit: int = 240) -> pd.DataFrame:
     """Fetch and validate public OKX OHLCV candles with a strict bounded timeout."""
     normalized_interval = str(interval or "").strip()
