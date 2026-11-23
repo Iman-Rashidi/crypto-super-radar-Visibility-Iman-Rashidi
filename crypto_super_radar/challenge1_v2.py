@@ -363,6 +363,122 @@ EARLY_W3_ATR_MULTIPLE = 1.5
 EARLY_W3_STOP_BUFFER_ATR = 0.10
 
 
+
+RSI_DIVERGENCE_PIVOT_REVERSAL = 0.002
+BREAKOUT_VOLUME_MULTIPLE = 1.20
+
+
+def detect_confirmed_rsi_divergence(frame: pd.DataFrame, *, timeframe: str) -> dict[str, Any]:
+    """Detect regular RSI divergence only at confirmed Elliott pivots."""
+    wave = monitor_elliott_waves(frame, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
+    rsi_values = rsi(frame["close"], 14)
+    highs = [p for p in pivots if str(p.get("kind", "")).upper() == "HIGH"]
+    lows = [p for p in pivots if str(p.get("kind", "")).upper() == "LOW"]
+
+    def pair(items: list[dict[str, Any]], kind: str) -> dict[str, Any]:
+        if len(items) < 2:
+            return {"type": "NONE", "timeframe": timeframe, "reason": "دو پیوت تأییدشده برای مقایسه وجود ندارد."}
+        left, right = items[-2:]
+        try:
+            i1, i2 = int(left["index"]), int(right["index"])
+            p1, p2 = float(left["price"]), float(right["price"])
+            r1, r2 = float(rsi_values.iloc[i1]), float(rsi_values.iloc[i2])
+        except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+            return {"type": "UNKNOWN", "timeframe": timeframe, "reason": "داده پیوت یا RSI معتبر نیست."}
+        if not all(math.isfinite(x) for x in (p1, p2, r1, r2)):
+            return {"type": "UNKNOWN", "timeframe": timeframe, "reason": "مقدار RSI یا قیمت پیوت معتبر نیست."}
+        divergence = (
+            "BEARISH" if kind == "HIGH" and p2 > p1 and r2 < r1
+            else "BULLISH" if kind == "LOW" and p2 < p1 and r2 > r1
+            else "NONE"
+        )
+        return {
+            "type": divergence, "timeframe": timeframe,
+            "price_pivot_1": p1, "price_pivot_2": p2,
+            "rsi_pivot_1": r1, "rsi_pivot_2": r2,
+            "pivot_1_confirmed_at": left.get("confirmed_at"),
+            "pivot_2_confirmed_at": right.get("confirmed_at"),
+            "confirmed_only": True,
+        }
+
+    bearish = pair(highs, "HIGH")
+    bullish = pair(lows, "LOW")
+    if bearish.get("type") == "BEARISH":
+        return bearish
+    if bullish.get("type") == "BULLISH":
+        return bullish
+    if "UNKNOWN" in {bearish.get("type"), bullish.get("type")}:
+        return {"type": "UNKNOWN", "timeframe": timeframe, "details": [bearish, bullish]}
+    return {"type": "NONE", "timeframe": timeframe, "details": [bearish, bullish]}
+
+
+def rsi_divergence_entry_guard(frame_5m: pd.DataFrame, frame_15m: pd.DataFrame, side: str) -> dict[str, Any]:
+    """Fail closed: bearish divergence blocks LONG; bullish divergence blocks SHORT."""
+    checks = [
+        detect_confirmed_rsi_divergence(frame_5m, timeframe="5m"),
+        detect_confirmed_rsi_divergence(frame_15m, timeframe="15m"),
+    ]
+    direction = str(side or "").upper()
+    blocked = any(
+        (direction == "LONG" and item.get("type") == "BEARISH")
+        or (direction == "SHORT" and item.get("type") == "BULLISH")
+        for item in checks
+    )
+    unknown = any(item.get("type") == "UNKNOWN" for item in checks)
+    return {
+        "blocked": bool(blocked or unknown),
+        "reason": (
+            "RSI_DIVERGENCE_OPPOSES_ENTRY" if blocked else
+            "RSI_DIVERGENCE_EVIDENCE_UNKNOWN" if unknown else
+            "NO_OPPOSING_CONFIRMED_RSI_DIVERGENCE"
+        ),
+        "timeframes": checks,
+    }
+
+
+def breakout_volume_confirmation(frame: pd.DataFrame, *, multiple: float = BREAKOUT_VOLUME_MULTIPLE) -> dict[str, Any]:
+    """Require the latest closed candle volume to exceed prior 20-candle mean."""
+    if len(frame) < 21:
+        return {"confirmed": False, "reason": "Insufficient 20-candle volume baseline"}
+    baseline = float(frame["volume"].iloc[-21:-1].mean())
+    current = float(frame["volume"].iloc[-1])
+    ratio = current / baseline if baseline > 0 else math.inf
+    return {
+        "confirmed": bool(math.isfinite(ratio) and ratio >= float(multiple)),
+        "current_volume": current, "average_volume_20": baseline,
+        "volume_ratio": ratio if math.isfinite(ratio) else None,
+        "required_multiple": float(multiple),
+        "reason": "VOLUME_CONFIRMED" if math.isfinite(ratio) and ratio >= float(multiple) else "BREAKOUT_VOLUME_TOO_LOW",
+    }
+
+
+def calculate_wave4_fibonacci(frame_5m: pd.DataFrame) -> dict[str, Any]:
+    """Calculate W3 retracement levels only from a confirmed five-pivot W4 structure."""
+    wave = monitor_elliott_waves(frame_5m, min_reversal_pct=0.002, max_reversal_pct=0.03)
+    pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
+    if str(wave.get("phase", "")).upper() != "WAVE_4_CONFIRMED" or len(pivots) < 5:
+        return {"status": "UNCONFIRMED", "timeframe": "5m", "levels": {}}
+    points = pivots[-5:]
+    pattern = str(wave.get("pattern") or "").upper()
+    expected = ["LOW", "HIGH", "LOW", "HIGH", "LOW"] if pattern == "BULLISH" else ["HIGH", "LOW", "HIGH", "LOW", "HIGH"]
+    if pattern not in {"BULLISH", "BEARISH"} or [str(p.get("kind", "")).upper() for p in points] != expected:
+        return {"status": "UNCONFIRMED", "timeframe": "5m", "levels": {}}
+    w3_start, w3_end = float(points[2]["price"]), float(points[3]["price"])
+    length = abs(w3_end - w3_start)
+    if length <= 0:
+        return {"status": "INVALID", "timeframe": "5m", "levels": {}}
+    sign = -1.0 if pattern == "BULLISH" else 1.0
+    levels = {str(level): w3_end + sign * level * length for level in (0.382, 0.5, 0.618)}
+    return {
+        "status": "CONFIRMED", "timeframe": "5m", "pattern": pattern,
+        "w3_start": w3_start, "w3_end": w3_end,
+        "w4_pivot": float(points[4]["price"]), "levels": levels,
+        "pivot_confirmed_at": points[4].get("confirmed_at"),
+        "completed_pivots_only": True,
+    }
+
+
 def detect_early_wave3_breakout(
     frame_5m: pd.DataFrame, frame_15m: pd.DataFrame, *,
     asof: pd.Timestamp, entry_price: float,
