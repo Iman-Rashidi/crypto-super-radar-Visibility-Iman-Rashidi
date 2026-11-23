@@ -99,7 +99,7 @@ class GemHunterDeepAnalysisTests(unittest.TestCase):
         self.assertEqual(report["market"]["volume_24h_usd"], 900000)
         self.assertEqual(report["security"]["provider"], "RUGCHECK")
         self.assertEqual(report["security"]["lp_locked_pct"], 98.5)
-        self.assertEqual(report["holders"]["total"], 25000)
+        self.assertEqual(report["whales"]["holder_count"], 25000)
         self.assertIn("BONK_HIGH_MINT", fetch.call_args_list[1].args[0])
         self.assertTrue(fetch.call_args_list[0].args[0].endswith("/latest/dex/search?q=BONK"))
         self.assertTrue(fetch.call_args_list[1].args[0].endswith(
