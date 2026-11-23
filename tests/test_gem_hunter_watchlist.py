@@ -77,7 +77,8 @@ class WatchlistLedgerTests(unittest.TestCase):
         self.assertAlmostEqual(item["eur_100_peak_profit_eur"], 150.0)
 
     def test_early_alpha_requires_rising_phase_and_52_percent_buy_share(self):
-        self.assertTrue(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
+        self.assertTrue(is_watchlist_eligible(self.candidate(qualification_status="QUALIFIED_EARLY_WAVE", risk_score=55,
+            security_evidence={"status":"PASS"}, gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
             pump_phase_fa="🟢 فاز ۱: شروع پامپ (Early Ignition)", buy_volume_share_pct=52)))
         self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
             pump_phase_fa="🔴 فاز ۳: سقف فرسودگی / خطر دامپ", buy_volume_share_pct=90)))

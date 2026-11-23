@@ -97,12 +97,14 @@ class GemHunterMarketValidationTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("MARKET_LIQUIDITY_MISMATCH", result["reason_codes"])
 
-    def test_exact_pool_identity_mismatch_is_unknown_not_substituted(self):
+    def test_highest_liquidity_matching_token_pool_becomes_reference_pool(self):
+        selected_pool = "0x" + "3" * 40
         result = reconcile_candidate_market_data(
-            candidate(), DexOnlyHttp(pool="0x" + "3" * 40)
+            candidate(), DexOnlyHttp(pool=selected_pool)
         )
-        self.assertEqual(result["status"], "UNKNOWN")
-        self.assertEqual(result["source_count"], 0)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["pool_address"], selected_pool)
+        self.assertEqual(result["reference_pool_selection"], "HIGHEST_LIQUIDITY_USD")
 
     def test_evm_addresses_are_case_insensitive_but_solana_base58_is_not(self):
         self.assertTrue(validation._same_address("0xAbCd", "0xabcd", "base"))
