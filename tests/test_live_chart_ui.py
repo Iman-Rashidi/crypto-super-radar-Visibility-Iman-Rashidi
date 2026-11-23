@@ -1,6 +1,15 @@
 """Regression tests for the Persian live chart UI (no network or exchange access)."""
 from pathlib import Path
+from http.server import ThreadingHTTPServer
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+from urllib.request import urlopen
 import unittest
+
+from crypto_super_radar.web_app import Handler
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "crypto_super_radar" / "web_app.py"
@@ -10,6 +19,47 @@ class LiveChartUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = SOURCE.read_text(encoding="utf-8")
+
+    def test_rendered_homepage_inline_scripts_pass_node_syntax_check(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(
+            node,
+            "Node.js is required for the rendered dashboard JavaScript syntax guard",
+        )
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{server.server_address[1]}/", timeout=10) as response:
+                self.assertEqual(response.status, 200)
+                html = response.read().decode("utf-8")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        scripts = re.findall(r"<script\\b[^>]*>([\\s\\S]*?)</script\\s*>", html, flags=re.IGNORECASE)
+        self.assertTrue(scripts, "The rendered homepage did not contain any script blocks")
+        inline_scripts = [script for script in scripts if script.strip()]
+        self.assertTrue(inline_scripts, "The rendered homepage contained no inline JavaScript")
+
+        with tempfile.TemporaryDirectory(prefix="csr-js-syntax-") as temp_dir:
+            for index, script in enumerate(inline_scripts, start=1):
+                script_path = Path(temp_dir) / f"homepage-script-{index}.js"
+                script_path.write_text(script, encoding="utf-8")
+                checked = subprocess.run(
+                    [node, "--check", str(script_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                self.assertEqual(
+                    checked.returncode,
+                    0,
+                    f"SyntaxError in rendered homepage inline <script> #{index}:\\n"
+                    f"{checked.stderr or checked.stdout}",
+                )
 
     def test_main_chart_is_mobile_readable(self):
         self.assertIn("#live-candle-chart{display:block;width:100%;min-width:820px;height:480px}", self.source)
