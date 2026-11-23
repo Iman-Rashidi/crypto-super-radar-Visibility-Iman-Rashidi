@@ -350,7 +350,17 @@ def analyze_challenge1_v2_market(
     if early_w3_path.get("signal") in {"LONG", "SHORT"}:
         record = early_w3_path
     elif wave5_path.get("signal") in {"LONG", "SHORT"}:
-        record = wave5_path
+        base_regime = record.get("regime") if isinstance(record.get("regime"), Mapping) else {}
+        if (
+            str(base_regime.get("direction") or "").upper() == str(wave5_path.get("signal")).upper()
+            and base_regime.get("aligned_4h") is True
+        ):
+            wave5_path["regime"] = dict(base_regime)
+            wave5_path["regime"]["status"] = "TREND"
+            wave5_path["regime"]["direction"] = str(wave5_path["signal"]).upper()
+            record = wave5_path
+        else:
+            wave5_path = {"signal": "NO_TRADE", "reason": "W5 setup lacks aligned 1H/4H context"}
     fast_path = None
     if not record.get("early_w3_active") and fast_trigger_record.get("signal") in {"LONG", "SHORT"}:
         try:
