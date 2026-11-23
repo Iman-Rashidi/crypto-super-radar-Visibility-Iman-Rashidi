@@ -14,6 +14,7 @@ from crypto_super_radar.gem_hunter_v3 import (
     notify_qualified_gem, TursoGemHunterStore, classify_gem_tier,
     analyze_pump_dump_phase, analyze_narrative_psychology,
 )
+from crypto_super_radar.gem_hunter_pool_trades import analyze_pool_trade_evidence
 
 
 class FakeStore:
