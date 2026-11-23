@@ -3128,115 +3128,115 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             return cached_payload
 
         http = ENGINE.data.http
-    provider_jobs = {
-        "Binance Spot": lambda: _ohlcv_frame(http.get_with_timeout(
-            f"{ENGINE.data.binance.BASE}/api/v3/klines",
-            {"symbol": normalized_symbol, "interval": normalized_interval, "limit": 240},
-            timeout=1.35,
-        )),
-        "Bybit Spot": lambda: fetch_bybit_candles(http, normalized_symbol, normalized_interval, 240),
-        "OKX Spot": lambda: fetch_okx_candles(http, normalized_symbol, normalized_interval, 240),
-        "Kraken Spot": lambda: fetch_kraken_candles(http, normalized_symbol, normalized_interval, 240),
-        "Coinbase Exchange": lambda: fetch_coinbase_candles(http, normalized_symbol, normalized_interval, 240),
-    }
-    frames = {}
-    errors = {}
-    # Four independent public venues are queried in parallel. Each HTTP call is
-    # single-attempt and bounded, so a blocked exchange cannot stall the chart.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="live-radar-fallback") as executor:
-        futures = {name: executor.submit(job) for name, job in provider_jobs.items()}
-        for name, future in futures.items():
-            try:
-                frame = future.result(timeout=1.8)
-                if not isinstance(frame, pd.DataFrame) or frame.empty:
-                    raise ValueError("provider returned no valid OHLCV candles")
-                frames[name] = frame
-            except Exception as exc:
-                errors[name] = f"{type(exc).__name__}: {str(exc)[:180]}"
-
-    priority = ("Binance Spot", "OKX Spot", "Kraken Spot", "Bybit Spot", "Coinbase Exchange")
-    primary_provider = next((name for name in priority if name in frames), None)
-    if primary_provider is None:
-        detail = "; ".join(f"{name}: {message}" for name, message in errors.items())
-        stale = get_live_market_radar_cache(key, allow_expired=True)
-        if stale is not None:
-            stale_payload, stale_age = stale
-            stale_payload["cache_status"] = "STALE_CACHE"
-            stale_payload["cache_age_seconds"] = round(stale_age, 3)
-            stale_payload["cache_ttl_seconds"] = LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
-            stale_payload["status"] = "STALE"
-            stale_payload["freshness_status"] = "STALE"
-            stale_payload["signal"] = {
-                "signal": "UNKNOWN", "status": "BLOCKED",
-                "reason": "آخرین داده معتبر به‌دلیل خطای موقت منابع عمومی نمایش داده شده؛ برای تصمیم تازه معتبر نیست.",
-            }
-            quality = stale_payload.get("market_analysis", {}).get("data_quality", {})
-            quality["freshness_status"] = "STALE"
-            quality["signal_eligible"] = False
-            quality["reason"] = "STALE_CACHE: upstream feeds failed; cached values are display-only."
-            stale_payload["feed_diagnostics"] = {
-                "primary_provider": None, "secondary_provider": None,
-                "provider_errors": errors, "stale_cache_fallback": True,
-            }
-            return stale_payload
-        raise RuntimeError("All public OHLCV feeds failed: " + detail[:700])
-    secondary_priority = ("Bybit Spot", "OKX Spot", "Kraken Spot", "Binance Spot", "Coinbase Exchange")
-    secondary_provider = next(
-        (name for name in secondary_priority if name in frames and name != primary_provider),
-        None,
-    )
-    primary_frame = frames[primary_provider]
-    secondary_frame = frames[secondary_provider] if secondary_provider else None
-    secondary_error = (
-        errors.get(secondary_priority[0])
-        or "No second independent public venue returned usable candles."
-    ) if secondary_frame is None else None
-    flow_error = "; ".join(
-        f"{name}: {message}" for name, message in errors.items()
-        if name not in {primary_provider, secondary_provider}
-    ) or None
-
-    payload = build_live_market_radar_payload(
-        normalized_symbol,
-        normalized_interval,
-        primary_frame,
-        secondary_frame,
-        bybit_error=secondary_error,
-        market_flow_error=flow_error,
-        primary_provider=primary_provider,
-        secondary_provider=secondary_provider or "Independent venue unavailable",
-    )
-    payload["feed_diagnostics"] = {
-        "primary_provider": primary_provider,
-        "secondary_provider": secondary_provider,
-        "fallback_used": primary_provider != "Binance Spot" or secondary_provider not in {None, "Bybit Spot"},
-        "provider_errors": errors,
-        "request_timeout_seconds": 1.35,
-    }
-    wave = payload.get("elliott_waves") if isinstance(payload.get("elliott_waves"), dict) else {}
-    pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
-    fib = {"status": "UNCONFIRMED", "timeframe": normalized_interval, "levels": {}}
-    if normalized_interval == "5m" and str(wave.get("phase") or "").upper() == "WAVE_4_CONFIRMED" and len(pivots) >= 5:
-        points = pivots[-5:]
-        pattern = str(wave.get("pattern") or "").upper()
-        expected = ["LOW", "HIGH", "LOW", "HIGH", "LOW"] if pattern == "BULLISH" else ["HIGH", "LOW", "HIGH", "LOW", "HIGH"]
-        if pattern in {"BULLISH", "BEARISH"} and [str(item.get("kind") or "").upper() for item in points] == expected:
-            start_price, end_price = float(points[2]["price"]), float(points[3]["price"])
-            sign = -1.0 if pattern == "BULLISH" else 1.0
-            length = abs(end_price - start_price)
-            if length > 0:
-                fib = {
-                    "status": "CONFIRMED", "timeframe": "5m", "pattern": pattern,
-                    "w3_start": start_price, "w3_end": end_price, "w4_pivot": float(points[4]["price"]),
-                    "levels": {str(level): end_price + sign * level * length for level in (0.382, 0.5, 0.618)},
-                    "pivot_confirmed_at": points[4].get("confirmed_at"),
+        provider_jobs = {
+            "Binance Spot": lambda: _ohlcv_frame(http.get_with_timeout(
+                f"{ENGINE.data.binance.BASE}/api/v3/klines",
+                {"symbol": normalized_symbol, "interval": normalized_interval, "limit": 240},
+                timeout=1.35,
+            )),
+            "Bybit Spot": lambda: fetch_bybit_candles(http, normalized_symbol, normalized_interval, 240),
+            "OKX Spot": lambda: fetch_okx_candles(http, normalized_symbol, normalized_interval, 240),
+            "Kraken Spot": lambda: fetch_kraken_candles(http, normalized_symbol, normalized_interval, 240),
+            "Coinbase Exchange": lambda: fetch_coinbase_candles(http, normalized_symbol, normalized_interval, 240),
+        }
+        frames = {}
+        errors = {}
+        # Four independent public venues are queried in parallel. Each HTTP call is
+        # single-attempt and bounded, so a blocked exchange cannot stall the chart.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="live-radar-fallback") as executor:
+            futures = {name: executor.submit(job) for name, job in provider_jobs.items()}
+            for name, future in futures.items():
+                try:
+                    frame = future.result(timeout=1.8)
+                    if not isinstance(frame, pd.DataFrame) or frame.empty:
+                        raise ValueError("provider returned no valid OHLCV candles")
+                    frames[name] = frame
+                except Exception as exc:
+                    errors[name] = f"{type(exc).__name__}: {str(exc)[:180]}"
+    
+        priority = ("Binance Spot", "OKX Spot", "Kraken Spot", "Bybit Spot", "Coinbase Exchange")
+        primary_provider = next((name for name in priority if name in frames), None)
+        if primary_provider is None:
+            detail = "; ".join(f"{name}: {message}" for name, message in errors.items())
+            stale = get_live_market_radar_cache(key, allow_expired=True)
+            if stale is not None:
+                stale_payload, stale_age = stale
+                stale_payload["cache_status"] = "STALE_CACHE"
+                stale_payload["cache_age_seconds"] = round(stale_age, 3)
+                stale_payload["cache_ttl_seconds"] = LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
+                stale_payload["status"] = "STALE"
+                stale_payload["freshness_status"] = "STALE"
+                stale_payload["signal"] = {
+                    "signal": "UNKNOWN", "status": "BLOCKED",
+                    "reason": "آخرین داده معتبر به‌دلیل خطای موقت منابع عمومی نمایش داده شده؛ برای تصمیم تازه معتبر نیست.",
                 }
-    payload["wave4_fibonacci"] = fib
-    payload["cache_status"] = "LIVE"
-    payload["cache_age_seconds"] = 0.0
-    payload["cache_ttl_seconds"] = LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
-    set_live_market_radar_cache(key, payload)
-    return payload
+                quality = stale_payload.get("market_analysis", {}).get("data_quality", {})
+                quality["freshness_status"] = "STALE"
+                quality["signal_eligible"] = False
+                quality["reason"] = "STALE_CACHE: upstream feeds failed; cached values are display-only."
+                stale_payload["feed_diagnostics"] = {
+                    "primary_provider": None, "secondary_provider": None,
+                    "provider_errors": errors, "stale_cache_fallback": True,
+                }
+                return stale_payload
+            raise RuntimeError("All public OHLCV feeds failed: " + detail[:700])
+        secondary_priority = ("Bybit Spot", "OKX Spot", "Kraken Spot", "Binance Spot", "Coinbase Exchange")
+        secondary_provider = next(
+            (name for name in secondary_priority if name in frames and name != primary_provider),
+            None,
+        )
+        primary_frame = frames[primary_provider]
+        secondary_frame = frames[secondary_provider] if secondary_provider else None
+        secondary_error = (
+            errors.get(secondary_priority[0])
+            or "No second independent public venue returned usable candles."
+        ) if secondary_frame is None else None
+        flow_error = "; ".join(
+            f"{name}: {message}" for name, message in errors.items()
+            if name not in {primary_provider, secondary_provider}
+        ) or None
+    
+        payload = build_live_market_radar_payload(
+            normalized_symbol,
+            normalized_interval,
+            primary_frame,
+            secondary_frame,
+            bybit_error=secondary_error,
+            market_flow_error=flow_error,
+            primary_provider=primary_provider,
+            secondary_provider=secondary_provider or "Independent venue unavailable",
+        )
+        payload["feed_diagnostics"] = {
+            "primary_provider": primary_provider,
+            "secondary_provider": secondary_provider,
+            "fallback_used": primary_provider != "Binance Spot" or secondary_provider not in {None, "Bybit Spot"},
+            "provider_errors": errors,
+            "request_timeout_seconds": 1.35,
+        }
+        wave = payload.get("elliott_waves") if isinstance(payload.get("elliott_waves"), dict) else {}
+        pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
+        fib = {"status": "UNCONFIRMED", "timeframe": normalized_interval, "levels": {}}
+        if normalized_interval == "5m" and str(wave.get("phase") or "").upper() == "WAVE_4_CONFIRMED" and len(pivots) >= 5:
+            points = pivots[-5:]
+            pattern = str(wave.get("pattern") or "").upper()
+            expected = ["LOW", "HIGH", "LOW", "HIGH", "LOW"] if pattern == "BULLISH" else ["HIGH", "LOW", "HIGH", "LOW", "HIGH"]
+            if pattern in {"BULLISH", "BEARISH"} and [str(item.get("kind") or "").upper() for item in points] == expected:
+                start_price, end_price = float(points[2]["price"]), float(points[3]["price"])
+                sign = -1.0 if pattern == "BULLISH" else 1.0
+                length = abs(end_price - start_price)
+                if length > 0:
+                    fib = {
+                        "status": "CONFIRMED", "timeframe": "5m", "pattern": pattern,
+                        "w3_start": start_price, "w3_end": end_price, "w4_pivot": float(points[4]["price"]),
+                        "levels": {str(level): end_price + sign * level * length for level in (0.382, 0.5, 0.618)},
+                        "pivot_confirmed_at": points[4].get("confirmed_at"),
+                    }
+        payload["wave4_fibonacci"] = fib
+        payload["cache_status"] = "LIVE"
+        payload["cache_age_seconds"] = 0.0
+        payload["cache_ttl_seconds"] = LIVE_MARKET_RADAR_CACHE_TTL_SECONDS
+        set_live_market_radar_cache(key, payload)
+        return payload
     finally:
         request_lock.release()
 
