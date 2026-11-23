@@ -71,6 +71,7 @@ from .ai_supervisor import (
     ai_supervisor_status, run_ai_supervisor, run_challenge1_v2_supervisor_reviews,
 )
 from .execution_diagnostics import build_execution_error_diagnostic
+from .challenge1_v2_render_scheduler import run_scheduler
 
 ENGINE = WhaleAwareConfirmationEngine()
 STORE = ENGINE.whale_store
@@ -11170,6 +11171,10 @@ def _blofin_demo_next_scan_after_cycle(
     return delay_seconds, target.isoformat()
 
 def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
+    if os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true":
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({"enabled": False, "status": "V2_EXCLUSIVE", "execution_profile": "CHALLENGE_1_V2"})
+        return
     """Run Challenge 1 on BloFin Demo; max_cycles enables safe scheduled one-shot runs."""
     interval_seconds = 300
     raw_symbols = os.getenv(
@@ -11608,6 +11613,10 @@ def _schedule_blofin_demo_startup_recovery() -> None:
 
 
 def _start_blofin_demo_autopilot() -> None:
+    if os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() == "true":
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({"enabled": False, "status": "V2_EXCLUSIVE", "execution_profile": "CHALLENGE_1_V2", "interval_seconds": 600})
+        return
     """Start the in-web worker only in WEB role; API and WORKER roles stay separate."""
     global BLOFIN_AUTOPILOT_THREAD
     role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
@@ -13626,6 +13635,33 @@ def _start_notion_sync_worker() -> None:
         NOTION_SYNC_THREAD.start()
 
 
+CHALLENGE1_V2_RENDER_SCHEDULER_THREAD = None
+CHALLENGE1_V2_RENDER_SCHEDULER_START_LOCK = threading.Lock()
+
+
+def _start_challenge1_v2_render_scheduler() -> None:
+    """Start the exclusive 10-minute V2 Demo scheduler in Render."""
+    global CHALLENGE1_V2_RENDER_SCHEDULER_THREAD
+    if os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
+        return
+    if os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() != "true":
+        return
+
+    def run_v2_cycle() -> None:
+        from .challenge1_v2_autopilot import main as run_v2_main
+        run_v2_main()
+
+    with CHALLENGE1_V2_RENDER_SCHEDULER_START_LOCK:
+        if CHALLENGE1_V2_RENDER_SCHEDULER_THREAD is not None and CHALLENGE1_V2_RENDER_SCHEDULER_THREAD.is_alive():
+            return
+        CHALLENGE1_V2_RENDER_SCHEDULER_THREAD = threading.Thread(
+            target=run_scheduler,
+            kwargs={"cycle_runner": run_v2_cycle, "cycle_lock": BLOFIN_AUTOPILOT_LOCK, "interval_seconds": 600},
+            daemon=True, name="challenge1-v2-render-autopilot",
+        )
+        CHALLENGE1_V2_RENDER_SCHEDULER_THREAD.start()
+
+
 def main():
     port = int(os.getenv("PORT", "10000"))
     host = os.getenv("HOST", "0.0.0.0")
@@ -13635,6 +13671,8 @@ def main():
         _start_notion_sync_worker()
         _start_blofin_demo_position_manager()
     _start_blofin_demo_autopilot()
+    if role == "WEB":
+        _start_challenge1_v2_render_scheduler()
     print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
     server.serve_forever()
 
