@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .providers import _ohlcv_frame
+
 from .elliott_waves import monitor_elliott_waves
 from .market_patterns import analyze_market_patterns
 from .market_flow import analyze_market_flow
@@ -55,6 +57,82 @@ ELLIOTT_MIN_REVERSAL_PCT = {
     "1w": 0.0250,
     "1M": 0.0300,
 }
+
+
+
+# Public fallback feeds for deployments whose egress IP is rate-limited by Binance.
+OKX_BAR = {
+    "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H",
+    "4h": "4H", "1d": "1Dutc", "1w": "1Wutc", "1M": "1Mutc",
+}
+KRAKEN_INTERVAL = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
+
+
+def _usdt_instrument(symbol: str) -> str:
+    normalized = str(symbol or "").strip().upper()
+    if not normalized.endswith("USDT") or len(normalized) <= 4 or not normalized.isascii() or not normalized.isalnum():
+        raise ValueError("Fallback feeds support explicit USDT spot symbols only")
+    return normalized[:-4] + "-USDT"
+
+
+def fetch_okx_candles(http: Any, symbol: str, interval: str, limit: int = 240) -> pd.DataFrame:
+    """Fetch and validate public OKX OHLCV candles with a strict bounded timeout."""
+    normalized_interval = str(interval or "").strip()
+    if normalized_interval not in OKX_BAR:
+        raise ValueError(f"OKX does not support interval {normalized_interval!r}")
+    payload = http.get_with_timeout(
+        "https://www.okx.com/api/v5/market/candles",
+        {"instId": _usdt_instrument(symbol), "bar": OKX_BAR[normalized_interval],
+         "limit": str(max(35, min(int(limit), 300)))},
+        timeout=1.35,
+    )
+    if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+        raise ValueError(f"OKX candle API error: {str((payload or {}).get('msg') if isinstance(payload, dict) else 'invalid JSON')[:160]}")
+    rows = payload.get("data")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("OKX returned no candle rows")
+    frame = _ohlcv_frame(rows)
+    if frame.empty:
+        raise ValueError("OKX returned no valid OHLCV candles")
+    return frame.tail(max(35, min(int(limit), 300)))
+
+
+def fetch_kraken_candles(http: Any, symbol: str, interval: str, limit: int = 240) -> pd.DataFrame:
+    """Fetch Kraken public OHLC and normalize its VWAP/volume response safely."""
+    normalized_interval = str(interval or "").strip()
+    if normalized_interval not in KRAKEN_INTERVAL:
+        raise ValueError(f"Kraken does not support interval {normalized_interval!r}")
+    base = str(symbol or "").strip().upper()
+    if not base.endswith("USDT") or len(base) <= 4 or not base.isascii() or not base.isalnum():
+        raise ValueError("Kraken fallback supports explicit USDT spot symbols only")
+    asset = base[:-4]
+    if asset == "BTC":
+        asset = "XBT"
+    pair = asset + "USDT"
+    payload = http.get_with_timeout(
+        "https://api.kraken.com/0/public/OHLC",
+        {"pair": pair, "interval": KRAKEN_INTERVAL[normalized_interval]},
+        timeout=1.35,
+    )
+    if not isinstance(payload, dict) or payload.get("error"):
+        detail = payload.get("error") if isinstance(payload, dict) else "invalid JSON"
+        raise ValueError(f"Kraken OHLC API error: {str(detail)[:160]}")
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("Kraken OHLC response omitted result")
+    series = [(key, value) for key, value in result.items() if key != "last" and isinstance(value, list)]
+    if len(series) != 1 or not series[0][1]:
+        raise ValueError(f"Kraken returned no unique OHLC series for {pair}")
+    rows = []
+    for row in series[0][1]:
+        if not isinstance(row, (list, tuple)) or len(row) < 7:
+            raise ValueError("Kraken returned a malformed OHLC row")
+        # Kraken's column 5 is VWAP; column 6 is the actual traded base volume.
+        rows.append([row[0], row[1], row[2], row[3], row[4], row[6]])
+    frame = _ohlcv_frame(rows)
+    if frame.empty:
+        raise ValueError("Kraken returned no valid OHLCV candles")
+    return frame.tail(max(35, min(int(limit), 300)))
 
 
 def _interval_end(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
@@ -284,6 +362,8 @@ def build_live_market_radar_payload(
     aggregate_trades: list[dict[str, Any]] | None = None,
     order_book: dict[str, Any] | None = None,
     market_flow_error: str | None = None,
+    primary_provider: str = "Binance Spot",
+    secondary_provider: str = "Bybit Spot",
 ) -> dict[str, Any]:
     """Build a chart payload and fail-closed signal from two public OHLCV sources."""
     normalized_symbol = str(symbol or "").strip().upper()
@@ -316,7 +396,7 @@ def build_live_market_radar_payload(
 
     provider_discrepancy = None
     cross_validation = "UNKNOWN"
-    cross_reason = bybit_error or "Bybit candle history is not available."
+    cross_reason = bybit_error or f"{secondary_provider} candle history is not available."
     common_count = 0
     bybit = None
     if isinstance(bybit_candles, pd.DataFrame):
@@ -336,7 +416,7 @@ def build_live_market_radar_payload(
                 provider_discrepancy = round(max(diffs), 5)
                 if provider_discrepancy <= MAX_CANDLE_DISCREPANCY_PCT:
                     cross_validation = "PASS"
-                    cross_reason = "Last five completed candle closes are aligned across Binance Spot and Bybit Spot."
+                    cross_reason = f"Last five completed candle closes are aligned across {primary_provider} and {secondary_provider}."
                 else:
                     cross_validation = "FAIL"
                     cross_reason = (
@@ -388,12 +468,12 @@ def build_live_market_radar_payload(
     if market_flow_error:
         market_flow["live_flow_error"] = str(market_flow_error)[:180]
     market_analysis["data_quality"] = {
-        "pattern_data_source": "Binance Spot",
+        "pattern_data_source": primary_provider,
         "freshness_status": freshness_status,
         "cross_validation_status": cross_validation,
         "signal_eligible": quality_status == "PASS" and freshness_status == "FRESH",
         "reason": (
-            "Patterns use completed Binance candles; trade alerts still require fresh, aligned Binance and Bybit candles."
+            f"Patterns use completed {primary_provider} candles; trade alerts still require fresh, aligned {primary_provider} and {secondary_provider} candles."
         ),
     }
     signal = _signal(
@@ -423,7 +503,7 @@ def build_live_market_radar_payload(
         "freshness_status": freshness_status,
         "cross_validation": {
             "status": cross_validation,
-            "providers": ["Binance Spot"] + (["Bybit Spot"] if bybit is not None else []),
+            "providers": [primary_provider] + ([secondary_provider] if bybit is not None else []),
             "common_completed_candles": common_count,
             "max_close_discrepancy_pct": provider_discrepancy,
             "reason": cross_reason,

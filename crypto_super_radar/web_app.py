@@ -41,7 +41,7 @@ from .gem_hunter_worker import latest_report_from_turso, cache_turso_credentials
 from .providers import _ohlcv_frame
 from .feed_health import build_feed_health_report
 from .global_market_data import GlobalMarketBoard
-from .live_market_radar import BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload
+from .live_market_radar import (BYBIT_INTERVAL, INTERVAL_MS, build_live_market_radar_payload, fetch_okx_candles, fetch_kraken_candles)
 from .blofin_demo_readonly import BloFinDemoAuthError, BloFinDemoError, BloFinDemoReadOnly, BloFinDemoResponseError, DEMO_READ_CREDENTIAL_ENV, DEMO_TRADE_CREDENTIAL_ENV, DEMO_REST_URL, _resolve_env_credential
 from .blofin_demo_executor import (
     BloFinDemoEventStore, BloFinDemoExecutionBlocked, BloFinDemoExecutionUnknown,
@@ -3071,8 +3071,9 @@ def _normalize_live_radar_symbol(symbol: str) -> str:
     return normalized
 
 
+
 def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: bool = False) -> dict:
-    """Fetch live spot candles from two independent venues and cache briefly."""
+    """Fetch chart candles concurrently from global public venues with bounded timeouts."""
     normalized_symbol = _normalize_live_radar_symbol(symbol)
     raw_interval = str(interval or "").strip()
     normalized_interval = raw_interval if raw_interval == "1M" else raw_interval.lower()
@@ -3087,77 +3088,78 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             and now - float(cached.get("_cached_at", 0.0)) < (2 if normalized_interval == "1s" else LIVE_MARKET_RADAR_CACHE_TTL_SECONDS)
         ):
             return copy.deepcopy({k: v for k, v in cached.items() if k != "_cached_at"})
-    # Fetch independent feeds concurrently. A slow secondary endpoint must not
-    # serialize candle, trade-flow, and order-book round trips on the chart path.
-    binance_provider = ENGINE.data.binance
-    bybit_provider = ENGINE.data.bybit
-    bybit_frame = None
-    bybit_error = None
-    aggregate_trades = None
-    order_book = None
-    flow_errors = []
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=4, thread_name_prefix="live-radar-feed"
-    ) as executor:
-        binance_future = executor.submit(
-            binance_provider.candles,
-            normalized_symbol, interval=normalized_interval, limit=300,
-        )
-        bybit_future = None
-        if normalized_interval in BYBIT_INTERVAL:
-            bybit_future = executor.submit(
-                bybit_provider.candles,
-                normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=300,
-            )
-        else:
-            bybit_error = "Bybit Spot does not provide 1-second candles; independent candle validation is unavailable on this interval."
-
-        trades_future = executor.submit(
-            binance_provider.http.get,
-            f"{binance_provider.BASE}/api/v3/aggTrades",
-            {"symbol": normalized_symbol, "limit": 500},
-        )
-        depth_future = executor.submit(
-            binance_provider.http.get,
-            f"{binance_provider.BASE}/api/v3/depth",
-            {"symbol": normalized_symbol, "limit": 20},
-        )
-
-        # Binance candles are mandatory for the chart. Other feeds fail independently.
-        binance_frame = binance_future.result()
-        if bybit_future is not None:
+    http = ENGINE.data.http
+    provider_jobs = {
+        "Binance Spot": lambda: _ohlcv_frame(http.get_with_timeout(
+            f"{ENGINE.data.binance.BASE}/api/v3/klines",
+            {"symbol": normalized_symbol, "interval": normalized_interval, "limit": 240},
+            timeout=1.35,
+        )),
+        "Bybit Spot": lambda: _ohlcv_frame(
+            (((http.get_with_timeout(
+                f"{ENGINE.data.bybit.BASE}/v5/market/kline",
+                {"category": "spot", "symbol": normalized_symbol,
+                 "interval": BYBIT_INTERVAL.get(normalized_interval, ""), "limit": 240},
+                timeout=1.35,
+            ).get("result") or {}).get("list") or [])
+        ),
+        "OKX Spot": lambda: fetch_okx_candles(http, normalized_symbol, normalized_interval, 240),
+        "Kraken Spot": lambda: fetch_kraken_candles(http, normalized_symbol, normalized_interval, 240),
+    }
+    frames = {}
+    errors = {}
+    # Four independent public venues are queried in parallel. Each HTTP call is
+    # single-attempt and bounded, so a blocked exchange cannot stall the chart.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="live-radar-fallback") as executor:
+        futures = {name: executor.submit(job) for name, job in provider_jobs.items()}
+        for name, future in futures.items():
             try:
-                bybit_frame = bybit_future.result()
+                frame = future.result(timeout=1.8)
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    raise ValueError("provider returned no valid OHLCV candles")
+                frames[name] = frame
             except Exception as exc:
-                bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+                errors[name] = f"{type(exc).__name__}: {str(exc)[:180]}"
 
-        try:
-            aggregate_trades = trades_future.result()
-            if not isinstance(aggregate_trades, list):
-                raise ValueError("Binance aggregate-trade response was not a list")
-        except Exception as exc:
-            flow_errors.append(f"aggTrades: {type(exc).__name__}: {str(exc)[:100]}")
-
-        try:
-            order_book = depth_future.result()
-            if not isinstance(order_book, dict) or not isinstance(order_book.get("bids"), list) or not isinstance(order_book.get("asks"), list):
-                raise ValueError("Binance depth response schema was incomplete")
-        except Exception as exc:
-            flow_errors.append(f"depth: {type(exc).__name__}: {str(exc)[:100]}")
+    priority = ("Binance Spot", "OKX Spot", "Kraken Spot", "Bybit Spot")
+    primary_provider = next((name for name in priority if name in frames), None)
+    if primary_provider is None:
+        detail = "; ".join(f"{name}: {message}" for name, message in errors.items())
+        raise RuntimeError("All public OHLCV feeds failed: " + detail[:700])
+    secondary_priority = ("Bybit Spot", "OKX Spot", "Kraken Spot", "Binance Spot")
+    secondary_provider = next(
+        (name for name in secondary_priority if name in frames and name != primary_provider),
+        None,
+    )
+    primary_frame = frames[primary_provider]
+    secondary_frame = frames[secondary_provider] if secondary_provider else None
+    secondary_error = (
+        errors.get(secondary_priority[0])
+        or "No second independent public venue returned usable candles."
+    ) if secondary_frame is None else None
+    flow_error = "; ".join(
+        f"{name}: {message}" for name, message in errors.items()
+        if name not in {primary_provider, secondary_provider}
+    ) or None
 
     payload = build_live_market_radar_payload(
         normalized_symbol,
         normalized_interval,
-        binance_frame,
-        bybit_frame,
-        bybit_error=bybit_error,
-        aggregate_trades=aggregate_trades,
-        order_book=order_book,
-        market_flow_error="; ".join(flow_errors) if flow_errors else None,
+        primary_frame,
+        secondary_frame,
+        bybit_error=secondary_error,
+        market_flow_error=flow_error,
+        primary_provider=primary_provider,
+        secondary_provider=secondary_provider or "Independent venue unavailable",
     )
-    # Publish W3 retracement levels only when the dashboard's non-repainting
-    # Elliott monitor confirms a complete W4 pivot sequence.
+    payload["feed_diagnostics"] = {
+        "primary_provider": primary_provider,
+        "secondary_provider": secondary_provider,
+        "fallback_used": primary_provider != "Binance Spot" or secondary_provider not in {None, "Bybit Spot"},
+        "provider_errors": errors,
+        "request_timeout_seconds": 1.35,
+    }
     wave = payload.get("elliott_waves") if isinstance(payload.get("elliott_waves"), dict) else {}
     pivots = wave.get("pivots") if isinstance(wave.get("pivots"), list) else []
     fib = {"status": "UNCONFIRMED", "timeframe": normalized_interval, "levels": {}}
@@ -3166,14 +3168,14 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         pattern = str(wave.get("pattern") or "").upper()
         expected = ["LOW", "HIGH", "LOW", "HIGH", "LOW"] if pattern == "BULLISH" else ["HIGH", "LOW", "HIGH", "LOW", "HIGH"]
         if pattern in {"BULLISH", "BEARISH"} and [str(item.get("kind") or "").upper() for item in points] == expected:
-            start, end = float(points[2]["price"]), float(points[3]["price"])
+            start_price, end_price = float(points[2]["price"]), float(points[3]["price"])
             sign = -1.0 if pattern == "BULLISH" else 1.0
-            length = abs(end - start)
+            length = abs(end_price - start_price)
             if length > 0:
                 fib = {
                     "status": "CONFIRMED", "timeframe": "5m", "pattern": pattern,
-                    "w3_start": start, "w3_end": end, "w4_pivot": float(points[4]["price"]),
-                    "levels": {str(level): end + sign * level * length for level in (0.382, 0.5, 0.618)},
+                    "w3_start": start_price, "w3_end": end_price, "w4_pivot": float(points[4]["price"]),
+                    "levels": {str(level): end_price + sign * level * length for level in (0.382, 0.5, 0.618)},
                     "pivot_confirmed_at": points[4].get("confirmed_at"),
                 }
     payload["wave4_fibonacci"] = fib
@@ -9768,8 +9770,9 @@ async function loadBlofinInstruments(){
               if(busy)return;busy=true;button.disabled=true;status.textContent='در حال دریافت و تطبیق کندل‌ها...';
               try{
                 const url='/api/live-market-radar?symbol='+encodeURIComponent(symbol.value)+'&interval='+encodeURIComponent(interval.value)+(force?'&refresh=1':'');
-                const response=await fetch(url,{cache:'no-store'});const data=await response.json();
-                if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+                const response=await fetch(url,{cache:'no-store'});const raw=await response.text();let data;try{data=JSON.parse(raw);}catch(parseError){throw new Error('HTTP '+response.status+' · پاسخ JSON نامعتبر: '+String(parseError.message||parseError)+' · '+raw.slice(0,180));}
+                if(!response.ok)throw new Error((data&&data.error)||('HTTP '+response.status));
+                if(!data||!Array.isArray(data.candles)||!data.candles.length)throw new Error((data&&data.error)||'پاسخ سرور فاقد آرایهٔ کندل معتبر است.');
                 latestChartData=data;draw(data);
                 const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
                 const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
@@ -9829,7 +9832,8 @@ async function loadBlofinInstruments(){
                   lastSignalKey=s.signal_key;status.textContent+=' · هشدار جدید '+(labels[s.signal]||s.signal);
                 }
               }catch(error){
-                status.textContent='دادهٔ تازه در دسترس نیست؛ سیگنال تازه صادر نمی‌شود: '+String(error.message||error);
+                const detail=String(error&&error.message||error||'خطای نامشخص');status.textContent='خطای دریافت چارت: '+detail+' · سیگنال تازه صادر نمی‌شود.';
+                fields.reason.textContent='خطای دقیق سرور/مرورگر: '+detail;
                 draw({candles:[]});
                 fields.action.textContent='نامشخص';
                 updateEasyTraderRobot({candlestick_patterns:[]},{signal:'UNKNOWN'},symbol.value,interval.value);
