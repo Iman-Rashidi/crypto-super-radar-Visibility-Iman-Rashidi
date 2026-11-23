@@ -303,9 +303,8 @@ def analyze_pump_dump_phase(candidate: Mapping[str, Any], *, now: Optional[datet
         denominator = 1 + change / 100
         if denominator > 0:
             start_price = round(price / denominator, 12)
-    invalidation = round(price * 0.82, 12) if price is not None and price > 0 else None
-    if invalidation is not None and start_price is not None and start_price < invalidation:
-        invalidation = round(start_price * 0.98, 12)
+    invalidation_base = min(price, start_price) if price is not None and price > 0 and start_price is not None else price
+    invalidation = round(invalidation_base * 0.82, 12) if invalidation_base is not None and invalidation_base > 0 else None
     identity = " ".join(str(candidate.get(k) or "") for k in ("token_name", "token_symbol", "dex_id", "dex")).lower()
     meme_terms = ("meme", "pepe", "doge", "shib", "inu", "frog", "cat", "moon", "pump")
     meme = any(term in identity for term in meme_terms)
