@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import copy
 import concurrent.futures
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_CEILING
 import json
 import math
 import os
@@ -9218,6 +9218,13 @@ async function loadBlofinInstruments(){
               #live-candle-chart{height:480px;min-width:720px}
               .live-candle-wrap{min-height:480px}
             }
+            .manual-wave-trade{margin:16px 0;border:1px solid var(--line);background:var(--surface-raised)}
+            .manual-wave-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+            .manual-wave-grid label{display:grid;gap:5px;font-weight:700}
+            .manual-wave-grid input,.manual-wave-grid select{width:100%;min-width:0}
+            .manual-wave-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}
+            .manual-wave-actions button:last-child{grid-column:1/-1;background:#7f293b}
+            @media(max-width:600px){.manual-wave-grid,.manual-wave-actions{grid-template-columns:1fr}.manual-wave-actions button:last-child{grid-column:auto}}
             .easy-trader-robot{margin:14px 0;border:1px solid var(--line);border-radius:18px;padding:12px;background:linear-gradient(135deg,#0b1d2c,#102b3b 60%,#142338);overflow:hidden}
             .easy-robot-stage{position:relative;min-height:240px;display:flex;align-items:flex-end;justify-content:center}
             .easy-robot-bubble{position:relative;z-index:2;width:min(560px,94%);margin:0 auto 96px;padding:12px;border:1px solid #3a7189;border-radius:15px;background:#081825;color:#e7f5ff;text-align:center}
@@ -9287,6 +9294,28 @@ async function loadBlofinInstruments(){
               <canvas id="live-candle-chart" width="1440" height="560" role="img" aria-label="نمودار بزرگ کندل، موج قیمت، نشانه‌های ساده خرید و فروش و حجم بازار"></canvas>
             </div>
             <div id="live-volume-status" class="live-volume-caption" role="status" aria-live="polite">حجم بازار پس از دریافت کندل‌ها نمایش داده می‌شود.</div>
+            <section class="card manual-wave-trade" id="manual-wave-trade">
+              <h4>⚡ معامله دستی هوشمند با یک کلیک در BloFin Demo</h4>
+              <p class="muted">این بخش فقط حساب آزمایشی BloFin Demo را هدف می‌گیرد. پیش از سفارش، وضعیت پوزیشن و سفارش‌های باز از صرافی دوباره بررسی می‌شوند.</p>
+              <div class="manual-wave-grid">
+                <label>توکن پنل (فقط در همین نشست)<input id="manual-wave-token" type="password" autocomplete="off" placeholder="BLOFIN_DASHBOARD_TOKEN"></label>
+                <label>سرمایه (USDT)<input id="manual-wave-margin" type="number" min="1" max="10000" step="1" value="100"></label>
+                <label>اهرم<select id="manual-wave-leverage"><option value="1" selected>1x · پیشنهادی</option><option value="2">2x</option><option value="3">3x</option></select></label>
+                <label>نماد قرارداد<input id="manual-wave-symbol" type="text" readonly value="BTC-USDT"></label>
+                <label>حد ضرر (SL)<input id="manual-wave-sl" type="number" min="0" step="any" inputmode="decimal" placeholder="از تحلیل چارت"></label>
+                <label>حد سود (TP)<input id="manual-wave-tp" type="number" min="0" step="any" inputmode="decimal" placeholder="از تحلیل چارت"></label>
+              </div>
+              <p class="muted">پیشنهاد امن: ۱ برابر. اهرم بالاتر سود و ضرر را چند برابر می‌کند؛ سقف این بخش ۳ برابر است.</p>
+              <p class="muted">حد ضرر و حد سود در همان سفارش به سرور BloFin Demo فرستاده می‌شوند. در صورت پذیرش صرافی، مدیریت خروج در سمت صرافی انجام می‌شود و به روشن‌ماندن گوشی نیاز ندارد. فعال بودن هر دو دستور را پس از ورود در حساب صرافی بررسی کن؛ شکاف قیمت، اختلال یا اجرای ناموفق همچنان ممکن است.</p>
+              <p id="manual-wave-profit" class="metric" aria-live="polite">💰 سود خالص تخمینی در صورت رسیدن به هدف: —</p>
+              <div class="manual-wave-actions">
+                <button type="button" id="manual-wave-long">🟢 خرید و پیش‌بینی رشد (LONG) در دمو</button>
+                <button type="button" id="manual-wave-short">🔴 فروش و پیش‌بینی ریزش (SHORT) در دمو</button>
+                <button type="button" id="manual-wave-close" disabled>⏹ بستن فوری پوزیشن دمو</button>
+              </div>
+              <p id="manual-wave-status" class="muted" role="status" aria-live="polite">برای سفارش، توکن پنل را وارد کن. قیمت و سطوح پیشنهادی پس از تحلیل چارت پر می‌شوند.</p>
+              <pre id="manual-wave-result" class="muted" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+            </section>
             <section class="live-wave-watch" aria-label="دیده‌بان هم‌زمان پنج بازار اصلی">
               <h4>🌊 دیده‌بان امواج ۵ بازار اصلی (BTC · ETH · SOL · XRP · LINK)</h4>
               <p class="live-wave-watch-note">تحلیل مستقل ۵ بازار با کندل‌های ۵ دقیقه‌ای؛ دادهٔ ناقص یا تأییدنشده به‌عنوان موج قطعی نمایش داده نمی‌شود.</p>
@@ -9385,7 +9414,23 @@ async function loadBlofinInstruments(){
             };
 
             const easyRobot={root:document.getElementById('easy-trader-robot'),pattern:document.getElementById('easy-robot-pattern'),direction:document.getElementById('easy-robot-direction'),signal:document.getElementById('easy-robot-signal'),confirmation:document.getElementById('easy-robot-confirmation'),market:document.getElementById('easy-robot-market')};
-            function updateEasyTraderRobot(analysis,signal,symbolValue,intervalValue){
+            const manualTrade={token:document.getElementById('manual-wave-token'),margin:document.getElementById('manual-wave-margin'),leverage:document.getElementById('manual-wave-leverage'),symbol:document.getElementById('manual-wave-symbol'),sl:document.getElementById('manual-wave-sl'),tp:document.getElementById('manual-wave-tp'),profit:document.getElementById('manual-wave-profit'),status:document.getElementById('manual-wave-status'),result:document.getElementById('manual-wave-result'),long:document.getElementById('manual-wave-long'),short:document.getElementById('manual-wave-short'),close:document.getElementById('manual-wave-close')};
+            let manualLastInstrument='BTC-USDT';
+            function updateManualTradeDefaults(data,signal){
+              const raw=String(symbol.value||'BTCUSDT').toUpperCase().replace(/USDT$/,'');
+              manualLastInstrument=raw+'-USDT';manualTrade.symbol.value=manualLastInstrument;
+              const entry=Number((data.candles||[]).slice(-1)[0]?.close||signal.entry_reference_price||0);
+              const sl=Number(signal.stop_loss||0),tp=Number(signal.take_profit||0);
+              if(sl>0)manualTrade.sl.value=String(sl);if(tp>0)manualTrade.tp.value=String(tp);
+              updateManualProfit(entry);
+            }
+            function updateManualProfit(entryValue){
+              const entry=Number(entryValue||document.getElementById('live-radar-current-price')?.textContent||0);
+              const target=Number(manualTrade.tp.value),margin=Number(manualTrade.margin.value||100),lev=Number(manualTrade.leverage.value||1);
+              const isShort=String(document.getElementById('live-radar-action')?.textContent||'').includes('فروش');
+              if(!(entry>0&&target>0&&margin>0)){manualTrade.profit.textContent='💰 سود خالص تخمینی در صورت رسیدن به هدف: —';return;}
+              const gross=(isShort?(entry-target):(target-entry))/entry*margin*lev,net=gross-margin*lev*0.0012;
+              manualTrade.profit.textContent='💰 سود خالص تخمینی در صورت رسیدن به هدف: '+(net>=0?'+':'')+'            function updateEasyTraderRobot(analysis,signal,symbolValue,intervalValue){
               if(!easyRobot.root)return;
               const items=Array.isArray(analysis&&analysis.candlestick_patterns)?analysis.candlestick_patterns:[];
               const rank=x=>x.state==='CONFIRMED'?2:(x.state==='NEEDS_CONFIRMATION'||x.state==='FORMING'?1:0);
@@ -9656,6 +9701,7 @@ async function loadBlofinInstruments(){
                 fields.entry.textContent=number(s.entry_reference_price);
                 fields.stop.textContent=number(s.stop_loss);
                 fields.target.textContent=number(s.take_profit);
+                updateManualTradeDefaults(data,s);
                 fields.rr.textContent=s.reward_risk===null||s.reward_risk===undefined?'—':s.reward_risk+'R';
                 fields.wave.textContent=(w.pattern||'نامشخص')+' · '+(w.phase||'داده ناکافی');
                 fields.bias.textContent=d.label_fa||faDirection(d.bias);
@@ -10114,6 +10160,35 @@ async function loadBlofinInstruments(){
     def do_POST(self):
         global SCAN_RUNNING
         route = urlparse(self.path).path
+        if route in {"/api/blofin-demo/manual-wave-order", "/api/blofin-demo/manual-wave-close"}:
+            expected_token=os.getenv("BLOFIN_DASHBOARD_TOKEN","").strip()
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization",""),expected_token):
+                return self._send(401,b'{"status":"UNAUTHORIZED"}',"application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type","").lower():
+                return self._send(415,b'{"status":"JSON_REQUIRED"}',"application/json; charset=utf-8")
+            try: length=int(self.headers.get("Content-Length","0"))
+            except (TypeError,ValueError): return self._send(400,b'{"status":"INVALID_CONTENT_LENGTH"}',"application/json; charset=utf-8")
+            if length<=0 or length>8192: return self._send(413,b'{"status":"INVALID_PAYLOAD_SIZE"}',"application/json; charset=utf-8")
+            try:
+                payload=json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload,dict): raise ValueError("JSON body must be an object.")
+                if route.endswith("manual-wave-order"):
+                    result=_blofin_manual_submit_wave_order(payload)
+                else:
+                    inst_id=str(payload.get("instrument_id") or "").strip().upper()
+                    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT",inst_id):
+                        raise BloFinDemoExecutionBlocked("نماد قرارداد معتبر نیست.")
+                    result=_blofin_manual_close_position(instrument_id=inst_id,
+                        position_id=str(payload.get("position_id") or "").strip(),
+                        position_side_hint=str(payload.get("position_side") or "net").strip().lower(),
+                        action_source="MANUAL")
+                return self._send(200,json.dumps(result,ensure_ascii=False,default=str).encode(),"application/json; charset=utf-8")
+            except (ValueError,BloFinDemoExecutionBlocked) as exc:
+                return self._send(422,json.dumps({"status":"BLOCKED","message_fa":str(exc)},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            except BloFinDemoExecutionUnknown as exc:
+                return self._send(503,json.dumps({"status":"UNKNOWN","message_fa":str(exc),"retry_allowed":False},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(502,json.dumps({"status":"ERROR","error_type":type(exc).__name__},ensure_ascii=False).encode(),"application/json; charset=utf-8")
         api_jobs_request = route == "/api/jobs"
         if api_jobs_request:
             route = "/scan"
@@ -11412,6 +11487,4107 @@ def _blofin_manual_write_client() -> BloFinDemoTradeClient:
         raise BloFinDemoExecutionBlocked("Manual trading is pinned to the BloFin Demo API host.")
     client.verify_trade_permission()
     return client
+
+
+
+def _blofin_manual_validate_wave_order_payload(payload: Any) -> dict[str, Any]:
+    """Validate manual-wave inputs before creating any exchange client."""
+    if not isinstance(payload, dict):
+        raise BloFinDemoExecutionBlocked("درخواست سفارش باید یک شیء JSON معتبر باشد.")
+    inst_id = str(payload.get("instrument_id") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id):
+        raise BloFinDemoExecutionBlocked("نماد باید یک قرارداد دائمی USDT مانند BTC-USDT باشد.")
+    side = str(payload.get("side") or "").strip().upper()
+    if side not in {"LONG", "SHORT"}:
+        raise BloFinDemoExecutionBlocked("جهت سفارش فقط LONG یا SHORT است.")
+    margin = _blofin_manual_decimal(payload.get("margin_usdt"), "margin_usdt")
+    raw_leverage = payload.get("leverage", 1)
+    if isinstance(raw_leverage, bool):
+        raise BloFinDemoExecutionBlocked("اهرم باید عدد صحیح بین 1 و 3 باشد.")
+    try:
+        leverage = int(raw_leverage)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BloFinDemoExecutionBlocked("اهرم باید عدد صحیح بین 1 و 3 باشد.") from exc
+    if str(raw_leverage).strip() not in {str(leverage), f"{leverage}.0"} or not 1 <= leverage <= 3:
+        raise BloFinDemoExecutionBlocked("اهرم فقط از 1x تا 3x مجاز است.")
+    tp = _blofin_manual_decimal(payload.get("tpTriggerPrice"), "tpTriggerPrice")
+    sl = _blofin_manual_decimal(payload.get("slTriggerPrice"), "slTriggerPrice")
+    if margin <= 0 or margin > Decimal("10000"):
+        raise BloFinDemoExecutionBlocked("سرمایه باید بیشتر از صفر و حداکثر 10000 USDT باشد.")
+    if tp <= 0 or sl <= 0 or tp == sl:
+        raise BloFinDemoExecutionBlocked("حد سود و حد ضرر باید دو قیمت مثبت و متفاوت باشند.")
+    return {"instrument_id":inst_id,"side":side,"margin_usdt":margin,"leverage":leverage,"tp":tp,"sl":sl}
+
+
+def _blofin_manual_submit_wave_order(payload: Any) -> dict[str, Any]:
+    """Submit one isolated BloFin Demo order with exchange-side TP and SL."""
+    if os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() != "true":
+        raise BloFinDemoExecutionBlocked("قفل BLOFIN_DEMO فعال نیست؛ هیچ سفارشی ارسال نشد.")
+    request = _blofin_manual_validate_wave_order_payload(payload)
+    client = _blofin_manual_write_client()
+    if str(getattr(client, "base_url", "")).rstrip("/") != DEMO_REST_URL.rstrip("/"):
+        raise BloFinDemoExecutionBlocked("مقصد سفارش خارج از BloFin Demo است؛ سفارش مسدود شد.")
+    inst_id, side = request["instrument_id"], request["side"]
+    mode = client.get_position_mode()
+    if not isinstance(mode, dict) or mode.get("positionMode") != "net_mode":
+        raise BloFinDemoExecutionBlocked("برای این مسیر فقط حالت One-Way (net_mode) پشتیبانی می‌شود.")
+    positions = client.get_positions(inst_id=inst_id)
+    if not isinstance(positions, list):
+        raise BloFinDemoExecutionBlocked("وضعیت پوزیشن‌های صرافی قابل تأیید نیست.")
+    for row in positions:
+        if not isinstance(row, dict):
+            raise BloFinDemoExecutionBlocked("دادهٔ پوزیشن ناقص است؛ سفارش مسدود شد.")
+        if str(row.get("instId") or "").upper() == inst_id and _blofin_manual_decimal(row.get("positions", "0"), "positions") != 0:
+            raise BloFinDemoExecutionBlocked("برای این نماد پوزیشن باز وجود دارد؛ ابتدا آن را ببند.")
+    pending = client.get_open_orders(inst_id=inst_id)
+    if not isinstance(pending, list):
+        raise BloFinDemoExecutionBlocked("وضعیت سفارش‌های باز قابل تأیید نیست.")
+    if any(isinstance(row,dict) and str(row.get("instId") or "").upper()==inst_id for row in pending):
+        raise BloFinDemoExecutionBlocked("برای این نماد سفارش باز وجود دارد؛ از ثبت سفارش تکراری جلوگیری شد.")
+    instrument = client.get_tradable_instrument(inst_id)
+    mark_rows = client.get_mark_price(inst_id=inst_id)
+    mark_row = mark_rows if isinstance(mark_rows,dict) else (
+        mark_rows[0] if isinstance(mark_rows,list) and mark_rows and isinstance(mark_rows[0],dict) else None
+    )
+    if not isinstance(mark_row,dict):
+        raise BloFinDemoExecutionBlocked("قیمت Mark معتبر از BloFin دریافت نشد.")
+    mark = _blofin_manual_decimal(mark_row.get("markPrice",mark_row.get("mark_price")),"markPrice")
+    if mark <= 0:
+        raise BloFinDemoExecutionBlocked("قیمت Mark نامعتبر است.")
+    tick = _blofin_manual_decimal(instrument.get("tickSize"),"tickSize")
+    contract_value = _blofin_manual_decimal(instrument.get("contractValue"),"contractValue")
+    lot_size = _blofin_manual_decimal(instrument.get("lotSize"),"lotSize")
+    min_size = _blofin_manual_decimal(instrument.get("minSize"),"minSize")
+    if min(tick,contract_value,lot_size,min_size) <= 0:
+        raise BloFinDemoExecutionBlocked("مشخصات اندازه و دقت قرارداد معتبر نیست.")
+    tp, sl = request["tp"], request["sl"]
+    if side == "LONG":
+        sl=(sl/tick).to_integral_value(rounding=ROUND_CEILING)*tick
+        tp=(tp/tick).to_integral_value(rounding=ROUND_CEILING)*tick
+        if not sl < mark < tp:
+            raise BloFinDemoExecutionBlocked("برای LONG باید SL پایین‌تر و TP بالاتر از Mark باشد.")
+    else:
+        sl=(sl/tick).to_integral_value(rounding=ROUND_FLOOR)*tick
+        tp=(tp/tick).to_integral_value(rounding=ROUND_FLOOR)*tick
+        if not tp < mark < sl:
+            raise BloFinDemoExecutionBlocked("برای SHORT باید TP پایین‌تر و SL بالاتر از Mark باشد.")
+    raw_size=request["margin_usdt"]*Decimal(request["leverage"])/(mark*contract_value)
+    quantity=(raw_size/lot_size).to_integral_value(rounding=ROUND_FLOOR)*lot_size
+    if quantity < min_size:
+        raise BloFinDemoExecutionBlocked("سرمایه انتخابی برای حداقل اندازه قرارداد کافی نیست.")
+    maximum=instrument.get("maxMarketSize")
+    if maximum not in (None,"") and quantity > _blofin_manual_decimal(maximum,"maxMarketSize"):
+        raise BloFinDemoExecutionBlocked("اندازه سفارش از سقف بازار بیشتر است.")
+    if mark*contract_value*quantity/Decimal(request["leverage"]) > request["margin_usdt"]:
+        raise BloFinDemoExecutionBlocked("مارجین تخمینی از سرمایه انتخابی بیشتر شد.")
+    client_order_id="MW"+uuid.uuid4().hex[:20]
+    audit={"instrument_id":inst_id,"side":side,"leverage":request["leverage"],"margin_usdt":str(request["margin_usdt"]),
+           "quantity_contracts":str(quantity),"mark_price":str(mark),"tpTriggerPrice":str(tp),"slTriggerPrice":str(sl),
+           "environment":"BLOFIN_DEMO","client_order_id":client_order_id}
+    store=None
+    try:
+        store=BloFinDemoEventStore()
+        store.record_manual_action(client_order_id,"MANUAL_WAVE_ORDER_REQUESTED",audit)
+        try:
+            with BLOFIN_ORDER_SUBMISSION_LOCK:
+                client.set_futures_leverage(inst_id,request["leverage"],margin_mode="isolated",position_side="net")
+                response=client.place_futures_order(inst_id=inst_id,side="buy" if side=="LONG" else "sell",
+                    position_side="net",size=format(quantity.normalize(),"f"),client_order_id=client_order_id,
+                    take_profit=format(tp.normalize(),"f"),stop_loss=format(sl.normalize(),"f"),margin_mode="isolated")
+        except Exception as exc:
+            store.record_manual_action(client_order_id,"MANUAL_WAVE_ORDER_UNKNOWN",
+                {**audit,"submission_outcome":"UNKNOWN","error_type":type(exc).__name__,"retry_allowed":False})
+            raise
+        data=response.get("data")
+        rows=data if isinstance(data,list) else [data]
+        exchange_order_id=next((str(row.get("orderId")) for row in rows if isinstance(row,dict) and row.get("orderId")),None)
+        store.record_manual_action(client_order_id,"MANUAL_WAVE_ORDER_ACCEPTED",
+            {**audit,"exchange_order_id":exchange_order_id,"exchange_response":data,"submission_outcome":"ACCEPTED"})
+    finally:
+        if store is not None: store.close()
+    return {"status":"ORDER_ACCEPTED","environment":"BLOFIN_DEMO","instrument_id":inst_id,"side":side,
+        "client_order_id":client_order_id,"exchange_order_id":exchange_order_id,"entry_reference_price":str(mark),
+        "leverage":request["leverage"],"quantity_contracts":str(quantity),"tpTriggerPrice":str(tp),
+        "slTriggerPrice":str(sl),"exchange_response":data,
+        "message_fa":"سفارش به BloFin Demo ارسال شد؛ TP/SL در درخواست همان سفارش درج شدند. فعال بودن حفاظت را در حساب صرافی بررسی کن."}
+
+
+def _blofin_manual_close_position(
+    *, instrument_id: str, position_id: str, position_side_hint: str = "",
+    action_source: str = "MANUAL", audit_id: str | None = None,
+    exit_reason: str | None = None,
+) -> dict[str, Any]:
+    """Close one freshly revalidated Demo position; loss-making positions are not blocked."""
+    instrument_id = str(instrument_id or "").strip().upper()
+    position_id = str(position_id or "").strip()
+    position_side_hint = str(position_side_hint or "").strip().lower()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id):
+        raise BloFinDemoExecutionBlocked("نماد پوزیشن معتبر نیست.")
+    if position_id and not re.fullmatch(r"[A-Za-z0-9-]{1,64}", position_id):
+        raise BloFinDemoExecutionBlocked("شناسه پوزیشن معتبر نیست.")
+    if position_side_hint and position_side_hint not in {"net", "long", "short"}:
+        raise BloFinDemoExecutionBlocked("جهت پوزیشن معتبر نیست.")
+
+    client = _blofin_manual_write_client()
+    positions = client.get_positions(inst_id=instrument_id)
+    if not isinstance(positions, list):
+        raise BloFinDemoExecutionBlocked("فهرست تازه پوزیشن‌ها قابل تفسیر نیست.")
+    active = []
+    for row in positions:
+        if not isinstance(row, dict):
+            raise BloFinDemoExecutionBlocked("ردیف پوزیشن موجود قابل تفسیر نیست.")
+        if str(row.get("instId") or "").strip().upper() != instrument_id:
+            continue
+        raw_size = row.get("positions")
+        quantity = _blofin_manual_decimal(raw_size, "position_size")
+        if abs(quantity) > 0:
+            active.append(row)
+
+    if position_id:
+        matches = [
+            row for row in active
+            if str(row.get("positionId") or "").strip() == position_id
+        ]
+    else:
+        matches = [
+            row for row in active
+            if str(row.get("positionSide") or "").strip().lower() == position_side_hint
+        ]
+    if len(matches) != 1:
+        raise BloFinDemoExecutionBlocked(
+            "پوزیشن دقیق و یکتا در وضعیت زنده حساب پیدا نشد؛ شناسه Position ID را دوباره از مانیتور تازه انتخاب کن."
+        )
+    row = matches[0]
+    actual_position_id = str(row.get("positionId") or "").strip()
+    if position_id and actual_position_id != position_id:
+        raise BloFinDemoExecutionBlocked("Position ID با پوزیشن زنده مطابقت ندارد.")
+    position_side = str(row.get("positionSide") or "").strip().lower()
+    margin_mode = str(row.get("marginMode") or "").strip().lower()
+    if position_side not in {"net", "long", "short"} or margin_mode not in {"isolated", "cross"}:
+        raise BloFinDemoExecutionBlocked("Margin Mode یا Position Side این پوزیشن کامل نیست.")
+    pnl_value = row.get("unrealizedPnl")
+    try:
+        pnl = _blofin_manual_decimal(pnl_value, "unrealized_pnl") if pnl_value not in (None, "") else None
+    except BloFinDemoExecutionBlocked:
+        pnl = None
+
+    action_source = str(action_source or "MANUAL").strip().upper()
+    if action_source not in {"MANUAL", "AUTOPILOT", "RISK_OVERRIDE"}:
+        raise BloFinDemoExecutionBlocked("منبع فرمان بستن پوزیشن معتبر نیست.")
+    if action_source == "AUTOPILOT":
+        try:
+            minimum_profit = max(
+                0.01, min(float(os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")), 100_000.0)
+            )
+        except (TypeError, ValueError):
+            minimum_profit = 0.02
+        if pnl is None or pnl < Decimal(str(minimum_profit)):
+            raise BloFinDemoExecutionBlocked(
+                "سود شناور پوزیشن در بازبینی نهایی به حداقل محافظه‌کارانه نرسید؛ خروج خودکار ارسال نشد."
+            )
+    action_id = "CLOSE" + uuid.uuid4().hex[:20]
+    audit_event_id = str(audit_id or action_id).strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{1,64}", audit_event_id):
+        raise BloFinDemoExecutionBlocked("شناسه ثبت گزارش بستن پوزیشن معتبر نیست.")
+    event_prefix = "AUTO" if action_source == "AUTOPILOT" else (
+        "RISK_OVERRIDE" if action_source == "RISK_OVERRIDE" else "MANUAL"
+    )
+    requested_event = f"{event_prefix}_POSITION_CLOSE_REQUESTED"
+    accepted_event = f"{event_prefix}_POSITION_CLOSE_ACCEPTED"
+    unknown_event = f"{event_prefix}_POSITION_CLOSE_UNKNOWN"
+    store = None
+    try:
+        store = BloFinDemoEventStore()
+        audit = {
+            "instrument_id": instrument_id,
+            "position_id": actual_position_id or None,
+            "position_side": position_side,
+            "margin_mode": margin_mode,
+            "unrealized_pnl_usdt": str(pnl) if pnl is not None else None,
+            "loss_making_position": bool(pnl is not None and pnl < 0),
+            "action_source": action_source,
+            "exit_reason": exit_reason,
+            "exchange_close_client_order_id": action_id,
+        }
+        store.record_manual_action(audit_event_id, requested_event, audit)
+        try:
+            with BLOFIN_ORDER_SUBMISSION_LOCK:
+                response = client.close_futures_position(
+                    inst_id=instrument_id,
+                    margin_mode=margin_mode,
+                    position_side=position_side,
+                    client_order_id=action_id,
+                    position_id=actual_position_id or None,
+                )
+        except Exception as exc:
+            store.record_manual_action(audit_event_id, unknown_event, {
+                **audit,
+                "submission_outcome": "UNKNOWN",
+                "error_type": type(exc).__name__,
+                "retry_allowed": False,
+            })
+            raise
+        store.record_manual_action(audit_event_id, accepted_event, {
+            **audit, "submission_outcome": "ACCEPTED",
+        })
+    finally:
+        if store is not None:
+            store.close()
+
+    return {
+        "status": "CLOSE_ACCEPTED",
+        "environment": "BLOFIN_DEMO",
+        "instrument_id": instrument_id,
+        "position_id": actual_position_id or None,
+        "position_side": position_side,
+        "unrealized_pnl_usdt_at_confirmation": str(pnl) if pnl is not None else None,
+        "loss_making_position": bool(pnl is not None and pnl < 0),
+        "exchange_response": response.get("data"),
+        "message_fa": (
+            "درخواست بستن همین پوزیشن به قیمت بازار به BloFin Demo ارسال شد. "
+            "منفی بودن PnL مانع بستن نبود؛ قیمت اجرای واقعی و PnL نهایی پس از Fill مشخص می‌شود."
+        ),
+    }
+
+def _blofin_demo_profit_exit_decision(
+    order: dict[str, Any], position: dict[str, Any], mark_price: Any,
+    *, now: int | None = None, minimum_profit_usdt: float = 0.50,
+    maximum_hold_seconds: int = 86_400,
+) -> str | None:
+    """Return a profit-only exit reason for one exact robot-linked Demo position."""
+    if not isinstance(order, dict) or not isinstance(position, dict):
+        return None
+    instrument = str(order.get("instrument_id") or "").strip().upper()
+    if instrument != str(position.get("instId") or "").strip().upper():
+        return None
+    linked_id = str(order.get("position_id") or "").strip()
+    active_id = str(position.get("positionId") or "").strip()
+    if not linked_id or linked_id != active_id:
+        return None
+    try:
+        quantity = float(position.get("positions") or 0)
+        pnl = float(position.get("unrealizedPnl"))
+        current_mark = float(mark_price)
+        target = float(order.get("take_profit"))
+        opened_at = int(order.get("created_at") or 0)
+        current_time = int(time.time()) if now is None else int(now)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in (quantity, pnl, current_mark, target)):
+        return None
+    if abs(quantity) <= 0 or current_mark <= 0 or target <= 0:
+        return None
+    # Never call a losing or fee-fragile position a profitable exit.
+    if pnl < max(0.01, float(minimum_profit_usdt)):
+        return None
+    side = str(order.get("side") or "").strip().upper()
+    if side not in {"LONG", "SHORT"}:
+        return None
+    target_reached = (
+        current_mark >= target if side == "LONG" else current_mark <= target
+    )
+    if target_reached:
+        return "TAKE_PROFIT_LEVEL_REACHED"
+    age_seconds = max(0, current_time - opened_at) if opened_at > 0 else 0
+    if opened_at > 0 and age_seconds >= max(900, int(maximum_hold_seconds)):
+        return "MAX_HOLD_PROFIT_ONLY"
+    return None
+
+
+def _blofin_demo_stop_loss_triggered(side: Any, mark_price: Any, stop_loss: Any) -> bool:
+    """Report whether mark has crossed the stored SL threshold; never sends an order."""
+    direction = str(side or "").strip().upper()
+    try:
+        mark = float(mark_price)
+        stop = float(stop_loss)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(mark) or not math.isfinite(stop) or mark <= 0 or stop <= 0:
+        return False
+    if direction == "LONG":
+        return mark <= stop
+    if direction == "SHORT":
+        return mark >= stop
+    return False
+
+
+def _blofin_demo_position_market_evidence(reader: Any, instrument_id: str) -> dict[str, Any]:
+    """Summarize only recent, exchange-confirmed closed 5m candles for an open Demo position."""
+    now_ms = int(time.time() * 1000)
+    interval_ms = 300_000
+    try:
+        raw = reader.get_candles(inst_id=instrument_id, bar="5m", limit=8)
+    except Exception as exc:
+        return {
+            "status": "READ_FAILED",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "error_type": type(exc).__name__,
+            "candles": [],
+        }
+    if not isinstance(raw, list):
+        return {
+            "status": "INVALID_RESPONSE",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "candles": [],
+        }
+    parsed = []
+    for item in raw:
+        try:
+            if isinstance(item, dict):
+                stamp = int(float(item.get("ts", item.get("timestamp"))))
+                opened, high, low, close = (
+                    float(item.get("open", item.get("o"))),
+                    float(item.get("high", item.get("h"))),
+                    float(item.get("low", item.get("l"))),
+                    float(item.get("close", item.get("c"))),
+                )
+                confirmed = str(item.get("confirm", item.get("confirmed", ""))).strip().lower()
+                volume = float(item.get("volume", item.get("vol", item.get("v", 0))) or 0)
+            elif isinstance(item, (list, tuple)) and len(item) >= 9:
+                stamp = int(float(item[0]))
+                opened, high, low, close = (float(item[1]), float(item[2]), float(item[3]), float(item[4]))
+                volume = float(item[5] or 0)
+                confirmed = str(item[8]).strip().lower()
+            else:
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        values = (opened, high, low, close, volume)
+        if not all(math.isfinite(value) for value in values):
+            continue
+        if min(opened, high, low, close) <= 0 or volume < 0 or high < max(opened, close, low) or low > min(opened, close, high):
+            continue
+        if confirmed not in {"1", "true", "yes"}:
+            continue
+        if stamp <= 0 or stamp + interval_ms > now_ms:
+            continue
+        parsed.append({
+            "timestamp_ms": stamp,
+            "open": opened,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        })
+    parsed.sort(key=lambda row: row["timestamp_ms"])
+    deduped = {}
+    for row in parsed:
+        deduped[row["timestamp_ms"]] = row
+    rows = list(deduped.values())[-4:]
+    if not rows:
+        return {
+            "status": "NO_CONFIRMED_CANDLES",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "candles": [],
+        }
+    if now_ms - (rows[-1]["timestamp_ms"] + interval_ms) > interval_ms + 60_000:
+        return {
+            "status": "STALE_CANDLES",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "latest_closed_candle_timestamp_ms": rows[-1]["timestamp_ms"],
+            "candles": rows,
+        }
+    if len(rows) < 3 or any(
+        rows[index]["timestamp_ms"] - rows[index - 1]["timestamp_ms"] != interval_ms
+        for index in range(1, len(rows))
+    ):
+        return {
+            "status": "INSUFFICIENT_OR_DISCONTINUOUS_CANDLES",
+            "direction": "UNKNOWN",
+            "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+            "latest_closed_candle_timestamp_ms": rows[-1]["timestamp_ms"],
+            "candles": rows,
+        }
+    closes = [float(row["close"]) for row in rows[-3:]]
+    if closes[0] < closes[1] < closes[2]:
+        direction = "UP"
+    elif closes[0] > closes[1] > closes[2]:
+        direction = "DOWN"
+    else:
+        direction = "SIDEWAYS"
+    return {
+        "status": "VERIFIED",
+        "direction": direction,
+        "source": "BLOFIN_CONFIRMED_5M_CANDLES",
+        "latest_closed_candle_timestamp_ms": rows[-1]["timestamp_ms"],
+        "candles": rows[-3:],
+    }
+
+
+def _blofin_demo_protective_order_evidence(
+    reader: Any, instrument_id: str, order: dict[str, Any], position: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify pending exchange TP/SL only by exact positionId or exact originating clientOrderId."""
+    position_id = str(position.get("positionId") or "").strip()
+    client_order_id = str(order.get("client_order_id") or "").strip()
+    side = str(order.get("side") or "").strip().lower()
+    try:
+        rows = reader.get_open_tpsl_orders(inst_id=instrument_id, limit=100)
+    except Exception as exc:
+        return {
+            "status": "READ_FAILED",
+            "error_type": type(exc).__name__,
+            "source": "BLOFIN_PENDING_TPSL",
+            "matched_by": None,
+            "orders": [],
+        }
+    if not isinstance(rows, list):
+        return {
+            "status": "INVALID_RESPONSE",
+            "source": "BLOFIN_PENDING_TPSL",
+            "matched_by": None,
+            "orders": [],
+        }
+    matched = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("instId") or "").strip().upper() != instrument_id:
+            continue
+        row_position_id = str(row.get("positionId") or "").strip()
+        row_client_id = str(row.get("clientOrderId") or "").strip()
+        row_position_side = str(row.get("positionSide") or "").strip().lower()
+        if row_position_side and row_position_side not in {side, "net"}:
+            continue
+        if position_id and row_position_id == position_id:
+            matched_by = "EXACT_POSITION_ID"
+        elif client_order_id and row_client_id == client_order_id:
+            matched_by = "EXACT_CLIENT_ORDER_ID"
+        else:
+            continue
+        matched.append({
+            "matched_by": matched_by,
+            "tpsl_id": str(row.get("tpslId") or ""),
+            "client_order_id": row_client_id,
+            "position_id": row_position_id,
+            "inst_id": str(row.get("instId") or ""),
+            "position_side": row_position_side,
+            "state": str(row.get("state") or ""),
+            "tp_trigger_price": row.get("tpTriggerPrice"),
+            "sl_trigger_price": row.get("slTriggerPrice"),
+            "tp_order_price": row.get("tpOrderPrice"),
+            "sl_order_price": row.get("slOrderPrice"),
+            "actual_size": row.get("actualSize"),
+            "size": row.get("size"),
+        })
+    if not matched:
+        return {
+            "status": "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+            "source": "BLOFIN_PENDING_TPSL",
+            "matched_by": None,
+            "orders": [],
+        }
+    has_sl = any(
+        _is_positive_finite_number(item.get("sl_trigger_price")) for item in matched
+    )
+    has_tp = any(
+        _is_positive_finite_number(item.get("tp_trigger_price")) for item in matched
+    )
+    if has_sl and has_tp:
+        status = "BOTH_TP_AND_SL_VISIBLE"
+    elif has_sl:
+        status = "SL_ONLY_VISIBLE"
+    elif has_tp:
+        status = "TP_ONLY_VISIBLE"
+    else:
+        status = "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES"
+    return {
+        "status": status,
+        "source": "BLOFIN_PENDING_TPSL",
+        "matched_by": sorted({item["matched_by"] for item in matched}),
+        "orders": matched,
+    }
+
+
+def _is_positive_finite_number(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(number) and number > 0
+
+
+def _blofin_demo_position_manager_cycle() -> dict[str, Any]:
+    """Manage only exchange positions linked by exact ID to the robot's Demo orders."""
+    store = None
+    try:
+        readiness = _blofin_demo_execution_readiness()
+        if readiness.get("status") != "READY":
+            readiness_blockers: list[str] = []
+            if not readiness.get("trade_credentials_configured"):
+                readiness_blockers.append("TRADE_CREDENTIALS_NOT_CONFIGURED")
+            if readiness.get("trade_permission_status") == "READ_ONLY":
+                readiness_blockers.append("TRADE_PERMISSION_READ_ONLY")
+            elif not readiness.get("trade_permission_verified"):
+                readiness_blockers.append("TRADE_PERMISSION_NOT_VERIFIED")
+            if not readiness.get("trading_enabled"):
+                readiness_blockers.append("DEMO_TRADING_DISABLED")
+            if not readiness.get("dashboard_auth_configured"):
+                readiness_blockers.append("DASHBOARD_TOKEN_NOT_CONFIGURED")
+            if not readiness.get("durable_storage"):
+                readiness_blockers.append("DURABLE_STORAGE_UNAVAILABLE")
+            if not readiness.get("event_store_readable"):
+                readiness_blockers.append("EVENT_STORE_UNREADABLE")
+            if not readiness_blockers:
+                readiness_blockers.append("EXECUTION_READINESS_NOT_READY")
+
+            if "TRADE_CREDENTIALS_NOT_CONFIGURED" in readiness_blockers:
+                message_fa = "اعتبارنامه‌های Trade در Environment کامل نیستند؛ مدیر خروج هیچ اقدامی انجام نداد."
+            elif "TRADE_PERMISSION_READ_ONLY" in readiness_blockers:
+                message_fa = "مجوز API فقط‌خواندنی است؛ مدیر خروج مجوز تغییر پوزیشن ندارد و هیچ اقدامی انجام نداد."
+            elif "TRADE_PERMISSION_NOT_VERIFIED" in readiness_blockers:
+                message_fa = "مجوز Trade تأیید نشد؛ مدیر خروج متوقف ماند و هیچ پوزیشنی تغییر نکرد."
+            else:
+                reasons = []
+                if "DEMO_TRADING_DISABLED" in readiness_blockers:
+                    reasons.append("فعال‌سازی معاملات Demo خاموش است")
+                if "DASHBOARD_TOKEN_NOT_CONFIGURED" in readiness_blockers:
+                    reasons.append("توکن پنل تنظیم نشده است")
+                if "DURABLE_STORAGE_UNAVAILABLE" in readiness_blockers:
+                    reasons.append("حافظه پایدار در دسترس نیست")
+                if "EVENT_STORE_UNREADABLE" in readiness_blockers:
+                    reasons.append("دفتر رویداد قابل خواندن نیست")
+                message_fa = (
+                    "مدیر خروج به‌دلیل پیش‌نیازهای مسدودشده اقدام نکرد: "
+                    + "؛ ".join(reasons or ["آمادگی اجرای Demo تأیید نشده است"])
+                    + ". هیچ پوزیشنی تغییر نکرد."
+                )
+            return {
+                "status": "EXECUTION_READINESS_BLOCKED",
+                "readiness_status": readiness.get("status"),
+                "readiness_blockers": readiness_blockers,
+                "trade_permission_status": readiness.get("trade_permission_status"),
+                "credential_source": readiness.get("credential_source"),
+                "trading_enabled": bool(readiness.get("trading_enabled")),
+                "dashboard_auth_configured": bool(readiness.get("dashboard_auth_configured")),
+                "durable_storage": bool(readiness.get("durable_storage")),
+                "event_store_readable": bool(readiness.get("event_store_readable")),
+                "message_fa": message_fa,
+            }
+        raw_min_profit = os.getenv("BLOFIN_DEMO_EXIT_MIN_PROFIT_USDT", "0.02")
+        raw_max_hold = os.getenv("BLOFIN_DEMO_MAX_HOLD_SECONDS", "86400")
+        try:
+            minimum_profit = max(0.01, min(float(raw_min_profit), 100_000.0))
+        except (TypeError, ValueError):
+            minimum_profit = 0.02
+        try:
+            maximum_hold = max(900, min(int(raw_max_hold), 604_800))
+        except (TypeError, ValueError):
+            maximum_hold = 86_400
+
+        store = BloFinDemoEventStore()
+        pending_orders = store.orders_pending_learning_outcome(limit=50)
+        if not pending_orders:
+            return {
+                "status": "IDLE",
+                "managed_positions": 0,
+                "message_fa": "پوزیشن رباتیِ لینک‌شده‌ای برای مدیریت خروج وجود ندارد.",
+            }
+
+        reader = BloFinDemoReadOnly(timeout=8.0)
+        positions = reader.get_positions()
+        if not isinstance(positions, list):
+            raise BloFinDemoResponseError("BloFin positions response is not a list.")
+
+        active_rows = []
+        for row in positions:
+            if not isinstance(row, dict):
+                raise BloFinDemoResponseError("BloFin returned an unreadable position row.")
+            try:
+                size = float(row.get("positions") or 0)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise BloFinDemoResponseError("BloFin position size is invalid.") from exc
+            if math.isfinite(size) and abs(size) > 0:
+                active_rows.append(row)
+
+        actions: list[dict[str, Any]] = []
+        managed = 0
+        for order in pending_orders:
+            instrument_id = str(order.get("instrument_id") or "").strip().upper()
+            position_id = str(order.get("position_id") or "").strip()
+            client_order_id = str(order.get("client_order_id") or "").strip()
+            if not instrument_id or not position_id or not client_order_id:
+                actions.append({"status": "UNLINKED_POSITION_ID", "instrument_id": instrument_id})
+                continue
+
+            # Exchange finalization is reconciled against exact positionId, not
+            # the newest history row or the dashboard's selected symbol.
+            matching_active = [
+                row for row in active_rows
+                if str(row.get("instId") or "").strip().upper() == instrument_id
+                and str(row.get("positionId") or "").strip() == position_id
+            ]
+            if len(matching_active) > 1:
+                actions.append({
+                    "status": "AMBIGUOUS_POSITION_ID",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                })
+                continue
+            if not matching_active:
+                try:
+                    closed_rows = reader.get_positions_history(
+                        inst_id=instrument_id, state="closed", limit=100,
+                    )
+                    partial_rows = reader.get_positions_history(
+                        inst_id=instrument_id, state="partially_closed", limit=100,
+                    )
+                    outcome = store.record_closed_position_outcome(
+                        instrument_id=instrument_id,
+                        history_rows=closed_rows if isinstance(closed_rows, list) else [],
+                        partial_rows=partial_rows if isinstance(partial_rows, list) else [],
+                        client_order_id=client_order_id,
+                        position_id=position_id,
+                    )
+                    if outcome:
+                        activity_update = _update_blofin_activity_after_close(
+                            outcome, instrument_id, position_id,
+                            closed_rows if isinstance(closed_rows, list) else [],
+                            partial_rows if isinstance(partial_rows, list) else [],
+                        )
+                        actions.append({
+                            "status": outcome.get("status"),
+                            "instrument_id": instrument_id,
+                            "position_id": position_id,
+                            "realized_result": outcome.get("realized_result"),
+                            "realized_pnl_after_reported_trading_fees": outcome.get(
+                                "realized_pnl_after_reported_trading_fees"
+                            ),
+                            "activity_report_sync": activity_update,
+                        })
+                except Exception as exc:
+                    actions.append({
+                        "status": "CLOSE_RECONCILIATION_UNKNOWN",
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "error_type": type(exc).__name__,
+                    })
+                continue
+
+            position = matching_active[0]
+            managed += 1
+            # A previously accepted/unknown close is not resent blindly.
+            prior_events = store.recent_events(client_order_id, limit=100)
+            prior_close = [
+                event for event in prior_events
+                if str(event.get("event_type") or "").upper() in {
+                    "AUTO_POSITION_CLOSE_ACCEPTED", "AUTO_POSITION_CLOSE_UNKNOWN",
+                    "RISK_OVERRIDE_POSITION_CLOSE_REQUESTED",
+                    "RISK_OVERRIDE_POSITION_CLOSE_ACCEPTED",
+                    "RISK_OVERRIDE_POSITION_CLOSE_UNKNOWN",
+                }
+            ]
+            if prior_close:
+                actions.append({
+                    "status": "CLOSE_AWAITING_EXCHANGE_RECONCILIATION",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                })
+                continue
+
+            mark_rows = reader.get_mark_price(inst_id=instrument_id)
+            mark_row = (
+                mark_rows[0] if isinstance(mark_rows, list) and mark_rows
+                and isinstance(mark_rows[0], dict)
+                else mark_rows if isinstance(mark_rows, dict) else None
+            )
+            if not isinstance(mark_row, dict):
+                actions.append({
+                    "status": "MARK_PRICE_UNKNOWN",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                })
+                continue
+            reason = _blofin_demo_profit_exit_decision(
+                order, position, mark_row.get("markPrice"),
+                minimum_profit_usdt=minimum_profit,
+                maximum_hold_seconds=maximum_hold,
+            )
+            experience_id = str(order.get("experience_id") or "").strip() or None
+            audit_position_id = str(position.get("positionId") or position_id)
+            try:
+                mark_price_value = float(mark_row.get("markPrice"))
+            except (TypeError, ValueError, OverflowError):
+                mark_price_value = None
+            try:
+                pnl_value = float(position.get("unrealizedPnl"))
+            except (TypeError, ValueError, OverflowError):
+                pnl_value = None
+            try:
+                opened_epoch = float(order.get("created_at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                opened_epoch = 0.0
+            holding_seconds = max(0, int(time.time() - opened_epoch)) if opened_epoch > 0 else None
+            try:
+                target_value = float(order.get("take_profit") or 0)
+            except (TypeError, ValueError, OverflowError):
+                target_value = 0.0
+            try:
+                stop_value = float(order.get("stop_loss") or 0)
+            except (TypeError, ValueError, OverflowError):
+                stop_value = 0.0
+            side_value = str(order.get("side") or "").upper()
+            take_profit_reached = (
+                mark_price_value is not None and target_value > 0
+                and ((mark_price_value >= target_value) if side_value == "LONG"
+                     else (mark_price_value <= target_value) if side_value == "SHORT" else False)
+            )
+            stop_loss_threshold_reached = _blofin_demo_stop_loss_triggered(
+                side_value, mark_price_value, stop_value,
+            )
+            cycle_epoch_ms = int(time.time() * 1000)
+            monitor_cycle_id = f"{audit_position_id}:{cycle_epoch_ms}"
+            market_evidence = _blofin_demo_position_market_evidence(reader, instrument_id)
+            protective_evidence = _blofin_demo_protective_order_evidence(
+                reader, instrument_id, order, position,
+            )
+
+            entry_snapshot = None
+            snapshot_read_error = None
+            if experience_id:
+                activity_journal = None
+                try:
+                    activity_journal = NotionActivityJournal()
+                    entry_snapshot = activity_journal.get_snapshot(experience_id)
+                except Exception as snapshot_exc:
+                    snapshot_read_error = type(snapshot_exc).__name__
+                finally:
+                    if activity_journal is not None:
+                        activity_journal.close()
+
+            snapshot_evidence = (
+                entry_snapshot.get("evidence")
+                if isinstance(entry_snapshot, dict) and isinstance(entry_snapshot.get("evidence"), dict)
+                else None
+            )
+            reviewer_states: dict[str, dict[str, Any]] = {}
+            review_record = None
+            if not experience_id:
+                skip_code = "EXPERIENCE_ID_MISSING"
+                skip_reason = "The local Demo order is not linked to a verified Challenge 1 experience."
+            elif snapshot_read_error:
+                skip_code = "ENTRY_SNAPSHOT_READ_FAILED"
+                skip_reason = f"Could not read the persisted entry evidence: {snapshot_read_error}"
+            elif not isinstance(snapshot_evidence, dict) or not snapshot_evidence:
+                skip_code = "ENTRY_SNAPSHOT_EVIDENCE_MISSING"
+                skip_reason = "The persisted entry journal has no Challenge 1 evidence for this experience."
+            else:
+                skip_code = ""
+                skip_reason = ""
+                review_record = {
+                    "instrument_id": instrument_id,
+                    "signal": side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                    "reason_fa": str(entry_snapshot.get("reason_fa") or ""),
+                    "entry_price_usd": order.get("entry_price"),
+                    "stop_loss_usd": order.get("stop_loss"),
+                    "take_profit_usd": order.get("take_profit"),
+                    "challenge1_evidence": snapshot_evidence,
+                }
+                cycle_context = {
+                    "cycle_id": monitor_cycle_id,
+                    "instrument_id": instrument_id,
+                    "position": position,
+                    "average_fill_price": (
+                        entry_snapshot.get("actual_entry_price")
+                        if isinstance(entry_snapshot, dict) and entry_snapshot.get("actual_entry_price") is not None
+                        else position.get("averagePrice")
+                    ),
+                    "filled_size": position.get("positions"),
+                    "execution_status": "OPEN_POSITION_MATCHED",
+                    "robot_decision": "EXIT_ELIGIBLE" if reason else "HOLD",
+                    "robot_reason": reason or "Profit exit conditions are not met.",
+                    "holding_seconds": holding_seconds,
+                    "market_direction": market_evidence.get("direction", "UNKNOWN"),
+                    "market_direction_source": market_evidence.get("source", "UNKNOWN"),
+                    "market_direction_evidence": market_evidence.get("candles", []),
+                    "protective_orders": protective_evidence,
+                    "risk_change": "NONE_BY_POSITION_MANAGER_CYCLE",
+                }
+                try:
+                    reviewer_states = schedule_position_observer_review(
+                        challenge_record=review_record,
+                        cycle_context=cycle_context,
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        order_id=str(order.get("exchange_order_id") or client_order_id),
+                        symbol=instrument_id,
+                        signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                    )
+                except Exception as observer_exc:
+                    skip_code = "OBSERVER_SCHEDULER_FAILED"
+                    skip_reason = f"Observer scheduler failed: {type(observer_exc).__name__}"
+                    reviewer_states = {}
+
+            if skip_code:
+                reviewer_states = {
+                    reviewer_id: {
+                        "status": "NOT_CALLED",
+                        "reason_code": skip_code,
+                        "request_attempted": False,
+                        "reason": skip_reason,
+                    }
+                    for reviewer_id in ("nemotron", "second_ai")
+                }
+
+            skip_audit_errors = []
+            for reviewer_id in ("nemotron", "second_ai"):
+                state = reviewer_states.get(reviewer_id)
+                state = state if isinstance(state, dict) else {
+                    "status": "NOT_CALLED",
+                    "reason_code": "REVIEWER_STATE_MISSING",
+                    "request_attempted": False,
+                }
+                reviewer_states[reviewer_id] = state
+                if str(state.get("status") or "").upper() in {"NOT_CALLED", "PENDING"}:
+                    try:
+                        record_position_observer_skip(
+                            experience_id=experience_id,
+                            position_id=audit_position_id,
+                            reviewer_id=reviewer_id,
+                            cycle_id=monitor_cycle_id,
+                            reason_code=str(state.get("reason_code") or "NOT_CALLED"),
+                            reason=str(state.get("reason") or state.get("reason_code") or "Observer was not called this cycle."),
+                            last_result=state,
+                        )
+                    except Exception as skip_exc:
+                        skip_audit_errors.append({
+                            "reviewer_id": reviewer_id,
+                            "error_type": type(skip_exc).__name__,
+                        })
+
+            exit_basis = {
+                "instrument_id": instrument_id, "position_id": audit_position_id,
+                "experience_id": experience_id,
+                "monitor_cycle_id": monitor_cycle_id,
+                "heartbeat_at_utc": datetime.now(timezone.utc).isoformat(),
+                "heartbeat_status": "ALIVE",
+                "manager_interval_seconds": 15,
+                "decision": "EXIT_ELIGIBLE" if reason else "HOLD",
+                "rule_engine": "BLOFIN_DEMO_PROFIT_EXIT_RULES",
+                "exit_reason": reason, "side": side_value,
+                "mark_price": mark_price_value,
+                "unrealized_pnl_usdt": pnl_value,
+                "loss_making_position": pnl_value is not None and pnl_value < 0,
+                "minimum_profit_usdt": minimum_profit,
+                "minimum_profit_passed": pnl_value is not None and pnl_value >= minimum_profit,
+                "stop_loss_price": stop_value,
+                "stop_loss_threshold_reached": stop_loss_threshold_reached,
+                "stop_loss_management": "EXCHANGE_PROTECTION_RECONCILIATION_ONLY_NO_MANUAL_CLOSE",
+                "take_profit": target_value,
+                "take_profit_reached": take_profit_reached,
+                "holding_seconds": holding_seconds,
+                "maximum_hold_seconds": maximum_hold,
+                "maximum_hold_reached": holding_seconds is not None and holding_seconds >= maximum_hold,
+                "market_direction": market_evidence.get("direction", "UNKNOWN"),
+                "market_evidence": market_evidence,
+                "protective_orders": protective_evidence,
+                "reviewer_states": reviewer_states,
+                "reviewer_skip_audit_errors": skip_audit_errors,
+                "observer_review_policy": "TWO_INDEPENDENT_POST_DECISION_AUDIT_REVIEWERS",
+                "observer_execution_effect": "NONE",
+                "observer_evidence_source": "PERSISTED_NOTION_ACTIVITY_JOURNAL",
+            }
+            try:
+                audit_result = record_position_monitor_cycle(
+                    experience_id=experience_id,
+                    position_id=audit_position_id,
+                    order_id=str(order.get("exchange_order_id") or client_order_id),
+                    symbol=instrument_id,
+                    signal=side_value if side_value in {"LONG", "SHORT"} else "UNKNOWN",
+                    cycle_details=exit_basis,
+                    cycle_epoch_ms=cycle_epoch_ms,
+                )
+                if audit_result.get("status") != "RECORDED":
+                    raise RuntimeError("POSITION_CYCLE_AUDIT_NOT_RECORDED")
+                if skip_audit_errors:
+                    raise RuntimeError("POSITION_OBSERVER_SKIP_AUDIT_INCOMPLETE")
+            except Exception as audit_exc:
+                actions.append({
+                    "status": "AUDIT_WRITE_FAILED", "instrument_id": instrument_id,
+                    "position_id": position_id, "error_type": type(audit_exc).__name__,
+                    "message_fa": "ثبت کامل چرخه پایش یا وضعیت عدم فراخوانی ناظرها تأیید نشد؛ درخواست خروج جدید ارسال نشد.",
+                })
+                continue
+            if not reason:
+                if stop_loss_threshold_reached:
+                    protection_status = str(protective_evidence.get("status") or "").upper()
+                    verified_sl_present = protection_status in {
+                        "BOTH_TP_AND_SL_VISIBLE", "SL_ONLY_VISIBLE",
+                    }
+                    verified_sl_absent = protection_status in {
+                        "NOT_VERIFIED_NO_EXACT_POSITION_LINK",
+                        "TP_ONLY_VISIBLE",
+                        "MATCHED_ORDER_WITHOUT_VALID_TP_SL_PRICES",
+                    }
+                    if verified_sl_absent:
+                        try:
+                            _record_challenge1_audit(
+                                experience_id or position_id, "RISK_OVERRIDE_EXIT_AUTHORIZED",
+                                {
+                                    **exit_basis,
+                                    "decision": "CLOSE_DEMO_POSITION",
+                                    "precondition": (
+                                        "Exact linked position matched, mark crossed stored stop, "
+                                        "and no active exchange SL could be verified."
+                                    ),
+                                    "protective_order_status": protection_status,
+                                    "loss_exit_permitted": True,
+                                },
+                                event_key=f"risk-override-exit:{audit_position_id}:{cycle_epoch_ms}",
+                                experience_id=experience_id, position_id=audit_position_id,
+                                status="WARNING",
+                                reason="Stop threshold crossed without verifiable exchange SL; exact-position risk override requested.",
+                            )
+                            close_result = _blofin_manual_close_position(
+                                instrument_id=instrument_id,
+                                position_id=position_id,
+                                action_source="RISK_OVERRIDE",
+                                audit_id=client_order_id,
+                                exit_reason="STOP_LOSS_CROSSED_WITHOUT_VERIFIED_SL",
+                            )
+                            actions.append({
+                                "status": "RISK_OVERRIDE_CLOSE_REQUESTED",
+                                "instrument_id": instrument_id,
+                                "position_id": position_id,
+                                "stop_loss_price": stop_value,
+                                "mark_price": mark_price_value,
+                                "protective_orders": protective_evidence,
+                                "exchange_response": close_result.get("exchange_response"),
+                                "position_cycle_audit": audit_result,
+                            })
+                        except Exception as close_exc:
+                            actions.append({
+                                "status": "RISK_OVERRIDE_CLOSE_NOT_CONFIRMED",
+                                "instrument_id": instrument_id,
+                                "position_id": position_id,
+                                "error_type": type(close_exc).__name__,
+                                "protective_orders": protective_evidence,
+                                "position_cycle_audit": audit_result,
+                            })
+                        continue
+                    actions.append({
+                        "status": (
+                            "STOP_LOSS_LEVEL_CROSSED_AWAIT_EXCHANGE_SL"
+                            if verified_sl_present
+                            else "STOP_LOSS_LEVEL_CROSSED_PROTECTION_STATE_UNKNOWN"
+                        ),
+                        "instrument_id": instrument_id,
+                        "position_id": position_id,
+                        "stop_loss_price": stop_value,
+                        "mark_price": mark_price_value,
+                        "protective_orders": protective_evidence,
+                        "position_cycle_audit": audit_result,
+                    })
+                    continue
+                actions.append({
+                    "status": "HOLD_UNTIL_PROFIT_EXIT",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "unrealized_pnl_usdt": position.get("unrealizedPnl"),
+                    "minimum_profit_usdt": minimum_profit,
+                    "position_cycle_audit": audit_result,
+                })
+                continue
+
+            try:
+                _record_challenge1_audit(
+                    experience_id or position_id, "EXIT_REQUEST_AUTHORIZED",
+                    {
+                        **exit_basis, "decision": "CLOSE_DEMO_POSITION",
+                        "precondition": "Exact linked position ID matched and minimum profit rule passed.",
+                    },
+                    event_key=f"exit-request:{audit_position_id}:{reason}",
+                    experience_id=experience_id, position_id=audit_position_id,
+                    status="SUCCESS", reason=f"Automatic Demo close request authorized by exit rule: {reason}",
+                )
+                close_result = _blofin_manual_close_position(
+                    instrument_id=instrument_id,
+                    position_id=position_id,
+                    action_source="AUTOPILOT",
+                    audit_id=client_order_id,
+                    exit_reason=reason,
+                )
+                actions.append({
+                    "status": close_result.get("status"),
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "unrealized_pnl_usdt_at_request": close_result.get(
+                        "unrealized_pnl_usdt_at_confirmation"
+                    ),
+                    "exchange_response": close_result.get("exchange_response"),
+                    "position_cycle_audit": audit_result,
+                })
+            except BloFinDemoExecutionBlocked as exc:
+                try:
+                    _record_challenge1_audit(
+                        experience_id or position_id,
+                        "EXIT_REQUEST_REJECTED",
+                        {
+                            **exit_basis,
+                            "decision": "EXIT_NOT_SUBMITTED",
+                            "rejection_reason_fa": str(exc)[:1000],
+                            "orders_submitted": False,
+                        },
+                        event_key=f"exit-request-rejected:{audit_position_id}:{reason}",
+                        experience_id=experience_id,
+                        position_id=audit_position_id,
+                        status="WARNING",
+                        reason=str(exc)[:1200],
+                    )
+                except Exception:
+                    pass
+                actions.append({
+                    "status": "AUTO_EXIT_NOT_SUBMITTED",
+                    "instrument_id": instrument_id,
+                    "position_id": position_id,
+                    "exit_reason": reason,
+                    "reason_fa": str(exc),
+                })
+
+        return {
+            "status": "PASS",
+            "managed_positions": managed,
+            "actions": actions,
+            "minimum_profit_usdt": minimum_profit,
+            "maximum_hold_seconds": maximum_hold,
+            "message_fa": (
+                "مدیر خروج فقط پوزیشن‌های دقیقاً لینک‌شده به سفارش ربات را بررسی می‌کند؛ "
+                "خروج خودکار فقط با رسیدن به حد سود یا پایان زمان نگهداری و سود شناور کافی انجام می‌شود."
+            ),
+        }
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+def _blofin_demo_position_manager_worker() -> None:
+    """Persistent Demo-only profit manager; independent from the new-entry AutoPilot switch."""
+    while True:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        try:
+            result = _blofin_demo_position_manager_cycle()
+            with LOCK:
+                BLOFIN_POSITION_MANAGER_STATE.update({
+                    "status": result.get("status", "UNKNOWN"),
+                    "last_check_at_utc": checked_at,
+                    "last_action": result.get("actions", []),
+                    "last_message_fa": result.get("message_fa", "مدیر خروج بررسی را انجام داد."),
+                    "readiness_status": result.get("readiness_status"),
+                    "readiness_blockers": list(result.get("readiness_blockers") or []),
+                    "trade_permission_status": result.get("trade_permission_status", "UNKNOWN"),
+                    "credential_source": result.get("credential_source"),
+                    "trading_enabled": result.get("trading_enabled"),
+                    "dashboard_auth_configured": result.get("dashboard_auth_configured"),
+                    "durable_storage": result.get("durable_storage"),
+                    "event_store_readable": result.get("event_store_readable"),
+                })
+        except Exception as exc:
+            with LOCK:
+                BLOFIN_POSITION_MANAGER_STATE.update({
+                    "status": "ERROR",
+                    "last_check_at_utc": checked_at,
+                    "last_error_type": type(exc).__name__,
+                    "last_message_fa": "مدیر خروج با خطای کنترل‌شده روبه‌رو شد؛ هیچ خروج تأییدنشده‌ای فرض نمی‌شود.",
+                })
+        time.sleep(15)
+
+def _start_blofin_demo_position_manager() -> None:
+    """Start at most one position manager loop in this Render process."""
+    global BLOFIN_POSITION_MANAGER_THREAD
+    with BLOFIN_POSITION_MANAGER_START_LOCK:
+        if BLOFIN_POSITION_MANAGER_THREAD is not None and BLOFIN_POSITION_MANAGER_THREAD.is_alive():
+            return
+        BLOFIN_POSITION_MANAGER_THREAD = threading.Thread(
+            target=_blofin_demo_position_manager_worker,
+            daemon=True,
+            name="blofin-demo-profit-manager",
+        )
+        BLOFIN_POSITION_MANAGER_THREAD.start()
+
+
+
+def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict) -> dict:
+    """Build one auditable Notion activity row from a real Challenge 1 symbol job."""
+    current = job if isinstance(job, dict) else {}
+    raw_result = current.get("result")
+    result = raw_result if isinstance(raw_result, dict) else {}
+    raw_analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else (
+        current.get("analysis") if isinstance(current.get("analysis"), dict) else {}
+    )
+    evidence = result.get("challenge1_evidence")
+    if not isinstance(evidence, dict):
+        evidence = raw_analysis.get("challenge1_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    experience_id = (
+        result.get("learning_experience_id")
+        or current.get("learning_experience_id")
+        or raw_analysis.get("learning_experience_id")
+    )
+    if not experience_id:
+        # Data-error jobs still get a unique audit row, but are not mislabelled
+        # as a verified LearningExperienceMemory record.
+        experience_id = "job-" + str(job_id)
+    signal = str(
+        result.get("signal")
+        or evidence.get("decision")
+        or raw_analysis.get("signal")
+        or "UNKNOWN"
+    ).upper()
+    if signal not in {"LONG", "SHORT", "NO_TRADE"}:
+        signal = "UNKNOWN"
+    positions = result.get("positions") if isinstance(result.get("positions"), list) else []
+    position = next(
+        (row for row in positions if isinstance(row, dict)
+         and str(row.get("instId") or "").upper() == str(instrument_id).upper()),
+        {},
+    )
+
+    # The successful execution result keeps a compact primary ai_review for the UI,
+    # while the full two-reviewer council stays at the job root. Prefer the complete
+    # reviewer records and preserve both independently in the activity journal.
+    raw_reviews = result.get("ai_reviews") if isinstance(result.get("ai_reviews"), list) else (
+        current.get("ai_reviews") if isinstance(current.get("ai_reviews"), list) else []
+    )
+    if not raw_reviews:
+        fallback = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
+            current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+        )
+        if fallback:
+            raw_reviews = [{
+                "reviewer_id": fallback.get("reviewer_id") or "nemotron",
+                "actor": "Nemotron Supervisor",
+                "review": fallback,
+            }]
+
+    ai_reviews = []
+    for item in raw_reviews[:2]:
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else item
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or "")
+        actor = str(item.get("actor") or (
+            "Nemotron Supervisor" if reviewer_id == "nemotron" else
+            "Second AI Supervisor" if reviewer_id == "second_ai" else
+            "AI Supervisor"
+        ))
+        request_attempted = review.get("request_attempted")
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        if request_attempted is None and review_status in {"NOT_CALLED", "NOT_CONFIGURED"}:
+            request_attempted = False
+        ai_reviews.append({
+            "reviewer_id": reviewer_id,
+            "actor": actor,
+            "status": review_status,
+            "provider": review.get("provider") or "",
+            "model": review.get("model") or "",
+            "returned_model": review.get("returned_model") or "",
+            "request_attempted": request_attempted,
+            "response_source": review.get("response_source") or "NONE",
+            "response_validated": review.get("response_validated") is True,
+            "model_verified": review.get("model_verified") is True,
+            "paper_entry_eligible": review.get("paper_entry_eligible") is True,
+            "skip_reason_code": review.get("skip_reason_code") or "",
+            "http_status": review.get("http_status"),
+            "latency_ms": review.get("latency_ms"),
+            "reason": (
+                review.get("rationale_fa") or review.get("reason")
+                or review.get("status_fa") or ""
+            ),
+        })
+
+    present_reviewers = {item["reviewer_id"] for item in ai_reviews if item.get("reviewer_id")}
+    for reviewer_id, actor in (
+        ("nemotron", "Nemotron Supervisor"),
+        ("second_ai", "Second AI Supervisor"),
+    ):
+        if reviewer_id not in present_reviewers:
+            ai_reviews.append({
+                "reviewer_id": reviewer_id,
+                "actor": actor,
+                "status": "NOT_CALLED",
+                "provider": "",
+                "model": "",
+                "returned_model": "",
+                "request_attempted": False,
+                "response_source": "NONE",
+                "response_validated": False,
+                "model_verified": False,
+                "paper_entry_eligible": False,
+                "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                "reason": (
+                    "این ناظر در این چرخه فراخوانی نشد؛ ربات پیش از مرحله بازبینی مستقل متوقف شد."
+                ),
+            })
+
+    raw_consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
+        current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
+    )
+    consensus = {
+        key: raw_consensus.get(key)
+        for key in (
+            "status", "primary_status", "second_status",
+            "primary_verified", "second_verified",
+            "primary_approved", "second_approved",
+            "two_reviewer_approval", "decision",
+        )
+        if key in raw_consensus
+    }
+    all_not_called = all(item.get("request_attempted") is False for item in ai_reviews)
+    reviewer_consensus = str(
+        consensus.get("status") or ("NOT_CALLED" if all_not_called else "NOT_COMPARABLE")
+    ).upper()
+    ai_status = (
+        "APPROVED_BY_BOTH"
+        if consensus.get("two_reviewer_approval") is True
+        and consensus.get("primary_verified") is True
+        and consensus.get("second_verified") is True
+        else "NOT_CALLED" if all_not_called
+        else reviewer_consensus
+    )
+    ai_model = " | ".join(
+        f"{item['reviewer_id'] or item['actor']}:{item['returned_model'] or item['model'] or 'UNKNOWN'}"
+        for item in ai_reviews
+    )[:300]
+    ai_reason = " | ".join(
+        f"{item['reviewer_id'] or item['actor']} {item['status']}: {item['reason']}"
+        for item in ai_reviews
+    )[:1600]
+
+    return {
+        "experience_id": str(experience_id),
+        "job_id": str(job_id),
+        "symbol": str(instrument_id).upper(),
+        "signal": signal,
+        "status": str(result.get("status") or current.get("stage") or current.get("status") or "UNKNOWN"),
+        "reason_fa": result.get("reason_fa") or current.get("message_fa") or "",
+        "analysis_time_utc": current.get("completed_at_utc") or current.get("updated_at_utc") or datetime.now(timezone.utc).isoformat(),
+        "signal_bar_open_utc": result.get("signal_bar_open_utc") or evidence.get("confirmation_candle", {}).get("open_time_utc") or evidence.get("confirmation_candle", {}).get("time_utc"),
+        "engine_version": evidence.get("decision_engine_version") or "CHALLENGE_1_UNKNOWN",
+        "patterns": evidence.get("detected_patterns") if isinstance(evidence.get("detected_patterns"), list) else [],
+        "chart_structure": json.dumps(evidence.get("chart_structure") or {}, ensure_ascii=False, sort_keys=True),
+        "volume_confirmation": evidence.get("volume_confirmation") if isinstance(evidence.get("volume_confirmation"), dict) else {},
+        "evidence": evidence,
+        "candles_5m": evidence.get("candles_5m") if isinstance(evidence.get("candles_5m"), list) else [],
+        "entry_price": result.get("entry_price_usd") or result.get("entry_price") or evidence.get("entry_price"),
+        "stop_loss": result.get("stop_loss_usd") or result.get("stop_loss"),
+        "take_profit": result.get("take_profit_usd") or result.get("take_profit"),
+        "actual_entry_price": result.get("average_fill_price") if result.get("trade_executed") is True else None,
+        "actual_entry_time_utc": result.get("filled_at_utc") if result.get("trade_executed") is True else None,
+        "actual_exit_price": None,
+        "actual_exit_time_utc": None,
+        "realized_net_pnl_usdt": None,
+        "reported_trading_fees_usdt": None,
+        "order_id": result.get("exchange_order_id") or result.get("order_id") or "",
+        "position_id": result.get("position_id") or position.get("positionId") or "",
+        "trade_executed": result.get("trade_executed") is True,
+        "orders_submitted": result.get("orders_submitted") is True,
+        "closed_confirmed": False,
+        "ai_status": ai_status or "NOT_CALLED",
+        "ai_model": ai_model,
+        "ai_reason": ai_reason,
+        "reviewer_consensus": reviewer_consensus,
+        "ai_consensus": consensus,
+        "ai_reviews": ai_reviews,
+        "source_url": (os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") + "/api/blofin/demo/autopilot/status") if os.getenv("RENDER_EXTERNAL_URL", "").strip() else "",
+    }
+
+def _queue_blofin_activity_journal(job_id: str, instrument_id: str, job: dict) -> dict:
+    """Persist the activity/market snapshot to Turso before Notion network sync."""
+    journal = None
+    try:
+        journal = NotionActivityJournal()
+        snapshot = _blofin_activity_journal_snapshot(job_id, instrument_id, job)
+        queued = journal.enqueue(snapshot)
+        return {"status": "QUEUED" if queued else "UNCHANGED", "experience_id": snapshot["experience_id"]}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if journal is not None:
+            journal.close()
+
+def _update_blofin_activity_after_close(
+    outcome: dict, instrument_id: str, position_id: str,
+    closed_rows: list, partial_rows: list,
+) -> dict:
+    """Update the same activity row only after full-size exchange history is reconciled."""
+    if not isinstance(outcome, dict) or outcome.get("status") != "RECORDED":
+        return {"status": "NOT_FINAL"}
+    experience_id = str(outcome.get("experience_id") or "")
+    journal = None
+    try:
+        journal = NotionActivityJournal()
+        snapshot = journal.get_snapshot(experience_id)
+        if not isinstance(snapshot, dict):
+            return {"status": "ACTIVITY_ROW_NOT_FOUND"}
+        matching = []
+        def finite_number(value):
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if math.isfinite(number) else None
+
+        for row in list(partial_rows or []) + list(closed_rows or []):
+            if not isinstance(row, dict):
+                continue
+            if (
+                str(row.get("positionId") or "") != str(position_id)
+                or str(row.get("instId") or "").upper() != str(instrument_id).upper()
+            ):
+                continue
+            quantity = finite_number(row.get("closePositions"))
+            price = finite_number(row.get("closeAveragePrice"))
+            if quantity is None or quantity <= 0 or price is None or price <= 0:
+                continue
+            matching.append((row, quantity, price))
+        total_quantity = sum(item[1] for item in matching)
+        if not matching or total_quantity <= 0:
+            return {"status": "EXIT_PRICE_UNAVAILABLE"}
+        weighted_exit = sum(quantity * price for _, quantity, price in matching) / total_quantity
+        exit_ms = max(
+            (int(row.get("updateTime") or row.get("createTime") or 0) for row, _, _ in matching),
+            default=0,
+        )
+        fee_total = 0.0
+        fee_values = [_blofin_safe_float(row.get("fee")) for row, _, _ in matching]
+        if fee_values and all(value is not None for value in fee_values):
+            fee_total = sum(value for value in fee_values if value is not None)
+        snapshot.update({
+            "actual_exit_price": weighted_exit,
+            "actual_exit_time_utc": (
+                datetime.fromtimestamp(exit_ms / 1000, tz=timezone.utc).isoformat()
+                if exit_ms > 0 else None
+            ),
+            "realized_net_pnl_usdt": outcome.get("realized_pnl_after_reported_trading_fees"),
+            "reported_trading_fees_usdt": fee_total,
+            "closed_confirmed": True,
+            "status": "CLOSED_RECONCILED",
+        })
+        _record_challenge1_audit(
+            experience_id, "EXIT_RECONCILED",
+            {
+                "instrument_id": instrument_id, "position_id": position_id,
+                "decision": "CLOSED_CONFIRMED_BY_BLOFIN_DEMO_HISTORY",
+                "actual_exit_price": weighted_exit,
+                "actual_exit_time_utc": snapshot.get("actual_exit_time_utc"),
+                "realized_net_pnl_usdt": snapshot.get("realized_net_pnl_usdt"),
+                "reported_trading_fees_usdt": fee_total,
+                "closed_confirmed": True, "exchange_outcome": outcome,
+                "reviewers_exit_status": "NOT_RUN_RULE_BASED_EXIT_MANAGER",
+            },
+            event_key=f"exit-reconciled:{position_id}:{exit_ms}",
+            experience_id=experience_id, position_id=position_id,
+            status="SUCCESS",
+            reason="Final exit price, exchange history and realized PnL were reconciled.",
+        )
+        journal.enqueue(snapshot)
+        return {"status": "QUEUED", "experience_id": experience_id}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error_type": type(exc).__name__}
+    finally:
+        if journal is not None:
+            journal.close()
+
+def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> list[dict]:
+    """Build one robot record and one independently attributable record per AI reviewer."""
+    current = job if isinstance(job, dict) else {}
+    result = current.get("result") if isinstance(current.get("result"), dict) else {}
+    summary = _blofin_autopilot_cycle_summary(current)
+    signal = summary.get("signal") or "UNKNOWN"
+    no_entry = bool(summary.get("no_entry"))
+    orders_submitted = bool(summary.get("orders_submitted"))
+    trade_executed = bool(summary.get("trade_executed"))
+    status = "SUCCESS" if str(current.get("status") or "").lower() == "completed" else "FAILED"
+    reason = result.get("reason_fa") or current.get("message_fa") or "No additional reason was supplied."
+    analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else (
+        current.get("analysis") if isinstance(current.get("analysis"), dict) else {}
+    )
+    reviews = result.get("ai_reviews") if isinstance(result.get("ai_reviews"), list) else (
+        current.get("ai_reviews") if isinstance(current.get("ai_reviews"), list) else []
+    )
+    if not reviews:
+        single = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else (
+            current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
+        )
+        if single:
+            reviews = [{"reviewer_id": single.get("reviewer_id") or "nemotron",
+                        "actor": "Nemotron Supervisor", "review": single}]
+    if reviews:
+        present_reviewers = {
+            str(item.get("reviewer_id") or (item.get("review") or {}).get("reviewer_id") or "").lower()
+            for item in reviews if isinstance(item, dict)
+        }
+        not_called_reason = (
+            "این ناظر در این چرخه فراخوانی نشد؛ نتیجهٔ عدم فراخوانی صریحاً ثبت شده است."
+        )
+        if "nemotron" not in present_reviewers:
+            reviews.append({
+                "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                "review": {
+                    "reviewer_id": "nemotron", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "REVIEWER_NOT_PRESENT",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": not_called_reason,
+                },
+            })
+        if not ({"second_ai", "second"} & present_reviewers):
+            reviews.append({
+                "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
+                "review": {
+                    "reviewer_id": "second_ai", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "REVIEWER_NOT_PRESENT",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": not_called_reason,
+                },
+            })
+
+    if not reviews:
+        blocked_stage = str(current.get("stage") or result.get("status") or "UNKNOWN")
+        blocked_reason = (
+            "هیچ فراخوانی خارجی برای این چرخه انجام نشد؛ ربات پیش از مرحله بازبینی AI "
+            f"در مرحله {blocked_stage} متوقف شد."
+        )
+        reviews = [
+            {
+                "reviewer_id": "nemotron",
+                "actor": "Nemotron Supervisor",
+                "review": {
+                    "reviewer_id": "nemotron", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": blocked_reason,
+                },
+            },
+            {
+                "reviewer_id": "second_ai",
+                "actor": "Second AI Supervisor",
+                "review": {
+                    "reviewer_id": "second_ai", "status": "NOT_CALLED",
+                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                    "response_source": "NONE", "response_validated": False,
+                    "model_verified": False, "paper_entry_eligible": False,
+                    "reason": blocked_reason,
+                },
+            },
+        ]
+
+    consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
+        current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
+    )
+    consensus_status = str(consensus.get("status") or "NOT_COMPARABLE").upper()
+    if not consensus:
+        verified = [
+            item.get("review", {}) for item in reviews
+            if isinstance(item, dict) and isinstance(item.get("review"), dict)
+            and item["review"].get("request_attempted") is True
+            and item["review"].get("response_validated") is True
+            and item["review"].get("model_verified") is True
+        ]
+        all_not_called = bool(reviews) and all(
+            isinstance(item, dict)
+            and isinstance(item.get("review"), dict)
+            and item["review"].get("request_attempted") is False
+            for item in reviews
+        )
+        consensus_status = (
+            "AGREEMENT" if len(verified) >= 2 and len({
+                str(item.get("status") or "").upper() for item in verified
+            }) == 1 else
+            "SINGLE_REVIEWER" if len(verified) == 1 else
+            "NOT_CALLED" if all_not_called else
+            "NOT_COMPARABLE"
+        )
+
+    reviewer_decisions = []
+    for item in reviews:
+        review = item.get("review") if isinstance(item, dict) and isinstance(item.get("review"), dict) else {}
+        verified = (
+            review.get("request_attempted") is True
+            and review.get("response_source") == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and bool(str(review.get("returned_model") or "").strip())
+        )
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        request_attempted = review.get("request_attempted")
+        if request_attempted is None and review_status in {"NOT_CALLED", "NOT_CONFIGURED"}:
+            request_attempted = False
+        if verified and review_status == "APPROVED" and review.get("paper_entry_eligible") is True:
+            reviewer_decisions.append("APPROVE")
+        elif verified and review_status in {"VETO", "REJECT"}:
+            reviewer_decisions.append("REJECT")
+        elif request_attempted is False:
+            reviewer_decisions.append("NOT_CALLED")
+        else:
+            reviewer_decisions.append("OBSERVE_ONLY")
+
+    if len(reviewer_decisions) >= 2 and all(x == "APPROVE" for x in reviewer_decisions):
+        ai_decision = "APPROVE"
+    elif "REJECT" in reviewer_decisions:
+        ai_decision = "REJECT"
+    elif reviewer_decisions and all(x == "NOT_CALLED" for x in reviewer_decisions):
+        ai_decision = "NOT_CALLED"
+    else:
+        ai_decision = "OBSERVE_ONLY"
+
+    order = result.get("order") if isinstance(result.get("order"), dict) else {}
+    order_id = (
+        result.get("exchange_order_id") or result.get("order_id")
+        or order.get("exchange_order_id") or order.get("order_id") or ""
+    )
+    positions = result.get("positions") if isinstance(result.get("positions"), list) else []
+    first_position = positions[0] if positions and isinstance(positions[0], dict) else {}
+    position_id = (
+        result.get("position_id") or first_position.get("positionId")
+        or first_position.get("position_id") or ""
+    )
+    experience_id = (
+        result.get("learning_experience_id")
+        or current.get("learning_experience_id")
+        or analysis.get("learning_experience_id")
+        or ""
+    )
+    error_record = current.get("error") if isinstance(current.get("error"), dict) else {}
+    details = {
+        "job_id": str(job_id),
+        "stage": current.get("stage"),
+        "job_status": current.get("status"),
+        "signal": signal,
+        "orders_submitted": orders_submitted,
+        "trade_executed": trade_executed,
+        "gate_pass_count": analysis.get("gate_pass_count"),
+        "gate_fail_count": analysis.get("gate_fail_count"),
+        "gate_unknown_count": analysis.get("gate_unknown_count"),
+        "result_status": result.get("status"),
+        "input_data_type": "LIVE_MARKET",
+        "reason": str(reason)[:1200],
+        "error_type": error_record.get("error_type") or error_record.get("type") or "",
+        "error_message": str(error_record.get("error_message") or "")[:1200],
+        "failed_operation": str(error_record.get("failed_operation") or "")[:160],
+        "execution_stage": str(error_record.get("execution_stage") or current.get("stage") or "")[:128],
+        "database_backend": str(error_record.get("database_backend") or "")[:64],
+        "error_trace_reference": str(error_record.get("error_trace_reference") or "")[:256],
+        "error_timestamp_utc": str(error_record.get("timestamp_utc") or "")[:64],
+    }
+    common = {
+        "cycle_id": str(job_id),
+        "occurred_at_utc": (
+            current.get("completed_at_utc") or current.get("updated_at_utc")
+            or datetime.now(timezone.utc).isoformat()
+        ),
+        "market": "Futures",
+        "symbol": str(instrument_id).upper(),
+        "timeframe": "5m",
+        "signal": signal if signal in {"LONG", "SHORT", "NO_TRADE"} else "UNKNOWN",
+        "experience_id": experience_id,
+        "order_id": order_id,
+        "position_id": position_id,
+        "source_url": (os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") + "/api/blofin/demo/autopilot/status") if os.getenv("RENDER_EXTERNAL_URL", "").strip() else "",
+        "input_data_type": "LIVE_MARKET",
+        "reviewer_consensus": consensus_status,
+    }
+    main_type = "NO_TRADE" if no_entry else "ANALYSIS_COMPLETED"
+    events = [{
+        **common,
+        "event_id": f"{job_id}:ROBOT:{main_type}",
+        "event_type": main_type,
+        "actor": "Robot",
+        "status": status,
+        "reason": str(reason)[:1600],
+        "details": json.dumps(details, ensure_ascii=False, sort_keys=True),
+        "ai_decision": ai_decision,
+    }]
+    if orders_submitted:
+        events.append({
+            **common, "event_id": f"{job_id}:ROBOT:ORDER_SUBMITTED",
+            "event_type": "ORDER_SUBMITTED", "actor": "Robot", "status": "SUCCESS",
+            "reason": "BloFin Demo accepted an order submission; exchange fill must be verified separately.",
+            "details": json.dumps({"job_id": job_id, "order_id": order_id}, ensure_ascii=False),
+            "ai_decision": ai_decision,
+        })
+    if trade_executed:
+        events.append({
+            **common, "event_id": f"{job_id}:BLOFIN:ORDER_FILLED",
+            "event_type": "ORDER_FILLED", "actor": "BloFin Demo", "status": "SUCCESS",
+            "reason": "A Demo fill was confirmed by the execution worker.",
+            "details": json.dumps({
+                "job_id": job_id,
+                "average_fill_price": result.get("average_fill_price"),
+                "filled_size": result.get("filled_size"),
+            }, ensure_ascii=False),
+            "ai_decision": ai_decision,
+        })
+
+    for index, item in enumerate(reviews):
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else {}
+        reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or f"reviewer_{index + 1}")
+        actor = str(item.get("actor") or (
+            "Nemotron Supervisor" if reviewer_id.lower() == "nemotron" else
+            "Second AI Supervisor" if reviewer_id.lower() in {"second_ai", "second"} else
+            "AI Supervisor"
+        ))
+        review_status = str(review.get("status") or "UNKNOWN").upper()
+        request_attempted = review.get("request_attempted")
+        if review_status == "PENDING" and request_attempted is None:
+            # Scheduled async review is not an actual NOT_CALLED response.
+            continue
+        if request_attempted is None and review_status in {"NOT_CALLED", "NOT_CONFIGURED"}:
+            request_attempted = False
+        response_source = str(review.get("response_source") or "NONE").upper()
+        response_validated = review.get("response_validated") is True
+        model_verified = review.get("model_verified") is True
+        verified_response = (
+            request_attempted is True and response_source == "LIVE_API"
+            and response_validated and model_verified
+            and bool(str(review.get("returned_model") or "").strip())
+        )
+        if verified_response and review_status == "APPROVED" and review.get("paper_entry_eligible") is True:
+            reviewer_decision = "APPROVE"
+            event_type = "AI_APPROVAL"
+        elif verified_response and review_status in {"VETO", "REJECT"}:
+            reviewer_decision = "REJECT"
+            event_type = "AI_VETO"
+        elif request_attempted is False:
+            reviewer_decision = "NOT_CALLED"
+            event_type = "AI_REVIEW_REQUESTED"
+        else:
+            reviewer_decision = "OBSERVE_ONLY"
+            event_type = "AI_RECOMMENDATION"
+
+        call_status = (
+            "CALLED" if request_attempted is True else
+            "NOT_CONFIGURED" if review_status == "NOT_CONFIGURED" else
+            "NOT_CALLED" if request_attempted is False else
+            "ERROR" if review_status == "ERROR" else "UNKNOWN"
+        )
+        validation_status = (
+            "VALID" if verified_response else
+            "INVALID" if request_attempted is True and response_source == "LIVE_API" else
+            "NOT_RUN" if request_attempted is False else "UNKNOWN"
+        )
+        actual_model = str(review.get("returned_model") or "") if verified_response else ""
+        review_reason = review.get("reason") or review.get("status_fa") or reason
+        event_details = {
+            "job_id": str(job_id),
+            "reviewer_id": reviewer_id,
+            "reviewer_status": review_status,
+            "configured_model": review.get("model") or review.get("configured_model"),
+            "returned_model": review.get("returned_model"),
+            "request_attempted": request_attempted,
+            "skip_reason_code": review.get("skip_reason_code"),
+            "response_source": response_source,
+            "response_validated": response_validated,
+            "model_verified": model_verified,
+            "http_status": review.get("http_status"),
+            "latency_ms": review.get("latency_ms"),
+            "total_tokens": review.get("total_tokens"),
+            "paper_entry_eligible": review.get("paper_entry_eligible"),
+            "native_council": review.get("native_council"),
+            "error_type": review.get("error_type"),
+            "error_code": review.get("error_code"),
+            "consensus": consensus,
+        }
+        events.append({
+            **common,
+            "event_id": f"{job_id}:AI:{reviewer_id}:{event_type}",
+            "event_type": event_type,
+            "actor": actor,
+            "status": "SUCCESS" if verified_response else "WARNING",
+            "ai_decision": reviewer_decision,
+            "ai_model": actual_model,
+            "reviewer_id": reviewer_id,
+            "ai_provider": review.get("provider") or "",
+            "ai_prompt_version": review.get("prompt_version") or "",
+            "ai_requested_at_utc": review.get("requested_at_utc") or review.get("request_started_at_utc"),
+            "ai_completed_at_utc": review.get("completed_at_utc"),
+            "ai_call_status": call_status,
+            "ai_validation": validation_status,
+            "ai_analysis": review.get("rationale_fa") or review.get("reason") or "",
+            "ai_suggestion": review.get("final_rating") or review.get("status_fa") or review_status,
+            "reason": str(review_reason)[:1600],
+            "details": json.dumps(event_details, ensure_ascii=False, sort_keys=True, default=str),
+        })
+
+    if consensus_status == "DISAGREEMENT":
+        events.append({
+            **common,
+            "event_id": f"{job_id}:AI:COUNCIL:AI_DISAGREEMENT",
+            "event_type": "AI_DISAGREEMENT",
+            "actor": "AI Supervisor",
+            "status": "WARNING",
+            "ai_decision": "OBSERVE_ONLY",
+            "reviewer_id": "COUNCIL",
+            "reviewer_consensus": "DISAGREEMENT",
+            "ai_call_status": "CALLED",
+            "ai_validation": "VALID",
+            "input_data_type": "LIVE_MARKET",
+            "reason": "دو ناظر مستقل به نتیجه یکسان نرسیدند؛ این گزارش صرفاً نظارتی است و مانع ورود یا مدیریت پوزیشن Challenge 1 نمی‌شود.",
+            "details": json.dumps({
+                "job_id": str(job_id),
+                "nemotron_status": consensus.get("primary_status"),
+                "second_ai_status": consensus.get("second_status"),
+                "decision": "OBSERVE_ONLY",
+                "orders_submitted": orders_submitted,
+                "trade_executed": trade_executed,
+            }, ensure_ascii=False, sort_keys=True),
+        })
+    return events
+
+def _queue_blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> dict:
+    """Persist the event/outbox before attempting any non-critical Notion network I/O."""
+    outbox = None
+    queued = 0
+    try:
+        outbox = NotionEventOutbox()
+        for event in _blofin_job_notion_events(job_id, instrument_id, job):
+            queued += int(outbox.enqueue(event))
+        return {"status": "QUEUED", "queued": queued}
+    except Exception as exc:
+        # Notion observability is intentionally fail-open for the trading engine.
+        return {"status": "UNAVAILABLE", "queued": queued, "error_type": type(exc).__name__}
+    finally:
+        if outbox is not None:
+            outbox.close()
+
+
+NOTION_SYNC_THREAD = None
+NOTION_SYNC_START_LOCK = threading.Lock()
+NOTION_EVENT_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "synced": 0,
+    "failed": 0,
+    "retrying": 0,
+    "last_error_type": None,
+    "last_http_status": None,
+    "recent_errors": [],
+    "last_worker_error_type": None,
+    "last_checked_at_utc": None,
+}
+NOTION_ACTIVITY_SYNC_STATE = {
+    "status": "STARTING",
+    "pending": 0,
+    "synced": 0,
+    "failed": 0,
+    "last_success_utc": None,
+    "latest_experience_id": None,
+    "last_error_type": None,
+    "last_http_status": None,
+    "last_checked_at_utc": None,
+}
+
+def _record_notion_event_sync_state(
+    result: dict | None = None, *, error_type: str | None = None,
+) -> dict:
+    """Publish outbox retry details and worker errors without exposing credentials."""
+    with LOCK:
+        NOTION_EVENT_SYNC_STATE["last_checked_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if isinstance(result, dict):
+            NOTION_EVENT_SYNC_STATE.update(copy.deepcopy(result))
+            NOTION_EVENT_SYNC_STATE["last_worker_error_type"] = None
+        elif error_type:
+            NOTION_EVENT_SYNC_STATE.update({
+                "status": "WORKER_ERROR",
+                "last_worker_error_type": str(error_type)[:100],
+            })
+        return copy.deepcopy(NOTION_EVENT_SYNC_STATE)
+
+
+def _notion_sync_worker() -> None:
+    """Flush pending outbox events while the Demo web process is awake."""
+    try:
+        interval = int(os.getenv("NOTION_SYNC_INTERVAL_SECONDS", "30"))
+    except (TypeError, ValueError):
+        interval = 30
+    interval = max(15, min(interval, 300))
+    while True:
+        outbox = None
+        activity_journal = None
+        event_sync_result = None
+        event_sync_error = None
+        try:
+            outbox = NotionEventOutbox()
+            event_sync_result = outbox.flush_pending(limit=10)
+        except Exception as exc:
+            # A temporary Notion/Turso outage must not stop trading, but it must
+            # remain visible in the operational status endpoint.
+            event_sync_error = type(exc).__name__
+        finally:
+            if outbox is not None:
+                outbox.close()
+        _record_notion_event_sync_state(event_sync_result, error_type=event_sync_error)
+        activity_sync_result = None
+        activity_sync_error = None
+        try:
+            activity_journal = NotionActivityJournal()
+            activity_sync_result = activity_journal.flush_pending(limit=3)
+        except Exception as exc:
+            # Chart/file sync is retryable and must never interrupt market analysis.
+            activity_sync_error = type(exc).__name__
+        finally:
+            if activity_journal is not None:
+                activity_journal.close()
+        with LOCK:
+            NOTION_ACTIVITY_SYNC_STATE["last_checked_at_utc"] = datetime.now(timezone.utc).isoformat()
+            if isinstance(activity_sync_result, dict):
+                NOTION_ACTIVITY_SYNC_STATE.update(activity_sync_result)
+                NOTION_ACTIVITY_SYNC_STATE["last_worker_error_type"] = None
+            elif activity_sync_error:
+                NOTION_ACTIVITY_SYNC_STATE["status"] = "WORKER_ERROR"
+                NOTION_ACTIVITY_SYNC_STATE["last_worker_error_type"] = activity_sync_error
+        time.sleep(interval)
+
+
+
+def _start_notion_sync_worker() -> None:
+    """Start a single best-effort outbox flusher for this web process."""
+    global NOTION_SYNC_THREAD
+    with NOTION_SYNC_START_LOCK:
+        if NOTION_SYNC_THREAD is not None and NOTION_SYNC_THREAD.is_alive():
+            return
+        NOTION_SYNC_THREAD = threading.Thread(
+            target=_notion_sync_worker,
+            daemon=True,
+            name="notion-event-outbox-sync",
+        )
+        NOTION_SYNC_THREAD.start()
+
+
+def main():
+    port = int(os.getenv("PORT", "10000"))
+    host = os.getenv("HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((host, port), Handler)
+    role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
+    if role == "WEB":
+        _start_notion_sync_worker()
+        _start_blofin_demo_position_manager()
+    _start_blofin_demo_autopilot()
+    print(f"CRYPTO SUPER RADAR listening on {host}:{port}")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
++net.toFixed(2)+' (کارمزد تخمینی؛ بدون لغزش)';
+            }
+            async function manualTradeRequest(path,payload){
+              const token=manualTrade.token.value.trim();if(!token)throw new Error('ابتدا توکن پنل را وارد کن.');
+              const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload),cache:'no-store'});
+              const result=await response.json();if(!response.ok)throw new Error(result.message_fa||result.status||('HTTP '+response.status));return result;
+            }
+            async function submitManualWave(side){
+              manualTrade.long.disabled=true;manualTrade.short.disabled=true;manualTrade.status.textContent='در حال بررسی مجوز و وضعیت حساب BloFin Demo...';manualTrade.result.textContent='';
+              try{
+                const payload={instrument_id:manualLastInstrument,side,margin_usdt:Number(manualTrade.margin.value),leverage:Number(manualTrade.leverage.value),tpTriggerPrice:Number(manualTrade.tp.value),slTriggerPrice:Number(manualTrade.sl.value)};
+                const result=await manualTradeRequest('/api/blofin-demo/manual-wave-order',payload);
+                manualTrade.result.textContent=JSON.stringify(result,null,2);
+                manualTrade.status.textContent='پاسخ صرافی: '+result.status+' · شناسه سفارش: '+(result.exchange_order_id||result.client_order_id||'نامشخص')+' · فعال بودن TP/SL را در حساب BloFin بررسی کن.';
+                manualTrade.close.disabled=false;
+              }catch(error){manualTrade.status.textContent='سفارش ارسال نشد یا نتیجه قابل تأیید نیست: '+String(error.message||error);}
+              finally{manualTrade.long.disabled=false;manualTrade.short.disabled=false;}
+            }
+            manualTrade.long.addEventListener('click',()=>submitManualWave('LONG'));
+            manualTrade.short.addEventListener('click',()=>submitManualWave('SHORT'));
+            manualTrade.close.addEventListener('click',async()=>{
+              if(!window.confirm('پوزیشن باز همین نماد در حساب BloFin Demo با قیمت بازار بسته شود؟'))return;
+              manualTrade.close.disabled=true;manualTrade.status.textContent='در حال شناسایی پوزیشن دقیق و ارسال درخواست بستن...';
+              try{const result=await manualTradeRequest('/api/blofin-demo/manual-wave-close',{instrument_id:manualLastInstrument,position_side:'net'});
+                manualTrade.result.textContent=JSON.stringify(result,null,2);manualTrade.status.textContent=result.message_fa||'درخواست بستن به صرافی ارسال شد.';
+              }catch(error){manualTrade.status.textContent='بستن پوزیشن انجام نشد: '+String(error.message||error);manualTrade.close.disabled=false;}
+            });
+            [manualTrade.margin,manualTrade.leverage,manualTrade.tp].forEach(input=>input.addEventListener('input',()=>updateManualProfit(Number(document.getElementById('live-radar-current-price')?.textContent||0))));
+            function updateEasyTraderRobot(analysis,signal,symbolValue,intervalValue){
+              if(!easyRobot.root)return;
+              const items=Array.isArray(analysis&&analysis.candlestick_patterns)?analysis.candlestick_patterns:[];
+              const rank=x=>x.state==='CONFIRMED'?2:(x.state==='NEEDS_CONFIRMATION'||x.state==='FORMING'?1:0);
+              const pattern=items.slice().sort((a,b)=>rank(b)-rank(a)||Math.abs(Number(b.score)||0)-Math.abs(Number(a.score)||0))[0];
+              const dir=pattern?(pattern.direction==='NEUTRAL'&&pattern.potential_direction?pattern.potential_direction:pattern.direction):'UNKNOWN';
+              const faDir={BULLISH:'صعودی',BEARISH:'نزولی',NEUTRAL:'خنثی',UNKNOWN:'نامشخص'}[dir]||'نامشخص';
+              const state=pattern?({CONFIRMED:'تأییدشده',NEEDS_CONFIRMATION:'در انتظار تأیید کندل بعدی',FORMING:'در حال شکل‌گیری'}[pattern.state]||'نامشخص'):'الگوی معتبر شناسایی نشد';
+              const sig=String(signal&&signal.signal||'UNKNOWN').toUpperCase();
+              const faSig={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'سیگنال نامشخص'}[sig]||'سیگنال نامشخص';
+              const tone=sig==='BUY'?'bullish':sig==='SELL'?'bearish':sig==='WAIT'?'neutral':'unknown';
+              easyRobot.pattern.textContent=pattern?((pattern.name_fa||pattern.name_en||'الگوی کندلی')+' · '+(pattern.name_en||'')):'در کندل بسته‌شده الگوی شاخصی شناسایی نشد';
+              easyRobot.direction.textContent='جهت الگو: '+faDir;easyRobot.direction.dataset.tone=dir==='BULLISH'?'bullish':dir==='BEARISH'?'bearish':'neutral';
+              easyRobot.signal.textContent='سیگنال موتور: '+faSig;easyRobot.signal.dataset.tone=tone;
+              easyRobot.confirmation.textContent='وضعیت الگو: '+state;easyRobot.confirmation.dataset.tone=pattern&&pattern.state==='CONFIRMED'?'bullish':pattern?'neutral':'unknown';
+              easyRobot.market.textContent='بازار: '+(symbolValue||'—')+' · '+(intervalValue||'—');
+            }
+            const number=v=>v===null||v===undefined?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:8});
+            const faDirection=v=>({BULLISH:'صعودی',BEARISH:'نزولی',NEUTRAL:'خنثی',UNKNOWN:'نامشخص'}[v]||v||'نامشخص');
+            const faState=v=>({CONFIRMED:'تأییدشده',FORMING:'در حال شکل‌گیری',NEEDS_CONFIRMATION:'نیازمند تأیید',CANDIDATE:'سناریوی ساختاری',AMBIGUOUS:'مبهم',UNKNOWN:'نامشخص'}[v]||v||'نامشخص');
+            function renderPatternList(target,items,emptyText){
+              if(!target)return;target.replaceChildren();
+              if(!Array.isArray(items)||!items.length){
+                const empty=document.createElement('p');empty.className='live-radar-note';empty.textContent=emptyText;target.appendChild(empty);return;
+              }
+              items.forEach(item=>{
+                const card=document.createElement('article');card.className='live-pattern-item';
+                const title=document.createElement('strong');
+                const displayDirection=item.direction==='NEUTRAL'&&item.potential_direction?'گرایش '+faDirection(item.potential_direction):faDirection(item.direction);
+                title.textContent=(item.name_fa||item.name_en||'الگوی ناشناخته')+' · '+displayDirection;
+                const meta=document.createElement('p');meta.className='live-pattern-meta';
+                meta.textContent=faState(item.state)+' · قدرت شواهد: '+(item.evidence_strength||'نامشخص')+
+                  (item.score?' · امتیاز: '+item.score:'');
+                const detail=document.createElement('p');detail.className='live-pattern-detail';detail.textContent=item.description||'شرح الگو موجود نیست.';
+                card.append(title,meta,detail);
+                if(item.trigger_price!==null&&item.trigger_price!==undefined){
+                  const trigger=document.createElement('p');trigger.className='live-pattern-meta';
+                  trigger.textContent='سطح ماشه/شکست: '+number(item.trigger_price);card.appendChild(trigger);
+                }
+                target.appendChild(card);
+              });
+            }
+            function renderFlow(flow){
+              flow=flow||{};const p=flow.pressure||{},a=flow.aggressor_flow||{},book=flow.order_book||{},whale=flow.whale_flow||{};
+              const buy=p.buy_pct===null||p.buy_pct===undefined?50:Math.max(0,Math.min(100,Number(p.buy_pct)||0));
+              const sell=p.sell_pct===null||p.sell_pct===undefined?50:Math.max(0,Math.min(100,Number(p.sell_pct)||0));
+              fields.flowBuyBar.style.width=buy+'%';fields.flowSellBar.style.width=sell+'%';
+              fields.flowBuyLabel.textContent='خرید تخمینی: '+number(p.buy_pct)+'% · '+number(p.buy_quote)+' USDT';
+              fields.flowSellLabel.textContent='فروش تخمینی: '+number(p.sell_pct)+'% · '+number(p.sell_quote)+' USDT';
+              fields.flowVolume.textContent='حجم دلاری کندل: '+number(flow.current_quote_volume)+' USDT';
+              fields.flowRvol.textContent='RVOL: '+number(flow.rvol)+'x · '+({EXTREME:'بسیار غیرعادی',HIGH:'بالا',NORMAL:'عادی',UNKNOWN:'نامشخص'}[flow.volume_state]||'نامشخص');
+              fields.flowCvd.textContent='دلتا معاملات واقعی: '+number(a.net_delta_quote)+' USDT';
+              fields.flowBook.textContent='عدم‌تعادل عمق ۲۰ سطح: '+number(book.imbalance_pct)+'%';
+              fields.whaleBias.textContent=(whale.label||'جریان معاملات بزرگ نامشخص')+' · امتیاز '+number(whale.score);
+              fields.whaleEvidence.textContent=(whale.evidence||[]).join(' · ')+' · '+(flow.disclaimer||'');
+              fields.whaleTrades.replaceChildren();
+              const events=flow.large_trades||[];
+              if(!events.length){const empty=document.createElement('span');empty.className='live-radar-note';empty.textContent='در پنجرهٔ معاملات اخیر، معامله‌ای بالاتر از آستانهٔ تطبیقی شناسایی نشد.';fields.whaleTrades.appendChild(empty);}
+              events.forEach(event=>{
+                const card=document.createElement('article');card.className='live-flow-event '+(event.side==='BUY'?'buy':'sell');
+                const side=event.side==='BUY'?'خرید تهاجمی':'فروش تهاجمی';
+                const time=event.timestamp_ms?new Date(event.timestamp_ms).toLocaleTimeString():'زمان نامشخص';
+                card.textContent=side+' · '+number(event.quote_value)+' USDT · قیمت '+number(event.price)+' · '+time;
+                fields.whaleTrades.appendChild(card);
+              });
+            }
+            let busy=false,lastSignalKey=null,timer=null;
+            function draw(data){
+              const bars=data.candles||[];
+              ctx.clearRect(0,0,canvas.width,canvas.height);
+              ctx.fillStyle='#07131f';ctx.fillRect(0,0,canvas.width,canvas.height);
+              if(!bars.length){ctx.fillStyle='#ffc66d';ctx.font='18px sans-serif';ctx.fillText('کندل معتبر برای نمایش در دسترس نیست',24,40);return;}
+              const pad={left:82,right:190,top:42,bottom:142};
+              const rawMin=Math.min.apply(null,bars.map(x=>x.low));
+              const rawMax=Math.max.apply(null,bars.map(x=>x.high));
+              const rawSpread=Math.max(rawMax-rawMin,Math.abs(rawMax)*0.0001,1e-9);
+              const min=rawMin-rawSpread*.10,max=rawMax+rawSpread*.10,spread=max-min;
+              const y=v=>canvas.height-pad.bottom-(v-min)/spread*(canvas.height-pad.top-pad.bottom);
+              const slot=(canvas.width-pad.left-pad.right)/bars.length;
+              const x=i=>pad.left+(i+.5)*slot;
+              const indexByTime=new Map(bars.map((bar,i)=>[bar.time,i]));
+              const analysis=data.market_analysis||{},direction=analysis.direction||{},divergence=direction.divergence||{};
+              const divType=divergence.type||'NONE';
+              const divIndexes=new Set();
+              [divergence.price_pivot_1_time,divergence.price_pivot_2_time].forEach(ts=>{
+                const key=ts?Date.parse(ts):NaN;
+                if(Number.isFinite(key)){const idx=indexByTime.get(key);if(idx!==undefined)divIndexes.add(idx);}
+              });
+              [divergence.price_pivot_1_index,divergence.price_pivot_2_index].forEach(idx=>{
+                if(Number.isInteger(idx)&&idx>=0&&idx<bars.length)divIndexes.add(idx);
+              });
+              const levels=[
+                {name:'سقف بازه',value:rawMax,color:'#ffb454',dash:[7,5]},
+                {name:'خط میانی بازه',value:(rawMax+rawMin)/2,color:'#74b7ff',dash:[4,5]},
+                {name:'کف بازه',value:rawMin,color:'#42d6a0',dash:[7,5]}
+              ];
+              levels.forEach(level=>{
+                const yy=y(level.value);
+                ctx.save();ctx.strokeStyle=level.color;ctx.lineWidth=1.8;ctx.setLineDash(level.dash);
+                ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right+8,yy);ctx.stroke();ctx.restore();
+                ctx.fillStyle=level.color;ctx.font='bold 13px sans-serif';
+                ctx.fillText(level.name,canvas.width-pad.right+16,yy-5);
+                ctx.font='12px sans-serif';ctx.fillText(number(level.value),canvas.width-pad.right+16,yy+13);
+              });
+              ctx.strokeStyle='#274156';ctx.lineWidth=1;
+              for(let k=0;k<=4;k++){
+                const value=max-k*spread/4,yy=y(value);
+                ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right,yy);ctx.stroke();
+                ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';ctx.fillText(number(value),4,yy+4);
+              }
+              bars.forEach((bar,i)=>{
+                const xx=x(i),up=bar.close>=bar.open;
+                const baseColor=up?'#53d6a0':'#ff7b85';
+                const special=bar.is_closed&&divIndexes.has(i);
+                const color=special?(divType==='BULLISH'?'#00f0a0':'#ff3d83'):baseColor;
+                if(special){
+                  ctx.save();ctx.fillStyle=divType==='BULLISH'?'rgba(0,240,160,.18)':'rgba(255,61,131,.20)';
+                  ctx.fillRect(xx-slot*.43,pad.top,slot*.86,canvas.height-pad.top-pad.bottom);
+                  ctx.shadowColor=color;ctx.shadowBlur=18;ctx.strokeStyle=color;ctx.lineWidth=3;
+                  ctx.strokeRect(xx-Math.max(4,slot*.42),y(Math.max(bar.open,bar.close))-5,
+                    Math.max(8,slot*.84),Math.max(10,Math.abs(y(bar.open)-y(bar.close))+10));ctx.restore();
+                }
+                ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=special?3:Math.max(1,slot*.12);
+                ctx.beginPath();ctx.moveTo(xx,y(bar.high));ctx.lineTo(xx,y(bar.low));ctx.stroke();
+                const top=y(Math.max(bar.open,bar.close)),bottom=y(Math.min(bar.open,bar.close));
+                const bodyW=Math.max(1,Math.min(12,slot*.66));
+                ctx.fillRect(xx-bodyW/2,top,bodyW,Math.max(1,bottom-top));
+                if(special){
+                  ctx.fillStyle=color;ctx.font='bold 12px sans-serif';
+                  ctx.fillText(divType==='BULLISH'?'واگرایی +':'واگرایی −',xx+6,Math.max(pad.top+14,top-8));
+                }
+                if(!bar.is_closed){
+                  ctx.save();ctx.strokeStyle='#ffc66d';ctx.setLineDash([3,3]);
+                  ctx.strokeRect(xx-bodyW/2-2,top-2,bodyW+4,Math.max(5,bottom-top+4));ctx.restore();
+                }
+              });
+              const waveLabels=new Map((data.wave_pivots||[]).map(p=>[Date.parse(p.timestamp),p]));
+              let prev=null;
+              (data.pivots||[]).forEach(p=>{
+                const i=indexByTime.get(Date.parse(p.timestamp));
+                if(i===undefined)return;
+                const xx=x(i),yy=y(p.price);
+                if(prev){
+                  ctx.save();ctx.strokeStyle='#72a7ff';ctx.lineWidth=2;ctx.setLineDash([5,4]);
+                  ctx.beginPath();ctx.moveTo(prev.x,prev.y);ctx.lineTo(xx,yy);ctx.stroke();ctx.restore();
+                }
+                ctx.fillStyle=p.kind==='LOW'?'#53d6a0':'#ffc66d';
+                ctx.beginPath();ctx.arc(xx,yy,5,0,Math.PI*2);ctx.fill();
+                const wavePoint=waveLabels.get(Date.parse(p.timestamp));
+                ctx.fillStyle='#edf4fb';ctx.font='11px sans-serif';
+                ctx.fillText(wavePoint?wavePoint.label:(p.kind==='LOW'?'کف':'سقف'),xx+5,yy+(p.kind==='LOW'?16:-8));
+                prev={x:xx,y:yy};
+              });
+              let wavePrev=null;
+              (data.wave_pivots||[]).forEach(p=>{
+                const i=indexByTime.get(Date.parse(p.timestamp));
+                if(i===undefined)return;
+                const point={x:x(i),y:y(p.price)};
+                if(wavePrev){
+                  ctx.save();ctx.strokeStyle='#d7a9ff';ctx.lineWidth=2.5;ctx.setLineDash([]);
+                  ctx.beginPath();ctx.moveTo(wavePrev.x,wavePrev.y);ctx.lineTo(point.x,point.y);ctx.stroke();ctx.restore();
+                }
+                ctx.fillStyle='#d7a9ff';ctx.beginPath();ctx.arc(point.x,point.y,7,0,Math.PI*2);ctx.fill();
+                ctx.fillStyle='#f5eaff';ctx.font='bold 12px sans-serif';ctx.fillText(p.label,point.x+7,point.y-9);
+                wavePrev=point;
+              });
+              const signal=data.signal||{};
+              const current=bars[bars.length-1];
+              const currentPrice=current?current.close:null;
+              if(currentPrice!==null&&currentPrice!==undefined){
+                const yy=y(currentPrice);
+                ctx.save();ctx.strokeStyle='#55d7ff';ctx.lineWidth=2.7;ctx.setLineDash([]);
+                ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(canvas.width-pad.right+8,yy);ctx.stroke();ctx.restore();
+                ctx.fillStyle='#55d7ff';ctx.font='bold 13px sans-serif';
+                ctx.fillText('قیمت آخرین کندل '+number(currentPrice),canvas.width-pad.right+16,yy-9);
+              }
+              if(signal.entry_reference_price){
+                const yy=y(signal.entry_reference_price);
+                ctx.save();ctx.strokeStyle=signal.signal==='BUY'?'#53d6a0':signal.signal==='SELL'?'#ff7b85':'#ffc66d';
+                ctx.setLineDash([8,5]);ctx.beginPath();ctx.moveTo(pad.left,yy);
+                ctx.lineTo(canvas.width-pad.right,yy);ctx.stroke();ctx.restore();
+              }
+              // Simple Persian signal tags are drawn only for confirmed BUY/SELL signals.
+              const confirmedSignal=String(signal.signal||'').toUpperCase();
+              if(confirmedSignal==='BUY'||confirmedSignal==='SELL'){
+                const text=confirmedSignal==='BUY'
+                  ?'🟢 زمان خوب برای خرید (شروع موج صعودی / الگوی برگشت خریداران)'
+                  :'🔴 زمان فروش یا خروج (سقف موج / احتمال افت قیمت)';
+                const tagX=pad.left+12,tagY=pad.top+24;
+                ctx.save();ctx.font='bold 18px sans-serif';
+                const tagWidth=Math.min(790,ctx.measureText(text).width+24);
+                ctx.fillStyle=confirmedSignal==='BUY'?'rgba(8,76,55,.94)':'rgba(104,29,43,.94)';
+                ctx.fillRect(tagX,tagY,tagWidth,34);
+                ctx.fillStyle='#ffffff';ctx.fillText(text,tagX+12,tagY+23,tagWidth-20);ctx.restore();
+              }
+              // Show up to two confirmed candle/classic patterns in plain Persian.
+              const patternItems=[
+                ...(Array.isArray(analysis.candlestick_patterns)?analysis.candlestick_patterns:[]),
+                ...(Array.isArray(analysis.geometric_patterns)?analysis.geometric_patterns:[])
+              ].filter(item=>item&&item.state==='CONFIRMED').slice(0,2);
+              patternItems.forEach((item,index)=>{
+                const name=String(item.name_fa||item.name_en||'الگوی قیمت');
+                const detail=String(item.description||'الگو در کندل‌های اخیر شناسایی شد.').replace(/\s+/g,' ').slice(0,82);
+                const text=name+' ('+detail+')';
+                const yy=pad.top+72+index*30;
+                ctx.save();ctx.font='bold 14px sans-serif';
+                ctx.fillStyle='rgba(18,36,52,.94)';ctx.fillRect(pad.left+12,yy,Math.min(700,ctx.measureText(text).width+20),25);
+                ctx.fillStyle='#e7f2fb';ctx.fillText(text,pad.left+22,yy+17,680);ctx.restore();
+              });
+              // Volume histogram uses candle direction: green for rising, red for falling.
+              const volumeTop=canvas.height-pad.bottom+14;
+              const volumeBase=canvas.height-43;
+              const volumeHeight=volumeBase-volumeTop;
+              const volumes=bars.map(bar=>Math.max(0,Number(bar.volume)||0));
+              const maxVolume=Math.max(...volumes,1);
+              const volumeSlot=(canvas.width-pad.left-pad.right)/bars.length;
+              ctx.save();ctx.fillStyle='rgba(12,29,43,.92)';ctx.fillRect(pad.left,volumeTop-8,canvas.width-pad.left-pad.right,volumeHeight+16);
+              ctx.strokeStyle='#345066';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(pad.left,volumeBase);ctx.lineTo(canvas.width-pad.right,volumeBase);ctx.stroke();ctx.setLineDash([]);
+              bars.forEach((bar,index)=>{
+                const value=volumes[index],height=Math.max(1,(value/maxVolume)*volumeHeight);
+                ctx.fillStyle=bar.close>=bar.open?'#27b982':'#e45e70';
+                const width=Math.max(2,Math.min(13,volumeSlot*.68));
+                ctx.fillRect(x(index)-width/2,volumeBase-height,width,height);
+              });
+              ctx.fillStyle='#b9cad8';ctx.font='bold 13px sans-serif';ctx.fillText('حجم معاملات هر کندل',pad.left+8,volumeTop+14);
+              ctx.restore();
+              const latest=bars[bars.length-1]||{};
+              const latestVolume=Number(latest.volume)||0;
+              const avgVolume=volumes.slice(-21,-1);
+              const average=avgVolume.length?avgVolume.reduce((sum,value)=>sum+value,0)/avgVolume.length:0;
+              const healthyVolume=average>0&&latestVolume>=average&&Number(latest.close)>=Number(latest.open);
+              const volumeStatus=document.getElementById('live-volume-status');
+              if(volumeStatus){
+                volumeStatus.className='live-volume-caption '+(healthyVolume?'good':'weak');
+                volumeStatus.textContent=healthyVolume
+                  ?'🟢 حجم بازار خوب است (مناسب خرید): فعالیت خریداران در آخرین کندل از میانگین بیشتر است.'
+                  :'🔴 حجم بازار ضعیف است (مناسب خرید نیست): قدرت خرید در آخرین کندل تأیید نشده است.';
+              }
+              const tickIndexes=[0,Math.floor((bars.length-1)/3),Math.floor(2*(bars.length-1)/3),bars.length-1];
+              ctx.fillStyle='#9eb3c7';ctx.font='12px sans-serif';ctx.textAlign='center';
+              tickIndexes.forEach(i=>{
+                const xx=x(i),stamp=new Date(bars[i].time);
+                const label=data.interval==='1s'?stamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'}):stamp.toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+                ctx.fillText(label,xx,canvas.height-22);
+              });
+              ctx.textAlign='start';
+              ctx.fillStyle='#d7e8f5';ctx.font='bold 14px sans-serif';
+              ctx.fillText(data.symbol+' · '+data.interval+' · محور افقی: زمان | محور عمودی: قیمت',pad.left,19);
+            }
+            async function refresh(force){
+              if(busy)return;busy=true;button.disabled=true;status.textContent='در حال دریافت و تطبیق کندل‌ها...';
+              try{
+                const url='/api/live-market-radar?symbol='+encodeURIComponent(symbol.value)+'&interval='+encodeURIComponent(interval.value)+(force?'&refresh=1':'');
+                const response=await fetch(url,{cache:'no-store'});const data=await response.json();
+                if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+                draw(data);
+                const s=data.signal||{},w=data.elliott_waves||{},cv=data.cross_validation||{};
+                const analysis=data.market_analysis||{},d=analysis.direction||{},wave=analysis.wave_structure||{},quality=analysis.data_quality||{};
+                renderFlow(data.market_flow||{});
+                updateEasyTraderRobot(analysis,s,symbol.value,interval.value);
+                const rsiDivergence=analysis.direction&&analysis.direction.divergence?analysis.direction.divergence:{};
+                const divergenceType=rsiDivergence.type||'NONE';
+                fields.divergence.className='live-radar-divergence '+(divergenceType==='BULLISH'?'bullish':divergenceType==='BEARISH'?'bearish':'neutral');
+                fields.divergence.textContent=divergenceType==='BULLISH'?'واگرایی مثبت (صعودی) شناسایی شد · دو کندل پیوت مرجع با سبز نئونی مشخص شده‌اند · RSI '+number(rsiDivergence.rsi_pivot_1)+' ← '+number(rsiDivergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':divergenceType==='BEARISH'?'واگرایی منفی (نزولی) شناسایی شد · دو کندل پیوت مرجع با صورتی پررنگ مشخص شده‌اند · RSI '+number(rsiDivergence.rsi_pivot_1)+' ← '+number(rsiDivergence.rsi_pivot_2)+' · هشدار، نه سیگنال ورود مستقل':'واگرایی RSI در پیوت‌های تأییدشده شناسایی نشد · کندل‌های مرجع فقط هنگام تأیید واگرایی رنگ ویژه می‌گیرند.';
+                const labels={BUY:'خرید تأییدشده',SELL:'فروش تأییدشده',WAIT:'در انتظار تأیید',UNKNOWN:'نامشخص'};
+                fields.action.textContent=labels[s.signal]||s.signal||'نامشخص';
+                const latestBarForPrice=(data.candles||[]).slice(-1)[0];
+                fields.currentPrice.textContent=number(latestBarForPrice?latestBarForPrice.close:null);
+                fields.entry.textContent=number(s.entry_reference_price);
+                fields.stop.textContent=number(s.stop_loss);
+                fields.target.textContent=number(s.take_profit);
+                fields.rr.textContent=s.reward_risk===null||s.reward_risk===undefined?'—':s.reward_risk+'R';
+                fields.wave.textContent=(w.pattern||'نامشخص')+' · '+(w.phase||'داده ناکافی');
+                fields.bias.textContent=d.label_fa||faDirection(d.bias);
+                fields.score.textContent=d.score===null||d.score===undefined?'—':(d.score>0?'+':'')+d.score+'/100';
+                fields.regime.textContent=({TRENDING:'رونددار',RANGE_OR_TRANSITION:'رنج / گذار'}[d.regime]||'نامشخص');
+                fields.trend.textContent=faDirection(d.trend);
+                const divergence=d.divergence||{},fib=d.fibonacci||{};
+                fields.indicators.textContent='EMA20: '+number(d.ema20)+' · EMA50: '+number(d.ema50)+' · EMA200: '+number(d.ema200)+
+                  ' · ADX(14): '+number(d.adx14)+' · RSI(14): '+number(d.rsi14)+' ('+({OVERSOLD:'اشباع فروش',OVERBOUGHT:'اشباع خرید',NEUTRAL:'میانه',UNKNOWN:'نامشخص'}[d.rsi_state]||'')+')'+
+                  ' · MACD Histogram: '+number(d.macd_histogram)+' · ATR: '+number(d.atr_pct)+'%'+
+                  ' · RVOL کندلی: '+number(d.volume_ratio)+'x · واگرایی: '+(divergence.type||'NONE')+
+                  ' · فیبوناچی: '+(fib.status||'نامشخص')+' '+number(fib.retracement)+
+                  ' · اصلاح W4: '+(data.wave4_fibonacci&&data.wave4_fibonacci.status==='CONFIRMED'?'38.2% '+number(data.wave4_fibonacci.levels['0.382'])+' / 50% '+number(data.wave4_fibonacci.levels['0.5'])+' / 61.8% '+number(data.wave4_fibonacci.levels['0.618']):'ساختار W4 هنوز تأیید نشده')+
+                  ' · تغییر ۱۰ کندل: '+number(d.price_change_10_candles_pct)+'%';
+                const qualityLabel=({PASS:'تطبیق دو منبع موفق',FAIL:'اختلاف دو منبع؛ سیگنال مسدود',UNKNOWN:'تطبیق دو منبع نامشخص'}[quality.cross_validation_status]||'تطبیق نامشخص');
+                const freshnessLabel=quality.freshness_status==='FRESH'?'داده تازه':quality.freshness_status==='STALE'?'داده کهنه':'تازگی نامشخص';
+                fields.analysisNote.textContent='منبع تحلیل: '+(quality.pattern_data_source||'نامشخص')+' · '+qualityLabel+' · '+freshnessLabel+
+                  ' · '+((analysis.summary||[]).join(' · ')||'امتیاز جهت بازار صرفاً تجمیع شواهد است و احتمال موفقیت نیست.');
+                renderPatternList(fields.candlePatterns,analysis.candlestick_patterns,'در آخرین کندل بسته‌شده الگوی شاخصی تشخیص داده نشد.');
+                renderPatternList(fields.geometricPatterns,analysis.geometric_patterns,'ساختار هندسی معتبر یا پیوت کافی هنوز شناسایی نشده است.');
+                renderPatternList(fields.waveAnalysis,[{
+                  name_fa:'موج الیوت · '+faDirection(wave.pattern),
+                  name_en:'Elliott structure',
+                  direction:wave.pattern,
+                  state:wave.status,
+                  evidence_strength:'ساختاری، نه احتمالاتی',
+                  score:0,
+                  description:(wave.phase||'مرحله نامشخص')+' · '+(wave.reason||'شواهد کافی وجود ندارد.')+
+                    (w.status==='AMBIGUOUS'&&Array.isArray(w.pivots)&&w.pivots.length?' · پیوت‌های تأییدشدهٔ سقف/کف در نمودار مشخص شده‌اند؛ شمارش شماره‌گذاری‌شدهٔ موج هنوز معتبر نیست.':'')+
+                    (wave.invalidation_price!==null&&wave.invalidation_price!==undefined?' · سطح ابطال: '+number(wave.invalidation_price):'')
+                }],'تحلیل موج در دسترس نیست.');
+                fields.reason.textContent=s.reason||'دلیل سیگنال در دسترس نیست.';
+                fields.provider.textContent='منابع: '+(cv.providers||[]).join(' و ')+' · تطبیق: '+cv.status+
+                  ' · اختلاف بیشینه: '+number(cv.max_close_discrepancy_pct)+'% · کندل بسته‌شده: '+(data.last_closed_candle_at||'—');
+                const lastClosed=(data.candles||[]).filter(x=>x.is_closed).slice(-1)[0];
+                status.textContent='قیمت آخرین کندل بسته‌شده: '+number(lastClosed&&lastClosed.close)+
+                  ' · سن کندل: '+number(data.candle_age_seconds)+' ثانیه · دریافت: '+new Date(data.updated_at_utc).toLocaleTimeString();
+                if(s.signal_key&&s.signal_key!==lastSignalKey){
+                  lastSignalKey=s.signal_key;status.textContent+=' · هشدار جدید '+(labels[s.signal]||s.signal);
+                }
+              }catch(error){
+                status.textContent='دادهٔ تازه در دسترس نیست؛ سیگنال تازه صادر نمی‌شود: '+String(error.message||error);
+                draw({candles:[]});
+                fields.action.textContent='نامشخص';
+                updateEasyTraderRobot({candlestick_patterns:[]},{signal:'UNKNOWN'},symbol.value,interval.value);
+                fields.bias.textContent='نامشخص';
+                fields.score.textContent='—';
+                renderPatternList(fields.candlePatterns,[],'دادهٔ تازه برای تحلیل الگوها در دسترس نیست.');
+                renderPatternList(fields.geometricPatterns,[],'دادهٔ تازه برای تحلیل الگوها در دسترس نیست.');
+                renderPatternList(fields.waveAnalysis,[],'دادهٔ تازه برای تحلیل موج در دسترس نیست.');
+                fields.reason.textContent='آخرین داده تأیید نشد. از سیگنال قبلی برای تصمیم تازه استفاده نکنید.';
+              }finally{busy=false;button.disabled=false;}
+            }
+            function normalizeCustomSymbol(value){
+              let raw=String(value||'').trim().toUpperCase().replaceAll(' ','').replaceAll('/','').replaceAll('-','').replaceAll('_','');
+              if(!raw.endsWith('USDT'))raw+='USDT';
+              if(!/^[A-Z0-9]{2,16}USDT$/.test(raw))throw new Error('نماد نامعتبر است؛ مانند PEPE یا PEPEUSDT وارد کنید.');
+              return raw;
+            }
+            async function searchCustomSymbol(){
+              try{
+                const normalized=normalizeCustomSymbol(customSymbol.value);
+                let option=Array.from(symbol.options).find(item=>item.value===normalized);
+                if(!option){option=document.createElement('option');option.value=normalized;option.textContent=normalized.replace(/USDT$/,'');symbol.appendChild(option);}
+                symbol.value=normalized;
+                await refresh(true);
+              }catch(error){status.textContent=String(error.message||error);}
+            }
+            function drawMiniChart(canvasElement,data){
+              const bars=(data&&Array.isArray(data.candles)?data.candles:[]).slice(-48);
+              const context=canvasElement.getContext('2d');
+              const width=canvasElement.width,height=canvasElement.height;
+              context.clearRect(0,0,width,height);context.fillStyle='#07131f';context.fillRect(0,0,width,height);
+              if(!bars.length){context.fillStyle='#ffc66d';context.font='20px sans-serif';context.fillText('داده موجود نیست',18,34);return;}
+              const low=Math.min(...bars.map(item=>Number(item.low))),high=Math.max(...bars.map(item=>Number(item.high)));
+              const spread=Math.max(high-low,Math.abs(high)*0.0001,1e-9),top=12,bottom=height-16;
+              const y=value=>bottom-((Number(value)-low)/spread)*(bottom-top);
+              const slot=width/bars.length,bodyWidth=Math.max(3,Math.min(9,slot*.62));
+              bars.forEach((bar,index)=>{
+                const x=(index+.5)*slot,up=Number(bar.close)>=Number(bar.open),color=up?'#53d6a0':'#ff7b85';
+                context.strokeStyle=color;context.fillStyle=color;context.lineWidth=2;
+                context.beginPath();context.moveTo(x,y(bar.high));context.lineTo(x,y(bar.low));context.stroke();
+                const candleTop=y(Math.max(Number(bar.open),Number(bar.close)));
+                const candleBottom=y(Math.min(Number(bar.open),Number(bar.close)));
+                context.fillRect(x-bodyWidth/2,candleTop,bodyWidth,Math.max(2,candleBottom-candleTop));
+              });
+              const indexByTime=new Map(bars.map((bar,index)=>[Date.parse(bar.time),index]));
+              const pivots=(data.pivots||[]).map(point=>({index:indexByTime.get(Date.parse(point.timestamp)),price:Number(point.price)}))
+                .filter(point=>Number.isInteger(point.index)&&Number.isFinite(point.price));
+              if(pivots.length>1){
+                context.save();context.strokeStyle='#d7a9ff';context.lineWidth=3;context.beginPath();
+                pivots.forEach((point,index)=>{const x=(point.index+.5)*slot,py=y(point.price);if(index===0)context.moveTo(x,py);else context.lineTo(x,py);});
+                context.stroke();context.restore();
+                pivots.forEach(point=>{context.fillStyle='#e8cfff';context.beginPath();context.arc((point.index+.5)*slot,y(point.price),4,0,Math.PI*2);context.fill();});
+              }
+              context.fillStyle='#b9cad8';context.font='bold 16px sans-serif';context.fillText('کندل و مسیر موج',10,18);
+            }
+            function renderWaveWatchCard(symbolValue,data){
+              const card=document.createElement('article');card.className='live-wave-card';
+              const title=document.createElement('h5');title.textContent=symbolValue;
+              const mini=document.createElement('canvas');mini.className='live-wave-mini';mini.width=640;mini.height=180;
+              mini.setAttribute('role','img');mini.setAttribute('aria-label',symbolValue+' نمودار کوچک کندل و موج');
+              drawMiniChart(mini,data);
+              const candles=Array.isArray(data.candles)?data.candles:[];
+              const waveMatch=phase.match(/WAVE[_ ]?([1-5])/);
+              const wave=document.createElement('div');wave.className='live-wave-meta';
+              wave.textContent='موج فعلی: '+(waveMatch?'W'+waveMatch[1]:(waves.phase||waves.pattern||'نامشخص'));
+              const fib=data.wave4_fibonacci||{},levels=fib.levels||{};
+              const fibonacci=document.createElement('div');fibonacci.className='live-wave-meta';
+              fibonacci.textContent=fib.status==='CONFIRMED'?'فیبوناچی W4 · 38.2% '+number(levels['0.382'])+' · 50% '+number(levels['0.5'])+' · 61.8% '+number(levels['0.618']):'فیبوناچی W4: تأیید نشده';
+              const divergence=((data.market_analysis||{}).direction||{}).divergence||{};
+              const div=document.createElement('div');div.className='live-wave-meta';
+              div.textContent='واگرایی RSI: '+({BULLISH:'مثبت',BEARISH:'منفی',NONE:'شناسایی نشد'}[divergence.type]||'نامشخص');
+              const action=document.createElement('button');action.type='button';action.textContent='نمایش روی نمودار بزرگ ↗';
+              action.addEventListener('click',()=>{let opt=Array.from(symbol.options).find(item=>item.value===symbolValue);if(!opt){opt=document.createElement('option');opt.value=symbolValue;opt.textContent=symbolValue.replace(/USDT$/,'');symbol.appendChild(opt);}symbol.value=symbolValue;refresh(true);});
+              card.append(title,mini,price,wave,fibonacci,div,action);return card;
+            }
+            async function refreshWaveWatchlist(){
+              const symbols=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','LINKUSDT'];
+              const results=await Promise.all(symbols.map(async item=>{
+                try{
+                  const response=await fetch('/api/live-market-radar?symbol='+encodeURIComponent(item)+'&interval=5m',{cache:'no-store'});
+                  const data=await response.json();if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+                  return {symbol:item,data};
+                }catch(error){return {symbol:item,error:String(error.message||error)};}
+              }));
+              waveWatchGrid.replaceChildren();
+              results.forEach(item=>{
+                if(item.data){waveWatchGrid.appendChild(renderWaveWatchCard(item.symbol,item.data));}
+                else{const card=document.createElement('article');card.className='live-wave-card';const title=document.createElement('h5');title.textContent=item.symbol;const note=document.createElement('p');note.className='live-wave-meta';note.textContent='داده در دسترس نیست: '+item.error;card.append(title,note);waveWatchGrid.appendChild(card);}
+              });
+            }
+            button.addEventListener('click',()=>refresh(true));
+            customSearch.addEventListener('click',searchCustomSymbol);
+            customSymbol.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();searchCustomSymbol();}});
+            symbol.addEventListener('change',()=>refresh(true));
+            function scheduleRefresh(){if(timer!==null)clearInterval(timer);timer=setInterval(()=>refresh(false),interval.value==='1s'?5000:15000);}
+            interval.addEventListener('change',()=>{scheduleRefresh();refresh(true);});
+            refresh(true);
+            refreshWaveWatchlist();
+            scheduleRefresh();
+            const waveWatchTimer=setInterval(refreshWaveWatchlist,30000);
+            window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);clearInterval(waveWatchTimer);});
+          })();
+          </script>
+          <p class="muted">موتور مستقل Spot Paper فقط LONG را با ۱۲ فیلتر ارزیابی می‌کند؛ این موتور با معاملهٔ BloFin Demo Challenge 1 یکی نیست. هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
+          <div class="metric" style="margin:12px 0">
+            <strong>اتصال الزامی به هوش مصنوعی رایگان · OpenRouter / NVIDIA Nemotron</strong>
+            <p class="muted">برای هر ورود جدید، مدل زبانی واقعی باید نقش تحلیل‌گر بازار، تحلیل‌گر تکنیکال، تحلیل‌گر احساسات، پژوهشگر صعودی/نزولی، معامله‌گر و مدیر ریسک را بررسی و خروجی معتبر بدهد. مدل رایگان <code>nvidia/nemotron-3-ultra-550b-a55b:free</code> با هزینهٔ مدل صفر استفاده می‌شود. سقف برنامه ۳۵ درخواست در روز و حافظهٔ نتیجه ۴ ساعت است؛ در صورت قطعی یا اتمام سهمیه، ورود جدید متوقف می‌شود اما مدیریت و خروج موقعیت باز ادامه دارد.</p>
+            <p class="muted">برای فعال‌سازی: در <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">OpenRouter</a> یک API Key رایگان بساز و آن را فقط در Render → Environment با نام <code>OPENROUTER_API_KEY</code> ثبت کن. کلید را در GitHub، فرم داشبورد یا مرورگر قرار نده. فقط دادهٔ عمومی و خلاصه‌شدهٔ بازار ارسال می‌شود؛ برای مدل رایگان ارائه‌دهنده ممکن است درخواست‌ها را برای امنیت و بهبود محصول نگه‌داری/استفاده کند.</p>
+            <div id="paper-bot-ai-status" class="muted" aria-live="polite">وضعیت اتصال AI در حال بررسی...</div>
+          </div>
+          <form method="post" action="/paper-bot/tick">
+            <label>دارایی</label>
+            <select name="asset">
+              <option value="cex:BTCUSDT">BTC / USDT</option>
+              <option value="cex:ETHUSDT">ETH / USDT</option>
+              <option value="cex:SOLUSDT">SOL / USDT</option>
+              <option value="cex:XRPUSDT">XRP / USDT</option>
+              <option value="cex:BNBUSDT">BNB / USDT</option>
+              <option value="cex:ADAUSDT">ADA / USDT</option>
+              <option value="cex:DOGEUSDT">DOGE / USDT</option>
+              <option value="cex:AVAXUSDT">AVAX / USDT</option>
+              <option value="cex:DOTUSDT">DOT / USDT</option>
+              <option value="cex:LTCUSDT">LTC / USDT</option>
+              <option value="cex:TRXUSDT">TRX / USDT</option>
+              <option value="cex:GRAMUSDT">GRAM / USDT</option>
+            </select>
+            <button type="submit">اجرای یک چرخهٔ ربات آزمایشی</button>
+          </form>
+          <div id="paper-bot-status" class="muted" style="margin-top:12px" aria-live="polite">در حال دریافت وضعیت حساب آزمایشی...</div>
+          <p class="muted">برای اجرای دوره‌ای رایگان روی رایانهٔ خود: <code>python scripts/paper_trading_bot.py --asset cex:BTCUSDT --interval-seconds 900</code>. فایل SQLite محلی است؛ سرویس رایگان Render ممکن است هنگام خواب یا راه‌اندازی مجدد فایل‌های محلی را پاک کند.</p>
+        </section>
+        <script>
+        (async function(){
+          const box=document.getElementById('paper-bot-status');
+          try{
+            const r=await fetch('/paper-bot/status');const s=await r.json();
+            const a=s.account||{};
+            box.textContent='حالت: Paper فقط · موجودی نقدی: '+Number(a.cash_balance_usd||0).toFixed(2)+' USD · ارزش کل حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · سود/زیان تحقق‌یافته: '+Number(a.realized_pnl_usd||0).toFixed(2)+' USD · موقعیت باز: '+((s.open_position||{}).asset||'ندارد')+' · ترمز ریسک: '+(s.risk_controls&&s.risk_controls.entry_allowed?'فعال':'متوقف')+' · زیان روز: '+Number((s.risk_controls||{}).daily_realized_loss_pct||0).toFixed(3)+'%';
+            const ai=s.ai_connection||{},aiBox=document.getElementById('paper-bot-ai-status');
+            if(aiBox)aiBox.textContent='اتصال AI: '+(ai.status_fa||'وضعیت نامشخص')+' · مدل: '+(ai.model||'ثبت نشده')+' · سقف محافظه‌کارانه: '+(ai.requests_per_day_app_cap||35)+' درخواست در روز / '+(ai.requests_per_minute_app_cap||18)+' در دقیقه (هر فرایند)';
+          }catch(e){box.textContent='وضعیت حساب آزمایشی در دسترس نیست.';}
+        })();
+        </script>
+        <section class="card" id="futures-paper-bot">
+          <h2>ربات فیوچرز هوشمند · USDT-M Perpetual</h2>
+          <p class="muted">این موتور به‌صورت مستقل LONG و SHORT را ارزیابی می‌کند. ورود فقط با عبور هر ۱۲ فیلتر، تأیید شورای AI، دادهٔ تازهٔ Binance و Bybit، Funding معتبر، حد ضرر و حد سود ساختاری و نسبت سود به ریسک خالص حداقل ۱٫۸ مجاز است.</p>
+          <p class="muted"><strong>ایمنی:</strong> Paper Trading فقط · اهرم حداکثر ۱× · ریسک هر معامله ۰٫۵٪ سرمایه · ارزش اسمی موقعیت حداکثر ۱۰٪ سرمایه · حداکثر یک موقعیت باز · بدون API Key صرافی، بدون سفارش واقعی. محاسبهٔ لیکوییدیشن وابسته به Tier مارجین هر صرافی هنوز فعال نیست.</p>
+          <form method="post" action="/futures-paper-bot/tick">
+            <label>قرارداد دائمی</label>
+            <select name="asset">
+              <option value="perp:BTCUSDT">BTCUSDT Perpetual</option>
+              <option value="perp:ETHUSDT">ETHUSDT Perpetual</option>
+              <option value="perp:SOLUSDT">SOLUSDT Perpetual</option>
+              <option value="perp:XRPUSDT">XRPUSDT Perpetual</option>
+              <option value="perp:BNBUSDT">BNBUSDT Perpetual</option>
+              <option value="perp:ADAUSDT">ADAUSDT Perpetual</option>
+              <option value="perp:DOGEUSDT">DOGEUSDT Perpetual</option>
+              <option value="perp:AVAXUSDT">AVAXUSDT Perpetual</option>
+              <option value="perp:DOTUSDT">DOTUSDT Perpetual</option>
+              <option value="perp:LTCUSDT">LTCUSDT Perpetual</option>
+              <option value="perp:TRXUSDT">TRXUSDT Perpetual</option>
+            </select>
+            <button type="submit">اجرای یک چرخهٔ فیوچرز آزمایشی</button>
+          </form>
+          <div id="futures-paper-status" class="muted" style="margin-top:12px" aria-live="polite">در حال دریافت وضعیت حساب فیوچرز آزمایشی...</div>
+          <script>(async function(){const box=document.getElementById('futures-paper-status');try{const r=await fetch('/futures-paper-bot/status',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const s=await r.json();const a=s.account||{},p=s.open_position||{},risk=s.risk_controls||{};const breakerClear=risk.risk_circuit_breaker_clear===true||(risk.risk_circuit_breaker_clear===undefined&&risk.entry_allowed===true);const riskText=breakerClear?'فعال نیست؛ اما این به‌معنای مجوز نهایی ورود نیست':'فعال یا نامشخص است؛ ورود متوقف بماند';box.textContent='حالت: حساب فرضی Paper · موجودی: '+Number(a.balance_usd||0).toFixed(2)+' USD · ارزش حساب: '+Number(a.equity_usd||0).toFixed(2)+' USD · موقعیت: '+(p.direction||'ندارد')+' '+(p.asset||'')+' · ترمز ریسک حساب: '+riskText+' · سفارش واقعی: غیرفعال';}catch(e){box.textContent='وضعیت حساب فیوچرز در دسترس نیست؛ تا دریافت پاسخ معتبر، ورود مجاز نیست.';}})();</script>
+        </section>
+        <section class="card" id="ai-diagnostic-panel">
+          <h2>آزمایش اتصال هوش مصنوعی · NVIDIA Nemotron</h2>
+          <p class="muted">این آزمون فقط یک پیام ثابت و کوتاه برای بررسی احراز هویت و پاسخ مدل می‌فرستد؛ داده بازار، اطلاعات حساب و کلید API به متن پیام اضافه نمی‌شود. هیچ چرخه معاملاتی یا موقعیت Paper اجرا نمی‌شود. سقف آزمون: ۳ بار در روز و حداقل ۵ دقیقه فاصله.</p>
+          <div id="ai-diagnostic-current" class="muted">در حال بررسی تنظیمات مدل...</div>
+          <button id="ai-diagnostic-run" type="button">آزمایش واقعی اتصال Nemotron</button>
+          <pre id="ai-diagnostic-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          <script>
+          (function(){
+            const button=document.getElementById('ai-diagnostic-run');
+            const current=document.getElementById('ai-diagnostic-current');
+            const output=document.getElementById('ai-diagnostic-result');
+            fetch('/api/ai/status',{cache:'no-store'}).then(r=>r.json()).then(s=>{
+              current.textContent='ارائه‌دهنده: '+s.provider+' · مدل: '+s.model+' · وضعیت کلید: '+s.status;
+            }).catch(()=>{current.textContent='وضعیت تنظیمات هوش مصنوعی دریافت نشد.';});
+            button.addEventListener('click',async function(){
+              button.disabled=true;
+              output.textContent='در حال ارسال درخواست تشخیصی محدود به OpenRouter...';
+              try{
+                const response=await fetch('/api/ai/diagnostic',{
+                  method:'POST',
+                  credentials:'same-origin',
+                  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                  body:'confirm=1'
+                });
+                const result=await response.json();
+                output.textContent=JSON.stringify(result,null,2);
+              }catch(error){
+                output.textContent='خطای ارتباط با مسیر تشخیصی؛ وضعیت سرویس را دوباره بررسی کن.';
+              }finally{button.disabled=false;}
+            });
+          })();
+          </script>
+        </section>
+        <section class="card" id="ai-dry-run-panel">
+          <h2>تست واقعی یکپارچگی Nemotron · بدون معامله</h2>
+          <p class="muted">در این تست، درخواست واقعی و تازه به مدل انتخاب‌شده ارسال می‌شود؛ ورودی فقط یک سناریوی ساختگی BTC با ۱۲ فیلتر نمونه است، نه قیمت یا سیگنال زنده. قالب JSON، جهت LONG، نظر مدیریت ریسک و شناسه مدل بررسی می‌شود. حتی اگر مدل سناریو را تأیید کند، این خروجی اجازه ورود به Paper ندارد و هیچ پوزیشن یا سفارشی ساخته نمی‌شود. این تست از سهمیه API رایگان استفاده می‌کند.</p>
+          <button id="ai-dry-run-run" type="button">اجرای تست واقعی Nemotron (Dry-Run)</button>
+          <pre id="ai-dry-run-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+          <script>
+          (function(){
+            const button=document.getElementById('ai-dry-run-run');
+            const output=document.getElementById('ai-dry-run-result');
+            if(!button||!output)return;
+            button.addEventListener('click',async function(){
+              button.disabled=true;
+              output.textContent='در حال ارسال سناریوی ساختگی به Nemotron و اعتبارسنجی پاسخ واقعی...';
+              try{
+                const response=await fetch('/api/ai/dry-run',{
+                  method:'POST',
+                  credentials:'same-origin',
+                  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                  body:'confirm=1'
+                });
+                const result=await response.json();
+                output.textContent=JSON.stringify(result,null,2);
+              }catch(error){
+                output.textContent='خطای ارتباط با مسیر Dry-Run؛ وضعیت سرویس را بررسی کن.';
+              }finally{button.disabled=false;}
+            });
+          })();
+          </script>
+        </section>
+        <section class="card" id="global-market-board">
+          <h2>پایش بازارهای جهانی · آمریکا، اروپا، ETF و ارز</h2>
+          <p class="muted">این فهرست، لایهٔ دادهٔ بازارهای سنتی است و در کنار رادار رمزارز کار می‌کند. آمریکا، اروپا، ETF، جفت‌ارز و فلزات گران‌بها از مسیر مستقل داده دریافت می‌شوند؛ ساعات، ارز پایه و سطح دسترسی هر بازار جدا نگه داشته می‌شود.</p>
+          <p class="muted">اتصال دادهٔ این بخش به <code>TWELVEDATA_API_KEY</code> نیاز دارد. کلید OpenRouter جایگزین آن نیست. پلن رایگان Twelve Data شامل دادهٔ لحظه‌ای سهام آمریکا/ETF و FX است؛ پوشش گستردهٔ اروپا و کالاها به پلن بالاتر وابسته است.</p>
+          <div class="global-market-controls">
+            <button type="button" id="global-market-refresh">به‌روزرسانی بازارهای جهانی</button>
+            <span id="global-market-status" class="muted" aria-live="polite">در حال بررسی تنظیمات منبع جهانی...</span>
+          </div>
+          <div id="global-market-table" style="overflow-x:auto"></div>
+          <p class="muted">محدودیت پذیرش: قیمت‌های این پنل تک‌منبعی‌اند، دادهٔ آمریکا لزوماً فید تجمیعی SIP نیست و دادهٔ اروپا ممکن است EOD باشد. تا زمان cross-validation مستقل، بک‌تست بازارمحور و دفتر Paper چنددارایی، <strong>هیچ سیگنال ورود یا سفارش معاملاتی از این پنل مجاز نیست</strong>.</p>
+        </section>
+        <script>
+        (function(){
+          const status=document.getElementById('global-market-status');
+          const tableHost=document.getElementById('global-market-table');
+          const button=document.getElementById('global-market-refresh');
+          if(!status||!tableHost||!button)return;
+          const labelStatus={
+            API_KEY_MISSING:'کلید داده ثبت نشده',
+            OBSERVED_SINGLE_SOURCE:'داده دریافت شد · تک‌منبعی',
+            ENTITLEMENT_REQUIRED:'پلن ارائه‌دهنده کافی نیست',
+            RATE_LIMITED:'سقف درخواست ارائه‌دهنده پر شده',
+            DAILY_BUDGET_OR_REFRESH_COOLDOWN:'محدودیت به‌روزرسانی / سهمیه روزانه',
+            UNKNOWN:'نامشخص',
+            STALE:'قدیمی'
+          };
+          function cell(row,value,header){
+            const node=document.createElement(header?'th':'td');
+            node.textContent=value===null||value===undefined||value===''?'—':String(value);
+            row.appendChild(node);
+          }
+          function render(data){
+            tableHost.replaceChildren();
+            const items=Array.isArray(data.items)?data.items:[];
+            if(!items.length){
+              tableHost.textContent=data.status==='LOADING'?'در حال دریافت داده‌ها؛ محدودیت نرخ ارائه‌دهنده رعایت می‌شود.':'هنوز داده‌ای برای نمایش وجود ندارد.';
+              return;
+            }
+            const table=document.createElement('table');
+            const head=document.createElement('thead');
+            const headRow=document.createElement('tr');
+            ['بازار','دارایی','نماد / بورس','قیمت','ارز','تازگی','وضعیت'].forEach(v=>cell(headRow,v,true));
+            head.appendChild(headRow);table.appendChild(head);
+            const body=document.createElement('tbody');
+            items.forEach(item=>{
+              const row=document.createElement('tr');
+              cell(row,item.asset_class+' · '+item.region);
+              cell(row,item.display_name);
+              cell(row,item.symbol+(item.mic_code?' · '+item.mic_code:''));
+              cell(row,item.price);
+              cell(row,item.currency||item.currency_hint);
+              cell(row,item.freshness);
+              cell(row,labelStatus[item.status]||item.status||'نامشخص');
+              body.appendChild(row);
+            });
+            table.appendChild(body);tableHost.appendChild(table);
+          }
+          async function refresh(force){
+            button.disabled=true;
+            status.textContent='در حال دریافت وضعیت فید جهانی...';
+            try{
+              const response=await fetch('/api/global-markets'+(force?'?refresh=1':''),{cache:'no-store'});
+              const data=await response.json();
+              if(!response.ok)throw new Error('HTTP '+response.status);
+              render(data);
+              const counts=data.counts||{};
+              status.textContent='وضعیت: '+data.status+' · منبع: '+(data.provider||'—')+
+                ' · دریافت‌شده: '+(counts.observed||0)+' / '+(counts.total||0)+
+                (data.refreshing?' · به‌روزرسانی ادامه دارد':'');
+              if(data.status==='CONFIGURATION_REQUIRED'){
+                status.textContent+=' · متغیر لازم: TWELVEDATA_API_KEY';
+              }
+            }catch(error){
+              status.textContent='فید جهانی در دسترس نیست: '+String(error.message||error);
+            }finally{button.disabled=false;}
+          }
+          button.addEventListener('click',()=>refresh(true));
+          refresh(false);
+        })();
+        </script>
+        <section class="card" id="scan-section">
+          <h2>اسکن دارایی</h2>
+          <div style="margin:12px 0 18px;padding:14px;border:1px solid #2b4660;border-radius:12px;background:#0a1725">
+            <label for="dex-token-query">جست‌وجوی نام یا نماد آلت‌کوین در DEX</label>
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px">
+              <input id="dex-token-query" placeholder="مثلاً PEPE یا BONK">
+              <button id="dex-token-search" type="button" style="width:auto">جست‌وجو</button>
+            </div>
+            <p class="muted">توکن را با نام، نماد، شبکه و آدرس قرارداد انتخاب کن. شبکه‌های جست‌وجو: Ethereum، Base و Solana.</p>
+            <div id="dex-search-status" class="muted" aria-live="polite">نمادهای تکراری ممکن است قراردادهای متفاوت داشته باشند.</div>
+            <div id="dex-search-results"></div>
+            <!--RADAR_DEX_SEARCH-->
+          </div>
+          <form method="post" action="/scan">
+            <label>بازار و نماد / آدرس</label>
+            <input id="scan-asset" name="asset" required value="BTC" placeholder="XRP، BTCUSDT یا eth:آدرس‌قرارداد">
+            <p class="muted">نمونه‌ها: XRP، BTC، XRPUSDT · برای توکن DEX آدرس قرارداد را با شبکه وارد کن؛ مثل base:0x... یا solana:...</p>
+            <label>تیتر خبری تکمیلی (اختیاری)</label>
+            <input name="headline" placeholder="تیتر خبر">
+            <label>متن اجتماعی تکمیلی (اختیاری)</label>
+            <input name="social_post" placeholder="متن عمومی شبکه اجتماعی">
+            <button type="submit">اجرای اسکن پژوهشی</button>
+          </form>
+        </section>
+        <script>
+        (function(){
+          const q=document.getElementById('dex-token-query'),b=document.getElementById('dex-token-search');
+          const st=document.getElementById('dex-search-status'),out=document.getElementById('dex-search-results');
+          const asset=document.getElementById('scan-asset');
+          b.addEventListener('click',async()=>{
+            const term=(q.value||'').trim();if(term.length<2){st.textContent='حداقل دو نویسه وارد کن.';return;}
+            b.disabled=true;st.textContent='در حال جست‌وجو...';out.replaceChildren();
+            try{const r=await fetch('/api/dex-search?q='+encodeURIComponent(term));const data=await r.json();
+              window.CryptoRadar.update('radar-dex-search', (data.results || []).map(item=>({...item, radar_signal:'NEUTRAL'})), {state:'complete', caption:'نتایج جست‌وجوی توکن روی رادار قرار گرفتند؛ این نتایج هنوز سیگنال خرید یا فروش نیستند.'});
+              if(!Array.isArray(data.results)||!data.results.length){st.textContent=data.reason||'نتیجه‌ای پیدا نشد.';return;}
+              st.textContent='قرارداد دقیق و شبکه موردنظر را انتخاب کن.';
+              data.results.forEach(item=>{const opt=document.createElement('button');opt.type='button';opt.textContent=item.name+' ('+item.symbol+') · '+item.chain+' · '+item.address;opt.addEventListener('click',()=>{asset.value=item.asset;st.textContent='انتخاب شد: '+item.chain+' / '+item.address;out.replaceChildren();});out.appendChild(opt);});
+            }catch(e){st.textContent='سرویس جست‌وجوی DEX در دسترس نیست.';}finally{b.disabled=false;}
+          });
+          q.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();b.click();}});
+        })();
+        </script>
+        <section class="card" id="market-tools">
+          <h2>ماشین‌حساب حرفه‌ای سناریوی Spot</h2>
+          <p class="muted">محاسبهٔ سود/زیان فرضی Long بدون اهرم؛ زمان انتخابی فقط افق سناریو است، نه پیش‌بینی زمان سود.</p>
+          <div class="calc-grid">
+            <div><label for="calc-amount">سرمایه (EUR)</label><input id="calc-amount" type="number" min="0.01" step="0.01" value="10"></div>
+            <div><label for="calc-move">تغییر فرضی قیمت (%)</label><input id="calc-move" type="number" min="-99.9" step="0.1" value="10"></div>
+            <div><label for="calc-days">افق سناریو (روز)</label><input id="calc-days" type="number" min="1" max="3650" value="14"></div>
+            <div><label for="calc-buy-fee">کارمزد خرید (%)</label><input id="calc-buy-fee" type="number" min="0" max="20" step="0.01" value="0.1"></div>
+            <div><label for="calc-sell-fee">کارمزد فروش (%)</label><input id="calc-sell-fee" type="number" min="0" max="20" step="0.01" value="0.1"></div>
+            <div><label for="calc-buy-slip">لغزش خرید (%)</label><input id="calc-buy-slip" type="number" min="0" max="20" step="0.01" value="0.2"></div>
+            <div><label for="calc-sell-slip">لغزش فروش (%)</label><input id="calc-sell-slip" type="number" min="0" max="20" step="0.01" value="0.2"></div>
+          </div>
+          <div class="grid" style="margin-top:12px">
+            <div class="metric">سود/زیان خالص<strong id="calc-pnl">—</strong></div>
+            <div class="metric">ارزش نهایی<strong id="calc-value">—</strong></div>
+            <div class="metric">بازده خالص<strong id="calc-return">—</strong></div>
+            <div class="metric">رشد سربه‌سر<strong id="calc-break-even">—</strong></div>
+          </div>
+          <h3>مقایسهٔ سناریوهای قیمت</h3><div id="calc-scenarios"></div>
+          <p class="muted">فرمول: Vnet = I(1−fb)(1−sb)(1+r)(1−ss)(1−fs). مالیات، تغییر EUR/USD، هزینه برداشت/شبکه و اثر اندازه سفارش خارج از محاسبه‌اند.</p>
+          <p class="muted">این ابزار پیش‌بینی، توصیه سرمایه‌گذاری یا سفارش معاملاتی نیست.</p>
+        </section>
+        <script>
+        (function(){
+          const ids=['calc-amount','calc-move','calc-days','calc-buy-fee','calc-sell-fee','calc-buy-slip','calc-sell-slip'];
+          const el=id=>document.getElementById(id);
+          function calc(move){
+            const amount=Number(el('calc-amount').value), change=Number(move);
+            const bf=Number(el('calc-buy-fee').value)/100, sf=Number(el('calc-sell-fee').value)/100;
+            const bs=Number(el('calc-buy-slip').value)/100, ss=Number(el('calc-sell-slip').value)/100;
+            const factor=(1-bf)*(1-bs)*(1+change/100)*(1-ss)*(1-sf);
+            const net=amount*factor, pnl=net-amount;
+            const base=(1-bf)*(1-bs)*(1-ss)*(1-sf);
+            return {net,pnl,ret:pnl/amount*100,be:(1/base-1)*100};
+          }
+          function update(){
+            const amount=Number(el('calc-amount').value),move=Number(el('calc-move').value);
+            const days=Number(el('calc-days').value);
+            const rates=ids.slice(3).map(id=>Number(el(id).value));
+            if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(move)||move<=-100||!Number.isFinite(days)||days<1||rates.some(x=>!Number.isFinite(x)||x<0||x>=100)){
+              el('calc-pnl').textContent='ورودی نامعتبر';return;
+            }
+            const out=calc(move),eur=x=>x.toFixed(4)+' €';
+            el('calc-pnl').textContent=(out.pnl>=0?'+':'')+eur(out.pnl);
+            el('calc-value').textContent=eur(out.net);
+            el('calc-return').textContent=(out.ret>=0?'+':'')+out.ret.toFixed(3)+'%';
+            el('calc-break-even').textContent=out.be.toFixed(3)+'%';
+            const rows=[-20,-10,0,5,10,20].map(v=>{const x=calc(v);return '<tr><td>'+v.toFixed(1)+'%</td><td>'+eur(x.pnl)+'</td><td>'+x.ret.toFixed(3)+'%</td><td>'+days+' روز</td></tr>';}).join('');
+            el('calc-scenarios').innerHTML='<table><thead><tr><th>تغییر قیمت</th><th>سود/زیان خالص</th><th>بازده خالص</th><th>افق</th></tr></thead><tbody>'+rows+'</tbody></table>';
+          }
+          ids.forEach(id=>el(id).addEventListener('input',update));update();
+        })();
+        </script>
+        <section class="card">
+          <h3>۱۲ فیلتر اجباری</h3>
+          <p>داده بازار · رژیم · روند · مومنتوم · جریان سرمایه · امنیت · احساسات · بک‌تست · ریسک · نهنگ‌ها · پوشش احساسات · Walk-forward</p>
+          <p class="muted">هر فیلتر FAIL یا UNKNOWN باشد، خروجی NO TRADE است. سولانا در نسخه فعلی فقط نمونه‌برداری محدود از تراکنش‌های اخیر دارد.</p>
+        </section>
+        <p class="muted">تاریخچه: <code>/history?asset=cex:BTCUSDT</code></p>
+        """
+        return self._send(200, _page(body))
+
+    def do_POST(self):
+        global SCAN_RUNNING
+        route = urlparse(self.path).path
+        if route in {"/api/blofin-demo/manual-wave-order", "/api/blofin-demo/manual-wave-close"}:
+            expected_token=os.getenv("BLOFIN_DASHBOARD_TOKEN","").strip()
+            if not _blofin_dashboard_token_valid(self.headers.get("Authorization",""),expected_token):
+                return self._send(401,b'{"status":"UNAUTHORIZED"}',"application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type","").lower():
+                return self._send(415,b'{"status":"JSON_REQUIRED"}',"application/json; charset=utf-8")
+            try: length=int(self.headers.get("Content-Length","0"))
+            except (TypeError,ValueError): return self._send(400,b'{"status":"INVALID_CONTENT_LENGTH"}',"application/json; charset=utf-8")
+            if length<=0 or length>8192: return self._send(413,b'{"status":"INVALID_PAYLOAD_SIZE"}',"application/json; charset=utf-8")
+            try:
+                payload=json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload,dict): raise ValueError("JSON body must be an object.")
+                if route.endswith("manual-wave-order"):
+                    result=_blofin_manual_submit_wave_order(payload)
+                else:
+                    inst_id=str(payload.get("instrument_id") or "").strip().upper()
+                    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT",inst_id):
+                        raise BloFinDemoExecutionBlocked("نماد قرارداد معتبر نیست.")
+                    result=_blofin_manual_close_position(instrument_id=inst_id,
+                        position_id=str(payload.get("position_id") or "").strip(),
+                        position_side_hint=str(payload.get("position_side") or "net").strip().lower(),
+                        action_source="MANUAL")
+                return self._send(200,json.dumps(result,ensure_ascii=False,default=str).encode(),"application/json; charset=utf-8")
+            except (ValueError,BloFinDemoExecutionBlocked) as exc:
+                return self._send(422,json.dumps({"status":"BLOCKED","message_fa":str(exc)},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            except BloFinDemoExecutionUnknown as exc:
+                return self._send(503,json.dumps({"status":"UNKNOWN","message_fa":str(exc),"retry_allowed":False},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(502,json.dumps({"status":"ERROR","error_type":type(exc).__name__},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+        api_jobs_request = route == "/api/jobs"
+        if api_jobs_request:
+            route = "/scan"
+        if route == "/api/gem-hunter/v3/refresh":
+            supplied = self.headers.get("Authorization", "")
+            if not supplied.startswith("Bearer ") or len(supplied) <= 7:
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            if self.headers.get("Origin"):
+                return self._send(403, b'{"status":"SERVER_TO_SERVER_ONLY"}', "application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type", "").lower():
+                return self._send(415, b'{"status":"JSON_REQUIRED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 16_384:
+                return self._send(413, b'{"status":"INVALID_REFRESH_PAYLOAD_SIZE"}', "application/json; charset=utf-8")
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                result = cache_turso_credentials_from_github_actions(
+                    supplied[7:].strip(),
+                    body.get("database_url"),
+                    body.get("auth_token"),
+                )
+                return self._send(200, json.dumps(result, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except PermissionError:
+                return self._send(403, b'{"status":"OIDC_FORBIDDEN"}', "application/json; charset=utf-8")
+            except Exception as exc:
+                payload = {"status": "REFRESH_FAILED", "error_type": type(exc).__name__}
+                return self._send(503, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+        if route == "/api/gem-hunter/v2/ingest":
+            supplied = self.headers.get("Authorization", "")
+            if not supplied.startswith("Bearer ") or len(supplied) <= 7:
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            source_token = supplied[7:].strip()
+            if self.headers.get("Origin"):
+                return self._send(403, b'{"status":"SERVER_TO_SERVER_ONLY"}', "application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type", "").lower():
+                return self._send(415, b'{"status":"JSON_REQUIRED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 524_288:
+                return self._send(413, b'{"status":"INVALID_SNAPSHOT_SIZE"}', "application/json; charset=utf-8")
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload, dict) or payload.get("read_only") is not True or payload.get("trade_authorization") != "NO_TRADE":
+                    return self._send(422, b'{"status":"READ_ONLY_SNAPSHOT_REQUIRED"}', "application/json; charset=utf-8")
+                source_url = str(payload.get("source_database_url") or "").strip()
+                source_db = connect_turso_database(source_url, source_token)
+                try:
+                    source_db.execute("SELECT 1").fetchone()
+                finally:
+                    source_db.close()
+                candidates = payload.get("candidates")
+                saved = gem_hunter_v2_ingest_candidates(candidates)
+                result = {
+                    "status": "OK", "ingested": len(saved),
+                    "candidate_count": len(saved), "read_only": True,
+                    "trade_authorization": "NO_TRADE",
+                }
+                return self._send(200, json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            except (ValueError, TypeError, KeyError) as exc:
+                return self._send(422, json.dumps({"status":"REJECTED","reason":str(exc)[:120]},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(503, json.dumps({"status":"UNAVAILABLE","error_type":type(exc).__name__},ensure_ascii=False).encode(),"application/json; charset=utf-8")
+        if route == "/api/blofin/demo/v2-autopilot/publish":
+            try:
+                _verify_staging_github_oidc_token(self.headers.get("Authorization", ""))
+            except PermissionError:
+                return self._send(401, b'{"status":"UNAUTHORIZED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 131_072:
+                return self._send(413, b'{"status":"INVALID_REPORT_SIZE"}', "application/json; charset=utf-8")
+            try:
+                report = json.loads(self.rfile.read(length).decode("utf-8"))
+                result = _publish_blofin_v2_cycle_report(report)
+                return self._send(200, json.dumps(result, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+            except (ValueError, RuntimeError) as exc:
+                return self._send(422, json.dumps({
+                    "status": "REJECTED", "reason": str(exc)[:120],
+                }).encode(), "application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(503, json.dumps({
+                    "status": "UNAVAILABLE", "error_type": type(exc).__name__,
+                }).encode(), "application/json; charset=utf-8")
+        if route not in {"/scan", "/paper-bot/tick", "/futures-paper-bot/tick", "/api/ai/diagnostic", "/api/ai/dry-run", "/api/blofin/demo/execute-once", "/api/blofin/demo/smoke-test", "/api/blofin/demo/autopilot/control", "/api/blofin/demo/v2-autopilot/run-once"}:
+            return self._send(404, b"Not found", "text/plain; charset=utf-8")
+        origin = self.headers.get("Origin")
+        request_host = self.headers.get("Host", "")
+        if origin and urlparse(origin).netloc.lower() != request_host.lower():
+            return self._send(403, b"Cross-origin scan requests are not allowed", "text/plain; charset=utf-8")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return self._send(400, b"Invalid Content-Length", "text/plain; charset=utf-8")
+        if length <= 0 or length > 16_384:
+            return self._send(413, b"Invalid request size", "text/plain; charset=utf-8")
+        try:
+            raw_body = self.rfile.read(length).decode("utf-8", errors="replace")
+            if api_jobs_request and "application/json" in self.headers.get("Content-Type", "").lower():
+                api_payload = json.loads(raw_body)
+                if not isinstance(api_payload, dict):
+                    raise ValueError("JSON request body must be an object")
+                form = {str(key): [str(value)] for key, value in api_payload.items() if value is not None}
+            else:
+                form = parse_qs(raw_body)
+            if route == "/api/blofin/demo/v2-autopilot/run-once":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({
+                        "status": "UNAUTHORIZED", "message_fa": "توکن پنل معتبر نیست."
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                if os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true" or not _enabled_v2_env("BLOFIN_DEMO_TRADING_ENABLED"):
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "blocker": "V2_DEMO_FLAGS_DISABLED",
+                        "message_fa": "دو کلید ایمنی V2 و BloFin Demo باید در Render فعال باشند؛ هیچ چرخه‌ای آغاز نشد.",
+                        "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "false":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "blocker": "LEGACY_AUTOPILOT_NOT_FALSE",
+                        "message_fa": "اتوپایلوت قدیمی باید صریحاً خاموش باشد.",
+                        "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if storage_backend() != "TURSO_CLOUD_SQLITE":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                        "message_fa": "ذخیره‌سازی پایدار Turso آماده نیست.",
+                        "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() != "WEB":
+                    return self._send(409, json.dumps({
+                        "status": "ROLE_BLOCKED", "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if not V2_AUTOPILOT_RUN_LOCK.acquire(blocking=False):
+                    with LOCK:
+                        active_job_id = V2_AUTOPILOT_RUN_STATE.get("job_id")
+                    return self._send(409, json.dumps({
+                        "status": "ALREADY_RUNNING", "job_id": active_job_id,
+                        "message_fa": "یک چرخه V2 در حال اجراست؛ همان چرخه را دنبال کن.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                job_id = uuid.uuid4().hex
+                with LOCK:
+                    V2_AUTOPILOT_RUN_STATE.update({
+                        "status": "QUEUED", "job_id": job_id,
+                        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "finished_at_utc": None, "result": None, "error_type": None,
+                    })
+                worker = threading.Thread(
+                    target=_run_challenge1_v2_dashboard_cycle,
+                    args=(job_id,), daemon=True, name="challenge1-v2-dashboard-cycle",
+                )
+                try:
+                    worker.start()
+                except Exception:
+                    V2_AUTOPILOT_RUN_LOCK.release()
+                    with LOCK:
+                        V2_AUTOPILOT_RUN_STATE.update({"status": "WORKER_START_FAILED", "error_type": "ThreadStartError"})
+                    return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "QUEUED", "job_id": job_id,
+                    "message_fa": "چرخه واقعی CHALLENGE_1_V2 در محیط BloFin Demo آغاز شد؛ ورود فقط با تأیید هر دو ناظر و کنترل‌های ریسک مجاز است.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+            if route == "/api/blofin/demo/autopilot/control":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({
+                        "status": "UNAUTHORIZED",
+                        "message_fa": "توکن پنل معتبر نیست یا در Environment سرویس تنظیم نشده است.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                action = str(form.get("action", [""])[0] or "").strip().lower()
+                if action not in {"start", "stop"}:
+                    return self._send(400, json.dumps({
+                        "status": "INVALID_ACTION",
+                        "message_fa": "فرمان اتوپایلوت باید start یا stop باشد.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+                if action == "stop":
+                    _set_blofin_demo_autopilot_runtime_override(False)
+                    with LOCK:
+                        BLOFIN_AUTOPILOT_STATE.update({
+                            "enabled": False,
+                            "status": "STOPPING",
+                            "search_continues": False,
+                            "next_cycle_scheduled": False,
+                            "next_cycle_at_utc": None,
+                            "next_cycle_in_seconds": None,
+                            "last_message_fa": "فرمان توقف دریافت شد؛ چرخه جاری تکمیل می‌شود و چرخه جدیدی شروع نخواهد شد.",
+                        })
+                    _persist_blofin_autopilot_state()
+                    return self._send(200, json.dumps({
+                        "status": "STOPPING",
+                        "message_fa": "توقف ثبت شد؛ چرخه جاری قطع نمی‌شود و پس از پایان آن چرخه جدیدی آغاز نخواهد شد.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+                configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+                configured_profile = (
+                    configured_profile
+                    if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+                    else "CHALLENGE_1"
+                )
+                if configured_profile == "CHALLENGE_1_V2":
+                    if os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() != "true":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_ORCHESTRATION_FEATURE_FLAG_DISABLED",
+                            "message_fa": "پروفایل AutoPilot روی V2 تنظیم شده اما Feature Flag مسیر مستقل خاموش است.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if storage_backend() != "TURSO_CLOUD_SQLITE":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                            "message_fa": "ذخیره‌سازی پایدار Turso برای چرخه V2 آماده نیست.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                else:
+                    readiness = _blofin_demo_execution_readiness()
+                    if readiness.get("status") != "READY":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "message_fa": readiness.get("message_fa"),
+                            "blockers": readiness.get("blockers") or [],
+                            "blockers_fa": readiness.get("blockers_fa") or [],
+                            "readiness": readiness,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
+                if role != "WEB":
+                    return self._send(409, json.dumps({
+                        "status": "ROLE_BLOCKED",
+                        "message_fa": "این سرویس در نقش WEB نیست؛ اتوپایلوت از این پردازش شروع نمی‌شود.",
+                        "runtime_role": role,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with LOCK:
+                    active_jobs = [
+                        item for item in BLOFIN_EXECUTION_JOBS.values()
+                        if item.get("status") in {"queued", "running"}
+                    ]
+                    worker_alive = bool(
+                        BLOFIN_AUTOPILOT_THREAD is not None
+                        and BLOFIN_AUTOPILOT_THREAD.is_alive()
+                    )
+                if active_jobs:
+                    return self._send(409, json.dumps({
+                        "status": "EXECUTION_ALREADY_RUNNING",
+                        "message_fa": "یک چرخه معامله در حال اجراست؛ پس از تعیین‌تکلیف همان چرخه اتوپایلوت را شروع کن.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                _set_blofin_demo_autopilot_runtime_override(True)
+                _start_blofin_demo_autopilot()
+                with LOCK:
+                    worker_alive = bool(
+                        BLOFIN_AUTOPILOT_THREAD is not None
+                        and BLOFIN_AUTOPILOT_THREAD.is_alive()
+                    )
+                if not worker_alive:
+                    _set_blofin_demo_autopilot_runtime_override(False)
+                    return self._send(503, json.dumps({
+                        "status": "WORKER_START_FAILED",
+                        "message_fa": "کارگر اتوپایلوت شروع نشد؛ نقش سرویس و لاگ‌های Staging را بررسی کن.",
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "STARTING",
+                    "message_fa": "اتوپایلوت Challenge 1 فعال شد؛ پایش از چرخه بعدی و پس از تکمیل کندل ۵ دقیقه‌ای ادامه می‌یابد.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+            if route == "/api/blofin/demo/smoke-test":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                # A separately managed smoke-test token lets an operator launch
+                # this one-purpose Demo test without changing the dashboard token.
+                expected_token = (
+                    os.getenv("BLOFIN_DEMO_SMOKE_TEST_TOKEN", "").strip()
+                    or os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                )
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({
+                        "status": "UNAUTHORIZED", "message_fa": "مجوز تست مستقل معتبر نیست."
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                readiness = _blofin_demo_smoke_test_readiness()
+                if readiness.get("status") != "READY":
+                    return self._send(409, json.dumps({
+                        "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
+                        "readiness": readiness,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with BLOFIN_EXECUTION_GUARD:
+                    with LOCK:
+                        active = any(
+                            item.get("status") in {"queued", "running"}
+                            for item in BLOFIN_EXECUTION_JOBS.values()
+                        )
+                    if active:
+                        return self._send(409, json.dumps({
+                            "status": "ALREADY_RUNNING",
+                            "message_fa": "یک چرخه اجرای Demo هم‌اکنون در حال اجراست."
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    job_id = uuid.uuid4().hex
+                    _set_blofin_execution_job(
+                        job_id, "queued", stage="QUEUED",
+                        message_fa="تست ربات در محیط دمو صرافی در صف اجرای مستقل قرار گرفت؛ هنوز سفارشی ارسال نشده است.",
+                        test_name="تست ربات در محیط دمو صرافی",
+                    )
+                    worker = threading.Thread(
+                        target=_run_blofin_demo_smoke_test_job,
+                        args=(job_id,), daemon=True, name="blofin-demo-smoke-test",
+                    )
+                    try:
+                        worker.start()
+                    except Exception:
+                        _set_blofin_execution_job(
+                            job_id, "failed", stage="WORKER_START_FAILED",
+                            message_fa="کارگر تست مستقل شروع نشد.",
+                        )
+                        return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "QUEUED", "job_id": job_id,
+                    "message_fa": "تست مستقل ربات در BloFin Demo آغاز شد.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+            if route == "/api/blofin/demo/execute-once":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN"}', "application/json; charset=utf-8")
+                expected_token = os.getenv("BLOFIN_DASHBOARD_TOKEN", "")
+                if not _blofin_dashboard_token_valid(self.headers.get("Authorization", ""), expected_token):
+                    return self._send(401, json.dumps({"status":"UNAUTHORIZED","message_fa":"توکن پنل معتبر نیست."}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                instrument_id = str(form.get("instrument", [""])[0] or "").strip().upper()
+                execution_profile = str(form.get("profile", ["CHALLENGE_1"])[0] or "CHALLENGE_1").strip().upper()
+                if (
+                    form.get("confirm", [""])[0] != "1"
+                    or not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", instrument_id)
+                    or execution_profile not in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+                ):
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}', "application/json; charset=utf-8")
+                if execution_profile == "CHALLENGE_1_V2":
+                    if os.getenv("BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED", "").strip().lower() != "true":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_ORCHESTRATION_FEATURE_FLAG_DISABLED",
+                            "message_fa": "مسیر مستقل V2 با Feature Flag خاموش است؛ هیچ سفارش یا چرخه‌ای شروع نشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if storage_backend() != "TURSO_CLOUD_SQLITE":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "DURABLE_TURSO_NOT_CONFIGURED",
+                            "message_fa": "برای اجرای V2 فقط‌خواندنی، دفتر ثبت پایدار Turso باید قابل دسترسی باشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if (
+                        os.getenv("BLOFIN_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "false"
+                        or _blofin_demo_autopilot_enabled()
+                    ):
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "AUTOPILOT_MUST_REMAIN_DISABLED",
+                            "message_fa": "برای اجرای دستی V2، AutoPilot باید در Render خاموش باشد؛ هیچ چرخه‌ای شروع نشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    required_flags = {
+                        "SINGLE_SHOT_DEMO_TEST": os.getenv("SINGLE_SHOT_DEMO_TEST", "").strip().lower() == "true",
+                        "BLOFIN_DEMO_TRADING_ENABLED": os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() == "true",
+                        "CHALLENGE_1_V2_SINGLE_SHOT_WRITE": os.getenv("CHALLENGE_1_V2_SINGLE_SHOT_WRITE", "").strip().lower() == "true",
+                    }
+                    missing_flags = [key for key, enabled in required_flags.items() if not enabled]
+                    if missing_flags:
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_SINGLE_SHOT_FLAGS_INCOMPLETE",
+                            "missing_flags": missing_flags,
+                            "message_fa": "کلیدهای ایمنی اجرای یک‌باره V2 کامل نیستند؛ هیچ چرخه‌ای شروع نشد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    lock_store = None
+                    try:
+                        lock_store = BloFinDemoEventStore()
+                        single_shot_lock = lock_store.single_shot_lock_status()
+                    except Exception:
+                        single_shot_lock = None
+                    finally:
+                        if lock_store is not None:
+                            lock_store.close()
+                    if not isinstance(single_shot_lock, dict) or not isinstance(single_shot_lock.get("locked"), bool):
+                        return self._send(503, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "SINGLE_SHOT_LOCK_UNREADABLE",
+                            "message_fa": "قفل دائمی Single-Shot قابل خواندن نیست؛ اجرای V2 متوقف شد.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    if single_shot_lock.get("locked") or int(single_shot_lock.get("consumed_orders") or 0) != 0:
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "SINGLE_SHOT_ALREADY_CONSUMED",
+                            "single_shot_lock": single_shot_lock,
+                            "message_fa": "سهمیه یک‌بارمصرف قبلاً مصرف شده است؛ اجرای مجدد مجاز نیست.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                else:
+                    readiness = _blofin_demo_execution_readiness()
+                    if readiness.get("status") != "READY":
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED", "message_fa": readiness.get("message_fa"),
+                            "readiness": readiness,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                with BLOFIN_EXECUTION_GUARD:
+                    with LOCK:
+                        active = any(
+                            item.get("status") in {"queued", "running"}
+                            for item in BLOFIN_EXECUTION_JOBS.values()
+                        )
+                    if active:
+                        return self._send(409, json.dumps({"status":"ALREADY_RUNNING","message_fa":"یک آزمایش دمو در حال اجراست."}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    job_id = uuid.uuid4().hex
+                    _set_blofin_execution_job(
+                        job_id, "queued", stage="QUEUED",
+                        message_fa=f"چرخه Demo برای {instrument_id} با ربات {execution_profile} ثبت شد؛ هنوز سفارشی ارسال نشده است.",
+                        trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
+                        selection_context={
+                            "selection_method": "MANUAL_OPERATOR",
+                            "selection_reason": "The operator explicitly selected this instrument for a Challenge 1 Demo cycle.",
+                            "configured_universe": [],
+                        },
+                    )
+                    worker = threading.Thread(
+                        target=_run_blofin_demo_execution_job,
+                        args=(job_id, instrument_id, execution_profile),
+                        daemon=True, name="blofin-demo-manual-cycle",
+                    )
+                    try:
+                        worker.start()
+                    except Exception:
+                        _set_blofin_execution_job(
+                            job_id, "failed", stage="WORKER_START_FAILED",
+                            message_fa="کارگر اجرای سفارش دمو شروع نشد.",
+                        )
+                        return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
+                return self._send(202, json.dumps({
+                    "status": "QUEUED", "job_id": job_id,
+                    "message_fa": "تحلیل Strategy 1 با الگوهای کندلی و نموداری در BloFin Demo آغاز شد.",
+                }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            if route == "/api/ai/dry-run":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN","message":"Same-origin request required."}',
+                                      "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}',
+                                      "application/json; charset=utf-8")
+                payload = _run_ai_synthetic_dry_run_limited()
+                status_code = _ai_dry_run_http_status(payload)
+                if status_code >= 400:
+                    # Structured, secret-free diagnostics make provider/configuration failures
+                    # distinguishable in Render logs without persisting prompts or credentials.
+                    print(
+                        "CSR_AI_DRY_RUN_DIAGNOSTIC "
+                        + json.dumps(_ai_dry_run_safe_diagnostic(payload), ensure_ascii=False, sort_keys=True),
+                        flush=True,
+                    )
+                return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+
+            if route == "/api/ai/diagnostic":
+                if (
+                    not origin
+                    or urlparse(origin).netloc.lower() != request_host.lower()
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                ):
+                    return self._send(403, b'{"status":"FORBIDDEN","message":"Same-origin request required."}',
+                                      "application/json; charset=utf-8")
+                if form.get("confirm", [""])[0] != "1":
+                    return self._send(400, b'{"status":"CONFIRMATION_REQUIRED"}',
+                                      "application/json; charset=utf-8")
+                payload = _run_ai_diagnostic_limited()
+                result_status = str(payload.get("status") or "UNKNOWN")
+                status_code = 200 if result_status == "CONNECTED" else (
+                    429 if result_status in {"RATE_LIMITED", "DIAGNOSTIC_COOLDOWN", "DAILY_DIAGNOSTIC_LIMIT"} else
+                    503 if result_status == "MISSING_API_KEY" else 502
+                )
+                return self._send(status_code, json.dumps(payload, ensure_ascii=False).encode(),
+                                  "application/json; charset=utf-8")
+
+            asset = _parse_scan_asset(form.get("asset", [""])[0].strip())
+            if route == "/paper-bot/tick" and (
+                asset.market_type != "cex" or asset.symbol not in PAPER_ASSETS
+            ):
+                raise ValueError("Paper trading accepts only the configured major CEX spot universe.")
+            if route == "/futures-paper-bot/tick" and (
+                asset.market_type != "perp" or asset.symbol not in FUTURES_PAPER_ASSETS
+            ):
+                raise ValueError("Futures paper trading accepts only the configured major USDT-M perpetual universe.")
+            headline = form.get("headline", [""])[0].strip() if route == "/scan" else ""
+            social_post = form.get("social_post", [""])[0].strip() if route == "/scan" else ""
+            global JOB_FENCE_COUNTER
+            canonical_request = json.dumps(
+                {"route": route, "asset": asset.raw, "headline": headline, "social_post": social_post},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            )
+            idempotency_key = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+            job_id = uuid.uuid4().hex
+            task = {"job_id": job_id, "route": route, "asset": asset,
+                    "headline": headline, "social_post": social_post,
+                    "idempotency_key": idempotency_key}
+            _ensure_scan_worker()
+            with LOCK:
+                existing_id = ACTIVE_SCAN_KEYS.get(idempotency_key)
+                existing = JOBS.get(existing_id) if existing_id else None
+                if existing and existing.get("status") in {"queued", "running"}:
+                    job_id = existing_id
+                else:
+                    if SCAN_QUEUE.full():
+                        return self._send(429, _page("<h2>صف اسکن پر است</h2><p>۵۰ درخواست در صف هستند. کمی بعد دوباره تلاش کن.</p><a href='/'>بازگشت</a>"))
+                    ACTIVE_SCAN_KEYS[idempotency_key] = job_id
+                    JOB_FENCE_COUNTER += 1
+                    created_at = datetime.now(timezone.utc)
+                    JOBS[job_id] = {
+                        "status": "queued",
+                        "queue_position": SCAN_QUEUE.qsize() + 1,
+                        "created_at_utc": created_at.isoformat(),
+                        "valid_until_utc": (created_at + timedelta(seconds=JOB_LEASE_SECONDS)).isoformat(),
+                        "idempotency_key": idempotency_key,
+                        "fencing_token": JOB_FENCE_COUNTER,
+                    }
+                    task["fencing_token"] = JOBS[job_id]["fencing_token"]
+                    while len(JOBS) > 100:
+                        oldest = next(iter(JOBS))
+                        if JOBS[oldest].get("status") in {"queued", "running"}:
+                            break
+                        JOBS.pop(oldest)
+                    SCAN_QUEUE.put_nowait(task)
+                    if route == "/scan":
+                        timer = threading.Timer(15.0, _expire_manual_scan_job, args=(job_id,))
+                        timer.daemon = True
+                        timer.start()
+            if api_jobs_request:
+                return self._send(202, json.dumps({"status": "queued", "job_id": job_id, "poll_url": "/api/jobs/" + job_id, "timeout_seconds": 15, "trade_authorization": "NO_TRADE"}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            if route == "/paper-bot/tick":
+                body = (
+                    "<h2>چرخهٔ ربات آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
+                    "<p id='state' aria-live='polite'>در حال ارزیابی دادهٔ بازار و مدیریت موقعیت کاغذی...</p>"
+                    "<div id='result' aria-live='polite'><p>نتیجه پس از تکمیل چرخه به فارسی نمایش داده می‌شود.</p></div>"
+                    "<p><a href='/'>بازگشت به داشبورد</a></p>"
+                    + _paper_tick_page_script(job_id)
+                )
+                return self._send(202, _page(body, "Paper Bot Cycle"))
+            if route == "/futures-paper-bot/tick":
+                body = (
+                    "<h2>چرخهٔ فیوچرز آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
+                    "<p id='futures-state' aria-live='polite'>در حال بررسی داده‌های بازار و شرایط ورود...</p>"
+                    "<section class='card' id='futures-report' aria-live='polite'><p>گزارش فارسی پس از تکمیل چرخه اینجا نمایش داده می‌شود.</p></section>"
+                    "<details class='card'><summary>جزئیات فنی و دادهٔ خام</summary><pre id='futures-result' style='white-space:pre-wrap;overflow-wrap:anywhere'></pre></details>"
+                    "<p><a href='/'>بازگشت به داشبورد</a></p>"
+                    "<script>(function(){const id='" + job_id + "',state=document.getElementById('futures-state'),report=document.getElementById('futures-report'),out=document.getElementById('futures-result');"
+                    "function addLine(label,value){const row=document.createElement('p'),strong=document.createElement('strong'),span=document.createElement('span');strong.textContent=label+'： ';span.textContent=value===null||value===undefined||value===''?'—':String(value);row.appendChild(strong);row.appendChild(span);report.appendChild(row);}"
+                    "async function poll(){try{const r=await fetch('/jobs/'+id,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();"
+                    "if(j.status==='completed'){const p=j.result||{},c=p.cycle||{},f=p.report_fa||{},s=p.futures_state||{},a=s.account||{},risk=s.risk_controls||{};"
+                    "state.textContent='چرخه تکمیل شد؛ نتیجه در گزارش فارسی آمده است.';report.replaceChildren();"
+                    "addLine('نتیجه',f.status||c.status_fa||'نامشخص');addLine('تصمیم',f.decision||c.decision_fa||'نامشخص');addLine('جهت',f.direction||c.direction_fa||'بدون معامله');"
+                    "addLine('دلیل',f.reason||c.reason_fa||'دلیل ثبت نشده است.');if(f.technical_error_type||f.technical_detail)addLine('جزئیات فنی',String(f.technical_error_type||'')+(f.technical_detail?': '+f.technical_detail:''));"
+                    "addLine('موجودی فرضی Paper',Number(a.balance_usd||0).toFixed(2)+' USD');addLine('ارزش فرضی حساب',Number(a.equity_usd||0).toFixed(2)+' USD');"
+                    "addLine('موقعیت باز',s.open_position?'وجود دارد':'وجود ندارد');addLine('ترمز ریسک حساب',f.risk_circuit_breaker_fa||risk.risk_circuit_breaker_status_fa||'نامشخص');"
+                    "addLine('وضعیت هوش مصنوعی',f.ai_status_fa||'در این چرخه تأیید نشده است.');addLine('محاسبه لیکوییدیشن',f.liquidation_model_status||'نامشخص');"
+                    "addLine('سفارش واقعی','هیچ سفارشی ارسال نشد');addLine('حالت اجرا','فقط Paper و فقط‌خواندنی');out.textContent=JSON.stringify(p,null,2);return;}"
+                    "if(j.status==='failed'){state.textContent='چرخه با خطا متوقف شد.';report.textContent='خطای چرخه: '+(j.error||'جزئیات در دسترس نیست');out.textContent=JSON.stringify(j,null,2);return;}"
+                    "state.textContent=j.status==='queued'?'چرخه در صف اجراست.':j.status==='running'?'در حال اجرای چرخه؛ هنوز تصمیم نهایی صادر نشده است.':'وضعیت چرخه: '+j.status;"
+                    "}catch(e){state.textContent='ارتباط موقتاً قطع شد؛ فقط همان شناسهٔ چرخه دوباره بررسی می‌شود.';}"
+                    "setTimeout(poll,2500);}poll();})();</script>"
+                )
+                return self._send(202, _page(body, "Futures Paper Bot"))
+            body = (
+                "<h2>اسکن آغاز شد</h2><p>شناسه کار: <code>" + job_id + "</code></p>"
+                "<p id='state'>در حال جمع‌آوری داده‌های بازار، نهنگ‌ها و احساسات...</p>"
+                 "<!--RADAR_ASSET_SCAN-->"
+                "<section class='card'><h3 id='diagnosis-title'>تشخیص نهایی</h3><div id='diagnosis-headline' class='metric'></div><div id='diagnosis-short' class='grid'></div><div id='diagnosis-long' class='grid'></div><div id='diagnosis-reasons'></div></section>"
+                "<section class='card'><h3>کف و سقف در بازه‌های مختلف</h3><div id='timeframe-range-table'></div><p id='candle-age-note' class='muted'></p></section>"
+                "<section class='card'><h3>نمای کلی بازار و نمودار</h3><div id='market-summary' class='grid'></div>"
+                "<div id='range-table'></div><canvas id='candles' width='1000' height='320'></canvas></section>"
+                "<section class='card'><h3>Market Intelligence · DEX و مشتقات</h3><div id='mi-summary' class='grid'></div><div id='mi-notes' class='muted'></div></section>"
+                "<section class='card'><h3>۱۲ فیلتر</h3><div id='gate-table'></div></section>"
+                "<section class='card'><h3>خلاصه نتیجه اسکن</h3><div id='scan-summary' class='grid'></div></section><p><a href='/'>بازگشت</a></p>"
+                "<script>const job='" + job_id + "';"
+                "function cell(tag,text){const e=document.createElement(tag);e.textContent=text??'UNKNOWN';return e;}"
+                "function table(container,headers,rows){const t=document.createElement('table'),h=document.createElement('thead'),hr=document.createElement('tr');headers.forEach(v=>hr.appendChild(cell('th',v)));h.appendChild(hr);t.appendChild(h);const b=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach(v=>tr.appendChild(cell('td',v)));b.appendChild(tr);});t.appendChild(b);container.replaceChildren(t);}"
+                "function renderMarket(m){const box=document.getElementById('market-summary');"
+                "const items=[['وضعیت دارایی',m.asset_regime],['رژیم معیار',m.benchmark_regime],['قیمت آخر',m.current_price],['سن کندل (ساعت)',m.candle_age_hours],['وضعیت کف/سقف',m.status],['الگوی هندسی',(m.chart_pattern||{}).pattern||'نامشخص'],['وضعیت الگو',(m.chart_pattern||{}).status||'UNKNOWN'],['تأیید شکست با حجم',(m.chart_pattern||{}).breakout_confirmation||'UNKNOWN'],['حجم شکست / میانه ۲۰ کندل',(m.chart_pattern||{}).breakout_volume_ratio||'UNKNOWN']];"
+                "box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));const strong=cell('strong',v);d.appendChild(strong);box.appendChild(d);});"
+                "const labels={'7':'۷ روز','30':'۳۰ روز','90':'۹۰ روز','365':'۳۶۵ روز'};"
+                "const rows=Object.entries(m.ranges||{}).map(([k,v])=>[labels[k]||k,v.status,v.low,v.high,v.candle_count,v.coverage_pct]);"
+                "table(document.getElementById('range-table'),['بازه','وضعیت','کف','سقف','تعداد کندل','پوشش %'],rows);"
+                "const canvas=document.getElementById('candles'),ctx=canvas.getContext('2d'),bars=m.candles||[];ctx.clearRect(0,0,canvas.width,canvas.height);"
+                "if(!bars.length){ctx.fillStyle='#f59e0b';ctx.fillText('تاریخچه OHLC برای نمودار موجود نیست',20,30);return;}"
+                "const lo=Math.min(...bars.map(x=>x.low)),hi=Math.max(...bars.map(x=>x.high)),span=Math.max(hi-lo,1e-12),pad=20,w=(canvas.width-2*pad)/bars.length;"
+                "bars.forEach((x,i)=>{const cx=pad+i*w+w/2,y=v=>canvas.height-pad-(v-lo)/span*(canvas.height-2*pad);const up=x.close>=x.open;ctx.strokeStyle=up?'#22c55e':'#ef4444';ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(cx,y(x.high));ctx.lineTo(cx,y(x.low));ctx.stroke();const top=y(Math.max(x.open,x.close)),bottom=y(Math.min(x.open,x.close));ctx.fillRect(cx-w*.32,top,Math.max(1,w*.64),Math.max(1,bottom-top));});const shape=m.chart_pattern||{};if(shape.status==='FORMING'||shape.status==='BREAKOUT_UP'||shape.status==='BREAKOUT_DOWN'){const drawLine=(line,color)=>{if(!line)return;ctx.save();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([7,5]);ctx.beginPath();ctx.moveTo(pad+(line.start_index+.5)*w,y(line.start_price));ctx.lineTo(pad+(line.end_index+.5)*w,y(line.end_price));ctx.stroke();ctx.restore();};drawLine(shape.upper_line,'#ffc66d');drawLine(shape.lower_line,'#72a7ff');(shape.pivots||[]).forEach(p=>{ctx.fillStyle=p.kind==='HIGH'?'#ffc66d':'#72a7ff';ctx.beginPath();ctx.arc(pad+(p.index+.5)*w,y(p.price),4,0,Math.PI*2);ctx.fill();});ctx.fillStyle='#edf4fb';ctx.fillText('Triangle: '+(shape.status||'UNKNOWN')+' / '+(shape.breakout||'NO BREAKOUT'),pad,16);}}"
+                "function renderTimeframes(rows){const labels={'1h':'۱ ساعت','6h':'۶ ساعت','12h':'۱۲ ساعت','1d':'۱ روز','1w':'۱ هفته','1mo':'۱ ماه'};const data=Object.entries(rows||{}).map(([k,v])=>[labels[k]||k,v.status==='KNOWN'?'کامل':v.status==='PARTIAL'?'ناقص':'ناموجود',v.low,v.high,v.bar_count+'/'+v.expected_bars,v.coverage_pct===undefined?'—':v.coverage_pct+'%',v.age_hours===null||v.age_hours===undefined?'—':v.age_hours+' ساعت']);table(document.getElementById('timeframe-range-table'),['بازه','وضعیت داده','کف','سقف','تعداد کندل','پوشش','سن آخرین کندل'],data);}"
+                "function renderDiagnosis(d){const title=document.getElementById('diagnosis-title'),head=document.getElementById('diagnosis-headline');title.textContent='تشخیص نهایی · '+(d.coin_name||'رمزارز')+' ('+(d.symbol||'')+')';head.replaceChildren(cell('strong',d.final_recommendation||'تشخیص در دسترس نیست'),cell('div','وضعیت کلی: '+(d.overall_signal_fa||'خنثی')+' · '+(d.explanation||'')));const makeCard=(label,item)=>{const box=document.createElement('div');box.className='metric';box.appendChild(cell('strong',label));box.appendChild(cell('div',item.action_fa||'ناموجود'));(item.reasons||[]).forEach(reason=>{const p=cell('p','• '+reason);box.appendChild(p);});return box;};document.getElementById('diagnosis-short').replaceChildren(makeCard('تصمیم کوتاه‌مدت',d.short_term||{}));document.getElementById('diagnosis-long').replaceChildren(makeCard('تصمیم بلندمدت / نگهداری',d.long_term||{}));const list=document.createElement('ul');(d.blockers||[]).forEach(row=>{const li=cell('li',(row.name?row.name+' — ':'')+row.reason+' ['+row.status+']');list.appendChild(li);});const reasons=document.getElementById('diagnosis-reasons');reasons.replaceChildren(cell('h4','چرا خرید توصیه می‌شود یا نمی‌شود؟'),list);document.getElementById('candle-age-note').textContent=d.candle_age_text||'سن کندل در دسترس نیست.';}"
+                "function renderMarketIntelligence(m){const d=m.dex_screener||{},c=m.coinglass||{},s=m.scoring||{};"
+                "const w=c.whale_intelligence||{};const items=[['وضعیت کلی',m.status],['توکن DEX',(d.token_name||'')+' '+(d.token_symbol||'')],['نقدینگی DEX (USD)',d.liquidity_usd],['حجم DEX در ۲۴ ساعت (USD)',d.volume_24h_usd],['سهم تعداد تراکنش خرید %',d.buy_transaction_share_pct],['تعداد تراکنش ۲۴ ساعت',d.total_transactions_24h],['عمر جفت‌ارز (ساعت)',d.pair_age_hours],['وضعیت CoinGlass',c.status],['Funding میانه %',c.funding_median_pct],['تعداد صرافی‌های Funding',c.funding_exchange_count],['Open Interest (USD)',c.open_interest_usd],['تغییر OI در ۲۴ ساعت %',c.open_interest_change_24h_pct],['وضعیت Whale API',w.status],['پوزیشن‌های نهنگ Hyperliquid',w.position_count],['کیف‌پول‌های نهنگ',w.wallet_count],['ارزش پوزیشن لانگ (USD)',w.long_notional_usd],['ارزش پوزیشن شورت (USD)',w.short_notional_usd],['خالص مواجهه جهت‌دار (USD)',w.net_directional_notional_usd],['هشدارهای ورود',w.open_alert_count],['هشدارهای خروج',w.close_alert_count],['تعدیل امتیاز تأیید',s.confirmation_adjustment],['تعدیل امتیاز ریسک',s.risk_adjustment],['فشار DEX',s.dex_flow_bias],['ازدحام مشتقات',s.coinglass_crowding]];const box=document.getElementById('mi-summary');box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});const whaleWallets=(w.positions||[]).slice(0,5).map(x=>'نهنگ '+(x.wallet||'آدرس نامشخص')+' · '+x.direction+' · '+(x.position_value_usd??'—')+' USD · اهرم '+(x.leverage??'—')+'x · PnL '+(x.unrealized_pnl_usd??'—'));const whaleAlerts=(w.alerts||[]).slice(0,5).map(x=>'هشدار '+x.action+' '+x.direction+' · '+(x.wallet||'آدرس نامشخص')+' · '+(x.position_value_usd??'—')+' USD');const notes=[...(s.notes||[]),d.reason,c.reason,w.reason,w.coverage,...whaleWallets,...whaleAlerts,m.disclaimer].filter(Boolean);document.getElementById('mi-notes').textContent=notes.join(' · ')||'دادهٔ تکمیلی خاصی از منابع بیرونی گزارش نشده است.';}"
+                "window.CryptoRadar.scanning('radar-asset-scan', 'در حال جمع‌آوری داده و اجرای فیلترهای تحلیلی...');"
+                "let pollAttempts=0;const pollStarted=Date.now();async function poll(){try{const controller=new AbortController(),requestTimer=setTimeout(()=>controller.abort(),4000);const r=await fetch('/jobs/'+job,{cache:'no-store',signal:controller.signal});clearTimeout(requestTimer);if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();pollAttempts=0;document.getElementById('state').textContent=j.status;"
+                "if(j.status==='completed'){const s=j.result||{};if(s.fast_asset_scan){const f=s.fast_scan||{},box=document.getElementById('scan-summary');window.CryptoRadar.update('radar-asset-scan',[{symbol:f.symbol||s.asset,name:f.token_name,signal:'NO_TRADE'}],{state:'complete',caption:'اسکن سریع Gem Hunter V3 · پژوهشی و فقط‌خواندنی'});document.getElementById('state').textContent=f.message_fa||'تحلیل سریع تکمیل شد.';const rows=[['توکن',(f.token_name||'نامشخص')+' ('+(f.symbol||'—')+')'],['قیمت USD',f.price_usd],['نقدینگی USD',f.liquidity_usd],['حجم ۲۴ ساعت USD',f.volume_24h_usd],['امتیاز فرصت',f.opportunity_score],['امتیاز ریسک',f.risk_score],['فاز پامپ/دامپ',f.pump_phase_fa],['قیمت ابطال سناریو USD',f.risk_invalidation_price_usd],['خط قرمز امنیتی',f.red_flag_fa],['جریان نهنگ‌ها',(f.whale_flow||{}).message_fa],['مجوز معامله','NO_TRADE · هیچ سفارشی ارسال نشد']];box.replaceChildren();rows.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});document.getElementById('diagnosis-title').textContent='گزارش اسکن سریع اختصاصی دارایی';document.getElementById('diagnosis-headline').textContent='وضعیت: '+f.status+' · فقط پژوهشی';document.getElementById('diagnosis-reasons').textContent='اطلاعات نهنگ‌ها و امنیت مستقل در این مسیر سریع ممکن است ناموجود باشد؛ UNKNOWN به معنی PASS نیست.';return;}window.CryptoRadar.update('radar-asset-scan',[{symbol:s.symbol||s.asset,name:s.coin_name,signal:s.signal}],{state:'complete',caption:'نتیجهٔ واقعی موتور تحلیل: '+String(s.signal||'UNKNOWN')+' · امتیاز تأیید به‌تنهایی مجوز ورود نیست.'});renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز خام تأیید (مجوز ورود نیست)',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
+                "if(j.status==='failed'){const state=document.getElementById('state');state.textContent=j.message_fa||('اسکن ناموفق بود: '+j.error);window.CryptoRadar.error('radar-asset-scan',j.message_fa||'اسکن کامل نشد؛ هیچ سیگنال خرید یا فروشی ثبت نشده است.');const back=document.createElement('a');back.href='/';back.textContent='بازگشت سریع به داشبورد';state.appendChild(document.createTextNode(' '));state.appendChild(back);return;}"
+                "if(Date.now()-pollStarted>=15000){const state=document.getElementById('state');state.textContent='مهلت پیگیری ۱۵ ثانیه‌ای تمام شد؛ اسکن متوقف شد. ';const back=document.createElement('a');back.href='/';back.textContent='بازگشت سریع به داشبورد';state.appendChild(back);return;}"
+                "}catch(e){pollAttempts+=1;const elapsed=Date.now()-pollStarted;if(elapsed>=15000){const state=document.getElementById('state');state.textContent='مهلت بازیابی ارتباط تمام شد؛ نتیجه در دسترس نیست. ';const back=document.createElement('a');back.href='/';back.textContent='بازگشت سریع به داشبورد';state.appendChild(back);return;}const delay=Math.min(30000,2500*Math.pow(2,Math.min(pollAttempts,4)));document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ تلاش مجدد خودکار برای همان شناسه در '+Math.ceil(delay/1000)+' ثانیه...';setTimeout(poll,delay);return;}"
+                "setTimeout(poll,2500);}poll();</script>"
+            )
+            return self._send(202, _page(body, "Scan Running"))
+        except Exception as exc:
+            with LOCK:
+                SCAN_RUNNING = False
+            message = html.escape(f"{type(exc).__name__}: {exc}")
+            return self._send(400, _page(f"<h2>خطا در ورودی</h2><p>{message}</p><a href='/'>بازگشت</a>"))
+
+    def log_message(self, fmt, *args):
+        super().log_message(fmt, *args)
+
+
+def _blofin_autopilot_cycle_summary(job: dict) -> dict:
+    """Normalize signal labels and classify completed no-entry Demo cycles safely."""
+    job = job if isinstance(job, dict) else {}
+    raw_result = job.get("result")
+    result = raw_result if isinstance(raw_result, dict) else {}
+    result_analysis = result.get("analysis")
+    job_analysis = job.get("analysis")
+    if isinstance(result_analysis, dict) and result_analysis:
+        analysis = result_analysis
+    elif isinstance(job_analysis, dict):
+        analysis = job_analysis
+    else:
+        analysis = {}
+
+    raw_signal = (
+        (result_analysis.get("signal") if isinstance(result_analysis, dict) else None)
+        or (job_analysis.get("signal") if isinstance(job_analysis, dict) else None)
+        or result.get("signal")
+        or job.get("signal")
+        or result.get("status")
+    )
+    raw_signal = getattr(raw_signal, "value", raw_signal)
+    signal_value = re.sub(r"_+", "_", re.sub(r"[\s-]+", "_", str(raw_signal or "").strip().upper())).strip("_")
+    cycle_status = str(job.get("status") or "UNKNOWN").strip().lower()
+    orders_submitted = bool(result.get("orders_submitted", job.get("orders_submitted", False)))
+    trade_executed = bool(result.get("trade_executed", job.get("trade_executed", False)))
+    no_entry = (
+        cycle_status == "completed"
+        and not orders_submitted
+        and not trade_executed
+        and signal_value in {"", "NONE", "NO_TRADE", "NO_SIGNAL", "HOLD", "NEUTRAL", "UNKNOWN"}
+    )
+    return {
+        "analysis": analysis,
+        "cycle_status": cycle_status,
+        "signal": signal_value or None,
+        "orders_submitted": orders_submitted,
+        "trade_executed": trade_executed,
+        "no_entry": no_entry,
+    }
+
+
+def _blofin_demo_next_5m_scan_window(now_utc: datetime | None = None) -> tuple[int, str]:
+    """Return the delay just after the next completed 5-minute entry candle."""
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    next_boundary_epoch = (int(current.timestamp()) // 300 + 1) * 300 + 3
+    next_at = datetime.fromtimestamp(next_boundary_epoch, timezone.utc)
+    delay_seconds = max(5, int(math.ceil((next_at - current).total_seconds())))
+    return delay_seconds, next_at.isoformat()
+
+def _blofin_demo_next_scan_after_cycle(
+    cycle_started_at_utc: datetime, *, now_utc: datetime | None = None,
+) -> tuple[int, str]:
+    """Schedule from cycle start so a scan overlapping a candle close catches it."""
+    _, boundary_iso = _blofin_demo_next_5m_scan_window(cycle_started_at_utc)
+    target = datetime.fromisoformat(boundary_iso)
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    if target <= current:
+        # The scan crossed the candle boundary. Re-check shortly rather than
+        # skipping the just-closed candle and sleeping for another full interval.
+        target = current + timedelta(seconds=5)
+    delay_seconds = max(5, int(math.ceil((target - current).total_seconds())))
+    return delay_seconds, target.isoformat()
+
+def _blofin_demo_autopilot_worker(max_cycles: int | None = None) -> None:
+    """Run Challenge 1 on BloFin Demo; max_cycles enables safe scheduled one-shot runs."""
+    interval_seconds = 300
+    raw_symbols = os.getenv(
+        "BLOFIN_DEMO_AUTOPILOT_INSTRUMENTS",
+        ",".join(DEFAULT_CHALLENGE1_INSTRUMENTS),
+    )
+    instrument_ids = tuple(dict.fromkeys(
+        symbol.strip().upper() for symbol in raw_symbols.split(",")
+        if re.fullmatch(r"[A-Z0-9]{2,20}-USDT", symbol.strip().upper())
+    ))
+    if not instrument_ids:
+        instrument_ids = DEFAULT_CHALLENGE1_INSTRUMENTS
+    configured_profile = os.getenv("BLOFIN_DEMO_AUTOPILOT_PROFILE", "CHALLENGE_1").strip().upper()
+    execution_profile = (
+        configured_profile
+        if configured_profile in {"CHALLENGE_1", "CHALLENGE_1_V2"}
+        else "CHALLENGE_1"
+    )
+    instrument_id = instrument_ids[0]
+    completed_cycles = 0
+    with LOCK:
+        BLOFIN_AUTOPILOT_STATE.update({
+            "enabled": True,
+            "status": "STARTING",
+            "runtime_role": "WORKER",
+            "interval_seconds": interval_seconds,
+            "instrument_id": instrument_id,
+            "instrument_ids": list(instrument_ids),
+            "execution_profile": execution_profile,
+            "last_message_fa": "اتوپایلوت Challenge 1 فعال شد؛ بازارهای منتخب برای الگوهای کندلی/نموداری پایش می‌شوند.",
+        })
+    _persist_blofin_autopilot_state()
+    while True:
+        if not _blofin_demo_autopilot_enabled():
+            with LOCK:
+                BLOFIN_AUTOPILOT_STATE.update({
+                    "enabled": False, "status": "DISABLED",
+                    "search_continues": False,
+                    "next_cycle_scheduled": False,
+                    "next_cycle_at_utc": None,
+                    "next_cycle_in_seconds": None,
+                    "last_message_fa": "اتوپایلوت با تنظیمات محیطی غیرفعال شده است.",
+                })
+            _persist_blofin_autopilot_state()
+            if max_cycles is not None:
+                return
+            time.sleep(30)
+            continue
+        if not BLOFIN_AUTOPILOT_LOCK.acquire(blocking=False):
+            if max_cycles is not None:
+                raise RuntimeError("Another Autopilot cycle already holds the worker lock.")
+            time.sleep(10)
+            continue
+        try:
+            if SCAN_RUNNING:
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE.update({
+                        "status": "WAITING_FOR_SCAN_QUEUE",
+                        "last_message_fa": "اسکن دیگری در حال اجراست؛ برای جلوگیری از تداخل، چرخه Demo به تعویق افتاد.",
+                    })
+                _persist_blofin_autopilot_state()
+                if max_cycles is not None:
+                    return
+                time.sleep(30)
+                continue
+            started = datetime.now(timezone.utc).isoformat()
+            batch_results = []
+            batch_jobs = []
+            for scan_index, scan_instrument in enumerate(instrument_ids, start=1):
+                instrument_id = scan_instrument
+                job_id = uuid.uuid4().hex
+                with LOCK:
+                    BLOFIN_AUTOPILOT_STATE.update({
+                        "enabled": True,
+                        "status": "RUNNING",
+                        "last_cycle_started_at_utc": started,
+                        "last_stage": "CHALLENGE_1_MULTI_SYMBOL_SCAN",
+                        "instrument_id": instrument_id,
+                        "instrument_ids": list(instrument_ids),
+                        "execution_profile": execution_profile,
+                        "last_message_fa": f"موتور Challenge 1 در حال اسکن {instrument_id} از {len(instrument_ids)} بازار منتخب است.",
+                        "cycles_started": int(BLOFIN_AUTOPILOT_STATE.get("cycles_started") or 0) + (1 if not batch_jobs else 0),
+                    })
+                _persist_blofin_autopilot_state()
+                _set_blofin_execution_job(
+                    job_id, "queued", stage="AUTOPILOT_CYCLE",
+                    message_fa=f"چرخه خودکار Challenge 1 برای {instrument_id} آغاز شد.",
+                    trade_context={"instrument_id": instrument_id, "execution_profile": execution_profile},
+                    selection_context={
+                        "selection_method": "CONFIGURED_UNIVERSE_ORDER",
+                        "selection_reason": (
+                            "The scheduler scans the configured instrument list sequentially; "
+                            "this is not a performance-ranked asset selection."
+                        ),
+                        "configured_universe": list(instrument_ids),
+                        "scan_index": scan_index, "scan_count": len(instrument_ids),
+                    },
+                )
+                _run_blofin_demo_execution_job(job_id, instrument_id, execution_profile)
+                with LOCK:
+                    finished_job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+                summary = _blofin_autopilot_cycle_summary(finished_job)
+                finished_result = finished_job.get("result") if isinstance(finished_job.get("result"), dict) else {}
+                ai_review_summary = _blofin_ai_review_summary(finished_job)
+                batch_results.append({
+                    "instrument_id": instrument_id,
+                    "job_id": job_id,
+                    "status": finished_job.get("status", "UNKNOWN"),
+                    "signal": summary.get("signal"),
+                    "orders_submitted": summary.get("orders_submitted"),
+                    "trade_executed": summary.get("trade_executed"),
+                    "reason_fa": finished_result.get("reason_fa") or finished_job.get("message_fa"),
+                    "failure_stage": finished_job.get("stage"),
+                    "error_type": (
+                        (finished_job.get("error") or {}).get("type")
+                        if isinstance(finished_job.get("error"), dict) else None
+                    ),
+                    "ai_review_summary": ai_review_summary,
+                    "ai_consensus": finished_job.get("ai_consensus") or finished_result.get("ai_consensus"),
+                })
+                batch_jobs.append((job_id, instrument_id))
+            job_id, instrument_id = batch_jobs[-1]
+            exchange_monitor = {}
+            monitor_store = None
+            try:
+                monitor_store = BloFinDemoEventStore()
+                latest_local_order = monitor_store.latest_order()
+                monitor_instrument_id = (
+                    str(latest_local_order.get("instrument_id") or instrument_id).upper()
+                    if isinstance(latest_local_order, dict) else instrument_id
+                )
+                snapshot = _blofin_demo_live_monitor_snapshot(monitor_instrument_id)
+                live_positions = [
+                    row for row in snapshot.get("positions", [])
+                    if isinstance(row, dict) and abs(float(row.get("positions") or 0)) > 0
+                ]
+                open_tpsl_rows = [
+                    row for row in snapshot.get("open_tpsl_orders", [])
+                    if isinstance(row, dict)
+                ]
+                closed_rows = [
+                    row for row in snapshot.get("closed_positions", [])
+                    if isinstance(row, dict)
+                ]
+                def safe_exchange_timestamp(row):
+                    try:
+                        return int(row.get("updateTime") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        return 0
+                closed_rows.sort(key=safe_exchange_timestamp, reverse=True)
+                latest_closed = closed_rows[0] if closed_rows else {}
+                try:
+                    latest_realized_pnl = float(latest_closed.get("realizedPnl"))
+                    if not math.isfinite(latest_realized_pnl):
+                        latest_realized_pnl = None
+                except (TypeError, ValueError, OverflowError):
+                    latest_realized_pnl = None
+                latest_closed_position_id = str(latest_closed.get("positionId") or "").strip()
+                learning_outcome_update = (
+                    monitor_store.record_closed_position_outcome(
+                        instrument_id=monitor_instrument_id,
+                        history_rows=closed_rows,
+                        partial_rows=snapshot.get("partially_closed_positions", []),
+                        position_id=latest_closed_position_id,
+                    )
+                    if latest_closed_position_id else
+                    {"status": "NO_CLOSED_POSITION_ID_IN_HISTORY"}
+                )
+                learning_integrity = monitor_store.learning_memory.integrity_report()
+                exchange_monitor = {
+                    "exchange_monitor_status": snapshot.get("status"),
+                    "exchange_data_completeness": snapshot.get("data_completeness"),
+                    "monitored_order_instrument": monitor_instrument_id,
+                    "exchange_open_position_count": len(live_positions),
+                    "exchange_open_positions": [
+                        {
+                            "instId": row.get("instId"),
+                            "positionSide": row.get("positionSide"),
+                            "positions": row.get("positions"),
+                            "averagePrice": row.get("averagePrice"),
+                            "markPrice": row.get("markPrice"),
+                            "unrealizedPnl": row.get("unrealizedPnl"),
+                            "leverage": row.get("leverage"),
+                        } for row in live_positions[:3]
+                    ],
+                    "exchange_open_tpsl_order_count": len(open_tpsl_rows),
+                    "exchange_open_tpsl_orders": [
+                        {
+                            "instId": row.get("instId"),
+                            "positionSide": row.get("positionSide"),
+                            "side": row.get("side"),
+                            "size": row.get("size"),
+                            "actualSize": row.get("actualSize"),
+                            "tpTriggerPrice": row.get("tpTriggerPrice"),
+                            "slTriggerPrice": row.get("slTriggerPrice"),
+                            "state": row.get("state"),
+                            "reduceOnly": row.get("reduceOnly"),
+                        } for row in open_tpsl_rows[:10]
+                    ],
+                    "latest_closed_position": (
+                        {
+                            "historyId": latest_closed.get("historyId"),
+                            "instId": latest_closed.get("instId"),
+                            "side": latest_closed.get("side"),
+                            "openAveragePrice": latest_closed.get("openAveragePrice"),
+                            "closeAveragePrice": latest_closed.get("closeAveragePrice"),
+                            "realizedPnl": latest_closed.get("realizedPnl"),
+                            "realizedPnlRatio": latest_closed.get("realizedPnlRatio"),
+                            "fee": latest_closed.get("fee"),
+                            "createTime": latest_closed.get("createTime"),
+                            "updateTime": latest_closed.get("updateTime"),
+                        } if latest_closed else None
+                    ),
+                    "exchange_closed_positions_observed": len(closed_rows),
+                    "latest_closed_realized_pnl": latest_realized_pnl,
+                    "latest_closed_profitable": (
+                        latest_realized_pnl > 0 if latest_realized_pnl is not None else None
+                    ),
+                    "learning_outcome_update": learning_outcome_update,
+                    "learning_memory_integrity": learning_integrity,
+                    "exchange_read_errors": snapshot.get("read_errors", []),
+                }
+            except Exception as monitor_exc:
+                exchange_monitor = {
+                    "exchange_monitor_status": "UNKNOWN",
+                    "exchange_monitor_error_type": type(monitor_exc).__name__,
+                }
+            finally:
+                if monitor_store is not None:
+                    try:
+                        monitor_store.close()
+                    except Exception:
+                        pass
+            with LOCK:
+                job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+                result = job.get("result") if isinstance(job.get("result"), dict) else {}
+                cycle_summary = _blofin_autopilot_cycle_summary(job)
+                analysis = cycle_summary["analysis"]
+                cycle_status = cycle_summary["cycle_status"]
+                orders_submitted = cycle_summary["orders_submitted"]
+                trade_executed = cycle_summary["trade_executed"]
+                signal_value = cycle_summary["signal"]
+                no_entry = cycle_summary["no_entry"]
+                # The scheduler keeps running even when a candle was already finalized,
+                # a signal was rejected, or a position is being managed. Reflect that fact
+                # instead of showing a false stopped state for duplicate-candle cycles.
+                autopilot_enabled = _blofin_demo_autopilot_enabled()
+                continue_search = bool(autopilot_enabled)
+                autopilot_status = "SEARCHING_FOR_SIGNAL" if continue_search else "DISABLED"
+                autopilot_message = (
+                    f"چرخهٔ {job_id} پایان یافت؛ پایش خودکار ادامه دارد و چرخهٔ بعدی در صف زمان‌بندی است."
+                    if continue_search else "اتوپایلوت غیرفعال شده؛ چرخهٔ بعدی زمان‌بندی نمی‌شود."
+                )
+                BLOFIN_AUTOPILOT_STATE.update({
+                    "enabled": bool(autopilot_enabled),
+                    "status": autopilot_status,
+                    "last_cycle_status": job.get("status", "UNKNOWN"),
+                    "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "last_stage": job.get("stage"),
+                    "last_message_fa": autopilot_message,
+                    "last_result_status": result.get("status") or job.get("stage"),
+                    "last_job_id": job_id,
+                    "search_continues": continue_search,
+                    "next_cycle_scheduled": bool(autopilot_enabled),
+                    "last_cycle_diagnostics": {
+                        "instrument_id": instrument_id,
+                        "instrument_ids": list(instrument_ids),
+                        "symbols_scanned": len(instrument_ids),
+                        "symbol_results": batch_results,
+                        "execution_profile": execution_profile,
+                        "signal": signal_value or None,
+                        "gate_pass_count": analysis.get("gate_pass_count"),
+                        "gate_fail_count": analysis.get("gate_fail_count"),
+                        "gate_unknown_count": analysis.get("gate_unknown_count"),
+                        "orders_submitted": orders_submitted,
+                        "trade_executed": trade_executed,
+                        "average_fill_price": result.get("average_fill_price"),
+                        "filled_size": result.get("filled_size"),
+                        "reason_fa": result.get("reason_fa") or job.get("message_fa"),
+                        "error_type": (
+                            (job.get("error") or {}).get("type")
+                            if isinstance(job.get("error"), dict) else None
+                        ),
+                        "open_positions": len(result.get("positions") or []),
+                        "closed_positions": len(result.get("closed_positions") or []),
+                        **exchange_monitor,
+                    },
+                })
+            _persist_blofin_autopilot_state()
+        except Exception as exc:
+            with LOCK:
+                BLOFIN_AUTOPILOT_STATE.update({
+                    "status": "ERROR",
+                    "last_cycle_finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "last_message_fa": "چرخه خودکار با خطای کنترل‌شده متوقف شد: " + type(exc).__name__,
+                })
+            _persist_blofin_autopilot_state()
+        finally:
+            BLOFIN_AUTOPILOT_LOCK.release()
+        completed_cycles += 1
+        if max_cycles is not None and completed_cycles >= max_cycles:
+            return
+        try:
+            cycle_started = datetime.fromisoformat(started)
+            next_delay_seconds, next_cycle_at_utc = _blofin_demo_next_scan_after_cycle(cycle_started)
+        except Exception:
+            next_delay_seconds, next_cycle_at_utc = _blofin_demo_next_5m_scan_window()
+        autopilot_enabled = _blofin_demo_autopilot_enabled()
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({
+                "status": "WAITING_FOR_NEXT_5M_CANDLE" if autopilot_enabled else "DISABLED",
+                "interval_seconds": interval_seconds,
+                "next_cycle_at_utc": next_cycle_at_utc if autopilot_enabled else None,
+                "next_cycle_in_seconds": next_delay_seconds if autopilot_enabled else None,
+                "next_cycle_scheduled": bool(autopilot_enabled),
+            })
+        _persist_blofin_autopilot_state()
+        time.sleep(next_delay_seconds)
+
+
+def _reconcile_blofin_demo_orders_on_startup() -> dict:
+    """Probe durable Turso and reconcile all unresolved Demo orders using READ only."""
+    global BLOFIN_STARTUP_RECONCILE_DONE
+    with BLOFIN_STARTUP_RECONCILE_LOCK:
+        if BLOFIN_STARTUP_RECONCILE_DONE:
+            with LOCK:
+                previous = copy.deepcopy(BLOFIN_AUTOPILOT_STATE.get("startup_reconciliation") or {})
+            return previous
+        BLOFIN_STARTUP_RECONCILE_DONE = True
+
+    store = None
+    result: dict[str, Any] = {
+        "status": "SKIPPED",
+        "reason": "DURABLE_TURSO_NOT_CONFIGURED",
+        "orders_submitted": False,
+        "trigger": "PROCESS_STARTUP",
+    }
+    try:
+        if storage_backend() != "TURSO_CLOUD_SQLITE":
+            raise RuntimeError("DURABLE_TURSO_NOT_CONFIGURED")
+        store = BloFinDemoEventStore()
+        storage_probe = store.verify_durable_round_trip(connections=4)
+        result["storage_probe"] = storage_probe
+        if not storage_probe.get("verified"):
+            result.update({
+                "status": "BLOCKED",
+                "reason": "TURSO_MULTI_CONNECTION_PROBE_FAILED",
+            })
+        else:
+            reconciler = BloFinDemoExecutor(
+                client=BloFinDemoTradeClient(timeout=10.0),
+                store=store,
+                policy=BloFinDemoRiskPolicy(max_leverage=1),
+                trading_enabled=False,
+            )
+            sweep = reconciler.reconcile_unresolved_orders(limit=100)
+            result.update(sweep)
+            result["trigger"] = "PROCESS_STARTUP"
+            result["storage_probe"] = storage_probe
+            if result.get("orders_submitted") is not False:
+                result["status"] = "BLOCKED"
+                result["orders_submitted"] = False
+                result["reason"] = "READ_ONLY_RECONCILIATION_REPORTED_UNSAFE_WRITE_STATE"
+            elif (
+                result.get("status") == "RECONCILED"
+                and int(result.get("remaining_unresolved") or 0) == 0
+            ):
+                result["reason"] = (
+                    "DURABLE_TURSO_PROBE_AND_READ_ONLY_RECONCILIATION_PASSED"
+                )
+            else:
+                # Do not retain the pre-probe DURABLE_TURSO_NOT_CONFIGURED
+                # placeholder after a successful durable storage probe.
+                existing_reason = result.get("reason")
+                if existing_reason == "DURABLE_TURSO_NOT_CONFIGURED":
+                    existing_reason = None
+                result["reason"] = existing_reason or (
+                    "DURABLE_TURSO_PROBE_PASSED; "
+                    "READ_ONLY_RECONCILIATION_REQUIRES_ATTENTION"
+                )
+    except Exception as exc:
+        result.update({
+            "status": "UNAVAILABLE",
+            "reason": "STARTUP_RECONCILIATION_UNAVAILABLE",
+            "error_type": type(exc).__name__,
+            "orders_submitted": False,
+        })
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+    with LOCK:
+        BLOFIN_AUTOPILOT_STATE["startup_reconciliation"] = copy.deepcopy(result)
+        BLOFIN_AUTOPILOT_STATE["startup_reconciliation_at_utc"] = datetime.now(timezone.utc).isoformat()
+        BLOFIN_AUTOPILOT_STATE["startup_reconciliation_orders_submitted"] = False
+    safe_log = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "attempted": result.get("attempted"),
+        "remaining_unresolved": result.get("remaining_unresolved"),
+        "orders_submitted": False,
+        "storage_probe_verified": bool(
+            isinstance(result.get("storage_probe"), dict)
+            and result["storage_probe"].get("verified") is True
+        ),
+        "storage_probe_connections": (
+            result.get("storage_probe", {}).get("connections")
+            if isinstance(result.get("storage_probe"), dict) else None
+        ),
+        "error_type": result.get("error_type"),
+    }
+    print("BLOFIN_DEMO_STARTUP_RECOVERY " + json.dumps(
+        safe_log, sort_keys=True, separators=(",", ":")
+    ))
+    _persist_blofin_autopilot_state()
+    return result
+
+
+def _schedule_blofin_demo_startup_recovery() -> None:
+    """Run startup Turso probing/recovery off the HTTP listener thread."""
+    global BLOFIN_STARTUP_RECONCILE_THREAD
+    with BLOFIN_STARTUP_RECONCILE_LOCK:
+        if BLOFIN_STARTUP_RECONCILE_DONE:
+            return
+        if BLOFIN_STARTUP_RECONCILE_THREAD is not None and BLOFIN_STARTUP_RECONCILE_THREAD.is_alive():
+            return
+        BLOFIN_STARTUP_RECONCILE_THREAD = threading.Thread(
+            target=_reconcile_blofin_demo_orders_on_startup,
+            daemon=True,
+            name="blofin-demo-startup-recovery",
+        )
+        BLOFIN_STARTUP_RECONCILE_THREAD.start()
+
+
+def _start_blofin_demo_autopilot() -> None:
+    """Start the in-web worker only in WEB role; API and WORKER roles stay separate."""
+    global BLOFIN_AUTOPILOT_THREAD
+    role = os.getenv("BLOFIN_DEMO_AUTOPILOT_ROLE", "WEB").strip().upper() or "WEB"
+    if role not in {"WEB", "API", "WORKER"}:
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": False, "status": "ROLE_BLOCKED",
+                "runtime_role": role,
+                "last_message_fa": "نقش اجرای Autopilot نامعتبر است؛ هیچ چرخه‌ای شروع نشد.",
+            })
+        return
+    if role != "WEB":
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": False, "status": "DISABLED",
+                "runtime_role": role,
+                "last_message_fa": (
+                    "این پردازش فقط نقش API دارد؛ اجرای Worker در Runner مستقل انجام می‌شود."
+                    if role == "API" else
+                    "این پردازش در نقش Worker زمان‌بندی‌شده است؛ حلقهٔ دائمی وب اجرا نمی‌شود."
+                ),
+            })
+        return
+    _restore_blofin_autopilot_state()
+    # Recovery is independent of the trading scheduler and remains READ-only.
+    # Schedule it off the HTTP listener thread so a slow Turso network never
+    # prevents the dashboard from binding and serving /health.
+    _schedule_blofin_demo_startup_recovery()
+    if not _blofin_demo_autopilot_enabled():
+        with LOCK:
+            BLOFIN_AUTOPILOT_STATE.update({
+                "enabled": False, "status": "DISABLED",
+                "search_continues": False,
+                "next_cycle_scheduled": False,
+                "next_cycle_at_utc": None,
+                "next_cycle_in_seconds": None,
+                "last_message_fa": "BLOFIN_DEMO_AUTOPILOT_ENABLED فعال نیست.",
+            })
+        _persist_blofin_autopilot_state()
+        return
+    with BLOFIN_AUTOPILOT_START_LOCK:
+        if BLOFIN_AUTOPILOT_THREAD is not None and BLOFIN_AUTOPILOT_THREAD.is_alive():
+            return
+        BLOFIN_AUTOPILOT_THREAD = threading.Thread(
+            target=_blofin_demo_autopilot_worker,
+            daemon=True,
+            name="blofin-demo-autopilot",
+        )
+        BLOFIN_AUTOPILOT_THREAD.start()
+
+
+
+def _demo_ai_review_approved(review: Any) -> bool:
+    """Fail closed unless a real AI review explicitly approves Demo entry."""
+    if not isinstance(review, dict):
+        return False
+    return (
+        str(review.get("status") or "").strip().upper() == "APPROVED"
+        and review.get("paper_entry_eligible") is True
+        and review.get("request_attempted") is True
+        and str(review.get("response_source") or "").upper() == "LIVE_API"
+        and review.get("response_validated") is True
+        and review.get("model_verified") is True
+        and bool(str(review.get("model") or "").strip())
+        and bool(str(review.get("returned_model") or "").strip())
+    )
+
+def _blofin_ai_review_summary(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose reviewer verification metadata without leaking prompts or credentials."""
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    review_rows = job.get("ai_reviews")
+    if not isinstance(review_rows, list):
+        review_rows = result.get("ai_reviews")
+    summary: list[dict[str, Any]] = []
+    for review_row in review_rows if isinstance(review_rows, list) else []:
+        if not isinstance(review_row, dict):
+            continue
+        review_payload = review_row.get("review")
+        review_payload = review_payload if isinstance(review_payload, dict) else review_row
+        summary.append({
+            "reviewer_id": review_row.get("reviewer_id") or review_payload.get("reviewer_id"),
+            "provider": review_payload.get("provider"),
+            "model": review_payload.get("model") or review_payload.get("configured_model"),
+            "returned_model": review_payload.get("returned_model"),
+            "status": review_payload.get("status") or "UNKNOWN",
+            "request_attempted": review_payload.get("request_attempted"),
+            "response_source": review_payload.get("response_source"),
+            "response_validated": review_payload.get("response_validated"),
+            "model_verified": review_payload.get("model_verified"),
+            "requested_at_utc": review_payload.get("requested_at_utc") or review_payload.get("request_started_at_utc"),
+            "completed_at_utc": review_payload.get("completed_at_utc"),
+            "http_status": review_payload.get("http_status"),
+            "latency_ms": review_payload.get("latency_ms"),
+            "error_type": review_payload.get("error_type"),
+            "error_code": review_payload.get("error_code"),
+        })
+    return summary
+
+
+def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict[str, Any]:
+    """Queue the final Demo event and activity projections for manual and AutoPilot jobs."""
+    with LOCK:
+        job = copy.deepcopy(BLOFIN_EXECUTION_JOBS.get(job_id) or {})
+    if str(job.get("status") or "").lower() not in {"completed", "failed"}:
+        return {"status": "NOT_FINAL"}
+    notion = _queue_blofin_job_notion_events(job_id, instrument_id, job)
+    activity = _queue_blofin_activity_journal(job_id, instrument_id, job)
+    return {"status": "QUEUED", "notion": notion, "activity": activity}
+
+def _run_challenge1_supervisor_reviews(
+    analysis: Any, asset: AssetSpec, *, signal_id: str | None = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper around the shared two-reviewer approval contract."""
+    return run_challenge1_v2_supervisor_reviews(
+        analysis, asset, signal_id=signal_id,
+        primary_reviewer=run_free_ai_second_opinion,
+        second_reviewer=run_independent_ai_supervisor,
+    )
+
+def _blofin_manual_decimal(value: Any, field_name: str) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise BloFinDemoExecutionBlocked(f"{field_name} is not a valid decimal value.") from exc
+    if not result.is_finite():
+        raise BloFinDemoExecutionBlocked(f"{field_name} must be finite.")
+    return result
+
+def _blofin_manual_write_client() -> BloFinDemoTradeClient:
+    """Resolve and verify the Demo-only Trade key before any manual write."""
+    readiness = _blofin_demo_execution_readiness()
+    if readiness.get("status") != "READY":
+        raise BloFinDemoExecutionBlocked(
+            str(readiness.get("message_fa") or "پیش‌نیازهای امن حساب Demo کامل نیستند.")
+        )
+    client = BloFinDemoTradeClient(timeout=10.0)
+    if client.base_url != DEMO_REST_URL:
+        raise BloFinDemoExecutionBlocked("Manual trading is pinned to the BloFin Demo API host.")
+    client.verify_trade_permission()
+    return client
+
+
+
+def _blofin_manual_validate_wave_order_payload(payload: Any) -> dict[str, Any]:
+    """Validate manual-wave inputs before creating any exchange client."""
+    if not isinstance(payload, dict):
+        raise BloFinDemoExecutionBlocked("درخواست سفارش باید یک شیء JSON معتبر باشد.")
+    inst_id = str(payload.get("instrument_id") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}-USDT", inst_id):
+        raise BloFinDemoExecutionBlocked("نماد باید یک قرارداد دائمی USDT مانند BTC-USDT باشد.")
+    side = str(payload.get("side") or "").strip().upper()
+    if side not in {"LONG", "SHORT"}:
+        raise BloFinDemoExecutionBlocked("جهت سفارش فقط LONG یا SHORT است.")
+    margin = _blofin_manual_decimal(payload.get("margin_usdt"), "margin_usdt")
+    raw_leverage = payload.get("leverage", 1)
+    if isinstance(raw_leverage, bool):
+        raise BloFinDemoExecutionBlocked("اهرم باید عدد صحیح بین 1 و 3 باشد.")
+    try:
+        leverage = int(raw_leverage)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BloFinDemoExecutionBlocked("اهرم باید عدد صحیح بین 1 و 3 باشد.") from exc
+    if str(raw_leverage).strip() not in {str(leverage), f"{leverage}.0"} or not 1 <= leverage <= 3:
+        raise BloFinDemoExecutionBlocked("اهرم فقط از 1x تا 3x مجاز است.")
+    tp = _blofin_manual_decimal(payload.get("tpTriggerPrice"), "tpTriggerPrice")
+    sl = _blofin_manual_decimal(payload.get("slTriggerPrice"), "slTriggerPrice")
+    if margin <= 0 or margin > Decimal("10000"):
+        raise BloFinDemoExecutionBlocked("سرمایه باید بیشتر از صفر و حداکثر 10000 USDT باشد.")
+    if tp <= 0 or sl <= 0 or tp == sl:
+        raise BloFinDemoExecutionBlocked("حد سود و حد ضرر باید دو قیمت مثبت و متفاوت باشند.")
+    return {"instrument_id":inst_id,"side":side,"margin_usdt":margin,"leverage":leverage,"tp":tp,"sl":sl}
+
+
+def _blofin_manual_submit_wave_order(payload: Any) -> dict[str, Any]:
+    """Submit one isolated BloFin Demo order with exchange-side TP and SL."""
+    if os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() != "true":
+        raise BloFinDemoExecutionBlocked("قفل BLOFIN_DEMO فعال نیست؛ هیچ سفارشی ارسال نشد.")
+    request = _blofin_manual_validate_wave_order_payload(payload)
+    client = _blofin_manual_write_client()
+    if str(getattr(client, "base_url", "")).rstrip("/") != DEMO_REST_URL.rstrip("/"):
+        raise BloFinDemoExecutionBlocked("مقصد سفارش خارج از BloFin Demo است؛ سفارش مسدود شد.")
+    inst_id, side = request["instrument_id"], request["side"]
+    mode = client.get_position_mode()
+    if not isinstance(mode, dict) or mode.get("positionMode") != "net_mode":
+        raise BloFinDemoExecutionBlocked("برای این مسیر فقط حالت One-Way (net_mode) پشتیبانی می‌شود.")
+    positions = client.get_positions(inst_id=inst_id)
+    if not isinstance(positions, list):
+        raise BloFinDemoExecutionBlocked("وضعیت پوزیشن‌های صرافی قابل تأیید نیست.")
+    for row in positions:
+        if not isinstance(row, dict):
+            raise BloFinDemoExecutionBlocked("دادهٔ پوزیشن ناقص است؛ سفارش مسدود شد.")
+        if str(row.get("instId") or "").upper() == inst_id and _blofin_manual_decimal(row.get("positions", "0"), "positions") != 0:
+            raise BloFinDemoExecutionBlocked("برای این نماد پوزیشن باز وجود دارد؛ ابتدا آن را ببند.")
+    pending = client.get_open_orders(inst_id=inst_id)
+    if not isinstance(pending, list):
+        raise BloFinDemoExecutionBlocked("وضعیت سفارش‌های باز قابل تأیید نیست.")
+    if any(isinstance(row,dict) and str(row.get("instId") or "").upper()==inst_id for row in pending):
+        raise BloFinDemoExecutionBlocked("برای این نماد سفارش باز وجود دارد؛ از ثبت سفارش تکراری جلوگیری شد.")
+    instrument = client.get_tradable_instrument(inst_id)
+    mark_rows = client.get_mark_price(inst_id=inst_id)
+    mark_row = mark_rows if isinstance(mark_rows,dict) else (
+        mark_rows[0] if isinstance(mark_rows,list) and mark_rows and isinstance(mark_rows[0],dict) else None
+    )
+    if not isinstance(mark_row,dict):
+        raise BloFinDemoExecutionBlocked("قیمت Mark معتبر از BloFin دریافت نشد.")
+    mark = _blofin_manual_decimal(mark_row.get("markPrice",mark_row.get("mark_price")),"markPrice")
+    if mark <= 0:
+        raise BloFinDemoExecutionBlocked("قیمت Mark نامعتبر است.")
+    tick = _blofin_manual_decimal(instrument.get("tickSize"),"tickSize")
+    contract_value = _blofin_manual_decimal(instrument.get("contractValue"),"contractValue")
+    lot_size = _blofin_manual_decimal(instrument.get("lotSize"),"lotSize")
+    min_size = _blofin_manual_decimal(instrument.get("minSize"),"minSize")
+    if min(tick,contract_value,lot_size,min_size) <= 0:
+        raise BloFinDemoExecutionBlocked("مشخصات اندازه و دقت قرارداد معتبر نیست.")
+    tp, sl = request["tp"], request["sl"]
+    if side == "LONG":
+        sl=(sl/tick).to_integral_value(rounding=ROUND_CEILING)*tick
+        tp=(tp/tick).to_integral_value(rounding=ROUND_CEILING)*tick
+        if not sl < mark < tp:
+            raise BloFinDemoExecutionBlocked("برای LONG باید SL پایین‌تر و TP بالاتر از Mark باشد.")
+    else:
+        sl=(sl/tick).to_integral_value(rounding=ROUND_FLOOR)*tick
+        tp=(tp/tick).to_integral_value(rounding=ROUND_FLOOR)*tick
+        if not tp < mark < sl:
+            raise BloFinDemoExecutionBlocked("برای SHORT باید TP پایین‌تر و SL بالاتر از Mark باشد.")
+    raw_size=request["margin_usdt"]*Decimal(request["leverage"])/(mark*contract_value)
+    quantity=(raw_size/lot_size).to_integral_value(rounding=ROUND_FLOOR)*lot_size
+    if quantity < min_size:
+        raise BloFinDemoExecutionBlocked("سرمایه انتخابی برای حداقل اندازه قرارداد کافی نیست.")
+    maximum=instrument.get("maxMarketSize")
+    if maximum not in (None,"") and quantity > _blofin_manual_decimal(maximum,"maxMarketSize"):
+        raise BloFinDemoExecutionBlocked("اندازه سفارش از سقف بازار بیشتر است.")
+    if mark*contract_value*quantity/Decimal(request["leverage"]) > request["margin_usdt"]:
+        raise BloFinDemoExecutionBlocked("مارجین تخمینی از سرمایه انتخابی بیشتر شد.")
+    client_order_id="MW"+uuid.uuid4().hex[:20]
+    audit={"instrument_id":inst_id,"side":side,"leverage":request["leverage"],"margin_usdt":str(request["margin_usdt"]),
+           "quantity_contracts":str(quantity),"mark_price":str(mark),"tpTriggerPrice":str(tp),"slTriggerPrice":str(sl),
+           "environment":"BLOFIN_DEMO","client_order_id":client_order_id}
+    store=None
+    try:
+        store=BloFinDemoEventStore()
+        store.record_manual_action(client_order_id,"MANUAL_WAVE_ORDER_REQUESTED",audit)
+        try:
+            with BLOFIN_ORDER_SUBMISSION_LOCK:
+                client.set_futures_leverage(inst_id,request["leverage"],margin_mode="isolated",position_side="net")
+                response=client.place_futures_order(inst_id=inst_id,side="buy" if side=="LONG" else "sell",
+                    position_side="net",size=format(quantity.normalize(),"f"),client_order_id=client_order_id,
+                    take_profit=format(tp.normalize(),"f"),stop_loss=format(sl.normalize(),"f"),margin_mode="isolated")
+        except Exception as exc:
+            store.record_manual_action(client_order_id,"MANUAL_WAVE_ORDER_UNKNOWN",
+                {**audit,"submission_outcome":"UNKNOWN","error_type":type(exc).__name__,"retry_allowed":False})
+            raise
+        data=response.get("data")
+        rows=data if isinstance(data,list) else [data]
+        exchange_order_id=next((str(row.get("orderId")) for row in rows if isinstance(row,dict) and row.get("orderId")),None)
+        store.record_manual_action(client_order_id,"MANUAL_WAVE_ORDER_ACCEPTED",
+            {**audit,"exchange_order_id":exchange_order_id,"exchange_response":data,"submission_outcome":"ACCEPTED"})
+    finally:
+        if store is not None: store.close()
+    return {"status":"ORDER_ACCEPTED","environment":"BLOFIN_DEMO","instrument_id":inst_id,"side":side,
+        "client_order_id":client_order_id,"exchange_order_id":exchange_order_id,"entry_reference_price":str(mark),
+        "leverage":request["leverage"],"quantity_contracts":str(quantity),"tpTriggerPrice":str(tp),
+        "slTriggerPrice":str(sl),"exchange_response":data,
+        "message_fa":"سفارش به BloFin Demo ارسال شد؛ TP/SL در درخواست همان سفارش درج شدند. فعال بودن حفاظت را در حساب صرافی بررسی کن."}
+
 
 def _blofin_manual_close_position(
     *, instrument_id: str, position_id: str, position_side_hint: str = "",
