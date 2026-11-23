@@ -6924,7 +6924,10 @@ def _deep_num(value):
 def _deep_analysis_json(url: str):
     from urllib.request import Request, urlopen
     try:
-        req = Request(url, headers={"Accept":"application/json","User-Agent":"CryptoSuperRadar/1.0"})
+        req = Request(url, headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 CryptoSuperRadar/1.0",
+        })
         with urlopen(req, timeout=9) as response:
             if response.status != 200: return None
             value = json.loads(response.read(2_000_000).decode("utf-8"))
@@ -6944,15 +6947,22 @@ def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = 
     pairs = dex.get("pairs", []) if isinstance(dex, dict) else []
     pairs = [p for p in pairs if isinstance(p, dict) and str(p.get("chainId","")).lower() == chain]
     if symbol and not address:
+        # Symbol lookup resolves only exact base-token matches; priceUsd then
+        # belongs to the requested token rather than its quote asset.
         pairs = [p for p in pairs if symbol == str((p.get("baseToken") or {}).get("symbol","")).upper()]
     if address:
         matched = [p for p in pairs if address.lower() in {
             str((p.get("baseToken") or {}).get("address","")).lower(),
             str((p.get("quoteToken") or {}).get("address","")).lower()}]
         if matched: pairs = matched
-    pairs.sort(key=lambda p: float(((p.get("liquidity") or {}).get("usd") or 0) or 0), reverse=True)
+    def _pair_liquidity(pair_data):
+        return _deep_num((pair_data.get("liquidity") or {}).get("usd")) or 0.0
+    pairs.sort(key=_pair_liquidity, reverse=True)
     pair = pairs[0] if pairs else {}
     token = pair.get("baseToken") or {}
+    # For symbol-only Solana lookups, use the selected highest-liquidity
+    # DexScreener pair's actual base-token mint for the RugCheck request.
+    resolved_address = address or str(token.get("address") or "").strip()
     price = _deep_num(pair.get("priceUsd")) if pair else None
     txns, changes, volume = pair.get("txns") or {}, pair.get("priceChange") or {}, pair.get("volume") or {}
     pressure = {}
@@ -6962,7 +6972,7 @@ def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = 
         pressure[key] = {"buys":b if valid else "NOT_AVAILABLE","sells":sell if valid else "NOT_AVAILABLE",
             "buy_sell_ratio":round(b/sell,4) if valid and sell else ("NOT_AVAILABLE" if not valid else None),
             "price_change_pct":changes.get(key,"NOT_AVAILABLE")}
-    rug = _deep_analysis_json("https://api.rugcheck.xyz/v1/tokens/"+quote(address,safe="")+"/report") if chain=="solana" and address else None
+    rug = _deep_analysis_json("https://api.rugcheck.xyz/v1/tokens/"+quote(resolved_address,safe="")+"/report/summary") if chain=="solana" and resolved_address else None
     if isinstance(rug,dict):
         risks = rug.get("risks") if isinstance(rug.get("risks"),list) else []
         risk_names = [str(x.get("name") or x.get("description") or "هشدار ثبت‌شده") for x in risks[:12] if isinstance(x,dict)]
