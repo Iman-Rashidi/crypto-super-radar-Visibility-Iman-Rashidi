@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import inspect
 from datetime import datetime, timezone
 import os
 import queue
@@ -2615,12 +2616,12 @@ class LiveRadarMultiMarketDashboardTests(unittest.TestCase):
                     web_app._normalize_live_radar_symbol(value)
 
     def test_dashboard_renders_custom_search_and_five_market_watchlist(self):
-        with patch.object(web_app, "_dashboard_html", wraps=web_app._dashboard_html) as _:
-            page = web_app._dashboard_html()
-        self.assertIn('id="live-radar-custom-symbol"', page)
-        self.assertIn('id="live-radar-custom-search"', page)
-        self.assertIn('id="live-wave-watch-grid"', page)
+        source = inspect.getsource(web_app)
+        page = web_app._page(source)
+        self.assertIn('id="live-radar-custom-symbol"', page.decode("utf-8"))
+        self.assertIn('id="live-radar-custom-search"', page.decode("utf-8"))
+        self.assertIn('id="live-wave-watch-grid"', page.decode("utf-8"))
         for symbol in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "LINKUSDT"):
-            self.assertIn(symbol, page)
-        self.assertIn("refreshWaveWatchlist", page)
-        self.assertIn("نمایش روی نمودار بزرگ", page)
+            self.assertIn(symbol, page.decode("utf-8"))
+        self.assertIn("refreshWaveWatchlist", page.decode("utf-8"))
+        self.assertIn("نمایش روی نمودار بزرگ", page.decode("utf-8"))
