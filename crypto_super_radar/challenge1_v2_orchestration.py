@@ -301,7 +301,7 @@ def analyze_challenge1_v2_market(
     # against the same exchange-derived as-of boundary. 15m trend alignment
     # is checked by the V2 fast-path builder before any AI reviewer is called.
     fast_ohlcv_ready = (
-        not frame_5m.empty
+        len(frame_5m) >= 30
         and {"open", "high", "low", "close", "volume"}.issubset(frame_5m.columns)
     )
     if not fast_ohlcv_ready:
