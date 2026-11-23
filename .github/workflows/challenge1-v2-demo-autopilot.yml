@@ -149,3 +149,5 @@ jobs:
           path: ${{ runner.temp }}/challenge1-v2-cycle.json
           if-no-files-found: ignore
           retention-days: 7
+
+# Staging Demo cycle trigger marker: 2026-11-23 (no runtime behavior change).
