@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from html import escape as html_escape
 from typing import Any, Mapping
+import os
 import requests
 
 from .database import connect_database, storage_backend
@@ -145,8 +147,114 @@ def refresh_watchlist_prices(db, *, session=None, batch_size: int = 30) -> dict[
                         updated += 1
         except Exception:
             errors += 1
+    alerts = send_watchlist_profit_alerts(db, session=client)
     return {"status": "OK" if errors == 0 else ("PARTIAL" if updated else "UNKNOWN"),
-            "tokens_total": len(rows), "prices_updated": updated, "batch_errors": errors}
+            "tokens_total": len(rows), "prices_updated": updated, "batch_errors": errors,
+            "profit_alerts": alerts}
+
+
+PROFIT_MILESTONES_PCT = (25, 50, 100)
+PROFIT_ALERT_TABLE = "gem_hunter_watchlist_profit_alerts"
+
+
+def ensure_profit_alert_schema(db) -> None:
+    with db:
+        db.execute(f"""CREATE TABLE IF NOT EXISTS {PROFIT_ALERT_TABLE} (
+            token_id TEXT NOT NULL,
+            threshold_pct INTEGER NOT NULL,
+            reserved_at_utc TEXT NOT NULL,
+            sent_at_utc TEXT,
+            telegram_message_id TEXT,
+            PRIMARY KEY (token_id, threshold_pct)
+        )""")
+
+
+def send_watchlist_profit_alerts(db, *, session=None, bot_token=None, chat_id=None) -> dict[str, Any]:
+    """Send one Persian Telegram alert per token/milestone, based on current price vs first discovery."""
+    token = (bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN")
+             or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    destination = (chat_id or os.getenv("GEM_HUNTER_TELEGRAM_CHAT_ID")
+                   or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    if not token or not destination:
+        return {"status": "NOT_CONFIGURED", "sent": 0, "duplicates": 0, "errors": 0}
+    ensure_watchlist_schema(db)
+    ensure_profit_alert_schema(db)
+    rows = db.execute(
+        f"SELECT token_id, first_detected_utc, token_name, token_symbol, chain, token_address, "
+        f"initial_price_usd, latest_price_usd FROM {TABLE} ORDER BY first_detected_utc"
+    ).fetchall()
+    client = session or requests
+    sent = duplicates = errors = 0
+    for row in rows:
+        item = dict(row) if isinstance(row, Mapping) else {
+            key: row[index] for index, key in enumerate((
+                "token_id", "first_detected_utc", "token_name", "token_symbol", "chain",
+                "token_address", "initial_price_usd", "latest_price_usd"
+            ))
+        }
+        initial, latest = _number(item.get("initial_price_usd")), _number(item.get("latest_price_usd"))
+        if initial is None or latest is None:
+            continue
+        change_pct = (latest / initial - 1.0) * 100.0
+        for milestone in PROFIT_MILESTONES_PCT:
+            if change_pct < milestone:
+                continue
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with db:
+                reservation = db.execute(
+                    f"INSERT OR IGNORE INTO {PROFIT_ALERT_TABLE} "
+                    "(token_id, threshold_pct, reserved_at_utc) VALUES (?, ?, ?)",
+                    (str(item["token_id"]), milestone, now),
+                )
+            if getattr(reservation, "rowcount", 0) == 0:
+                duplicates += 1
+                continue
+            profit_eur = 100.0 * (latest / initial - 1.0)
+            current_value = 100.0 + profit_eur
+            name = html_escape(str(item.get("token_name") or "نامشخص"))
+            symbol = html_escape(str(item.get("token_symbol") or "?"))
+            chain = html_escape(str(item.get("chain") or "نامشخص"))
+            address = html_escape(str(item.get("token_address") or ""))
+            text = (
+                "💰 <b>گزارش سود واچ‌لیست رادار</b>\\n"
+                f"🎯 <b>سطح سود ثبت‌شده:</b> +{milestone}%  (معادل +€{milestone} روی مبنای €100)\\n"
+                f"🪙 <b>دارایی:</b> {name} ({symbol}) · {chain}\\n"
+                f"📈 <b>تغییر از اولین کشف:</b> +{change_pct:.2f}%\\n"
+                f"💶 <b>ارزش فرضی €100:</b> €{current_value:.2f} · <b>سود:</b> +€{profit_eur:.2f}\\n"
+                f"💵 <b>قیمت اولیه:</b> ${initial:.12g} · <b>قیمت فعلی:</b> ${latest:.12g}\\n"
+                f"🕒 <b>اولین کشف UTC:</b> {html_escape(str(item.get('first_detected_utc') or 'نامشخص'))}\\n"
+                f"<code>{address}</code>\\n"
+                "⚠️ این گزارش تغییر قیمت از زمان کشف است؛ سود تحقق‌یافته نیست و کارمزد، مالیات و لغزش را لحاظ نمی‌کند. ربات هیچ معامله‌ای انجام نداده است."
+            )
+            try:
+                response = client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": destination, "text": text, "parse_mode": "HTML",
+                          "disable_web_page_preview": True},
+                    timeout=15,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not payload.get("ok"):
+                    raise RuntimeError("Telegram API did not confirm the watchlist profit alert")
+                message_id = str((payload.get("result") or {}).get("message_id") or "")
+                with db:
+                    db.execute(
+                        f"UPDATE {PROFIT_ALERT_TABLE} SET sent_at_utc=?, telegram_message_id=? "
+                        "WHERE token_id=? AND threshold_pct=?",
+                        (datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                         message_id, str(item["token_id"]), milestone),
+                    )
+                sent += 1
+            except Exception:
+                with db:
+                    db.execute(
+                        f"DELETE FROM {PROFIT_ALERT_TABLE} WHERE token_id=? AND threshold_pct=? AND sent_at_utc IS NULL",
+                        (str(item["token_id"]), milestone),
+                    )
+                errors += 1
+    return {"status": "OK" if errors == 0 else "PARTIAL",
+            "sent": sent, "duplicates": duplicates, "errors": errors}
 
 def watchlist_snapshot(db) -> dict[str, Any]:
     ensure_watchlist_schema(db)
