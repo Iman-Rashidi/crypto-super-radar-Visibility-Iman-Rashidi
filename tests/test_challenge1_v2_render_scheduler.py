@@ -7,6 +7,23 @@ from crypto_super_radar.challenge1_v2_render_scheduler import run_cycle_guarded
 
 
 class Challenge1V2RenderSchedulerTests(unittest.TestCase):
+    def test_v2_scheduler_requires_web_demo_flags_and_smoke_test_off(self):
+        from crypto_super_radar.challenge1_v2_render_scheduler import scheduler_is_configured
+
+        base = {
+            "BLOFIN_DEMO_AUTOPILOT_ROLE": "WEB",
+            "CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "true",
+            "BLOFIN_DEMO_TRADING_ENABLED": "true",
+            "BLOFIN_DEMO_SMOKE_TEST_ENABLED": "false",
+            "BLOFIN_DEMO_AUTOPILOT_ENABLED": "false",
+        }
+        self.assertTrue(scheduler_is_configured(base))
+        self.assertFalse(scheduler_is_configured({**base, "BLOFIN_DEMO_AUTOPILOT_ROLE": "WORKER"}))
+        self.assertFalse(scheduler_is_configured({**base, "BLOFIN_DEMO_SMOKE_TEST_ENABLED": "true"}))
+        self.assertFalse(scheduler_is_configured({**base, "BLOFIN_DEMO_AUTOPILOT_ENABLED": "true"}))
+        self.assertFalse(scheduler_is_configured({**base, "CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED": "false"}))
+        self.assertFalse(scheduler_is_configured({**base, "BLOFIN_DEMO_TRADING_ENABLED": "false"}))
+
     def test_cycle_runs_and_releases_lock(self):
         lock = threading.Lock()
         calls = []

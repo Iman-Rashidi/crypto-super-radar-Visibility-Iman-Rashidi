@@ -10692,6 +10692,33 @@ async function loadBlofinInstruments(){
                             "message_fa": "ذخیره‌سازی پایدار Turso برای چرخه V2 آماده نیست.",
                             "orders_submitted": False,
                         }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    # V2 has its own 10-minute scheduler. The legacy worker deliberately
+                    # exits with V2_EXCLUSIVE, so treating its absence as WORKER_START_FAILED
+                    # caused the observed HTTP 503 even when V2 was correctly selected.
+                    if not _start_challenge1_v2_render_scheduler():
+                        return self._send(409, json.dumps({
+                            "status": "BLOCKED",
+                            "blocker": "V2_SCHEDULER_PREREQUISITES_NOT_MET",
+                            "message_fa": "زمان‌بند V2 آماده نیست؛ نقش WEB، کلیدهای V2 و Demo، خاموش‌بودن Smoke Test و خاموش‌بودن اتوپایلوت قدیمی بررسی شوند.",
+                            "orders_submitted": False,
+                        }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    now = datetime.now(timezone.utc)
+                    with LOCK:
+                        BLOFIN_AUTOPILOT_STATE.update({
+                            "enabled": True, "status": "SCHEDULED",
+                            "runtime_role": "WEB", "execution_profile": "CHALLENGE_1_V2",
+                            "interval_seconds": 600, "search_continues": True,
+                            "next_cycle_scheduled": True,
+                            "next_cycle_at_utc": (now + timedelta(seconds=600)).isoformat(),
+                            "next_cycle_in_seconds": 600,
+                            "last_message_fa": "زمان‌بند Challenge 1 V2 در نقش WEB فعال شد؛ نخستین چرخه پس از ۶۰۰ ثانیه اجرا می‌شود.",
+                        })
+                    _persist_blofin_autopilot_state()
+                    return self._send(202, json.dumps({
+                        "status": "SCHEDULED", "enabled": True, "interval_seconds": 600,
+                        "message_fa": "زمان‌بند اتوپایلوت V2 فعال شد؛ نخستین چرخه پس از ۶۰۰ ثانیه اجرا می‌شود.",
+                        "orders_submitted": False,
+                    }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 else:
                     readiness = _blofin_demo_execution_readiness()
                     if readiness.get("status") != "READY":
@@ -13639,13 +13666,12 @@ CHALLENGE1_V2_RENDER_SCHEDULER_THREAD = None
 CHALLENGE1_V2_RENDER_SCHEDULER_START_LOCK = threading.Lock()
 
 
-def _start_challenge1_v2_render_scheduler() -> None:
-    """Start the exclusive 10-minute V2 Demo scheduler in Render."""
+def _start_challenge1_v2_render_scheduler() -> bool:
+    """Start the exclusive 10-minute V2 Demo scheduler in the WEB process."""
     global CHALLENGE1_V2_RENDER_SCHEDULER_THREAD
-    if os.getenv("CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED", "").strip().lower() != "true":
-        return
-    if os.getenv("BLOFIN_DEMO_TRADING_ENABLED", "").strip().lower() != "true":
-        return
+    from .challenge1_v2_render_scheduler import scheduler_is_configured
+    if not scheduler_is_configured(os.environ):
+        return False
 
     def run_v2_cycle() -> None:
         from .challenge1_v2_autopilot import main as run_v2_main
@@ -13653,13 +13679,14 @@ def _start_challenge1_v2_render_scheduler() -> None:
 
     with CHALLENGE1_V2_RENDER_SCHEDULER_START_LOCK:
         if CHALLENGE1_V2_RENDER_SCHEDULER_THREAD is not None and CHALLENGE1_V2_RENDER_SCHEDULER_THREAD.is_alive():
-            return
+            return True
         CHALLENGE1_V2_RENDER_SCHEDULER_THREAD = threading.Thread(
             target=run_scheduler,
             kwargs={"cycle_runner": run_v2_cycle, "cycle_lock": BLOFIN_AUTOPILOT_LOCK, "interval_seconds": 600},
             daemon=True, name="challenge1-v2-render-autopilot",
         )
         CHALLENGE1_V2_RENDER_SCHEDULER_THREAD.start()
+        return CHALLENGE1_V2_RENDER_SCHEDULER_THREAD.is_alive()
 
 
 def main():
