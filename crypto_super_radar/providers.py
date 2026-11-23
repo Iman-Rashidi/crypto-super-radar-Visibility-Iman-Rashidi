@@ -853,7 +853,7 @@ class PerpetualMarketProvider:
         try:
             return self._binance_ticker(symbol)
         except DataProviderError as exc:
-            if self._binance_unavailable(exc):
+            if any(code in str(exc) for code in ("HTTP 418", "timeout", "timed out")):
                 def load():
                     instrument = f"{symbol[:-4]}-USDT-SWAP"
                     okx = self.http.get(f"{self.OKX}/market/ticker", {"instId": instrument})
@@ -1141,8 +1141,15 @@ class PerpetualMarketProvider:
         except DataProviderError as exc:
             if not self._binance_unavailable(exc):
                 raise
-            return self._cached_fallback(("snapshot", symbol),
-                                         lambda: self._okx_bybit_snapshot(symbol, reason=str(exc)))
+            if any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+                return self._cached_fallback(
+                    ("snapshot-gate-okx", symbol),
+                    lambda: self._gate_okx_execution_snapshot(symbol, fallback_reason=str(exc)),
+                )
+            return self._cached_fallback(
+                ("snapshot-okx-bybit", symbol),
+                lambda: self._okx_bybit_snapshot(symbol, reason=str(exc)),
+            )
 
         if not isinstance(book, dict) or not isinstance(premium, dict) or not isinstance(binance_oi, dict):
             raise DataProviderError("Binance perpetual order-book/mark response has an invalid schema")
