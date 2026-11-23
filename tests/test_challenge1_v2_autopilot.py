@@ -123,3 +123,73 @@ class Challenge1V2EntryIntegrationTests(unittest.TestCase):
         db.close()
 
 if __name__=="__main__": unittest.main()
+
+
+from unittest.mock import patch
+import pandas as pd
+
+
+class Challenge1V2BalancedEntryTests(unittest.TestCase):
+    def test_adx_trend_does_not_require_swing_structure_or_4h_alignment(self):
+        from crypto_super_radar import challenge1_v2 as strategy
+        i1 = pd.date_range("2026-11-01", periods=210, freq="1h", tz="UTC")
+        i4 = pd.date_range("2026-10-01", periods=210, freq="4h", tz="UTC")
+        c1 = pd.Series([100.0 + n * 0.2 for n in range(210)], index=i1)
+        h1 = pd.DataFrame({"open": c1 - .05, "high": c1 + .1, "low": c1 - .1,
+                           "close": c1, "volume": 100.0}, index=i1)
+        c4 = pd.Series([200.0] * 210, index=i4)
+        h4 = pd.DataFrame({"open": c4, "high": c4 + .1, "low": c4 - .1,
+                           "close": c4, "volume": 100.0}, index=i4)
+        with patch.object(strategy, "adx", return_value=pd.Series([25.0] * 210, index=i1)), patch.object(
+            strategy, "_swing_structure", side_effect=[False, False]
+        ):
+            regime = strategy._regime(h1, h4, i1[-1] + pd.Timedelta(hours=1))
+        self.assertEqual(regime["direction"], "LONG")
+        self.assertEqual(regime["status"], "TREND")
+        self.assertGreaterEqual(regime["adx_1h"], 22)
+        self.assertFalse(regime["structure_aligned_1h"])
+        self.assertFalse(regime["aligned_4h"])
+        self.assertFalse(regime["opposed_4h"])
+
+    def test_neutral_4h_and_ambiguous_elliott_reach_two_reviewer_supervisor(self):
+        from crypto_super_radar import challenge1_v2_orchestration as flow
+        asof_ms = 1_800_000_000_000
+        asof = pd.Timestamp(asof_ms, unit="ms", tz="UTC")
+        h1_open = (asof - pd.Timedelta(hours=1)).isoformat()
+        h4_open = (asof - pd.Timedelta(hours=4)).isoformat()
+        m15_open = (asof - pd.Timedelta(minutes=15)).isoformat()
+        signal_id = f"challenge1-v2:BTC-USDT:15m:{m15_open}:LONG"
+        wave = {"status": "AMBIGUOUS", "pattern": "AMBIGUOUS", "phase": "AMBIGUOUS",
+                "wave_alignment": "UNCONFIRMED", "timeframe": "1H",
+                "evidence_source": "CONFIRMED_CLOSED_1H_CANDLES",
+                "data_asof_utc": asof.isoformat(), "latest_closed_candle_open_utc": h1_open}
+        record = {"signal": "LONG", "signal_id": signal_id, "instrument_id": "BTC-USDT",
+                  "status": "ANALYSIS_READY", "orders_submitted": False,
+                  "regime": {"direction": "LONG", "status": "TREND", "aligned_4h": False,
+                             "neutral_4h": True, "opposed_4h": False,
+                             "candle_open_utc": h1_open, "candle_open_utc_4h": h4_open},
+                  "challenge1_v2_evidence": {"elliott_wave": wave}}
+        frames = [
+            pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(hours=1)]),
+            pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(hours=4)]),
+            pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
+            pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
+        ]
+        reviewer_result = {"approved": False, "status": "PENDING", "ai_reviews": [],
+                           "ai_consensus": {"status": "PENDING"}}
+        with patch.object(flow, "_contract_specs", return_value={"instId": "BTC-USDT"}), patch.object(
+            flow, "_market_quote", return_value={"asof_ts_ms": asof_ms, "spread_fraction": .0001}
+        ), patch.object(flow, "_closed_frame", side_effect=frames), patch.object(
+            flow, "_regular_funding", return_value={"funding_rate": 0.0, "funding_kind": "0",
+                "funding_classification": "STANDARD_CRYPTO_FUNDING", "funding_event_time_ms": asof_ms - 60000,
+                "funding_max_age_ms": 9 * 60 * 60_000, "funding_age_ms": 60000}
+        ), patch.object(flow, "analyze_signal", return_value=record), patch.object(
+            flow, "challenge1_v2_execution_evidence_ready", return_value=(True, "ok")
+        ), patch.object(flow, "run_challenge1_v2_supervisor_reviews", return_value=reviewer_result) as review:
+            out = flow.analyze_challenge1_v2_market(object(), "BTC-USDT", local_now_ms=asof_ms)
+        self.assertEqual(out["signal"], "LONG")
+        self.assertEqual(out["status"], "AI_REVIEW_BLOCKED")
+        self.assertFalse(out["orders_submitted"])
+        self.assertEqual(review.call_count, 1)
+        self.assertFalse(out["regime"]["aligned_4h"])
+        self.assertEqual(out["challenge1_v2_evidence"]["elliott_wave"]["phase"], "AMBIGUOUS")

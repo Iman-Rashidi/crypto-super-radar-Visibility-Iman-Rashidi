@@ -304,11 +304,11 @@ def analyze_challenge1_v2_market(
         })
         return record
     regime = record.get("regime")
-    if not isinstance(regime, Mapping) or regime.get("aligned_4h") is not True:
+    if not isinstance(regime, Mapping) or regime.get("opposed_4h") is True:
         record.update({
             "signal": "NO_TRADE",
             "status": "NO_TRADE",
-            "reason": "1H/4H directional alignment is not confirmed",
+            "reason": "4H trend is directly opposed to the 1H signal",
             "orders_submitted": False,
         })
         return record

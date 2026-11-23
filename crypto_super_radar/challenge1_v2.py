@@ -259,26 +259,17 @@ def _regime(
     strength = float(adx14.iloc[-1])
     if strength < 22:
         return {"status": "RANGE", "direction": "NONE", "adx": strength, "reason": "ADX(14) below 22"}
-    # Require both fast and slow trend EMAs to slope with the regime.
-    # Their ordering alone can persist after momentum has already rolled over.
+    # ADX confirms trend strength; close location versus both fast EMAs sets direction.
+    # HH/HL or LL/LH remains measurable confluence, never a standalone hard gate.
     ema21_slope = float(e21.iloc[-1] - e21.iloc[-4])
     ema55_slope = float(e55.iloc[-1] - e55.iloc[-4])
-    long_ok = (
-        row["close"] > e200.iloc[-1]
-        and e21.iloc[-1] > e55.iloc[-1]
-        and ema21_slope > 0
-        and ema55_slope > 0
-        and swing_long
-    )
-    short_ok = (
-        row["close"] < e200.iloc[-1]
-        and e21.iloc[-1] < e55.iloc[-1]
-        and ema21_slope < 0
-        and ema55_slope < 0
-        and swing_short
-    )
+    long_ok = float(row["close"]) > float(e21.iloc[-1]) and float(row["close"]) > float(e55.iloc[-1])
+    short_ok = float(row["close"]) < float(e21.iloc[-1]) and float(row["close"]) < float(e55.iloc[-1])
     direction = "LONG" if long_ok else "SHORT" if short_ok else "NONE"
+    structure_aligned = bool(swing_long if direction == "LONG" else swing_short if direction == "SHORT" else False)
     aligned_4h = False
+    opposed_4h = False
+    neutral_4h = True
     if len(h4) >= 205:
         c4 = h4["close"]
         if precomputed_context is None:
@@ -287,10 +278,12 @@ def _regime(
             h4_indicators = precomputed_context["indicators"]["4H"]
             e50_4h = h4_indicators["ema50"].iloc[:h4_end]
             e200_4h = h4_indicators["ema200"].iloc[:h4_end]
-        if direction == "LONG" and not pd.isna(e50_4h.iloc[-4]) and not pd.isna(e200_4h.iloc[-1]):
-            aligned_4h = c4.iloc[-1] > e200_4h.iloc[-1] and e50_4h.iloc[-1] > e50_4h.iloc[-4]
-        elif direction == "SHORT" and not pd.isna(e50_4h.iloc[-4]) and not pd.isna(e200_4h.iloc[-1]):
-            aligned_4h = c4.iloc[-1] < e200_4h.iloc[-1] and e50_4h.iloc[-1] < e50_4h.iloc[-4]
+        if direction in {"LONG", "SHORT"} and not pd.isna(e50_4h.iloc[-4]) and not pd.isna(e200_4h.iloc[-1]):
+            h4_bearish = c4.iloc[-1] < e200_4h.iloc[-1] and e50_4h.iloc[-1] < e50_4h.iloc[-4]
+            h4_bullish = c4.iloc[-1] > e200_4h.iloc[-1] and e50_4h.iloc[-1] > e50_4h.iloc[-4]
+            aligned_4h = bool(h4_bullish if direction == "LONG" else h4_bearish)
+            opposed_4h = bool(h4_bearish if direction == "LONG" else h4_bullish)
+            neutral_4h = not aligned_4h and not opposed_4h
     return {
         "status": "TREND" if direction != "NONE" else "NEUTRAL", "direction": direction,
         "adx_1h": strength, "close_1h": float(row["close"]),
@@ -299,9 +292,12 @@ def _regime(
         "ema21_slope_1h": ema21_slope,
         "ema55_slope_1h": ema55_slope,
         "aligned_4h": bool(aligned_4h),
+        "opposed_4h": bool(opposed_4h),
+        "neutral_4h": bool(neutral_4h),
+        "structure_aligned_1h": structure_aligned,
         "candle_open_utc": h1.index[-1].isoformat(),
         "candle_open_utc_4h": h4.index[-1].isoformat() if not h4.empty else None,
-        "reason": "1H trend, EMA structure and HH/HL or LL/LH hard gate",
+        "reason": "ADX>=22 and 1H close aligned above/below EMA21+EMA55; swing structure is auxiliary",
     }
 
 def _elliott_wave_1h_evidence(
@@ -422,10 +418,11 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
         not isinstance(regime, Mapping)
         or str(regime.get("direction") or "").upper() != side
         or str(regime.get("status") or "").upper() != "TREND"
+        or regime.get("opposed_4h") is True
         or regime.get("candle_open_utc") != evidence.get("context_1h_candle_open_utc")
         or regime.get("candle_open_utc_4h") != evidence.get("context_4h_candle_open_utc")
     ):
-        return False, "V2 1H/4H regime evidence does not match the signal packet."
+        return False, "V2 1H regime or directly opposing 4H evidence is invalid."
 
     wave = evidence.get("elliott_wave")
     if not isinstance(wave, Mapping):
@@ -439,43 +436,55 @@ def challenge1_v2_execution_evidence_ready(record: Any) -> tuple[bool, str]:
     }
     wave_status = str(wave.get("status") or "").upper()
     phase = str(wave.get("phase") or "").upper()
+    wave_pattern = str(wave.get("pattern") or "").upper()
+    wave_alignment = str(wave.get("wave_alignment") or "").upper()
+    wave_unconfirmed = (
+        wave_status in {"AMBIGUOUS", "UNKNOWN", "INSUFFICIENT_DATA"}
+        or phase in {"AMBIGUOUS", "INSUFFICIENT_DATA", "UNKNOWN"}
+        or wave_pattern in {"AMBIGUOUS", "UNKNOWN", "NONE"}
+        or wave_alignment in {"UNCONFIRMED", "AMBIGUOUS"}
+    )
     if (
-        wave_status not in {"CANDIDATE", "CONFIRMED"}
-        or str(wave.get("pattern") or "").upper() != expected_pattern
-        or phase not in allowed_phases
-        or wave.get("wave_alignment") != "ALIGNED"
-        or wave.get("timeframe") != "1H"
+        wave.get("timeframe") != "1H"
         or wave.get("evidence_source") != "CONFIRMED_CLOSED_1H_CANDLES"
         or _utc_timestamp(wave.get("data_asof_utc")) != asof
         or _utc_timestamp(wave.get("latest_closed_candle_open_utc")) != h1_open
+        or wave_alignment == "OPPOSED"
+        or (not wave_unconfirmed and (
+            wave_status not in {"CANDIDATE", "CONFIRMED"}
+            or wave_pattern != expected_pattern
+            or phase not in allowed_phases
+            or wave_alignment != "ALIGNED"
+        ))
     ):
-        return False, "V2 Elliott phase, direction or as-of evidence is not aligned."
-    try:
-        pivot_count = int(wave.get("confirmed_pivot_count"))
-        invalidation = float(wave.get("invalidation_price"))
-    except (TypeError, ValueError, OverflowError):
-        return False, "V2 Elliott pivot count or invalidation price is invalid."
-    if isinstance(wave.get("confirmed_pivot_count"), bool) or pivot_count < 3:
-        return False, "V2 Elliott history has fewer than three confirmed pivots."
-    if not math.isfinite(invalidation) or invalidation <= 0:
-        return False, "V2 Elliott invalidation price is missing or invalid."
-    pivots = wave.get("pivots")
-    if not isinstance(pivots, list) or len(pivots) < 3:
-        return False, "V2 Elliott pivot evidence is incomplete."
-    previous_pivot = previous_confirmation = None
-    for pivot in pivots:
-        if not isinstance(pivot, Mapping):
-            return False, "V2 Elliott pivot row is malformed."
-        pivot_time = _utc_timestamp(pivot.get("timestamp"))
-        confirmed_at = _utc_timestamp(pivot.get("confirmed_at"))
-        if (
-            pivot_time is None or confirmed_at is None
-            or pivot_time > confirmed_at or confirmed_at > asof
-            or (previous_pivot is not None and pivot_time <= previous_pivot)
-            or (previous_confirmation is not None and confirmed_at < previous_confirmation)
-        ):
-            return False, "V2 Elliott pivot chronology violates the as-of boundary."
-        previous_pivot, previous_confirmation = pivot_time, confirmed_at
+        return False, "V2 Elliott evidence is directly opposed or violates its as-of contract."
+    if not wave_unconfirmed:
+        try:
+            pivot_count = int(wave.get("confirmed_pivot_count"))
+            invalidation = float(wave.get("invalidation_price"))
+        except (TypeError, ValueError, OverflowError):
+            return False, "V2 Elliott pivot evidence is invalid."
+        if isinstance(wave.get("confirmed_pivot_count"), bool) or pivot_count < 3:
+            return False, "V2 Elliott history has fewer than three confirmed pivots."
+        if not math.isfinite(invalidation) or invalidation <= 0:
+            return False, "V2 Elliott invalidation price is missing or invalid."
+        pivots = wave.get("pivots")
+        if not isinstance(pivots, list) or len(pivots) < 3:
+            return False, "V2 Elliott pivot evidence is incomplete."
+        previous_pivot = previous_confirmation = None
+        for pivot in pivots:
+            if not isinstance(pivot, Mapping):
+                return False, "V2 Elliott pivot row is malformed."
+            pivot_time = _utc_timestamp(pivot.get("timestamp"))
+            confirmed_at = _utc_timestamp(pivot.get("confirmed_at"))
+            if (
+                pivot_time is None or confirmed_at is None
+                or pivot_time > confirmed_at or confirmed_at > asof
+                or (previous_pivot is not None and pivot_time <= previous_pivot)
+                or (previous_confirmation is not None and confirmed_at < previous_confirmation)
+            ):
+                return False, "V2 Elliott pivot chronology violates the as-of boundary."
+            previous_pivot, previous_confirmation = pivot_time, confirmed_at
 
     if (
         record.get("funding_kind") != "0"
@@ -625,9 +634,10 @@ def analyze_signal(
         trigger = float(last["close"]) > float(previous["high"]) and float(last["close"]) > float(last["open"])
     else:
         trigger = float(last["close"]) < float(previous["low"]) and float(last["close"]) < float(last["open"])
-    if not value_zone or not 40 <= rsi_value <= 60 or not trigger or volume_ratio < 1.2:
-        return {"signal": "NO_TRADE", "reason": "15M value zone, RSI, close-break or 1.2x volume hard gate failed", "regime": regime,
-                "setup": {"value_zone": value_zone, "rsi_15m": rsi_value, "volume_ratio": volume_ratio, "trigger": trigger}}
+    rsi_low, rsi_high = (35, 68) if direction == "LONG" else (32, 65)
+    if not value_zone or not rsi_low <= rsi_value <= rsi_high or not trigger or volume_ratio < 1.0:
+        return {"signal": "NO_TRADE", "reason": "15M value zone, directional RSI, close-break or 1.0x volume gate failed", "regime": regime,
+                "setup": {"value_zone": value_zone, "rsi_15m": rsi_value, "rsi_range": [rsi_low, rsi_high], "volume_ratio": volume_ratio, "trigger": trigger}}
 
     if precomputed_context is None:
         atr_series = atr14.dropna()
@@ -677,13 +687,17 @@ def analyze_signal(
         return {"signal": "NO_TRADE", "reason": "stop distance breaches 1.5% volatility cap", "regime": regime}
 
     score_parts = {
-        "h1_h4_alignment": 30 if regime.get("aligned_4h") else 0,
-        "adx_gt_28": 20 if float(regime["adx_1h"]) > 28 else 0,
-        "value_zone_rejection": 25,
-        "volume_gt_1_5x": 15 if volume_ratio >= 1.5 else 0,
+        "h1_ema21_ema55_direction": 25,
+        "h1_swing_structure_bonus": 5 if regime.get("structure_aligned_1h") else 0,
+        "adx_gte_22": 20 if float(regime["adx_1h"]) >= 22 else 0,
+        "value_zone_rejection": 20,
+        "volume_gte_1_0x": 15 if volume_ratio >= 1.0 else 0,
         "btc_alignment": 10 if btc_ok else 0,
     }
     confidence_score = sum(score_parts.values())
+    if regime.get("opposed_4h") is True:
+        return {"signal": "NO_TRADE", "reason": "4H trend is directly opposed to the 1H signal", "regime": regime,
+                "confidence_score": confidence_score, "score_parts": score_parts}
     if confidence_score < 70:
         return {"signal": "NO_TRADE", "reason": "confluence score below 70", "regime": regime,
                 "confidence_score": confidence_score, "score_parts": score_parts}
