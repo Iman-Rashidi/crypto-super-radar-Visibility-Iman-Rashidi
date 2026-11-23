@@ -5,7 +5,10 @@ Signals use completed candles only; the currently-forming candle is chart-only.
 """
 from __future__ import annotations
 
+import copy
 import math
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -66,6 +69,80 @@ OKX_BAR = {
     "4h": "4H", "1d": "1Dutc", "1w": "1Wutc", "1M": "1Mutc",
 }
 KRAKEN_INTERVAL = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
+
+
+# Process-local OHLCV + analysis cache. Per-key locks prevent duplicate upstream
+# fetches when the same dashboard card is requested concurrently.
+LIVE_MARKET_RADAR_CACHE_TTL_SECONDS = 45
+_LIVE_MARKET_RADAR_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_LIVE_MARKET_RADAR_CACHE_LOCK = threading.RLock()
+_LIVE_MARKET_RADAR_KEY_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_LIVE_MARKET_RADAR_KEY_LOCKS_GUARD = threading.Lock()
+
+
+def live_market_radar_key_lock(key: tuple[str, str]) -> threading.Lock:
+    with _LIVE_MARKET_RADAR_KEY_LOCKS_GUARD:
+        return _LIVE_MARKET_RADAR_KEY_LOCKS.setdefault(key, threading.Lock())
+
+
+def get_live_market_radar_cache(
+    key: tuple[str, str], *, now: float | None = None, allow_expired: bool = False,
+) -> tuple[dict[str, Any], float] | None:
+    current = time.monotonic() if now is None else float(now)
+    with _LIVE_MARKET_RADAR_CACHE_LOCK:
+        entry = _LIVE_MARKET_RADAR_CACHE.get(key)
+        if not isinstance(entry, dict):
+            return None
+        age = max(0.0, current - float(entry.get("cached_at", 0.0)))
+        if age >= LIVE_MARKET_RADAR_CACHE_TTL_SECONDS and not allow_expired:
+            return None
+        return copy.deepcopy(entry["payload"]), age
+
+
+def set_live_market_radar_cache(
+    key: tuple[str, str], payload: dict[str, Any], *, now: float | None = None,
+) -> None:
+    current = time.monotonic() if now is None else float(now)
+    with _LIVE_MARKET_RADAR_CACHE_LOCK:
+        _LIVE_MARKET_RADAR_CACHE[key] = {
+            "cached_at": current, "payload": copy.deepcopy(payload),
+        }
+        while len(_LIVE_MARKET_RADAR_CACHE) > 60:
+            oldest = min(_LIVE_MARKET_RADAR_CACHE, key=lambda item: _LIVE_MARKET_RADAR_CACHE[item]["cached_at"])
+            _LIVE_MARKET_RADAR_CACHE.pop(oldest, None)
+
+
+COINBASE_GRANULARITY = {
+    "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400,
+}
+
+
+def fetch_coinbase_candles(http: Any, symbol: str, interval: str, limit: int = 240) -> pd.DataFrame:
+    """Fetch Coinbase Exchange public candles where its product/timeframe exists."""
+    if interval not in COINBASE_GRANULARITY:
+        raise ValueError(f"Coinbase Exchange does not support interval {interval!r}")
+    instrument = _usdt_instrument(symbol)
+    payload = http.get_with_timeout(
+        f"https://api.exchange.coinbase.com/products/{instrument}/candles",
+        {"granularity": COINBASE_GRANULARITY[interval]},
+        timeout=1.35,
+    )
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("Coinbase Exchange returned no candle rows")
+    # Coinbase rows: [time, low, high, open, close, volume].
+    rows = []
+    for row in payload[:max(35, min(int(limit), 300))]:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        rows.append({
+            "timestamp": pd.to_datetime(row[0], unit="s", utc=True),
+            "open": row[3], "high": row[2], "low": row[1],
+            "close": row[4], "volume": row[5],
+        })
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        raise ValueError("Coinbase Exchange returned no valid OHLCV candles")
+    return frame.set_index("timestamp").sort_index().tail(max(35, min(int(limit), 300)))
 
 
 def _usdt_instrument(symbol: str) -> str:
