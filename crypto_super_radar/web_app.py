@@ -6939,9 +6939,12 @@ def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = 
     chain, address, symbol = str(chain or "").lower().strip(), str(address or "").strip(), str(symbol or "").upper().strip()
     if chain not in {"solana", "base", "ethereum"} or not (address or symbol):
         return {"status":"INVALID_INPUT","message_fa":"شبکه یا آدرس/نماد معتبر نیست.","trade_authorization":"NO_TRADE"}
-    dex = _deep_analysis_json("https://api.dexscreener.com/latest/dex/tokens/" + quote(address or symbol, safe=""))
+    dex_url = ("https://api.dexscreener.com/latest/dex/tokens/" + quote(address, safe="")) if address else ("https://api.dexscreener.com/latest/dex/search?q=" + quote(symbol, safe=""))
+    dex = _deep_analysis_json(dex_url)
     pairs = dex.get("pairs", []) if isinstance(dex, dict) else []
     pairs = [p for p in pairs if isinstance(p, dict) and str(p.get("chainId","")).lower() == chain]
+    if symbol and not address:
+        pairs = [p for p in pairs if symbol == str((p.get("baseToken") or {}).get("symbol","")).upper()]
     if address:
         matched = [p for p in pairs if address.lower() in {
             str((p.get("baseToken") or {}).get("address","")).lower(),
