@@ -21,7 +21,8 @@ class FastAssetScanTests(unittest.TestCase):
             "priceUsd": "0.00012",
             "liquidity": {"usd": 125000},
             "volume": {"h24": 56000},
-            "txns": {"h24": {"buys": 240, "sells": 130}},
+            "txns": {"h24": {"buys": 240, "sells": 130}, "h1": {"buys": 18, "sells": 7}},
+            "pairCreatedAt": 1795400000000,
             "priceChange": {"m5": 3, "h1": 12, "h6": 24, "h24": 55},
             "marketCap": 500000,
             "fdv": 600000,
@@ -41,6 +42,10 @@ class FastAssetScanTests(unittest.TestCase):
         self.assertEqual(report["opportunity_score"], 81)
         self.assertEqual(report["trade_authorization"], "NO_TRADE")
         processor.assert_called_once()
+        submitted = processor.call_args.args[0][0]
+        self.assertEqual(submitted["buys_1h"], 18)
+        self.assertEqual(submitted["sells_1h"], 7)
+        self.assertTrue(submitted["pool_created_at_utc"])
         self.assertFalse(processor.call_args.kwargs["notify"])
 
     def test_missing_pair_returns_limited_card(self):
