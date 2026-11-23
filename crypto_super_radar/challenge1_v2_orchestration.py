@@ -284,6 +284,9 @@ def analyze_challenge1_v2_market(
     record["market_data_proof"] = {
         "source": "BLOFIN_DEMO_REST",
         "asof_utc": asof.isoformat(),
+        "signal_rule": "COMPLETED_1H_ADX14_GTE_22_AND_CLOSE_VS_EMA21",
+        "signal_timeframe": "1H",
+        "entry_execution_timeframe": "15m",
         "timeframes": {
             "1H": {"rows": len(frame_1h), "latest_open_utc": frame_1h.index[-1].isoformat()},
             "4H": {"rows": len(frame_4h), "latest_open_utc": frame_4h.index[-1].isoformat()},
