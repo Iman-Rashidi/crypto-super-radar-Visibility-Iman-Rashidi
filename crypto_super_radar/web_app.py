@@ -6875,6 +6875,102 @@ def _run_blofin_demo_smoke_test_job(job_id: str) -> None:
         )
 
 
+
+
+def _deep_analysis_json(url: str):
+    from urllib.request import Request, urlopen
+    try:
+        req = Request(url, headers={"Accept":"application/json","User-Agent":"CryptoSuperRadar/1.0"})
+        with urlopen(req, timeout=9) as response:
+            if response.status != 200: return None
+            value = json.loads(response.read(2_000_000).decode("utf-8"))
+            return value if isinstance(value, (dict, list)) else None
+    except Exception:
+        return None
+
+
+def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = "") -> dict:
+    """Read-only token research using public DexScreener and RugCheck evidence."""
+    from urllib.parse import quote
+    chain, address, symbol = str(chain or "").lower().strip(), str(address or "").strip(), str(symbol or "").upper().strip()
+    if chain not in {"solana", "base", "ethereum"} or not (address or symbol):
+        return {"status":"INVALID_INPUT","message_fa":"شبکه یا آدرس/نماد معتبر نیست.","trade_authorization":"NO_TRADE"}
+    dex = _deep_analysis_json("https://api.dexscreener.com/latest/dex/tokens/" + quote(address or symbol, safe=""))
+    pairs = dex.get("pairs", []) if isinstance(dex, dict) else []
+    pairs = [p for p in pairs if isinstance(p, dict) and str(p.get("chainId","")).lower() == chain]
+    if address:
+        matched = [p for p in pairs if address.lower() in {
+            str((p.get("baseToken") or {}).get("address","")).lower(),
+            str((p.get("quoteToken") or {}).get("address","")).lower()}]
+        if matched: pairs = matched
+    pairs.sort(key=lambda p: float(((p.get("liquidity") or {}).get("usd") or 0) or 0), reverse=True)
+    pair = pairs[0] if pairs else {}
+    token = pair.get("baseToken") or {}
+    price = _safe_float(pair.get("priceUsd")) if pair else None
+    txns, changes, volume = pair.get("txns") or {}, pair.get("priceChange") or {}, pair.get("volume") or {}
+    pressure = {}
+    for key in ("m5","h1","h6","h24"):
+        row = txns.get(key) or {}; b, sell = row.get("buys"), row.get("sells")
+        valid = isinstance(b,(int,float)) and isinstance(sell,(int,float))
+        pressure[key] = {"buys":b if valid else "NOT_AVAILABLE","sells":sell if valid else "NOT_AVAILABLE",
+            "buy_sell_ratio":round(b/sell,4) if valid and sell else ("NOT_AVAILABLE" if not valid else None),
+            "price_change_pct":changes.get(key,"NOT_AVAILABLE")}
+    rug = _deep_analysis_json("https://api.rugcheck.xyz/v1/tokens/"+quote(address,safe="")+"/report") if chain=="solana" and address else None
+    if isinstance(rug,dict):
+        risks = rug.get("risks") if isinstance(rug.get("risks"),list) else []
+        risk_names = [str(x.get("name") or x.get("description") or "هشدار ثبت‌شده") for x in risks[:12] if isinstance(x,dict)]
+        markets = rug.get("markets") if isinstance(rug.get("markets"),list) else []
+        lp = [m["lp"].get("lpLockedPct") for m in markets if isinstance(m,dict) and isinstance(m.get("lp"),dict) and isinstance(m["lp"].get("lpLockedPct"),(int,float))]
+        top = rug.get("topHolders") if isinstance(rug.get("topHolders"),list) else []
+        concentration = sum(float(x.get("pct",0) or 0) for x in top[:10] if isinstance(x,dict)) if top else None
+        security = {"provider":"RUGCHECK","mint_authority":rug.get("mintAuthority","NOT_AVAILABLE"),
+            "freeze_authority":rug.get("freezeAuthority","NOT_AVAILABLE"),"lp_locked_pct":max(lp) if lp else "NOT_AVAILABLE",
+            "raw_risk_score":rug.get("score_normalised",rug.get("score","NOT_AVAILABLE")),
+            "warnings_fa":risk_names or ["هشدار ثبت‌شده‌ای دریافت نشد؛ نبود هشدار به معنی امن بودن نیست."]}
+        holders = rug.get("totalHolders","NOT_AVAILABLE")
+    else:
+        risk_names=["داده معتبر RugCheck در دسترس نیست."] if chain=="solana" else ["RugCheck فقط برای Solana بررسی می‌شود."]
+        security={"provider":"NOT_AVAILABLE" if chain=="solana" else "NOT_SUPPORTED",
+            "mint_authority":"NOT_AVAILABLE","freeze_authority":"NOT_AVAILABLE","lp_locked_pct":"NOT_AVAILABLE",
+            "raw_risk_score":"NOT_AVAILABLE","warnings_fa":risk_names}
+        concentration, holders = None, "NOT_AVAILABLE"
+    liq = (pair.get("liquidity") or {}).get("usd") if pair else None
+    b24,s24=pressure["h24"]["buys"],pressure["h24"]["sells"]
+    buy_share=100*b24/(b24+s24) if isinstance(b24,(int,float)) and isinstance(s24,(int,float)) and b24+s24 else None
+    risk=52 + (12 if chain=="solana" and rug is None else 0) + (12 if isinstance(liq,(int,float)) and liq<50000 else 0)
+    risk += min(20,2*len(risk_names))
+    if isinstance(concentration,(int,float)) and concentration>35: risk+=15
+    if isinstance(security.get("raw_risk_score"),(int,float)): risk=max(risk,min(95,int(security["raw_risk_score"]/10)))
+    risk=max(0,min(100,risk))
+    opportunity=35+(int((buy_share-50)*.8) if buy_share is not None else 0)
+    if isinstance(changes.get("h1"),(int,float)) and changes["h1"]>0: opportunity+=8
+    if isinstance(changes.get("h24"),(int,float)) and changes["h24"]>0: opportunity+=5
+    if isinstance(liq,(int,float)) and liq>=100000: opportunity+=8
+    opportunity=max(0,min(100,opportunity))
+    trend="صعودی" if isinstance(changes.get("h1"),(int,float)) and changes["h1"]>1 and (buy_share is None or buy_share>=50) else ("نزولی" if isinstance(changes.get("h1"),(int,float)) and changes["h1"] < -1 else "خنثی")
+    verdict="🔴 از این توکن دوری کن" if risk>=75 or not pair else ("🟢 خرید بررسی شود (پژوهشی)" if opportunity>=65 and risk<55 else "🟡 فعلاً صبر کن")
+    levels={"entry_range_usd":[round(price*.97,12),round(price*.99,12)],"invalidation_usd":round(price*.94,12),
+        "targets_usd":[round(price*1.05,12),round(price*1.10,12),round(price*1.20,12)],
+        "method_fa":"سناریوی مکانیکی نسبت به قیمت فعلی؛ حمایت/مقاومت تکنیکال تأییدشده نیست."} if price and price>0 else "NOT_AVAILABLE"
+    scenarios={str(c):{"capital_eur":c,"minus_20_pct":round(c*.8,2),"minus_10_pct":round(c*.9,2),
+        "plus_10_pct":round(c*1.1,2),"plus_20_pct":round(c*1.2,2),"note_fa":"بدون کارمزد، مالیات و لغزش قیمت."} for c in (10,50,100)}
+    return {"status":"OK" if pair else "MARKET_DATA_UNAVAILABLE","read_only":True,"trade_authorization":"NO_TRADE",
+        "token":{"chain":chain,"address":address or token.get("address","NOT_AVAILABLE"),"symbol":token.get("symbol") or symbol or "NOT_AVAILABLE","name":token.get("name","NOT_AVAILABLE")},
+        "market":{"price_usd":price if price is not None else "NOT_AVAILABLE","volume_24h_usd":volume.get("h24","NOT_AVAILABLE"),
+            "liquidity_usd":liq if liq is not None else "NOT_AVAILABLE","fdv_usd":pair.get("fdv","NOT_AVAILABLE"),
+            "market_cap_usd":pair.get("marketCap","NOT_AVAILABLE"),"dex":pair.get("dexId","NOT_AVAILABLE")},
+        "buy_sell_pressure":pressure,"security":security,
+        "whales":{"status":"NOT_AVAILABLE","holder_count":holders,
+            "top10_reported_concentration_pct":round(concentration,3) if concentration is not None else "NOT_AVAILABLE",
+            "large_transfers":"NOT_AVAILABLE","note_fa":"انتقال‌های بزرگ تأییدشده در دادهٔ این گزارش موجود نیست؛ از حجم معاملات نهنگ استنباط نشده است."},
+        "opportunity_score":opportunity,"risk_score":risk,"trend_fa":trend,"price_levels":levels,
+        "eur_scenarios":scenarios,"research_status_fa":verdict,
+        "reasons_fa":{"positive":["بازار از DexScreener خوانده شد." if pair else "جفت‌ارز معتبر در DexScreener پیدا نشد.",
+            "سهم خرید ۲۴ساعته: "+(f"{buy_share:.1f}%" if buy_share is not None else "NOT_AVAILABLE")],
+            "cautions":risk_names+["این گزارش پژوهشی است، نه توصیه قطعی یا دستور سفارش."]},
+        "updated_at_utc":datetime.now(timezone.utc).isoformat().replace("+00:00","Z")}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CryptoSuperRadar/0.2"
 
@@ -7158,6 +7254,11 @@ class Handler(BaseHTTPRequestHandler):
             payload = GLOBAL_MARKET_BOARD.get_board(force_refresh=refresh)
             return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if parsed.path == "/api/gem-hunter/deep-analysis":
+            params = parse_qs(parsed.query)
+            payload = build_gem_hunter_deep_analysis(params.get("chain", [""])[0], params.get("address", [""])[0], params.get("symbol", [""])[0])
+            code = 200 if payload.get("status") in {"OK", "MARKET_DATA_UNAVAILABLE"} else 400
+            return self._send(code, json.dumps(payload, ensure_ascii=False, default=str).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/gem-hunter/v3/watchlist":
             try:
                 payload = watchlist_from_turso()
