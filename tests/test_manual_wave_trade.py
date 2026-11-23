@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from crypto_super_radar import web_app
 
@@ -63,6 +63,50 @@ class ManualWaveTradeTests(unittest.TestCase):
             "client.place_futures_order",
         ):
             self.assertIn(item, source)
+
+
+    def test_long_and_short_orders_use_demo_client_contract_and_attach_tp_sl(self):
+        for side, expected_side, tp, sl in (
+            ("LONG", "buy", "70000", "65000"),
+            ("SHORT", "sell", "65000", "70000"),
+        ):
+            with self.subTest(side=side):
+                client = MagicMock()
+                client.base_url = web_app.DEMO_REST_URL
+                client.get_position_mode.return_value = {"positionMode": "net_mode"}
+                client.get_positions.return_value = []
+                client.get_open_orders.return_value = []
+                client.get_tradable_instrument.return_value = {
+                    "tickSize": "0.1", "contractValue": "0.001",
+                    "lotSize": "0.01", "minSize": "0.01", "maxMarketSize": "100",
+                }
+                client.get_mark_price.return_value = [{"markPrice": "68000"}]
+                client.place_futures_order.return_value = {
+                    "code": "0", "data": [{"orderId": "demo-order-123"}],
+                }
+                payload = {**self.valid, "side": side, "tpTriggerPrice": tp, "slTriggerPrice": sl}
+                with patch.dict(os.environ, {"BLOFIN_DEMO_TRADING_ENABLED": "true"}):
+                    with patch.object(web_app, "_blofin_manual_write_client", return_value=client):
+                        with patch.object(web_app, "BloFinDemoEventStore") as store_cls:
+                            store_cls.return_value = MagicMock()
+                            result = web_app._blofin_manual_submit_wave_order(payload)
+                self.assertEqual(result["status"], "ORDER_ACCEPTED")
+                self.assertEqual(result["environment"], "BLOFIN_DEMO")
+                self.assertEqual(result["exchange_order_id"], "demo-order-123")
+                kwargs = client.place_futures_order.call_args.kwargs
+                self.assertEqual(kwargs["side"], expected_side)
+                self.assertEqual(kwargs["take_profit"], tp)
+                self.assertEqual(kwargs["stop_loss"], sl)
+                self.assertEqual(kwargs["position_side"], "net")
+                self.assertEqual(kwargs["margin_mode"], "isolated")
+
+    def test_manual_trade_ui_uses_top_panel_token_fallback_and_renders_error_details(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("blofin-dashboard-token", source)
+        self.assertIn("error.payload", source)
+        self.assertIn("جزئیات خطا", source)
+        self.assertIn('"message_fa":message_fa', source)
+        self.assertIn('"error_type":type(exc).__name__', source)
 
 
 if __name__ == "__main__":
