@@ -3100,15 +3100,14 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
     higher_timeframes = {}
     higher_timeframe_errors = {}
     news_items = []
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=7, thread_name_prefix="live-radar-feed"
-    ) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=7, thread_name_prefix="live-radar-feed")
+    try:
         binance_future = executor.submit(
             binance_provider.candles,
             normalized_symbol, interval=normalized_interval, limit=500,
         )
         bybit_future = None
-        if normalized_interval in BYBIT_INTERVAL:
+        if normalized_interval in BYBIT_INTERVAL and normalized_interval != "1s":
             bybit_future = executor.submit(
                 bybit_provider.candles,
                 normalized_symbol, interval=BYBIT_INTERVAL[normalized_interval], limit=500,
@@ -3116,46 +3115,50 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         else:
             bybit_error = "Bybit Spot does not provide 1-second candles; independent candle validation is unavailable on this interval."
 
-        trades_future = executor.submit(
-            binance_provider.http.get,
-            f"{binance_provider.BASE}/api/v3/aggTrades",
-            {"symbol": normalized_symbol, "limit": 500},
-        )
-        depth_future = executor.submit(
-            binance_provider.http.get,
-            f"{binance_provider.BASE}/api/v3/depth",
-            {"symbol": normalized_symbol, "limit": 20},
-        )
-        htf_futures = {
-            timeframe: executor.submit(
-                binance_provider.candles, normalized_symbol, interval=timeframe, limit=500
+        if normalized_interval == "1s":
+            trades_future = depth_future = news_future = None
+            htf_futures = {}
+        else:
+            trades_future = executor.submit(
+                binance_provider.http.get,
+                f"{binance_provider.BASE}/api/v3/aggTrades",
+                {"symbol": normalized_symbol, "limit": 500},
             )
-            for timeframe in ("1h", "4h", "1d", "1w", "1M")
-        }
-        base_asset = normalized_symbol[:-4]
-        news_future = executor.submit(
-            binance_provider.http.get,
-            "https://min-api.cryptocompare.com/data/v2/news/",
-            {"categories": base_asset, "lang": "EN"},
-        )
+            depth_future = executor.submit(
+                binance_provider.http.get,
+                f"{binance_provider.BASE}/api/v3/depth",
+                {"symbol": normalized_symbol, "limit": 20},
+            )
+            htf_futures = {
+                timeframe: executor.submit(
+                    binance_provider.candles, normalized_symbol, interval=timeframe, limit=500
+                )
+                for timeframe in ("1h", "4h", "1d", "1w", "1M")
+            }
+            base_asset = normalized_symbol[:-4]
+            news_future = executor.submit(
+                binance_provider.http.get,
+                "https://min-api.cryptocompare.com/data/v2/news/",
+                {"categories": base_asset, "lang": "EN"},
+            )
 
         # Binance candles are mandatory for the chart. Other feeds fail independently.
-        binance_frame = binance_future.result()
+        binance_frame = binance_future.result(timeout=1.5 if normalized_interval == "1s" else 5.0)
         if bybit_future is not None:
             try:
-                bybit_frame = bybit_future.result()
+                bybit_frame = bybit_future.result(timeout=5.0)
             except Exception as exc:
                 bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
 
         try:
-            aggregate_trades = trades_future.result()
+            aggregate_trades = trades_future.result(timeout=0.05) if trades_future is not None else None
             if not isinstance(aggregate_trades, list):
                 raise ValueError("Binance aggregate-trade response was not a list")
         except Exception as exc:
             flow_errors.append(f"aggTrades: {type(exc).__name__}: {str(exc)[:100]}")
 
         try:
-            order_book = depth_future.result()
+            order_book = depth_future.result(timeout=0.05) if depth_future is not None else None
             if not isinstance(order_book, dict) or not isinstance(order_book.get("bids"), list) or not isinstance(order_book.get("asks"), list):
                 raise ValueError("Binance depth response schema was incomplete")
         except Exception as exc:
@@ -3163,7 +3166,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
 
         for timeframe, future in htf_futures.items():
             try:
-                frame = future.result()
+                frame = future.result(timeout=0.05)
                 higher_timeframes[timeframe] = [
                     {"open": float(row.open), "high": float(row.high), "low": float(row.low),
                      "close": float(row.close), "volume": float(row.volume)}
@@ -3173,7 +3176,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
                 higher_timeframe_errors[timeframe] = f"{type(exc).__name__}: {str(exc)[:100]}"
 
         try:
-            raw_news = news_future.result()
+            raw_news = news_future.result(timeout=0.05) if news_future is not None else {}
             records = raw_news.get("Data", []) if isinstance(raw_news, dict) else []
             for item in records if isinstance(records, list) else []:
                 if not isinstance(item, dict):
@@ -3199,6 +3202,9 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
             # Missing or unavailable news is explicitly reported as unknown downstream.
             news_items = []
 
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
     payload = build_live_market_radar_payload(
         normalized_symbol,
         normalized_interval,
@@ -3212,6 +3218,11 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         news=news_items,
     )
     payload["future_forecast"]["higher_timeframe_errors"] = higher_timeframe_errors
+    if normalized_interval == "1s" or bybit_frame is None:
+        payload["source_mode"] = "SINGLE_SOURCE"
+        payload["source_status_fa"] = "دادهٔ کندل از Binance دریافت شد؛ اعتبارسنجی Bybit در این بازه یا به‌دلیل تأخیر در دسترس نیست. سیگنال دو‌منبعی مسدود است."
+    else:
+        payload["source_mode"] = "DUAL_SOURCE"
     payload["future_forecast"]["higher_timeframes"] = higher_timeframes
     payload["future_forecast"]["news_status"] = "PASS" if news_items else "UNAVAILABLE"
     # Publish W3 retracement levels only when the dashboard's non-repainting
