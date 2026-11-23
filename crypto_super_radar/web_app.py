@@ -9643,7 +9643,7 @@ async function loadBlofinInstruments(){
               }finally{busy=false;button.disabled=false;}
             }
             function normalizeCustomSymbol(value){
-              let raw=String(value||'').trim().toUpperCase().replace(/[\s/_-]+/g,'');
+              let raw=String(value||'').trim().toUpperCase().replaceAll(' ','').replaceAll('/','').replaceAll('-','').replaceAll('_','');
               if(!raw.endsWith('USDT'))raw+='USDT';
               if(!/^[A-Z0-9]{2,16}USDT$/.test(raw))throw new Error('نماد نامعتبر است؛ مانند PEPE یا PEPEUSDT وارد کنید.');
               return raw;
