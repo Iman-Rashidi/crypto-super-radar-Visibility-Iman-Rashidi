@@ -845,16 +845,17 @@ class WebAppHttpTests(unittest.TestCase):
                 expires_at=0.0, payload=None, refreshing=False, last_error=None
             )
 
-        def snapshot(asset):
-            return SimpleNamespace(
-                price_usd=100.0,
-                volume_24h_usd=1_000_000.0,
-                price_discrepancy_pct=0.25,
-                provider_a="Binance Spot",
-                provider_b="Bybit Spot",
-            )
+        def binance_ticker(symbol):
+            return {"price": 100.0, "volume_24h": 1_000_000.0,
+                    "raw": {"priceChangePercent": "2.0"}}
 
-        with patch.object(web_app.ENGINE.data, "snapshot", side_effect=snapshot) as fetch:
+        def bybit_ticker(symbol):
+            return {"price": 100.0, "volume_24h": 1_000_000.0,
+                    "raw": {"price24hPcnt": "0.02"}}
+
+        with patch.object(web_app.ENGINE.data.binance, "ticker", side_effect=binance_ticker) as binance_fetch, \\
+             patch.object(web_app.ENGINE.data.bybit, "ticker", side_effect=bybit_ticker) as bybit_fetch, \\
+             patch.object(web_app, "_market_volume_spike", return_value=1.5):
             status, _, payload = self.request("GET", "/api/crypto-markets")
             first = json.loads(payload)
             self.assertEqual(status, 200)
@@ -869,14 +870,17 @@ class WebAppHttpTests(unittest.TestCase):
             self.assertEqual(len(first["items"]), len(web_app.CRYPTO_MARKET_UNIVERSE))
             self.assertGreaterEqual(len(first["items"]), 20)
             self.assertEqual(len({item["symbol"] for item in first["items"]}), len(first["items"]))
-            self.assertEqual(first["items"][0]["symbol"], "BTCUSDT")
+            self.assertEqual(first["items"][0]["price_change_24h_pct"], 2.0)
             self.assertEqual(first["items"][0]["providers"], ["Binance Spot", "Bybit Spot"])
+            self.assertEqual(first["items"][0]["volume_spike_ratio"], 1.5)
+            self.assertEqual(first["trade_authorization"], "NO_TRADE")
 
             status, _, payload = self.request("GET", "/api/crypto-markets")
             second = json.loads(payload)
             self.assertEqual(status, 200)
             self.assertEqual(second, first)
-            self.assertEqual(fetch.call_count, len(web_app.CRYPTO_MARKET_UNIVERSE))
+            self.assertEqual(binance_fetch.call_count, len(web_app.CRYPTO_MARKET_UNIVERSE))
+            self.assertEqual(bybit_fetch.call_count, len(web_app.CRYPTO_MARKET_UNIVERSE))
 
     def test_crypto_market_endpoint_keeps_failed_symbols_unknown(self):
         with web_app.CRYPTO_MARKET_CACHE_LOCK:
@@ -884,18 +888,21 @@ class WebAppHttpTests(unittest.TestCase):
                 expires_at=0.0, payload=None, refreshing=False, last_error=None
             )
 
-        def snapshot(asset):
-            if asset.symbol == "ETHUSDT":
+        def binance_ticker(symbol):
+            if symbol == "ETHUSDT":
                 raise RuntimeError("public source unavailable")
-            return SimpleNamespace(
-                price_usd=100.0,
-                volume_24h_usd=1_000_000.0,
-                price_discrepancy_pct=0.25,
-                provider_a="Binance Spot",
-                provider_b="Bybit Spot",
-            )
+            return {"price": 100.0, "volume_24h": 1_000_000.0,
+                    "raw": {"priceChangePercent": "2.0"}}
 
-        with patch.object(web_app.ENGINE.data, "snapshot", side_effect=snapshot):
+        def bybit_ticker(symbol):
+            if symbol == "ETHUSDT":
+                raise RuntimeError("public source unavailable")
+            return {"price": 100.0, "volume_24h": 1_000_000.0,
+                    "raw": {"price24hPcnt": "0.02"}}
+
+        with patch.object(web_app.ENGINE.data.binance, "ticker", side_effect=binance_ticker), \\
+             patch.object(web_app.ENGINE.data.bybit, "ticker", side_effect=bybit_ticker), \\
+             patch.object(web_app, "_market_volume_spike", return_value=None):
             status, _, payload = self.request("GET", "/api/crypto-markets")
             result = json.loads(payload)
             deadline = time.monotonic() + 5
