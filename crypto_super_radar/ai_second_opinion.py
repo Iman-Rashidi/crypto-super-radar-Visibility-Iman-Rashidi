@@ -251,7 +251,10 @@ def _challenge1_v2_native_review(result: Any) -> dict[str, Any]:
     if record.get("wave5_entry_active") is True:
         evidence = record.get("challenge1_v2_evidence") if isinstance(record.get("challenge1_v2_evidence"), Mapping) else {}
         wave = evidence.get("elliott_wave") if isinstance(evidence.get("elliott_wave"), Mapping) else {}
-        asof = _safe_timestamp(evidence.get("data_asof_utc"))
+        raw_asof = str(evidence.get("data_asof_utc") or "").strip()
+        asof = datetime.fromisoformat(raw_asof.replace("Z", "+00:00")) if raw_asof else None
+        if asof is not None and asof.tzinfo is None:
+            asof = None
         try:
             funding_time = int(evidence.get("funding_event_time_ms"))
             funding_max_age = int(evidence.get("funding_max_age_ms"))
