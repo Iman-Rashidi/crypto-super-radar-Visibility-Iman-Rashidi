@@ -317,37 +317,43 @@ def analyze_challenge1_v2_market(
             fast_trigger_record = analyze_blofin_challenge1(
                 client, symbol, now_ms=asof_ms,
             )
-        except (ValueError, TypeError, KeyError, IndexError) as exc:
+        except Exception as exc:
             fast_trigger_record = {
                 "signal": "NO_TRADE", "reason_fa": "Fast dashboard engine unavailable: " + str(exc),
                 "signal_id": None,
             }
-        early_w3_path = build_early_wave3_signal(
-            instrument_id=symbol, frame_5m=frame_5m, frame_15m=frame_15m,
-            asof=asof, entry_price=float(quote.get("last") or quote.get("markPrice") or frame_5m["close"].iloc[-1]),
-            funding_rate=funding["funding_rate"], funding_kind=funding["funding_kind"],
-            funding_event_time_ms=funding["funding_event_time_ms"],
-            funding_max_age_ms=funding["funding_max_age_ms"],
-            spread_fraction=quote["spread_fraction"],
-        )
+        try:
+            early_w3_path = build_early_wave3_signal(
+                instrument_id=symbol, frame_5m=frame_5m, frame_15m=frame_15m,
+                asof=asof, entry_price=float(quote.get("last") or quote.get("markPrice") or frame_5m["close"].iloc[-1]),
+                funding_rate=funding["funding_rate"], funding_kind=funding["funding_kind"],
+                funding_event_time_ms=funding["funding_event_time_ms"],
+                funding_max_age_ms=funding["funding_max_age_ms"],
+                spread_fraction=quote["spread_fraction"],
+            )
+        except Exception as exc:
+            early_w3_path = {"signal": "NO_TRADE", "reason": "Early W3 detector unavailable: " + type(exc).__name__}
     if early_w3_path.get("signal") in {"LONG", "SHORT"}:
         record = early_w3_path
     fast_path = None
     if not record.get("early_w3_active") and fast_trigger_record.get("signal") in {"LONG", "SHORT"}:
-        fast_path = build_fast_trigger_signal(
-            instrument_id=symbol,
-            frame_1h=frame_1h,
-            frame_4h=frame_4h,
-            frame_15m=frame_15m,
-            btc_15m=btc_15m,
-            asof=asof,
-            funding_rate=funding["funding_rate"],
-            funding_kind=funding["funding_kind"],
-            funding_event_time_ms=funding["funding_event_time_ms"],
-            funding_max_age_ms=funding["funding_max_age_ms"],
-            spread_fraction=quote["spread_fraction"],
-            fast_trigger_record=fast_trigger_record,
-        )
+        try:
+            fast_path = build_fast_trigger_signal(
+                instrument_id=symbol,
+                frame_1h=frame_1h,
+                frame_4h=frame_4h,
+                frame_15m=frame_15m,
+                btc_15m=btc_15m,
+                asof=asof,
+                funding_rate=funding["funding_rate"],
+                funding_kind=funding["funding_kind"],
+                funding_event_time_ms=funding["funding_event_time_ms"],
+                funding_max_age_ms=funding["funding_max_age_ms"],
+                spread_fraction=quote["spread_fraction"],
+                fast_trigger_record=fast_trigger_record,
+            )
+        except Exception as exc:
+            fast_path = {"signal": "NO_TRADE", "reason": "Dashboard fast-trigger adapter unavailable: " + type(exc).__name__}
         if fast_path.get("signal") in {"LONG", "SHORT"}:
             record = fast_path
     record = dict(record)
