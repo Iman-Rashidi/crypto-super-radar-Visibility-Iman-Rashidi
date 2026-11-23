@@ -152,6 +152,16 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     if holder_count is not None:
         holder_count = int(holder_count)
 
+
+    security_status = security.get("status")
+    exit_status = exit_gate.get("status")
+    safety = None
+    if security_status == "FAIL" or exit_status == "FAIL":
+        safety = 0.0
+    elif security_status == "PASS" and exit_status == "PASS":
+        slip = _finite(exit_gate.get("estimated_slippage_bps"))
+        safety = round(max(0.0, 100.0 - (slip or 0.0) / MAX_EXIT_SLIPPAGE_BPS * 30.0), 2)
+
     # Independent risk score: missing evidence raises risk, never implies PASS.
     risk_score = 55.0 if safety is None else round(100.0 - safety, 2)
     if security_status != "PASS":
@@ -171,15 +181,6 @@ def score_candidate_v3(candidate: Mapping[str, Any]) -> dict[str, Any]:
     if holder_count is None:
         risk_score += 5.0
     risk_score = round(min(100.0, max(0.0, risk_score)), 2)
-
-    security_status = security.get("status")
-    exit_status = exit_gate.get("status")
-    safety = None
-    if security_status == "FAIL" or exit_status == "FAIL":
-        safety = 0.0
-    elif security_status == "PASS" and exit_status == "PASS":
-        slip = _finite(exit_gate.get("estimated_slippage_bps"))
-        safety = round(max(0.0, 100.0 - (slip or 0.0) / MAX_EXIT_SLIPPAGE_BPS * 30.0), 2)
 
     confidence_parts = []
     if reconciliation.get("status") in {"PASS", "FAIL"}:
