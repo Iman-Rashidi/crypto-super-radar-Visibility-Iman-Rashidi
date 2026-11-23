@@ -1113,7 +1113,8 @@ class PerpetualMarketProvider:
         except DataProviderError as exc:
             if not self._binance_unavailable(exc):
                 raise
-            return self._okx_bybit_snapshot(symbol, reason=str(exc))
+            return self._cached_fallback(("snapshot", symbol),
+                                         lambda: self._okx_bybit_snapshot(symbol, reason=str(exc)))
 
         if not isinstance(book, dict) or not isinstance(premium, dict) or not isinstance(binance_oi, dict):
             raise DataProviderError("Binance perpetual order-book/mark response has an invalid schema")
@@ -1223,25 +1224,24 @@ class PerpetualMarketProvider:
         try:
             return self._legacy_funding_interval_hours(symbol)
         except DataProviderError as exc:
-            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+            if not self._binance_unavailable(exc):
                 raise
-            contract = f"{symbol[:-4]}_USDT"
             instrument = f"{symbol[:-4]}-{symbol[-4:]}-SWAP"
-            meta = self.http.get(f"{self.GATE}/futures/usdt/contracts/{contract}")
-            gate_seconds = _positive_float(meta.get("funding_interval")) if isinstance(meta, dict) else None
-            okx = self.http.get(f"{self.OKX}/public/funding-rate-history", {"instId": instrument, "limit": 3})
-            rows = okx.get("data") if isinstance(okx, dict) and okx.get("code") == "0" else None
-            stamps = sorted(
-                int(float(row["fundingTime"])) for row in rows
-                if isinstance(row, dict) and _positive_float(row.get("fundingTime")) is not None
-            ) if isinstance(rows, list) else []
-            if gate_seconds is None or len(stamps) < 2:
-                raise DataProviderError("Gate.io/OKX funding interval metadata is incomplete") from exc
+            okx = self.http.get(f"{self.OKX}/public/funding-rate-history", {"instId": instrument, "limit": 4})
+            bybit = self.http.get(f"{self.BYBIT}/v5/market/instruments-info",
+                                  {"category": "linear", "symbol": symbol})
+            okx_rows = okx.get("data") if isinstance(okx, dict) and okx.get("code") == "0" else None
+            bybit_rows = ((bybit or {}).get("result") or {}).get("list") if isinstance(bybit, dict) and bybit.get("retCode") in (0, "0") else None
+            stamps = sorted(int(float(row["fundingTime"])) for row in okx_rows
+                            if isinstance(row, dict) and _positive_float(row.get("fundingTime")) is not None) if isinstance(okx_rows, list) else []
+            minutes = _positive_float(bybit_rows[0].get("fundingInterval")) if isinstance(bybit_rows, list) and len(bybit_rows) == 1 else None
+            if len(stamps) < 2 or minutes is None:
+                raise DataProviderError("OKX/Bybit funding interval metadata is incomplete") from exc
             okx_hours = (stamps[-1] - stamps[-2]) / 3_600_000
-            gate_hours = gate_seconds / 3600.0
-            if okx_hours <= 0 or abs(gate_hours - okx_hours) > (1.0 / 6.0):
-                raise DataProviderError(f"Gate.io/OKX funding interval mismatch: {gate_hours:g}h vs {okx_hours:g}h") from exc
-            return gate_hours
+            bybit_hours = minutes / 60.0
+            if okx_hours <= 0 or abs(bybit_hours - okx_hours) > (1.0 / 6.0):
+                raise DataProviderError(f"OKX/Bybit funding interval mismatch: {okx_hours:g}h vs {bybit_hours:g}h") from exc
+            return (okx_hours + bybit_hours) / 2.0
 
     def _legacy_funding_interval_hours(self, symbol: str) -> float:
         """Require Binance USD-M and Bybit Linear funding settlement intervals to agree."""
@@ -1291,17 +1291,36 @@ class PerpetualMarketProvider:
         try:
             return self._legacy_funding_history(symbol, limit)
         except DataProviderError as exc:
-            if not any(code in str(exc) for code in ("HTTP 403", "HTTP 451")):
+            if not self._binance_unavailable(exc):
                 raise
-            interval = self.funding_interval_hours(symbol)
-            contract, instrument = f"{symbol[:-4]}_USDT", f"{symbol[:-4]}-{symbol[-4:]}-SWAP"
-            gate_rows = self.http.get(f"{self.GATE}/futures/usdt/funding_rate",
-                                      {"contract": contract, "limit": min(limit, 1000)})
+            instrument = f"{symbol[:-4]}-{symbol[-4:]}-SWAP"
             okx_payload = self.http.get(f"{self.OKX}/public/funding-rate-history",
                                         {"instId": instrument, "limit": min(limit, 100)})
+            bybit_payload = self.http.get(f"{self.BYBIT}/v5/market/funding/history",
+                                          {"category": "linear", "symbol": symbol, "limit": min(limit, 200)})
             okx_rows = okx_payload.get("data") if isinstance(okx_payload, dict) and okx_payload.get("code") == "0" else None
-            if not isinstance(gate_rows, list) or not isinstance(okx_rows, list):
-                raise DataProviderError("Gate.io/OKX historical funding returned an invalid schema") from exc
+            bybit_rows = ((bybit_payload or {}).get("result") or {}).get("list") if isinstance(bybit_payload, dict) and bybit_payload.get("retCode") in (0, "0") else None
+            if not isinstance(okx_rows, list) or not isinstance(bybit_rows, list):
+                raise DataProviderError("OKX/Bybit historical funding returned an invalid schema") from exc
+            def validated_points(rows, stamp_key, rate_key):
+                points = {}
+                for row in rows:
+                    stamp = _positive_float(row.get(stamp_key)) if isinstance(row, dict) else None
+                    rate = _finite_float(row.get(rate_key)) if isinstance(row, dict) else None
+                    if stamp is None or rate is None:
+                        raise DataProviderError("OKX/Bybit historical funding contains invalid values") from exc
+                    points[int(stamp)] = rate
+                return points
+            okx_points = validated_points(okx_rows, "fundingTime", "fundingRate")
+            bybit_points = validated_points(bybit_rows, "fundingRateTimestamp", "fundingRate")
+            common = sorted(set(okx_points).intersection(bybit_points))
+            if len(common) < 2:
+                raise DataProviderError("OKX/Bybit funding histories have insufficient matching timestamps") from exc
+            if any(abs(okx_points[stamp] - bybit_points[stamp]) > 0.0002 for stamp in common):
+                raise DataProviderError("OKX/Bybit historical funding discrepancy exceeds 2 bps") from exc
+            return pd.Series({pd.to_datetime(stamp, unit="ms", utc=True):
+                              (okx_points[stamp] + bybit_points[stamp]) / 2.0
+                              for stamp in common[-min(limit, 100):]}).sort_index()
             def series(rows, ts_key, rate_key, scale):
                 points = []
                 for row in rows:
