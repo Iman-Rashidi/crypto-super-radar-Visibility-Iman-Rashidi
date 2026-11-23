@@ -75,6 +75,7 @@ jobs:
           for pass in 1 2 3; do
             echo "===== Challenge 1 regression pass ${pass}/3 ====="
             for test_file in \
+              test_future_forecast.py \
               test_elliott_waves.py \
               test_chart_patterns.py \
               test_challenge1_strategy.py \
