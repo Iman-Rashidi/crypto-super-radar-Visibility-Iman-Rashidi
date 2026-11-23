@@ -3093,7 +3093,7 @@ def _market_board_payload(items: list[dict], *, refreshing: bool) -> dict:
                 continue
     oldest_observation = min(observed_times) if observed_times else None
     if complete:
-        status = "PASS" if all(item.get("status") == "PASS" for item in items[:total]) else "PARTIAL" if usable_count else "UNKNOWN"
+        status = "PASS" if all(item.get("status") == "PASS" for item in items[:total]) and len(observed_times) == total else "PARTIAL" if usable_count else "UNKNOWN"
     else:
         status = "PARTIAL" if usable_count else "LOADING"
     sources = list(dict.fromkeys(
