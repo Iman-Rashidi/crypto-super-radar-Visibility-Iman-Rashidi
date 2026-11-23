@@ -284,8 +284,17 @@ def run_cycle(client: Any, connection: Any, *, analyzer=None, symbols: tuple[str
             safe.update(execution_profile="CHALLENGE_1_V2",orders_submitted=False,mode="DRY_RUN",
                 exit_manager_summary=exit_summary.get("results", []))
             consensus=safe.get("ai_consensus")
-            approved=isinstance(consensus,Mapping) and consensus.get("status")=="APPROVED_BY_BOTH"
-            if trading_active and approved and str(safe.get("signal") or "").upper() in {"LONG","SHORT"}:
+            approved = isinstance(consensus, Mapping) and consensus.get("status") == "APPROVED_BY_BOTH"
+            demo_failover_approved = (
+                trading_active
+                and isinstance(consensus, Mapping)
+                and consensus.get("status") == "APPROVED_WITH_TRANSIENT_PROVIDER_FAILURE"
+                and consensus.get("single_reviewer_demo_failover") is True
+                and consensus.get("verified_approval_count") == 1
+                and consensus.get("veto_provider_count") == 0
+                and consensus.get("transient_provider_failure_count") == 1
+            )
+            if trading_active and (approved or demo_failover_approved) and str(safe.get("signal") or "").upper() in {"LONG","SHORT"}:
                 inst=str(result.get("instrument_id") or result.get("inst_id") or symbol).upper()
                 execution=executor.execute(result,inst_id=inst,allow_demo_orders=True,
                     leverage=int(env.get("CHALLENGE_1_V2_LEVERAGE","1")))
