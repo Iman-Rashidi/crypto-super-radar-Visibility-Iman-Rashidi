@@ -172,8 +172,14 @@ class Challenge1V2BalancedEntryTests(unittest.TestCase):
         frames = [
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(hours=1)]),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(hours=4)]),
-            # The 5m input is now a required, independently closed market-data frame.
-            pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=5)]),
+            # The 5m input must satisfy the Elliott engine's full OHLCV contract.
+            pd.DataFrame(
+                {
+                    "open": [100.0], "high": [101.0], "low": [99.0],
+                    "close": [100.0], "volume": [1000.0],
+                },
+                index=pd.DatetimeIndex([asof - pd.Timedelta(minutes=5)], tz="UTC"),
+            ),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
             pd.DataFrame({"close": [1.0]}, index=[asof - pd.Timedelta(minutes=15)]),
         ]
