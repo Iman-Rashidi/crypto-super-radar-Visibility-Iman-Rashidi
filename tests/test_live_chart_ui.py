@@ -16,6 +16,21 @@ class LiveChartUiTests(unittest.TestCase):
         self.assertIn('width="1440" height="560"', self.source)
         self.assertIn("@media(max-width:600px)", self.source)
 
+    def test_five_minute_default_and_bounded_chart_request(self):
+        self.assertIn('<option value="5m" selected>۵ دقیقه</option>', self.source)
+        self.assertIn("new AbortController()", self.source)
+        self.assertIn("setTimeout(()=>controller.abort(),8000)", self.source)
+        self.assertIn("signal:controller.signal", self.source)
+        self.assertIn('id="live-radar-retry"', self.source)
+        self.assertIn("retryButton.hidden=false", self.source)
+        self.assertIn("مهلت دریافت ۸ ثانیه‌ای تمام شد", self.source)
+
+    def test_custom_symbol_search_fits_mobile_width(self):
+        self.assertIn(".live-radar-custom-search{display:flex;flex-wrap:wrap", self.source)
+        self.assertIn("max-width:100%;min-width:0;overflow:hidden", self.source)
+        self.assertIn(".live-radar-custom-search label,.live-radar-custom-search button{width:100%;max-width:100%;min-width:0", self.source)
+        self.assertIn(".live-radar-controls{grid-template-columns:minmax(0,1fr)", self.source)
+
     def test_simple_persian_buy_and_sell_labels_are_present(self):
         self.assertIn("🟢 زمان خوب برای خرید (شروع موج صعودی / الگوی برگشت خریداران)", self.source)
         self.assertIn("🔴 زمان فروش یا خروج (سقف موج / احتمال افت قیمت)", self.source)
