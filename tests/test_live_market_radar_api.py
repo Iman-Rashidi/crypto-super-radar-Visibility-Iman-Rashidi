@@ -109,9 +109,11 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertFalse(payload["orders_submitted"])
         self.assertIn("future_forecast", payload)
         self.assertEqual(len(payload["future_forecast"]["confidence_band"]), 12)
+        self.assertIn("higher_timeframes", payload["future_forecast"])
         self.assertEqual(payload["future_forecast"]["news_summary_fa"], "داده تأییدشده موجود نیست")
-        self.assertEqual(binance.call_count, 3)
-        self.assertEqual({call.kwargs.get("interval") for call in binance.call_args_list}, {"5m", "1h", "4h"})
+        self.assertEqual(binance.call_count, 6)
+        self.assertEqual({call.kwargs.get("interval") for call in binance.call_args_list}, {"5m", "1h", "4h", "1d", "1w", "1M"})
+        self.assertTrue(all(call.kwargs.get("limit") == 500 for call in binance.call_args_list))
         bybit.assert_called_once()
 
     def test_missing_second_provider_blocks_buy_sell_signal(self):
