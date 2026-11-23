@@ -133,7 +133,7 @@ def build_fast_asset_scan_report(
     risk_score = _number(scored.get("risk_score"))
     opportunity_score = _number(scored.get("opportunity_score"))
     return {
-        "status": "COMPLETE" if price is not None else "LIMITED",
+        "status": "COMPLETE" if all(value is not None for value in (price, liquidity, volume)) else "LIMITED",
         "message_fa": "تحلیل سریع Gem Hunter V3 تکمیل شد؛ داده‌های تک‌منبعی به‌عنوان تأیید مستقل معرفی نمی‌شوند.",
         "asset": getattr(asset, "raw", ""),
         "chain": dex_chain,
