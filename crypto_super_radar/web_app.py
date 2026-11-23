@@ -1956,71 +1956,71 @@ canvas{{width:100%;height:300px;background:#08101d;border-radius:12px}}
 {_radar_css()}
 
 /* CRYPTO SUPER RADAR · visual-only FinTech refresh */
-:root{font-family:"Vazirmatn","Segoe UI",Tahoma,Arial,sans-serif}
-body{background:radial-gradient(ellipse at 78% -12%,#193e5a 0,transparent 38%),linear-gradient(145deg,#070b14,#0f172a 68%,#091321);background-attachment:fixed}
-.card,.gem-candidate,.metric,.live-radar-flow,.live-radar-pattern-panel{backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-color:#28445f;box-shadow:0 14px 38px #02081780, inset 0 1px #ffffff0a}
-.app-header{border-bottom-color:#2a4662}
-.brand-mark{box-shadow:0 0 28px #38bdf833,0 12px 30px #0005}
-.brand-copy h1{font-weight:850;letter-spacing:.025em}
-.gem-candidate{position:relative;overflow:hidden;background:linear-gradient(145deg,#12243aee,#0a1728f2);transition:transform .22s ease,border-color .22s ease,box-shadow .22s ease}
-.gem-candidate:hover{transform:translateY(-3px);border-color:#4f9ac0;box-shadow:0 18px 42px #020817aa,0 0 22px #38bdf822}
-.gem-candidate h3{font-size:1.12rem}
-.gem-fact{background:linear-gradient(145deg,#10243a,#0b192a);border-color:#2b4966}
-.gem-links a{padding:6px 10px;border:1px solid #32617a;border-radius:999px;background:#0c2638;text-decoration:none}
-.gem-candidate details{border:1px solid #294862;border-radius:12px;margin-top:12px;padding:10px;background:#091a2a99}
-.gem-candidate details>summary{cursor:pointer;color:#bdeeff;font-weight:750;list-style:none}
-.gem-candidate details>summary:after{content:"＋";float:left;color:#63e6d2;transition:transform .2s}
-.gem-candidate details[open]>summary:after{content:"−";transform:rotate(180deg)}
-.gem-wave-panel{overflow:hidden;transition:opacity .24s ease,transform .24s ease}
-.gem-candidate button:focus-visible{outline:2px solid #5eead4;outline-offset:3px}
-.gem-visual-badges{display:flex;flex-wrap:wrap;gap:7px;margin:9px 0}
-.gem-visual-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid #3a607c;border-radius:999px;background:#112c42;color:#d8f5ff;font-size:.76rem;font-weight:750;box-shadow:0 0 14px #38bdf81a}
-.gem-visual-badge.phase-start{border-color:#169b70;color:#a7f5d6;background:#092c27}
-.gem-visual-badge.phase-mid{border-color:#a77a2b;color:#ffe2a0;background:#302611}
-.gem-visual-badge.phase-risk{border-color:#b84960;color:#ffc0cf;background:#351522}
-.gem-visual-badge.net-solana{border-color:#8d68d9;color:#ddc8ff}.gem-visual-badge.net-base{border-color:#397be8;color:#c6dcff}.gem-visual-badge.net-ethereum{border-color:#8998ac;color:#e3eaf3}
-.gem-score-row{display:grid;grid-template-columns:110px 1fr 38px;align-items:center;gap:8px;margin:7px 0;font-size:.78rem;color:var(--muted)}
-.gem-score-track{height:8px;border-radius:99px;background:#1a2a3d;overflow:hidden}
-.gem-score-fill{height:100%;border-radius:99px;transition:width .55s ease}
-.gem-score-fill.opportunity{background:linear-gradient(90deg,#13a879,#a3f36b);box-shadow:0 0 12px #24d69a66}
-.gem-score-fill.risk{background:linear-gradient(90deg,#f3a33b,#f05261);box-shadow:0 0 12px #f0526166}
-.gem-copy-success{border-color:#25c58b!important;background:#0c4938!important;color:#b9ffe2!important;box-shadow:0 0 18px #25c58b44!important}
-#radar-live-strip{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 16px;padding:12px 15px;border:1px solid #28506a;border-radius:16px;background:linear-gradient(100deg,#0c1b2bdf,#10283be8);box-shadow:0 12px 32px #0004;backdrop-filter:blur(14px)}
-#radar-live-strip .radar-live-status{display:inline-flex;align-items:center;gap:8px;color:#a8f5d5;font-weight:850;font-size:.78rem}
-#radar-live-strip .pulse-dot{width:9px;height:9px;border-radius:50%;background:#35e39b;box-shadow:0 0 0 0 #35e39b88;animation:radar-live-pulse 1.6s infinite}
-#radar-live-strip .radar-wordmark{font-weight:900;letter-spacing:.06em;color:#e5f7ff}
-#radar-theme-toggle{margin:0 0 0 auto;width:auto;padding:7px 11px;border:1px solid #426783;background:#132d42;font-size:.78rem}
-@keyframes radar-live-pulse{0%{box-shadow:0 0 0 0 #35e39b88}70%{box-shadow:0 0 0 9px #35e39b00}100%{box-shadow:0 0 0 0 #35e39b00}}
-#radar-scan-overlay{display:none;align-items:center;gap:15px;padding:15px;margin:12px 0;border:1px solid #2e7890;border-radius:16px;background:linear-gradient(110deg,#0a2535,#10283b);box-shadow:0 0 25px #1ac9dd1c}
-#radar-scan-overlay.is-active{display:flex;animation:radar-overlay-in .3s ease both}
-#radar-scan-overlay .radar-svg{width:86px;height:86px;flex:0 0 86px;filter:drop-shadow(0 0 10px #37d7ff55)}
-#radar-scan-overlay .radar-sweep{transform-origin:50px 50px;animation:radar-spin 2.2s linear infinite}
-#radar-scan-overlay .radar-wave{transform-origin:50px 50px;animation:radar-wave 2s ease-out infinite}
-#radar-scan-overlay .radar-wave.delay{animation-delay:1s}
-#radar-scan-overlay .radar-progress{height:6px;margin-top:8px;border-radius:99px;background:#20394c;overflow:hidden}
-#radar-scan-overlay .radar-progress:after{content:"";display:block;width:38%;height:100%;border-radius:99px;background:linear-gradient(90deg,#20d5bf,#66d8ff);box-shadow:0 0 14px #38d9ff;animation:radar-progress 1.4s ease-in-out infinite}
-@keyframes radar-spin{to{transform:rotate(360deg)}}@keyframes radar-wave{0%{transform:scale(.35);opacity:.8}100%{transform:scale(1.6);opacity:0}}@keyframes radar-progress{0%{transform:translateX(260%)}100%{transform:translateX(-260%)}}
-@keyframes radar-overlay-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
-#radar-quick-jump{display:none}
-body.light-theme{--bg:#edf4fb;--surface:#fff;--surface-raised:#e6eef7;--line:#d2dfeb;--text:#17283a;--muted:#52677d;color-scheme:light;background:radial-gradient(ellipse at 78% -12%,#c8e8f6 0,transparent 38%),linear-gradient(145deg,#f8fbff,#eaf2fa 68%,#f4f8fc);color:var(--text)}
-body.light-theme .card,body.light-theme .gem-candidate,body.light-theme .metric,body.light-theme .live-radar-flow,body.light-theme .live-radar-pattern-panel{background:linear-gradient(145deg,#ffffffed,#f1f6fbf2);border-color:#cfdeeb;box-shadow:0 12px 30px #42617d18}
-body.light-theme input,body.light-theme select,body.light-theme textarea,body.light-theme pre,body.light-theme .gem-fact,body.light-theme .gem-candidate details{background:#f7fbff;color:#17283a;border-color:#c8d8e7}
-body.light-theme #radar-live-strip{background:#ffffffdf;border-color:#c8dce9}
-body.light-theme #radar-live-strip .radar-wordmark{color:#17364d}
-body.light-theme .gem-candidate details>summary{color:#174b70}
-body.light-theme #radar-scan-overlay{background:linear-gradient(110deg,#e8f8fc,#eef5ff);color:#17364d}
-@media(max-width:680px){
- body{padding:14px 10px 94px}
- #radar-live-strip{gap:8px;padding:10px}
- #radar-live-strip .radar-wordmark{font-size:.82rem}
- #radar-theme-toggle{font-size:.7rem;padding:6px 8px}
- #radar-scan-overlay{gap:10px;padding:11px}
- #radar-scan-overlay .radar-svg{width:70px;height:70px;flex-basis:70px}
- #radar-quick-jump{position:fixed;z-index:9999;left:9px;right:9px;bottom:max(9px,env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;padding:7px;border:1px solid #426783aa;border-radius:17px;background:#081725ed;box-shadow:0 12px 35px #0009;backdrop-filter:blur(18px)}
- #radar-quick-jump a{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:0;padding:7px 2px;border-radius:10px;color:#d9f3ff;text-decoration:none;font-size:.65rem;font-weight:750;line-height:1.3;text-align:center}
- #radar-quick-jump a:active{background:#1b4963}
-}
-@media(prefers-reduced-motion:reduce){#radar-live-strip .pulse-dot,#radar-scan-overlay .radar-sweep,#radar-scan-overlay .radar-wave,#radar-scan-overlay .radar-progress:after{animation:none!important}}
+:root{{font-family:"Vazirmatn","Segoe UI",Tahoma,Arial,sans-serif}}
+body{{background:radial-gradient(ellipse at 78% -12%,#193e5a 0,transparent 38%),linear-gradient(145deg,#070b14,#0f172a 68%,#091321);background-attachment:fixed}}
+.card,.gem-candidate,.metric,.live-radar-flow,.live-radar-pattern-panel{{backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-color:#28445f;box-shadow:0 14px 38px #02081780, inset 0 1px #ffffff0a}}
+.app-header{{border-bottom-color:#2a4662}}
+.brand-mark{{box-shadow:0 0 28px #38bdf833,0 12px 30px #0005}}
+.brand-copy h1{{font-weight:850;letter-spacing:.025em}}
+.gem-candidate{{position:relative;overflow:hidden;background:linear-gradient(145deg,#12243aee,#0a1728f2);transition:transform .22s ease,border-color .22s ease,box-shadow .22s ease}}
+.gem-candidate:hover{{transform:translateY(-3px);border-color:#4f9ac0;box-shadow:0 18px 42px #020817aa,0 0 22px #38bdf822}}
+.gem-candidate h3{{font-size:1.12rem}}
+.gem-fact{{background:linear-gradient(145deg,#10243a,#0b192a);border-color:#2b4966}}
+.gem-links a{{padding:6px 10px;border:1px solid #32617a;border-radius:999px;background:#0c2638;text-decoration:none}}
+.gem-candidate details{{border:1px solid #294862;border-radius:12px;margin-top:12px;padding:10px;background:#091a2a99}}
+.gem-candidate details>summary{{cursor:pointer;color:#bdeeff;font-weight:750;list-style:none}}
+.gem-candidate details>summary:after{{content:"＋";float:left;color:#63e6d2;transition:transform .2s}}
+.gem-candidate details[open]>summary:after{{content:"−";transform:rotate(180deg)}}
+.gem-wave-panel{{overflow:hidden;transition:opacity .24s ease,transform .24s ease}}
+.gem-candidate button:focus-visible{{outline:2px solid #5eead4;outline-offset:3px}}
+.gem-visual-badges{{display:flex;flex-wrap:wrap;gap:7px;margin:9px 0}}
+.gem-visual-badge{{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid #3a607c;border-radius:999px;background:#112c42;color:#d8f5ff;font-size:.76rem;font-weight:750;box-shadow:0 0 14px #38bdf81a}}
+.gem-visual-badge.phase-start{{border-color:#169b70;color:#a7f5d6;background:#092c27}}
+.gem-visual-badge.phase-mid{{border-color:#a77a2b;color:#ffe2a0;background:#302611}}
+.gem-visual-badge.phase-risk{{border-color:#b84960;color:#ffc0cf;background:#351522}}
+.gem-visual-badge.net-solana{{border-color:#8d68d9;color:#ddc8ff}}.gem-visual-badge.net-base{{border-color:#397be8;color:#c6dcff}}.gem-visual-badge.net-ethereum{{border-color:#8998ac;color:#e3eaf3}}
+.gem-score-row{{display:grid;grid-template-columns:110px 1fr 38px;align-items:center;gap:8px;margin:7px 0;font-size:.78rem;color:var(--muted)}}
+.gem-score-track{{height:8px;border-radius:99px;background:#1a2a3d;overflow:hidden}}
+.gem-score-fill{{height:100%;border-radius:99px;transition:width .55s ease}}
+.gem-score-fill.opportunity{{background:linear-gradient(90deg,#13a879,#a3f36b);box-shadow:0 0 12px #24d69a66}}
+.gem-score-fill.risk{{background:linear-gradient(90deg,#f3a33b,#f05261);box-shadow:0 0 12px #f0526166}}
+.gem-copy-success{{border-color:#25c58b!important;background:#0c4938!important;color:#b9ffe2!important;box-shadow:0 0 18px #25c58b44!important}}
+#radar-live-strip{{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 16px;padding:12px 15px;border:1px solid #28506a;border-radius:16px;background:linear-gradient(100deg,#0c1b2bdf,#10283be8);box-shadow:0 12px 32px #0004;backdrop-filter:blur(14px)}}
+#radar-live-strip .radar-live-status{{display:inline-flex;align-items:center;gap:8px;color:#a8f5d5;font-weight:850;font-size:.78rem}}
+#radar-live-strip .pulse-dot{{width:9px;height:9px;border-radius:50%;background:#35e39b;box-shadow:0 0 0 0 #35e39b88;animation:radar-live-pulse 1.6s infinite}}
+#radar-live-strip .radar-wordmark{{font-weight:900;letter-spacing:.06em;color:#e5f7ff}}
+#radar-theme-toggle{{margin:0 0 0 auto;width:auto;padding:7px 11px;border:1px solid #426783;background:#132d42;font-size:.78rem}}
+@keyframes radar-live-pulse{{0%{{box-shadow:0 0 0 0 #35e39b88}}70%{{box-shadow:0 0 0 9px #35e39b00}}100%{{box-shadow:0 0 0 0 #35e39b00}}}}
+#radar-scan-overlay{{display:none;align-items:center;gap:15px;padding:15px;margin:12px 0;border:1px solid #2e7890;border-radius:16px;background:linear-gradient(110deg,#0a2535,#10283b);box-shadow:0 0 25px #1ac9dd1c}}
+#radar-scan-overlay.is-active{{display:flex;animation:radar-overlay-in .3s ease both}}
+#radar-scan-overlay .radar-svg{{width:86px;height:86px;flex:0 0 86px;filter:drop-shadow(0 0 10px #37d7ff55)}}
+#radar-scan-overlay .radar-sweep{{transform-origin:50px 50px;animation:radar-spin 2.2s linear infinite}}
+#radar-scan-overlay .radar-wave{{transform-origin:50px 50px;animation:radar-wave 2s ease-out infinite}}
+#radar-scan-overlay .radar-wave.delay{{animation-delay:1s}}
+#radar-scan-overlay .radar-progress{{height:6px;margin-top:8px;border-radius:99px;background:#20394c;overflow:hidden}}
+#radar-scan-overlay .radar-progress:after{{content:"";display:block;width:38%;height:100%;border-radius:99px;background:linear-gradient(90deg,#20d5bf,#66d8ff);box-shadow:0 0 14px #38d9ff;animation:radar-progress 1.4s ease-in-out infinite}}
+@keyframes radar-spin{{to{{transform:rotate(360deg)}}}}@keyframes radar-wave{{0%{{transform:scale(.35);opacity:.8}}100%{{transform:scale(1.6);opacity:0}}}}@keyframes radar-progress{{0%{{transform:translateX(260%)}}100%{{transform:translateX(-260%)}}}}
+@keyframes radar-overlay-in{{from{{opacity:0;transform:translateY(7px)}}to{{opacity:1;transform:translateY(0)}}}}
+#radar-quick-jump{{display:none}}
+body.light-theme{{--bg:#edf4fb;--surface:#fff;--surface-raised:#e6eef7;--line:#d2dfeb;--text:#17283a;--muted:#52677d;color-scheme:light;background:radial-gradient(ellipse at 78% -12%,#c8e8f6 0,transparent 38%),linear-gradient(145deg,#f8fbff,#eaf2fa 68%,#f4f8fc);color:var(--text)}}
+body.light-theme .card,body.light-theme .gem-candidate,body.light-theme .metric,body.light-theme .live-radar-flow,body.light-theme .live-radar-pattern-panel{{background:linear-gradient(145deg,#ffffffed,#f1f6fbf2);border-color:#cfdeeb;box-shadow:0 12px 30px #42617d18}}
+body.light-theme input,body.light-theme select,body.light-theme textarea,body.light-theme pre,body.light-theme .gem-fact,body.light-theme .gem-candidate details{{background:#f7fbff;color:#17283a;border-color:#c8d8e7}}
+body.light-theme #radar-live-strip{{background:#ffffffdf;border-color:#c8dce9}}
+body.light-theme #radar-live-strip .radar-wordmark{{color:#17364d}}
+body.light-theme .gem-candidate details>summary{{color:#174b70}}
+body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,#eef5ff);color:#17364d}}
+@media(max-width:680px){{
+ body{{padding:14px 10px 94px}}
+ #radar-live-strip{{gap:8px;padding:10px}}
+ #radar-live-strip .radar-wordmark{{font-size:.82rem}}
+ #radar-theme-toggle{{font-size:.7rem;padding:6px 8px}}
+ #radar-scan-overlay{{gap:10px;padding:11px}}
+ #radar-scan-overlay .radar-svg{{width:70px;height:70px;flex-basis:70px}}
+ #radar-quick-jump{{position:fixed;z-index:9999;left:9px;right:9px;bottom:max(9px,env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;padding:7px;border:1px solid #426783aa;border-radius:17px;background:#081725ed;box-shadow:0 12px 35px #0009;backdrop-filter:blur(18px)}}
+ #radar-quick-jump a{{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:0;padding:7px 2px;border-radius:10px;color:#d9f3ff;text-decoration:none;font-size:.65rem;font-weight:750;line-height:1.3;text-align:center}}
+ #radar-quick-jump a:active{{background:#1b4963}}
+}}
+@media(prefers-reduced-motion:reduce){{#radar-live-strip .pulse-dot,#radar-scan-overlay .radar-sweep,#radar-scan-overlay .radar-wave,#radar-scan-overlay .radar-progress:after{{animation:none!important}}}}
 </style></head><body><main>{_radar_runtime()}<section id="radar-live-strip" aria-label="وضعیت زنده رادار">
 <span class="radar-live-status"><i class="pulse-dot" aria-hidden="true"></i> LIVE PULSE</span>
 <svg width="36" height="36" viewBox="0 0 48 48" role="img" aria-label="لوگوی رادار کریپتو"><defs><linearGradient id="radarLogoGrad" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#5eead4"/><stop offset="1" stop-color="#60a5fa"/></linearGradient></defs><circle cx="24" cy="24" r="21" fill="#0b2031" stroke="url(#radarLogoGrad)" stroke-width="2"/><circle cx="24" cy="24" r="14" fill="none" stroke="#39718a"/><circle cx="24" cy="24" r="7" fill="none" stroke="#39718a"/><path d="M24 24L38 11A19 19 0 0 1 42 24Z" fill="#36d9c080"/><path d="M24 24L38 11" stroke="#8fffe8" stroke-width="2"/><circle cx="24" cy="24" r="3" fill="#8fffe8"/></svg>
@@ -2075,47 +2075,47 @@ body.light-theme #radar-scan-overlay{background:linear-gradient(110deg,#e8f8fc,#
   }}))).observe(document.body,{{childList:true,subtree:true}});
 }})();
 </script><script>
-(function(){
+(function(){{
  const body=document.body,toggle=document.getElementById('radar-theme-toggle');
- const saved=(()=>{try{return localStorage.getItem('csr-theme')}catch(_){return null}})();
+ const saved=(()=>{{try{{return localStorage.getItem('csr-theme')}}catch(_){{return null}}}})();
  if(saved==='light')body.classList.add('light-theme');
- function syncTheme(){const light=body.classList.contains('light-theme');toggle.textContent=light?'🌙 حالت شب':'☀️ حالت روز';toggle.setAttribute('aria-pressed',String(light));}
- syncTheme();toggle.addEventListener('click',()=>{body.classList.toggle('light-theme');try{localStorage.setItem('csr-theme',body.classList.contains('light-theme')?'light':'dark')}catch(_){}syncTheme()});
+ function syncTheme(){{const light=body.classList.contains('light-theme');toggle.textContent=light?'🌙 حالت شب':'☀️ حالت روز';toggle.setAttribute('aria-pressed',String(light));}}
+ syncTheme();toggle.addEventListener('click',()=>{{body.classList.toggle('light-theme');try{{localStorage.setItem('csr-theme',body.classList.contains('light-theme')?'light':'dark')}}catch(_){{}}syncTheme()}});
  const overlay=document.getElementById('radar-scan-overlay'),title=document.getElementById('radar-scan-title');
  let scanTimer=null;
- function scanning(label){title.textContent=label||'رادار در حال اسکن بلاک‌چین...';overlay.classList.add('is-active');if(scanTimer)clearTimeout(scanTimer);scanTimer=setTimeout(()=>overlay.classList.remove('is-active'),90000);}
- function complete(){if(scanTimer)clearTimeout(scanTimer);overlay.classList.remove('is-active');}
- document.addEventListener('click',event=>{
+ function scanning(label){{title.textContent=label||'رادار در حال اسکن بلاک‌چین...';overlay.classList.add('is-active');if(scanTimer)clearTimeout(scanTimer);scanTimer=setTimeout(()=>overlay.classList.remove('is-active'),90000);}}
+ function complete(){{if(scanTimer)clearTimeout(scanTimer);overlay.classList.remove('is-active');}}
+ document.addEventListener('click',event=>{{
    const button=event.target.closest('button');if(!button)return;
    const label=(button.textContent||'').trim();
    if(/اجرای اسکن زنده Gem Hunter V3|اجرای اسکن پژوهشی|اجرای یک چرخه|به‌روزرسانی بازار|به‌روزرسانی کندل‌ها|جست‌وجو/.test(label))scanning(label.includes('Gem Hunter')?'در حال شکار فرصت‌های ارزیابی‌شده...':'رادار در حال دریافت داده‌های بازار...');
- },true);
- document.addEventListener('submit',event=>{
+ }},true);
+ document.addEventListener('submit',event=>{{
    const form=event.target;if(form.matches('form[action="/scan"],form[action*="paper-bot"],form[action*="futures"]'))scanning('در حال اجرای اسکن و ارزیابی بازار...');
- },true);
+ }},true);
  const gemStatus=document.getElementById('gem-hunter-status');
- if(gemStatus)new MutationObserver(()=>{const t=gemStatus.textContent||'';if(/در حال|اسکن.*جاری|اعتبارسنجی.*ادامه/.test(t))scanning('Gem Hunter V3 · '+t);else complete()}).observe(gemStatus,{childList:true,subtree:true,characterData:true});
- document.addEventListener('click',event=>{
+ if(gemStatus)new MutationObserver(()=>{{const t=gemStatus.textContent||'';if(/در حال|اسکن.*جاری|اعتبارسنجی.*ادامه/.test(t))scanning('Gem Hunter V3 · '+t);else complete()}}).observe(gemStatus,{{childList:true,subtree:true,characterData:true}});
+ document.addEventListener('click',event=>{{
    const button=event.target.closest('button');if(!button)return;
-   if(button.textContent.trim()==='کپی آدرس قرارداد'){button.classList.remove('gem-copy-success');setTimeout(()=>{if(/کپی شد/.test(button.textContent))button.classList.add('gem-copy-success')},120)}
- },true);
- const enhance=()=>{
-   document.querySelectorAll('#gem-hunter-results .gem-candidate:not([data-visual-enhanced])').forEach(card=>{
+   if(button.textContent.trim()==='کپی آدرس قرارداد'){{button.classList.remove('gem-copy-success');setTimeout(()=>{{if(/کپی شد/.test(button.textContent))button.classList.add('gem-copy-success')}},120)}}
+ }},true);
+ const enhance=()=>{{
+   document.querySelectorAll('#gem-hunter-results .gem-candidate:not([data-visual-enhanced])').forEach(card=>{{
      card.dataset.visualEnhanced='1';
      const text=card.textContent||'';
      const badges=document.createElement('div');badges.className='gem-visual-badges';
      const category=text.includes('میم‌کوین')||text.includes('میم کوین')?'🐸 میم‌کوین':'💎 آلت‌کوین';
      const categoryBadge=document.createElement('span');categoryBadge.className='gem-visual-badge';categoryBadge.textContent=category;badges.appendChild(categoryBadge);
      const chain=text.toLowerCase().includes('solana')?'solana':text.toLowerCase().includes('base')?'base':text.toLowerCase().includes('ethereum')?'ethereum':'';
-     if(chain){const b=document.createElement('span');b.className='gem-visual-badge net-'+chain;b.textContent=chain==='solana'?'Solana':chain==='base'?'Base':'Ethereum';badges.appendChild(b)}
-     if(card.dataset.gemHasWhale==='true'){const b=document.createElement('span');b.className='gem-visual-badge';b.textContent='🐋 شواهد نهنگ';badges.appendChild(b)}
+     if(chain){{const b=document.createElement('span');b.className='gem-visual-badge net-'+chain;b.textContent=chain==='solana'?'Solana':chain==='base'?'Base':'Ethereum';badges.appendChild(b)}}
+     if(card.dataset.gemHasWhale==='true'){{const b=document.createElement('span');b.className='gem-visual-badge';b.textContent='🐋 شواهد نهنگ';badges.appendChild(b)}}
      const heading=card.querySelector('h3');if(heading)heading.insertAdjacentElement('afterend',badges);
-   });
- };
+   }});
+ }};
  const results=document.getElementById('gem-hunter-results');
- if(results){new MutationObserver(enhance).observe(results,{childList:true,subtree:true});enhance()}
- document.querySelectorAll('#free-airdrop-radar .gem-candidate').forEach((card,i)=>{card.style.setProperty('--airdrop-index',i);});
-})();
+ if(results){{new MutationObserver(enhance).observe(results,{{childList:true,subtree:true}});enhance()}}
+ document.querySelectorAll('#free-airdrop-radar .gem-candidate').forEach((card,i)=>{{card.style.setProperty('--airdrop-index',i);}});
+}})();
 </script></main></body></html>""".encode("utf-8")
 
 
@@ -8313,14 +8313,14 @@ async function loadBlofinInstruments(){
             const opportunityScore = Math.max(0, Math.min(100, Number(item.opportunity_score ?? item.short_term_momentum_score ?? item.short_term_momentum_smart_money_score ?? 0)));
             const riskScore = Math.max(0, Math.min(100, Number(item.risk_score ?? q.risk_score ?? 0)));
             const scorePanel = document.createElement('div'); scorePanel.className = 'gem-score-panel';
-            const scoreLine = (label, value, kind) => {
+            const scoreLine = (label, value, kind) => {{
               const line = document.createElement('div'); line.className = 'gem-score-row';
               const caption = document.createElement('span'); caption.textContent = label;
               const track = document.createElement('div'); track.className = 'gem-score-track';
               const fill = document.createElement('div'); fill.className = 'gem-score-fill ' + kind; fill.style.width = value + '%'; track.appendChild(fill);
               const number = document.createElement('strong'); number.textContent = String(value);
               line.append(caption, track, number); scorePanel.appendChild(line);
-            };
+            }};
             scoreLine('امتیاز فرصت', opportunityScore, 'opportunity'); scoreLine('امتیاز ریسک', riskScore, 'risk');
             card.appendChild(scorePanel);
             const tier = item.gem_hunter_v3_status || item.tier || 'RESEARCH_WATCH';
