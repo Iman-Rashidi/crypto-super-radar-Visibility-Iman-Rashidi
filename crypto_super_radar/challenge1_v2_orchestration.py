@@ -258,9 +258,9 @@ def analyze_challenge1_v2_market(
             client.get_candles(symbol, bar="5m", limit=300),
             bar="5m", asof_ms=asof_ms, minimum_rows=MINIMUM_ROWS["5m"],
         )
-    except Challenge1V2DataBlocked as exc:
-        # The fast lane is additive: missing 5m data must not disable the
-        # independently validated V2 1H/15m baseline path.
+    except Exception as exc:
+        # The fast lane is additive: missing or unavailable 5m data must not
+        # disable the independently validated V2 1H/15m baseline path.
         fast_feed_error = str(exc)
         frame_5m = pd.DataFrame(
             columns=["open", "high", "low", "close", "volume"],
