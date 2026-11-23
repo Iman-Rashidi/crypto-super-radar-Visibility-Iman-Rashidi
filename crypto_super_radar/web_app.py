@@ -2476,9 +2476,44 @@ def _build_user_diagnosis(result, asset: AssetSpec, timeframe_ranges: dict, mark
     }
 
 
+def _expire_manual_scan_job(job_id: str) -> None:
+    """Mark a manual scan terminal at 15 seconds and fence late worker results."""
+    with LOCK:
+        current = JOBS.get(job_id) or {}
+        if current.get("status") not in {"queued", "running"}:
+            return
+        JOBS[job_id] = {
+            **current, "status": "failed", "error": "SCAN_TIMEOUT_15S",
+            "message_fa": "مهلت سخت ۱۵ ثانیه‌ای تمام شد؛ منبع داده یا موتور تحلیل پاسخ نداد. به داشبورد بازگرد.",
+            "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+
 def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) -> None:
     global SCAN_RUNNING
     try:
+        if asset.market_type == "dex":
+            completed, fast_report = run_with_hard_timeout(
+                lambda: build_fast_asset_scan_report(asset), timeout_seconds=12.0,
+            )
+            if not completed:
+                with LOCK:
+                    current = JOBS.get(job_id) or {}
+                    if current.get("status") == "running":
+                        JOBS[job_id] = {**current, "status": "failed", "error": "FAST_SCAN_TIMEOUT",
+                                        "message_fa": "اسکن سریع در مهلت ایمن پایان نیافت؛ منبع DEX پاسخ‌گو نبود.",
+                                        "finished_at_utc": datetime.now(timezone.utc).isoformat()}
+                return
+            payload = {"fast_asset_scan": True, "asset": asset.raw, "symbol": fast_report.get("symbol"),
+                       "coin_name": fast_report.get("token_name"), "signal": "NO_TRADE",
+                       "summary_fa": fast_report.get("message_fa"), "fast_scan": fast_report,
+                       "safety": {"read_only": True, "public_data_only": True, "orders_submitted": False,
+                                  "transactions_signed": False, "trade_authorization": "NO_TRADE"}}
+            with LOCK:
+                current = JOBS.get(job_id) or {}
+                if current.get("status") == "running":
+                    JOBS[job_id] = {"status": "completed", "result": payload,
+                                    "finished_at_utc": datetime.now(timezone.utc).isoformat()}
+            return
         result = ENGINE.analyze(
             asset,
             headlines=[headline] if headline else [],
@@ -2561,10 +2596,14 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             },
         }
         with LOCK:
-            JOBS[job_id] = {"status": "completed", "result": payload}
+            current = JOBS.get(job_id) or {}
+            if current.get("status") == "running":
+                JOBS[job_id] = {"status": "completed", "result": payload, "finished_at_utc": datetime.now(timezone.utc).isoformat()}
     except Exception as exc:
         with LOCK:
-            JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            current = JOBS.get(job_id) or {}
+            if current.get("status") == "running":
+                JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "finished_at_utc": datetime.now(timezone.utc).isoformat()}
     finally:
         with LOCK:
             SCAN_RUNNING = False
@@ -10482,6 +10521,12 @@ async function loadBlofinInstruments(){
                             break
                         JOBS.pop(oldest)
                     SCAN_QUEUE.put_nowait(task)
+                    if route == "/scan":
+                        timer = threading.Timer(15.0, _expire_manual_scan_job, args=(job_id,))
+                        timer.daemon = True
+                        timer.start()
+            if api_jobs_request:
+                return self._send(202, json.dumps({"status": "queued", "job_id": job_id, "poll_url": "/api/jobs/" + job_id, "timeout_seconds": 15, "trade_authorization": "NO_TRADE"}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             if route == "/paper-bot/tick":
                 body = (
                     "<h2>چرخهٔ ربات آزمایشی آغاز شد</h2><p>شناسه: <code>" + job_id + "</code></p>"
