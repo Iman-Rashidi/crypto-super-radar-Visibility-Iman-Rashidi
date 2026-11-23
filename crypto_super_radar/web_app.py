@@ -9883,6 +9883,7 @@ async function loadBlofinInstruments(){
               ctx.fillText(data.symbol+' · '+data.interval+' · محور افقی: زمان | محور عمودی: قیمت',pad.left,19);
             }
             async function refresh(force){
+              window.__csrLiveChartPrimaryStarted=true;
               if(busy)return;busy=true;button.disabled=true;retryButton.hidden=true;status.textContent='در حال دریافت کندل‌های زنده...';
               const controller=new AbortController();
               const requestTimeout=setTimeout(()=>controller.abort(),7000);
@@ -10250,12 +10251,61 @@ async function loadBlofinInstruments(){
             function scheduleRefresh(){if(timer!==null)clearInterval(timer);timer=setInterval(()=>refresh(false),interval.value==='1s'?5000:15000);}
             interval.addEventListener('change',()=>{scheduleRefresh();refresh(true);});
             refresh(true);
-            refreshWaveWatchlist();
+            // Do not launch five extra full market analyses while the primary chart is loading.
             scheduleRefresh();
-            const waveWatchTimer=setInterval(refreshWaveWatchlist,30000);
-            window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);clearInterval(waveWatchTimer);});
+            window.addEventListener('beforeunload',()=>{if(timer!==null)clearInterval(timer);});
           })();
           </script>
+<script>
+/* Independent chart bootstrap: survives an error in the advanced dashboard script. */
+(function(){
+  if(window.__csrLiveChartPrimaryStarted)return;
+  const status=document.getElementById('live-radar-status');
+  const retry=document.getElementById('live-radar-retry');
+  const canvas=document.getElementById('live-candle-chart');
+  const symbol=document.getElementById('live-radar-symbol');
+  const interval=document.getElementById('live-radar-interval');
+  if(!status||!retry||!canvas||!symbol||!interval)return;
+  const ctx=canvas.getContext('2d');
+  if(!ctx)return;
+  let loading=false;
+  function drawFallback(data){
+    const bars=Array.isArray(data.candles)?data.candles.slice(-180):[];
+    const w=canvas.width,h=canvas.height,p={l:72,r:36,t:36,b:58};
+    ctx.clearRect(0,0,w,h);ctx.fillStyle='#07131f';ctx.fillRect(0,0,w,h);
+    if(!bars.length)throw new Error('سرور کندل معتبری برنگرداند.');
+    const lo=Math.min(...bars.map(x=>Number(x.low))),hi=Math.max(...bars.map(x=>Number(x.high)));
+    const pad=Math.max((hi-lo)*.08,Math.abs(hi)*.0001,1e-9),min=lo-pad,max=hi+pad,range=max-min;
+    const y=v=>h-p.b-(Number(v)-min)/range*(h-p.t-p.b),slot=(w-p.l-p.r)/bars.length;
+    ctx.strokeStyle='#284257';ctx.fillStyle='#b6c8d8';ctx.font='13px sans-serif';
+    for(let n=0;n<=4;n++){const v=max-n*range/4,yy=y(v);ctx.beginPath();ctx.moveTo(p.l,yy);ctx.lineTo(w-p.r,yy);ctx.stroke();ctx.fillText(v.toPrecision(7),5,yy+4);}
+    bars.forEach((bar,i)=>{const x=p.l+(i+.5)*slot,up=Number(bar.close)>=Number(bar.open),color=up?'#53d6a0':'#ff7b85';
+      ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(x,y(bar.high));ctx.lineTo(x,y(bar.low));ctx.stroke();
+      const top=y(Math.max(bar.open,bar.close)),bottom=y(Math.min(bar.open,bar.close)),bw=Math.max(2,Math.min(12,slot*.68));
+      ctx.fillRect(x-bw/2,top,bw,Math.max(2,bottom-top));
+    });
+    ctx.fillStyle='#d7e8f5';ctx.font='bold 16px sans-serif';ctx.fillText((data.symbol||symbol.value)+' · '+(data.interval||interval.value)+' · '+bars.length+' کندل',p.l,22);
+  }
+  async function load(){
+    if(loading)return;loading=true;retry.hidden=true;status.textContent='در حال دریافت کندل‌های زنده...';
+    const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),7000);
+    try{
+      const url='/api/live-market-radar?symbol='+encodeURIComponent(symbol.value||'BTCUSDT')+'&interval='+encodeURIComponent(interval.value||'5m');
+      const response=await fetch(url,{cache:'no-store',signal:controller.signal});
+      const data=await response.json();
+      if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+      drawFallback(data);
+      status.textContent='نمودار اضطراری فعال است · '+(data.candles||[]).length+' کندل دریافت شد · تحلیل پیشرفته موقتاً بارگذاری نشد.';
+    }catch(error){
+      status.textContent=error&&error.name==='AbortError'?'دریافت کندل بیش از ۷ ثانیه طول کشید؛ اتصال Binance یا سرور پاسخ نداد.':'خطای دریافت/رسم کندل: '+String(error&&error.message||error);
+      retry.hidden=false;
+    }finally{clearTimeout(timeout);loading=false;}
+  }
+  retry.addEventListener('click',load);
+  symbol.addEventListener('change',load);interval.addEventListener('change',load);
+  load();
+})();
+</script>
           <p class="muted">موتور مستقل Spot Paper فقط LONG را با ۱۲ فیلتر ارزیابی می‌کند؛ این موتور با معاملهٔ BloFin Demo Challenge 1 یکی نیست. هر بار یک چرخه اجرا می‌شود. ریسک هر موقعیت حداکثر ۰٫۵٪ سرمایه، ارزش موقعیت حداکثر ۱۰٪، بدون اهرم و بدون سفارش واقعی است. کارمزد و لغزش اعمال می‌شوند؛ حد سربه‌سر متحرک، خروج زمان‌دار، سقف زیان روزانه، افت سرمایه و وقفه پس از زیان هم ورودهای تازه را کنترل می‌کنند.</p>
           <div class="metric" style="margin:12px 0">
             <strong>اتصال الزامی به هوش مصنوعی رایگان · OpenRouter / NVIDIA Nemotron</strong>
