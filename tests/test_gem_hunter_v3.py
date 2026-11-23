@@ -458,9 +458,25 @@ class GemHunterV3Tests(unittest.TestCase):
         self.assertEqual(third["status"], "SENT")
         self.assertEqual(client.post.call_count, 2)
         sent_text = client.post.call_args_list[0].kwargs["json"]["text"]
-        for expected in ("Minelius", "solana", "$0.01", "$75,000.00", "$650,000.00",
-                         "10,000", "MintAddress123", "بررسی", "NO_TRADE"):
+        for expected in (
+            "🐋 <b>CRYPTO SUPER RADAR · رادار شکار فرصت‌ها</b>",
+            "🟠 فرصت زودهنگام نیازمند بررسی",
+            "Minelius (MNL)", "Solana (شبکه سولانا)", "$0.01",
+            "حدود 10,000 توکن", "$75,000.00", "$650,000.00",
+            "<code>MintAddress123</code>", "[مرجع: GeckoTerminal]",
+            "[مرجع: Solana RPC]", "۳ تا ۱۴ روزه",
+            "https://jup.ag/swap/SOL-MintAddress123",
+            "https://dexscreener.com/solana/MintAddress123",
+            "https://crypto-super-radar-unlimited-demo-staging.onrender.com",
+            "NO_TRADE (بدون معامله خودکار)",
+        ):
             self.assertIn(expected, sent_text)
+        self.assertIn("\n", sent_text)
+        self.assertNotIn("\\\\n", sent_text)
+        self.assertIn("🛡️ <b>بخش ۳", sent_text)
+        self.assertIn("Seed Phrase", sent_text)
+        self.assertIn("📡 <b>بخش ۴", sent_text)
+        self.assertEqual(client.post.call_args_list[0].kwargs["json"]["parse_mode"], "HTML")
 
     def test_early_alpha_review_telegram_rejects_values_below_requested_thresholds(self):
         candidate = {

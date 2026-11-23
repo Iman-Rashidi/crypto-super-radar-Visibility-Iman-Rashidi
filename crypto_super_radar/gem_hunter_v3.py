@@ -494,7 +494,7 @@ def persist_candidate_lifecycle(store: Any, candidate: Mapping[str, Any],
 def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
                          session: Any = None, bot_token: Optional[str] = None,
                          chat_id: Optional[str] = None, timeout: float = 10.0) -> dict[str, Any]:
-    """Send deduplicated research alerts; EARLY_ALPHA_REVIEW is explicitly not a buy signal."""
+    """Send a structured Persian VIP research card; never a trade instruction."""
     status = candidate.get("gem_hunter_v3_status", candidate.get("candidate_status"))
     allowed = {"TIER_1_VERIFIED_GEM", "TIER_2_EARLY_ALPHA", "EARLY_ALPHA_REVIEW"}
     if status not in allowed or candidate.get("gem_hunter_v3_trade_authorization", "NO_TRADE") != "NO_TRADE":
@@ -524,8 +524,8 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
             or candidate.get("tier_base_security_status") == "FAIL"
             or security.get("honeypot_detected") is True
             or security.get("transfer_simulation_status") == "FAIL"
-            or _finite(security.get("sell_tax_pct")) is not None
-               and _finite(security.get("sell_tax_pct")) > 5.0
+            or (_finite(security.get("sell_tax_pct")) is not None
+                and _finite(security.get("sell_tax_pct")) > 5.0)
         )
         if hard_block:
             return {"status": "BLOCKED", "reason": "Explicit security/sellability failure blocks EARLY_ALPHA_REVIEW alerts."}
@@ -536,8 +536,9 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
 
     chain = str(candidate.get("chain") or "").lower()
     address = str(candidate.get("token_address") or "")
+    if not address:
+        return {"status": "BLOCKED", "reason": "Token contract address is missing."}
     candidate_id = f"{chain}:{address if chain == 'solana' else address.lower()}"
-    # A deterministic UTC bucket permits one alert per token/status in each six-hour window.
     six_hour_bucket = int(datetime.now(timezone.utc).timestamp() // (6 * 60 * 60))
     event_key = f"TELEGRAM_{status}:{candidate_id}:{six_hour_bucket}"
     token = bot_token or os.getenv("GEM_HUNTER_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
@@ -551,47 +552,139 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     if not inserted:
         return {"status": "DUPLICATE_SUPPRESSED", "candidate_id": candidate_id}
 
-    momentum = candidate.get("short_term_momentum_score", candidate.get("short_term_momentum_smart_money_score"))
+    momentum = _finite(candidate.get("short_term_momentum_score",
+                                     candidate.get("short_term_momentum_smart_money_score")))
     price = _finite(candidate.get("price_usd"))
-    liquidity = _finite(
-        market.get("verified_liquidity_usd")
-        if market.get("status") == "PASS" else candidate.get("liquidity_usd")
-    )
-    volume_24h = _finite(
-        market.get("verified_volume_24h_usd")
-        if market.get("status") == "PASS" else candidate.get("volume_24h_usd")
-    )
+    liquidity = _finite(market.get("verified_liquidity_usd")
+                        if market.get("status") == "PASS" else candidate.get("liquidity_usd"))
+    volume_24h = _finite(market.get("verified_volume_24h_usd")
+                         if market.get("status") == "PASS" else candidate.get("volume_24h_usd"))
     estimated_tokens = candidate.get("estimated_tokens_for_100_usd")
     if estimated_tokens is None and price is not None and price > 0:
         estimated_tokens = int(100.0 / price)
-    token_name = html_escape(str(candidate.get("token_name") or "Unknown"))
+
+    token_name = html_escape(str(candidate.get("token_name") or "نامشخص"))
     token_symbol = html_escape(str(candidate.get("token_symbol") or "?"))
-    safe_chain = html_escape(chain or "نامشخص")
-    safe_address = html_escape(address or "ناموجود")
+    safe_address = html_escape(address)
+    network_names = {
+        "solana": "Solana (شبکه سولانا)",
+        "base": "Base (شبکه بیس)",
+        "ethereum": "Ethereum (شبکه اتریوم)",
+    }
+    network_label = network_names.get(chain, f"{html_escape(chain or 'نامشخص')} (شبکه نامشخص)")
     tier_title = {
-        "TIER_1_VERIFIED_GEM": "⭐ TIER 1 · ستاره طلایی",
-        "TIER_2_EARLY_ALPHA": "🔥 TIER 2 · فرصت اولیه",
-        "EARLY_ALPHA_REVIEW": "🟠 EARLY ALPHA REVIEW · بررسی امنیتی لازم",
+        "TIER_1_VERIFIED_GEM": "⭐ ستاره طلایی TIER 1",
+        "TIER_2_EARLY_ALPHA": "🔥 فرصت اولیه TIER 2",
+        "EARLY_ALPHA_REVIEW": "🟠 فرصت زودهنگام نیازمند بررسی",
     }[status]
     price_text = f"{price:.10g}" if price is not None else "نامشخص"
     liquidity_text = f"{liquidity:,.2f}" if liquidity is not None else "نامشخص"
     volume_text = f"{volume_24h:,.2f}" if volume_24h is not None else "نامشخص"
     tokens_text = f"{int(estimated_tokens):,}" if _finite(estimated_tokens) is not None else "نامشخص"
+
+    market_source = str(market.get("provider") or market.get("source") or "GeckoTerminal")
+    security_provider = str(security.get("provider") or "نامشخص")
+    if security_provider == "GOPLUS_SOURCIFY":
+        security_source = "GoPlus / Sourcify"
+    elif security_provider == "SOLANA_RPC":
+        security_source = "Solana RPC"
+    else:
+        security_source = security_provider
+    strengths = candidate.get("tier_strengths_fa") or []
+    cautions = candidate.get("tier_cautions_fa") or []
+    strength_lines = [
+        f"• {html_escape(str(item))} <i>[مرجع: {html_escape(market_source)}]</i>"
+        for item in strengths[:5]
+    ] or [f"• داده‌های اولیه بازار ثبت شده‌اند. <i>[مرجع: {html_escape(market_source)}]</i>"]
+    caution_lines = [
+        f"• {html_escape(str(item))} <i>[مرجع: {html_escape(security_source)}]</i>"
+        for item in cautions[:5]
+    ]
+    if security.get("status") != "PASS":
+        caution_lines.append(
+            f"• امنیت قرارداد تأیید کامل نشده است؛ وضعیت {html_escape(str(security.get('status') or 'UNKNOWN'))} را سالم تلقی نکن. <i>[مرجع: {html_escape(security_source)}]</i>"
+        )
+    if not caution_lines:
+        caution_lines.append(f"• حتی عبور از کنترل‌های موجود، ممیزی کامل قرارداد یا تضمین امکان فروش نیست. <i>[مرجع: {html_escape(security_source)}]</i>")
+
+    market_cap = _finite(candidate.get("market_cap_usd", candidate.get("fdv_usd")))
+    market_cap_label = "ارزش بازار" if _finite(candidate.get("market_cap_usd")) is not None else "FDV"
+    if market_cap is not None and market_cap > 0:
+        scenario_text = (
+            f"ارزش فعلی {market_cap_label}: \${market_cap:,.0f}. سناریوی فرضی ۲x یعنی "
+            f"\${market_cap * 2:,.0f} و ۵x یعنی \${market_cap * 5:,.0f}؛ این‌ها محاسبات سناریویی‌اند، نه هدف قیمت یا پیش‌بینی."
+        )
+    else:
+        scenario_text = "ارزش بازار/FDV معتبر در Snapshot موجود نیست؛ بنابراین سناریوی ۲x تا ۵x محاسبه نمی‌شود و عددی حدس زده نخواهد شد."
+    if momentum is not None and momentum >= 70:
+        horizon_text = "با توجه به شتاب مشاهده‌شده، افق پیگیری پژوهشی ۳ تا ۱۴ روزه قابل بررسی است؛ نه توصیه به نگهداری."
+    elif momentum is not None and momentum >= 50:
+        horizon_text = "شتاب متوسط است؛ فقط تا روشن‌شدن روند و حجم، در واچ‌لیست کوتاه‌مدت بماند."
+    else:
+        horizon_text = "شتاب کافی یا داده معتبر برای تعیین افق نگهداری وجود ندارد؛ فعلاً فقط پایش داده‌ای."
+    scenario_text += " " + horizon_text + " در صورت شکست حمایت، افت حجم یا بدترشدن امکان خروج، سناریوی رشد باطل می‌شود. این برآورد پژوهشی، غیرقطعی و بدون تضمین سود است."
+
+    if chain == "solana":
+        dex_url = f"https://dexscreener.com/solana/{address}"
+        trade_url = f"https://jup.ag/swap/SOL-{address}"
+        wallet_guide = (
+            "در Trust Wallet یا Phantom بخش Swap/Browser را باز کن، شبکه Solana را انتخاب کن، "
+            "آدرس قرارداد بالا را خودت تطبیق بده و فقط در صورت پذیرش ریسک با SOL یا USDC تبدیل کن."
+        )
+        trade_label = "بازکردن توکن در Jupiter"
+    elif chain in {"base", "ethereum"}:
+        dex_url = f"https://dexscreener.com/{chain}/{address}"
+        trade_url = f"https://app.uniswap.org/swap?chain={chain}&outputCurrency={address}"
+        wallet_guide = (
+            f"در Trust Wallet یا MetaMask شبکه {network_label} را دستی انتخاب کن، "
+            "آدرس قرارداد را با منبع مستقل تطبیق بده و سپس در Swap آن را به‌عنوان توکن مقصد وارد کن. "
+            "شبکه اشتباه می‌تواند باعث از دست‌رفتن دارایی شود."
+        )
+        trade_label = "بازکردن توکن در Uniswap"
+    else:
+        dex_url = "https://dexscreener.com/"
+        trade_url = ""
+        wallet_guide = "برای این شبکه لینک Swap خودکار ارائه نمی‌شود؛ ابتدا شبکه و قرارداد را از منبع رسمی تأیید کن."
+        trade_label = ""
+
+    dex_link = f'<a href="{html_escape(dex_url, quote=True)}">مشاهده نمودار و جفت‌ارز در DEX Screener</a>'
+    trade_link = (
+        f'<a href="{html_escape(trade_url, quote=True)}">{trade_label}</a>'
+        if trade_url else "لینک خرید مستقیم ارائه نشده است."
+    )
+    dashboard_url = "https://crypto-super-radar-unlimited-demo-staging.onrender.com"
+    dashboard_link = f'<a href="{dashboard_url}">📊 مشاهده گزارش کامل و ایردراپ‌ها در داشبورد CRYPTO SUPER RADAR</a>'
+
     text = (
-        f"🔎 <b>{tier_title} · گزارش پژوهشی</b>\\n"
-        f"<b>توکن:</b> {token_name} ({token_symbol})\\n"
-        f"<b>شبکه:</b> {safe_chain}\\n"
-        f"<b>قیمت دلاری:</b> ${price_text}\\n"
-        f"<b>نقدینگی:</b> ${liquidity_text}\\n"
-        f"<b>حجم ۲۴ ساعته:</b> ${volume_text}\\n"
-        f"<b>تعداد تخمینی با ۱۰۰ دلار:</b> {tokens_text} توکن\\n"
-        f"<b>آدرس قرارداد (آماده کپی):</b> <code>{safe_address}</code>\\n"
-        f"<b>مومنتوم مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'}/100\\n"
-        f"<b>نقاط قوت:</b> {html_escape(' | '.join(candidate.get('tier_strengths_fa') or []) or 'شواهد اولیه موجود است.')}\\n"
-        f"<b>احتیاط:</b> {html_escape(' | '.join(candidate.get('tier_cautions_fa') or []) or 'بررسی تکمیلی لازم است.')}\\n"
-        f"<b>اعتماد داده:</b> {html_escape(str(candidate.get('tier_data_confidence', 'LIMITED')))}\\n"
-        "<i>قبل از هرگونه خرید، قرارداد و امکان فروش را مستقل بررسی کن. وضعیت امنیتی نامعلوم به معنی سالم بودن نیست.\\n"
-        "این پیام توصیه خرید نیست؛ هیچ سفارشی ارسال نشده است. NO_TRADE.</i>"
+        "🐋 <b>CRYPTO SUPER RADAR · رادار شکار فرصت‌ها</b>\n"
+        f"{tier_title}\n"
+        "\n"
+        "🧾 <b>بخش ۱ | شناسنامه و اعداد کلیدی</b>\n"
+        f"<b>نام و نماد ارز:</b> {token_name} ({token_symbol})\n"
+        f"<b>بلاک‌چین / شبکه:</b> {network_label}\n"
+        f"<b>قیمت فعلی:</b> \${price_text}\n"
+        f"<b>مقدار قابل خرید با ۱۰۰ دلار:</b> حدود {tokens_text} توکن (تخمینی؛ بدون کارمزد و لغزش)\n"
+        f"<b>نقدینگی استخر:</b> \${liquidity_text} | <b>حجم ۲۴ ساعته:</b> \${volume_text}\n"
+        f"<b>آدرس قرارداد (برای کپی):</b> <code>{safe_address}</code>\n"
+        "\n"
+        "🧠 <b>بخش ۲ | تحلیل هوشمند، نقاط قوت، ضعف و رفرنس</b>\n"
+        f"<b>شتاب مشاهده‌شده:</b> {momentum if momentum is not None else 'نامشخص'} از ۱۰۰\n"
+        "<b>نقاط قوت:</b>\n"
+        + "\n".join(strength_lines) + "\n"
+        "<b>نقاط ضعف و هشدارها:</b>\n"
+        + "\n".join(caution_lines) + "\n"
+        f"<b>سناریوی رشد و افق پیگیری (پژوهشی):</b> {html_escape(scenario_text)}\n"
+        "\n"
+        "🛡️ <b>بخش ۳ | راهنمای امن استفاده از کیف پول</b>\n"
+        f"{trade_link}\n"
+        f"{dex_link}\n"
+        f"{html_escape(wallet_guide)}\n"
+        "⚠️ قبل از Swap، آدرس قرارداد و شبکه را دوباره بررسی کن؛ از لینک تبلیغاتی، توکن هم‌نام و پیام خصوصی افراد ناشناس استفاده نکن. Seed Phrase یا کلید خصوصی را هرگز وارد نکن.\n"
+        "\n"
+        "📡 <b>بخش ۴ | داشبورد زنده</b>\n"
+        f"{dashboard_link}\n"
+        "\n"
+        "<i>وضعیت سیستم: پژوهشی · NO_TRADE (بدون معامله خودکار)</i>"
     )
     client = session or requests
     try:
@@ -607,7 +700,9 @@ def notify_qualified_gem(candidate: Mapping[str, Any], store: Any, *,
     except Exception:
         store.release_event(event_key)
         raise
-    return {"status": "SENT", "candidate_id": candidate_id, "message_id": (payload.get("result") or {}).get("message_id")}
+    return {"status": "SENT", "candidate_id": candidate_id,
+            "message_id": (payload.get("result") or {}).get("message_id")}
+
 
 
 
