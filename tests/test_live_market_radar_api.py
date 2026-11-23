@@ -114,7 +114,7 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertEqual(payload["future_forecast"]["news_summary_fa"], "داده تأییدشده موجود نیست")
         self.assertEqual(binance.call_count, 6)
         self.assertEqual({call.kwargs.get("interval") for call in binance.call_args_list}, {"5m", "1h", "4h", "1d", "1w", "1M"})
-        self.assertTrue(all(call.kwargs.get("limit") == 500 for call in binance.call_args_list))
+        self.assertTrue(all(call.kwargs.get("limit") == 180 for call in binance.call_args_list))
         bybit.assert_called_once()
 
     def test_one_second_interval_uses_fast_binance_only_fallback(self):
@@ -126,7 +126,7 @@ class LiveMarketRadarApiTests(unittest.TestCase):
             payload = web_app._live_market_radar_payload("BTCUSDT", "1s", force_refresh=True)
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 2.0)
-        binance.assert_called_once_with("BTCUSDT", interval="1s", limit=500)
+        binance.assert_called_once_with("BTCUSDT", interval="1s", limit=180)
         bybit.assert_not_called()
         self.assertEqual(payload["source_mode"], "SINGLE_SOURCE")
         self.assertIn("Binance", payload["source_status_fa"])
