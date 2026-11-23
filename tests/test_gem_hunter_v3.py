@@ -31,6 +31,28 @@ class FakeStore:
 
 
 class GemHunterV3Tests(unittest.TestCase):
+
+    def test_whale_tracker_exposes_wallet_flow_token_amount_and_explorer_links(self):
+        now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+        trades = [
+            {"kind": "buy", "volume_in_usd": 5000, "block_timestamp": "2026-11-23T11:30:00Z",
+             "tx_hash": "0xabc", "tx_from_address": "0x" + "a" * 40, "to_token_amount": "125000"},
+            {"kind": "sell", "volume_in_usd": 1000, "block_timestamp": "2026-11-23T11:40:00Z",
+             "tx_hash": "0xdef", "tx_from_address": "0x" + "b" * 40, "from_token_amount": "25000"},
+        ]
+        result = analyze_pool_trade_evidence(
+            trades, chain="base", token_address="0x" + "1" * 40,
+            pool_address="0x" + "2" * 40, liquidity_usd=100000, now=now,
+        )
+        self.assertEqual(result["whale_buy_volume_1h_usd"], 5000)
+        self.assertEqual(result["whale_sell_volume_1h_usd"], 1000)
+        self.assertEqual(result["whale_buy_sell_ratio_1h"], 5.0)
+        self.assertIn("🟢", result["whale_net_action_fa"])
+        self.assertEqual(result["whale_events"][0]["token_amount"], 125000.0)
+        self.assertEqual(result["whale_events"][0]["explorer_tx_url"], "https://basescan.org/tx/0xabc")
+        self.assertEqual(result["whale_events"][0]["explorer_wallet_url"], "https://basescan.org/address/" + "0x" + "a" * 40)
+        self.assertEqual(result["whale_wallets_1h"][0]["wallet_address"], "0x" + "a" * 40)
+
     def test_exit_slippage_unknown_without_liquidity(self):
         self.assertEqual(estimate_exit_slippage(liquidity_usd=None)["status"], "UNKNOWN")
 
