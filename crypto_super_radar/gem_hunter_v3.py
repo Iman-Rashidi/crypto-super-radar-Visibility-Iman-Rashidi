@@ -820,7 +820,7 @@ def process_gem_hunter_v3_candidates(candidates: Any, *, notify: bool = True) ->
         }
         row["opportunity_score"] = row.get("opportunity_score", row.get("short_term_momentum_score"))
         qualification = row.get("qualification")
-        if isinstance(qualification, dict):
+        if isinstance(qualification, dict) and qualification.get("schema_version") == SCHEMA_VERSION:
             qualification = dict(qualification)
             market_metrics = dict(qualification.get("market_metrics") or {})
             market_metrics.update(metrics)
