@@ -39,7 +39,8 @@ BYBIT_INTERVAL = {
     "1M": "M",
 }
 PIVOT_RADIUS = 3
-MAX_CANDLES = 500
+MAX_CANDLES = 180
+ANALYSIS_CANDLES = 120
 MAX_CANDLE_DISCREPANCY_PCT = 0.40
 SIGNAL_MAX_PIVOT_AGE_BARS = 10
 
@@ -352,9 +353,12 @@ def build_live_market_radar_payload(
             cross_reason = f"{type(exc).__name__}: {str(exc)[:160]}"
     quality_status = cross_validation
 
-    pivots = _pivots(closed)
+    # Keep the chart history at 180 candles, but bound all structural analysis
+    # to the latest 120 completed candles to avoid mobile request timeouts.
+    analysis_frame = closed.tail(ANALYSIS_CANDLES)
+    pivots = _pivots(analysis_frame)
     wave = monitor_elliott_waves(
-        closed,
+        analysis_frame,
         min_reversal_pct=ELLIOTT_MIN_REVERSAL_PCT[normalized_interval],
         max_reversal_pct=0.15,
     )
@@ -384,9 +388,9 @@ def build_live_market_radar_payload(
                 "kind": point["kind"],
                 "label": "سقف ساختاری" if point["kind"] == "HIGH" else "کف ساختاری",
             })
-    market_analysis = analyze_market_patterns(closed, pivots, wave)
+    market_analysis = analyze_market_patterns(analysis_frame, pivots, wave)
     market_flow = analyze_market_flow(
-        closed, aggregate_trades=aggregate_trades, order_book=order_book, now=current.to_pydatetime()
+        analysis_frame, aggregate_trades=aggregate_trades, order_book=order_book, now=current.to_pydatetime()
     )
     if market_flow_error:
         market_flow["live_flow_error"] = str(market_flow_error)[:180]
@@ -400,7 +404,7 @@ def build_live_market_radar_payload(
         ),
     }
     signal = _signal(
-        closed, pivots, quality_status=quality_status, freshness_status=freshness_status,
+        analysis_frame, pivots, quality_status=quality_status, freshness_status=freshness_status,
         divergence=market_analysis.get("direction", {}).get("divergence"),
     )
     chart = []
