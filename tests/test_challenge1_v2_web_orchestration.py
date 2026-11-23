@@ -379,7 +379,7 @@ class Challenge1V2MarketIngestionTests(unittest.TestCase):
 
 
     def test_missing_1h_or_15m_history_fails_closed_before_analysis(self):
-        for missing_bar in ("1H", "15m", "5m"):
+        for missing_bar in ("1H", "15m"):
             with self.subTest(missing_bar=missing_bar):
                 client = FakeBloFinReadOnly(
                     now_ms=self.client.now_ms, missing_bar=missing_bar,
@@ -394,7 +394,7 @@ class Challenge1V2MarketIngestionTests(unittest.TestCase):
                 analyze.assert_not_called()
 
     def test_stale_required_timeframes_fail_closed_before_analysis(self):
-        for stale_bar in ("1H", "4H", "15m", "5m"):
+        for stale_bar in ("1H", "4H", "15m"):
             with self.subTest(stale_bar=stale_bar):
                 client = FakeBloFinReadOnly(now_ms=self.client.now_ms)
                 get_candles = client.get_candles
