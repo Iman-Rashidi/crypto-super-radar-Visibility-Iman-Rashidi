@@ -83,10 +83,24 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         with web_app.LIVE_MARKET_RADAR_CACHE_LOCK:
             web_app.LIVE_MARKET_RADAR_CACHE.clear()
 
+    @staticmethod
+    def provider_rows(frame, timestamp_scale=1000):
+        return [
+            [int(stamp.timestamp() * (1000 if timestamp_scale == 1000 else 1)),
+             str(row.open), str(row.high), str(row.low), str(row.close), str(row.volume)]
+            for stamp, row in frame.iterrows()
+        ]
+
     def test_api_returns_two_source_candles_waves_and_signal(self):
         frame = candle_frame()
-        with patch.object(web_app.ENGINE.data.binance, "candles", return_value=frame) as binance, \
-             patch.object(web_app.ENGINE.data.bybit, "candles", return_value=frame.copy()) as bybit, \
+        rows = self.provider_rows(frame)
+        def get_json(url, params=None, timeout=1.35):
+            if "data-api.binance.vision" in url:
+                return rows
+            if "api.bybit.com" in url:
+                return {"retCode": 0, "result": {"list": rows}}
+            raise RuntimeError("fallback feed deliberately unavailable in this test")
+        with patch.object(web_app.ENGINE.data.http, "get_with_timeout", side_effect=get_json), \
              patch("crypto_super_radar.live_market_radar.datetime") as clock:
             clock.now.return_value = datetime(2025, 1, 1, 5, 3, tzinfo=timezone.utc)
             clock.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
@@ -100,13 +114,19 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertTrue(payload["candles"][-1]["is_closed"] is False)
         self.assertEqual(payload["signal"]["signal_candle_at"], payload["last_closed_candle_at"])
         self.assertFalse(payload["orders_submitted"])
-        binance.assert_called_once()
-        bybit.assert_called_once()
+        self.assertEqual(payload["cross_validation"]["providers"], ["Binance Spot", "Bybit Spot"])
 
     def test_missing_second_provider_blocks_buy_sell_signal(self):
         frame = candle_frame()
-        with patch.object(web_app.ENGINE.data.binance, "candles", return_value=frame), \
-             patch.object(web_app.ENGINE.data.bybit, "candles", side_effect=RuntimeError("rate limited")):
+        rows = self.provider_rows(frame)
+        def get_json(url, params=None, timeout=1.35):
+            if "data-api.binance.vision" in url:
+                return rows
+            raise RuntimeError("rate limited")
+        with patch.object(web_app.ENGINE.data.http, "get_with_timeout", side_effect=get_json), \
+             patch("crypto_super_radar.live_market_radar.datetime") as clock:
+            clock.now.return_value = datetime(2025, 1, 1, 5, 3, tzinfo=timezone.utc)
+            clock.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
             status, raw_payload = self.request(
                 "/api/live-market-radar?symbol=BTCUSDT&interval=5m&refresh=1"
             )
@@ -115,6 +135,40 @@ class LiveMarketRadarApiTests(unittest.TestCase):
         self.assertEqual(payload["cross_validation"]["status"], "UNKNOWN")
         self.assertNotIn(payload["signal"]["signal"], {"BUY", "SELL"})
         self.assertEqual(payload["signal"]["status"], "BLOCKED")
+
+    def test_api_falls_back_to_okx_and_kraken_when_binance_and_bybit_fail(self):
+        frame = candle_frame()
+        okx_rows = [
+            [str(row[0]), row[1], row[2], row[3], row[4], row[5], row[5], row[5], "1"]
+            for row in self.provider_rows(frame)
+        ]
+        kraken_rows = [
+            [int(row[0] / 1000), row[1], row[2], row[3], row[4], "101.0", row[5], 10]
+            for row in self.provider_rows(frame)
+        ]
+        def get_json(url, params=None, timeout=1.35):
+            if "data-api.binance.vision" in url or "api.bybit.com" in url:
+                raise RuntimeError("HTTP 418 / region unavailable")
+            if "www.okx.com" in url:
+                return {"code": "0", "data": okx_rows}
+            if "api.kraken.com" in url:
+                return {"error": [], "result": {"XBTUSDT": kraken_rows, "last": kraken_rows[-1][0]}}
+            raise AssertionError(url)
+        with patch.object(web_app.ENGINE.data.http, "get_with_timeout", side_effect=get_json), \
+             patch("crypto_super_radar.live_market_radar.datetime") as clock:
+            clock.now.return_value = datetime(2025, 1, 1, 5, 3, tzinfo=timezone.utc)
+            clock.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+            status, raw_payload = self.request(
+                "/api/live-market-radar?symbol=BTCUSDT&interval=5m&refresh=1"
+            )
+        payload = json.loads(raw_payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["feed_diagnostics"]["primary_provider"], "OKX Spot")
+        self.assertEqual(payload["feed_diagnostics"]["secondary_provider"], "Kraken Spot")
+        self.assertTrue(payload["feed_diagnostics"]["fallback_used"])
+        self.assertGreaterEqual(len(payload["candles"]), 35)
+        self.assertEqual(payload["cross_validation"]["status"], "PASS")
+        self.assertFalse(payload["orders_submitted"])
 
     def test_valid_custom_symbol_is_normalized_and_sent_to_spot_analyzer(self):
         expected = {"symbol": "UNKNOWNUSDT", "status": "OK", "candles": [], "orders_submitted": False}
