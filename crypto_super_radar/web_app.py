@@ -2136,6 +2136,10 @@ def _parse_scan_asset(value: str) -> AssetSpec:
         raise ValueError("نام ارز یا نماد را وارد کن؛ نمونه: XRP یا BTCUSDT.")
     if ":" in raw:
         return AssetSpec.parse(raw)
+    if re.fullmatch(r"0x[a-fA-F0-9]{40}", raw):
+        return AssetSpec.parse("eth:" + raw)
+    if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", raw):
+        return AssetSpec.parse("solana:" + raw)
     compact = re.sub(r"[\s/_-]+", "", raw).upper()
     if not compact.isalnum() or len(compact) > 24:
         raise ValueError("نماد ارز معتبر نیست. نمونه: XRP، XRPUSDT یا eth:آدرس‌قرارداد.")
