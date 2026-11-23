@@ -3101,6 +3101,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
     higher_timeframe_errors = {}
     news_items = []
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=7, thread_name_prefix="live-radar-feed")
+    exchange_started = time.monotonic()
     try:
         binance_future = executor.submit(
             binance_provider.candles,
@@ -3146,7 +3147,7 @@ def _live_market_radar_payload(symbol: str, interval: str, *, force_refresh: boo
         binance_frame = binance_future.result(timeout=1.5 if normalized_interval == "1s" else 5.0)
         if bybit_future is not None:
             try:
-                bybit_frame = bybit_future.result(timeout=5.0)
+                bybit_frame = bybit_future.result(timeout=max(0.05, 5.0 - (time.monotonic() - exchange_started)))
             except Exception as exc:
                 bybit_error = f"{type(exc).__name__}: {str(exc)[:160]}"
 
@@ -9939,8 +9940,8 @@ async function loadBlofinInstruments(){
                     (wave.invalidation_price!==null&&wave.invalidation_price!==undefined?' · سطح ابطال: '+number(wave.invalidation_price):'')
                 }],'تحلیل موج در دسترس نیست.');
                 fields.reason.textContent=s.reason||'دلیل سیگنال در دسترس نیست.';
-                fields.provider.textContent='منابع: '+(cv.providers||[]).join(' و ')+' · تطبیق: '+cv.status+
-                  ' · اختلاف بیشینه: '+number(cv.max_close_discrepancy_pct)+'% · کندل بسته‌شده: '+(data.last_closed_candle_at||'—');
+                fields.provider.textContent='منابع: '+(cv.providers||[]).join(' و ')+' · حالت منبع: '+(data.source_mode==='SINGLE_SOURCE'?'تک‌منبعی':'چندمنبعی')+' · تطبیق: '+cv.status+
+                  ' · '+(data.source_status_fa||'')+' · اختلاف بیشینه: '+number(cv.max_close_discrepancy_pct)+'% · کندل بسته‌شده: '+(data.last_closed_candle_at||'—');
                 const lastClosed=(data.candles||[]).filter(x=>x.is_closed).slice(-1)[0];
                 status.textContent='قیمت آخرین کندل بسته‌شده: '+number(lastClosed&&lastClosed.close)+
                   ' · سن کندل: '+number(data.candle_age_seconds)+' ثانیه · دریافت: '+new Date(data.updated_at_utc).toLocaleTimeString();
