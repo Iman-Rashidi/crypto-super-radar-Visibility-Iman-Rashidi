@@ -1,10 +1,11 @@
 """Tests for the bounded DEX manual-scan fast path."""
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from crypto_super_radar.fast_asset_scan import build_fast_asset_scan_report, run_with_hard_timeout
 from crypto_super_radar.models import AssetSpec
+from crypto_super_radar import web_app
 
 
 class FastAssetScanTests(unittest.TestCase):
@@ -60,6 +61,40 @@ class FastAssetScanTests(unittest.TestCase):
         completed, result = run_with_hard_timeout(lambda: "ok", 0.5)
         self.assertTrue(completed)
         self.assertEqual(result, "ok")
+
+    def test_manual_scan_routes_dex_contract_to_fast_engine_not_twelve_gate_engine(self):
+        asset = AssetSpec.parse("solana:So11111111111111111111111111111111111111112")
+        job_id = "fast-scan-test"
+        web_app.JOBS[job_id] = {"status": "running"}
+        report = {"status": "COMPLETE", "symbol": "EX", "token_name": "Example",
+                  "opportunity_score": 70, "trade_authorization": "NO_TRADE"}
+        with patch.object(web_app, "build_fast_asset_scan_report", return_value=report), \
+             patch.object(web_app, "run_with_hard_timeout", return_value=(True, report)), \
+             patch.object(web_app.ENGINE, "analyze") as analyze:
+            web_app._run_scan(job_id, asset, "", "")
+        self.assertEqual(web_app.JOBS[job_id]["status"], "completed")
+        self.assertTrue(web_app.JOBS[job_id]["result"]["fast_asset_scan"])
+        self.assertEqual(web_app.JOBS[job_id]["result"]["fast_scan"], report)
+        analyze.assert_not_called()
+
+    def test_manual_scan_timeout_is_terminal_and_does_not_wait_for_engine(self):
+        asset = AssetSpec.parse("base:0x1111111111111111111111111111111111111111")
+        job_id = "fast-scan-timeout-test"
+        web_app.JOBS[job_id] = {"status": "running"}
+        with patch.object(web_app, "run_with_hard_timeout", return_value=(False, None)), \
+             patch.object(web_app.ENGINE, "analyze") as analyze:
+            web_app._run_scan(job_id, asset, "", "")
+        self.assertEqual(web_app.JOBS[job_id]["status"], "failed")
+        self.assertEqual(web_app.JOBS[job_id]["error"], "FAST_SCAN_TIMEOUT")
+        analyze.assert_not_called()
+
+    def test_standalone_contract_addresses_are_detected(self):
+        evm = web_app._parse_scan_asset("0x1111111111111111111111111111111111111111")
+        sol = web_app._parse_scan_asset("So11111111111111111111111111111111111111112")
+        self.assertEqual(evm.market_type, "dex")
+        self.assertEqual(evm.chain, "eth")
+        self.assertEqual(sol.market_type, "dex")
+        self.assertEqual(sol.chain, "solana")
 
 
 if __name__ == "__main__":
