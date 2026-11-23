@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 from crypto_super_radar.gem_hunter_watchlist import (
     ensure_watchlist_schema, record_watchlist_candidates, refresh_watchlist_prices,
-    watchlist_snapshot, is_watchlist_eligible,
+    watchlist_snapshot, is_watchlist_eligible, send_watchlist_profit_alerts,
 )
 
 class WatchlistLedgerTests(unittest.TestCase):
@@ -60,6 +60,69 @@ class WatchlistLedgerTests(unittest.TestCase):
             pump_phase_fa="🔴 فاز ۳: سقف فرسودگی / خطر دامپ", buy_volume_share_pct=90)))
         self.assertFalse(is_watchlist_eligible(self.candidate(gem_hunter_v3_status="EARLY_ALPHA_REVIEW",
             pump_phase_fa="🟡 فاز ۲: میانه موج صعودی", buy_volume_share_pct=51.99)))
+
+
+    def test_profit_milestones_are_sent_once_and_deduplicated_per_level(self):
+        record_watchlist_candidates(self.db, [self.candidate()])
+        with self.db:
+            self.db.execute(
+                "UPDATE gem_hunter_watchlist_ledger SET latest_price_usd=0.02 WHERE token_id='solana:MintABC'"
+            )
+        client = Mock()
+        client.post.return_value.raise_for_status.return_value = None
+        client.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 42}}
+
+        first = send_watchlist_profit_alerts(
+            self.db, session=client, bot_token="bot-token", chat_id="12345"
+        )
+        second = send_watchlist_profit_alerts(
+            self.db, session=client, bot_token="bot-token", chat_id="12345"
+        )
+
+        self.assertEqual(first, {"status": "OK", "sent": 3, "duplicates": 0, "errors": 0})
+        self.assertEqual(second, {"status": "OK", "sent": 0, "duplicates": 3, "errors": 0})
+        self.assertEqual(client.post.call_count, 3)
+        messages = [call.kwargs["json"]["text"] for call in client.post.call_args_list]
+        self.assertIn("+25%", messages[0])
+        self.assertIn("+50%", messages[1])
+        self.assertIn("+100%", messages[2])
+        self.assertTrue(all("€200.00" in message and "+€100.00" in message for message in messages))
+        self.assertTrue(all("گزارش سود واچ‌لیست رادار" in message for message in messages))
+
+    def test_profit_alert_does_not_send_below_25_percent(self):
+        record_watchlist_candidates(self.db, [self.candidate()])
+        with self.db:
+            self.db.execute(
+                "UPDATE gem_hunter_watchlist_ledger SET latest_price_usd=0.012 WHERE token_id='solana:MintABC'"
+            )
+        client = Mock()
+        result = send_watchlist_profit_alerts(
+            self.db, session=client, bot_token="bot-token", chat_id="12345"
+        )
+        self.assertEqual(result["sent"], 0)
+        client.post.assert_not_called()
+
+    def test_failed_profit_alert_delivery_releases_reservation(self):
+        record_watchlist_candidates(self.db, [self.candidate()])
+        with self.db:
+            self.db.execute(
+                "UPDATE gem_hunter_watchlist_ledger SET latest_price_usd=0.013 WHERE token_id='solana:MintABC'"
+            )
+        failed = Mock()
+        failed.post.side_effect = RuntimeError("temporary Telegram failure")
+        result = send_watchlist_profit_alerts(
+            self.db, session=failed, bot_token="bot-token", chat_id="12345"
+        )
+        self.assertEqual(result["errors"], 1)
+
+        success = Mock()
+        success.post.return_value.raise_for_status.return_value = None
+        success.post.return_value.json.return_value = {"ok": True, "result": {"message_id": 9}}
+        retry = send_watchlist_profit_alerts(
+            self.db, session=success, bot_token="bot-token", chat_id="12345"
+        )
+        self.assertEqual(retry["sent"], 1)
+        self.assertEqual(success.post.call_count, 1)
 
 if __name__ == "__main__":
     unittest.main()
