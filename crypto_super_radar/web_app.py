@@ -2090,7 +2090,7 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
  if(!btn)return;
  const esc=v=>String(v==null?'—':v).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
  const money=v=>v==null?'—':'€'+Number(v).toFixed(2);
- const germanyTime=v=>{if(!v)return 'زمان ثبت نشده';const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString('fa-IR',{timeZone:'Europe/Berlin',dateStyle:'short',timeStyle:'medium'})+' وقت آلمان (CET/CEST)'};
+ const germanyTime=v=>{{if(!v)return 'زمان ثبت نشده';const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString('fa-IR',{{timeZone:'Europe/Berlin',dateStyle:'short',timeStyle:'medium'}})+' وقت آلمان (CET/CEST)'}};
  async function load(){{
   const status=document.getElementById('gem-watchlist-status');
   status.textContent='در حال دریافت…';
