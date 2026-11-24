@@ -1068,7 +1068,7 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
                 "mode": row.get("mode"),
                 "status": row.get("status"),
                 "signal": row.get("signal"),
-                "signal_raw": row.get("signal") or "UNKNOWN",
+                "signal_raw": row.get("signal_raw") or row.get("signal") or "UNKNOWN",
                 "entry_price": row.get("entry_price"),
                 "stop_loss": row.get("stop_loss"),
                 "take_profit": row.get("take_profit"),
