@@ -144,5 +144,119 @@ class OpenRouterFreeFallbackChainTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
 
+
+from crypto_super_radar import ai_second_opinion as _ai_second_opinion
+
+
+@unittest.skipUnless(
+    hasattr(_ai_second_opinion, "_normalize_specialist_views"),
+    "V2 specialist normalization implementation is being pushed in the paired commit",
+)
+class Challenge1V2SpecialistNormalizationTests(unittest.TestCase):
+    def valid_v2_document(self):
+        document = valid_approval()
+        document.update({
+            "specialist_views": {
+                "market_regime": {"view": "BEARISH", "reason_fa": "رژیم نزولی است."},
+                "technical": {"view": "BEARISH", "reason_fa": "ساختار نزولی است."},
+                "news_sentiment": {"view": "NEUTRAL", "reason_fa": "داده احساسات خنثی است."},
+                "bull_researcher": {"view": "OPPOSE", "reason_fa": "سناریوی صعودی رد شد."},
+                "bear_researcher": {"view": "SUPPORT", "reason_fa": "سناریوی نزولی پشتیبانی می‌شود."},
+                "trader": {"proposal": "SHORT", "reason_fa": "پیشنهاد فروش."},
+                "risk_manager": {"verdict": "APPROVE", "reason_fa": "ریسک کنترل شده است."},
+                "portfolio_manager": {"verdict": "APPROVE", "reason_fa": "حد پرتفوی رعایت شده است."},
+            },
+            "final_rating": "Sell",
+            "risk_flags": [],
+            "rationale_fa": "تحلیل مستقل مبتنی بر شواهد.",
+            "wave_analyst": {
+                "verdict": "SUPPORT", "phase": "WAVE_4_CONFIRMED",
+                "direction": "BEARISH", "reason_fa": "موج با شواهد هم‌خوان است.",
+            },
+        })
+        return document
+
+    def validate(self, document):
+        from crypto_super_radar.ai_second_opinion import _validated_v2_review
+        return _validated_v2_review(
+            document, "test-free-model", "perp:BTCUSDT",
+            expected_side="SHORT",
+            evidence={"elliott_wave": {"phase": "WAVE_4_CONFIRMED", "pattern": "BEARISH"}},
+        )
+
+    def test_v2_canonical_schema_is_accepted(self):
+        result = self.validate(self.valid_v2_document())
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertTrue(result["paper_entry_eligible"])
+
+    def test_v2_specialist_analysis_aliases_and_abbreviated_roles_normalize(self):
+        source = self.valid_v2_document()
+        original = source.pop("specialist_views")
+        source["specialist_analysis"] = {
+            "regime": {"view": "BEAR", "reason": original["market_regime"]["reason_fa"]},
+            "tech": {"verdict": "BEARISH", "analysis": original["technical"]["reason_fa"]},
+            "sentiment": {"view": "NEUTRAL", "why": original["news_sentiment"]["reason_fa"]},
+            "bull": {"stance": "OPPOSE", "rationale": original["bull_researcher"]["reason_fa"]},
+            "bear_case": {"view": "SUPPORT", "reason_fa": original["bear_researcher"]["reason_fa"]},
+            "trade": {"direction": "SHORT", "reason": original["trader"]["reason_fa"]},
+            "risk": {"decision": "APPROVED", "analysis": original["risk_manager"]["reason_fa"]},
+            "portfolio": {"status": "APPROVE", "explanation": original["portfolio_manager"]["reason_fa"]},
+        }
+        source["decision"] = "APPROVE"
+        source["direction"] = "BEARISH"
+        result = self.validate(source)
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["trader_proposal"], "SHORT")
+        self.assertEqual(result["risk_manager_verdict"], "APPROVE")
+        self.assertEqual(result["portfolio_manager_verdict"], "APPROVE")
+        self.assertEqual(result["declared_direction"], "SHORT")
+
+    def test_v2_views_alias_is_accepted_but_missing_role_is_not_fabricated(self):
+        source = self.valid_v2_document()
+        source["views"] = source.pop("specialist_views")
+        self.assertEqual(self.validate(source)["status"], "APPROVED")
+        del source["views"]["bear_researcher"]
+        with self.assertRaisesRegex(ValueError, "Required specialist views are missing"):
+            self.validate(source)
+
+    def test_v2_conflicting_alias_or_direction_fails_closed(self):
+        source = self.valid_v2_document()
+        source["specialist_analysis"] = dict(source["specialist_views"])
+        source["specialist_analysis"]["trader"] = {"proposal": "LONG", "reason_fa": "جهت متناقض"}
+        with self.assertRaisesRegex(ValueError, "Conflicting specialist view containers"):
+            self.validate(source)
+        source = self.valid_v2_document()
+        source["direction"] = "LONG"
+        with self.assertRaisesRegex(ValueError, "AI direction conflicts"):
+            self.validate(source)
+
+    def test_v2_declared_approval_cannot_override_risk_veto(self):
+        source = self.valid_v2_document()
+        source["specialist_views"]["risk_manager"]["verdict"] = "REJECT"
+        source["decision"] = "APPROVE"
+        with self.assertRaisesRegex(ValueError, "approval conflicts"):
+            self.validate(source)
+        source["decision"] = "VETO"
+        result = self.validate(source)
+        self.assertEqual(result["status"], "VETO")
+        self.assertFalse(result["paper_entry_eligible"])
+
+    def test_v2_prompt_contains_all_mandatory_specialist_keys(self):
+        from crypto_super_radar.ai_second_opinion import _prompt_messages
+        prompt = _prompt_messages({
+            "execution_profile": "CHALLENGE_1_V2",
+            "review_mode": "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW",
+            "expected_side": "SHORT",
+            "elliott_wave": {"phase": "WAVE_4_CONFIRMED", "pattern": "BEARISH"},
+        })[0]["content"]
+        for key in (
+            '"specialist_views"', '"market_regime"', '"technical"',
+            '"news_sentiment"', '"bull_researcher"', '"bear_researcher"',
+            '"trader"', '"risk_manager"', '"portfolio_manager"',
+            '"wave_analyst"', '"final_rating"', '"risk_flags"', '"rationale_fa"',
+        ):
+            self.assertIn(key, prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
