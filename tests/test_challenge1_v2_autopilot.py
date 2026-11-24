@@ -97,7 +97,7 @@ class FakeEntryExecutor:
     def __init__(self,store): self.store=store; self.called=0
     def execute(self,signal,*,inst_id,allow_demo_orders,leverage):
         self.called+=1
-        assert signal["ai_consensus"]["status"]=="APPROVED_BY_BOTH"
+        assert signal["ai_consensus"]["status"]=="APPROVED_BY_GROQ"
         assert allow_demo_orders is True
         return {"position_id":"pos-1","client_order_id":"entry123","instrument_id":inst_id,
           "side":"LONG","entry_price":"100","entry_reference_price":"100","stop_loss":"98",
@@ -105,13 +105,13 @@ class FakeEntryExecutor:
 
 
 class Challenge1V2EntryIntegrationTests(unittest.TestCase):
-    def test_two_reviewer_approval_enters_executor_and_persists_exit_state(self):
+    def test_single_groq_approval_enters_executor_and_persists_exit_state(self):
         db=sqlite3.connect(":memory:")
         store=FakeStore({})
         executor=FakeEntryExecutor(store)
         exchange=FakeExchange(mark="100")
         signal={"execution_profile":"CHALLENGE_1_V2","instrument_id":"BTC-USDT","signal":"LONG",
-          "status":"SIGNAL_READY","ai_consensus":{"status":"APPROVED_BY_BOTH"}}
+          "status":"SIGNAL_READY","ai_consensus":{"status":"APPROVED_BY_GROQ"}}
         env={"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED":"true","BLOFIN_DEMO_TRADING_ENABLED":"true"}
         out=run_cycle(exchange,db,analyzer=lambda *_:signal,symbols=("BTC-USDT",),
                       executor=executor,environ=env)

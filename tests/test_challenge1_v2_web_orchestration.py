@@ -287,10 +287,10 @@ def approved_review(provider: str, model: str):
     }
 
 
-    def test_v2_orchestration_attaches_live_dual_review_and_real_executor_gate_accepts_it(self):
+    def test_v2_orchestration_attaches_live_groq_review_and_executor_gate_accepts_it(self):
         self.record = make_v2_record(self.client.now_ms)
         nemotron = approved_review("OpenRouter", "nemotron/test-model")
-        groq = approved_review("Groq", "llama/test-model")
+        groq = approved_review("Groq", "openai/gpt-oss-120b")
         with (
             patch.object(v2_orchestration, "analyze_signal", return_value=dict(self.record)),
             patch.object(ai_supervisor._ai, "run_free_ai_second_opinion", return_value=nemotron) as reviewer_one,
@@ -299,13 +299,13 @@ def approved_review(provider: str, model: str):
             result = v2_orchestration.analyze_challenge1_v2_market(
                 self.client, "BTC-USDT", local_now_ms=self.client.now_ms,
             )
-        self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_BOTH")
+        self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_GROQ")
         self.assertEqual(result["ai_consensus"]["reviewed_signal_id"], result["signal_id"])
-        self.assertEqual({row["reviewer_id"] for row in result["ai_reviews"]}, {"nemotron", "second_ai"})
+        self.assertEqual({row["reviewer_id"] for row in result["ai_reviews"]}, {"groq"})
         self.assertTrue(all(row["review"]["reviewed_signal_id"] == result["signal_id"] for row in result["ai_reviews"]))
         ready, reason = _challenge1_two_reviewer_approval_ready(result)
         self.assertTrue(ready, reason)
-        reviewer_one.assert_called_once()
+        reviewer_one.assert_not_called()
         reviewer_two.assert_called_once()
 
 class Challenge1V2MarketIngestionTests(unittest.TestCase):
@@ -448,9 +448,9 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
     def tearDown(self):
         web_app.BLOFIN_EXECUTION_JOBS.pop(self.job_id, None)
 
-    def test_end_to_end_v2_dry_run_reaches_two_reviewers_and_order_plan_without_order_write(self):
+    def test_end_to_end_v2_dry_run_reaches_groq_reviewer_and_order_plan_without_order_write(self):
         review_one = approved_review("OpenRouter", "nemotron/test-model")
-        review_two = approved_review("Groq", "llama/test-model")
+        review_two = approved_review("Groq", "openai/gpt-oss-120b")
         with patch.dict(os.environ, {"BLOFIN_CHALLENGE1_V2_ORCHESTRATION_ENABLED": "true"}):
             with (
                 patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"),
@@ -480,17 +480,17 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
         self.assertEqual(job["result"]["execution_method"], "READ_ONLY_DRY_RUN_NO_ORDER_WRITE")
         self.assertEqual(job["result"]["order_plan"]["side"], "LONG")
         self.assertEqual(job["result"]["aggregate_risk_preview"]["max_concurrent_positions"], 4)
-        self.assertEqual(len(job["ai_reviews"]), 2)
+        self.assertEqual(len(job["ai_reviews"]), 1)
         self.assertEqual(
             {item["reviewer_id"] for item in job["ai_reviews"]},
-            {"nemotron", "second_ai"},
+            {"groq"},
         )
         self.assertEqual(
             {item["review"].get("reviewed_signal_id") for item in job["ai_reviews"]},
             {self.record["signal_id"]},
         )
         engine.assert_called_once()
-        reviewer_one.assert_called_once()
+        reviewer_one.assert_not_called()
         reviewer_two.assert_called_once()
         self.assertEqual(len(self.store.recorded), 1)
 
@@ -524,7 +524,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
                     "OpenRouter", "nemotron/test-model",
                 )),
                 patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=approved_review(
-                    "Groq", "llama/test-model",
+                    "Groq", "openai/gpt-oss-120b",
                 )),
             ):
                 web_app._run_blofin_demo_execution_job(
@@ -568,7 +568,7 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
                     "OpenRouter", "nemotron/test-model",
                 )),
                 patch.object(ai_supervisor._ai, "run_independent_ai_supervisor", return_value=approved_review(
-                    "Groq", "llama/test-model",
+                    "Groq", "openai/gpt-oss-120b",
                 )),
             ):
                 web_app._run_blofin_demo_execution_job(
@@ -652,8 +652,8 @@ class Challenge1V2WebOrchestrationTests(unittest.TestCase):
             "approved": True, "status": "APPROVED",
             "ai_review": {"status": "APPROVED"},
             "second_ai_review": {"status": "APPROVED"},
-            "ai_reviews": [{"reviewer_id": "nemotron"}, {"reviewer_id": "groq"}],
-            "ai_consensus": {"status": "APPROVED_BY_BOTH"},
+            "ai_reviews": [{"reviewer_id": "groq"}],
+            "ai_consensus": {"status": "APPROVED_BY_GROQ", "single_reviewer_approval": True},
         }
         client = FakeBloFinReadOnly(now_ms=now_ms)
         with (

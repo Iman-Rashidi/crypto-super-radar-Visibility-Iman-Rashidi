@@ -280,23 +280,40 @@ def v2_signal_record(**overrides):
         "challenge1_v2_evidence": evidence,
     })
     reviewed_at = datetime.now(timezone.utc).isoformat()
-    for item in record["ai_reviews"]:
-        review = item["review"]
-        review.update({
-            "reviewed_signal_id": signal_id,
-            "reviewed_at_utc": reviewed_at,
-            "expected_side": "LONG",
-            "trader_proposal": "LONG",
-            "elliott_wave_phase": wave_phase,
-            "elliott_wave_direction": wave_direction,
-        })
-    record["ai_consensus"].update({
+    groq_review = {
+        "reviewer_id": "groq", "provider": "Groq",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "status": "APPROVED", "paper_entry_eligible": True,
+        "request_attempted": True, "response_source": "LIVE_API",
+        "response_validated": True, "model_verified": True,
+        "expected_side": "LONG", "trader_proposal": "LONG",
+        "elliott_wave_phase": wave_phase,
+        "elliott_wave_direction": wave_direction,
+        "reviewed_signal_id": signal_id, "reviewed_at_utc": reviewed_at,
+    }
+    record["ai_review"] = groq_review
+    record["second_ai_review"] = None
+    record["ai_reviews"] = [{
+        "reviewer_id": "groq", "actor": "Groq Sole Supervisor",
+        "review": groq_review,
+    }]
+    record["ai_consensus"] = {
+        "status": "APPROVED_BY_GROQ",
+        "decision": "AUTHORIZE_DEMO_EXECUTION",
+        "single_reviewer_approval": True,
+        "two_reviewer_approval": False,
+        "entry_gate_enforced": True,
+        "reviewer_id": "groq",
+        "reviewer_provider": "Groq",
+        "reviewer_model": "openai/gpt-oss-120b",
+        "groq_verified": True, "groq_approved": True,
         "expected_side": "LONG",
         "elliott_wave_phase": wave_phase,
         "elliott_wave_direction": wave_direction,
         "reviewed_signal_id": signal_id,
         "reviewed_at_utc": reviewed_at,
-    })
+    }
     record.update(overrides)
     return record
 
@@ -367,7 +384,7 @@ class BloFinDemoV2OrderPlanTests(unittest.TestCase):
 
     def test_v2_quorum_rejects_a_reviewer_bound_to_another_signal(self):
         record = v2_signal_record()
-        record["ai_reviews"][1]["review"]["reviewed_signal_id"] = "another-signal"
+        record["ai_reviews"][0]["review"]["reviewed_signal_id"] = "another-signal"
         ready, reason = _challenge1_two_reviewer_approval_ready(record)
         self.assertFalse(ready)
         self.assertIn("different signal", reason)
@@ -391,7 +408,7 @@ class BloFinDemoV2OrderPlanTests(unittest.TestCase):
             self.assertEqual(snapshot["setup_timeframe"], "15m")
             self.assertEqual(snapshot["context_timeframes"], ["1H", "4H"])
             self.assertEqual(snapshot["funding_kind"], "0")
-            self.assertEqual(len(snapshot["ai_reviews"]), 2)
+            self.assertEqual(len(snapshot["ai_reviews"]), 1)
             self.assertEqual(snapshot["challenge1_v2_evidence"]["signal_id"], record["signal_id"])
         finally:
             store.close()

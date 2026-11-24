@@ -5388,14 +5388,14 @@ def _run_blofin_demo_v2_readonly_job(
             to_record=lambda: record,
         )
         _set_blofin_execution_job(
-            job_id, "running", stage="V2_DUAL_REVIEW",
-            message_fa="شواهد V2 تأیید شد؛ دو ناظر مستقل فقط همین signal_id و شواهد 1H/4H/15m را بررسی می‌کنند.",
+            job_id, "running", stage="V2_GROQ_REVIEW",
+            message_fa="شواهد V2 تأیید شد؛ ناظر اصلی Groq فقط همین signal_id و شواهد 1H/4H/15m را بررسی می‌کند.",
             analysis=record,
         )
         if isinstance(record.get("ai_consensus"), dict) and isinstance(record.get("ai_reviews"), list):
             consensus = record["ai_consensus"]
             reviewers = {
-                "approved": consensus.get("two_reviewer_approval") is True,
+                "approved": consensus.get("single_reviewer_approval") is True,
                 "status": consensus.get("status") or "UNKNOWN",
                 "ai_review": record.get("ai_review"),
                 "second_ai_review": record.get("second_ai_review"),
@@ -5406,6 +5406,7 @@ def _run_blofin_demo_v2_readonly_job(
         else:
             reviewers = _run_challenge1_supervisor_reviews(
                 analysis, asset, signal_id=str(record.get("signal_id") or ""),
+                single_reviewer=True,
             )
         record.update({
             "ai_review": reviewers.get("ai_review"),
@@ -5417,7 +5418,7 @@ def _run_blofin_demo_v2_readonly_job(
         if reviewers.get("approved") is not True:
             _set_blofin_execution_job(
                 job_id, "completed", stage="V2_REVIEW_BLOCKED",
-                message_fa=reviewers.get("reason_fa") or "دو تأیید مستقل و معتبر دریافت نشد؛ اجرای V2 مسدود است.",
+                message_fa=reviewers.get("reason_fa") or "تأیید معتبر ناظر Groq دریافت نشد؛ اجرای V2 مسدود است.",
                 analysis=record,
                 ai_reviews=record["ai_reviews"], ai_consensus=record["ai_consensus"],
                 result={
@@ -5430,7 +5431,7 @@ def _run_blofin_demo_v2_readonly_job(
             return
         quorum_ready, quorum_reason = _challenge1_two_reviewer_approval_ready(record)
         if not quorum_ready:
-            raise BloFinDemoExecutionBlocked("V2 two-reviewer quorum gate: " + quorum_reason)
+            raise BloFinDemoExecutionBlocked("V2 Groq approval gate: " + quorum_reason)
 
         _set_blofin_execution_job(
             job_id, "running", stage="V2_READ_ONLY_ACCOUNT_RISK",
@@ -7251,9 +7252,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = {
                 "primary_supervisor": ai_connection_status(),
                 "second_supervisor": second_ai_connection_status(),
-                "two_reviewer_gate": "REQUIRES_BOTH_VERIFIED_APPROVALS",
-                "required_verified_approvals": 2,
-                "execution_role": "ENTRY_APPROVAL_GATE",
+                "legacy_challenge1_gate": "REQUIRES_TWO_INDEPENDENT_VERIFIED_APPROVALS",
+                "challenge1_v2_gate": "REQUIRES_ONE_VERIFIED_GROQ_APPROVAL",
+                "required_verified_approvals": 1,
+                "execution_role": "SOLE_GROQ_ENTRY_APPROVAL_GATE_FOR_V2",
                 "entry_gate_enforced": True,
                 "status_scope": "NON_SECRET_CONFIGURATION_PREFLIGHT_ONLY",
                 "connectivity_probe_performed": False,
@@ -12178,12 +12180,14 @@ def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict
 
 def _run_challenge1_supervisor_reviews(
     analysis: Any, asset: AssetSpec, *, signal_id: str | None = None,
+    single_reviewer: bool = False,
 ) -> dict[str, Any]:
-    """Compatibility wrapper around the shared two-reviewer approval contract."""
+    """Compatibility wrapper for legacy dual review and V2's sole Groq reviewer."""
     return run_challenge1_v2_supervisor_reviews(
         analysis, asset, signal_id=signal_id,
         primary_reviewer=run_free_ai_second_opinion,
         second_reviewer=run_independent_ai_supervisor,
+        single_reviewer=single_reviewer,
     )
 
 def _blofin_manual_decimal(value: Any, field_name: str) -> Decimal:

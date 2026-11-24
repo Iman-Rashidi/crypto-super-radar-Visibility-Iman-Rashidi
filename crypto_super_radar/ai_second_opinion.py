@@ -2148,6 +2148,7 @@ def second_ai_connection_status() -> dict[str, Any]:
 
 def run_independent_ai_supervisor(
     result: Any, asset: Any = None, http_post=None,
+    review_role: str = "SECOND, INDEPENDENT AI SUPERVISOR",
 ) -> dict[str, Any]:
     """Run a separately credentialed, free, OpenAI-compatible reviewer.
 
@@ -2233,8 +2234,9 @@ def run_independent_ai_supervisor(
 
     evidence = _build_review_input(result, asset)
     messages = _prompt_messages(evidence)
+    role_label = str(review_role or "SECOND, INDEPENDENT AI SUPERVISOR").strip()[:80]
     messages[0]["content"] = (
-        "You are the SECOND, INDEPENDENT AI SUPERVISOR. Review only the supplied "
+        f"You are the {role_label}. Review only the supplied "
         "market evidence. Do not rely on or imitate another model's answer. "
         "Do not claim to have inspected an exchange account or executed an order. "
         "The first reviewer output is intentionally not provided. "

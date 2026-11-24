@@ -473,6 +473,7 @@ def analyze_challenge1_v2_market(
     )
     reviewers = run_challenge1_v2_supervisor_reviews(
         analysis, asset, signal_id=str(record.get("signal_id") or ""),
+        single_reviewer=True,
     )
     record.update({
         "ai_review":reviewers.get("ai_review"),

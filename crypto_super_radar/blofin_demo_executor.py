@@ -160,7 +160,75 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     except (TypeError, ValueError):
         return False, "The reviewer approval timestamp is missing or invalid."
     if approval_age < -30 or approval_age > 300:
-        return False, "The two-reviewer approval is outside the five-minute validity window."
+        return False, "The reviewer approval is outside the five-minute validity window."
+
+    if execution_profile == "CHALLENGE_1_V2":
+        required_groq_consensus = (
+            consensus.get("status") == "APPROVED_BY_GROQ"
+            and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
+            and consensus.get("single_reviewer_approval") is True
+            and consensus.get("two_reviewer_approval") is False
+            and consensus.get("entry_gate_enforced") is True
+            and consensus.get("reviewer_id") == "groq"
+            and consensus.get("groq_verified") is True
+            and consensus.get("groq_approved") is True
+            and consensus.get("reviewed_signal_id") == signal_id
+            and consensus.get("expected_side") == side
+            and consensus.get("elliott_wave_phase") == wave_phase
+            and consensus.get("elliott_wave_direction") == wave_direction
+        )
+        if not required_groq_consensus:
+            return False, "The recorded single-Groq approval is not valid for this V2 signal."
+        raw_reviews = record.get("ai_reviews")
+        if not isinstance(raw_reviews, list) or len(raw_reviews) != 1:
+            return False, "Exactly one Groq reviewer record is required for Challenge 1 V2."
+        item = raw_reviews[0]
+        if not isinstance(item, Mapping):
+            return False, "The Groq reviewer record is malformed."
+        review = item.get("review")
+        if not isinstance(review, Mapping):
+            return False, "The Groq reviewer response is missing."
+        if str(item.get("reviewer_id") or review.get("reviewer_id") or "").strip().lower() != "groq":
+            return False, "The sole V2 reviewer must be Groq."
+        provider = str(review.get("provider") or "").strip().casefold()
+        model = str(review.get("model") or "").strip()
+        returned_model = str(review.get("returned_model") or "").strip()
+        model_identity = model.split(":", 1)[0].casefold()
+        returned_identity = returned_model.split(":", 1)[0].casefold()
+        allowed_groq_models = {
+            "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
+        }
+        try:
+            reviewer_time = datetime.fromisoformat(
+                str(review.get("reviewed_at_utc") or "").replace("Z", "+00:00")
+            )
+            reviewer_age = (
+                datetime.now(timezone.utc) - reviewer_time.astimezone(timezone.utc)
+            ).total_seconds() if reviewer_time.tzinfo is not None else float("inf")
+        except (TypeError, ValueError):
+            reviewer_age = float("inf")
+        valid_groq_review = (
+            "groq" in provider
+            and model_identity in allowed_groq_models
+            and returned_identity == model_identity
+            and str(review.get("status") or "").strip().upper() == "APPROVED"
+            and review.get("paper_entry_eligible") is True
+            and review.get("request_attempted") is True
+            and str(review.get("response_source") or "").strip().upper() == "LIVE_API"
+            and review.get("response_validated") is True
+            and review.get("model_verified") is True
+            and str(review.get("reviewed_signal_id") or "").strip() == signal_id
+            and -30 <= reviewer_age <= 300
+            and str(review.get("expected_side") or "").strip().upper() == side
+            and str(review.get("trader_proposal") or "").strip().upper() == side
+            and str(review.get("elliott_wave_phase") or "").strip().upper() == wave_phase
+            and str(review.get("elliott_wave_direction") or "").strip().upper() == wave_direction
+            and str(consensus.get("reviewer_provider") or "").strip().casefold() == provider
+            and str(consensus.get("reviewer_model") or "").strip() == model
+        )
+        if not valid_groq_review:
+            return False, "Groq did not provide a fresh, verified live approval aligned with this exact signal and Elliott phase."
+        return True, "The sole verified Groq reviewer approved the same V2 signal and Elliott phase."
 
     required_consensus = (
         consensus.get("status") == "APPROVED_BY_BOTH"
