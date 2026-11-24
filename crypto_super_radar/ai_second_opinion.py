@@ -91,7 +91,7 @@ def _post_openrouter_with_fallback(
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v9-v2-explicit-schema-specialist-alias-normalization"
+PROMPT_VERSION = "free-second-opinion-v10-v2-nested-list-specialist-normalization-and-safe-shape-diagnostics"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
@@ -1161,6 +1161,7 @@ def _message_content_candidates(message: Any) -> list[str]:
 def _parse_validated_review_candidates(candidates, validator):
     """Select the first schema-valid JSON review, not merely the first JSON object."""
     validation_errors = []
+    candidate_shapes = []
     last_validation_error = None
     parsed_count = 0
     oversized = False
@@ -1177,6 +1178,10 @@ def _parse_validated_review_candidates(candidates, validator):
                                       "error_code": _safe_ai_error_code(exc)})
             continue
         parsed_count += 1
+        candidate_shapes.append({
+            "candidate_index": index,
+            **_candidate_shape_diagnostic(document),
+        })
         try:
             review = validator(document)
         except (TypeError, ValueError, KeyError, AttributeError) as exc:
@@ -1186,6 +1191,13 @@ def _parse_validated_review_candidates(candidates, validator):
             continue
         return document, review, index, validation_errors[:6]
     if last_validation_error is not None:
+        try:
+            setattr(last_validation_error, "_csr_parser_diagnostic", {
+                "candidate_validation_errors": validation_errors[:6],
+                "candidate_shapes": candidate_shapes[:6],
+            })
+        except Exception:
+            pass
         raise last_validation_error
     if oversized and parsed_count == 0:
         raise ValueError("AI response exceeded the maximum accepted size")
@@ -1369,42 +1381,148 @@ def _validated_v2_review(
     return result
 
 
-_SPECIALIST_CONTAINER_ALIASES = ("specialist_views", "specialist_analysis", "views")
+_SPECIALIST_CONTAINER_ALIASES = (
+    "specialist_views", "specialist_analysis", "views", "specialists",
+    "specialist_assessments", "expert_views",
+)
+_SPECIALIST_WRAPPER_ALIASES = (
+    "review", "analysis", "result", "response", "output", "committee",
+    "assessment", "specialist_review", "expert_analysis", "final_review",
+)
 _SPECIALIST_ROLE_ALIASES = {
-    "market_regime": ("market_regime", "market_regime_analyst", "regime_analyst", "regime", "market"),
-    "technical": ("technical", "technical_analyst", "tech_analyst", "tech"),
-    "news_sentiment": ("news_sentiment", "news_sentiment_analyst", "sentiment_analyst", "sentiment", "news"),
-    "bull_researcher": ("bull_researcher", "bullish_researcher", "bull_case", "bull"),
-    "bear_researcher": ("bear_researcher", "bearish_researcher", "bear_case", "bear"),
-    "trader": ("trader", "trade", "trading", "trade_proposal"),
-    "risk_manager": ("risk_manager", "risk_analyst", "risk_analysis", "risk"),
-    "portfolio_manager": ("portfolio_manager", "portfolio_analyst", "portfolio_analysis", "portfolio"),
+    "market_regime": (
+        "market_regime", "market_regime_analyst", "regime_analyst",
+        "market_regime_view", "market_trend", "regime", "market",
+    ),
+    "technical": (
+        "technical", "technical_analyst", "tech_analyst",
+        "technical_view", "technicals", "tech",
+    ),
+    "news_sentiment": (
+        "news_sentiment", "news_sentiment_analyst", "sentiment_analyst",
+        "news_analyst", "sentiment", "news",
+    ),
+    "bull_researcher": (
+        "bull_researcher", "bullish_researcher", "bull_case_analyst",
+        "bullish_case", "bull_case", "bull",
+    ),
+    "bear_researcher": (
+        "bear_researcher", "bearish_researcher", "bear_case_analyst",
+        "bearish_case", "bear_case", "bear",
+    ),
+    "trader": (
+        "trader", "trading_analyst", "trade_analyst", "trade",
+        "trading", "trade_proposal",
+    ),
+    "risk_manager": (
+        "risk_manager", "risk_analyst", "risk_analysis",
+        "risk_control", "risk",
+    ),
+    "portfolio_manager": (
+        "portfolio_manager", "portfolio_analyst", "portfolio_analysis",
+        "portfolio_risk_manager", "portfolio_risk", "portfolio",
+    ),
 }
+_SPECIALIST_ALIAS_TO_CANONICAL = {
+    re.sub(r"[^a-z0-9]+", "_", alias.lower()).strip("_"): canonical
+    for canonical, aliases in _SPECIALIST_ROLE_ALIASES.items()
+    for alias in aliases
+}
+_SPECIALIST_METADATA_KEYS = (
+    "decision", "direction", "final_rating", "risk_flags",
+    "rationale_fa", "wave_analyst", "confidence", "confidence_score",
+)
+
+
+def _specialist_payload_present(value: Mapping[str, Any]) -> bool:
+    if any(key in value for key in _SPECIALIST_CONTAINER_ALIASES):
+        return True
+    return any(key in _SPECIALIST_ALIAS_TO_CANONICAL for key in value)
+
+
+def _specialist_list_to_mapping(value: list[Any]) -> dict[str, Any]:
+    """Convert explicitly named specialist records to canonical role keys."""
+    specialists: dict[str, Any] = {}
+    for record in value:
+        if not isinstance(record, Mapping):
+            raise ValueError("Invalid specialist view")
+        role_value = next(
+            (record.get(key) for key in ("role", "name", "specialist", "agent")
+             if isinstance(record.get(key), str) and record.get(key).strip()),
+            None,
+        )
+        if role_value is None:
+            raise ValueError("Invalid specialist role name")
+        role_key = re.sub(r"[^a-z0-9]+", "_", role_value.lower()).strip("_")
+        canonical = _SPECIALIST_ALIAS_TO_CANONICAL.get(role_key)
+        if canonical is None:
+            # Additional commentary roles are harmless, but cannot replace a required role.
+            continue
+        details = dict(record)
+        nested_analysis = details.pop("analysis", None)
+        if isinstance(nested_analysis, Mapping):
+            details = {**dict(nested_analysis), **details}
+        for key in ("role", "name", "specialist", "agent"):
+            details.pop(key, None)
+        if canonical in specialists and specialists[canonical] != details:
+            raise ValueError("Conflicting aliases for a specialist role")
+        specialists[canonical] = details
+    return specialists
+
+
+def _unwrap_specialist_document(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Unwrap one unambiguous model response envelope; preserve explicit decision fields."""
+    current = dict(document)
+    for _depth in range(4):
+        if _specialist_payload_present(current):
+            return current
+        wrappers = [
+            (key, value) for key, value in current.items()
+            if key in _SPECIALIST_WRAPPER_ALIASES
+            and isinstance(value, Mapping)
+            and _specialist_payload_present(value)
+        ]
+        if not wrappers:
+            raise ValueError("Required specialist views are missing")
+        if len(wrappers) != 1:
+            raise ValueError("Conflicting nested specialist review objects")
+        child = dict(wrappers[0][1])
+        for key in _SPECIALIST_METADATA_KEYS:
+            if key not in child and key in current:
+                child[key] = current[key]
+        current = child
+    raise ValueError("Specialist response wrapper nesting exceeded the safe limit")
 
 
 def _normalize_specialist_views(document: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize common model key aliases without inventing missing specialist evidence."""
+    """Normalize common model aliases without inventing missing specialist evidence."""
     if not isinstance(document, Mapping):
         raise ValueError("AI response is not a JSON object")
-    normalized = dict(document)
-    containers = [
-        (key, document.get(key))
-        for key in _SPECIALIST_CONTAINER_ALIASES
-        if isinstance(document.get(key), Mapping)
-    ]
-    if not containers:
-        role_names = {alias for aliases in _SPECIALIST_ROLE_ALIASES.values() for alias in aliases}
-        specialists = {key: value for key, value in document.items() if key in role_names}
-        if not specialists:
-            raise ValueError("Required specialist views are missing")
-    else:
-        specialists = dict(containers[0][1])
-        for _, candidate in containers[1:]:
-            if dict(candidate) != specialists:
+    normalized = _unwrap_specialist_document(document)
+    containers = [(key, normalized.get(key)) for key in _SPECIALIST_CONTAINER_ALIASES if key in normalized]
+    if containers:
+        converted = []
+        for key, value in containers:
+            if isinstance(value, Mapping):
+                converted.append((key, dict(value)))
+            elif isinstance(value, list):
+                converted.append((key, _specialist_list_to_mapping(value)))
+            else:
+                raise ValueError("Invalid specialist views container")
+        specialists = converted[0][1]
+        for _, candidate in converted[1:]:
+            if candidate != specialists:
                 raise ValueError("Conflicting specialist view containers")
-    clean = {}
+    else:
+        specialists = {
+            key: value for key, value in normalized.items()
+            if key in _SPECIALIST_ALIAS_TO_CANONICAL
+        }
+    clean: dict[str, dict[str, Any]] = {}
     for canonical, aliases in _SPECIALIST_ROLE_ALIASES.items():
         present = [(alias, specialists[alias]) for alias in aliases if alias in specialists]
+        if canonical in specialists:
+            present.insert(0, (canonical, specialists[canonical]))
         if not present:
             raise ValueError("Required specialist views are missing")
         first_value = present[0][1]
@@ -1414,22 +1532,29 @@ def _normalize_specialist_views(document: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("Invalid specialist view")
         item = dict(first_value)
         if canonical == "trader":
-            value_keys = ("proposal", "direction", "view", "verdict", "decision", "status")
+            value_keys = ("proposal", "direction", "view", "verdict", "decision", "status", "recommendation", "action")
         elif canonical in {"risk_manager", "portfolio_manager"}:
-            value_keys = ("verdict", "decision", "view", "status")
+            value_keys = ("verdict", "decision", "view", "status", "recommendation")
         else:
-            value_keys = ("view", "verdict", "stance", "decision", "status")
+            value_keys = ("view", "verdict", "stance", "decision", "status", "bias", "assessment")
         raw_value = next((item.get(key) for key in value_keys if item.get(key) not in (None, "")), None)
         if not isinstance(raw_value, str):
             raise ValueError("Invalid specialist verdict")
         token = raw_value.strip().upper().replace("-", "_").replace(" ", "_")
         token = {
             "BULL": "BULLISH", "BEAR": "BEARISH", "SUPPORTS": "SUPPORT",
-            "AGAINST": "OPPOSE", "APPROVED": "APPROVE", "REJECTED": "REJECT",
+            "AGAINST": "OPPOSE", "APPROVED": "APPROVE", "ACCEPT": "APPROVE",
+            "REJECTED": "REJECT", "VETO": "REJECT",
             "INSUFFICIENT": "INSUFFICIENT_DATA", "BUY": "LONG", "SELL": "SHORT",
         }.get(token, token)
-        reason_keys = ("reason_fa", "reason", "analysis", "rationale", "explanation", "why")
-        reason = next((item.get(key) for key in reason_keys if isinstance(item.get(key), str) and item.get(key).strip()), None)
+        if canonical == "trader":
+            token = {"BULLISH": "LONG", "BEARISH": "SHORT"}.get(token, token)
+        reason_keys = ("reason_fa", "reason", "analysis", "rationale", "explanation", "why", "summary", "details")
+        reason = next(
+            (item.get(key) for key in reason_keys
+             if isinstance(item.get(key), str) and item.get(key).strip()),
+            None,
+        )
         if not reason:
             raise ValueError("Specialist explanation is missing")
         if canonical == "trader":
@@ -1441,7 +1566,7 @@ def _normalize_specialist_views(document: Mapping[str, Any]) -> dict[str, Any]:
         item["reason_fa"] = reason.strip()
         clean[canonical] = item
     normalized["specialist_views"] = clean
-    declared_decision = document.get("decision")
+    declared_decision = normalized.get("decision")
     if declared_decision not in (None, ""):
         if not isinstance(declared_decision, str):
             raise ValueError("AI final decision is invalid")
@@ -1450,7 +1575,7 @@ def _normalize_specialist_views(document: Mapping[str, Any]) -> dict[str, Any]:
         if decision not in {"APPROVE", "VETO", "INSUFFICIENT_DATA"}:
             raise ValueError("AI final decision is invalid")
         normalized["decision"] = decision
-    declared_direction = document.get("direction")
+    declared_direction = normalized.get("direction")
     if declared_direction not in (None, ""):
         if not isinstance(declared_direction, str):
             raise ValueError("AI direction is invalid")
@@ -1460,6 +1585,48 @@ def _normalize_specialist_views(document: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("AI direction is invalid")
         normalized["direction"] = direction
     return normalized
+
+
+def _candidate_shape_diagnostic(document: Any) -> dict[str, Any]:
+    """Return schema key names only; never log model prose or values."""
+    if not isinstance(document, Mapping):
+        return {"document_type": type(document).__name__}
+    keys = sorted(str(key)[:80] for key in document.keys() if isinstance(key, str))[:32]
+    containers = []
+    role_keys = []
+    for key in _SPECIALIST_CONTAINER_ALIASES:
+        if key not in document:
+            continue
+        value = document.get(key)
+        if isinstance(value, Mapping):
+            containers.append({"key": key, "type": "object"})
+            role_keys.extend(
+                str(role)[:80] for role in value.keys()
+                if isinstance(role, str) and role in _SPECIALIST_ALIAS_TO_CANONICAL
+            )
+        elif isinstance(value, list):
+            names = []
+            for item in value[:16]:
+                if isinstance(item, Mapping):
+                    role = next((item.get(k) for k in ("role", "name", "specialist", "agent") if isinstance(item.get(k), str)), None)
+                    if role:
+                        names.append(str(role)[:80])
+            containers.append({"key": key, "type": "array", "role_names": names})
+        else:
+            containers.append({"key": key, "type": type(value).__name__})
+    wrappers = [
+        key for key, value in document.items()
+        if isinstance(key, str) and key in _SPECIALIST_WRAPPER_ALIASES
+        and isinstance(value, Mapping)
+    ]
+    root_roles = [key for key in keys if key in _SPECIALIST_ALIAS_TO_CANONICAL]
+    return {
+        "top_level_keys": keys,
+        "specialist_containers": containers,
+        "specialist_role_keys": sorted(set(role_keys)),
+        "root_role_aliases": root_roles,
+        "wrapper_keys": wrappers[:12],
+    }
 
 
 def _validated_review(document: dict[str, Any], model: str, asset: str, *, expected_side: str = "LONG", market_type: str = "spot") -> dict[str, Any]:
@@ -1812,6 +1979,9 @@ def run_free_ai_second_opinion(
                         _CACHE.pop(next(iter(_CACHE)))
         return review
     except Exception as exc:
+        extra_diagnostic = getattr(exc, "_csr_parser_diagnostic", None)
+        if isinstance(extra_diagnostic, dict):
+            parser_diagnostic.update(extra_diagnostic)
         return {
             "provider": "OpenRouter", "model": model, "status": "UNKNOWN",
             "status_fa": "پاسخ معتبر از هوش مصنوعی دریافت نشد؛ ورود جدید متوقف شد.",
@@ -2128,6 +2298,9 @@ def run_independent_ai_supervisor(
         })
         return review
     except Exception as exc:
+        extra_diagnostic = getattr(exc, "_csr_parser_diagnostic", None)
+        if isinstance(extra_diagnostic, dict):
+            parser_diagnostic.update(extra_diagnostic)
         return {
             "reviewer_id": "second_ai", "provider": provider, "model": model,
             "status": "ERROR",
