@@ -7136,8 +7136,8 @@ def _ai_copilot_dashboard_context() -> dict:
         security = item.get("security_evidence") if isinstance(item.get("security_evidence"), dict) else {}
         address = item.get("token_address") or item.get("contract_address") or item.get("address")
         safe_candidates.append({
-            "name": item.get("name") or "UNKNOWN",
-            "symbol": item.get("symbol") or "UNKNOWN",
+            "name": item.get("name") or item.get("token_name") or "UNKNOWN",
+            "symbol": item.get("symbol") or item.get("token_symbol") or "UNKNOWN",
             "chain": item.get("chain") or "UNKNOWN",
             "contract_address_short": _short_ai_contract_address(address),
             "price_usd": item.get("price_usd"),
