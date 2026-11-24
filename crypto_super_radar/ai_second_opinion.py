@@ -91,7 +91,7 @@ def _post_openrouter_with_fallback(
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v11-v2-normalized-envelope-and-wave-evidence"
+PROMPT_VERSION = "free-second-opinion-v12-v2-safe-schema-token-diagnostics"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
@@ -1186,8 +1186,11 @@ def _parse_validated_review_candidates(candidates, validator):
             review = validator(document)
         except (TypeError, ValueError, KeyError, AttributeError) as exc:
             last_validation_error = exc
-            validation_errors.append({"candidate_index": index, "stage": "schema",
-                                      "error_code": _safe_ai_error_code(exc)})
+            validation_errors.append({
+                "candidate_index": index, "stage": "schema",
+                "error_code": _safe_ai_error_code(exc),
+                "validation_error": str(exc)[:140] if isinstance(exc, ValueError) else type(exc).__name__,
+            })
             continue
         return document, review, index, validation_errors[:6]
     if last_validation_error is not None:
@@ -1591,44 +1594,78 @@ def _normalize_specialist_views(document: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _candidate_shape_diagnostic(document: Any) -> dict[str, Any]:
-    """Return schema key names only; never log model prose or values."""
+    """Return schema keys and enum tokens only; never log model prose or values."""
     if not isinstance(document, Mapping):
         return {"document_type": type(document).__name__}
     keys = sorted(str(key)[:80] for key in document.keys() if isinstance(key, str))[:32]
+    target = document
+    nested_wrappers = []
+    for key in _SPECIALIST_WRAPPER_ALIASES:
+        child = document.get(key)
+        if isinstance(child, Mapping):
+            nested_wrappers.append(key)
+    if len(nested_wrappers) == 1 and isinstance(document.get(nested_wrappers[0]), Mapping):
+        target = document[nested_wrappers[0]]
     containers = []
-    role_keys = []
+    specialists = None
     for key in _SPECIALIST_CONTAINER_ALIASES:
-        if key not in document:
+        if key not in target:
             continue
-        value = document.get(key)
+        value = target.get(key)
         if isinstance(value, Mapping):
+            specialists = dict(value)
             containers.append({"key": key, "type": "object"})
-            role_keys.extend(
-                str(role)[:80] for role in value.keys()
-                if isinstance(role, str) and role in _SPECIALIST_ALIAS_TO_CANONICAL
-            )
         elif isinstance(value, list):
-            names = []
-            for item in value[:16]:
-                if isinstance(item, Mapping):
-                    role = next((item.get(k) for k in ("role", "name", "specialist", "agent") if isinstance(item.get(k), str)), None)
-                    if role:
-                        names.append(str(role)[:80])
-            containers.append({"key": key, "type": "array", "role_names": names})
+            containers.append({"key": key, "type": "array"})
+            try:
+                specialists = _specialist_list_to_mapping(value)
+            except (TypeError, ValueError):
+                specialists = None
         else:
             containers.append({"key": key, "type": type(value).__name__})
-    wrappers = [
-        key for key, value in document.items()
-        if isinstance(key, str) and key in _SPECIALIST_WRAPPER_ALIASES
-        and isinstance(value, Mapping)
-    ]
+    role_keys = []
+    role_value_tokens = {}
+    if isinstance(specialists, Mapping):
+        for role_key, role_value in specialists.items():
+            if isinstance(role_key, str) and role_key in _SPECIALIST_ALIAS_TO_CANONICAL:
+                role_keys.append(role_key)
+        for canonical, aliases in _SPECIALIST_ROLE_ALIASES.items():
+            item = next((specialists.get(alias) for alias in aliases if alias in specialists), None)
+            if isinstance(item, Mapping):
+                value_keys = (
+                    ("proposal", "direction", "view", "verdict", "decision", "status", "recommendation", "action")
+                    if canonical == "trader" else
+                    ("verdict", "decision", "view", "status", "recommendation")
+                    if canonical in {"risk_manager", "portfolio_manager"} else
+                    ("view", "verdict", "stance", "decision", "status", "bias", "assessment")
+                )
+                raw = next((item.get(k) for k in value_keys if item.get(k) not in (None, "")), None)
+                if isinstance(raw, str):
+                    role_value_tokens[canonical] = raw.strip().upper().replace("-", "_").replace(" ", "_")[:40]
     root_roles = [key for key in keys if key in _SPECIALIST_ALIAS_TO_CANONICAL]
+    wave = target.get("wave_analyst")
+    wave_shape = None
+    if isinstance(wave, Mapping):
+        wave_shape = {
+            "keys": sorted(str(key)[:60] for key in wave.keys() if isinstance(key, str))[:16],
+            "verdict": str(wave.get("verdict") or wave.get("decision") or wave.get("assessment") or "").strip().upper()[:40],
+            "phase": str(wave.get("phase") or wave.get("wave_phase") or "").strip().upper()[:60],
+            "direction": str(wave.get("direction") or wave.get("wave_direction") or "").strip().upper()[:30],
+        }
+    risk_flags = target.get("risk_flags")
     return {
         "top_level_keys": keys,
         "specialist_containers": containers,
         "specialist_role_keys": sorted(set(role_keys)),
+        "role_value_tokens": role_value_tokens,
         "root_role_aliases": root_roles,
-        "wrapper_keys": wrappers[:12],
+        "wrapper_keys": nested_wrappers[:12],
+        "final_rating_token": str(target.get("final_rating") or "").strip().upper()[:40],
+        "risk_flags_shape": {
+            "type": type(risk_flags).__name__,
+            "count": len(risk_flags) if isinstance(risk_flags, list) else None,
+        },
+        "wave_analyst_shape": wave_shape,
     }
 
 
