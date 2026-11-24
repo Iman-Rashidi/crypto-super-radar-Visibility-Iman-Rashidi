@@ -713,6 +713,7 @@ class GemHunterV3Tests(unittest.TestCase):
             "gem_hunter_v3_trade_authorization": "NO_TRADE",
             "security_evidence": {"status": "UNKNOWN"},
             "tier_base_security_status": "UNKNOWN",
+            "risk_score": 55,
             "pump_phase_fa": "🟢 فاز ۱: شروع پامپ (Early Ignition)",
             "buy_volume_share_pct": 60,
         }
