@@ -56,8 +56,8 @@ class ScanResilienceTests(unittest.TestCase):
             completed = engine.analyze(asset)
 
         self.assertIs(completed, result)
-        self.assertEqual([g.gate_id for g in completed.gates[-2:]], [10, 11])
-        self.assertEqual(completed.gates[-1].status, GateStatus.UNKNOWN)
+        self.assertEqual([g.gate_id for g in completed.gates[-3:]], [10, 11, 12])
+        self.assertEqual(completed.gates[-2].status, GateStatus.UNKNOWN)
         self.assertEqual(completed.metrics["sentiment_coverage_status"], "UNKNOWN")
         self.assertEqual(completed.metrics["market_intelligence"]["status"], "PARTIAL")
         self.assertEqual(completed.signal, Signal.NO_TRADE)
