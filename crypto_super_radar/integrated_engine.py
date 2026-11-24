@@ -259,13 +259,26 @@ class WhaleAwareConfirmationEngine:
     ):
         asset = asset_input if isinstance(asset_input, AssetSpec) else AssetSpec.parse(asset_input)
         supplied = list(headlines or [])
-        sentiment = self.sentiment_fetcher(
-            self.news_feed_urls,
-            social_feed_urls=self.social_feed_urls,
-            social_text=list(social_posts or []),
-            cache=self.sentiment_cache,
-            limiter=getattr(getattr(self.data, "http", None), "limiter", None),
-        )
+        try:
+            sentiment = self.sentiment_fetcher(
+                self.news_feed_urls,
+                social_feed_urls=self.social_feed_urls,
+                social_text=list(social_posts or []),
+                cache=self.sentiment_cache,
+                limiter=getattr(getattr(self.data, "http", None), "limiter", None),
+            )
+            if not isinstance(sentiment, dict):
+                raise TypeError("Sentiment provider returned a non-object payload")
+        except Exception as exc:
+            # Optional sentiment providers must never abort the core market analysis.
+            # UNKNOWN remains a blocking gate; it is not silently treated as PASS.
+            sentiment = {
+                "status": "UNKNOWN", "score": None, "label": "UNKNOWN",
+                "reason": f"Sentiment collection failed: {type(exc).__name__}: {str(exc)[:240]}",
+                "news": {"status": "ERROR", "headlines": []},
+                "social": {"status": "ERROR", "headlines": []},
+                "fear_greed": None, "social_coverage": "UNKNOWN",
+            }
         news_items = [
             " ".join(x for x in (item.get("title", ""), item.get("summary", "")) if x)
             for item in sentiment.get("news", {}).get("headlines", [])
@@ -379,13 +392,27 @@ class WhaleAwareConfirmationEngine:
              "market_behavior": behavior},
         ))
         direction = result.gates[2].evidence.get("direction") if len(result.gates) >= 3 else None
-        market_intelligence = fetch_market_intelligence(
-            asset,
-            direction or "NONE",
-            snapshot=snapshot,
-            http=getattr(self.data, "http", None),
-            min_dex_liquidity_usd=self.config.thresholds.min_dex_liquidity_usd,
-        )
+        try:
+            market_intelligence = fetch_market_intelligence(
+                asset,
+                direction or "NONE",
+                snapshot=snapshot,
+                http=getattr(self.data, "http", None),
+                min_dex_liquidity_usd=self.config.thresholds.min_dex_liquidity_usd,
+            )
+            if not isinstance(market_intelligence, dict):
+                raise TypeError("Market intelligence provider returned a non-object payload")
+        except Exception as exc:
+            # Preserve the validated price/candle analysis when enrichment APIs fail.
+            market_intelligence = {
+                "status": "PARTIAL",
+                "reason": f"Market intelligence collection failed: {type(exc).__name__}: {str(exc)[:240]}",
+                "dex_screener": {"status": "UNKNOWN", "reason": "DEX enrichment unavailable"},
+                "coinglass": {"status": "UNKNOWN", "reason": "Derivatives enrichment unavailable",
+                              "whale_intelligence": {"status": "UNKNOWN",
+                                  "reason": "Whale enrichment unavailable"}},
+                "scoring": {},
+            }
         market_intelligence_scoring = market_intelligence.get("scoring") or {}
         market_intelligence_confirmation_adjustment = float(
             market_intelligence_scoring.get("confirmation_adjustment") or 0.0
