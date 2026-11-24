@@ -726,8 +726,8 @@ class WebAppHttpTests(unittest.TestCase):
             "gem_hunter_v3_tier1_count": 1,
             "gem_hunter_v3_tier2_count": 0,
             "candidates": [{
-                "name": "Example Token",
-                "symbol": "EXT",
+                "token_name": "Example Token",
+                "token_symbol": "EXT",
                 "chain": "base",
                 "token_address": "0x1234567890abcdef1234567890abcdef12345678",
                 "price_usd": 0.0125,
