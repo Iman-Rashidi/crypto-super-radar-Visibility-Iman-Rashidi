@@ -692,6 +692,11 @@ def _blofin_dashboard_token_valid(auth_header: str, expected_token: str) -> bool
 
 
 V2_AUTOPILOT_RUN_LOCK = threading.Lock()
+# Read-only public cycle snapshot cache: the dashboard and CSR AI Chat can share
+# one short-lived Turso read without changing the Demo execution pipeline.
+V2_PUBLIC_SNAPSHOT_CACHE_TTL_SECONDS = 10.0
+V2_PUBLIC_SNAPSHOT_CACHE_LOCK = threading.Lock()
+V2_PUBLIC_SNAPSHOT_CACHE = {"expires_at": 0.0, "payload": None}
 V2_AUTOPILOT_RUN_STATE = {
     "status": "IDLE", "job_id": None, "started_at_utc": None,
     "finished_at_utc": None, "result": None, "error_type": None,
@@ -970,20 +975,25 @@ def _publish_blofin_v2_cycle_report(report: dict) -> dict:
 
 
 def _blofin_v2_public_cycle_snapshot() -> dict:
-    """Read and expose only the latest five public market rows from Turso."""
+    """Read and expose the latest five public market rows from Turso with a short read-only cache."""
+    now = time.monotonic()
+    with V2_PUBLIC_SNAPSHOT_CACHE_LOCK:
+        cached = V2_PUBLIC_SNAPSHOT_CACHE.get("payload")
+        if cached is not None and V2_PUBLIC_SNAPSHOT_CACHE.get("expires_at", 0.0) > now:
+            return copy.deepcopy(cached)
+
     connection = None
     try:
         if storage_backend() != "TURSO_CLOUD_SQLITE":
             raise RuntimeError("DURABLE_TURSO_NOT_CONFIGURED")
         connection = connect_database()
-        connection.execute("""CREATE TABLE IF NOT EXISTS challenge1_v2_autopilot_cycles (
-            cycle_id TEXT NOT NULL, symbol TEXT NOT NULL, started_at_utc TEXT NOT NULL,
-            finished_at_utc TEXT NOT NULL, environment TEXT NOT NULL, mode TEXT NOT NULL,
-            status TEXT NOT NULL, signal TEXT, reason TEXT, orders_submitted INTEGER NOT NULL DEFAULT 0,
-            payload_json TEXT NOT NULL, PRIMARY KEY (cycle_id, symbol))""")
+        # The writer creates this table. Avoid DDL on a read endpoint; one indexed
+        # latest-cycle lookup is enough to return the five market rows.
         rows = connection.execute(
             "SELECT cycle_id,symbol,started_at_utc,finished_at_utc,mode,status,signal,reason,orders_submitted,payload_json "
-            "FROM challenge1_v2_autopilot_cycles ORDER BY finished_at_utc DESC LIMIT 25"
+            "FROM challenge1_v2_autopilot_cycles WHERE cycle_id = ("
+            "SELECT cycle_id FROM challenge1_v2_autopilot_cycles "
+            "ORDER BY finished_at_utc DESC LIMIT 1)"
         ).fetchall()
         decoded = []
         for row in rows:
@@ -1070,7 +1080,7 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
             })
         with LOCK:
             state = copy.deepcopy(V2_AUTOPILOT_RUN_STATE)
-        return {
+        result = {
             "status": "OK", "environment": "BLOFIN_DEMO",
             "latest_cycle_id": latest_cycle_id,
             "scan_time_utc": (
@@ -1084,6 +1094,10 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
                 "finished_at_utc": state.get("finished_at_utc"),
             },
         }
+        with V2_PUBLIC_SNAPSHOT_CACHE_LOCK:
+            V2_PUBLIC_SNAPSHOT_CACHE["payload"] = copy.deepcopy(result)
+            V2_PUBLIC_SNAPSHOT_CACHE["expires_at"] = time.monotonic() + V2_PUBLIC_SNAPSHOT_CACHE_TTL_SECONDS
+        return result
     except Exception as exc:
         return {
             "status": "UNAVAILABLE", "environment": "BLOFIN_DEMO",
