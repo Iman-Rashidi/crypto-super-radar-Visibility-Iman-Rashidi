@@ -848,52 +848,59 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertFalse(result["orders_submitted"])
         self.assertFalse(result["trade_executed"])
 
-    def test_challenge1_synthetic_dry_run_uses_exact_two_reviewer_gate_and_never_trades(self):
+    def test_challenge1_synthetic_dry_run_uses_single_groq_reviewer_and_never_trades(self):
         previous = dict(web_app.AI_DRY_RUN_STATE)
-        primary_config = {
-            "configured": True, "provider": "OpenRouter",
-            "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "status": "CONFIGURED",
-        }
         second_config = {
             "configured": True, "provider": "Groq",
             "model": "openai/gpt-oss-120b", "status": "CONFIGURED",
             "configuration_issues": [],
         }
+        groq_review = {
+            "reviewer_id": "groq", "provider": "Groq",
+            "model": "openai/gpt-oss-120b",
+            "request_attempted": True, "response_source": "LIVE_API",
+        }
         expected_quorum = {
             "approved": True,
-            "status": "APPROVED_BY_BOTH",
-            "reason_fa": "Synthetic test quorum only.",
+            "status": "APPROVED_BY_GROQ",
+            "reason_fa": "Synthetic test approval only.",
             "ai_consensus": {
-                "status": "APPROVED_BY_BOTH",
-                "primary_verified": True, "second_verified": True,
-                "providers_independent": True, "models_independent": True,
+                "status": "APPROVED_BY_GROQ",
+                "decision": "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER",
+                "single_reviewer_approval": True,
+                "reviewer_id": "groq",
+                "reviewer_verified": True,
+                "provider_is_groq": True,
+                "model_is_groq_allowlisted": True,
+                "reviewer_approved": True,
             },
             "ai_reviews": [
-                {"reviewer_id": "nemotron", "review": {"request_attempted": True, "response_source": "LIVE_API"}},
-                {"reviewer_id": "second_ai", "review": {"request_attempted": True, "response_source": "LIVE_API"}},
+                {"reviewer_id": "groq", "actor": "Groq Supervisor", "review": groq_review},
             ],
-            "ai_review": {"reviewer_id": "nemotron"},
-            "second_ai_review": {"reviewer_id": "second_ai"},
+            "ai_review": groq_review,
+            "second_ai_review": None,
         }
         try:
             web_app.AI_DRY_RUN_STATE.update(day=datetime.now(timezone.utc).date().isoformat(), count=0, last_started=0.0)
             with (
-                patch.object(web_app, "ai_connection_status", return_value=primary_config),
                 patch.object(web_app, "second_ai_connection_status", return_value=second_config),
-                patch.object(web_app, "_run_challenge1_supervisor_reviews", return_value=expected_quorum) as quorum,
+                patch.object(web_app, "_run_challenge1_supervisor_reviews", return_value=expected_quorum) as reviewer,
                 patch.object(web_app, "run_ai_supervisor") as generic_supervisor,
                 patch.object(web_app.FUTURES_PAPER_BOT, "run_once") as futures_tick,
                 patch.object(web_app.PAPER_BOT, "run_once") as spot_tick,
             ):
                 result = web_app._run_ai_synthetic_dry_run_limited()
             self.assertTrue(result["test_passed"])
-            self.assertEqual(result["test_mode"], "SYNTHETIC_CHALLENGE1_DUAL_REVIEWER_DRY_RUN")
-            self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_BOTH")
+            self.assertEqual(result["test_mode"], "SYNTHETIC_CHALLENGE1_GROQ_DRY_RUN")
+            self.assertEqual(result["ai_consensus"]["status"], "APPROVED_BY_GROQ")
+            self.assertEqual(result["ai_consensus"]["reviewer_id"], "groq")
+            self.assertEqual(len(result["ai_reviews"]), 1)
+            self.assertEqual(result["ai_reviews"][0]["reviewer_id"], "groq")
             self.assertFalse(result["paper_entry_eligible"])
             self.assertFalse(result["orders_submitted"])
             self.assertFalse(result["trade_executed"])
-            quorum.assert_called_once()
-            analysis, asset = quorum.call_args.args
+            reviewer.assert_called_once()
+            analysis, asset = reviewer.call_args.args
             self.assertEqual(asset.raw, "perp:BTCUSDT")
             self.assertEqual(analysis.metrics["execution_profile"], "CHALLENGE_1")
             record = analysis.to_record()
@@ -907,33 +914,27 @@ class WebAppHttpTests(unittest.TestCase):
             web_app.AI_DRY_RUN_STATE.clear()
             web_app.AI_DRY_RUN_STATE.update(previous)
 
-    def test_challenge1_synthetic_dry_run_fails_closed_before_any_model_call_when_second_reviewer_missing(self):
+    def test_challenge1_synthetic_dry_run_fails_closed_when_groq_reviewer_is_missing(self):
         previous = dict(web_app.AI_DRY_RUN_STATE)
-        primary_config = {
-            "configured": True, "provider": "OpenRouter",
-            "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "status": "CONFIGURED",
-        }
         second_config = {
-            "configured": False, "provider": None, "model": None,
-            "status": "NOT_CONFIGURED", "configuration_issues": ["CSR_SECOND_AI_API_KEY_MISSING"],
+            "configured": False, "provider": "Groq", "model": "openai/gpt-oss-120b",
+            "status": "NOT_CONFIGURED", "configuration_issues": ["GROQ_API_KEY_MISSING"],
         }
         try:
             with (
-                patch.object(web_app, "ai_connection_status", return_value=primary_config),
                 patch.object(web_app, "second_ai_connection_status", return_value=second_config),
-                patch.object(web_app, "_run_challenge1_supervisor_reviews") as quorum,
+                patch.object(web_app, "_run_challenge1_supervisor_reviews") as reviewer,
             ):
                 result = web_app._run_ai_synthetic_dry_run_limited()
-            self.assertEqual(result["status"], "PROVIDERS_INSUFFICIENT")
+            self.assertEqual(result["status"], "NOT_CONFIGURED")
             self.assertFalse(result["test_passed"])
             self.assertFalse(result["paper_entry_eligible"])
             self.assertFalse(result["orders_submitted"])
             self.assertFalse(result["trade_executed"])
-            self.assertTrue(all(
-                item["review"]["request_attempted"] is False
-                for item in result["ai_reviews"]
-            ))
-            quorum.assert_not_called()
+            self.assertEqual(len(result["ai_reviews"]), 1)
+            self.assertEqual(result["ai_reviews"][0]["reviewer_id"], "groq")
+            self.assertIs(result["ai_reviews"][0]["review"]["request_attempted"], False)
+            reviewer.assert_not_called()
         finally:
             web_app.AI_DRY_RUN_STATE.clear()
             web_app.AI_DRY_RUN_STATE.update(previous)
@@ -2110,9 +2111,9 @@ class Challenge1PositionManagerTests(unittest.TestCase):
 
 class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
     def review(
-        self, reviewer_id, provider, model, *, status="APPROVED",
-        wave_phase="WAVES_1_AND_2_CONFIRMED", wave_direction="BULLISH",
-        trader_proposal="LONG", paper_entry=True,
+        self, reviewer_id="groq", provider="Groq", model="openai/gpt-oss-120b", *,
+        status="APPROVED", wave_phase="WAVES_1_AND_2_CONFIRMED",
+        wave_direction="BULLISH", trader_proposal="LONG", paper_entry=True,
     ):
         return {
             "reviewer_id": reviewer_id,
@@ -2135,10 +2136,10 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
         return SimpleNamespace(
             signal="LONG",
             metrics={
-                "execution_profile": "CHALLENGE_1",
-                "challenge1_evidence": {
+                "execution_profile": "CHALLENGE_1_V2",
+                "challenge1_v2_evidence": {
                     "elliott_wave": {
-                        "status": "CANDIDATE",
+                        "status": "CONFIRMED",
                         "pattern": "BULLISH",
                         "phase": "WAVES_1_AND_2_CONFIRMED",
                     },
@@ -2146,94 +2147,77 @@ class Challenge1IndependentSupervisorGateTests(unittest.TestCase):
             },
         )
 
-    def test_two_independent_valid_approvals_authorize_demo_executor_only(self):
-        primary = self.review("nemotron", "OpenRouter", "nvidia/nemotron-free")
-        secondary = self.review("second_ai", "Groq", "openai/gpt-oss-120b")
+    def test_single_verified_groq_approval_authorizes_only_after_all_evidence_checks(self):
+        groq = self.review()
         with (
-            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
-            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
+            patch.object(web_app, "run_free_ai_second_opinion") as nemotron,
+            patch.object(web_app, "run_independent_ai_supervisor", return_value=groq) as groq_reviewer,
         ):
             result = web_app._run_challenge1_supervisor_reviews(
                 self.analysis(), "perp:BTCUSDT",
             )
         self.assertTrue(result["approved"])
-        self.assertEqual(result["status"], "APPROVED_BY_BOTH")
-        self.assertEqual(result["ai_consensus"]["decision"], "AUTHORIZE_DEMO_EXECUTION")
+        self.assertEqual(result["status"], "APPROVED_BY_GROQ")
+        self.assertEqual(result["ai_consensus"]["decision"], "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER")
         self.assertTrue(result["ai_consensus"]["entry_gate_enforced"])
-        self.assertTrue(result["ai_consensus"]["providers_independent"])
-        self.assertTrue(result["ai_consensus"]["models_independent"])
-        self.assertTrue(all(
-            item["review"]["execution_role"] == "ENTRY_APPROVAL_GATE"
-            and item["review"]["entry_gate_enforced"]
-            for item in result["ai_reviews"]
-        ))
+        self.assertTrue(result["ai_consensus"]["single_reviewer_approval"])
+        self.assertFalse(result["ai_consensus"]["two_reviewer_approval"])
+        self.assertEqual(len(result["ai_reviews"]), 1)
+        self.assertEqual(result["ai_reviews"][0]["reviewer_id"], "groq")
+        nemotron.assert_not_called()
+        groq_reviewer.assert_called_once()
 
-    def test_one_veto_blocks_even_when_the_other_reviewer_approves(self):
-        primary = self.review("nemotron", "OpenRouter", "nvidia/nemotron-free")
-        secondary = self.review(
-            "second_ai", "Groq", "openai/gpt-oss-120b",
-            status="VETO", paper_entry=False,
-        )
-        with (
-            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
-            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
-        ):
+    def test_groq_veto_blocks_entry(self):
+        groq = self.review(status="VETO", paper_entry=False)
+        with patch.object(web_app, "run_independent_ai_supervisor", return_value=groq):
             result = web_app._run_challenge1_supervisor_reviews(
                 self.analysis(), "perp:BTCUSDT",
             )
         self.assertFalse(result["approved"])
         self.assertEqual(result["status"], "VETO")
         self.assertEqual(result["ai_consensus"]["decision"], "BLOCK_DEMO_ENTRY")
+        self.assertEqual(len(result["ai_reviews"]), 1)
 
-    def test_missing_or_unverified_second_review_fails_closed(self):
-        primary = self.review("nemotron", "OpenRouter", "nvidia/nemotron-free")
-        secondary = {
-            "reviewer_id": "second_ai", "provider": "Groq",
+    def test_missing_or_unverified_groq_review_fails_closed(self):
+        groq = {
+            "reviewer_id": "groq", "provider": "Groq",
             "model": "openai/gpt-oss-120b", "status": "NOT_CONFIGURED",
             "request_attempted": False, "response_source": "NONE",
             "response_validated": False, "model_verified": False,
             "paper_entry_eligible": False,
         }
-        with (
-            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
-            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
-        ):
+        with patch.object(web_app, "run_independent_ai_supervisor", return_value=groq):
             result = web_app._run_challenge1_supervisor_reviews(
                 self.analysis(), "perp:BTCUSDT",
             )
         self.assertFalse(result["approved"])
-        self.assertNotEqual(result["status"], "APPROVED_BY_BOTH")
+        self.assertEqual(result["status"], "NOT_CONFIGURED")
         self.assertEqual(result["ai_consensus"]["decision"], "BLOCK_DEMO_ENTRY")
+        self.assertEqual(len(result["ai_reviews"]), 1)
 
-    def test_duplicate_provider_or_model_cannot_count_as_independent_quorum(self):
-        primary = self.review("nemotron", "OpenRouter", "same-model")
-        secondary = self.review("second_ai", "OpenRouter", "same-model")
-        with (
-            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
-            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
+    def test_non_groq_provider_or_unallowlisted_model_cannot_approve(self):
+        for changes in (
+            {"provider": "OpenRouter"},
+            {"model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+             "returned_model": "nvidia/nemotron-3-ultra-550b-a55b:free"},
         ):
+            with self.subTest(changes=changes):
+                groq = {**self.review(), **changes}
+                with patch.object(web_app, "run_independent_ai_supervisor", return_value=groq):
+                    result = web_app._run_challenge1_supervisor_reviews(
+                        self.analysis(), "perp:BTCUSDT",
+                    )
+                self.assertFalse(result["approved"])
+                self.assertEqual(result["ai_consensus"]["status"], "UNKNOWN")
+
+    def test_groq_wave_phase_mismatch_cannot_be_overridden_by_approval_flag(self):
+        groq = self.review(wave_phase="WAVE_3_CONFIRMED")
+        with patch.object(web_app, "run_independent_ai_supervisor", return_value=groq):
             result = web_app._run_challenge1_supervisor_reviews(
                 self.analysis(), "perp:BTCUSDT",
             )
         self.assertFalse(result["approved"])
-        self.assertFalse(result["ai_consensus"]["providers_independent"])
-        self.assertFalse(result["ai_consensus"]["models_independent"])
-
-    def test_wave_phase_mismatch_cannot_be_overridden_by_two_approved_flags(self):
-        primary = self.review(
-            "nemotron", "OpenRouter", "nvidia/nemotron-free",
-            wave_phase="WAVE_3_CONFIRMED",
-        )
-        secondary = self.review("second_ai", "Groq", "openai/gpt-oss-120b")
-        with (
-            patch.object(web_app, "run_free_ai_second_opinion", return_value=primary),
-            patch.object(web_app, "run_independent_ai_supervisor", return_value=secondary),
-        ):
-            result = web_app._run_challenge1_supervisor_reviews(
-                self.analysis(), "perp:BTCUSDT",
-            )
-        self.assertFalse(result["approved"])
-        self.assertNotEqual(result["status"], "APPROVED_BY_BOTH")
+        self.assertEqual(result["status"], "UNKNOWN")
 
 
 class BloFinUnifiedCredentialStatusTests(unittest.TestCase):
