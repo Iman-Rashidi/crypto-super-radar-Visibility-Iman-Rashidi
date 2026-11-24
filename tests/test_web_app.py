@@ -692,7 +692,7 @@ class WebAppHttpTests(unittest.TestCase):
         }
         connection = Mock()
         connection.execute.side_effect = [Mock(), Mock(fetchall=Mock(return_value=[row]))]
-        with patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"), \\
+        with patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"), \
              patch.object(web_app, "connect_database", return_value=connection):
             snapshot = web_app._blofin_v2_public_cycle_snapshot()
         self.assertEqual(snapshot["status"], "OK")
@@ -744,8 +744,8 @@ class WebAppHttpTests(unittest.TestCase):
             "status": "OK", "environment": "BLOFIN_DEMO",
             "latest_cycle_id": "cycle-1", "scan_time_utc": "2026-11-24T19:00:00Z",
             "run_state": {"status": "IDLE"}, "cycles": cycles,
-        }), patch.object(web_app, "latest_report_from_turso", return_value=gem_report), \\
-             patch.object(web_app, "_crypto_market_board", return_value=[]), \\
+        }), patch.object(web_app, "latest_report_from_turso", return_value=gem_report), \
+             patch.object(web_app, "_crypto_market_board", return_value=[]), \
              patch.object(web_app, "build_feed_health_report", return_value={"status": "OK"}):
             context = web_app._ai_copilot_dashboard_context()
         self.assertEqual(context["challenge1_v2"]["expected_markets"], symbols)
