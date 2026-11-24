@@ -993,24 +993,45 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
             except (TypeError, ValueError):
                 payload = {}
             reviews = payload.get("ai_reviews") if isinstance(payload.get("ai_reviews"), list) else []
+            if not reviews:
+                reviews = [
+                    item for item in (payload.get("ai_review"), payload.get("second_ai_review"))
+                    if isinstance(item, dict)
+                ]
             votes = []
-            for entry in reviews[:2]:
+            for entry in reviews[:4]:
                 if not isinstance(entry, dict):
                     continue
                 review = entry.get("review") if isinstance(entry.get("review"), dict) else entry
+                model_verified = review.get("model_verified", entry.get("model_verified")) is True
+                response_validated = review.get("response_validated", entry.get("response_validated")) is True
                 votes.append({
-                    "reviewer_id": entry.get("reviewer_id") or review.get("reviewer_id"),
-                    "provider": review.get("provider") or entry.get("provider"),
+                    "reviewer_id": entry.get("reviewer_id") or review.get("reviewer_id") or entry.get("reviewer") or review.get("reviewer") or "UNKNOWN",
+                    "reviewer_name": entry.get("reviewer_name") or review.get("reviewer_name"),
+                    "actor": entry.get("actor") or review.get("actor"),
+                    "provider": review.get("provider") or entry.get("provider") or "UNKNOWN",
+                    "model": review.get("returned_model") or review.get("model") or entry.get("returned_model") or entry.get("model") or "UNKNOWN",
                     "status": review.get("status") or entry.get("status") or "UNKNOWN",
                     "opinion": (
                         review.get("decision") or review.get("verdict")
                         or review.get("final_rating") or review.get("proposal")
-                        or review.get("recommendation") or review.get("status")
+                        or review.get("recommendation") or entry.get("decision")
+                        or entry.get("verdict") or review.get("status")
                         or entry.get("status") or "UNKNOWN"
                     ),
-                    "reason_fa": str(review.get("reason_fa") or review.get("status_fa") or "")[:320],
-                    "verified": review.get("model_verified") is True and review.get("response_validated") is True,
-                    "returned_model": review.get("returned_model") or review.get("model") or entry.get("model"),
+                    "reason_fa": str(
+                        review.get("reason_fa") or review.get("status_fa")
+                        or review.get("reason") or entry.get("reason_fa")
+                        or entry.get("status_fa") or entry.get("reason") or ""
+                    )[:1000],
+                    "verified": model_verified and response_validated,
+                    "model_verified": model_verified,
+                    "response_validated": response_validated,
+                    "request_attempted": review.get("request_attempted", entry.get("request_attempted")) is True,
+                    "skip_reason_code": review.get("skip_reason_code") or entry.get("skip_reason_code"),
+                    "error_type": review.get("error_type") or review.get("error_code") or entry.get("error_type") or entry.get("error_code"),
+                    "http_status": review.get("http_status") or entry.get("http_status"),
+                    "returned_model": review.get("returned_model") or review.get("model") or entry.get("returned_model") or entry.get("model"),
                 })
             item["signal_raw"] = payload.get("signal") or item.get("signal") or "UNKNOWN"
             for field in ("entry_price", "stop_loss", "take_profit", "entry_skipped_reason", "execution_profile"):
