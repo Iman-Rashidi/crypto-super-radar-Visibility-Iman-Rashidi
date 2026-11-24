@@ -485,8 +485,18 @@ class WhaleAwareConfirmationEngine:
             + whale_risk_adjustment
             + sentiment_risk_adjustment
         )
-        self.whale_store.record(asset.raw, whale, whale_bias)
-        whale_history = self.whale_store.summary(asset.raw)
+        try:
+            self.whale_store.record(asset.raw, whale, whale_bias)
+            whale_history = self.whale_store.summary(asset.raw)
+            if not isinstance(whale_history, dict):
+                raise TypeError("Whale history store returned a non-object payload")
+        except Exception as exc:
+            # Persistence is enrichment only; a store outage cannot discard market evidence.
+            whale_history = {
+                "observation_count": 0, "recent_bias": "UNKNOWN",
+                "status": "UNAVAILABLE",
+                "reason": f"Whale history persistence failed: {type(exc).__name__}: {str(exc)[:200]}",
+            }
         if result.estimated_risk_score is not None:
             result.estimated_risk_score = round(
                 max(0.0, min(100.0, result.estimated_risk_score + risk_adjustment)), 2
