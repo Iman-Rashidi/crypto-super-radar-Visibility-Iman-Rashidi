@@ -57,6 +57,10 @@ class Challenge1V2SingleGroqReviewerTests(unittest.TestCase):
         result = self.invoke(valid_approval())
         self.assertTrue(result["approved"])
         self.assertEqual(result["status"], "APPROVED_BY_GROQ")
+        self.assertEqual(
+            result["ai_consensus"]["decision"],
+            "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER",
+        )
         self.assertTrue(result["ai_consensus"]["single_reviewer_approval"])
         self.assertFalse(result["ai_consensus"]["two_reviewer_approval"])
         self.assertEqual(result["ai_consensus"]["verified_approval_count"], 1)
