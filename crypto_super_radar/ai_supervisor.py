@@ -303,6 +303,7 @@ def run_challenge1_v2_supervisor_reviews(
     analysis: Any, asset: Any, *, signal_id: str | None = None,
     primary_reviewer: Callable[..., dict[str, Any]] | None = None,
     second_reviewer: Callable[..., dict[str, Any]] | None = None,
+    single_reviewer: bool = True,
 ) -> dict[str, Any]:
     """Run one independent Groq review; fail closed on any missing or invalid evidence.
 
@@ -312,6 +313,8 @@ def run_challenge1_v2_supervisor_reviews(
     mandatory and are not delegated to the language model.
     """
     del primary_reviewer  # Compatibility-only injection; Nemotron is no longer called.
+    if single_reviewer is not True:
+        raise ValueError("Challenge 1 V2 is configured for the Groq-only reviewer path")
     signal_value = getattr(analysis, "signal", "UNKNOWN")
     expected_side = str(getattr(signal_value, "value", signal_value) or "UNKNOWN").upper()
     metrics = getattr(analysis, "metrics", {})
@@ -349,8 +352,17 @@ def run_challenge1_v2_supervisor_reviews(
     reviewed_at_utc = datetime.now(timezone.utc).isoformat()
     groq["reviewed_at_utc"] = reviewed_at_utc
 
+    provider_name = str(groq.get("provider") or "").strip().casefold().replace("-", "").replace("_", "").replace(" ", "")
+    allowed_groq_models = {
+        "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
+    }
+    configured_model = str(groq.get("model") or "").strip()
+    returned_model = str(groq.get("returned_model") or "").strip()
     verified = bool(
-        groq.get("request_attempted") is True
+        provider_name in {"groq", "groqcloud"}
+        and configured_model in allowed_groq_models
+        and returned_model == configured_model
+        and groq.get("request_attempted") is True
         and str(groq.get("response_source") or "").upper() == "LIVE_API"
         and groq.get("response_validated") is True
         and groq.get("model_verified") is True
