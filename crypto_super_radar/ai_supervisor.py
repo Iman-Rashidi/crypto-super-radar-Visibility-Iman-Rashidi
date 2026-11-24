@@ -411,7 +411,7 @@ def run_challenge1_v2_supervisor_reviews(
         status_fa = "ناظر Groq با شواهد معتبر ورود را رد کرد؛ هیچ سفارش Demo ارسال نمی‌شود."
     elif approved:
         consensus_status = "APPROVED_BY_GROQ"
-        decision = "AUTHORIZE_DEMO_EXECUTION"
+        decision = "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER"
         status_fa = "ناظر Groq پاسخ زنده، مدل و شواهد موج و جهت را تأیید کرد؛ تمام کنترل‌های قطعی Executor همچنان اجباری هستند."
     elif reviewer_status in {"NOT_CONFIGURED", "SECOND_AI_NOT_CONFIGURED"}:
         consensus_status = "NOT_CONFIGURED"
@@ -490,41 +490,37 @@ def _configured_providers() -> list[dict[str, Any]]:
 
 
 def ai_supervisor_status() -> dict[str, Any]:
-    """Return non-secret configuration status; never return key material."""
-    configured_ids = {item["id"] for item in _configured_providers()}
-    states = []
-    for definition in _PROVIDER_DEFINITIONS:
-        ready = definition["id"] in configured_ids
-        states.append({
-            "id": definition["id"],
-            "provider": definition["label"],
-            "model": definition["model"],
-            "configured": ready,
-            "status": "CONFIGURED" if ready else "MISSING_API_KEY",
-            "key_variable": definition["env"],
-            "pricing_guard": definition["tier"],
-        })
-    count = len(configured_ids)
-    ready = count >= MIN_INDEPENDENT_APPROVALS
+    """Return the active Challenge 1 V2 Groq-only reviewer status without secrets."""
+    definition = next(item for item in _PROVIDER_DEFINITIONS if item["id"] == "groq")
+    configured = bool((os.getenv("GROQ_API_KEY") or "").strip())
+    provider = {
+        "id": "groq",
+        "provider": definition["label"],
+        "model": definition["model"],
+        "configured": configured,
+        "status": "CONFIGURED" if configured else "MISSING_API_KEY",
+        "key_variable": "GROQ_API_KEY",
+        "pricing_guard": definition["tier"],
+        "execution_role": "SOLE_CHALLENGE_1_V2_ENTRY_REVIEWER",
+    }
     return {
-        "provider": "Independent Multi-Provider AI Supervisor",
-        "model": "NVIDIA Nemotron + Gemini 3.8 Flash + Groq GPT-OSS 120B",
-        "status": "READY" if ready else "INSUFFICIENT_PROVIDERS",
+        "provider": "Groq Sole Challenge 1 V2 Supervisor",
+        "model": definition["model"],
+        "status": "READY" if configured else "NOT_CONFIGURED",
         "status_fa": (
-            f"{count} ارائه‌دهنده تنظیم شده؛ حداقل دو مدل مستقل برای صدور تأیید لازم است."
-            if ready else
-            f"فقط {count} ارائه‌دهنده تنظیم شده است؛ حداقل دو کلید رایگان مستقل لازم است. تا آن زمان ورود جدید مسدود می‌ماند."
+            "یک ناظر Groq با مدل و پاسخ زنده اعتبارسنجی‌شده فعال است؛ کنترل‌های قطعی استراتژی و Executor همچنان اجباری‌اند."
+            if configured else
+            "کلید Groq تنظیم نشده است؛ تأیید ورود و ارسال سفارش مسدود می‌ماند."
         ),
-        "configured": ready,
-        "configured_provider_count": count,
-        "available_provider_count": len(_PROVIDER_DEFINITIONS),
-        "required_independent_approvals": MIN_INDEPENDENT_APPROVALS,
-        "providers": states,
+        "configured": configured,
+        "configured_provider_count": int(configured),
+        "available_provider_count": 1,
+        "required_independent_approvals": 1,
+        "providers": [provider],
         "secret_sent_to_model": False,
         "orders_submitted": False,
         "paper_entry_eligible": False,
     }
-
 
 def _reserve_provider_budget(provider_id: str) -> bool:
     day = datetime.now(timezone.utc).date().isoformat()
