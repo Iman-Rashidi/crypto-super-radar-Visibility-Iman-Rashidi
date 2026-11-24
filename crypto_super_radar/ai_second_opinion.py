@@ -24,10 +24,56 @@ from .agent_council import build_native_agent_council_review
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+# OpenRouter model fallbacks verified in its live public catalogue on 2026-11-24.
+# Every entry is explicitly free; never place a paid model in this chain.
+OPENROUTER_FREE_FALLBACK_MODELS = (
+    DEFAULT_FREE_MODEL,
+    "nvidia/nemotron-3.5-lightning:free",
+    "inclusionai/ling-3.2-flash:free",
+)
+
+
+def _openrouter_free_model_chain(primary_model=None):
+    """Return a deduplicated, strictly-free priority chain for OpenRouter."""
+    candidates = [str(primary_model or _model()).strip(), *OPENROUTER_FREE_FALLBACK_MODELS]
+    chain = []
+    for candidate in candidates:
+        if candidate.endswith(":free") and candidate not in chain:
+            chain.append(candidate)
+    return tuple(chain)
+
+
+def _post_openrouter_with_fallback(
+    post, url, *, headers, payload, timeout, allow_redirects,
+):
+    """Try free models in order after rate limits, provider errors, or timeouts."""
+    chain = _openrouter_free_model_chain(str(payload.get("model") or ""))
+    last_response = None
+    for index, candidate in enumerate(chain):
+        request_payload = dict(payload)
+        request_payload["model"] = candidate
+        try:
+            response = post(
+                url, headers=headers, json=request_payload,
+                timeout=timeout, allow_redirects=allow_redirects,
+            )
+        except (requests.Timeout, requests.ConnectionError):
+            if index + 1 < len(chain):
+                continue
+            raise
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status in {408, 429} or 500 <= status <= 599:
+            last_response = response
+            if index + 1 < len(chain):
+                continue
+        return response
+    if last_response is not None:
+        return last_response
+    raise requests.RequestException("OpenRouter free fallback chain is empty")
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v7-5m-candle-chart-elliott-wave"
+PROMPT_VERSION = "free-second-opinion-v8-openrouter-free-model-fallback-5m-candle-chart-elliott-wave"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
@@ -1225,6 +1271,9 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
                 "model_verified": False, "latency_ms": latency_ms,
                 "paper_entry_eligible": False,
             }
+        # Record the exact model that answered, including a fallback model.
+        model = returned_model.strip()
+        review["model"] = model
         usage = body.get("usage") if isinstance(body, dict) else None
         total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
@@ -1502,12 +1551,10 @@ def run_free_ai_second_opinion(
     http_status = None
     parser_diagnostic: dict[str, Any] = {}
     try:
-        response = post(
-            OPENROUTER_URL,
-            headers=headers,
-            json=payload,
-            timeout=(8, 35),
-            allow_redirects=False,
+        response = _post_openrouter_with_fallback(
+            post, OPENROUTER_URL,
+            headers=headers, payload=payload,
+            timeout=(8, 35), allow_redirects=False,
         )
         latency_ms = int((time.monotonic() - started) * 1000)
         http_status = int(getattr(response, "status_code", 0) or 0)
@@ -1582,11 +1629,12 @@ def run_free_ai_second_opinion(
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
-        if returned_model.strip().split(":", 1)[0] != model.split(":", 1)[0]:
+        allowed_models = set(_openrouter_free_model_chain(model))
+        if returned_model.strip() not in allowed_models:
             return {
                 "provider": "OpenRouter", "model": model,
                 "returned_model": returned_model[:160], "status": "MODEL_MISMATCH",
-                "status_fa": "پاسخ تحلیل از مدلی غیر از Nemotron انتخاب‌شده دریافت شد.",
+                "status_fa": "پاسخ تحلیل از مدلی خارج از زنجیره رایگان تأییدشده دریافت شد.",
                 "http_status": http_status, "latency_ms": latency_ms,
                 "request_attempted": True, "response_source": "LIVE_API",
                 "request_started_at_utc": request_started_at_utc,
