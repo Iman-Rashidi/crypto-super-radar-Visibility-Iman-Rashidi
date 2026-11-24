@@ -70,18 +70,23 @@ class MultiProviderSupervisorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _extract_json(candidates[-1])
 
-    def test_status_counts_configured_providers_without_exposing_secrets(self):
+    def test_status_reports_only_the_configured_groq_challenge1_reviewer_without_exposing_secrets(self):
         with patch.dict(os.environ, {
-            "OPENROUTER_API_KEY": "openrouter-secret",
-            "GEMINI_API_KEY": "gemini-secret",
+            "GROQ_API_KEY": "groq-secret",
+            "OPENROUTER_API_KEY": "legacy-openrouter-secret",
+            "GEMINI_API_KEY": "legacy-gemini-secret",
         }, clear=True):
             status = ai_supervisor_status()
-        self.assertEqual(status["configured_provider_count"], 2)
+        self.assertEqual(status["configured_provider_count"], 1)
+        self.assertEqual(status["available_provider_count"], 1)
+        self.assertEqual(status["required_independent_approvals"], 1)
         self.assertTrue(status["configured"])
         self.assertEqual(status["status"], "READY")
+        self.assertEqual([provider["id"] for provider in status["providers"]], ["groq"])
         rendered = json.dumps(status)
-        self.assertNotIn("openrouter-secret", rendered)
-        self.assertNotIn("gemini-secret", rendered)
+        self.assertNotIn("groq-secret", rendered)
+        self.assertNotIn("legacy-openrouter-secret", rendered)
+        self.assertNotIn("legacy-gemini-secret", rendered)
 
     def test_one_provider_never_has_authority_to_approve(self):
         calls = []
