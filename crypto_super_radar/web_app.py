@@ -2090,6 +2090,7 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
  if(!btn)return;
  const esc=v=>String(v==null?'—':v).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
  const money=v=>v==null?'—':'€'+Number(v).toFixed(2);
+ const germanyTime=v=>{if(!v)return 'زمان ثبت نشده';const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString('fa-IR',{timeZone:'Europe/Berlin',dateStyle:'short',timeStyle:'medium'})+' وقت آلمان (CET/CEST)'};
  async function load(){{
   const status=document.getElementById('gem-watchlist-status');
   status.textContent='در حال دریافت…';
@@ -2106,13 +2107,13 @@ body.light-theme #radar-scan-overlay{{background:linear-gradient(110deg,#e8f8fc,
     const profit=Number(r.eur_100_net_profit_eur||0);
     const color=profit>=0?'#20c997':'#ff647c';
     return '<tr><td>'+esc(r.token_name)+' ('+esc(r.token_symbol)+')<br>'+esc(r.chain)+' · '+esc(r.detection_count)+' بار شکار<br><button type="button" data-deep-analysis data-deep-chain="'+esc(r.chain)+'" data-deep-address="'+esc(r.token_address)+'" data-deep-symbol="'+esc(r.token_symbol)+'">🔍 مشاهده تحلیل کامل</button></td>'+
-     '<td>'+esc(r.first_detected_utc)+'</td>'+
+     '<td><b>UTC:</b> '+esc(r.first_detected_utc)+'<br><b>آلمان:</b> '+esc(germanyTime(r.first_detected_utc))+'</td>'+
      '<td>'+esc(r.initial_price_usd)+' ← '+esc(r.latest_price_usd)+' ('+esc(r.peak_price_usd)+')</td>'+
      '<td style="color:'+color+'">'+(r.current_change_pct==null?'—':Number(r.current_change_pct).toFixed(2)+'%')+'</td>'+
      '<td>'+money(r.eur_100_current_value)+' · <b style="color:'+color+'">'+(profit>=0?'+':'')+money(r.eur_100_net_profit_eur)+'</b></td>'+
      '<td><button type="button" data-copy-contract="'+esc(r.token_address)+'">کپی آدرس</button></td></tr>';
    }}).join('')||'<tr><td colspan="6">هنوز توکن واجد شرایطی در واچ‌لیست ثبت نشده است.</td></tr>';
-   status.textContent='آخرین دریافت: '+esc(data.updated_at_utc)+' · مبنای محاسبه €100 برای هر ارز';
+   status.textContent='آخرین دریافت UTC: '+esc(data.updated_at_utc)+' · وقت آلمان: '+esc(germanyTime(data.updated_at_utc))+' · مبنای €100 فرضی برای هر ارز واجد شرایط';
    document.querySelectorAll('[data-copy-contract]').forEach(b=>b.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(b.getAttribute('data-copy-contract'));b.textContent='کپی شد ✓';}}catch(e){{b.textContent='کپی ناموفق';}}}}));
   }}catch(e){{status.textContent='واچ‌لیست در دسترس نیست: '+e.message;}}
  }}
