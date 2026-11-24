@@ -7546,6 +7546,56 @@ class Handler(BaseHTTPRequestHandler):
           </div>
           <span class="mode-pill"><span class="mode-dot"></span>Spot Research: فقط خواندنی · BloFin: Demo</span>
         </header>
+        <section class="card" id="csr-ai-copilot" aria-labelledby="csr-ai-copilot-title">
+          <h2 id="csr-ai-copilot-title">🤖 دستیار هوشمند بازار و رادار (CSR AI Chat)</h2>
+          <p class="muted">پاسخ فارسی بر پایهٔ آخرین داده‌های داشبورد، فقط با فشردن دکمه ارسال. فقط‌خواندنی؛ بدون سفارش، معامله یا تغییر تنظیمات. سقف ۲۰ پیام در ساعت برای هر IP و حداکثر ۲۰۰۰ نویسه در هر پیام.</p>
+          <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px">
+            <button type="button" data-copilot-question="خلاصه وضعیت پنج ارز CHALLENGE_1_V2 الان چیست؟">خلاصه وضعیت ۵ ارز V2</button>
+            <button type="button" data-copilot-question="چرا ربات در چرخه اخیر وارد معامله نشد؟">چرا چرخه اخیر وارد نشد؟</button>
+            <button type="button" data-copilot-question="بهترین نامزدهای Gem Hunter کدام‌اند و چه ریسک‌هایی دارند؟">نامزدهای برتر Gem Hunter</button>
+          </div>
+          <div id="csr-copilot-transcript" role="log" aria-live="polite" style="min-height:72px;max-height:340px;overflow:auto;margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:12px;background:#081522">
+            <p class="muted">گفت‌وگو هنوز آغاز نشده است. برای حفظ سهمیه، هیچ درخواست خودکاری ارسال نمی‌شود.</p>
+          </div>
+          <form id="csr-copilot-form">
+            <label for="csr-copilot-input">پیام شما</label>
+            <textarea id="csr-copilot-input" maxlength="2000" rows="3" placeholder="سؤال خود را به فارسی بنویسید..." style="width:100%;margin:8px 0;padding:12px;border-radius:11px;border:1px solid #334a63;background:#091522;color:var(--text)"></textarea>
+            <div class="grid" style="grid-template-columns:minmax(0,1fr) auto;align-items:center">
+              <span id="csr-copilot-status" class="muted" aria-live="polite">اتصال فقط هنگام ارسال پیام برقرار می‌شود.</span>
+              <button id="csr-copilot-send" type="submit" style="width:auto;min-width:112px">ارسال پیام</button>
+            </div>
+          </form>
+        </section>
+        <script>
+        (() => {
+          const form=document.getElementById('csr-copilot-form');
+          if(!form)return;
+          const input=document.getElementById('csr-copilot-input');
+          const transcript=document.getElementById('csr-copilot-transcript');
+          const status=document.getElementById('csr-copilot-status');
+          const send=document.getElementById('csr-copilot-send');
+          function addLine(label,value){
+            const p=document.createElement('p');p.style.whiteSpace='pre-wrap';
+            const strong=document.createElement("strong");strong.textContent=label+" ";
+            const span=document.createElement("span");span.textContent=value;
+            p.append(strong,span);transcript.append(p);transcript.scrollTop=transcript.scrollHeight;
+          }
+          async function submitMessage(message){
+            const text=String(message||'').trim();if(!text)return;
+            if(text.length>2000){status.textContent='حداکثر طول پیام ۲۰۰۰ نویسه است.';return;}
+            addLine('شما:',text);input.value='';send.disabled=true;status.textContent='در حال دریافت پاسخ...';
+            try{
+              const response=await fetch('/api/ai-copilot/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
+              const data=await response.json();if(!response.ok)throw new Error(data.code||"درخواست ناموفق بود");
+              addLine('دستیار:',data.answer||'پاسخ خالی از مدل دریافت شد.');
+              status.textContent='مدل: '+data.provider+' · فقط‌خواندنی · سقف ۲۰ پیام در ساعت';
+            }catch(error){addLine("خطا:",String(error.message||error));status.textContent="پاسخ دریافت نشد؛ برای جلوگیری از مصرف سهمیه، فقط در صورت نیاز دوباره ارسال کنید.";}
+            finally{send.disabled=false;}
+          }
+          form.addEventListener("submit",event=>{event.preventDefault();submitMessage(input.value);});
+          document.querySelectorAll('[data-copilot-question]').forEach(button=>button.addEventListener('click',()=>submitMessage(button.getAttribute('data-copilot-question'))));
+        })();
+        </script>
         <section class="card" id="external-analysis-tools">
           <h2>ابزارهای تحلیل بازار</h2>
           <p class="muted">دو منبع تحلیلی را هم‌زمان و در کنار داشبورد اصلی باز کنید؛ هرکدام در زبانهٔ جداگانه باز می‌شود.</p>
