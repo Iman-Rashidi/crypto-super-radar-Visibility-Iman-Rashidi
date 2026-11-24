@@ -111,7 +111,7 @@ class Challenge1V2EntryIntegrationTests(unittest.TestCase):
         executor=FakeEntryExecutor(store)
         exchange=FakeExchange(mark="100")
         signal={"execution_profile":"CHALLENGE_1_V2","instrument_id":"BTC-USDT","signal":"LONG",
-          "status":"SIGNAL_READY","ai_consensus":{"status":"APPROVED_BY_GROQ"}}
+          "status":"SIGNAL_READY","ai_consensus":{"status":"APPROVED_BY_GROQ","single_reviewer_approval":True,"reviewer_id":"groq"}}
         env={"CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED":"true","BLOFIN_DEMO_TRADING_ENABLED":"true"}
         out=run_cycle(exchange,db,analyzer=lambda *_:signal,symbols=("BTC-USDT",),
                       executor=executor,environ=env)

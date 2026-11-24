@@ -207,6 +207,8 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
             ).total_seconds() if reviewer_time.tzinfo is not None else float("inf")
         except (TypeError, ValueError):
             reviewer_age = float("inf")
+        if str(review.get("reviewed_signal_id") or "").strip() != signal_id:
+            return False, "Groq approval is bound to a different signal."
         valid_groq_review = (
             "groq" in provider
             and model_identity in allowed_groq_models
