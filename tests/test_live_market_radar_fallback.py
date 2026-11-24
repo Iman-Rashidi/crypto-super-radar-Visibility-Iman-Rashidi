@@ -47,5 +47,55 @@ class LiveMarketRadarFallbackTests(unittest.TestCase):
             fetch_kraken_candles(Mock(), "BTCUSDT", "1s")
 
 
+class MarketDataServiceBinanceBlockedTests(unittest.TestCase):
+    def _frames(self):
+        index = pd.date_range("2026-11-20", periods=8, freq="D", tz="UTC")
+        base = pd.DataFrame({
+            "open": [99.0] * 8,
+            "high": [102.0] * 8,
+            "low": [98.0] * 8,
+            "close": [100.0, 100.2, 99.8, 100.1, 100.3, 100.0, 100.4, 100.5],
+            "volume": [10.0] * 8,
+        }, index=index)
+        return {"OKX": base.copy(), "Bybit": base.copy(), "Kraken": base.copy()}
+
+    def _service(self):
+        from crypto_super_radar.models import AssetSpec
+        from crypto_super_radar.providers import DataProviderError, MarketDataService
+
+        service = MarketDataService()
+        service.binance.ticker = Mock(side_effect=DataProviderError("HTTP 418 from api.binance.com"))
+        service.binance.candles = Mock(side_effect=DataProviderError("HTTP 418 from api.binance.com"))
+        service._fetch_cex_fallback_frames = Mock(return_value=self._frames())
+        return service, AssetSpec.parse("cex:BTCUSDT")
+
+    def test_snapshot_uses_independent_okx_bybit_kraken_after_binance_418(self):
+        service, asset = self._service()
+        snapshot = service.snapshot(asset)
+        self.assertGreater(snapshot.price_usd, 0)
+        self.assertIn(snapshot.provider_a, {"OKX", "Bybit", "Kraken"})
+        self.assertIn(snapshot.provider_b, {"OKX", "Bybit", "Kraken"})
+        self.assertNotEqual(snapshot.provider_a, snapshot.provider_b)
+        self.assertTrue(snapshot.raw["fallback"])
+        self.assertFalse(snapshot.raw["orders_submitted"])
+        self.assertEqual(service._fetch_cex_fallback_frames.call_args.args[0], "BTCUSDT")
+
+    def test_candles_return_validated_fallback_history_after_binance_418(self):
+        service, asset = self._service()
+        from crypto_super_radar.models import MarketSnapshot
+
+        snapshot = MarketSnapshot(
+            asset=asset, price_usd=100.0, volume_24h_usd=1000.0,
+            liquidity_usd=None, price_discrepancy_pct=0.0,
+            volume_discrepancy_pct=None, provider_a="OKX", provider_b="Bybit",
+        )
+        frame = service.candles(asset, snapshot)
+        self.assertFalse(frame.empty)
+        self.assertEqual(float(frame.iloc[-1]["close"]), 100.5)
+        self.assertEqual(list(frame.columns), ["open", "high", "low", "close", "volume"])
+        self.assertEqual(service._fetch_cex_fallback_frames.call_args.args[0], "BTCUSDT")
+
+
+
 if __name__ == "__main__":
     unittest.main()
