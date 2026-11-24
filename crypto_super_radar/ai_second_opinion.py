@@ -125,6 +125,16 @@ _SAFE_AI_VALUE_ERRORS = {
     "Missing AI response message": "AI_RESPONSE_MESSAGE_MISSING",
     "AI message content is not text": "AI_RESPONSE_CONTENT_NOT_TEXT",
     "AI response exceeded the maximum accepted size": "AI_RESPONSE_CONTENT_TOO_LARGE",
+    "Unknown final rating": "AI_FINAL_RATING_INVALID",
+    "Required specialist views are missing": "AI_SPECIALIST_VIEWS_MISSING",
+    "Risk flags have an invalid format or exceed the maximum count": "AI_RISK_FLAGS_INVALID",
+    "Invalid specialist view": "AI_SPECIALIST_VIEW_INVALID",
+    "Invalid specialist verdict": "AI_SPECIALIST_VERDICT_INVALID",
+    "Specialist explanation is missing": "AI_SPECIALIST_EXPLANATION_MISSING",
+    "AI direction conflicts with the expected trade side": "AI_DIRECTION_MISMATCH",
+    "AI approval conflicts with specialist risk validation": "AI_APPROVAL_RISK_CONFLICT",
+    "V2 Elliott reviewer evidence is missing": "AI_V2_WAVE_EVIDENCE_MISSING",
+    "V2 Elliott phase/direction was not independently confirmed": "AI_V2_WAVE_EVIDENCE_MISMATCH",
     "Missing second AI response choices": "SECOND_AI_RESPONSE_CHOICES_MISSING",
     "Missing second AI response message": "SECOND_AI_RESPONSE_MESSAGE_MISSING",
     "Second AI response content is missing or too large": "SECOND_AI_RESPONSE_CONTENT_INVALID",
@@ -1194,14 +1204,38 @@ def _parse_validated_review_candidates(candidates, validator):
             continue
         return document, review, index, validation_errors[:6]
     if last_validation_error is not None:
+        # Prefer the error from the candidate that actually contains the
+        # specialist review. Providers often put free-form reasoning after
+        # the content field; that reasoning may contain a tiny JSON fragment
+        # (or no specialist object) and must not overwrite the real schema
+        # failure from the content candidate.
+        selected_error = last_validation_error
+        for candidate_error in validation_errors:
+            if candidate_error.get("stage") != "schema":
+                continue
+            candidate_index = candidate_error.get("candidate_index")
+            shape = next(
+                (item for item in candidate_shapes
+                 if item.get("candidate_index") == candidate_index),
+                {},
+            )
+            if shape.get("specialist_containers") or shape.get("root_role_aliases"):
+                selected_error_code = candidate_error.get("error_code")
+                selected_error = next(
+                    (exc for exc in [last_validation_error]
+                     if _safe_ai_error_code(exc) == selected_error_code),
+                    last_validation_error,
+                )
+                break
         try:
-            setattr(last_validation_error, "_csr_parser_diagnostic", {
+            setattr(selected_error, "_csr_parser_diagnostic", {
                 "candidate_validation_errors": validation_errors[:6],
                 "candidate_shapes": candidate_shapes[:6],
+                "selected_validation_error": _safe_ai_error_code(selected_error),
             })
         except Exception:
             pass
-        raise last_validation_error
+        raise selected_error
     if oversized and parsed_count == 0:
         raise ValueError("AI response exceeded the maximum accepted size")
     raise ValueError("No JSON object returned")
