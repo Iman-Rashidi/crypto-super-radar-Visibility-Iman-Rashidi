@@ -639,6 +639,29 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(body), payload)
         self.assertNotIn("api_key", body.decode().lower())
 
+    def test_ai_copilot_chat_is_same_origin_and_read_only(self):
+        payload = {"status": "OK", "answer": "فقط‌خواندنی", "read_only": True, "orders_submitted": False}
+        with patch.object(web_app, "ai_copilot_chat", return_value=payload) as chat:
+            status, _, body = self.request(
+                "POST", "/api/ai-copilot/chat", json.dumps({"message": "وضعیت بازار؟"}),
+                {"Content-Type": "application/json", "Origin": f"http://{self.host}:{self.port}"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["read_only"], True)
+        self.assertFalse(json.loads(body)["orders_submitted"])
+        chat.assert_called_once()
+        self.assertEqual(chat.call_args.args[0], "وضعیت بازار؟")
+
+    def test_ai_copilot_rejects_cross_origin_requests(self):
+        with patch.object(web_app, "ai_copilot_chat") as chat:
+            status, _, body = self.request(
+                "POST", "/api/ai-copilot/chat", json.dumps({"message": "سلام"}),
+                {"Content-Type": "application/json", "Origin": "https://attacker.example"},
+            )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["code"], "SAME_ORIGIN_REQUIRED")
+        chat.assert_not_called()
+
     def test_ai_diagnostic_endpoint_is_same_origin_and_does_not_start_paper_bot(self):
         payload = {
             "provider": "OpenRouter",
