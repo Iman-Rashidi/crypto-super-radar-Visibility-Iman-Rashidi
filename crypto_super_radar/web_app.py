@@ -2685,10 +2685,19 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             if current.get("status") == "running":
                 JOBS[job_id] = {"status": "completed", "result": payload, "finished_at_utc": datetime.now(timezone.utc).isoformat()}
     except Exception as exc:
+        error_text = f"{type(exc).__name__}: {str(exc)[:300]}"
+        print("CSR_ASSET_SCAN_FAILED " + json.dumps({
+            "job_id": job_id, "asset": getattr(asset, "raw", None),
+            "error": error_text,
+        }, ensure_ascii=False, sort_keys=True), flush=True)
         with LOCK:
             current = JOBS.get(job_id) or {}
             if current.get("status") == "running":
-                JOBS[job_id] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "finished_at_utc": datetime.now(timezone.utc).isoformat()}
+                JOBS[job_id] = {
+                    **current, "status": "failed", "error": error_text,
+                    "message_fa": f"اسکن دارایی با خطا متوقف شد: {error_text}",
+                    "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                }
     finally:
         with LOCK:
             SCAN_RUNNING = False
@@ -3732,7 +3741,7 @@ def _scan_queue_worker():
                 else:
                     finished, _ = run_with_hard_timeout(
                         lambda: _run_scan(job_id, task["asset"], task["headline"], task["social_post"]),
-                        timeout_seconds=14.5,
+                        timeout_seconds=60.0,
                     )
                     if not finished:
                         with LOCK:
@@ -11251,7 +11260,7 @@ async function loadBlofinInstruments(){
                         JOBS.pop(oldest)
                     SCAN_QUEUE.put_nowait(task)
                     if route == "/scan":
-                        timer = threading.Timer(15.0, _expire_manual_scan_job, args=(job_id,))
+                        timer = threading.Timer(float(JOB_LEASE_SECONDS), _expire_manual_scan_job, args=(job_id,))
                         timer.daemon = True
                         timer.start()
             if api_jobs_request:
@@ -11274,7 +11283,7 @@ async function loadBlofinInstruments(){
                     "<p><a href='/'>بازگشت به داشبورد</a></p>"
                     "<script>(function(){const id='" + job_id + "',state=document.getElementById('futures-state'),report=document.getElementById('futures-report'),out=document.getElementById('futures-result');"
                     "function addLine(label,value){const row=document.createElement('p'),strong=document.createElement('strong'),span=document.createElement('span');strong.textContent=label+'： ';span.textContent=value===null||value===undefined||value===''?'—':String(value);row.appendChild(strong);row.appendChild(span);report.appendChild(row);}"
-                    "async function poll(){try{const r=await fetch('/jobs/'+id,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();"
+                    "async function poll(){try{const r=await fetch('/jobs/'+id,{cache:'no-store'});if(r.status===404){document.getElementById('state').textContent='شناسهٔ کار در این نمونهٔ سرور پیدا نشد؛ احتمالاً فرایند Render بازراه‌اندازی شده است. اسکن تازه لازم است.';return;}if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();"
                     "if(j.status==='completed'){const p=j.result||{},c=p.cycle||{},f=p.report_fa||{},s=p.futures_state||{},a=s.account||{},risk=s.risk_controls||{};"
                     "state.textContent='چرخه تکمیل شد؛ نتیجه در گزارش فارسی آمده است.';report.replaceChildren();"
                     "addLine('نتیجه',f.status||c.status_fa||'نامشخص');addLine('تصمیم',f.decision||c.decision_fa||'نامشخص');addLine('جهت',f.direction||c.direction_fa||'بدون معامله');"
@@ -11321,8 +11330,8 @@ async function loadBlofinInstruments(){
                 "let pollAttempts=0;const pollStarted=Date.now();async function poll(){try{const controller=new AbortController(),requestTimer=setTimeout(()=>controller.abort(),4000);const r=await fetch('/jobs/'+job,{cache:'no-store',signal:controller.signal});clearTimeout(requestTimer);if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();pollAttempts=0;document.getElementById('state').textContent=j.status;"
                 "if(j.status==='completed'){const s=j.result||{};if(s.fast_asset_scan){const f=s.fast_scan||{},box=document.getElementById('scan-summary');window.CryptoRadar.update('radar-asset-scan',[{symbol:f.symbol||s.asset,name:f.token_name,signal:'NO_TRADE'}],{state:'complete',caption:'اسکن سریع Gem Hunter V3 · پژوهشی و فقط‌خواندنی'});document.getElementById('state').textContent=f.message_fa||'تحلیل سریع تکمیل شد.';const rows=[['توکن',(f.token_name||'نامشخص')+' ('+(f.symbol||'—')+')'],['قیمت USD',f.price_usd],['نقدینگی USD',f.liquidity_usd],['حجم ۲۴ ساعت USD',f.volume_24h_usd],['امتیاز فرصت',f.opportunity_score],['امتیاز ریسک',f.risk_score],['فاز پامپ/دامپ',f.pump_phase_fa],['قیمت ابطال سناریو USD',f.risk_invalidation_price_usd],['خط قرمز امنیتی',f.red_flag_fa],['جریان نهنگ‌ها',(f.whale_flow||{}).message_fa],['مجوز معامله','NO_TRADE · هیچ سفارشی ارسال نشد']];box.replaceChildren();rows.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v===null||v===undefined?'ناموجود':v));box.appendChild(d);});document.getElementById('diagnosis-title').textContent='گزارش اسکن سریع اختصاصی دارایی';document.getElementById('diagnosis-headline').textContent='وضعیت: '+f.status+' · فقط پژوهشی';document.getElementById('diagnosis-reasons').textContent='اطلاعات نهنگ‌ها و امنیت مستقل در این مسیر سریع ممکن است ناموجود باشد؛ UNKNOWN به معنی PASS نیست.';return;}window.CryptoRadar.update('radar-asset-scan',[{symbol:s.symbol||s.asset,name:s.coin_name,signal:s.signal}],{state:'complete',caption:'نتیجهٔ واقعی موتور تحلیل: '+String(s.signal||'UNKNOWN')+' · امتیاز تأیید به‌تنهایی مجوز ورود نیست.'});renderDiagnosis(j.result.diagnosis||{});renderTimeframes(j.result.timeframe_ranges||{});renderMarket(j.result.market_overview||{});renderMarketIntelligence(j.result.market_intelligence||{});renderGates(j.result.gates);const s=j.result,box=document.getElementById('scan-summary');const items=[['نام ارز',s.coin_name||s.asset],['نماد',s.symbol||'—'],['وضعیت',((s.diagnosis||{}).overall_signal_fa)||s.signal],['امتیاز خام تأیید (مجوز ورود نیست)',s.confirmation_score],['امتیاز ریسک',s.estimated_risk_score],['رتبه فرصت',s.opportunity_rank],['خلاصه',s.summary_fa]];box.replaceChildren();items.forEach(([k,v])=>{const d=document.createElement('div');d.className='metric';d.appendChild(cell('span',k));d.appendChild(cell('strong',v));box.appendChild(d);});return;}"
                 "if(j.status==='failed'){const state=document.getElementById('state');state.textContent=j.message_fa||('اسکن ناموفق بود: '+j.error);window.CryptoRadar.error('radar-asset-scan',j.message_fa||'اسکن کامل نشد؛ هیچ سیگنال خرید یا فروشی ثبت نشده است.');const back=document.createElement('a');back.href='/';back.textContent='بازگشت سریع به داشبورد';state.appendChild(document.createTextNode(' '));state.appendChild(back);return;}"
-                "if(Date.now()-pollStarted>=15000){const state=document.getElementById('state');state.textContent='مهلت پیگیری ۱۵ ثانیه‌ای تمام شد؛ اسکن متوقف شد. ';const back=document.createElement('a');back.href='/';back.textContent='بازگشت سریع به داشبورد';state.appendChild(back);return;}"
-                "}catch(e){pollAttempts+=1;const elapsed=Date.now()-pollStarted;if(elapsed>=15000){const state=document.getElementById('state');state.textContent='مهلت بازیابی ارتباط تمام شد؛ نتیجه در دسترس نیست. ';const back=document.createElement('a');back.href='/';back.textContent='بازگشت سریع به داشبورد';state.appendChild(back);return;}const delay=Math.min(30000,2500*Math.pow(2,Math.min(pollAttempts,4)));document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ تلاش مجدد خودکار برای همان شناسه در '+Math.ceil(delay/1000)+' ثانیه...';setTimeout(poll,delay);return;}"
+                "document.getElementById('state').textContent='اسکن هنوز در سرور در حال اجراست؛ پیگیری خودکار ادامه دارد.';"
+                "}catch(e){pollAttempts+=1;const delay=Math.min(30000,2500*Math.pow(2,Math.min(pollAttempts,4)));document.getElementById('state').textContent='ارتباط موقتاً قطع شد؛ تلاش مجدد خودکار برای همان شناسه در '+Math.ceil(delay/1000)+' ثانیه...';setTimeout(poll,delay);return;}"
                 "setTimeout(poll,2500);}poll();</script>"
             )
             return self._send(202, _page(body, "Scan Running"))
