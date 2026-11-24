@@ -90,5 +90,59 @@ class Challenge1V2DemoReviewerFailoverTests(unittest.TestCase):
                 self.assertNotEqual(result["ai_consensus"]["status"], "APPROVED_WITH_TRANSIENT_PROVIDER_FAILURE")
 
 
+
+class OpenRouterFreeFallbackChainTests(unittest.TestCase):
+    def test_chain_contains_only_free_models_and_keeps_primary_first(self):
+        from crypto_super_radar.ai_second_opinion import (
+            DEFAULT_FREE_MODEL, _openrouter_free_model_chain,
+        )
+        chain = _openrouter_free_model_chain()
+        self.assertEqual(chain[0], DEFAULT_FREE_MODEL)
+        self.assertGreaterEqual(len(chain), 3)
+        self.assertEqual(len(chain), len(set(chain)))
+        self.assertTrue(all(model.endswith(":free") for model in chain))
+
+    def test_rate_limit_moves_to_next_free_model(self):
+        from crypto_super_radar.ai_second_opinion import (
+            DEFAULT_FREE_MODEL, _post_openrouter_with_fallback,
+        )
+        calls = []
+        class Response:
+            def __init__(self, status):
+                self.status_code = status
+        def post(_url, *, headers, json, timeout, allow_redirects):
+            calls.append(json["model"])
+            return Response(429 if len(calls) == 1 else 200)
+        result = _post_openrouter_with_fallback(
+            post, "https://openrouter.ai/api/v1/chat/completions",
+            headers={}, payload={"model": DEFAULT_FREE_MODEL},
+            timeout=(8, 35), allow_redirects=False,
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(calls[0], DEFAULT_FREE_MODEL)
+        self.assertEqual(calls[1], "nvidia/nemotron-3.5-lightning:free")
+
+    def test_timeout_moves_to_next_free_model(self):
+        import requests
+        from crypto_super_radar.ai_second_opinion import (
+            DEFAULT_FREE_MODEL, _post_openrouter_with_fallback,
+        )
+        calls = []
+        class Response:
+            status_code = 200
+        def post(_url, *, headers, json, timeout, allow_redirects):
+            calls.append(json["model"])
+            if len(calls) == 1:
+                raise requests.Timeout("test timeout")
+            return Response()
+        result = _post_openrouter_with_fallback(
+            post, "https://openrouter.ai/api/v1/chat/completions",
+            headers={}, payload={"model": DEFAULT_FREE_MODEL},
+            timeout=(8, 35), allow_redirects=False,
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(len(calls), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
