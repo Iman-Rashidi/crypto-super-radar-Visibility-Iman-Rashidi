@@ -716,6 +716,52 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertIn("نوسان", cycle["ai_votes"][1]["reason_fa"])
         self.assertFalse(cycle["orders_submitted"])
 
+    def test_ai_copilot_context_includes_gem_identity_contract_price_liquidity_and_security(self):
+        symbols = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT"]
+        cycles = [{"symbol": symbol, "signal_raw": "NO_TRADE"} for symbol in symbols]
+        gem_report = {
+            "status": "OK",
+            "generated_at_utc": "2026-11-24T19:00:00Z",
+            "discovered_candidate_count": 1,
+            "gem_hunter_v3_tier1_count": 1,
+            "gem_hunter_v3_tier2_count": 0,
+            "candidates": [{
+                "name": "Example Token",
+                "symbol": "EXT",
+                "chain": "base",
+                "token_address": "0x1234567890abcdef1234567890abcdef12345678",
+                "price_usd": 0.0125,
+                "liquidity_usd": 76543.21,
+                "security_evidence": {
+                    "status": "PASS",
+                    "provider": "GOPLUS_SOURCIFY",
+                    "reason_fa": ["بررسی حداقلی قرارداد عبور کرد."],
+                    "flags": {"is_honeypot": False},
+                },
+            }],
+        }
+        with patch.object(web_app, "_blofin_v2_public_cycle_snapshot", return_value={
+            "status": "OK", "environment": "BLOFIN_DEMO",
+            "latest_cycle_id": "cycle-1", "scan_time_utc": "2026-11-24T19:00:00Z",
+            "run_state": {"status": "IDLE"}, "cycles": cycles,
+        }), patch.object(web_app, "latest_report_from_turso", return_value=gem_report), \\
+             patch.object(web_app, "_crypto_market_board", return_value=[]), \\
+             patch.object(web_app, "build_feed_health_report", return_value={"status": "OK"}):
+            context = web_app._ai_copilot_dashboard_context()
+        self.assertEqual(context["challenge1_v2"]["expected_markets"], symbols)
+        self.assertEqual(context["challenge1_v2"]["missing_markets"], [])
+        candidate = context["gem_hunter"]["top_candidates"][0]
+        self.assertEqual(candidate["name"], "Example Token")
+        self.assertEqual(candidate["symbol"], "EXT")
+        self.assertEqual(candidate["chain"], "base")
+        self.assertEqual(candidate["contract_address_short"], "0x1234…5678")
+        self.assertEqual(candidate["price_usd"], 0.0125)
+        self.assertEqual(candidate["liquidity_usd"], 76543.21)
+        self.assertEqual(candidate["security_status"], "PASS")
+        self.assertEqual(candidate["security_provider"], "GOPLUS_SOURCIFY")
+        self.assertEqual(candidate["security_reason_fa"], ["بررسی حداقلی قرارداد عبور کرد."])
+        self.assertFalse(context["orders_submitted"])
+
     def test_ai_copilot_chat_is_same_origin_and_read_only(self):
         payload = {"status": "OK", "answer": "فقط‌خواندنی", "read_only": True, "orders_submitted": False}
         with patch.object(web_app, "ai_copilot_chat", return_value=payload) as chat:
