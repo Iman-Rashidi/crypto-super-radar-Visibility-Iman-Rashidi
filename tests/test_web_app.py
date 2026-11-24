@@ -639,6 +639,83 @@ class WebAppHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(body), payload)
         self.assertNotIn("api_key", body.decode().lower())
 
+    def test_copilot_public_snapshot_preserves_both_reviewer_votes_and_entry_levels(self):
+        payload = {
+            "signal": "LONG",
+            "entry_price": "100.25",
+            "stop_loss": "97.50",
+            "take_profit": "106.00",
+            "entry_skipped_reason": "TWO_REVIEWER_APPROVAL_NOT_PRESENT",
+            "ai_reviews": [
+                {
+                    "reviewer_id": "nemotron",
+                    "provider": "OpenRouter",
+                    "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                    "review": {
+                        "status": "APPROVED",
+                        "decision": "APPROVE",
+                        "reason_fa": "ساختار روند تأیید شد",
+                        "model_verified": True,
+                        "response_validated": True,
+                        "request_attempted": True,
+                        "returned_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                    },
+                },
+                {
+                    "reviewer_id": "groq",
+                    "provider": "Groq",
+                    "model": "openai/gpt-oss-120b",
+                    "review": {
+                        "status": "REJECTED",
+                        "decision": "VETO",
+                        "reason_fa": "ریسک نوسان بیش از حد است",
+                        "model_verified": True,
+                        "response_validated": True,
+                        "request_attempted": True,
+                        "http_status": 200,
+                        "returned_model": "openai/gpt-oss-120b",
+                    },
+                },
+            ],
+        }
+        row = {
+            "cycle_id": "cycle-test",
+            "symbol": "BTC-USDT",
+            "started_at_utc": "2026-11-24T18:00:00Z",
+            "finished_at_utc": "2026-11-24T18:00:05Z",
+            "mode": "DRY_RUN",
+            "status": "NO_TRADE",
+            "signal": "LONG",
+            "reason": "دو رأی همسو نیستند",
+            "orders_submitted": 0,
+            "payload_json": json.dumps(payload),
+        }
+        connection = Mock()
+        connection.execute.side_effect = [Mock(), Mock(fetchall=Mock(return_value=[row]))]
+        with patch.object(web_app, "storage_backend", return_value="TURSO_CLOUD_SQLITE"), \\
+             patch.object(web_app, "connect_database", return_value=connection):
+            snapshot = web_app._blofin_v2_public_cycle_snapshot()
+        self.assertEqual(snapshot["status"], "OK")
+        self.assertEqual(len(snapshot["cycles"]), 1)
+        cycle = snapshot["cycles"][0]
+        self.assertEqual(cycle["signal_raw"], "LONG")
+        self.assertEqual(cycle["entry_price"], "100.25")
+        self.assertEqual(cycle["stop_loss"], "97.50")
+        self.assertEqual(cycle["take_profit"], "106.00")
+        self.assertEqual(cycle["entry_skipped_reason"], "TWO_REVIEWER_APPROVAL_NOT_PRESENT")
+        self.assertEqual(len(cycle["ai_votes"]), 2)
+        self.assertEqual(cycle["ai_votes"][0]["reviewer_id"], "nemotron")
+        self.assertEqual(cycle["ai_votes"][0]["provider"], "OpenRouter")
+        self.assertEqual(cycle["ai_votes"][0]["opinion"], "APPROVE")
+        self.assertTrue(cycle["ai_votes"][0]["verified"])
+        self.assertIn("ساختار روند", cycle["ai_votes"][0]["reason_fa"])
+        self.assertEqual(cycle["ai_votes"][1]["reviewer_id"], "groq")
+        self.assertEqual(cycle["ai_votes"][1]["provider"], "Groq")
+        self.assertEqual(cycle["ai_votes"][1]["opinion"], "VETO")
+        self.assertEqual(cycle["ai_votes"][1]["http_status"], 200)
+        self.assertIn("نوسان", cycle["ai_votes"][1]["reason_fa"])
+        self.assertFalse(cycle["orders_submitted"])
+
     def test_ai_copilot_chat_is_same_origin_and_read_only(self):
         payload = {"status": "OK", "answer": "فقط‌خواندنی", "read_only": True, "orders_submitted": False}
         with patch.object(web_app, "ai_copilot_chat", return_value=payload) as chat:
