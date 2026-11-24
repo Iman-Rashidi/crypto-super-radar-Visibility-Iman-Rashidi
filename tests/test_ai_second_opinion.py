@@ -219,6 +219,28 @@ class FreeAISecondOpinionTests(unittest.TestCase):
             ai_second_opinion._REQUEST_COUNTS.clear()
             ai_second_opinion._MINUTE_REQUEST_TIMESTAMPS.clear()
 
+    def test_parser_preserves_content_candidate_error_over_reasoning_fragment(self):
+        from crypto_super_radar.ai_second_opinion import _parse_validated_review_candidates
+
+        content_candidate = json.dumps({"specialist_views": {"technical": {}}})
+        reasoning_fragment = json.dumps({"direction": "SHORT"})
+
+        def reject_candidate(document):
+            if "specialist_views" in document:
+                raise ValueError("AI direction conflicts with the expected trade side")
+            raise ValueError("Required specialist views are missing")
+
+        with self.assertRaisesRegex(ValueError, "AI direction conflicts") as caught:
+            _parse_validated_review_candidates(
+                [content_candidate, reasoning_fragment], reject_candidate,
+            )
+        diagnostic = getattr(caught.exception, "_csr_parser_diagnostic", {})
+        self.assertEqual(diagnostic.get("selected_validation_error"), "AI_DIRECTION_MISMATCH")
+        self.assertEqual(
+            diagnostic.get("candidate_validation_errors", [])[-1].get("error_code"),
+            "AI_SPECIALIST_VIEWS_MISSING",
+        )
+
     def test_missing_api_key_is_unknown_and_not_tradeable(self):
         with patch.dict(os.environ, {}, clear=True):
             status = ai_connection_status()
