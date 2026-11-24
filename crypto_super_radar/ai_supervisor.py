@@ -365,6 +365,20 @@ def run_challenge1_v2_supervisor_reviews(
         groq.get("expected_side") == expected_side
         and groq.get("trader_proposal") == expected_side
     )
+    provider_value = str(groq.get("provider") or "").strip().casefold().replace("-", "").replace("_", "").replace(" ", "")
+    provider_id = str(groq.get("provider_id") or "").strip().casefold()
+    provider_is_groq = provider_value in {"groq", "groqcloud"} or provider_id in {"groq", "groqcloud"}
+    allowed_groq_models = {
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+    }
+    configured_model = str(groq.get("model") or "").strip()
+    returned_model = str(groq.get("returned_model") or "").strip()
+    model_is_groq_allowlisted = (
+        configured_model in allowed_groq_models
+        and returned_model.split(":", 1)[0] == configured_model.split(":", 1)[0]
+    )
     approved = (
         expected_side in {"LONG", "SHORT"}
         and expected_wave_phase in {
@@ -372,6 +386,7 @@ def run_challenge1_v2_supervisor_reviews(
             "WAVE_4_CONFIRMED", "FIVE_WAVE_IMPULSE_CONFIRMED",
         }
         and expected_wave_direction == ("BULLISH" if expected_side == "LONG" else "BEARISH")
+        and provider_is_groq and model_is_groq_allowlisted
         and verified and wave_match and side_match
         and _demo_ai_review_approved(groq)
     )
@@ -403,6 +418,8 @@ def run_challenge1_v2_supervisor_reviews(
         "reviewer_id": "groq",
         "reviewer_status": reviewer_status,
         "reviewer_verified": verified,
+        "provider_is_groq": provider_is_groq,
+        "model_is_groq_allowlisted": model_is_groq_allowlisted,
         "reviewer_approved": approved,
         "primary_status": reviewer_status,
         "second_status": "DISABLED",
@@ -418,6 +435,7 @@ def run_challenge1_v2_supervisor_reviews(
         "two_reviewer_approval": False,
         "single_reviewer_demo_failover": False,
         "single_groq_reviewer_approval": approved,
+        "single_reviewer_approval": approved,
         "verified_approval_count": int(approved),
         "transient_provider_failure_count": 0,
         "veto_provider_count": int(reviewer_status in {"VETO", "REJECT"}),
