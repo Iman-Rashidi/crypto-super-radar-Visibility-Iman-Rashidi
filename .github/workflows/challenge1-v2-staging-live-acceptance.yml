@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/challenge1-v2-staging-live-acceptance.yml
       - crypto_super_radar/web_app.py
+      - crypto_super_radar/ai_supervisor.py
+      - crypto_super_radar/ai_second_opinion.py
       - tests/test_v2_public_dashboard.py
   workflow_dispatch:
 
@@ -56,7 +58,7 @@ jobs:
     env:
       STAGING_URL: https://crypto-super-radar-unlimited-demo-staging.onrender.com
     steps:
-      - name: Run simultaneous independent live AI reviewer dry-run
+      - name: Run single live Groq reviewer synthetic dry-run
         shell: python
         run: |
           import json
@@ -81,17 +83,18 @@ jobs:
               assert response.status == 200
           consensus = payload.get("ai_consensus") or {}
           assert payload.get("test_passed") is True, payload.get("status")
-          assert consensus.get("status") == "APPROVED_BY_BOTH", consensus
-          assert consensus.get("primary_verified") is True
-          assert consensus.get("second_verified") is True
-          assert consensus.get("providers_independent") is True
-          assert consensus.get("models_independent") is True
+          assert consensus.get("status") == "APPROVED_BY_GROQ", consensus
+          assert consensus.get("single_reviewer_approval") is True
+          assert consensus.get("reviewer_id") == "groq"
+          assert consensus.get("reviewer_verified") is True
+          assert consensus.get("provider_is_groq") is True
+          assert consensus.get("model_is_groq_allowlisted") is True
           reviewers = payload.get("ai_reviews") or []
-          assert len(reviewers) == 2, reviewers
-          for reviewer in reviewers:
-              review = reviewer.get("review") or {}
-              assert review.get("http_status") == 200, reviewer
-              assert review.get("response_validated") is True, reviewer
-              assert review.get("model_verified") is True, reviewer
+          assert len(reviewers) == 1, reviewers
+          assert reviewers[0].get("reviewer_id") == "groq", reviewers
+          review = reviewers[0].get("review") or {}
+          assert review.get("http_status") == 200, reviewers[0]
+          assert review.get("response_validated") is True, reviewers[0]
+          assert review.get("model_verified") is True, reviewer
           assert payload.get("orders_submitted") is False
           assert payload.get("trade_executed") is False

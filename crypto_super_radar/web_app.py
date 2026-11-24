@@ -315,9 +315,10 @@ def _ai_dry_run_safe_diagnostic(payload: dict) -> dict:
     safe_consensus = {
         key: consensus.get(key)
         for key in (
-            "status", "decision", "primary_status", "second_status",
-            "primary_verified", "second_verified", "providers_independent",
-            "models_independent",
+            "status", "decision", "reviewer_id", "reviewer_status",
+            "reviewer_verified", "provider_is_groq", "model_is_groq_allowlisted",
+            "reviewer_approved", "single_groq_reviewer_approval",
+            "single_reviewer_approval", "entry_gate_enforced",
         )
         if consensus.get(key) is not None
     }
@@ -333,25 +334,14 @@ def _ai_dry_run_safe_diagnostic(payload: dict) -> dict:
 
 def _run_ai_synthetic_dry_run_limited() -> dict:
     """Call the real configured LLM on synthetic evidence, with no bot or ledger access."""
-    primary_config = ai_connection_status()
     second_config = second_ai_connection_status()
-    if not primary_config.get("configured") or not second_config.get("configured"):
-        primary_state = {
-            "reviewer_id": "nemotron",
-            "provider": primary_config.get("provider"),
-            "model": primary_config.get("model"),
-            "status": primary_config.get("status"),
-            "request_attempted": False,
-            "response_source": "NONE",
-            "response_validated": False,
-            "model_verified": False,
-            "paper_entry_eligible": False,
-        }
-        second_state = {
-            "reviewer_id": "second_ai",
-            "provider": second_config.get("provider"),
-            "model": second_config.get("model"),
-            "status": second_config.get("status"),
+    groq_model = str(second_config.get("model") or "UNKNOWN")
+    if not second_config.get("configured"):
+        groq_state = {
+            "reviewer_id": "groq",
+            "provider": second_config.get("provider") or "Groq",
+            "model": groq_model,
+            "status": second_config.get("status") or "NOT_CONFIGURED",
             "configuration_issues": list(second_config.get("configuration_issues") or []),
             "request_attempted": False,
             "response_source": "NONE",
@@ -360,15 +350,16 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
             "paper_entry_eligible": False,
         }
         return {
-            "provider": "Challenge 1 Independent Reviewer Pair",
-            "model": "Nemotron + independently configured second reviewer",
-            "status": "PROVIDERS_INSUFFICIENT",
-            "status_fa": "هر دو ناظر اختصاصی Challenge 1 آماده نیستند؛ هیچ درخواست مدل ارسال نشد.",
-            "ai_reviews": [
-                {"reviewer_id": "nemotron", "actor": "Nemotron Supervisor", "review": primary_state},
-                {"reviewer_id": "second_ai", "actor": "Second AI Supervisor", "review": second_state},
-            ],
-            "ai_consensus": {"status": "NOT_CONFIGURED", "decision": "BLOCK_DEMO_ENTRY"},
+            "provider": "Groq Sole Challenge 1 Reviewer",
+            "model": groq_model,
+            "status": "NOT_CONFIGURED",
+            "status_fa": "ناظر Groq با تنظیمات معتبر در دسترس نیست؛ هیچ درخواست مدل یا سفارش معاملاتی انجام نشد.",
+            "ai_reviews": [{"reviewer_id": "groq", "actor": "Groq Sole Supervisor", "review": groq_state}],
+            "ai_consensus": {
+                "status": "NOT_CONFIGURED", "decision": "BLOCK_DEMO_ENTRY",
+                "reviewer_id": "groq", "single_reviewer_approval": False,
+                "entry_gate_enforced": True,
+            },
             "test_passed": False,
             "paper_entry_eligible": False,
             "orders_submitted": False,
@@ -384,7 +375,7 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
         elapsed = now - last_started if last_started > 0 else AI_DRY_RUN_MIN_INTERVAL_SECONDS
         if elapsed < AI_DRY_RUN_MIN_INTERVAL_SECONDS:
             return {
-                "provider": "OpenRouter", "model": primary_config.get("model"),
+                "provider": "Groq", "model": groq_model,
                 "status": "DRY_RUN_COOLDOWN",
                 "status_fa": "برای جلوگیری از مصرف سهمیه، فاصله پنج‌دقیقه‌ای تست رعایت شود.",
                 "retry_after_seconds": max(1, int(AI_DRY_RUN_MIN_INTERVAL_SECONDS - elapsed)),
@@ -393,7 +384,7 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
             }
         if int(AI_DRY_RUN_STATE.get("count") or 0) >= AI_DRY_RUN_MAX_PER_UTC_DAY:
             return {
-                "provider": "OpenRouter", "model": primary_config.get("model"),
+                "provider": "Groq", "model": groq_model,
                 "status": "DAILY_DRY_RUN_LIMIT",
                 "status_fa": "سقف دو تست یکپارچگی امروز تکمیل شده است.",
                 "test_passed": False, "paper_entry_eligible": False,
@@ -487,15 +478,15 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
     quorum = _run_challenge1_supervisor_reviews(result, asset)
     consensus = quorum.get("ai_consensus") if isinstance(quorum.get("ai_consensus"), dict) else {}
     payload = {
-        "provider": "Challenge 1 Independent Reviewer Pair",
-        "model": "Nemotron + independently configured second reviewer",
+        "provider": "Groq Sole Challenge 1 Reviewer",
+        "model": groq_model,
         "status": quorum.get("status", "UNKNOWN"),
-        "status_fa": quorum.get("reason_fa") or "بررسی دو ناظر کامل نشد.",
+        "status_fa": quorum.get("reason_fa") or "بررسی ناظر Groq کامل نشد.",
         "ai_review": quorum.get("ai_review"),
         "second_ai_review": quorum.get("second_ai_review"),
         "ai_reviews": quorum.get("ai_reviews", []),
         "ai_consensus": consensus,
-        "test_mode": "SYNTHETIC_CHALLENGE1_DUAL_REVIEWER_DRY_RUN",
+        "test_mode": "SYNTHETIC_CHALLENGE1_GROQ_DRY_RUN",
         "input_data": "SYNTHETIC_NOT_LIVE_MARKET",
         "synthetic_asset": "perp:BTCUSDT",
         "synthetic_setup": {
@@ -508,11 +499,13 @@ def _run_ai_synthetic_dry_run_limited() -> dict:
         },
         "test_passed": bool(
             quorum.get("approved") is True
-            and consensus.get("status") == "APPROVED_BY_BOTH"
-            and consensus.get("primary_verified") is True
-            and consensus.get("second_verified") is True
-            and consensus.get("providers_independent") is True
-            and consensus.get("models_independent") is True
+            and consensus.get("status") == "APPROVED_BY_GROQ"
+            and consensus.get("single_reviewer_approval") is True
+            and consensus.get("reviewer_id") == "groq"
+            and consensus.get("reviewer_verified") is True
+            and consensus.get("provider_is_groq") is True
+            and consensus.get("model_is_groq_allowlisted") is True
+            and consensus.get("reviewer_approved") is True
         ),
         "ai_approval_for_synthetic_scenario": quorum.get("approved") is True,
         "paper_entry_eligible": False,
@@ -7254,7 +7247,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = {
                 "primary_supervisor": ai_connection_status(),
                 "second_supervisor": second_ai_connection_status(),
-                "legacy_challenge1_gate": "REQUIRES_TWO_INDEPENDENT_VERIFIED_APPROVALS",
+                "challenge1_gate": "REQUIRES_ONE_VERIFIED_GROQ_APPROVAL",
+                "legacy_challenge1_gate": "REQUIRES_ONE_VERIFIED_GROQ_APPROVAL",
                 "challenge1_v2_gate": "REQUIRES_ONE_VERIFIED_GROQ_APPROVAL",
                 "required_verified_approvals": 1,
                 "execution_role": "SOLE_GROQ_ENTRY_APPROVAL_GATE_FOR_V2",
@@ -12182,19 +12176,13 @@ def _queue_blofin_completed_job_reports(job_id: str, instrument_id: str) -> dict
 
 def _run_challenge1_supervisor_reviews(
     analysis: Any, asset: AssetSpec, *, signal_id: str | None = None,
-    single_reviewer: bool = False,
+    single_reviewer: bool = True,
 ) -> dict[str, Any]:
-    """Keep legacy dual review isolated; Challenge 1 V2 uses Groq alone."""
-    if single_reviewer:
-        return run_challenge1_v2_supervisor_reviews(
-            analysis, asset, signal_id=signal_id,
-            second_reviewer=run_independent_ai_supervisor,
-            single_reviewer=True,
-        )
-    return _run_two_reviewer_challenge1_supervisor_reviews(
+    """Use Groq as the sole Challenge 1 entry reviewer."""
+    return run_challenge1_v2_supervisor_reviews(
         analysis, asset, signal_id=signal_id,
-        primary_reviewer=run_free_ai_second_opinion,
         second_reviewer=run_independent_ai_supervisor,
+        single_reviewer=True,
     )
 
 def _blofin_manual_decimal(value: Any, field_name: str) -> Decimal:

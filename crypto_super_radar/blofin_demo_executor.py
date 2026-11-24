@@ -145,11 +145,11 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
 
     consensus = record.get("ai_consensus")
     if not isinstance(consensus, Mapping):
-        return False, "The two-reviewer consensus record is missing."
+        return False, "The verified Groq reviewer consensus record is missing."
     signal_id = str(record.get("signal_id") or "").strip()
     consensus_signal_id = str(consensus.get("reviewed_signal_id") or "").strip()
     if not signal_id or consensus_signal_id != signal_id:
-        return False, "The two-reviewer approval is not bound to this exact signal_id."
+        return False, "The Groq reviewer approval is not bound to this exact signal_id."
     try:
         consensus_reviewed_at = datetime.fromisoformat(
             str(consensus.get("reviewed_at_utc") or "").replace("Z", "+00:00")
@@ -165,13 +165,16 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
     if execution_profile == "CHALLENGE_1_V2":
         required_groq_consensus = (
             consensus.get("status") == "APPROVED_BY_GROQ"
-            and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION"
+            and consensus.get("decision") == "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER"
             and consensus.get("single_reviewer_approval") is True
+            and consensus.get("single_groq_reviewer_approval") is True
             and consensus.get("two_reviewer_approval") is False
             and consensus.get("entry_gate_enforced") is True
             and consensus.get("reviewer_id") == "groq"
-            and consensus.get("groq_verified") is True
-            and consensus.get("groq_approved") is True
+            and consensus.get("reviewer_verified") is True
+            and consensus.get("provider_is_groq") is True
+            and consensus.get("model_is_groq_allowlisted") is True
+            and consensus.get("reviewer_approved") is True
             and consensus.get("reviewed_signal_id") == signal_id
             and consensus.get("expected_side") == side
             and consensus.get("elliott_wave_phase") == wave_phase
@@ -225,8 +228,6 @@ def _challenge1_two_reviewer_approval_ready(record: Mapping[str, Any]) -> tuple[
             and str(review.get("trader_proposal") or "").strip().upper() == side
             and str(review.get("elliott_wave_phase") or "").strip().upper() == wave_phase
             and str(review.get("elliott_wave_direction") or "").strip().upper() == wave_direction
-            and str(consensus.get("reviewer_provider") or "").strip().casefold() == provider
-            and str(consensus.get("reviewer_model") or "").strip() == model
         )
         if not valid_groq_review:
             return False, "Groq did not provide a fresh, verified live approval aligned with this exact signal and Elliott phase."

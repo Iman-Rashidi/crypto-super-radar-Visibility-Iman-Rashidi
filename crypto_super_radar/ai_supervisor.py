@@ -341,7 +341,9 @@ def run_challenge1_v2_supervisor_reviews(
         }
 
     try:
-        groq = (second_reviewer or _ai.run_independent_ai_supervisor)(analysis, asset)
+        groq = (second_reviewer or _ai.run_independent_ai_supervisor)(
+            analysis, asset, review_role="SOLE AI SUPERVISOR",
+        )
     except Exception as exc:
         groq = unavailable(type(exc).__name__)
     if not isinstance(groq, dict):
