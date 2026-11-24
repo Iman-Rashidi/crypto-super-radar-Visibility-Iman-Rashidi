@@ -71,6 +71,7 @@ from .challenge1_position_observers import (
 )
 from .ai_supervisor import (
     ai_supervisor_status, run_ai_supervisor, run_challenge1_v2_supervisor_reviews,
+    _run_two_reviewer_challenge1_supervisor_reviews,
 )
 from .execution_diagnostics import build_execution_error_diagnostic
 from .challenge1_v2_render_scheduler import run_scheduler
@@ -12182,12 +12183,17 @@ def _run_challenge1_supervisor_reviews(
     analysis: Any, asset: AssetSpec, *, signal_id: str | None = None,
     single_reviewer: bool = False,
 ) -> dict[str, Any]:
-    """Compatibility wrapper for legacy dual review and V2's sole Groq reviewer."""
-    return run_challenge1_v2_supervisor_reviews(
+    """Keep legacy dual review isolated; Challenge 1 V2 uses Groq alone."""
+    if single_reviewer:
+        return run_challenge1_v2_supervisor_reviews(
+            analysis, asset, signal_id=signal_id,
+            second_reviewer=run_independent_ai_supervisor,
+            single_reviewer=True,
+        )
+    return _run_two_reviewer_challenge1_supervisor_reviews(
         analysis, asset, signal_id=signal_id,
         primary_reviewer=run_free_ai_second_opinion,
         second_reviewer=run_independent_ai_supervisor,
-        single_reviewer=single_reviewer,
     )
 
 def _blofin_manual_decimal(value: Any, field_name: str) -> Decimal:
