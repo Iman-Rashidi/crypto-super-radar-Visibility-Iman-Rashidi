@@ -6,6 +6,8 @@ on:
       - staging/challenge1-integration-2026-11-16
     paths:
       - .github/workflows/challenge1-v2-demo-autopilot.yml
+      - crypto_super_radar/ai_second_opinion.py
+      - tests/test_challenge1_v2_supervisor_failover.py
   workflow_dispatch:
 
 permissions:
