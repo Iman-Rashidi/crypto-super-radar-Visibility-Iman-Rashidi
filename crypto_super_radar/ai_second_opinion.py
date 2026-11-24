@@ -1173,6 +1173,7 @@ def _parse_validated_review_candidates(candidates, validator):
     validation_errors = []
     candidate_shapes = []
     last_validation_error = None
+    validation_exceptions = []
     parsed_count = 0
     oversized = False
     for index, candidate in enumerate(candidates):
@@ -1196,6 +1197,7 @@ def _parse_validated_review_candidates(candidates, validator):
             review = validator(document)
         except (TypeError, ValueError, KeyError, AttributeError) as exc:
             last_validation_error = exc
+            validation_exceptions.append((index, exc))
             validation_errors.append({
                 "candidate_index": index, "stage": "schema",
                 "error_code": _safe_ai_error_code(exc),
@@ -1210,22 +1212,14 @@ def _parse_validated_review_candidates(candidates, validator):
         # (or no specialist object) and must not overwrite the real schema
         # failure from the content candidate.
         selected_error = last_validation_error
-        for candidate_error in validation_errors:
-            if candidate_error.get("stage") != "schema":
-                continue
-            candidate_index = candidate_error.get("candidate_index")
+        for candidate_index, candidate_exception in validation_exceptions:
             shape = next(
                 (item for item in candidate_shapes
                  if item.get("candidate_index") == candidate_index),
                 {},
             )
             if shape.get("specialist_containers") or shape.get("root_role_aliases"):
-                selected_error_code = candidate_error.get("error_code")
-                selected_error = next(
-                    (exc for exc in [last_validation_error]
-                     if _safe_ai_error_code(exc) == selected_error_code),
-                    last_validation_error,
-                )
+                selected_error = candidate_exception
                 break
         try:
             setattr(selected_error, "_csr_parser_diagnostic", {
