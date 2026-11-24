@@ -3717,7 +3717,7 @@ def _run_futures_paper_tick(job_id: str, asset: AssetSpec) -> None:
             ),
             "ai_status": ai.get("status"),
             "ai_status_fa": (
-                "تنظیمات AI با وضعیت " + str(ai.get("status") or "نامشخص") + " ثبت شده‌اند؛ اما Nemotron در این چرخه فراخوانی نشد، چون چرخه پیش از مرحلهٔ AI متوقف شد."
+                "تنظیمات AI با وضعیت " + str(ai.get("status") or "نامشخص") + " ثبت شده‌اند؛ اما Groq در این چرخه فراخوانی نشد، چون چرخه پیش از مرحلهٔ AI متوقف شد."
                 if not ai_was_reviewed else
                 "مرحلهٔ AI در این چرخه اجرا شد؛ نتیجهٔ آن در جزئیات فنی ثبت شده است."
             ),
@@ -6266,7 +6266,7 @@ def _run_blofin_demo_execution_job(
 
         _set_blofin_execution_job(
             job_id, "running", stage="AI_SUPERVISOR_REVIEW",
-            message_fa="دو ناظر مستقل در حال بررسی هم‌زمان کندل‌ها، ساختار نمودار و موج الیوت ۵ دقیقه‌ای هستند؛ تا اجماع کامل هیچ سفارشی ارسال نمی‌شود.",
+            message_fa="ناظر Groq در حال بررسی شواهد کندل‌ها، ساختار نمودار و موج الیوت ۵ دقیقه‌ای است؛ تا تأیید معتبر او و عبور از کنترل‌های مستقل هیچ سفارشی ارسال نمی‌شود.",
             analysis=gate_summary,
             elliott_wave=wave_report,
             trade_context=trade_context,
@@ -6308,7 +6308,7 @@ def _run_blofin_demo_execution_job(
         second_ai_review = ai_quorum["second_ai_review"]
 
         if not ai_quorum["approved"]:
-            reason_fa = str(ai_quorum.get("reason_fa") or "اجماع دو ناظر مستقل تأیید نشد؛ ورود مسدود است.")
+            reason_fa = str(ai_quorum.get("reason_fa") or "تأیید معتبر ناظر Groq دریافت نشد؛ ورود مسدود است.")
             _record_challenge1_audit(
                 job_id, "FINAL_ENTRY_DECISION",
                 {
@@ -6318,7 +6318,7 @@ def _run_blofin_demo_execution_job(
                     "entry_price": record.get("entry_price_usd"),
                     "stop_loss": record.get("stop_loss_usd"),
                     "take_profit": record.get("take_profit_usd"),
-                    "risk_policy": "NO_ORDER_WITHOUT_TWO_VERIFIED_INDEPENDENT_APPROVALS",
+                    "risk_policy": "NO_ORDER_WITHOUT_ONE_VERIFIED_GROQ_APPROVAL",
                 },
                 event_key="final-entry-blocked-by-reviewers",
                 experience_id=learning_experience_id, status="WARNING", reason=reason_fa,
@@ -6362,7 +6362,7 @@ def _run_blofin_demo_execution_job(
 
         _set_blofin_execution_job(
             job_id, "running", stage="AI_SUPERVISOR_QUORUM_PASSED",
-            message_fa="هر دو ناظر مستقل، الگوی ورود و ساختار موج الیوت را تأیید کردند؛ کنترل‌های نهایی ریسک و حساب Demo آغاز می‌شود.",
+            message_fa="ناظر Groq الگوی ورود و ساختار موج الیوت را تأیید کرد؛ کنترل‌های مستقل ریسک و حساب Demo آغاز می‌شود.",
             ai_review=ai_review,
             ai_reviews=ai_reviews,
             ai_consensus=ai_consensus,
@@ -6415,7 +6415,7 @@ def _run_blofin_demo_execution_job(
                 job_id, "completed", stage="TRADE_READINESS_BLOCKED",
                 message_fa=(
                     str(reason_fa)
-                    + " هر دو ناظر مستقل اجرا و نتیجه‌شان ثبت شد؛ هیچ سفارشی ارسال نشد."
+                    + " نتیجه ناظر Groq ثبت شد؛ هیچ سفارشی ارسال نشد."
                 ),
                 ai_review=ai_review,
                 ai_reviews=ai_reviews,
@@ -6459,7 +6459,7 @@ def _run_blofin_demo_execution_job(
             job_id, "ORDER_SUBMISSION_AUTHORIZED",
             {
                 "instrument_id": instrument_id, "decision": "APPROVE",
-                "reason_fa": "Both reviewers passed, Demo readiness is READY, and executor preflight remains mandatory.",
+                "reason_fa": "The sole verified Groq reviewer passed, Demo readiness is READY, and executor preflight remains mandatory.",
                 "order_plan": {
                     key: record.get(key) for key in (
                         "signal_id", "signal", "entry_price_usd", "stop_loss_usd",
@@ -6470,7 +6470,7 @@ def _run_blofin_demo_execution_job(
                 "leverage": 1, "minimum_size_only": True,
             },
             event_key="order-submission-authorized", experience_id=learning_experience_id,
-            reason="The exact Demo order plan passed the robot and two-reviewer gates.",
+            reason="The exact Demo order plan passed the robot and sole verified Groq reviewer gate.",
         )
         submission_started = True
         failed_operation = "blofin_demo_executor.reserve_and_submit_order"
@@ -7759,7 +7759,7 @@ class Handler(BaseHTTPRequestHandler):
             <button id="blofin-demo-execute-once" type="button" disabled>اجرای دستی یک چرخه نسخه جدید (CHALLENGE_1_V2 Single-Shot)</button>
             <div class="metric" id="blofin-autopilot-panel" style="margin-top:14px;border-color:#2d6470">
               <h3>حالت اتوماتیک · Challenge 1</h3>
-              <p class="muted">پس از فعال‌سازی، ربات بازارهای تنظیم‌شده را در هر کندل بسته‌شدهٔ ۵ دقیقه‌ای بررسی می‌کند. ورود همچنان به دو تأیید مستقل AI، مجوز Demo، حد ضرر/سود و کنترل ریسک وابسته است. توقف، چرخه جاری را قطع نمی‌کند و فقط از شروع چرخه‌های بعدی جلوگیری می‌کند. کنترل داشبورد تا راه‌اندازی مجدد همین سرویس معتبر است؛ پس از Restart، مقدار BLOFIN_DEMO_AUTOPILOT_ENABLED در Environment مبنا خواهد بود.</p>
+              <p class="muted">پس از فعال‌سازی، ربات بازارهای تنظیم‌شده را در هر کندل بسته‌شدهٔ ۵ دقیقه‌ای بررسی می‌کند. ورود به یک تأیید زنده و معتبر Groq، مجوز Demo، حد ضرر/سود و کنترل‌های مستقل ریسک وابسته است. توقف، چرخه جاری را قطع نمی‌کند و فقط از شروع چرخه‌های بعدی جلوگیری می‌کند. کنترل داشبورد تا راه‌اندازی مجدد همین سرویس معتبر است؛ پس از Restart، مقدار BLOFIN_DEMO_AUTOPILOT_ENABLED در Environment مبنا خواهد بود.</p>
               <div class="grid" style="margin:10px 0">
                 <button id="blofin-autopilot-start" type="button" disabled>شروع پایش و معامله اتوماتیک</button>
                 <button id="blofin-autopilot-stop" type="button" disabled>توقف چرخه‌های اتوماتیک</button>
@@ -7770,8 +7770,8 @@ class Handler(BaseHTTPRequestHandler):
               <p class="muted">گزارش فارسی اجرای معامله پس از آغاز چرخه در این قسمت نمایش داده می‌شود.</p>
             </div>
             <div class="metric" id="blofin-v2-autopilot-panel" style="margin-top:14px;border-color:#2d6470">
-              <h3>اجرای مستقیم V2 · پنج بازار و دو ناظر مستقل</h3>
-              <p class="muted">این دکمه مستقیماً چرخهٔ مشترک challenge1_v2_autopilot.run_cycle را در Render اجرا می‌کند. قبل از ارسال درخواست، توکن پنل لازم است. هر سفارش احتمالی فقط به BloFin Demo و با تأیید هر دو ناظر، حد ضرر/سود و سقف چهار پوزیشن می‌رود.</p>
+              <h3>اجرای مستقیم V2 · پنج بازار و ناظر Groq</h3>
+              <p class="muted">این دکمه مستقیماً چرخهٔ مشترک challenge1_v2_autopilot.run_cycle را در Render اجرا می‌کند. قبل از ارسال درخواست، توکن پنل لازم است. هر سفارش احتمالی فقط به BloFin Demo و پس از تأیید معتبر Groq، کنترل مستقل حد ضرر/سود و سقف چهار پوزیشن می‌رود.</p>
               <button id="blofin-v2-run-once" type="button">اجرای یک چرخه V2 در BloFin Demo</button>
               <p id="blofin-v2-cycle-status" class="muted" aria-live="polite">برای اجرای دستی، توکن پنل را وارد کن.</p>
               <div id="blofin-v2-cycle-history" style="overflow-x:auto"></div>
@@ -8191,7 +8191,7 @@ async function loadBlofinInstruments(){
               const token=tokenInput.value.trim();
               if(!token){autopilotStatus.textContent='ابتدا توکن پنل را در کادر بالاتر وارد کن.';return;}
               const prompt=action==='start'
-                ?'پایش اتوماتیک Challenge 1 در BloFin DEMO فعال شود؟ ربات فقط در Demo و با تمام گیت‌های دو ناظر، SL/TP و کنترل ریسک مجاز است.'
+                ?'پایش اتوماتیک Challenge 1 در BloFin DEMO فعال شود؟ ربات فقط در Demo و با تأیید Groq، SL/TP و تمام کنترل‌های مستقل ریسک مجاز است.'
                 :'چرخه‌های جدید اتوماتیک متوقف شوند؟ چرخه در حال اجرا و مدیریت پوزیشن باز قطع نخواهد شد.';
               if(!window.confirm(prompt))return;
               autopilotStartButton.disabled=true;
@@ -8496,7 +8496,7 @@ async function loadBlofinInstruments(){
               executionReport.replaceChildren();
               const runningMessage=document.createElement('p');
               runningMessage.className='muted';
-              runningMessage.textContent='در حال تحلیل '+selectedInstrument+' با کندل بسته‌شدهٔ ۵ دقیقه‌ای، ساختار قیمت و موج الیوت و بررسی دو ناظر مستقل AI؛ هنوز سفارشی ارسال نشده است.';
+              runningMessage.textContent='در حال تحلیل '+selectedInstrument+' با کندل بسته‌شدهٔ ۵ دقیقه‌ای، ساختار قیمت و موج الیوت و بررسی ناظر Groq؛ هنوز سفارشی ارسال نشده است.';
               executionReport.appendChild(runningMessage);
               try{
                 const response=await fetch('/api/blofin/demo/execute-once',{
@@ -8543,7 +8543,7 @@ async function loadBlofinInstruments(){
               }
               const table=document.createElement('table');
               table.style.width='100%';table.style.borderCollapse='collapse';
-              const headers=['نماد','وضعیت','سیگنال','دلیل','Nemotron','Groq'];
+              const headers=['نماد','وضعیت','سیگنال','دلیل','Groq'];
               const thead=document.createElement('thead'),headRow=document.createElement('tr');
               headers.forEach(label=>{const th=add(headRow,'th',label);th.style.padding='8px';th.style.textAlign='right';});
               thead.appendChild(headRow);table.appendChild(thead);
@@ -8551,11 +8551,10 @@ async function loadBlofinInstruments(){
               cycles.forEach(item=>{
                 const tr=document.createElement('tr');
                 const votes=Array.isArray(item.ai_votes)?item.ai_votes:[];
-                const nemotron=votes.find(x=>x.reviewer_id==='nemotron'||String(x.provider||'').toLowerCase().includes('openrouter'))||{};
-                const groq=votes.find(x=>x.reviewer_id==='second_ai'||String(x.provider||'').toLowerCase().includes('groq'))||{};
+                const groq=votes.find(x=>x.reviewer_id==='groq'||String(x.provider||'').toLowerCase().includes('groq'))||{};
                 const opinion=x=>[x.status||'NOT_RECORDED',x.opinion&&x.opinion!==x.status?x.opinion:''].filter(Boolean).join(' · ');
                 [item.symbol,item.status,item.signal,item.reason,
-                 opinion(nemotron),opinion(groq)].forEach(value=>{
+                 opinion(groq)].forEach(value=>{
                   const td=add(tr,'td',value);td.style.padding='8px';td.style.borderTop='1px solid rgba(128,128,128,.25)';
                 });
                 tbody.appendChild(tr);
@@ -8587,7 +8586,7 @@ async function loadBlofinInstruments(){
             v2RunButton.addEventListener('click',async function(){
               const token=tokenInput.value.trim();
               if(!token){v2CycleStatus.textContent='ابتدا توکن پنل را وارد کن.';return;}
-              if(!window.confirm('یک چرخه کامل CHALLENGE_1_V2 روی پنج بازار در BloFin Demo اجرا می‌شود. اگر هر دو ناظر تأیید معتبر بدهند و همه کنترل‌های ریسک عبور کنند، سفارش واقعی Demo ممکن است ارسال شود. هیچ سفارش Live مجاز نیست. ادامه؟'))return;
+              if(!window.confirm('یک چرخه کامل CHALLENGE_1_V2 روی پنج بازار در BloFin Demo اجرا می‌شود. اگر ناظر Groq تأیید معتبر بدهد و همه کنترل‌های مستقل ریسک عبور کنند، سفارش Demo ممکن است ارسال شود. هیچ سفارش Live مجاز نیست. ادامه؟'))return;
               v2RunButton.disabled=true;v2CycleStatus.textContent='درخواست چرخه V2 به Render Staging ارسال شد...';
               try{
                 const response=await fetch('/api/blofin/demo/v2-autopilot/run-once',{
@@ -9772,7 +9771,7 @@ async function loadBlofinInstruments(){
             </section>
             <p id="live-radar-reason" class="live-radar-note" aria-live="polite">سیگنال خرید/فروش پس از تأیید ساختار قیمت و اعتبارسنجی دو منبع نمایش داده می‌شود.</p>
             <p id="live-radar-provider" class="live-radar-note">اعتبارسنجی چندمنبعی: در انتظار داده</p>
-            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance، Bybit، OKX و Kraken و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و از موتور Challenge 1 فیوچرز BloFin جداست. Challenge 1 به‌طور مستقل فقط کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای BloFin را همراه با ساختار قیمت، موج الیوت و دو ناظر مستقل بررسی می‌کند؛ تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
+            <p class="live-radar-note">این نمودار رادار پژوهشی Spot از Binance، Bybit، OKX و Kraken و تایم‌فریم انتخابی است؛ سفارش نمی‌فرستد و از موتور Challenge 1 فیوچرز BloFin جداست. Challenge 1 به‌طور مستقل فقط کندل‌های بسته‌شدهٔ ۵ دقیقه‌ای BloFin را همراه با ساختار قیمت، موج الیوت و ناظر Groq بررسی می‌کند؛ تایم‌فریم‌های ۱۵ دقیقه و یک‌ساعته شرط اجباری ورود نیستند. هیچ الگوریتمی کف یا سقف مطلق را تضمین نمی‌کند. کندل در حال تشکیل صرفاً برای نمایش است و ممکن است تغییر کند.</p>
           </div>
           <script>
           (function(){
@@ -10599,9 +10598,9 @@ async function loadBlofinInstruments(){
           </script>
         </section>
         <section class="card" id="ai-dry-run-panel">
-          <h2>تست واقعی یکپارچگی Nemotron · بدون معامله</h2>
+          <h2>تست واقعی یکپارچگی ناظر Groq · بدون معامله</h2>
           <p class="muted">در این تست، درخواست واقعی و تازه به مدل انتخاب‌شده ارسال می‌شود؛ ورودی فقط یک سناریوی ساختگی BTC با ۱۲ فیلتر نمونه است، نه قیمت یا سیگنال زنده. قالب JSON، جهت LONG، نظر مدیریت ریسک و شناسه مدل بررسی می‌شود. حتی اگر مدل سناریو را تأیید کند، این خروجی اجازه ورود به Paper ندارد و هیچ پوزیشن یا سفارشی ساخته نمی‌شود. این تست از سهمیه API رایگان استفاده می‌کند.</p>
-          <button id="ai-dry-run-run" type="button">اجرای تست واقعی Nemotron (Dry-Run)</button>
+          <button id="ai-dry-run-run" type="button">اجرای تست واقعی Groq (Dry-Run)</button>
           <pre id="ai-dry-run-result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
           <script>
           (function(){
@@ -10610,7 +10609,7 @@ async function loadBlofinInstruments(){
             if(!button||!output)return;
             button.addEventListener('click',async function(){
               button.disabled=true;
-              output.textContent='در حال ارسال سناریوی ساختگی به Nemotron و اعتبارسنجی پاسخ واقعی...';
+              output.textContent='در حال ارسال سناریوی ساختگی به Groq و اعتبارسنجی پاسخ واقعی...';
               try{
                 const response=await fetch('/api/ai/dry-run',{
                   method:'POST',
@@ -11053,7 +11052,7 @@ async function loadBlofinInstruments(){
                     return self._send(503, b'{"status":"WORKER_START_FAILED"}', "application/json; charset=utf-8")
                 return self._send(202, json.dumps({
                     "status": "QUEUED", "job_id": job_id,
-                    "message_fa": "چرخه واقعی CHALLENGE_1_V2 در محیط BloFin Demo آغاز شد؛ ورود فقط با تأیید هر دو ناظر و کنترل‌های ریسک مجاز است.",
+                    "message_fa": "چرخه واقعی CHALLENGE_1_V2 در محیط BloFin Demo آغاز شد؛ ورود فقط با تأیید معتبر Groq و عبور از کنترل‌های مستقل ریسک مجاز است.",
                 }, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
             if route == "/api/blofin/demo/autopilot/control":
@@ -13368,9 +13367,8 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         {},
     )
 
-    # The successful execution result keeps a compact primary ai_review for the UI,
-    # while the full two-reviewer council stays at the job root. Prefer the complete
-    # reviewer records and preserve both independently in the activity journal.
+    # The successful execution result keeps a compact primary ai_review for the UI.
+    # Preserve the actual Groq reviewer record; never invent a second reviewer.
     raw_reviews = result.get("ai_reviews") if isinstance(result.get("ai_reviews"), list) else (
         current.get("ai_reviews") if isinstance(current.get("ai_reviews"), list) else []
     )
@@ -13380,8 +13378,8 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         )
         if fallback:
             raw_reviews = [{
-                "reviewer_id": fallback.get("reviewer_id") or "nemotron",
-                "actor": "Nemotron Supervisor",
+                "reviewer_id": fallback.get("reviewer_id") or "groq",
+                "actor": "Groq Sole Supervisor",
                 "review": fallback,
             }]
 
@@ -13392,9 +13390,8 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         review = item.get("review") if isinstance(item.get("review"), dict) else item
         reviewer_id = str(item.get("reviewer_id") or review.get("reviewer_id") or "")
         actor = str(item.get("actor") or (
-            "Nemotron Supervisor" if reviewer_id == "nemotron" else
-            "Second AI Supervisor" if reviewer_id == "second_ai" else
-            "AI Supervisor"
+            "Groq Sole Supervisor" if reviewer_id == "groq" else
+            "Legacy Reviewer"
         ))
         request_attempted = review.get("request_attempted")
         review_status = str(review.get("status") or "UNKNOWN").upper()
@@ -13423,8 +13420,7 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
 
     present_reviewers = {item["reviewer_id"] for item in ai_reviews if item.get("reviewer_id")}
     for reviewer_id, actor in (
-        ("nemotron", "Nemotron Supervisor"),
-        ("second_ai", "Second AI Supervisor"),
+        ("groq", "Groq Sole Supervisor"),
     ):
         if reviewer_id not in present_reviewers:
             ai_reviews.append({
@@ -13451,10 +13447,10 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
     consensus = {
         key: raw_consensus.get(key)
         for key in (
-            "status", "primary_status", "second_status",
-            "primary_verified", "second_verified",
-            "primary_approved", "second_approved",
-            "two_reviewer_approval", "decision",
+            "status", "reviewer_id", "reviewer_status",
+            "reviewer_verified", "provider_is_groq", "model_is_groq_allowlisted",
+            "reviewer_approved", "single_groq_reviewer_approval",
+            "single_reviewer_approval", "entry_gate_enforced", "decision",
         )
         if key in raw_consensus
     }
@@ -13463,10 +13459,10 @@ def _blofin_activity_journal_snapshot(job_id: str, instrument_id: str, job: dict
         consensus.get("status") or ("NOT_CALLED" if all_not_called else "NOT_COMPARABLE")
     ).upper()
     ai_status = (
-        "APPROVED_BY_BOTH"
-        if consensus.get("two_reviewer_approval") is True
-        and consensus.get("primary_verified") is True
-        and consensus.get("second_verified") is True
+        "APPROVED_BY_GROQ"
+        if consensus.get("single_reviewer_approval") is True
+        and consensus.get("reviewer_id") == "groq"
+        and consensus.get("reviewer_verified") is True
         else "NOT_CALLED" if all_not_called
         else reviewer_consensus
     )
@@ -13636,8 +13632,8 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             current.get("ai_review") if isinstance(current.get("ai_review"), dict) else {}
         )
         if single:
-            reviews = [{"reviewer_id": single.get("reviewer_id") or "nemotron",
-                        "actor": "Nemotron Supervisor", "review": single}]
+            reviews = [{"reviewer_id": single.get("reviewer_id") or "groq",
+                        "actor": "Groq Sole Supervisor", "review": single}]
     if reviews:
         present_reviewers = {
             str(item.get("reviewer_id") or (item.get("review") or {}).get("reviewer_id") or "").lower()
@@ -13646,22 +13642,11 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
         not_called_reason = (
             "این ناظر در این چرخه فراخوانی نشد؛ نتیجهٔ عدم فراخوانی صریحاً ثبت شده است."
         )
-        if "nemotron" not in present_reviewers:
+        if "groq" not in present_reviewers:
             reviews.append({
-                "reviewer_id": "nemotron", "actor": "Nemotron Supervisor",
+                "reviewer_id": "groq", "actor": "Groq Sole Supervisor",
                 "review": {
-                    "reviewer_id": "nemotron", "status": "NOT_CALLED",
-                    "request_attempted": False, "skip_reason_code": "REVIEWER_NOT_PRESENT",
-                    "response_source": "NONE", "response_validated": False,
-                    "model_verified": False, "paper_entry_eligible": False,
-                    "reason": not_called_reason,
-                },
-            })
-        if not ({"second_ai", "second"} & present_reviewers):
-            reviews.append({
-                "reviewer_id": "second_ai", "actor": "Second AI Supervisor",
-                "review": {
-                    "reviewer_id": "second_ai", "status": "NOT_CALLED",
+                    "reviewer_id": "groq", "status": "NOT_CALLED",
                     "request_attempted": False, "skip_reason_code": "REVIEWER_NOT_PRESENT",
                     "response_source": "NONE", "response_validated": False,
                     "model_verified": False, "paper_entry_eligible": False,
@@ -13675,30 +13660,17 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             "هیچ فراخوانی خارجی برای این چرخه انجام نشد؛ ربات پیش از مرحله بازبینی AI "
             f"در مرحله {blocked_stage} متوقف شد."
         )
-        reviews = [
-            {
-                "reviewer_id": "nemotron",
-                "actor": "Nemotron Supervisor",
-                "review": {
-                    "reviewer_id": "nemotron", "status": "NOT_CALLED",
-                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
-                    "response_source": "NONE", "response_validated": False,
-                    "model_verified": False, "paper_entry_eligible": False,
-                    "reason": blocked_reason,
-                },
+        reviews = [{
+            "reviewer_id": "groq",
+            "actor": "Groq Sole Supervisor",
+            "review": {
+                "reviewer_id": "groq", "status": "NOT_CALLED",
+                "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
+                "response_source": "NONE", "response_validated": False,
+                "model_verified": False, "paper_entry_eligible": False,
+                "reason": blocked_reason,
             },
-            {
-                "reviewer_id": "second_ai",
-                "actor": "Second AI Supervisor",
-                "review": {
-                    "reviewer_id": "second_ai", "status": "NOT_CALLED",
-                    "request_attempted": False, "skip_reason_code": "UPSTREAM_STAGE_BLOCKED",
-                    "response_source": "NONE", "response_validated": False,
-                    "model_verified": False, "paper_entry_eligible": False,
-                    "reason": blocked_reason,
-                },
-            },
-        ]
+        }]
 
     consensus = result.get("ai_consensus") if isinstance(result.get("ai_consensus"), dict) else (
         current.get("ai_consensus") if isinstance(current.get("ai_consensus"), dict) else {}
@@ -13719,9 +13691,9 @@ def _blofin_job_notion_events(job_id: str, instrument_id: str, job: dict) -> lis
             for item in reviews
         )
         consensus_status = (
-            "AGREEMENT" if len(verified) >= 2 and len({
-                str(item.get("status") or "").upper() for item in verified
-            }) == 1 else
+            "APPROVED_BY_GROQ" if len(verified) == 1
+            and str(verified[0].get("reviewer_id") or "").lower() == "groq"
+            and str(verified[0].get("status") or "").upper() == "APPROVED" else
             "SINGLE_REVIEWER" if len(verified) == 1 else
             "NOT_CALLED" if all_not_called else
             "NOT_COMPARABLE"
