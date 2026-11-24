@@ -685,7 +685,7 @@ class WebAppHttpTests(unittest.TestCase):
             "finished_at_utc": "2026-11-24T18:00:05Z",
             "mode": "DRY_RUN",
             "status": "NO_TRADE",
-            "signal": "LONG",
+            "signal": None,
             "reason": "دو رأی همسو نیستند",
             "orders_submitted": 0,
             "payload_json": json.dumps(payload),
