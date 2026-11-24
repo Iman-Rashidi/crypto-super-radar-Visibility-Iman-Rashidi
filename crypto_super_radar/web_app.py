@@ -2593,7 +2593,9 @@ def _run_scan(job_id: str, asset: AssetSpec, headline: str, social_post: str) ->
             with LOCK:
                 current = JOBS.get(job_id) or {}
                 if current.get("status") == "running":
-                    JOBS[job_id] = {"status": "completed", "result": payload,
+                    JOBS[job_id] = {"status": "partial" if payload.get("status") == "PARTIAL" else "completed",
+                                    "result": payload,
+                                    "message_fa": payload.get("summary_fa"),
                                     "finished_at_utc": datetime.now(timezone.utc).isoformat()}
             return
         result = ENGINE.analyze(
