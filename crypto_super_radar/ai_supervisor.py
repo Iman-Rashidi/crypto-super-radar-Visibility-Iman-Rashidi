@@ -409,7 +409,7 @@ def run_challenge1_v2_supervisor_reviews(
         status_fa = "ناظر Groq با شواهد معتبر ورود را رد کرد؛ هیچ سفارش Demo ارسال نمی‌شود."
     elif approved:
         consensus_status = "APPROVED_BY_GROQ"
-        decision = "AUTHORIZE_DEMO_EXECUTION_WITH_ONE_REVIEWER"
+        decision = "AUTHORIZE_DEMO_EXECUTION"
         status_fa = "ناظر Groq پاسخ زنده، مدل و شواهد موج و جهت را تأیید کرد؛ تمام کنترل‌های قطعی Executor همچنان اجباری هستند."
     elif reviewer_status in {"NOT_CONFIGURED", "SECOND_AI_NOT_CONFIGURED"}:
         consensus_status = "NOT_CONFIGURED"
@@ -428,11 +428,15 @@ def run_challenge1_v2_supervisor_reviews(
     consensus = {
         "status": consensus_status,
         "reviewer_id": "groq",
+        "reviewer_provider": str(groq.get("provider") or "").strip(),
+        "reviewer_model": str(groq.get("model") or "").strip(),
         "reviewer_status": reviewer_status,
         "reviewer_verified": verified,
         "provider_is_groq": provider_is_groq,
         "model_is_groq_allowlisted": model_is_groq_allowlisted,
         "reviewer_approved": approved,
+        "groq_verified": verified,
+        "groq_approved": approved,
         "primary_status": reviewer_status,
         "second_status": "DISABLED",
         "primary_verified": verified,
