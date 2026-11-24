@@ -91,7 +91,7 @@ def _post_openrouter_with_fallback(
 CACHE_TTL_SECONDS = 4 * 60 * 60
 MAX_REQUESTS_PER_UTC_DAY = 35
 MAX_REQUESTS_PER_MINUTE = 18
-PROMPT_VERSION = "free-second-opinion-v10-v2-nested-list-specialist-normalization-and-safe-shape-diagnostics"
+PROMPT_VERSION = "free-second-opinion-v11-v2-normalized-envelope-and-wave-evidence"
 MAX_RESPONSE_CHARS = 16_000
 ALLOWED_RATINGS = {"buy", "overweight", "hold", "underweight", "sell", "review"}
 
@@ -1352,6 +1352,9 @@ def _validated_v2_review(
     expected_side: str, evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate generic specialist approvals plus an exact V2 Elliott echo."""
+    # Unwrap once here as well so the separate Elliott echo is read from the
+    # same canonical review object as the generic specialist gate.
+    document = _unwrap_specialist_document(document)
     result = _validated_review(
         document, model, asset, expected_side=expected_side, market_type="perpetual",
     )
