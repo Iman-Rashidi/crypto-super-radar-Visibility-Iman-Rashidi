@@ -1551,6 +1551,24 @@ def run_free_ai_second_opinion(
         }
         if not content_candidates:
             raise ValueError("AI message content is not text")
+        def validate_candidate(document):
+            return (
+                _validated_v2_review(
+                    document, model, asset_name, expected_side=expected_side, evidence=evidence,
+                )
+                if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
+                else _validated_pattern_review(document, model, asset_name, evidence=evidence)
+                if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
+                else _validated_review(
+                    document, model, asset_name, expected_side=expected_side, market_type=market_type
+                )
+            )
+
+        parsed, review, validated_candidate_index, candidate_validation_errors = (
+            _parse_validated_review_candidates(content_candidates, validate_candidate)
+        )
+        parser_diagnostic["validated_candidate_index"] = validated_candidate_index
+        parser_diagnostic["candidate_validation_errors"] = candidate_validation_errors
         returned_model = body.get("model") if isinstance(body, dict) else None
         if not isinstance(returned_model, str) or not returned_model.strip():
             return {
@@ -1577,24 +1595,6 @@ def run_free_ai_second_opinion(
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
-        def validate_candidate(document):
-            return (
-                _validated_v2_review(
-                    document, model, asset_name, expected_side=expected_side, evidence=evidence,
-                )
-                if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
-                else _validated_pattern_review(document, model, asset_name, evidence=evidence)
-                if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
-                else _validated_review(
-                    document, model, asset_name, expected_side=expected_side, market_type=market_type
-                )
-            )
-
-        parsed, review, validated_candidate_index, candidate_validation_errors = (
-            _parse_validated_review_candidates(content_candidates, validate_candidate)
-        )
-        parser_diagnostic["validated_candidate_index"] = validated_candidate_index
-        parser_diagnostic["candidate_validation_errors"] = candidate_validation_errors
         usage = body.get("usage") if isinstance(body, dict) else None
         total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
@@ -1611,6 +1611,7 @@ def run_free_ai_second_opinion(
             "prompt_version": PROMPT_VERSION,
             "model_verified": True,
             "response_validated": True,
+            "parser_diagnostic": parser_diagnostic,
             "latency_ms": latency_ms,
             "total_tokens": total_tokens,
         })
