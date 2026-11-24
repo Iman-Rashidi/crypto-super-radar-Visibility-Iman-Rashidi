@@ -95,6 +95,6 @@ jobs:
           review = reviewers[0].get("review") or {}
           assert review.get("http_status") == 200, reviewers[0]
           assert review.get("response_validated") is True, reviewers[0]
-          assert review.get("model_verified") is True, reviewer
+          assert review.get("model_verified") is True, reviewers[0]
           assert payload.get("orders_submitted") is False
           assert payload.get("trade_executed") is False
