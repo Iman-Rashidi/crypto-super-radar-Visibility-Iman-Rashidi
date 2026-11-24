@@ -116,6 +116,56 @@ class DatabaseAdapterTests(unittest.TestCase):
         self.assertEqual(remote.execute_calls, 1)
         db.close()
 
+    def test_transient_turso_http_errors_retry_up_to_three_times(self):
+        class TemporarilyUnavailableRemote(_FakeRemoteConnection):
+            def _maybe_fail(self):
+                self.execute_calls += 1
+                if self.failures_remaining:
+                    self.failures_remaining -= 1
+                    raise sqlite3.OperationalError("HTTP status 503: temporarily unavailable")
+
+        remote = TemporarilyUnavailableRemote()
+        remote.failures_remaining = 3
+        db = _ConnectionAdapter(remote)
+        with patch("crypto_super_radar.database.time.sleep"):
+            row = db.execute("SELECT 11 AS value").fetchone()
+        self.assertEqual(row["value"], 11)
+        self.assertEqual(remote.execute_calls, 4)
+        db.close()
+
+    def test_idempotent_turso_transaction_retries_after_rollback(self):
+        remote = _FakeRemoteConnection()
+        db = _ConnectionAdapter(remote)
+        attempts = {"count": 0}
+
+        def write_unit():
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise sqlite3.OperationalError("HTTP status 503: service unavailable")
+            db.execute("CREATE TABLE IF NOT EXISTS retry_sample (value INTEGER)")
+            db.execute("INSERT OR REPLACE INTO retry_sample VALUES (23)")
+
+        with patch("crypto_super_radar.database.time.sleep"):
+            db.run_transaction(write_unit, retries=3)
+        row = db.execute("SELECT value FROM retry_sample").fetchone()
+        self.assertEqual(row[0], 23)
+        self.assertEqual(attempts["count"], 2)
+        db.close()
+
+    def test_transaction_does_not_retry_non_transient_turso_errors(self):
+        remote = _FakeRemoteConnection()
+        db = _ConnectionAdapter(remote)
+        attempts = {"count": 0}
+
+        def forbidden_retry():
+            attempts["count"] += 1
+            raise sqlite3.OperationalError("HTTP status 401: unauthorized")
+
+        with self.assertRaisesRegex(sqlite3.OperationalError, "401"):
+            db.run_transaction(forbidden_retry, retries=3)
+        self.assertEqual(attempts["count"], 1)
+        db.close()
+
     def test_hybrid_rows_support_name_index_and_dict_access(self):
         raw = sqlite3.connect(":memory:")
         db = _ConnectionAdapter(raw)

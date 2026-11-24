@@ -5,6 +5,7 @@ from decimal import Decimal
 import hashlib
 import json
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -70,19 +71,28 @@ def _safe_record(record: Mapping[str, Any]) -> dict[str, Any]:
 
 def persist_result(connection: Any, *, cycle_id: str, symbol: str, result: Mapping[str, Any],
                    started_at: str, finished_at: str) -> None:
-    connection.execute("""CREATE TABLE IF NOT EXISTS challenge1_v2_autopilot_cycles (
-        cycle_id TEXT NOT NULL, symbol TEXT NOT NULL, started_at_utc TEXT NOT NULL,
-        finished_at_utc TEXT NOT NULL, environment TEXT NOT NULL, mode TEXT NOT NULL,
-        status TEXT NOT NULL, signal TEXT, reason TEXT, orders_submitted INTEGER NOT NULL DEFAULT 0,
-        payload_json TEXT NOT NULL, PRIMARY KEY (cycle_id, symbol))""")
     safe = _safe_record(result)
-    connection.execute("""INSERT OR REPLACE INTO challenge1_v2_autopilot_cycles
-        (cycle_id,symbol,started_at_utc,finished_at_utc,environment,mode,status,signal,reason,orders_submitted,payload_json)
-        VALUES (?,?,?,?, 'BLOFIN_DEMO',?,?,?,?,?,?)""",
-        (cycle_id,symbol,started_at,finished_at,str(result.get("mode") or "DRY_RUN"),
-         str(safe.get("status") or "UNKNOWN"),str(safe.get("signal") or "UNKNOWN"),
-         str(safe.get("reason") or ""),int(bool(result.get("orders_submitted"))),
-         json.dumps(safe,ensure_ascii=False,sort_keys=True,default=str)))
+
+    def write_symbol_record():
+        connection.execute("""CREATE TABLE IF NOT EXISTS challenge1_v2_autopilot_cycles (
+            cycle_id TEXT NOT NULL, symbol TEXT NOT NULL, started_at_utc TEXT NOT NULL,
+            finished_at_utc TEXT NOT NULL, environment TEXT NOT NULL, mode TEXT NOT NULL,
+            status TEXT NOT NULL, signal TEXT, reason TEXT, orders_submitted INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL, PRIMARY KEY (cycle_id, symbol))""")
+        connection.execute("""INSERT OR REPLACE INTO challenge1_v2_autopilot_cycles
+            (cycle_id,symbol,started_at_utc,finished_at_utc,environment,mode,status,signal,reason,orders_submitted,payload_json)
+            VALUES (?,?,?,?, 'BLOFIN_DEMO',?,?,?,?,?,?)""",
+            (cycle_id,symbol,started_at,finished_at,str(result.get("mode") or "DRY_RUN"),
+             str(safe.get("status") or "UNKNOWN"),str(safe.get("signal") or "UNKNOWN"),
+             str(safe.get("reason") or ""),int(bool(result.get("orders_submitted"))),
+             json.dumps(safe,ensure_ascii=False,sort_keys=True,default=str)))
+
+    retry_transaction = getattr(connection, "run_transaction", None)
+    if callable(retry_transaction):
+        retry_transaction(write_symbol_record, retries=3)
+    else:
+        write_symbol_record()
+        connection.commit()
 
 
 def _rows(value: Any) -> list[Mapping[str, Any]]:
@@ -358,7 +368,18 @@ def main() -> int:
         print(json.dumps(payload,ensure_ascii=False,sort_keys=True,default=str))
         return 0 if payload["status"]=="CYCLE_COMPLETED" else 3
     except Exception as exc:
-        print(json.dumps({"status":"ERROR","error_type":type(exc).__name__,"orders_submitted":False}))
+        detail = " ".join(str(exc).split())[:240]
+        for secret in (os.getenv("TURSO_AUTH_TOKEN", ""), os.getenv("BLOFIN_DEMO_TRADE_API_SECRET", ""),
+                       os.getenv("BLOFIN_DEMO_TRADE_PASSPHRASE", "")):
+            if secret:
+                detail = detail.replace(secret, "[REDACTED]")
+        detail = re.sub(r"(?i)(?:libsql|https?)://\S+", "[ENDPOINT_REDACTED]", detail)
+        detail = re.sub(r"(?i)(authorization|token|password|secret)\s*[:=]\s*[^,\s]+",
+                        r"\1=[REDACTED]", detail)
+        print(json.dumps({
+            "status":"ERROR","error_type":type(exc).__name__,
+            "error_detail":detail[:240],"orders_submitted":False,
+        }))
         return 1
 
 

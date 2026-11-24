@@ -1180,3 +1180,74 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertEqual(calls["count"], 0)
         self.assertFalse(result["request_attempted"])
         self.assertEqual(result["skip_reason_code"], "NATIVE_COUNCIL_NOT_APPROVED")
+
+
+    def test_primary_uses_schema_valid_reasoning_when_content_contains_unrelated_json(self):
+        document = valid_document()
+
+        class MultiCandidateResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": DEFAULT_FREE_MODEL,
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json.dumps({"analysis": "intermediate object"}),
+                            "reasoning": "Final review follows:\\n" + json.dumps(document, ensure_ascii=False),
+                        },
+                    }],
+                }
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            review = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: MultiCandidateResponse(),
+                bypass_cache=True,
+            )
+
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["response_validated"])
+        self.assertTrue(review["paper_entry_eligible"])
+        self.assertEqual(review["parser_diagnostic"]["validated_candidate_index"], 1)
+        self.assertEqual(review["parser_diagnostic"]["candidate_validation_errors"][0]["stage"], "schema")
+
+    def test_second_supervisor_uses_reasoning_candidate_when_content_is_not_json(self):
+        second_model = "independent/test-model:free"
+        document = valid_document()
+
+        class ReasoningOnlyResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model": second_model,
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": "The final structured review is in the reasoning field.",
+                            "reasoning": json.dumps(document, ensure_ascii=False),
+                        },
+                    }],
+                }
+
+        env = {
+            "OPENROUTER_API_KEY": "primary-key",
+            "CSR_AI_MODEL": DEFAULT_FREE_MODEL,
+            "CSR_SECOND_AI_API_KEY": "independent-key",
+            "CSR_SECOND_AI_MODEL": second_model,
+            "CSR_SECOND_AI_PROVIDER": "Independent Compatible Provider",
+            "CSR_SECOND_AI_API_URL": "https://second.example.test/v1/chat/completions",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            review = run_independent_ai_supervisor(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=lambda *args, **kwargs: ReasoningOnlyResponse(),
+            )
+
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertTrue(review["response_validated"])
+        self.assertTrue(review["model_verified"])
+        self.assertTrue(review["paper_entry_eligible"])
+        self.assertEqual(review["parser_diagnostic"]["validated_candidate_index"], 1)

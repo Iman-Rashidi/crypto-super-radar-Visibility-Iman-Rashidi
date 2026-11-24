@@ -5,10 +5,41 @@ Turso credentials are server-side secrets. Never expose them to browser code.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+
+def _is_transient_turso_error(error: BaseException) -> bool:
+    """Recognize temporary Turso/HTTP/network failures, not SQL or auth errors."""
+    message = " ".join(str(error).lower().split())
+    if re.search(r"\b(?:408|425|429|500|502|503|504)\b", message) and (
+        "http" in message or "status" in message or "tempor" in message
+    ):
+        return True
+    transient_phrases = (
+        "stream not found", "stream expired", "temporarily unavailable",
+        "service unavailable", "server disconnected", "connection reset",
+        "connection aborted", "connection refused", "connection closed",
+        "remote end closed", "timed out", "timeout", "network is unreachable",
+        "broken pipe", "unexpected eof", "transport endpoint is not connected",
+        "database is locked", "try again",
+    )
+    return any(phrase in message for phrase in transient_phrases)
+
+
+def _retry_turso_operation(operation, *args, retries: int = 3, **kwargs):
+    """Retry one safe, idempotent Turso operation up to three times."""
+    for attempt in range(retries + 1):
+        try:
+            return operation(*args, **kwargs)
+        except Exception as error:
+            if attempt >= retries or not _is_transient_turso_error(error):
+                raise
+            time.sleep(0.15 * (2 ** attempt))
 
 
 def _credentials() -> tuple[str, str]:
@@ -127,15 +158,25 @@ class _ConnectionAdapter:
         except Exception:
             was_in_transaction = True
 
-        try:
+        if was_in_transaction:
             return operation(*args, **kwargs)
-        except Exception as error:
-            if was_in_transaction or not _is_expired_stream_error(error):
-                raise
-            # The turso_serverless session clears its stale baton on HTTP
-            # errors. The same connection can therefore open a fresh stream
-            # when the exact same, not-yet-executed statement is retried.
-            return operation(*args, **kwargs)
+        return _retry_turso_operation(operation, *args, **kwargs)
+
+    def run_transaction(self, operation, *, retries: int = 3):
+        """Retry an idempotent DB unit as a whole after rolling back partial work."""
+        for attempt in range(retries + 1):
+            try:
+                result = operation()
+                self._connection.commit()
+                return result
+            except Exception as error:
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                if attempt >= retries or not _is_transient_turso_error(error):
+                    raise
+                time.sleep(0.15 * (2 ** attempt))
 
     def execute(self, sql: str, parameters: Any = ()):
         cursor = self._execute_with_stream_recovery(
@@ -170,7 +211,7 @@ def connect_turso_database(database_url: str, auth_token: str):
         import turso_serverless
     except ImportError as exc:
         raise RuntimeError("turso_serverless is not installed.") from exc
-    remote = turso_serverless.connect(database_url, auth_token=auth_token)
+    remote = _retry_turso_operation(turso_serverless.connect, database_url, auth_token=auth_token)
     return _ConnectionAdapter(remote)
 
 
@@ -201,7 +242,7 @@ def connect_database(path: str | None = None, *, url: str | None = None,
             raise RuntimeError(
                 "Turso credentials are configured but turso_serverless is not installed."
             ) from exc
-        remote = turso_serverless.connect(url, auth_token=token)
+        remote = _retry_turso_operation(turso_serverless.connect, url, auth_token=token)
         return _ConnectionAdapter(remote)
 
     db_path = path or os.getenv("CSR_DB_PATH", "data/crypto_super_radar.sqlite3")

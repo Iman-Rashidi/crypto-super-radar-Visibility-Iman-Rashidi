@@ -1078,6 +1078,39 @@ def _message_content_candidates(message: Any) -> list[str]:
     return candidates
 
 
+def _parse_validated_review_candidates(candidates, validator):
+    """Select the first schema-valid JSON review, not merely the first JSON object."""
+    validation_errors = []
+    last_validation_error = None
+    parsed_count = 0
+    oversized = False
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        if len(candidate) > MAX_RESPONSE_CHARS:
+            oversized = True
+            continue
+        try:
+            document = _extract_json(candidate)
+        except (TypeError, ValueError) as exc:
+            validation_errors.append({"candidate_index": index, "stage": "json",
+                                      "error_code": _safe_ai_error_code(exc)})
+            continue
+        parsed_count += 1
+        try:
+            review = validator(document)
+        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            last_validation_error = exc
+            validation_errors.append({"candidate_index": index, "stage": "schema",
+                                      "error_code": _safe_ai_error_code(exc)})
+            continue
+        return document, review, index, validation_errors[:6]
+    if last_validation_error is not None:
+        raise last_validation_error
+    if oversized and parsed_count == 0:
+        raise ValueError("AI response exceeded the maximum accepted size")
+    raise ValueError("No JSON object returned")
+
 
 def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
     """Make one tiny, fixed-prompt connectivity probe; never evaluates a trade."""
@@ -1518,22 +1551,6 @@ def run_free_ai_second_opinion(
         }
         if not content_candidates:
             raise ValueError("AI message content is not text")
-        parsed = None
-        oversized = False
-        parse_errors = []
-        for candidate in content_candidates:
-            if len(candidate) > MAX_RESPONSE_CHARS:
-                oversized = True
-                continue
-            try:
-                parsed = _extract_json(candidate)
-                break
-            except (TypeError, ValueError) as exc:
-                parse_errors.append(type(exc).__name__)
-        if parsed is None:
-            if oversized:
-                raise ValueError("AI response exceeded the maximum accepted size")
-            raise ValueError("No JSON object returned")
         returned_model = body.get("model") if isinstance(body, dict) else None
         if not isinstance(returned_model, str) or not returned_model.strip():
             return {
@@ -1560,17 +1577,24 @@ def run_free_ai_second_opinion(
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
-        review = (
-            _validated_v2_review(
-                parsed, model, asset_name, expected_side=expected_side, evidence=evidence,
+        def validate_candidate(document):
+            return (
+                _validated_v2_review(
+                    document, model, asset_name, expected_side=expected_side, evidence=evidence,
+                )
+                if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
+                else _validated_pattern_review(document, model, asset_name, evidence=evidence)
+                if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
+                else _validated_review(
+                    document, model, asset_name, expected_side=expected_side, market_type=market_type
+                )
             )
-            if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
-            else _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
-            if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
-            else _validated_review(
-                parsed, model, asset_name, expected_side=expected_side, market_type=market_type
-            )
+
+        parsed, review, validated_candidate_index, candidate_validation_errors = (
+            _parse_validated_review_candidates(content_candidates, validate_candidate)
         )
+        parser_diagnostic["validated_candidate_index"] = validated_candidate_index
+        parser_diagnostic["candidate_validation_errors"] = candidate_validation_errors
         usage = body.get("usage") if isinstance(body, dict) else None
         total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
@@ -1800,6 +1824,7 @@ def run_independent_ai_supervisor(
     post = http_post or requests.post
     latency_ms = 0
     http_status = None
+    parser_diagnostic: dict[str, Any] = {}
     started = time.monotonic()
     response_started_at = datetime.now(timezone.utc).isoformat()
     try:
@@ -1839,15 +1864,19 @@ def run_independent_ai_supervisor(
         message = choices[0].get("message")
         if not isinstance(message, dict):
             raise ValueError("Missing second AI response message")
-        content = message.get("content")
-        if isinstance(content, list):
-            content = "\n".join(
-                part.get("text", "") for part in content
-                if isinstance(part, dict) and isinstance(part.get("text"), str)
-            )
-        if not isinstance(content, str) or len(content) > MAX_RESPONSE_CHARS:
+        content_candidates = _message_content_candidates(message)
+        parser_diagnostic = {
+            "message_keys": sorted(str(key) for key in message.keys())[:20],
+            "content_type": type(message.get("content")).__name__,
+            "content_length": len(message.get("content")) if isinstance(message.get("content"), str) else None,
+            "reasoning_type": type(message.get("reasoning")).__name__,
+            "reasoning_length": len(message.get("reasoning")) if isinstance(message.get("reasoning"), str) else None,
+            "candidate_count": len(content_candidates),
+            "candidate_lengths": [len(candidate) for candidate in content_candidates[:6]],
+            "finish_reason": str(choices[0].get("finish_reason") or "")[:80],
+        }
+        if not content_candidates:
             raise ValueError("Second AI response content is missing or too large")
-        parsed = _extract_json(content)
         returned_model = body.get("model") if isinstance(body, dict) else None
         if not isinstance(returned_model, str) or not returned_model.strip():
             return {
@@ -1873,17 +1902,24 @@ def run_independent_ai_supervisor(
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "prompt_version": PROMPT_VERSION + "-second-ai",
             }
-        review = (
-            _validated_v2_review(
-                parsed, model, asset_name, expected_side=expected_side, evidence=evidence,
+        def validate_candidate(document):
+            return (
+                _validated_v2_review(
+                    document, model, asset_name, expected_side=expected_side, evidence=evidence,
+                )
+                if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
+                else _validated_pattern_review(document, model, asset_name, evidence=evidence)
+                if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
+                else _validated_review(
+                    document, model, asset_name, expected_side=expected_side, market_type=market_type,
+                )
             )
-            if evidence.get("review_mode") == "CHALLENGE_1_V2_MULTI_TIMEFRAME_REVIEW"
-            else _validated_pattern_review(parsed, model, asset_name, evidence=evidence)
-            if evidence.get("review_mode") == "CANDLE_CHART_ELLIOTT_WAVE_REVIEW"
-            else _validated_review(
-                parsed, model, asset_name, expected_side=expected_side, market_type=market_type,
-            )
+
+        parsed, review, validated_candidate_index, candidate_validation_errors = (
+            _parse_validated_review_candidates(content_candidates, validate_candidate)
         )
+        parser_diagnostic["validated_candidate_index"] = validated_candidate_index
+        parser_diagnostic["candidate_validation_errors"] = candidate_validation_errors
         usage = body.get("usage") if isinstance(body, dict) else None
         tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
@@ -1901,6 +1937,7 @@ def run_independent_ai_supervisor(
             "response_started_at_utc": response_started_at,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "prompt_version": PROMPT_VERSION + "-second-ai",
+            "parser_diagnostic": parser_diagnostic,
         })
         return review
     except Exception as exc:
@@ -1915,6 +1952,7 @@ def run_independent_ai_supervisor(
             "request_attempted": True,
             "response_source": "LIVE_API", "response_validated": False,
             "model_verified": False, "paper_entry_eligible": False,
+            "parser_diagnostic": parser_diagnostic,
             "requested_at_utc": requested_at,
             "response_started_at_utc": response_started_at,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),

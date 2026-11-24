@@ -1,0 +1,32 @@
+name: challenge1-v2-demo-autopilot-scheduler
+
+# GitHub evaluates scheduled workflows from the repository default branch (main).
+# This dispatcher runs the actual worker on the protected Staging branch only.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: challenge1-v2-demo-autopilot-scheduler
+  cancel-in-progress: false
+
+jobs:
+  dispatch-staging-v2:
+    # Enabled by default; setting the variable to the literal string false is the kill switch.
+    if: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Dispatch the full Challenge 1 V2 Demo worker on Staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${GH_REPO}/actions/workflows/challenge1-v2-demo-autopilot.yml/dispatches" \
+            -f ref=staging/challenge1-integration-2026-11-16
