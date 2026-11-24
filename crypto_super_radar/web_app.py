@@ -1012,6 +1012,10 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
                     "verified": review.get("model_verified") is True and review.get("response_validated") is True,
                     "returned_model": review.get("returned_model") or review.get("model") or entry.get("model"),
                 })
+            item["signal_raw"] = payload.get("signal") or item.get("signal") or "UNKNOWN"
+            for field in ("entry_price", "stop_loss", "take_profit", "entry_skipped_reason", "execution_profile"):
+                if field in payload:
+                    item[field] = payload.get(field)
             item["ai_votes"] = votes
             item["ai_consensus"] = payload.get("ai_consensus") if isinstance(payload.get("ai_consensus"), dict) else {}
             decoded.append(item)
@@ -7148,7 +7152,7 @@ def _ai_copilot_dashboard_context() -> dict:
             "five_assets": cycles[:5],
         },
         "gem_hunter": {
-            "status": gem.get("status),
+            "status": gem.get("status"),
             "generated_at_utc": gem.get("generated_at_utc"),
             "discovered_candidate_count": gem.get("discovered_candidate_count"),
             "tier1_count": gem.get("gem_hunter_v3_tier1_count"),
