@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/challenge1-v2-demo-autopilot.yml
       - crypto_super_radar/ai_second_opinion.py
+      - crypto_super_radar/ai_supervisor.py
       - tests/test_challenge1_v2_supervisor_failover.py
   workflow_dispatch:
 
