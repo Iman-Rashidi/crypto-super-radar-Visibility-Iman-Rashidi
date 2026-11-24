@@ -1279,3 +1279,79 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(review["model_verified"])
         self.assertTrue(review["paper_entry_eligible"])
         self.assertEqual(review["parser_diagnostic"]["validated_candidate_index"], 1)
+
+
+
+from crypto_super_radar import ai_second_opinion as _ai_second_opinion
+
+
+@unittest.skipUnless(
+    "specialists" in getattr(_ai_second_opinion, "_SPECIALIST_CONTAINER_ALIASES", ())
+    and hasattr(_ai_second_opinion, "_candidate_shape_diagnostic"),
+    "nested/list specialist-shape support is included in the paired implementation commit",
+)
+class V2NestedSpecialistShapeTests(unittest.TestCase):
+    def valid_v2_document(self):
+        doc = valid_document(
+            rating="Sell", risk_verdict="APPROVE",
+            portfolio_verdict="APPROVE", proposal="SHORT",
+        )
+        doc["wave_analyst"] = {
+            "verdict": "SUPPORT", "phase": "WAVE_4_CONFIRMED",
+            "direction": "BEARISH", "reason_fa": "موج با داده ورودی هم‌راستا است.",
+        }
+        return doc
+
+    def validate(self, doc):
+        from crypto_super_radar.ai_second_opinion import _validated_v2_review
+        return _validated_v2_review(
+            doc, "test-free-model", "perp:BTCUSDT", expected_side="SHORT",
+            evidence={"elliott_wave": {"phase": "WAVE_4_CONFIRMED", "pattern": "BEARISH"}},
+        )
+
+    def test_nested_review_wrapper_is_unwrapped_without_losing_decision_fields(self):
+        source = self.valid_v2_document()
+        source["decision"] = "APPROVE"
+        source["direction"] = "SHORT"
+        wrapped = {"review": source}
+        result = self.validate(wrapped)
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["declared_decision"], "APPROVE")
+        self.assertEqual(result["declared_direction"], "SHORT")
+
+    def test_specialists_alias_and_role_array_are_normalized(self):
+        source = self.valid_v2_document()
+        roles = source.pop("specialist_views")
+        source["specialists"] = [
+            {"role": "market_regime_analyst", **roles["market_regime"]},
+            {"role": "technical_analyst", **roles["technical"]},
+            {"role": "news_sentiment_analyst", **roles["news_sentiment"]},
+            {"role": "bull_case", **roles["bull_researcher"]},
+            {"role": "bear_case", **roles["bear_researcher"]},
+            {"role": "trader", "direction": "SHORT", "reason_fa": roles["trader"]["reason_fa"]},
+            {"role": "risk_manager", **roles["risk_manager"]},
+            {"role": "portfolio_manager", **roles["portfolio_manager"]},
+        ]
+        source["decision"] = "APPROVE"
+        source["direction"] = "BEARISH"
+        result = self.validate(source)
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["trader_proposal"], "SHORT")
+
+    def test_nested_wrappers_with_two_competing_review_objects_fail_closed(self):
+        source = self.valid_v2_document()
+        other = dict(source)
+        other["final_rating"] = "Buy"
+        with self.assertRaisesRegex(ValueError, "Conflicting nested specialist review objects"):
+            self.validate({"review": source, "result": other})
+
+    def test_candidate_shape_diagnostic_contains_keys_only_not_model_values(self):
+        from crypto_super_radar.ai_second_opinion import _candidate_shape_diagnostic
+        doc = self.valid_v2_document()
+        doc["private_free_text"] = "DO_NOT_LOG_THIS_TEXT"
+        shape = _candidate_shape_diagnostic(doc)
+        rendered = json.dumps(shape, ensure_ascii=False)
+        self.assertIn("specialist_views", rendered)
+        self.assertIn("risk_manager", rendered)
+        self.assertNotIn("DO_NOT_LOG_THIS_TEXT", rendered)
+
