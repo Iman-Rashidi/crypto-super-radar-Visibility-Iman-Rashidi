@@ -798,8 +798,9 @@ def _blofin_v2_cycle_snapshot() -> dict:
                     continue
                 review = entry.get("review") if isinstance(entry.get("review"), dict) else entry
                 votes.append({
-                    "reviewer_id": entry.get("reviewer_id") or review.get("reviewer_id"),
-                    "provider": review.get("provider") or entry.get("provider"),
+                    "reviewer_id": entry.get("reviewer_id") or review.get("reviewer_id") or "UNKNOWN",
+                    "actor": entry.get("actor") or review.get("actor"),
+                    "provider": review.get("provider") or entry.get("provider") or "UNKNOWN",
                     "status": review.get("status") or entry.get("status") or "UNKNOWN",
                     "opinion": (
                         review.get("decision") or review.get("verdict")
@@ -807,8 +808,14 @@ def _blofin_v2_cycle_snapshot() -> dict:
                         or review.get("recommendation") or review.get("status")
                         or entry.get("status") or "UNKNOWN"
                     ),
-                    "reason_fa": str(review.get("reason_fa") or review.get("status_fa") or "")[:320],
+                    "reason_fa": str(review.get("reason_fa") or review.get("status_fa") or review.get("reason") or "")[:1000],
                     "verified": review.get("model_verified") is True and review.get("response_validated") is True,
+                    "model_verified": review.get("model_verified") is True,
+                    "response_validated": review.get("response_validated") is True,
+                    "request_attempted": review.get("request_attempted") is True,
+                    "skip_reason_code": review.get("skip_reason_code"),
+                    "error_type": review.get("error_type") or review.get("error_code"),
+                    "http_status": review.get("http_status"),
                     "returned_model": review.get("returned_model") or review.get("model") or entry.get("model"),
                 })
             item["ai_votes"] = votes
@@ -1026,7 +1033,12 @@ def _blofin_v2_public_cycle_snapshot() -> dict:
                 "mode": row.get("mode"),
                 "status": row.get("status"),
                 "signal": row.get("signal"),
-                "reason": str(row.get("reason") or "")[:500],
+                "signal_raw": row.get("signal") or "UNKNOWN",
+                "entry_price": row.get("entry_price"),
+                "stop_loss": row.get("stop_loss"),
+                "take_profit": row.get("take_profit"),
+                "entry_skipped_reason": str(row.get("entry_skipped_reason") or "")[:1000],
+                "reason": str(row.get("reason") or "")[:1000],
                 "orders_submitted": bool(row.get("orders_submitted")),
                 "ai_votes": row.get("ai_votes") if isinstance(row.get("ai_votes"), list) else [],
                 "ai_consensus": row.get("ai_consensus") if isinstance(row.get("ai_consensus"), dict) else {},
@@ -7075,6 +7087,16 @@ def build_gem_hunter_deep_analysis(chain: str, address: str = "", symbol: str = 
         "updated_at_utc":datetime.now(timezone.utc).isoformat().replace("+00:00","Z")}
 
 
+def _short_ai_contract_address(value: Any) -> str:
+    """Return a display-safe shortened token contract address without inventing one."""
+    address = str(value or "").strip()
+    if not address:
+        return "NOT_AVAILABLE"
+    if len(address) <= 14:
+        return address
+    return address[:6] + "…" + address[-4:]
+
+
 def _ai_copilot_dashboard_context() -> dict:
     """Collect bounded public dashboard snapshots only when a user sends a chat message."""
     v2 = _blofin_v2_public_cycle_snapshot()
@@ -7082,12 +7104,58 @@ def _ai_copilot_dashboard_context() -> dict:
     health = build_feed_health_report(_crypto_market_board())
     cycles = v2.get("cycles") if isinstance(v2.get("cycles"), list) else []
     candidates = gem.get("candidates") if isinstance(gem.get("candidates"), list) else []
-    allowed = ("symbol", "name", "chain", "status", "tier", "score", "qualification_status", "price_usd", "volume_24h_usd", "liquidity_usd", "risk_score", "opportunity_score", "reason_fa", "updated_at_utc")
-    safe_candidates = [{key: item.get(key) for key in allowed if key in item} for item in candidates[:5] if isinstance(item, dict)]
+    safe_candidates = []
+    for item in candidates[:5]:
+        if not isinstance(item, dict):
+            continue
+        security = item.get("security_evidence") if isinstance(item.get("security_evidence"), dict) else {}
+        address = item.get("token_address") or item.get("contract_address") or item.get("address")
+        safe_candidates.append({
+            "name": item.get("name") or "UNKNOWN",
+            "symbol": item.get("symbol") or "UNKNOWN",
+            "chain": item.get("chain") or "UNKNOWN",
+            "contract_address_short": _short_ai_contract_address(address),
+            "price_usd": item.get("price_usd"),
+            "liquidity_usd": item.get("liquidity_usd"),
+            "security_status": security.get("status") or item.get("security_status") or "UNKNOWN",
+            "security_provider": security.get("provider") or "UNKNOWN",
+            "security_reason_fa": security.get("reason_fa") or [],
+            "security_flags": security.get("flags") or {},
+            "mint_authority_active": security.get("mint_authority_active"),
+            "freeze_authority_active": security.get("freeze_authority_active"),
+            "honeypot_detected": security.get("honeypot_detected"),
+            "sell_tax_pct": security.get("sell_tax_pct"),
+            "volume_24h_usd": item.get("volume_24h_usd"),
+            "risk_score": item.get("risk_score"),
+            "opportunity_score": item.get("opportunity_score"),
+            "qualification_status": item.get("qualification_status"),
+            "reason_fa": item.get("reason_fa"),
+            "updated_at_utc": item.get("updated_at_utc"),
+        })
+    expected_symbols = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "LINK-USDT"]
+    observed_symbols = {str(row.get("symbol") or "") for row in cycles if isinstance(row, dict)}
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "challenge1_v2": {"status": v2.get("status"), "environment": v2.get("environment"), "latest_cycle_id": v2.get("latest_cycle_id"), "scan_time_utc": v2.get("scan_time_utc"), "run_state": v2.get("run_state"), "five_assets": cycles[:5]},
-        "gem_hunter": {"status": gem.get("status"), "generated_at_utc": gem.get("generated_at_utc"), "discovered_candidate_count": gem.get("discovered_candidate_count"), "tier1_count": gem.get("gem_hunter_v3_tier1_count"), "tier2_count": gem.get("gem_hunter_v3_tier2_count"), "top_candidates": safe_candidates, "trade_authorization": "NO_TRADE"},
+        "challenge1_v2": {
+            "status": v2.get("status"),
+            "environment": v2.get("environment"),
+            "latest_cycle_id": v2.get("latest_cycle_id"),
+            "scan_time_utc": v2.get("scan_time_utc"),
+            "run_state": v2.get("run_state"),
+            "expected_markets": expected_symbols,
+            "observed_markets": sorted(observed_symbols),
+            "missing_markets": [symbol for symbol in expected_symbols if symbol not in observed_symbols],
+            "five_assets": cycles[:5],
+        },
+        "gem_hunter": {
+            "status": gem.get("status),
+            "generated_at_utc": gem.get("generated_at_utc"),
+            "discovered_candidate_count": gem.get("discovered_candidate_count"),
+            "tier1_count": gem.get("gem_hunter_v3_tier1_count"),
+            "tier2_count": gem.get("gem_hunter_v3_tier2_count"),
+            "top_candidates": safe_candidates,
+            "trade_authorization": "NO_TRADE",
+        },
         "data_health": {key: health.get(key) for key in ("status", "observed_at_utc", "age_seconds", "stale_after_seconds", "verified_symbols", "observed_symbols", "expected_symbols", "providers", "reason")},
         "read_only": True, "orders_submitted": False,
     }
