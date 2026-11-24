@@ -10696,6 +10696,31 @@ async function loadBlofinInstruments(){
                     "environment":"BLOFIN_DEMO", "orders_submitted":"UNKNOWN",
                     "retry_allowed":False,
                 },ensure_ascii=False).encode(),"application/json; charset=utf-8")
+        if route == "/api/ai-copilot/chat":
+            origin = self.headers.get("Origin", "")
+            request_host = self.headers.get("Host", "")
+            if not origin or urlparse(origin).netloc.lower() != request_host.lower():
+                return self._send(403, b'{"status":"FORBIDDEN","code":"SAME_ORIGIN_REQUIRED"}', "application/json; charset=utf-8")
+            if "application/json" not in self.headers.get("Content-Type", "").lower():
+                return self._send(415, b'{"status":"JSON_REQUIRED"}', "application/json; charset=utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return self._send(400, b'{"status":"INVALID_CONTENT_LENGTH"}', "application/json; charset=utf-8")
+            if length <= 0 or length > 8192:
+                return self._send(413, b'{"status":"INVALID_PAYLOAD_SIZE"}', "application/json; charset=utf-8")
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON object required")
+                answer = ai_copilot_chat(payload.get("message", ""), _ai_copilot_dashboard_context, client_key=self.client_address[0] if self.client_address else "unknown")
+                return self._send(200, json.dumps(answer, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            except CopilotError as exc:
+                return self._send(exc.status, json.dumps({"status":"ERROR", "code":exc.code, "read_only":True, "orders_submitted":False}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return self._send(400, b'{"status":"INVALID_JSON"}', "application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(503, json.dumps({"status":"ERROR", "code":"COPILOT_UNAVAILABLE", "error_type":type(exc).__name__, "read_only":True, "orders_submitted":False}).encode(), "application/json; charset=utf-8")
         api_jobs_request = route == "/api/jobs"
         if api_jobs_request:
             route = "/scan"
