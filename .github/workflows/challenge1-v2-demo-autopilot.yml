@@ -21,7 +21,7 @@ concurrency:
 jobs:
   v2-demo-cycle:
     # Enabled by default; explicit false remains the kill switch.
-    if: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' }}
+    if: ${{ vars.CHALLENGE_1_V2_DEMO_AUTOPILOT_ENABLED != 'false' && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip-v2-demo]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

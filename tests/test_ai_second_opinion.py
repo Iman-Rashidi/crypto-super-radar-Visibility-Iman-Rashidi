@@ -623,6 +623,34 @@ class FreeAISecondOpinionTests(unittest.TestCase):
         self.assertTrue(second["paper_entry_eligible"])
         self.assertEqual(models, [DEFAULT_FREE_MODEL, "another/free-model:free"])
 
+    def test_rate_limit_retries_with_verified_free_fallback_and_records_actual_model(self):
+        calls = []
+        fallback_model = "nvidia/nemotron-3.5-lightning:free"
+
+        def fake_post(url, headers, json, timeout, allow_redirects=False):
+            calls.append(dict(json))
+            if len(calls) == 1:
+                return FakeResponse(status_code=429)
+            return FakeResponse(
+                document=valid_document(),
+                model=fallback_model,
+            )
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            result = run_free_ai_second_opinion(
+                valid_result(), AssetSpec.parse("cex:BTCUSDT"),
+                http_post=fake_post, bypass_cache=True,
+            )
+
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertTrue(result["response_validated"])
+        self.assertTrue(result["model_verified"])
+        self.assertEqual(result["model"], fallback_model)
+        self.assertEqual(result["returned_model"], fallback_model)
+        self.assertEqual(calls[0]["model"], DEFAULT_FREE_MODEL)
+        self.assertEqual(calls[1]["model"], fallback_model)
+        self.assertNotIn("response_format", calls[1])
+
     def test_local_per_minute_cap_blocks_request_before_provider_call(self):
         calls = {"count": 0}
 

@@ -43,6 +43,19 @@ def _openrouter_free_model_chain(primary_model=None):
     return tuple(chain)
 
 
+def _reserve_openrouter_retry_slot() -> bool:
+    """Count each fallback HTTP request against the same per-minute safety cap."""
+    now = time.monotonic()
+    with _LOCK:
+        _MINUTE_REQUEST_TIMESTAMPS[:] = [
+            stamp for stamp in _MINUTE_REQUEST_TIMESTAMPS if stamp > now - 60.0
+        ]
+        if len(_MINUTE_REQUEST_TIMESTAMPS) >= MAX_REQUESTS_PER_MINUTE:
+            return False
+        _MINUTE_REQUEST_TIMESTAMPS.append(now)
+        return True
+
+
 def _post_openrouter_with_fallback(
     post, url, *, headers, payload, timeout, allow_redirects,
 ):
@@ -52,19 +65,24 @@ def _post_openrouter_with_fallback(
     for index, candidate in enumerate(chain):
         request_payload = dict(payload)
         request_payload["model"] = candidate
+        # Nemotron 3.5 Lightning free does not implement response_format.
+        if candidate == "nvidia/nemotron-3.5-lightning:free":
+            request_payload.pop("response_format", None)
         try:
             response = post(
                 url, headers=headers, json=request_payload,
                 timeout=timeout, allow_redirects=allow_redirects,
             )
         except (requests.Timeout, requests.ConnectionError):
-            if index + 1 < len(chain):
+            if index + 1 < len(chain) and _reserve_openrouter_retry_slot():
                 continue
             raise
         status = int(getattr(response, "status_code", 0) or 0)
         if status in {408, 429} or 500 <= status <= 599:
             last_response = response
             if index + 1 < len(chain):
+                if not _reserve_openrouter_retry_slot():
+                    return last_response
                 continue
         return response
     if last_response is not None:
@@ -1271,9 +1289,6 @@ def run_openrouter_connection_diagnostic(http_post=None) -> dict[str, Any]:
                 "model_verified": False, "latency_ms": latency_ms,
                 "paper_entry_eligible": False,
             }
-        # Record the exact model that answered, including a fallback model.
-        model = returned_model.strip()
-        review["model"] = model
         usage = body.get("usage") if isinstance(body, dict) else None
         total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
@@ -1643,6 +1658,8 @@ def run_free_ai_second_opinion(
                 "response_validated": False, "model_verified": False,
                 "paper_entry_eligible": False, "cost_usd": 0.0,
             }
+        model = returned_model.strip()
+        review["model"] = model
         usage = body.get("usage") if isinstance(body, dict) else None
         total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
